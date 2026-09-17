@@ -677,6 +677,9 @@ void pruneRetention() {
   const uint32_t oldestAllowedBoot =
       newestBoot >= kRetentionBoots - 1 ? newestBoot - (kRetentionBoots - 1) : 0;
   uint64_t totalBytes = 0;
+  uint64_t freeBytes = storage->diagnosticsSdFreeBytes();
+  const storage_policy::Budget budget = storage_policy::budgetForBackend(
+      storage->storageBackend() == StorageBackend::InternalFFat);
   const time_t now = time(nullptr);
   for (std::size_t index = 0; index < count; ++index)
     totalBytes += retentionFiles[index].bytes;
@@ -691,10 +694,14 @@ void pruneRetention() {
         static_cast<uint64_t>(std::max<time_t>(file.modifiedAt, 0)),
         kRetentionDays);
     const bool tooOld = tooOldByBoot || tooOldByDate;
-    if (isActive || (!tooOld && totalBytes <= kRetentionBytes))
+    const bool overBudget = storage_policy::constraintsExceeded(
+        totalBytes, freeBytes, kChunkBytes, budget);
+    if (isActive || (!tooOld && !overBudget))
       continue;
-    if (removeChunkFile(file))
+    if (removeChunkFile(file)) {
       totalBytes -= std::min<uint64_t>(totalBytes, file.bytes);
+      freeBytes = storage->diagnosticsSdFreeBytes();
+    }
   }
   removeEmptyBootDirectories();
 }
@@ -703,8 +710,9 @@ bool hasChunkWriteReserve() {
   if (storage == nullptr || !storage->getDiagnosticsSdLoaded())
     return false;
   const uint64_t freeBytes = storage->diagnosticsSdFreeBytes();
-  return freeBytes == UINT64_MAX ||
-         freeBytes >= kMinimumFreeSpaceBytes + kChunkBytes;
+  const storage_policy::Budget budget = storage_policy::budgetForBackend(
+      storage->storageBackend() == StorageBackend::InternalFFat);
+  return storage_policy::hasWriteReserve(freeBytes, kChunkBytes, budget);
 }
 
 bool prepareChunkWriteReserve() {

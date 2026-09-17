@@ -46,6 +46,27 @@ int main() {
   assert(!ride_diagnostics::retention_policy::shouldPruneAfterWrite(1, true));
   assert(ride_diagnostics::retention_policy::shouldPruneAfterWrite(16, true));
 
+  using namespace ride_diagnostics::storage_policy;
+  constexpr uint64_t mib = 1024ULL * 1024ULL;
+  constexpr uint64_t chunk = ride_diagnostics::kChunkBytes;
+  constexpr Budget removable = budgetForBackend(false);
+  constexpr Budget internal = budgetForBackend(true);
+  static_assert(removable.retentionBytes == 32ULL * mib);
+  static_assert(removable.minimumFreeBytes == 8ULL * mib);
+  static_assert(internal.retentionBytes == 1ULL * mib);
+  static_assert(internal.minimumFreeBytes == 2ULL * mib);
+  static_assert(hasWriteReserve(7ULL * mib, chunk, internal));
+  static_assert(hasWriteReserve(2ULL * mib + chunk, chunk, internal));
+  static_assert(!hasWriteReserve(2ULL * mib + chunk - 1, chunk, internal));
+  static_assert(hasWriteReserve(UINT64_MAX, chunk, internal));
+  static_assert(!hasWriteReserve(UINT64_MAX - 1, UINT64_MAX, internal));
+  static_assert(!constraintsExceeded(1ULL * mib, 2ULL * mib + chunk,
+                                    chunk, internal));
+  static_assert(constraintsExceeded(1ULL * mib + 1, 7ULL * mib,
+                                   chunk, internal));
+  static_assert(constraintsExceeded(0, 2ULL * mib + chunk - 1,
+                                   chunk, internal));
+
   using namespace ride_diagnostics::capture_policy;
   constexpr uint32_t wrapToZeroStart =
       0U - kDetailedCaptureDurationMs;
