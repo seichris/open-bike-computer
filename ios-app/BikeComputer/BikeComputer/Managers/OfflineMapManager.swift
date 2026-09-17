@@ -5876,6 +5876,11 @@ final class OfflineMapManager: ObservableObject {
     private func updateLastTransferOutcome(_ outcome: String) {
         lastTransferOutcome = outcome
         defaults.set(outcome, forKey: OfflineMapDefaults.lastTransferOutcomeKey)
+        if MapActivationProgressPresentation.shouldClear(
+            forTransferOutcome: outcome
+        ) {
+            activationProgress = nil
+        }
         if !lastTransferMapId.isEmpty {
             let protocolVersion = defaults.object(
                 forKey: OfflineMapDefaults.lastTransferProtocolKey

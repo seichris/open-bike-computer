@@ -9440,6 +9440,18 @@ struct NavigationProtocolTests {
             nil,
             "completed activation hides the in-progress presentation"
         )
+        assert(
+            MapActivationProgressPresentation.shouldClear(
+                forTransferOutcome: "installed"
+            ) &&
+                MapActivationProgressPresentation.shouldClear(
+                    forTransferOutcome: "failed"
+                ) &&
+                !MapActivationProgressPresentation.shouldClear(
+                    forTransferOutcome: "unconfirmed"
+                ),
+            "terminal transfer outcomes clear restored activation progress"
+        )
     }
 
     static func testMapUploadProgressReconciliation() {
@@ -12597,12 +12609,20 @@ struct NavigationProtocolTests {
         let bleManager = BLEManager()
         bleManager.mapTransferActiveMapId = "map-1"
         bleManager.mapTransferActiveSessionId = "map-1-manifest"
-        bleManager.mapTransferActivationStatus = "idle"
+        bleManager.mapTransferActivationStatus = "finalizing"
+        bleManager.mapTransferActivationStep = 2
+        bleManager.mapTransferActivationStepCount = 3
+        bleManager.mapTransferActivationProgress = 90
         manager.reconcileLastTransfer(bleManager: bleManager)
 
         assertEqual(manager.lastTransferOutcome, "installed", "durable exact-session status reconciles after device restart")
         assert(!manager.hasPendingDeviceActivation,
                "installed reconciliation clears pending activation status")
+        assertEqual(
+            manager.activationProgress,
+            nil,
+            "installed reconciliation clears restored in-progress presentation"
+        )
     }
 
     @MainActor
