@@ -113,13 +113,13 @@ struct OfflineMapOnboardingView: View {
         case .welcome:
             VStack(spacing: 12) {
                 Button(action: onAddBicino) {
-                    Label("Add your Bicino", systemImage: "bicycle")
+                    Label("Connect your Bicino", systemImage: "bicycle")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
 
                 Button(action: onUseIPhone) {
-                    Text("Use iPhone only")
+                    Text("Continue with iPhone")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
