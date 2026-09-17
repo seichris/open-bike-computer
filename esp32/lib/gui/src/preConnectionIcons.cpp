@@ -97,7 +97,7 @@ lv_obj_t *create(lv_obj_t *parent, Artwork artwork) {
   case Artwork::WaitingForIPhone: {
     addPhone(root, 7, gray);
     lv_obj_t *wifi =
-        symbol(root, LV_SYMBOL_WIFI, &lv_font_montserrat_42, blue);
+        symbol(root, LV_SYMBOL_WIFI, &lv_font_montserrat_38, blue);
     lv_obj_set_pos(wifi, 65, 34);
     break;
   }

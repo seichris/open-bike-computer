@@ -204,6 +204,7 @@ int main() {
   assert(sensorAsk.takePendingCancellation());
   assert(sensorAsk.pendingTransition() == Transition::None);
 
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
   Settings automatic = ask;
   automatic.startMode = StartMode::Automatic;
   RideAutomationPolicy sensorAutomatic;
@@ -212,6 +213,7 @@ int main() {
   decision = sensorAutomatic.update(10'000, wheel(2.0F, 10'000),
                                     ConfirmedLifecycle::Idle, automatic);
   assert(decision.transition == Transition::Start);
+#endif
 
   Settings disabled = ask;
   disabled.startMode = StartMode::Off;
@@ -248,6 +250,7 @@ int main() {
   assert((decision.evidenceMask & EvidenceImuMoving) != 0);
   assert((decision.evidenceMask & EvidenceGpsDisplacement) != 0);
 
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
   RideAutomationPolicy gpsAutomatic;
   for (uint32_t second = 0; second < 20; ++second) {
     const uint32_t nowMs = second * 1'000;
@@ -259,6 +262,7 @@ int main() {
       20'000, gpsImu(3.0F, 0.9F, 65.0F, 20'000),
       ConfirmedLifecycle::Idle, automatic);
   assert(decision.transition == Transition::Start);
+#endif
 
   RideAutomationPolicy badAccuracy;
   for (uint32_t second = 0; second < 20; ++second) {

@@ -463,7 +463,7 @@ enum BikeComputersMenuPolicy {
     static func title(knownDeviceCount: Int) -> String {
         switch knownDeviceCount {
         case 0:
-            return "Connect Bike Computer"
+            return "Connect your Bicino"
         case 1:
             return "My Bike Computer"
         default:
@@ -554,7 +554,7 @@ enum BikeComputerSettingsDiscoveryLifecyclePolicy {
 enum BikeComputerSettingsPresentationPolicy {
     static func settingsLinkTitle(knownDeviceCount: Int) -> String {
         if knownDeviceCount == 0 {
-            return "Connect a Bicino Bike Computer!"
+            return "Connect your Bicino!"
         }
         return knownDeviceCount > 1
             ? "My Bike Computers"
@@ -569,6 +569,15 @@ enum BikeComputerSettingsPresentationPolicy {
         knownDeviceCount > 0
     }
 
+    static func shouldShowSensorManagement(
+        hasEverConnectedBikeComputer: Bool,
+        sensorProfileCount: Int,
+        isExplicitSensorSetup: Bool = false
+    ) -> Bool {
+        isExplicitSensorSetup || hasEverConnectedBikeComputer ||
+            sensorProfileCount > 0
+    }
+
     static func title(
         knownDeviceCount: Int,
         isExplicitBikeComputerSetup: Bool
@@ -579,7 +588,7 @@ enum BikeComputerSettingsPresentationPolicy {
             )
         }
         if knownDeviceCount == 0 {
-            return "Add a Bicino Bike Computer"
+            return "Connect your Bicino"
         }
         return knownDeviceCount > 1
             ? "My Bike Computers"
@@ -618,9 +627,20 @@ enum BikeComputerSettingsPresentationPolicy {
 
     static func shouldShowConnectAction(
         baseEligibility: Bool,
-        scanPurpose: BLEScanPurpose
+        scanPurpose: BLEScanPurpose,
+        isExplicitDiscoveryPending: Bool = false
     ) -> Bool {
-        baseEligibility && scanPurpose != .explicitDiscovery
+        baseEligibility && scanPurpose != .explicitDiscovery &&
+            !isExplicitDiscoveryPending
+    }
+}
+
+nonisolated enum BikeComputerOnboardingPreferencePolicy {
+    static func prefersIPhoneOnly(
+        storedPreference: Bool,
+        knownDeviceCount: Int
+    ) -> Bool {
+        storedPreference && knownDeviceCount == 0
     }
 }
 
@@ -1042,6 +1062,7 @@ enum AuthenticatedBLEChannel: UInt8 {
     case settings = 5
     case workout = 6
     case rideAutomation = 7
+    case screenConfiguration = 8
 }
 
 final class AuthenticatedBLEWriteSession {
@@ -1231,6 +1252,8 @@ final class BikeComputerDeviceRegistry {
     private enum Keys {
         static let devices = "ble.knownDevices.v2"
         static let activeDeviceID = "ble.activeDeviceID.v2"
+        static let hasEverConnectedBikeComputer =
+            "ble.hasEverConnectedBikeComputer.v1"
         static func provisionalConfirmed(deviceID: String) -> String {
             "ble.provisionalOwnerConfirmed.\(deviceID)"
         }
@@ -1257,6 +1280,9 @@ final class BikeComputerDeviceRegistry {
 #else
         self.credentialStore = credentialStore ?? KeychainDeviceCredentialStore()
 #endif
+        if !devices.isEmpty {
+            defaults.set(true, forKey: Keys.hasEverConnectedBikeComputer)
+        }
     }
 
     var devices: [KnownBikeComputerDevice] {
@@ -1282,6 +1308,10 @@ final class BikeComputerDeviceRegistry {
                 defaults.removeObject(forKey: Keys.activeDeviceID)
             }
         }
+    }
+
+    var hasEverConnectedBikeComputer: Bool {
+        defaults.bool(forKey: Keys.hasEverConnectedBikeComputer)
     }
 
     func installationOwnerID() -> Data? {
@@ -1404,6 +1434,7 @@ final class BikeComputerDeviceRegistry {
         }
         current.append(device)
         devices = current
+        defaults.set(true, forKey: Keys.hasEverConnectedBikeComputer)
         if makeActive || activeDeviceID == nil || replacedActiveAlias ||
             !current.contains(where: { $0.deviceID == activeDeviceID }) {
             activeDeviceID = device.deviceID

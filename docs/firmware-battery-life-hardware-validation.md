@@ -25,10 +25,12 @@ gate.
 The firmware now uses four connected operating modes:
 
 - `active`: saved user brightness and the normal LVGL cadence;
-- `dimmed`: at most 20% brightness after 15 seconds without meaningful input,
+- `dimmed`: at most 20% brightness after the configured delay (15 seconds by
+  default) without meaningful input,
   with the main UI timer reduced from 30 ms to 250 ms and LVGL serviced at most
   every 100 ms;
-- `off`: after 45 seconds idle, the panel is turned off, the main UI timer is
+- `off`: after the configured later delay (45 seconds by default), the panel is
+  turned off, the main UI timer is
   paused, LVGL servicing stops, and any already-queued flush is acknowledged
   without QSPI traffic; and
 - `transfer`: the panel remains active while the map/firmware transfer service

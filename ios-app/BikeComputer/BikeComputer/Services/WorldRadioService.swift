@@ -1,0 +1,673 @@
+import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+#if canImport(AVFoundation) && !HOST_TESTING
+import AVFoundation
+#endif
+#if canImport(MediaPlayer) && !HOST_TESTING
+import MediaPlayer
+#endif
+
+nonisolated enum WorldRadioDirectoryError: Error, Equatable, Sendable {
+    case invalidResponse
+    case noStations
+}
+
+nonisolated struct WorldRadioDirectoryClient: Sendable {
+    let nearby: @Sendable (_ latitude: Double, _ longitude: Double) async throws -> [WorldRadioStation]
+    let random: @Sendable () async throws -> [WorldRadioStation]
+    let recordClick: @Sendable (_ stationUUID: String) async -> Void
+
+    static func live() -> Self {
+        let directory = RadioBrowserDirectory()
+        return Self(
+            nearby: { latitude, longitude in
+                try await directory.nearby(latitude: latitude, longitude: longitude)
+            },
+            random: {
+                try await directory.randomStations()
+            },
+            recordClick: { uuid in
+                await directory.recordClick(stationUUID: uuid)
+            }
+        )
+    }
+}
+
+private nonisolated struct RadioBrowserStationDTO: Decodable, Sendable {
+    let stationuuid: String
+    let name: String
+    let country: String
+    let countrycode: String
+    let state: String
+    let codec: String
+    let bitrate: Int
+    let hls: Int
+    let lastcheckok: Int
+    let sslError: Int
+    let url: String
+    let urlResolved: String
+    let geoLat: Double?
+    let geoLong: Double?
+    let geoDistance: Double?
+    let clickcount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case stationuuid
+        case name
+        case country
+        case countrycode
+        case state
+        case codec
+        case bitrate
+        case hls
+        case lastcheckok
+        case sslError = "ssl_error"
+        case url
+        case urlResolved = "url_resolved"
+        case geoLat = "geo_lat"
+        case geoLong = "geo_long"
+        case geoDistance = "geo_distance"
+        case clickcount
+    }
+
+    var station: WorldRadioStation? {
+        guard lastcheckok == 1,
+              sslError == 0,
+              let latitude = geoLat,
+              let longitude = geoLong,
+              latitude.isFinite,
+              longitude.isFinite,
+              (-90...90).contains(latitude),
+              (-180...180).contains(longitude) else {
+            return nil
+        }
+        let candidate = urlResolved.isEmpty ? url : urlResolved
+        guard let streamURL = URL(string: candidate),
+              streamURL.scheme?.lowercased() == "https" else {
+            return nil
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, !stationuuid.isEmpty else { return nil }
+        let place = state.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackPlace = country.trimmingCharacters(in: .whitespacesAndNewlines)
+        return WorldRadioStation(
+            uuid: stationuuid,
+            name: trimmedName,
+            place: place.isEmpty ? fallbackPlace : place,
+            countryCode: countrycode.uppercased(),
+            latitudeE7: Int32((latitude * 10_000_000).rounded()),
+            longitudeE7: Int32((longitude * 10_000_000).rounded()),
+            bitrateKbps: UInt16(clamping: bitrate),
+            streamURL: streamURL,
+            clickCount: max(0, clickcount),
+            distanceMeters: geoDistance
+        )
+    }
+}
+
+private actor RadioBrowserDirectory {
+    private static let nearbyRadii = [75_000, 200_000, 500_000, 1_500_000]
+    private static let userAgent =
+        "Bicino/0.1 (World Radio; github.com/seichris/open-bike-computer)"
+
+    private let session: URLSession
+    private let baseURL: URL
+
+    init(
+        session: URLSession = .shared,
+        baseURL: URL = URL(string: "https://all.api.radio-browser.info")!
+    ) {
+        self.session = session
+        self.baseURL = baseURL
+    }
+
+    func nearby(latitude: Double, longitude: Double) async throws -> [WorldRadioStation] {
+        for radius in Self.nearbyRadii {
+            let stations = try await search(queryItems: [
+                URLQueryItem(name: "geo_lat", value: String(latitude)),
+                URLQueryItem(name: "geo_long", value: String(longitude)),
+                URLQueryItem(name: "geo_distance", value: String(radius)),
+                URLQueryItem(name: "has_geo_info", value: "true"),
+                URLQueryItem(name: "hidebroken", value: "true"),
+                URLQueryItem(name: "order", value: "clickcount"),
+                URLQueryItem(name: "reverse", value: "true"),
+                URLQueryItem(name: "limit", value: "40"),
+            ])
+            if stations.count >= 3 || radius == Self.nearbyRadii.last {
+                guard !stations.isEmpty else { throw WorldRadioDirectoryError.noStations }
+                return stations
+            }
+        }
+        throw WorldRadioDirectoryError.noStations
+    }
+
+    func randomStations() async throws -> [WorldRadioStation] {
+        let stations = try await search(queryItems: [
+            URLQueryItem(name: "has_geo_info", value: "true"),
+            URLQueryItem(name: "hidebroken", value: "true"),
+            URLQueryItem(name: "order", value: "random"),
+            URLQueryItem(name: "limit", value: "40"),
+        ], rankNearby: false)
+        guard !stations.isEmpty else { throw WorldRadioDirectoryError.noStations }
+        return stations
+    }
+
+    func recordClick(stationUUID: String) async {
+        guard stationUUID.utf8.allSatisfy({ byte in
+            (48...57).contains(byte) || (65...70).contains(byte) ||
+                (97...102).contains(byte) || byte == 45
+        }) else { return }
+        let url = baseURL
+            .appendingPathComponent("json")
+            .appendingPathComponent("url")
+            .appendingPathComponent(stationUUID)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        _ = try? await session.data(for: request)
+    }
+
+    private func search(queryItems: [URLQueryItem], rankNearby: Bool = true) async throws -> [WorldRadioStation] {
+        var components = URLComponents(
+            url: baseURL
+                .appendingPathComponent("json")
+                .appendingPathComponent("stations")
+                .appendingPathComponent("search"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = queryItems
+        guard let url = components?.url else {
+            throw WorldRadioDirectoryError.invalidResponse
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            throw WorldRadioDirectoryError.invalidResponse
+        }
+        let decoded = try JSONDecoder().decode([RadioBrowserStationDTO].self, from: data)
+        var seen = Set<String>()
+        let stations = decoded.compactMap(\.station).filter { station in
+            seen.insert(station.uuid).inserted
+        }
+        // Preserve the directory's worldwide random order; popularity sorting
+        // would bias the global sample back toward the same stations.
+        guard rankNearby else { return Array(stations.prefix(12)) }
+        return stations.sorted { lhs, rhs in
+            let leftDistance = lhs.distanceMeters ?? .greatestFiniteMagnitude
+            let rightDistance = rhs.distanceMeters ?? .greatestFiniteMagnitude
+            if abs(leftDistance - rightDistance) > 1 {
+                return leftDistance < rightDistance
+            }
+            if lhs.clickCount != rhs.clickCount {
+                return lhs.clickCount > rhs.clickCount
+            }
+            let leftBitratePenalty = abs(Int(lhs.bitrateKbps) - 96)
+            let rightBitratePenalty = abs(Int(rhs.bitrateKbps) - 96)
+            return leftBitratePenalty < rightBitratePenalty
+        }.prefix(12).map { $0 }
+    }
+}
+
+/// Item ownership and user intent have different lifetimes. BLE request IDs are
+/// deliberately not used here: Pause/Resume are new commands for the same item.
+nonisolated struct WorldRadioPlaybackSession {
+    enum Intent { case stopped, playing, paused }
+    private(set) var generation: UInt64 = 0
+    private(set) var intent: Intent = .stopped
+
+    mutating func begin() -> UInt64 {
+        generation &+= 1
+        intent = .playing
+        return generation
+    }
+
+    mutating func pause() {
+        if intent != .stopped { intent = .paused }
+    }
+
+    @discardableResult
+    mutating func resume() -> Bool {
+        guard intent != .stopped else { return false }
+        intent = .playing
+        return true
+    }
+
+    mutating func stop() {
+        // Invalidate already-enqueued KVO work before detaching observations.
+        generation &+= 1
+        intent = .stopped
+    }
+
+    func isCurrent(_ generation: UInt64) -> Bool {
+        generation == self.generation && intent != .stopped
+    }
+
+    func shouldPlay(_ generation: UInt64) -> Bool {
+        isCurrent(generation) && intent == .playing
+    }
+
+    func accepts(_ event: WorldRadioAudioEvent, generation: UInt64) -> Bool {
+        guard isCurrent(generation) else { return false }
+        switch event {
+        case .paused: return intent == .paused
+        case .connecting, .buffering, .playing, .failed: return intent == .playing
+        }
+    }
+}
+
+@MainActor
+protocol WorldRadioAudioPlaying: AnyObject {
+    var eventHandler: ((WorldRadioAudioEvent) -> Void)? { get set }
+    func play(_ station: WorldRadioStation)
+    func pause()
+    func resume()
+    func stop()
+}
+
+nonisolated enum WorldRadioAudioEvent: Equatable, Sendable {
+    case connecting
+    case buffering
+    case playing
+    case paused
+    case failed(String)
+}
+
+@MainActor
+private final class SilentWorldRadioPlayer: WorldRadioAudioPlaying {
+    var eventHandler: ((WorldRadioAudioEvent) -> Void)?
+
+    func play(_ station: WorldRadioStation) {
+        _ = station
+        eventHandler?(.failed("Audio playback is unavailable"))
+    }
+    func pause() { eventHandler?(.paused) }
+    func resume() { eventHandler?(.failed("Audio playback is unavailable")) }
+    func stop() {}
+}
+
+#if canImport(AVFoundation) && !HOST_TESTING
+@MainActor
+private final class IPhoneWorldRadioPlayer: WorldRadioAudioPlaying {
+    var eventHandler: ((WorldRadioAudioEvent) -> Void)?
+
+    private let player = AVPlayer()
+    private var playbackSession = WorldRadioPlaybackSession()
+    private var itemObservation: NSKeyValueObservation?
+    private var timeControlObservation: NSKeyValueObservation?
+    private var currentStation: WorldRadioStation?
+
+    func play(_ station: WorldRadioStation) {
+        let generation = playbackSession.begin()
+        // Observers may already have scheduled MainActor work; removing them
+        // alone is insufficient. Every scheduled callback checks generation.
+        itemObservation = nil
+        timeControlObservation = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        currentStation = station
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default)
+            try session.setActive(true)
+        } catch {
+            eventHandler?(.failed("Could not start iPhone audio"))
+            return
+        }
+
+        eventHandler?(.connecting)
+        let item = AVPlayerItem(url: station.streamURL)
+        player.replaceCurrentItem(with: item)
+        itemObservation = item.observe(\.status, options: [.initial, .new]) {
+            [weak self] item, _ in
+            Task { @MainActor [weak self, item] in
+                guard let self,
+                      self.playbackSession.isCurrent(generation),
+                      self.player.currentItem === item else { return }
+                switch item.status {
+                case .readyToPlay:
+                    if self.playbackSession.shouldPlay(generation) { self.player.play() }
+                case .failed:
+                    let event = WorldRadioAudioEvent.failed(
+                        item.error?.localizedDescription ?? "Station could not be played"
+                    )
+                    if self.playbackSession.accepts(event, generation: generation) {
+                        self.eventHandler?(event)
+                    }
+                case .unknown:
+                    break
+                @unknown default:
+                    break
+                }
+            }
+        }
+        timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) {
+            [weak self, weak item] _, _ in
+            Task { @MainActor [weak self, weak item] in
+                guard let self, let item,
+                      self.playbackSession.isCurrent(generation),
+                      self.player.currentItem === item else { return }
+                // Read the current status after hopping actors. A queued
+                // transition must not replay a superseded playback state.
+                switch self.player.timeControlStatus {
+                case .playing:
+                    guard self.playbackSession.shouldPlay(generation) else { return }
+                    self.updateNowPlaying(rate: 1)
+                    self.eventHandler?(.playing)
+                case .waitingToPlayAtSpecifiedRate:
+                    guard self.playbackSession.shouldPlay(generation) else { return }
+                    self.updateNowPlaying(rate: 0)
+                    self.eventHandler?(.buffering)
+                case .paused:
+                    self.updateNowPlaying(rate: 0)
+                @unknown default:
+                    break
+                }
+            }
+        }
+        if playbackSession.shouldPlay(generation) { player.play() }
+        updateNowPlaying(rate: 0)
+    }
+
+    func pause() {
+        playbackSession.pause()
+        player.pause()
+        updateNowPlaying(rate: 0)
+        eventHandler?(.paused)
+    }
+
+    func resume() {
+        guard let item = player.currentItem, playbackSession.resume() else {
+            eventHandler?(.failed("Choose a station first"))
+            return
+        }
+        // Failure while paused does not silently start a different station.
+        // Surface it on explicit resume so the service can apply fallback.
+        if item.status == .failed {
+            eventHandler?(.failed(item.error?.localizedDescription ?? "Station could not be played"))
+            return
+        }
+        player.play()
+    }
+
+    func stop() {
+        playbackSession.stop()
+        itemObservation = nil
+        timeControlObservation = nil
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        currentStation = nil
+#if canImport(MediaPlayer)
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+#endif
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
+    }
+
+    private func updateNowPlaying(rate: Double) {
+#if canImport(MediaPlayer)
+        guard let station = currentStation else { return }
+        let subtitle = [station.place, station.countryCode]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = [
+            MPMediaItemPropertyTitle: station.name,
+            MPMediaItemPropertyAlbumTitle: subtitle,
+            MPMediaItemPropertyArtist: "Bicino World Radio",
+            MPNowPlayingInfoPropertyPlaybackRate: rate,
+            MPNowPlayingInfoPropertyIsLiveStream: true,
+        ]
+#endif
+    }
+}
+#endif
+
+@MainActor
+final class WorldRadioService {
+    typealias StatusSink = (WorldRadioStatus) -> Void
+
+    private let directory: WorldRadioDirectoryClient
+    private let player: WorldRadioAudioPlaying
+    private let statusSink: StatusSink
+    private let chooseIndex: (Int) -> Int
+    private var requestTask: Task<Void, Never>?
+    private var candidates: [WorldRadioStation] = []
+    private var stationIndex = 0
+    private var failedStationUUIDs = Set<String>()
+    private var requestID: UInt32 = 0
+    private var searchGeneration: UInt64 = 0
+    private var pausedByUser = false
+    private var hasPlayerItem = false
+    private(set) var currentStatus: WorldRadioStatus?
+
+    init(
+        directory: WorldRadioDirectoryClient = .live(),
+        player: WorldRadioAudioPlaying? = nil,
+        chooseIndex: @escaping (Int) -> Int = { Int.random(in: 0..<$0) },
+        statusSink: @escaping StatusSink
+    ) {
+        self.directory = directory
+#if canImport(AVFoundation) && !HOST_TESTING
+        self.player = player ?? IPhoneWorldRadioPlayer()
+#else
+        self.player = player ?? SilentWorldRadioPlayer()
+#endif
+        self.statusSink = statusSink
+        self.chooseIndex = chooseIndex
+        self.player.eventHandler = { [weak self] event in
+            self?.handleAudioEvent(event)
+        }
+    }
+
+    func handle(_ request: WorldRadioRequest) {
+        requestID = request.requestID
+        switch request.command {
+        case .selectLocation:
+#if DEBUG
+            NSLog("World Radio search scope=nearby request=%u", request.requestID)
+#endif
+            let latitude = Double(request.latitudeE7) / 10_000_000
+            let longitude = Double(request.longitudeE7) / 10_000_000
+            startSearch { [directory] in
+                try await directory.nearby(latitude, longitude)
+            }
+        case .randomStation:
+#if DEBUG
+            NSLog("World Radio search scope=global request=%u", request.requestID)
+#endif
+            startSearch { [directory] in
+                try await directory.random()
+            }
+        case .playPause:
+            if requestTask != nil && candidates.isEmpty {
+                pausedByUser.toggle()
+                emit(state: pausedByUser ? .paused : .searching,
+                     message: pausedByUser ? "Paused" : "Finding stations...")
+                return
+            }
+            guard !candidates.isEmpty else {
+                emit(state: .noStations, message: "Choose a place first")
+                return
+            }
+            if currentStatus?.state == .playing || currentStatus?.state == .buffering ||
+                currentStatus?.state == .connecting {
+                pausedByUser = true
+                player.pause()
+            } else if pausedByUser {
+                pausedByUser = false
+                if hasPlayerItem { player.resume() } else { playCurrent() }
+            } else {
+                playCurrent()
+            }
+        case .previousStation:
+            moveStation(by: -1)
+        case .nextStation:
+            moveStation(by: 1)
+        case .stop:
+            cancelSearch()
+            stopPlayer()
+            pausedByUser = false
+            emit(state: .idle, message: "Stopped")
+        }
+    }
+
+    /// Stop all radio work and release the feature's station/player state.
+    /// The coordinator calls this when the World Radio screen is disabled;
+    /// a temporary BLE disconnect deliberately does not call it so phone-side
+    /// playback can continue.
+    func stop() {
+        cancelSearch()
+        stopPlayer()
+        pausedByUser = false
+        candidates = []
+        stationIndex = 0
+        failedStationUUIDs = []
+        requestID = 0
+        currentStatus = nil
+    }
+
+    /// Re-send the last state without restarting discovery or playback after
+    /// the authenticated BLE session comes back.
+    func resendCurrentStatus() {
+        guard let currentStatus else { return }
+        statusSink(currentStatus)
+    }
+
+    private func cancelSearch() {
+        searchGeneration &+= 1
+        requestTask?.cancel()
+        requestTask = nil
+    }
+
+    private func stopPlayer() {
+        hasPlayerItem = false
+        player.stop()
+    }
+
+    private func startSearch(
+        operation: @escaping @Sendable () async throws -> [WorldRadioStation]
+    ) {
+        cancelSearch()
+        let generation = searchGeneration
+        let previousUUID = currentStation?.uuid
+        stopPlayer()
+        pausedByUser = false
+        candidates = []
+        stationIndex = 0
+        failedStationUUIDs = []
+        emit(state: .searching, message: "Finding stations...")
+        requestTask = Task { [weak self] in
+            do {
+                let stations = try await operation()
+                guard !Task.isCancelled, let self,
+                      self.searchGeneration == generation else { return }
+                self.requestTask = nil
+                self.candidates = stations
+                let alternatives = stations.indices.filter { stations[$0].uuid != previousUUID }
+                let choices = alternatives.isEmpty ? Array(stations.indices) : alternatives
+                self.stationIndex = choices.isEmpty ? 0 : choices[self.chooseIndex(choices.count)]
+                self.failedStationUUIDs = []
+                if self.pausedByUser && !stations.isEmpty {
+                    self.emit(state: .paused, message: "Paused")
+                } else {
+                    self.playCurrent()
+                }
+            } catch {
+                // A cancelled directory can throw a non-CancellationError.
+                // Never let an old failure replace the current search/status.
+                guard !Task.isCancelled, let self,
+                      self.searchGeneration == generation else { return }
+                self.requestTask = nil
+                if error is CancellationError { return }
+                if error as? WorldRadioDirectoryError == .noStations {
+                    self.emit(state: .noStations, message: "No playable stations nearby")
+                } else {
+                    self.emit(state: .error, message: "Radio directory unavailable")
+                }
+            }
+        }
+    }
+
+    private func moveStation(by offset: Int) {
+        guard !candidates.isEmpty else {
+            emit(state: .noStations, message: "Choose a place first")
+            return
+        }
+        stopPlayer()
+        stationIndex = (stationIndex + offset + candidates.count) % candidates.count
+        failedStationUUIDs = []
+        playCurrent()
+    }
+
+    private func playCurrent() {
+        guard candidates.indices.contains(stationIndex) else {
+            emit(state: .noStations, message: "No playable stations nearby")
+            return
+        }
+        pausedByUser = false
+        hasPlayerItem = true
+        emit(state: .connecting, message: "Connecting...")
+        player.play(candidates[stationIndex])
+    }
+
+    private func handleAudioEvent(_ event: WorldRadioAudioEvent) {
+        guard hasPlayerItem, requestID != 0 else { return }
+        if pausedByUser && event != .paused { return }
+        switch event {
+        case .connecting:
+            emit(state: .connecting, message: "Connecting...")
+        case .buffering:
+            emit(state: .buffering, message: "Buffering...")
+        case .playing:
+            emit(state: .playing, message: "Playing on iPhone")
+            if let station = currentStation {
+                Task { [directory] in
+                    await directory.recordClick(station.uuid)
+                }
+            }
+        case .paused:
+            emit(state: .paused, message: "Paused")
+        case .failed:
+            guard let station = currentStation else {
+                emit(state: .error, message: "Station unavailable")
+                return
+            }
+            failedStationUUIDs.insert(station.uuid)
+            if failedStationUUIDs.count < candidates.count {
+                repeat {
+                    stationIndex = (stationIndex + 1) % candidates.count
+                } while failedStationUUIDs.contains(candidates[stationIndex].uuid) &&
+                    failedStationUUIDs.count < candidates.count
+                playCurrent()
+            } else {
+                stopPlayer()
+                emit(state: .error, message: "No station could be played")
+            }
+        }
+    }
+
+    private var currentStation: WorldRadioStation? {
+        candidates.indices.contains(stationIndex) ? candidates[stationIndex] : nil
+    }
+
+    private func emit(state: WorldRadioPlaybackState, message: String) {
+        let status = WorldRadioStatus(
+            state: state,
+            stationIndex: stationIndex,
+            stationCount: candidates.count,
+            requestID: requestID,
+            station: currentStation,
+            message: message
+        )
+        currentStatus = status
+        statusSink(status)
+    }
+}

@@ -317,6 +317,8 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.workoutUUID
     static let rideAutomationCharacteristicUUIDString =
         RideBLEGeneratedProtocolV1.rideAutomationUUID
+    static let screenConfigurationCharacteristicUUIDString =
+        RideBLEGeneratedProtocolV1.screenConfigurationUUID
     static let deviceInformationServiceUUIDString = "180A"
     static let modelNumberCharacteristicUUIDString = "2A24"
     static let firmwareRevisionCharacteristicUUIDString = "2A26"
@@ -352,6 +354,10 @@ enum DeviceBLEProtocol {
     static let destinationRequestPrefix =
         RideBLEGeneratedProtocolV1.destinationRequestMagic
     static let destinationStatusPrefix = "DNST"
+    static let worldRadioRequestPrefix =
+        RideBLEGeneratedProtocolV1.worldRadioRequestMagic
+    static let worldRadioStatusPrefix =
+        RideBLEGeneratedProtocolV1.worldRadioStatusMagic
     static let workoutStartRequestPrefix =
         RideBLEGeneratedProtocolV1.workoutStartRequestMagic
     static let rideDeliveryCommandPrefix =
@@ -409,12 +415,18 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.rendererDiagnosticsFeature
     static let automaticDisplayOffCapabilityMask =
         RideBLEGeneratedProtocolV1.automaticDisplayOffFeature
+    static let displayInactivityTimeoutsCapabilityMask =
+        RideBLEGeneratedProtocolV1.displayInactivityTimeoutsFeature
     static let rideDiagnosticsCapabilityMask =
         RideBLEGeneratedProtocolV1.rideDiagnosticsFeature
     static let detailedRideDiagnosticsCapabilityMask =
         RideBLEGeneratedProtocolV1.detailedRideDiagnosticsFeature
     static let rideDeliveryAcknowledgementCapabilityMask =
         RideBLEGeneratedProtocolV1.rideDeliveryAckFeature
+    static let worldRadioCapabilityMask =
+        RideBLEGeneratedProtocolV1.worldRadioFeature
+    static let screenConfigurationCapabilityMask =
+        RideBLEGeneratedProtocolV1.screenConfigurationV1Feature
     static let rendererBenchmarkSampleCapabilityMask =
         RideBLEGeneratedProtocolV1.rendererBenchmarkSampleFeature
     static let watchGPSMotionEvidenceV1CapabilityMask =
@@ -434,6 +446,9 @@ enum DeviceBLEProtocol {
     static let gpsPositionCoalescingKey = "gps-position"
     static let automaticDisplayOffSettingCoalescingKey =
         "automatic-display-off-setting"
+    static let displayInactivityTimeoutsSettingCoalescingKey =
+        "display-inactivity-timeouts-setting"
+    static let worldRadioStatusCoalescingKey = "world-radio-status"
     // Large enough for the worst schema-v1 three-favorite catalog at the
     // minimum BLE write length, without retaining a long stale GPS backlog.
     static let fallbackWriteQueueCapacity = 64
@@ -469,6 +484,7 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigation3DBuildingsSettingID: UInt8 = 35
     static let mapPlusNavigationRotationSettingID: UInt8 = 37
     static let automaticDisplayOffSettingID: UInt8 = 36
+    static let displayInactivityTimeoutsSettingID: UInt8 = 38
     static let currentScreenMaskMarker: Int32 = 1 << 30
     static let defaultMapStreetLabelsEnabled = true
     static let defaultMapPlusNavigationStreetLabelsEnabled = false
@@ -476,6 +492,37 @@ enum DeviceBLEProtocol {
     static let defaultStreetLabelLanguageMode = 2
     static let defaultStreetLabelTextSize = 0
     static let defaultStreetLabelOrientation = 1
+    static let defaultDisplayDimAfterSeconds = 15
+    static let defaultDisplayOffAfterSeconds = 45
+
+    static func displayInactivityTimeoutsSettingValue(
+        dimAfterSeconds: Int,
+        displayOffAfterSeconds: Int
+    ) -> Int32? {
+        guard (5...600).contains(dimAfterSeconds),
+              (10...3_600).contains(displayOffAfterSeconds),
+              displayOffAfterSeconds >= dimAfterSeconds + 5,
+              let dim = UInt16(exactly: dimAfterSeconds),
+              let off = UInt16(exactly: displayOffAfterSeconds) else {
+            return nil
+        }
+        return Int32(bitPattern: UInt32(dim) | (UInt32(off) << 16))
+    }
+
+    static func displayInactivityTimeouts(
+        fromSettingValue value: Int32
+    ) -> (dimAfterSeconds: Int, displayOffAfterSeconds: Int)? {
+        let packed = UInt32(bitPattern: value)
+        let dim = Int(UInt16(truncatingIfNeeded: packed))
+        let off = Int(UInt16(truncatingIfNeeded: packed >> 16))
+        guard displayInactivityTimeoutsSettingValue(
+            dimAfterSeconds: dim,
+            displayOffAfterSeconds: off
+        ) != nil else {
+            return nil
+        }
+        return (dim, off)
+    }
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
     static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
@@ -488,6 +535,9 @@ enum DeviceBLEProtocol {
     }
     static var rideAutomationCharacteristicUUID: CBUUID {
         CBUUID(string: rideAutomationCharacteristicUUIDString)
+    }
+    static var screenConfigurationCharacteristicUUID: CBUUID {
+        CBUUID(string: screenConfigurationCharacteristicUUIDString)
     }
     static var deviceInformationServiceUUID: CBUUID { CBUUID(string: deviceInformationServiceUUIDString) }
     static var modelNumberCharacteristicUUID: CBUUID { CBUUID(string: modelNumberCharacteristicUUIDString) }
@@ -540,6 +590,14 @@ enum DeviceBLEProtocol {
             return hardware
         }
         return ""
+    }
+}
+
+enum DeviceScreenSettingsTransportPolicy {
+    static func usesLegacySettings(
+        supportsScreenConfiguration: Bool
+    ) -> Bool {
+        !supportsScreenConfiguration
     }
 }
 
@@ -625,41 +683,29 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
     }
 }
 
-enum DeviceScreen: Int, CaseIterable, Identifiable {
-    case map = 0
-    case navigation = 1
-    case rideStats = 2
-    case mapPlusNavigation = 3
-    case batteryStatus = 4
+typealias DeviceScreen = RideBLELegacyScreenV1
 
+extension RideBLELegacyScreenV1: Identifiable {
     var id: Int { rawValue }
     var bit: Int { 1 << rawValue }
 
-    var title: String {
-        switch self {
-        case .map:
-            return "Map"
-        case .navigation:
-            return "Navigation"
-        case .rideStats:
-            return "Ride Stats"
-        case .mapPlusNavigation:
-            return "Map + Navigation"
-        case .batteryStatus:
-            return "Battery Status"
-        }
-    }
+    var title: String { wireType.title }
 
     static var allScreensMask: Int {
         allCases.reduce(0) { $0 | $1.bit }
     }
 
+    static var defaultScreensMask: Int {
+        allScreensMask & ~worldRadio.bit
+    }
+
     static var legacyScreensMask: Int {
-        allScreensMask & ~batteryStatus.bit
+        allScreensMask & ~(batteryStatus.bit | worldRadio.bit)
     }
 
     static var displayOrder: [DeviceScreen] {
-        [.mapPlusNavigation, .rideStats, .map, .navigation, .batteryStatus]
+        [.mapPlusNavigation, .rideStats, .map, .navigation, .worldRadio,
+         .batteryStatus]
     }
 
     static func normalizedMask(_ rawMask: Int) -> Int {
@@ -718,6 +764,43 @@ enum DisconnectedSleepTimeout: Int, CaseIterable, Identifiable {
 
     static func normalized(rawValue: Int) -> DisconnectedSleepTimeout {
         DisconnectedSleepTimeout(rawValue: rawValue) ?? .twoMinutes
+    }
+}
+
+enum DisplayDimTimeout: Int, CaseIterable, Identifiable {
+    case fiveSeconds = 5
+    case fifteenSeconds = 15
+    case thirtySeconds = 30
+    case oneMinute = 60
+    case twoMinutes = 120
+
+    var id: Int { rawValue }
+
+    var title: String {
+        rawValue < 60 ? "\(rawValue) sec" : "\(rawValue / 60) min"
+    }
+
+    static func normalized(rawValue: Int) -> DisplayDimTimeout {
+        DisplayDimTimeout(rawValue: rawValue) ?? .fifteenSeconds
+    }
+}
+
+enum DisplayOffTimeout: Int, CaseIterable, Identifiable {
+    case thirtySeconds = 30
+    case fortyFiveSeconds = 45
+    case oneMinute = 60
+    case twoMinutes = 120
+    case fiveMinutes = 300
+    case tenMinutes = 600
+
+    var id: Int { rawValue }
+
+    var title: String {
+        rawValue < 60 ? "\(rawValue) sec" : "\(rawValue / 60) min"
+    }
+
+    static func normalized(rawValue: Int) -> DisplayOffTimeout {
+        DisplayOffTimeout(rawValue: rawValue) ?? .fortyFiveSeconds
     }
 }
 
@@ -907,6 +990,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
     @Published private(set) var supportsAutomaticDisplayOff: Bool = false
+    @Published private(set) var supportsDisplayInactivityTimeouts: Bool = false
     @Published var supportsDeviceSounds: Bool = false
     @Published var supportsPowerButtonHonk: Bool = false
     @Published var supportsPowerButtonHonkAcknowledgement: Bool = false
@@ -936,7 +1020,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRideDiagnostics: Bool = false
     @Published private(set) var supportsDetailedRideDiagnostics: Bool = false
     @Published private(set) var supportsRideDeliveryAcknowledgement: Bool = false
+    @Published private(set) var supportsWorldRadio: Bool = false
+    @Published private(set) var supportsScreenConfiguration: Bool = false
     @Published private(set) var supportsWatchGPSMotionEvidenceV1: Bool = false
+    @Published private(set) var supportsWorkoutZonesV1: Bool = false
+    private var workoutZoneSequence: UInt32 = 0
     @Published private(set) var rideTransportPhase:
         RideBLETransportPhaseV1 = .idle
     @Published private(set) var rideTransportFailureReason:
@@ -952,12 +1040,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published var centralStateDescription: String = "unknown"
     @Published var trustedPeripheralDescription: String = "none"
     @Published private(set) var knownDevices: [KnownBikeComputerDevice] = []
+    @Published private(set) var hasEverConnectedBikeComputer = false
     @Published private(set) var discoveredDevices: [DiscoveredBikeComputerDevice] = []
     @Published private(set) var isDiscoveringDevices = false
     @Published private(set) var currentScanPurpose: BLEScanPurpose = .none
     @Published private(set) var nearbyBicinoCandidate: DiscoveredBikeComputerDevice?
     @Published private(set) var isApplicationActive = false
     @Published private(set) var isOpportunisticDiscoverySuppressed = false
+    private var isOpportunisticDiscoveryEnabled = true
     @Published private(set) var observedIdentityMismatchDeviceIDs: Set<String> = []
     @Published private(set) var activeDeviceID: String?
     @Published private(set) var connectedDeviceID: String?
@@ -969,6 +1059,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceOperationDeviceID: String?
     @Published private(set) var deviceFeedbackDeviceID: String?
     @Published var debugEvents: [String] = []
+    var isExplicitDiscoveryPending: Bool {
+        explicitDiscoveryRequested && currentScanPurpose != .explicitDiscovery
+    }
     weak var diagnosticsRecorder: RideDiagnosticsRecorder? {
         didSet {
             DispatchQueue.main.async { [weak self] in
@@ -1063,10 +1156,12 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
     @Published var mapPlusNavigationLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
     @Published var tapToSwitchScreens: Bool = false
-    @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
+    @Published var enabledDeviceScreensMask: Int = DeviceScreen.defaultScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
     @Published var automaticDisplayOffEnabled: Bool = true
+    @Published var displayDimTimeout: DisplayDimTimeout = .fifteenSeconds
+    @Published var displayOffTimeout: DisplayOffTimeout = .fortyFiveSeconds
     @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
     @Published var deviceSoundsEnabled: Bool = false
     @Published var selectedDeviceSound: DeviceSound = .defaultSelection
@@ -1124,6 +1219,8 @@ class BLEManager: NSObject, ObservableObject {
         DeviceBLEProtocol.workoutTelemetryCharacteristicUUID
     private let rideAutomationCharacteristicUUID =
         DeviceBLEProtocol.rideAutomationCharacteristicUUID
+    private let screenConfigurationCharacteristicUUID =
+        DeviceBLEProtocol.screenConfigurationCharacteristicUUID
     private let deviceInformationServiceUUID = DeviceBLEProtocol.deviceInformationServiceUUID
     private let modelNumberCharacteristicUUID = DeviceBLEProtocol.modelNumberCharacteristicUUID
     private let firmwareRevisionCharacteristicUUID = DeviceBLEProtocol.firmwareRevisionCharacteristicUUID
@@ -1140,6 +1237,9 @@ class BLEManager: NSObject, ObservableObject {
     private var settingsCharacteristic: CBCharacteristic?
     private var workoutTelemetryCharacteristic: CBCharacteristic?
     private var rideAutomationCharacteristic: CBCharacteristic?
+    private var screenConfigurationCharacteristic: CBCharacteristic?
+    let deviceScreenConfigurationController =
+        DeviceScreenConfigurationController()
     private var workoutTelemetryWriteEndpointForTesting: WorkoutTelemetryWriteEndpoint?
     var workoutMotionUptime = { ProcessInfo.processInfo.systemUptime }
     private var deviceInformation: [CBUUID: String] = [:]
@@ -1209,6 +1309,8 @@ class BLEManager: NSObject, ObservableObject {
         BLEUnknownScanObservationGate()
 #if HOST_TESTING
     private var scanDriverForTesting: BLEScanDriverForTesting?
+    private(set) var watchDirectRideReconciliationRequestForTesting:
+        WatchDirectRideReconciliationRequestV1?
 #endif
     private var opportunisticSelectionTimer: Timer?
     private var opportunisticCandidateExpiryTimer: Timer?
@@ -1228,6 +1330,7 @@ class BLEManager: NSObject, ObservableObject {
     private var watchDirectRidePreparationID: UUID?
     private var watchDirectRidePreviousAutoReconnect: Bool?
     private var watchDirectRidePreparationExpiryTimer: Timer?
+    private var watchDirectRideReconciliationTimeoutTimer: Timer?
     private var watchDirectRideReleaseTombstones:
         [WatchDirectRideReleaseTombstone] = []
     private var lastConnectedPeripheralIdentifier: UUID?
@@ -1334,6 +1437,7 @@ class BLEManager: NSObject, ObservableObject {
     private var hasSentMapNavigationProfileForConnection = false
     private var hasSentScreenSettingsForConnection = false
     private var hasSentAutomaticDisplayOffForConnection = false
+    private var hasSentDisplayInactivityTimeoutsForConnection = false
     private var isSendingNegotiatedMapProfiles = false
     private var lastSentPhoneBatteryPercent: Int32?
     private var lastSentPhoneBatteryCharging: Bool?
@@ -1345,6 +1449,7 @@ class BLEManager: NSObject, ObservableObject {
     var hasActiveTransportSession: Bool { hasActiveBLESession }
 
     var onDestinationRequest: ((DeviceDestinationRequest) -> Void)?
+    var onWorldRadioRequest: ((WorldRadioRequest) -> Void)?
     var onWorkoutStartRequest: (() -> Void)?
     var onRideAutomationFrame: ((RideAutomationFrame) -> Void)?
     var onDestinationCatalogWriteFailure: (() -> Void)?
@@ -1404,6 +1509,10 @@ class BLEManager: NSObject, ObservableObject {
         static let batteryStatusScreenMigrated = "deviceSettings.enabledScreensMask.batteryStatus.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let automaticDisplayOffEnabled = "deviceSettings.automaticDisplayOffEnabled"
+        static let displayDimTimeoutSeconds =
+            "deviceSettings.displayDimTimeoutSeconds"
+        static let displayOffTimeoutSeconds =
+            "deviceSettings.displayOffTimeoutSeconds"
         static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
         static let deviceSoundsEnabled = "deviceSettings.deviceSoundsEnabled"
         static let watchControllerIDsByDevice =
@@ -1612,7 +1721,7 @@ class BLEManager: NSObject, ObservableObject {
         }
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
         var storedScreensMask = defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int
-            ?? DeviceScreen.allScreensMask
+            ?? DeviceScreen.defaultScreensMask
         if !defaults.bool(forKey: SettingsKeys.batteryStatusScreenMigrated) {
             storedScreensMask |= DeviceScreen.batteryStatus.bit
             defaults.set(storedScreensMask, forKey: SettingsKeys.enabledDeviceScreensMask)
@@ -1638,6 +1747,20 @@ class BLEManager: NSObject, ObservableObject {
         automaticDisplayOffEnabled = defaults.object(
             forKey: SettingsKeys.automaticDisplayOffEnabled
         ) as? Bool ?? true
+        displayDimTimeout = DisplayDimTimeout.normalized(
+            rawValue: defaults.object(
+                forKey: SettingsKeys.displayDimTimeoutSeconds
+            ) as? Int ?? DeviceBLEProtocol.defaultDisplayDimAfterSeconds
+        )
+        displayOffTimeout = DisplayOffTimeout.normalized(
+            rawValue: defaults.object(
+                forKey: SettingsKeys.displayOffTimeoutSeconds
+            ) as? Int ?? DeviceBLEProtocol.defaultDisplayOffAfterSeconds
+        )
+        if displayOffTimeout.rawValue < displayDimTimeout.rawValue + 5 {
+            displayDimTimeout = .fifteenSeconds
+            displayOffTimeout = .fortyFiveSeconds
+        }
         disconnectedSleepTimeout = DisconnectedSleepTimeout.normalized(
             rawValue: defaults.object(forKey: SettingsKeys.disconnectedSleepTimeoutSeconds) as? Int ?? DisconnectedSleepTimeout.twoMinutes.rawValue
         )
@@ -1865,6 +1988,8 @@ class BLEManager: NSObject, ObservableObject {
 
     private func refreshKnownDevices() {
         knownDevices = deviceRegistry.devices
+        hasEverConnectedBikeComputer =
+            deviceRegistry.hasEverConnectedBikeComputer
         observedIdentityMismatchDeviceIDs.formIntersection(
             Set(knownDevices.map(\.deviceID))
         )
@@ -1929,6 +2054,10 @@ class BLEManager: NSObject, ObservableObject {
         )
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(automaticDisplayOffEnabled, forKey: SettingsKeys.automaticDisplayOffEnabled)
+        defaults.set(displayDimTimeout.rawValue,
+                     forKey: SettingsKeys.displayDimTimeoutSeconds)
+        defaults.set(displayOffTimeout.rawValue,
+                     forKey: SettingsKeys.displayOffTimeoutSeconds)
         defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
         defaults.set(deviceSoundsEnabled, forKey: SettingsKeys.deviceSoundsEnabled)
         defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
@@ -2031,6 +2160,9 @@ class BLEManager: NSObject, ObservableObject {
         watchDirectRidePreparedDeviceID = isExclusiveOperationActive
             ? knownDevices.first?.deviceID ?? "host-test-device"
             : nil
+        watchDirectRidePreparationID = isExclusiveOperationActive
+            ? UUID(uuidString: "DDDDDDDD-EEEE-FFFF-AAAA-BBBBBBBBBBBB")
+            : nil
         isApplicationActive = false
         isOpportunisticDiscoverySuppressed = false
         explicitDiscoveryRequested = false
@@ -2083,6 +2215,11 @@ class BLEManager: NSObject, ObservableObject {
         pairingStatusMessage = "Disconnecting before searching nearby…"
     }
 
+    func installConnectionAttemptForTesting() {
+        stopPhysicalScan(reason: "test connection attempt starting")
+        isConnecting = true
+    }
+
     func completeExplicitDisconnectHandoffForTesting() {
         _ = resumeExplicitDiscoveryAfterTransportEnded(
             reason: "test explicit disconnect handoff completed"
@@ -2128,6 +2265,11 @@ class BLEManager: NSObject, ObservableObject {
                 autoReconnect = false
                 refreshPureExplicitDiscoveryPresentation()
             }
+            if watchDirectRidePreparedDeviceID != nil {
+                _ = requestWatchDirectRideReconciliation(
+                    forExplicitDiscovery: false
+                )
+            }
         } else {
             let isSuspendingExplicitDiscovery =
                 explicitDiscoveryRequested && pendingPairingSession == nil
@@ -2161,6 +2303,19 @@ class BLEManager: NSObject, ObservableObject {
         reconcileScanning(
             reason: isActive ? "application became active" :
                 "application entered background"
+        )
+    }
+
+    func setOpportunisticDiscoveryEnabled(_ isEnabled: Bool) {
+        guard isOpportunisticDiscoveryEnabled != isEnabled else { return }
+        isOpportunisticDiscoveryEnabled = isEnabled
+        if !isEnabled {
+            clearUnknownDiscoveryState()
+        }
+        reconcileScanning(
+            reason: isEnabled
+                ? "opportunistic discovery enabled"
+                : "opportunistic discovery disabled"
         )
     }
 
@@ -2254,6 +2409,7 @@ class BLEManager: NSObject, ObservableObject {
                 selectedPeripheralIdentifier:
                     pendingScannedConnectionIdentifier,
                 isUnknownDiscoverySuppressed:
+                    !isOpportunisticDiscoveryEnabled ||
                     isOpportunisticDiscoverySuppressed ||
                     isUnknownDeviceDiscoverySuspended,
                 isExclusiveOperationActive:
@@ -2278,6 +2434,10 @@ class BLEManager: NSObject, ObservableObject {
         pairingStatusMessage = nil
         if !isApplicationActive || isUnknownDeviceDiscoverySuspended {
             pairingError = nil
+        } else if watchDirectRidePreparedDeviceID != nil {
+            pairingError = nil
+            pairingStatusMessage =
+                "Waiting for Apple Watch to release this Bike Computer…"
         } else if !isScanDriverPoweredOn {
             pairingError = "Turn on Bluetooth to add a Bike Computer."
         } else {
@@ -2526,6 +2686,8 @@ class BLEManager: NSObject, ObservableObject {
         }
         watchDirectRidePreparedDeviceID = deviceID
         watchDirectRidePreparationID = preparationID
+        watchDirectRideReconciliationTimeoutTimer?.invalidate()
+        watchDirectRideReconciliationTimeoutTimer = nil
         autoReconnect = false
         resetReconnectionState()
         pendingConnectionAfterDisconnect = nil
@@ -2554,10 +2716,18 @@ class BLEManager: NSObject, ObservableObject {
               watchDirectRidePreparationID == preparationID else { return }
         let shouldReconnect = watchDirectRidePreviousAutoReconnect ?? true
         clearWatchDirectRidePreparationPersistence()
+        watchDirectRideReconciliationTimeoutTimer?.invalidate()
+        watchDirectRideReconciliationTimeoutTimer = nil
         watchDirectRidePreparedDeviceID = nil
         watchDirectRidePreparationID = nil
         watchDirectRidePreviousAutoReconnect = nil
         autoReconnect = shouldReconnect
+        refreshPureExplicitDiscoveryPresentation()
+        if explicitDiscoveryRequested {
+            resetReconnectionState()
+            reconcileScanning(reason: "Apple Watch direct ride released")
+            return
+        }
         guard shouldReconnect else { return }
         resetReconnectionState()
         reconcileScanning(reason: "Apple Watch direct ride released")
@@ -2658,6 +2828,61 @@ class BLEManager: NSObject, ObservableObject {
         defaults.removeObject(
             forKey: SettingsKeys.watchDirectRidePreparationExpiresAt
         )
+    }
+
+    @discardableResult
+    private func requestWatchDirectRideReconciliation(
+        forExplicitDiscovery: Bool
+    ) -> Bool {
+        guard let deviceID = watchDirectRidePreparedDeviceID,
+              let preparationID = watchDirectRidePreparationID else {
+            return false
+        }
+        guard let request = try?
+                WatchDirectRideReconciliationRequestV1(
+                    preparationID: preparationID,
+                    deviceID: deviceID
+                ) else {
+            pairingStatusMessage = nil
+            pairingError =
+                "Apple Watch handoff state is invalid. Open Bicino on Apple Watch, then try again."
+            return true
+        }
+#if HOST_TESTING
+        watchDirectRideReconciliationRequestForTesting = request
+#endif
+        watchConnectivityCoordinator?
+            .queueWatchDirectRideReconciliation(request)
+        if forExplicitDiscovery {
+            watchDirectRideReconciliationTimeoutTimer?.invalidate()
+            watchDirectRideReconciliationTimeoutTimer =
+                Timer.scheduledOnMainActor(
+                    withTimeInterval:
+                        WatchDirectRideReconciliationPolicyV1
+                            .phoneWaitTimeoutSeconds,
+                    repeats: false
+                ) { [weak self] _ in
+                    guard let self,
+                          self.explicitDiscoveryRequested,
+                          self.watchDirectRidePreparedDeviceID ==
+                            request.deviceID,
+                          self.watchDirectRidePreparationID ==
+                            request.preparationID else { return }
+                    self.watchDirectRideReconciliationTimeoutTimer = nil
+                    self.pairingStatusMessage = nil
+                    self.pairingError =
+                        "Apple Watch still owns this Bike Computer. End any active ride, or open Bicino on Apple Watch, then try again."
+                    self.log(
+                        "Explicit discovery is waiting for Apple Watch direct ride release"
+                    )
+                }
+        }
+        log(
+            forExplicitDiscovery
+                ? "Requested Apple Watch direct ride reconciliation for discovery"
+                : "Requested Apple Watch direct ride reconciliation on foreground"
+        )
+        return true
     }
 
     private func rememberReleasedWatchDirectRidePreparation(
@@ -2780,6 +3005,10 @@ class BLEManager: NSObject, ObservableObject {
             pairingError = "Keep Bicino open to search for a Bike Computer."
             return
         }
+        if isConnecting {
+            cancelConnectionAttemptForDiscovery()
+            return
+        }
         guard !hasActiveBLESession else {
             pairingError = "Disconnect the current Bike Computer before searching for another."
             return
@@ -2795,6 +3024,14 @@ class BLEManager: NSObject, ObservableObject {
         clearUnknownDiscoveryState()
         isPairingMode = true
         refreshPureExplicitDiscoveryPresentation()
+        if requestWatchDirectRideReconciliation(
+            forExplicitDiscovery: true
+        ) {
+            reconcileScanning(
+                reason: "explicit discovery waiting for Apple Watch release"
+            )
+            return
+        }
         guard !isUnknownDeviceDiscoverySuspended else {
             reconcileScanning(
                 reason: "explicit discovery remains yielded to another enrollment"
@@ -2870,6 +3107,8 @@ class BLEManager: NSObject, ObservableObject {
         clearUnknownDiscoveryState()
         pairingStatusMessage = nil
         pairingError = nil
+        watchDirectRideReconciliationTimeoutTimer?.invalidate()
+        watchDirectRideReconciliationTimeoutTimer = nil
         if shouldResumeAutoReconnect {
             autoReconnect = true
             resumeAutoReconnectIfNeeded()
@@ -2878,13 +3117,16 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    /// Stop a stale or failed transport attempt so Settings can immediately
-    /// hand the radio to explicit nearby discovery. A board reboot during the
-    /// connection handshake can otherwise leave Core Bluetooth reporting
-    /// `isConnecting` until its delayed disconnect callback arrives, which
-    /// used to make the only add-device action permanently inert.
+    /// Replace a stale or failed transport attempt with explicit nearby
+    /// discovery. A board reset can change Core Bluetooth's peripheral
+    /// identity while an unbounded trusted reconnect remains pending for the
+    /// old identifier. Cancelling that attempt without retaining explicit
+    /// intent leaves Settings idle and requires a second user action.
     func cancelConnectionAttemptForDiscovery() {
-        guard isConnecting else { return }
+        guard isConnecting else {
+            startDeviceDiscovery()
+            return
+        }
 
         if pendingPairingSession != nil || pendingPairingMaterial != nil ||
             pairingPrompt != nil || isPairingMode {
@@ -2912,7 +3154,8 @@ class BLEManager: NSObject, ObservableObject {
         clearConnectionState()
         pairingStatusMessage = nil
         pairingError = nil
-        reconcileScanning(reason: "connection attempt cancelled for explicit discovery")
+        log("Connection attempt cancelled for explicit discovery")
+        startDeviceDiscovery()
     }
 
     func pair(with candidate: DiscoveredBikeComputerDevice, name: String) {
@@ -3471,6 +3714,7 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
         queueRememberedWatchControllerDeletion(deviceID: device.deviceID)
+        deviceScreenConfigurationController.clearCache(deviceID: device.deviceID)
 
         locallyForgottenPeripheralIdentifiers.insert(device.peripheralIdentifier)
         if pendingScannedConnectionIdentifier == device.peripheralIdentifier {
@@ -4140,6 +4384,7 @@ class BLEManager: NSObject, ObservableObject {
         core: Data,
         extended: Data,
         origin: Data? = nil,
+        zoneContext: WorkoutZoneDeviceContextV1? = nil,
         prioritized: Bool,
         onWrite: @escaping (Data) -> Void,
         onDrop: @escaping (Data) -> Void,
@@ -4157,11 +4402,17 @@ class BLEManager: NSObject, ObservableObject {
             return false
         }
 
+        var zones: [Data] = []
+        if supportsWorkoutZonesV1, origin != nil, workoutZoneSequence < UInt32.max {
+            workoutZoneSequence += 1
+            zones = WorkoutZoneDeviceCodecV1.packets(for: zoneContext,
+                sequence: workoutZoneSequence, pairGeneration: core[1] >> 6, at: Date())
+        }
         if prioritized,
            supportsRideDeliveryAcknowledgement,
            workoutTelemetryCharacteristic != nil {
             return sendAcknowledgedWorkoutTelemetryGroup(
-                frames: [core, extended] + (origin.map { [$0] } ?? []),
+                frames: [core, extended] + (origin.map { [$0] } ?? []) + zones,
                 onWrite: onWrite,
                 onDrop: onDrop,
                 onWriteFailure: onWriteFailure
@@ -4210,6 +4461,14 @@ class BLEManager: NSObject, ObservableObject {
             }
             writes.append(originWrite)
         }
+        for zone in zones {
+            guard let write = workoutTelemetryWrite(zone,
+                navigationEndpoint: navigationEndpoint,
+                coalescingKey: "workout-zone-\(zone[2])",
+                onWrite: { onWrite(zone) }, onDrop: { onDrop(zone) },
+                onWriteFailure: { onWriteFailure(zone) }) else { return false }
+            writes.append(write)
+        }
         let didEnqueue = prioritized
             ? navigationWriteQueue.enqueuePrioritizedAtomically(writes)
             : navigationWriteQueue.enqueueAtomically(writes)
@@ -4254,9 +4513,14 @@ class BLEManager: NSObject, ObservableObject {
                     peripheral.maximumWriteValueLength(for: writeType) else {
                 return nil
             }
+            let zone = frames[index].first == WorkoutZoneDeviceCodecV1.frameKind
+                ? RideBLEZoneDispatch(frame: frames[index]) : nil
             return NavigationWrite(
                 data: payload,
                 label: "acknowledged workout telemetry \(index + 1)/\(frames.count)",
+                prepareData: zone.map { zone in {
+                    Data(payload.prefix(RideBLEGeneratedProtocolV1.applicationCommandHeaderBytes)) + zone.payload()
+                } },
                 transportWrite: { [weak self, weak peripheral, weak characteristic] data in
                     guard let self, let peripheral, let characteristic else {
                         return
@@ -4601,6 +4865,10 @@ class BLEManager: NSObject, ObservableObject {
         onDrop: (() -> Void)?,
         onWriteFailure: (() -> Void)?
     ) -> NavigationWrite? {
+        if frame.first == WorkoutZoneDeviceCodecV1.frameKind {
+            guard supportsWorkoutZonesV1, WorkoutZoneDeviceCodecV1.hasValidShape(frame),
+                  workoutTelemetryCharacteristic != nil else { return nil }
+        }
         let payload: Data
         let label: String
         let transportWrite: ((Data) -> Void)?
@@ -4703,18 +4971,18 @@ class BLEManager: NSObject, ObservableObject {
         let motionClock = workoutMotionUptime
         let motion = frame.first == 4
             ? RideBLEMotionDispatch(frame: frame, enqueuedUptime: motionClock()) : nil
+        let zone = frame.first == WorkoutZoneDeviceCodecV1.frameKind
+            ? RideBLEZoneDispatch(frame: frame, enqueuedUptime: motionClock()) : nil
         let isFallback = route == .navigationFallback
+        let prepare: (() -> Data?)? = zone.map { zone in { zone.payload(at: motionClock()) } }
+            ?? motion.map { motion in {
+                guard let frame = motion.payload(at: motionClock()) else { return nil }
+                return isFallback ? Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8) + frame : frame
+            } }
         return NavigationWrite(
             data: payload,
             label: label,
-            prepareData: motion.map { motion in
-                {
-                    guard let frame = motion.payload(at: motionClock()) else { return nil }
-                    return isFallback
-                        ? Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8) + frame
-                        : frame
-                }
-            },
+            prepareData: prepare,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,
@@ -4738,6 +5006,17 @@ class BLEManager: NSObject, ObservableObject {
             )
         } else if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
             automaticDisplayOffEnabled = value != 0
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            guard let timeouts = DeviceBLEProtocol.displayInactivityTimeouts(
+                    fromSettingValue: value
+                  ),
+                  let dim = DisplayDimTimeout(rawValue: timeouts.dimAfterSeconds),
+                  let off = DisplayOffTimeout(rawValue: timeouts.displayOffAfterSeconds) else {
+                log("Invalid display inactivity timeout setting value \(value)")
+                return false
+            }
+            displayDimTimeout = dim
+            displayOffTimeout = off
         } else if id == DeviceBLEProtocol.mapPlusNavigationRotationSettingID {
             mapPlusNavigationRotationMode = value == 0 ? 0 : 1
         }
@@ -4756,6 +5035,12 @@ class BLEManager: NSObject, ObservableObject {
         if id == DeviceBLEProtocol.automaticDisplayOffSettingID,
            (!hasReceivedDeviceCapabilities || !supportsAutomaticDisplayOff) {
             log("Automatic display-off setting not sent: connected firmware does not advertise support")
+            return false
+        }
+        if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID,
+           (!hasReceivedDeviceCapabilities ||
+            !supportsDisplayInactivityTimeouts) {
+            log("Display inactivity timeouts not sent: connected firmware does not advertise support")
             return false
         }
         if Self.isIndependentMapProfileSetting(id),
@@ -4808,6 +5093,8 @@ class BLEManager: NSObject, ObservableObject {
         }
         if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
             hasSentAutomaticDisplayOffForConnection = true
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            hasSentDisplayInactivityTimeoutsForConnection = true
         }
         return true
     }
@@ -4825,7 +5112,7 @@ class BLEManager: NSObject, ObservableObject {
             settingID = DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID
             enabled = mapPlusNavigationLabelsEnabled
             density = mapPlusNavigationLabelDensity
-        case .navigation, .rideStats, .batteryStatus:
+        case .navigation, .rideStats, .batteryStatus, .worldRadio:
             return
         }
         sendSetting(
@@ -4848,16 +5135,32 @@ class BLEManager: NSObject, ObservableObject {
         var fallback = Data(DeviceBLEProtocol.settingsFallbackPrefix.utf8)
         fallback.append(data)
 
-        let coalescingKey = id == DeviceBLEProtocol.automaticDisplayOffSettingID
-            ? DeviceBLEProtocol.automaticDisplayOffSettingCoalescingKey
-            : nil
-        let onDrop: (() -> Void)? = id == DeviceBLEProtocol.automaticDisplayOffSettingID
-            ? { [weak self] in
+        let coalescingKey: String?
+        if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            coalescingKey = DeviceBLEProtocol
+                .automaticDisplayOffSettingCoalescingKey
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            coalescingKey = DeviceBLEProtocol
+                .displayInactivityTimeoutsSettingCoalescingKey
+        } else {
+            coalescingKey = nil
+        }
+        let onDrop: (() -> Void)?
+        if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            onDrop = { [weak self] in
                 guard let self else { return }
                 self.hasSentAutomaticDisplayOffForConnection = false
                 self.log("Automatic display-off setting was dropped before transmission")
             }
-            : nil
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            onDrop = { [weak self] in
+                guard let self else { return }
+                self.hasSentDisplayInactivityTimeoutsForConnection = false
+                self.log("Display inactivity timeouts were dropped before transmission")
+            }
+        } else {
+            onDrop = nil
+        }
 
         return DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
@@ -4972,6 +5275,18 @@ class BLEManager: NSObject, ObservableObject {
               isNavigationReady,
               hasReceivedDeviceCapabilities else { return }
 
+        // Once the atomic screen document is negotiated it is the canonical
+        // source for every per-instance map profile. Replaying the app's old
+        // singleton values here would overwrite the primary Map and Map +
+        // Navigation instances through the firmware's legacy adapter.
+        guard DeviceScreenSettingsTransportPolicy.usesLegacySettings(
+            supportsScreenConfiguration: supportsScreenConfiguration
+        ) else {
+            hasSentMapProfileForConnection = true
+            hasSentMapNavigationProfileForConnection = true
+            return
+        }
+
         let shouldSendMap = !hasSentMapProfileForConnection
         let shouldSendMapNavigation = supportsIndependentMapProfiles &&
             !hasSentMapNavigationProfileForConnection
@@ -5032,6 +5347,7 @@ class BLEManager: NSObject, ObservableObject {
 
         if shouldSendMap {
             hasSentMapProfileForConnection = true
+            sendSetting(id: 6, value: Int32(mapRotationMode))
             sendVisibilityMask(for: .map)
             sendSetting(id: 1, value: Int32(minPolygonSize))
             sendSetting(id: 2, value: Int32(detailLevel))
@@ -5054,6 +5370,7 @@ class BLEManager: NSObject, ObservableObject {
     func useDeviceCapabilitiesFallback() {
         guard isConnected, isNavigationReady, !hasReceivedDeviceCapabilities else { return }
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
         supportsBirdsEyeMapNavigation = false
@@ -5077,7 +5394,12 @@ class BLEManager: NSObject, ObservableObject {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWorldRadio = false
+        supportsScreenConfiguration = false
+        deviceScreenConfigurationController.markLegacyUnsupported()
         supportsWatchGPSMotionEvidenceV1 = false
+        supportsWorkoutZonesV1 = false
+        workoutZoneSequence = 0
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -5137,7 +5459,7 @@ class BLEManager: NSObject, ObservableObject {
                 mask |= DeviceBLEProtocol.extendedVisibilityMarker
             }
             settingID = DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
-        case .navigation, .rideStats, .batteryStatus:
+        case .navigation, .rideStats, .batteryStatus, .worldRadio:
             return
         }
 
@@ -5160,6 +5482,9 @@ class BLEManager: NSObject, ObservableObject {
         var mask = effectiveEnabledDeviceScreensMask
         if !supportsBatteryStatusScreen {
             mask |= enabledDeviceScreensMask & DeviceScreen.batteryStatus.bit
+        }
+        if !supportsWorldRadio {
+            mask |= enabledDeviceScreensMask & DeviceScreen.worldRadio.bit
         }
         if enabled {
             mask |= screen.bit
@@ -5204,7 +5529,7 @@ class BLEManager: NSObject, ObservableObject {
             mask: enabledDeviceScreensMask
         )
         var outgoingMask = Int32(effectiveEnabledDeviceScreensMask)
-        if supportsBatteryStatusScreen {
+        if supportsBatteryStatusScreen || supportsWorldRadio {
             outgoingMask |= DeviceBLEProtocol.currentScreenMaskMarker
         }
         sendSetting(id: DeviceBLEProtocol.enabledScreensSettingID,
@@ -5222,9 +5547,14 @@ class BLEManager: NSObject, ObservableObject {
 
     private var supportedDeviceScreensMask: Int {
         guard hasReceivedDeviceCapabilities else { return DeviceScreen.allScreensMask }
-        return supportsBatteryStatusScreen
-            ? DeviceScreen.allScreensMask
-            : DeviceScreen.legacyScreensMask
+        var mask = DeviceScreen.legacyScreensMask
+        if supportsBatteryStatusScreen {
+            mask |= DeviceScreen.batteryStatus.bit
+        }
+        if supportsWorldRadio {
+            mask |= DeviceScreen.worldRadio.bit
+        }
+        return mask
     }
 
     private var effectiveEnabledDeviceScreensMask: Int {
@@ -5236,12 +5566,18 @@ class BLEManager: NSObject, ObservableObject {
 
     private func sendScreenSettingsAfterCapabilityNegotiation() {
         sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
+        sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
         guard supportsDeviceSettings,
               hasReceivedDeviceCapabilities,
               !hasSentScreenSettingsForConnection else {
             return
         }
         hasSentScreenSettingsForConnection = true
+        // Enabled/default state lives in the atomic document on new firmware.
+        // Keep IDs 13/14 only for older clients and older firmware.
+        guard DeviceScreenSettingsTransportPolicy.usesLegacySettings(
+            supportsScreenConfiguration: supportsScreenConfiguration
+        ) else { return }
         sendEnabledDeviceScreensMask()
         sendDefaultDeviceScreen()
         if supportsBatteryStatusScreen {
@@ -5259,6 +5595,36 @@ class BLEManager: NSObject, ObservableObject {
         _ = sendSetting(
             id: DeviceBLEProtocol.automaticDisplayOffSettingID,
             value: automaticDisplayOffEnabled ? 1 : 0
+        )
+    }
+
+    private func sendDisplayInactivityTimeoutsAfterCapabilityNegotiation() {
+        guard supportsDeviceSettings,
+              hasReceivedDeviceCapabilities,
+              supportsDisplayInactivityTimeouts,
+              !hasSentDisplayInactivityTimeoutsForConnection,
+              let value = DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+                  dimAfterSeconds: displayDimTimeout.rawValue,
+                  displayOffAfterSeconds: displayOffTimeout.rawValue
+              ) else {
+            return
+        }
+        _ = sendSetting(
+            id: DeviceBLEProtocol.displayInactivityTimeoutsSettingID,
+            value: value
+        )
+    }
+
+    func sendDisplayInactivityTimeouts() {
+        guard let value = DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+            dimAfterSeconds: displayDimTimeout.rawValue,
+            displayOffAfterSeconds: displayOffTimeout.rawValue
+        ) else {
+            return
+        }
+        _ = sendSetting(
+            id: DeviceBLEProtocol.displayInactivityTimeoutsSettingID,
+            value: value
         )
     }
 
@@ -6051,6 +6417,7 @@ class BLEManager: NSObject, ObservableObject {
         settingsCharacteristic = nil
         workoutTelemetryCharacteristic = nil
         rideAutomationCharacteristic = nil
+        screenConfigurationCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
         deviceGPSOverrideToken = nil
@@ -6108,6 +6475,10 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func clearConnectionState() {
+        deviceScreenConfigurationController.disconnect(
+            deviceID: connectedDeviceID,
+            generation: rideDeliveryConnectionGeneration
+        )
         if rideTransportStateMachine.phase != .idle {
             _ = reduceRideTransport(.disconnected(
                 generation: rideTransportStateMachine.generation
@@ -6117,6 +6488,7 @@ class BLEManager: NSObject, ObservableObject {
         isConnecting = false
         supportsDeviceSettings = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         connectedPeripheral = nil
         connectedDeviceID = nil
         navigationCharacteristic = nil
@@ -6126,6 +6498,7 @@ class BLEManager: NSObject, ObservableObject {
         settingsCharacteristic = nil
         workoutTelemetryCharacteristic = nil
         rideAutomationCharacteristic = nil
+        screenConfigurationCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
         deviceGPSOverrideToken = nil
@@ -6226,6 +6599,7 @@ class BLEManager: NSObject, ObservableObject {
         firmwareUpdateLastError = nil
         supportsDeviceSounds = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         supportsPowerButtonHonk = false
         supportsPowerButtonHonkAcknowledgement = false
         supportsIndependentMapProfiles = false
@@ -6253,7 +6627,11 @@ class BLEManager: NSObject, ObservableObject {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWorldRadio = false
+        supportsScreenConfiguration = false
         supportsWatchGPSMotionEvidenceV1 = false
+        supportsWorkoutZonesV1 = false
+        workoutZoneSequence = 0
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -6268,6 +6646,7 @@ class BLEManager: NSObject, ObservableObject {
         hasSentMapNavigationProfileForConnection = false
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
+        hasSentDisplayInactivityTimeoutsForConnection = false
         isSendingNegotiatedMapProfiles = false
         clearPendingPowerButtonHonkConfiguration()
     }
@@ -7165,6 +7544,7 @@ class BLEManager: NSObject, ObservableObject {
         pendingDeregistrationDeviceID = nil
         deviceOperationDeviceID = nil
         queueRememberedWatchControllerDeletion(deviceID: deviceID)
+        deviceScreenConfigurationController.clearCache(deviceID: deviceID)
         connectedDeviceID = nil
         explicitDiscoveryRequested = false
         isExplicitDiscoveryPausedForCandidate = false
@@ -7516,13 +7896,13 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func sendInitialDeviceSettingsAfterAuthentication() {
-        sendSetting(id: 6, value: Int32(mapRotationMode))
         sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
         sendSetting(
             id: DeviceBLEProtocol.brightnessSettingID,
             value: Int32(deviceBrightnessPercent)
         )
         sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
+        sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
         sendSetting(
             id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
             value: disconnectedSleepTimeout.settingValue
@@ -7659,6 +8039,65 @@ class BLEManager: NSObject, ObservableObject {
         flushPendingNavigationWrites(endpoint: endpoint)
         scheduleNavigationFlushRetryIfNeeded()
         log("Queued \(frames.count) \(label) frame(s)")
+        return true
+    }
+
+    @discardableResult
+    private func enqueueScreenConfigurationFrames(
+        _ frames: [Data],
+        onSent: @escaping () -> Void,
+        onWriteFailure: @escaping () -> Void
+    ) -> Bool {
+        guard !frames.isEmpty,
+              isConnected,
+              isNavigationReady,
+              authenticatedWriteSession != nil,
+              let endpoint = navigationWriteEndpoint,
+              let peripheral = connectedPeripheral,
+              let characteristic = screenConfigurationCharacteristic,
+              characteristic.properties.contains(.write) else {
+            return false
+        }
+        let maximumPlaintext = peripheral.maximumWriteValueLength(
+            for: .withResponse
+        ) - AuthenticatedBLEWriteSession.frameOverhead
+        guard maximumPlaintext > 0,
+              frames.allSatisfy({ $0.count <= maximumPlaintext }) else {
+            return false
+        }
+        let writes = frames.enumerated().map { index, frame in
+            NavigationWrite(
+                data: frame,
+                label: "screen configuration \(index + 1)/\(frames.count)",
+                transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                    guard let self, let peripheral, let characteristic else {
+                        return
+                    }
+                    self.writeDeviceData(
+                        payload,
+                        to: characteristic,
+                        on: peripheral,
+                        type: .withResponse
+                    )
+                },
+                onWrite: index == frames.count - 1 ? onSent : nil,
+                onWriteFailure: onWriteFailure,
+                transportCanSend: { [weak self] in
+                    self?.writeWithResponseInFlight == false
+                },
+                transportExpectsWriteResponse: true,
+                transportCharacteristicUUIDString:
+                    characteristic.uuid.uuidString,
+                writeClass: .settingsControl
+            )
+        }
+        guard navigationWriteQueue.enqueueAtomically(writes) else {
+            log("Screen configuration frames not queued: insufficient write queue capacity")
+            return false
+        }
+        flushPendingNavigationWrites(endpoint: endpoint)
+        scheduleNavigationFlushRetryIfNeeded()
+        log("Queued \(frames.count) screen configuration frame(s)")
         return true
     }
 
@@ -7888,10 +8327,13 @@ class BLEManager: NSObject, ObservableObject {
         if madeProgress,
            hasReceivedDeviceCapabilities,
            supportsDeviceSettings,
-           supportsAutomaticDisplayOff,
-           !hasSentAutomaticDisplayOffForConnection {
+           (supportsAutomaticDisplayOff &&
+                !hasSentAutomaticDisplayOffForConnection ||
+            supportsDisplayInactivityTimeouts &&
+                !hasSentDisplayInactivityTimeoutsForConnection) {
             DispatchQueue.main.async { [weak self] in
                 self?.sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
+                self?.sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
             }
         }
     }
@@ -8547,6 +8989,9 @@ class BLEManager: NSObject, ObservableObject {
         if uuid == settingsCharacteristicUUID { return .settings }
         if uuid == workoutTelemetryCharacteristicUUID { return .workout }
         if uuid == rideAutomationCharacteristicUUID { return .rideAutomation }
+        if uuid == screenConfigurationCharacteristicUUID {
+            return .screenConfiguration
+        }
         return nil
     }
 
@@ -8925,6 +9370,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         isConnecting = false
         supportsDeviceSettings = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         hardwareLabel = ""
         deviceInformation.removeAll()
         connectedPeripheral = nil
@@ -9217,6 +9663,16 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                     peripheral.setNotifyValue(true, for: characteristic)
                 }
             }
+
+            if characteristic.uuid == screenConfigurationCharacteristicUUID {
+                guard characteristic.properties.contains(.write),
+                      characteristic.properties.contains(.notify) else {
+                    log("Screen configuration characteristic requires acknowledged writes and notifications")
+                    continue
+                }
+                screenConfigurationCharacteristic = characteristic
+                peripheral.setNotifyValue(true, for: characteristic)
+            }
         }
     }
 
@@ -9374,6 +9830,26 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             return
         }
 
+        if characteristic.uuid == screenConfigurationCharacteristicUUID {
+            guard isNavigationReady,
+                  supportsScreenConfiguration,
+                  let deviceID = connectedDeviceID,
+                  let authenticatedWriteSession,
+                  let payload = authenticatedWriteSession.notificationPayload(
+                    from: data,
+                    channel: .screenConfiguration
+                  ) else {
+                log("Rejected invalid or unauthenticated screen configuration notification")
+                return
+            }
+            deviceScreenConfigurationController.receive(
+                payload,
+                deviceID: deviceID,
+                generation: rideDeliveryConnectionGeneration
+            )
+            return
+        }
+
         if [modelNumberCharacteristicUUID,
             firmwareRevisionCharacteristicUUID,
             hardwareRevisionCharacteristicUUID,
@@ -9418,6 +9894,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     private func rejectDeviceCapabilities(_ message: String) {
         supportsDeviceSounds = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         supportsPowerButtonHonk = false
         supportsPowerButtonHonkAcknowledgement = false
         supportsIndependentMapProfiles = false
@@ -9443,7 +9920,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWorldRadio = false
+        supportsScreenConfiguration = false
+        deviceScreenConfigurationController.markLegacyUnsupported()
         supportsWatchGPSMotionEvidenceV1 = false
+        supportsWorkoutZonesV1 = false
+        workoutZoneSequence = 0
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -9452,6 +9934,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
+        hasSentDisplayInactivityTimeoutsForConnection = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
         clearPendingPowerButtonHonkConfiguration()
@@ -9474,6 +9957,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let flags: UInt32
         let legacyExtendedFlags: UInt8
         let powerButtonConfig: Data?
+        var screenConfigurationCapabilities:
+            DeviceScreenConfigurationCapabilities? = nil
         if prefix == DeviceBLEProtocol.deviceCapabilitiesPrefix {
             guard data.count == 5 || data.count == 6 ||
                     data.count == 8 || data.count == 9 else {
@@ -9519,6 +10004,15 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         break
                     }
                     parsedPowerConfig = data.subdata(in: offset..<(offset + length))
+                } else if type == RideBLEGeneratedProtocolV1
+                    .screenConfigurationCapabilityTLVType {
+                    guard let parsed = DeviceScreenConfigurationCapabilities(
+                        tlvValue: data.subdata(in: offset..<(offset + length))
+                    ) else {
+                        valid = false
+                        break
+                    }
+                    screenConfigurationCapabilities = parsed
                 }
                 offset += length
             }
@@ -9578,6 +10072,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.rendererDiagnosticsCapabilityMask != 0
         let hasAutomaticDisplayOff =
             flags & DeviceBLEProtocol.automaticDisplayOffCapabilityMask != 0
+        let hasDisplayInactivityTimeouts = hasAutomaticDisplayOff &&
+            flags & DeviceBLEProtocol
+                .displayInactivityTimeoutsCapabilityMask != 0
         let hasRideDiagnostics =
             flags & DeviceBLEProtocol.rideDiagnosticsCapabilityMask != 0
         let hasDetailedRideDiagnostics = hasRideDiagnostics &&
@@ -9585,6 +10082,18 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let hasRideDeliveryAcknowledgement =
             flags & DeviceBLEProtocol
                 .rideDeliveryAcknowledgementCapabilityMask != 0
+        let hasWorldRadio =
+            flags & DeviceBLEProtocol.worldRadioCapabilityMask != 0
+        let advertisesScreenConfiguration =
+            flags & DeviceBLEProtocol.screenConfigurationCapabilityMask != 0
+        guard !advertisesScreenConfiguration ||
+                (prefix == DeviceBLEProtocol.deviceCapabilitiesV2Prefix &&
+                 screenConfigurationCapabilities != nil) else {
+            rejectDeviceCapabilities(
+                "Received incomplete screen configuration capabilities"
+            )
+            return true
+        }
         let hasWatchGPSMotionEvidenceV1 =
             flags & DeviceBLEProtocol
                 .watchGPSMotionEvidenceV1CapabilityMask != 0
@@ -9652,15 +10161,22 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             hasSentMapNavigationProfileForConnection = false
         }
         if hasReceivedDeviceCapabilities &&
-            supportsBatteryStatusScreen != hasBatteryStatusScreen {
+            (supportsBatteryStatusScreen != hasBatteryStatusScreen ||
+             supportsWorldRadio != hasWorldRadio) {
             hasSentScreenSettingsForConnection = false
         }
         if hasReceivedDeviceCapabilities &&
             supportsAutomaticDisplayOff != hasAutomaticDisplayOff {
             hasSentAutomaticDisplayOffForConnection = false
         }
+        if hasReceivedDeviceCapabilities &&
+            supportsDisplayInactivityTimeouts !=
+                hasDisplayInactivityTimeouts {
+            hasSentDisplayInactivityTimeoutsForConnection = false
+        }
         supportsDeviceSounds = hasDeviceSounds
         supportsAutomaticDisplayOff = hasAutomaticDisplayOff
+        supportsDisplayInactivityTimeouts = hasDisplayInactivityTimeouts
         supportsPowerButtonHonk = hasPowerButtonHonk
         supportsPowerButtonHonkAcknowledgement = hasPowerButtonHonkAcknowledgement
         supportsIndependentMapProfiles = hasIndependentMapProfiles
@@ -9685,12 +10201,50 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask != 0
         supportsRideDiagnostics = hasRideDiagnostics
         supportsDetailedRideDiagnostics = hasDetailedRideDiagnostics
+        supportsWorldRadio = hasWorldRadio
         if supportsRideDeliveryAcknowledgement &&
             !hasRideDeliveryAcknowledgement {
             cancelPendingRideApplicationDeliveries(notifyFailure: true)
         }
         supportsRideDeliveryAcknowledgement = hasRideDeliveryAcknowledgement
+        // Treat a complete advertised contract as authoritative even if the
+        // local characteristic is unexpectedly unavailable. Falling back to
+        // legacy writes in that state would mutate the primary instances in
+        // the device's new document. The controller instead fails closed when
+        // its enqueue closure cannot reach the characteristic.
+        supportsScreenConfiguration = advertisesScreenConfiguration
+        if advertisesScreenConfiguration,
+           let capabilities = screenConfigurationCapabilities,
+           let peripheral = connectedPeripheral,
+           let deviceID = connectedDeviceID {
+            let maximumPlaintextWriteBytes = max(
+                0,
+                peripheral.maximumWriteValueLength(for: .withResponse) -
+                    AuthenticatedBLEWriteSession.frameOverhead
+            )
+            deviceScreenConfigurationController.connect(
+                deviceID: deviceID,
+                generation: rideDeliveryConnectionGeneration,
+                capabilities: capabilities,
+                maximumPlaintextWriteBytes: maximumPlaintextWriteBytes,
+                sendFrames: { [weak self] frames, sent, failed in
+                    self?.enqueueScreenConfigurationFrames(
+                        frames,
+                        onSent: sent,
+                        onWriteFailure: failed
+                    ) ?? false
+                }
+            )
+        } else {
+            deviceScreenConfigurationController.markLegacyUnsupported()
+        }
         supportsWatchGPSMotionEvidenceV1 = hasWatchGPSMotionEvidenceV1
+        supportsWorkoutZonesV1 = hasWorkoutTelemetry && hasRideAutomation && hasRideDeliveryAcknowledgement
+            && flags & RideBLEGeneratedProtocolV1.workoutZonesV1Feature != 0
+            && workoutTelemetryCharacteristic != nil
+            && (connectedPeripheral?.maximumWriteValueLength(for: .withResponse) ?? 0) >=
+                WorkoutZoneDeviceCodecV1.maximumFrameBytes + AuthenticatedBLEWriteSession.frameOverhead
+                    + RideBLEGeneratedProtocolV1.applicationCommandHeaderBytes
         if hasRideDiagnostics {
             sendDiagnosticsCaptureBindingIfNeeded()
         }
@@ -9734,6 +10288,22 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     }
 
     @discardableResult
+    func sendWorldRadioStatus(_ status: WorldRadioStatus) -> Bool {
+        guard supportsWorldRadio, isNavigationReady,
+              let payload = status.encoded() else {
+            return false
+        }
+        return sendFallbackMapPacket(
+            payload,
+            label: "world radio status",
+            writeClass: .settingsControl,
+            coalescingKey: DeviceBLEProtocol.worldRadioStatusCoalescingKey,
+            prioritized: true,
+            atomically: true
+        )
+    }
+
+    @discardableResult
     func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
         if data.starts(with: RideBLEApplicationAcknowledgementV1.prefix) {
             guard supportsRideDeliveryAcknowledgement,
@@ -9758,6 +10328,19 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 return true
             }
             onRideAutomationFrame?(frame)
+            return true
+        }
+        if let request = WorldRadioRequest(data) {
+            guard isConnected, isNavigationReady, supportsWorldRadio else {
+                log("Ignored World Radio request before capability negotiation")
+                return true
+            }
+            log("Received World Radio request command=\(request.command.rawValue) id=\(request.requestID)")
+            onWorldRadioRequest?(request)
+            return true
+        }
+        if data.starts(with: Data(DeviceBLEProtocol.worldRadioRequestPrefix.utf8)) {
+            log("Rejected malformed World Radio request")
             return true
         }
         if DeviceWorkoutStartRequest.matches(data) {

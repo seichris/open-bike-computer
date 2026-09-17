@@ -4046,6 +4046,9 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
   request.projectionSignature = projectionSignature(
       request.zoom, request.viewportWidth, request.viewportHeight,
       request.birdsEye, request.context.birdsEyePerspective);
+  request.screenInstanceID = currentMapRenderInstanceID();
+  request.screenType = currentMapRenderInstanceType();
+  request.screenProfileSignature = currentMapRenderProfileSignature();
 
   const bool followPosition = request.context.followPosition;
   request.center = followPosition && hasPresentedPose
@@ -4244,6 +4247,9 @@ bool Maps::renderRequestStillCurrent(const RenderRequest &request) const {
          request.version.mapEpoch == mapEpoch &&
          request.version.projectionEpoch == projectionEpoch &&
          request.styleSignature == styleSignature(style) &&
+         request.screenInstanceID == currentMapRenderInstanceID() &&
+         request.screenType == currentMapRenderInstanceType() &&
+         request.screenProfileSignature == currentMapRenderProfileSignature() &&
          request.navigationSignature ==
              navigationSignatureForScreen(guidanceScreenActive) &&
          request.projectionSignature == projectionSignature(
@@ -4260,6 +4266,9 @@ bool Maps::renderResultStillCurrent(const RenderResult &result) const {
   request.styleSignature = result.styleSignature;
   request.navigationSignature = result.navigationSignature;
   request.projectionSignature = result.projectionSignature;
+  request.screenInstanceID = result.screenInstanceID;
+  request.screenType = result.screenType;
+  request.screenProfileSignature = result.screenProfileSignature;
   request.zoom = result.viewport.zoom;
   request.viewportWidth = result.viewportWidth;
   request.viewportHeight = result.viewportHeight;
@@ -4449,6 +4458,9 @@ void Maps::renderWorkerLoop() {
       result.styleSignature = request.styleSignature;
       result.navigationSignature = request.navigationSignature;
       result.projectionSignature = request.projectionSignature;
+      result.screenInstanceID = request.screenInstanceID;
+      result.screenType = request.screenType;
+      result.screenProfileSignature = request.screenProfileSignature;
       result.viewportWidth = request.viewportWidth;
       result.viewportHeight = request.viewportHeight;
       result.renderWidth = request.renderWidth;
@@ -4813,7 +4825,6 @@ bool Maps::publishReadyFrame(uint32_t nowMs) {
   viewPort = result.viewport;
   publishedMapFound = result.mapFound;
   publishedMapFrame = true;
-  stableCameraHidden = false;
   framePublicationPending = true;
   if (!mapAvailabilityKnown || mapAvailabilityAvailable != result.mapFound) {
     mapAvailabilityKnown = true;
@@ -4872,10 +4883,10 @@ void Maps::updatePresentedFrameTransform() {
       lv_img_set_angle(canvasMap, 0);
       lv_obj_center(canvasMap);
     }
-    if (stableCameraHidden)
-      lv_obj_add_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
-    else
-      lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
+    // Keep the last complete camera visible while its replacement renders.
+    // It may be behind the live pose briefly, but replacing useful map context
+    // with a loading state is worse during active navigation.
+    lv_obj_clear_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
     return;
   }
   const map_transform::WorldPoint current =
@@ -5026,8 +5037,7 @@ void Maps::renderLiveForeground() {
     return;
   }
   const RouteSnapshot route = routeOverlay.snapshot();
-  if ((map_profile_protocol::STABLE_CAMERA_ENABLED && stableCameraHidden) ||
-      !publishedMapFrame || !hasVisibleProjection || !route.hasRoute() ||
+  if (!publishedMapFrame || !hasVisibleProjection || !route.hasRoute() ||
       !isRouteOverlayVisible(mapRenderSettings) || !hasPresentedPose) {
     hideForeground();
     return;
@@ -5154,21 +5164,9 @@ void Maps::serviceStableCamera(uint32_t nowMs) {
   const bool required = !current ||
       map_camera::needsRefresh(visibleProjection, target, bearing);
   cameraLag.observe(required, nowMs);
-  const auto rider = visibleProjection.projectWorld(target);
-  const double x = rider.x - visibleRenderResult.overscanPixels;
-  const double y = rider.y - visibleRenderResult.overscanPixels;
-  stableCameraHidden = !current || cameraLag.expired(nowMs) ||
-      !rider.valid || x < 0 || y < 0 ||
-      x >= visibleRenderResult.viewportWidth || y >= visibleRenderResult.viewportHeight;
-  if (cameraStatusLabel != nullptr) {
-    if (stableCameraHidden)
-      lv_obj_clear_flag(cameraStatusLabel, LV_OBJ_FLAG_HIDDEN);
-    else
-      lv_obj_add_flag(cameraStatusLabel, LV_OBJ_FLAG_HIDDEN);
-  }
   renderer_diagnostics::CameraSample sample;
   sample.enabled = true;
-  sample.hidden = stableCameraHidden;
+  sample.hidden = false;
   sample.updateRequired = required;
   sample.frameSequence = visibleRenderResult.version.sequence;
   sample.sceneGeneration = visibleRenderResult.sceneGeneration;
@@ -5212,7 +5210,7 @@ renderer_diagnostics::CameraSample Maps::captureCameraMetadata() const {
       cameraEvidence.frameSequence != visibleRenderResult.version.sequence)
     return {};
   auto sample = cameraEvidence;
-  sample.hidden = stableCameraHidden || canvasMap == nullptr ||
+  sample.hidden = canvasMap == nullptr ||
       lv_obj_has_flag(canvasMap, LV_OBJ_FLAG_HIDDEN);
   return sample;
 }
@@ -5996,7 +5994,6 @@ void Maps::deleteMapScrSprites() {
   publishedMapFrame = false;
   cameraLag = {};
   cameraEvidence = {};
-  stableCameraHidden = false;
   lastCameraRequestMs = 0;
   publishedMapFound = false;
   framePublicationPending = false;
@@ -6004,9 +6001,6 @@ void Maps::deleteMapScrSprites() {
   lastForegroundPresentationSignature = 0;
   if (Maps::canvasArrow)
     lv_obj_delete(Maps::canvasArrow);
-  if (cameraStatusLabel)
-    lv_obj_delete(cameraStatusLabel);
-  cameraStatusLabel = nullptr;
   if (Maps::canvasMap)
     lv_obj_delete(Maps::canvasMap);
   if (Maps::canvasMapTemp)
@@ -6116,13 +6110,6 @@ void Maps::createMapScrSprites() {
   lv_obj_add_event_cb(Maps::canvasArrow, drawCurrentPositionMarker,
                       LV_EVENT_DRAW_MAIN, nullptr);
   updateCurrentPositionMarker(Maps::canvasArrow, 0.0, true);
-
-  if (map_profile_protocol::STABLE_CAMERA_ENABLED) {
-    cameraStatusLabel = lv_label_create(mapTile);
-    lv_label_set_text_static(cameraStatusLabel, "Updating map...");
-    lv_obj_center(cameraStatusLabel);
-    lv_obj_add_flag(cameraStatusLabel, LV_OBJ_FLAG_HIDDEN);
-  }
 
   if (!startRenderWorker()) {
     ESP_LOGE(TAG, "Map render worker unavailable");
@@ -7629,7 +7616,7 @@ void Maps::updatePositionOverlay() {
     }
 
     if (map_profile_protocol::STABLE_CAMERA_ENABLED && hasVisibleProjection) {
-      if (stableCameraHidden || !hasPresentedPose) {
+      if (!hasPresentedPose) {
         lv_obj_add_flag(canvasArrow, LV_OBJ_FLAG_HIDDEN);
         return;
       }

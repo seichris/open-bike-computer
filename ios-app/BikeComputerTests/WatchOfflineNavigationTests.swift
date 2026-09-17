@@ -9,7 +9,36 @@ enum WatchOfflineNavigationTests {
         try testExpiryAndDowngradeFailClosed()
         try testStravaStartWindowAndActiveExpiry()
         try testEvictionReportsExactIdentity()
+        try testPhoneOnlyMapKitRejected()
         print("WatchOfflineNavigationTests passed")
+    }
+
+    private static func testPhoneOnlyMapKitRejected() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("watch-phone-only-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "watch-phone-only.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let saved = try archive(revision: 1, now: now, provider: RouteProviderPolicyV1.mapKitSavedOnPhone)
+        let bytes = try saved.encoded(purpose: .offlineNavigation, now: now)
+        let identity = WatchRouteIdentityV1(archive: saved)
+        // Even an injected phone store cannot bypass the Watch admission check.
+        let library = WatchRouteLibrary(store: NavigationRouteFileStoreV1(rootDirectory: root),
+            now: { now }, defaults: defaults)
+        expectThrows(NavigationRouteArchiveError.durableStorageNotAllowed(providerID: "apple.mapkit"),
+            "Watch receiver rejects a phone-only MapKit archive") {
+            _ = try library.install(bytes, expectedIdentity: identity)
+        }
+        expect(library.routes.isEmpty, "Rejected phone archive never becomes an installed Watch route")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let path = "\(saved.routeID.uuidString.lowercased())-r\(saved.revision)-\(saved.contentHash).routev1"
+        try bytes.write(to: root.appendingPathComponent(path))
+        let watchStore = NavigationRouteFileStoreV1(rootDirectory: root, limits: .watch, destination: .watch)
+        expect(watchStore.records(now: now).isEmpty, "Watch restart does not admit injected phone-only files")
+        _ = watchStore.pruneInvalidAndExpired(now: now)
+        expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent(path).path),
+            "Invalid-for-Watch archive is quarantined by the existing store")
     }
 
     private static func testStravaStartWindowAndActiveExpiry() throws {

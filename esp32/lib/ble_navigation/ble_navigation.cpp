@@ -33,7 +33,11 @@
 #include "ride_automation_protocol.hpp"
 #include "ride_automation_runtime.hpp"
 #include "ride_delivery_protocol.hpp"
+#include "screen_configuration.hpp"
 #include "authenticated_workout_telemetry.hpp"
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+#include "../world_radio/world_radio_runtime.hpp"
+#endif
 #include "../gps/gps.hpp"
 #include "../gui/src/waitingScr.hpp"
 #include "../gui/src/globalGuiDef.h"
@@ -101,6 +105,7 @@ BLENavigationServer bleNavServer;
 // Forward declaration of the LVGL-owner map scheduler entry point.
 extern void requestMapRender(map_render_policy::Reason reason);
 extern void applyDeviceScreenSettings();
+extern void applyDeviceScreenConfiguration();
 extern bool isMapScreenActive();
 extern bool isMapGuidanceScreenActive();
 
@@ -128,6 +133,10 @@ static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
+static std::atomic<bool> bleSessionSupportsWorkoutZones{false};
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+static std::atomic<bool> bleSessionSupportsWorldRadio{false};
+#endif
 // Captured while the ownership mutex is held by the accepted ride write. The
 // application ACK path runs in the same NimBLE callback and must never fall
 // back to lease generation zero merely because another task briefly owns the
@@ -266,6 +275,52 @@ static SemaphoreHandle_t destinationCatalogReassemblerMutex = nullptr;
 static bool destinationRequestPending = false;
 static uint32_t destinationRequestStartedMs = 0;
 static uint32_t destinationStatusUpdatedMs = 0;
+
+struct PendingScreenConfigurationControl {
+  bool snapshotRequested = false;
+  uint32_t snapshotRequestID = 0;
+  bool uploadReady = false;
+  uint32_t uploadRequestID = 0;
+  uint32_t baseRevision = 0;
+  std::size_t documentLength = 0;
+  uint32_t rejectedRequestID = 0;
+  screen_configuration::CommitResult rejectedResult =
+      screen_configuration::CommitResult::Malformed;
+  std::array<uint8_t, screen_configuration_protocol::MAX_DOCUMENT_BYTES>
+      document{};
+  bool acknowledgementReady = false;
+  uint32_t acknowledgementRequestID = 0;
+  screen_configuration::CommitResult acknowledgementResult =
+      screen_configuration::CommitResult::Malformed;
+};
+
+struct OutgoingScreenConfigurationSnapshot {
+  bool active = false;
+  uint32_t requestID = 0;
+  uint32_t revision = 0;
+  std::size_t documentLength = 0;
+  std::size_t chunkPayloadBytes = 0;
+  uint8_t chunkCount = 0;
+  uint8_t nextChunk = 0;
+  std::array<uint8_t, screen_configuration_protocol::MAX_DOCUMENT_BYTES>
+      document{};
+};
+
+static StaticSemaphore_t screenConfigurationMutexStorage;
+static SemaphoreHandle_t screenConfigurationMutex = nullptr;
+static screen_configuration_protocol::UploadReassembler
+    screenConfigurationUpload;
+static PendingScreenConfigurationControl pendingScreenConfiguration;
+static OutgoingScreenConfigurationSnapshot outgoingScreenConfiguration;
+static std::atomic<bool> screenConfigurationSnapshotActive{false};
+static std::atomic<bool> screenConfigurationResetRequested{false};
+static bool screenConfigurationAckPending = false;
+static uint32_t screenConfigurationAckRequestID = 0;
+static screen_configuration::CommitOutcome screenConfigurationAckOutcome{};
+static NimBLECharacteristic *screenConfigurationCharacteristic = nullptr;
+static std::array<uint8_t,
+                  screen_configuration_protocol::MAX_DOCUMENT_BYTES>
+    processingScreenConfigurationDocument{};
 
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
                                           const uint8_t *data, size_t length);
@@ -747,7 +802,7 @@ bool BLENavigationServer::requestWorkoutStart() {
 }
 
 static uint8_t deviceScreenBit(uint8_t screen) {
-  return (screen <= DEVICE_SCREEN_BATTERY_STATUS) ? (1 << screen) : 0;
+  return (screen <= DEVICE_SCREEN_WORLD_RADIO) ? (1 << screen) : 0;
 }
 
 static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
@@ -758,7 +813,7 @@ static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
 static uint8_t normalizedDefaultScreen(int32_t rawDefault,
                                        uint8_t enabledScreensMask) {
   uint8_t defaultScreen =
-      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_BATTERY_STATUS
+      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_WORLD_RADIO
           ? (uint8_t)rawDefault
           : (uint8_t)DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   if (enabledScreensMask & deviceScreenBit(defaultScreen)) {
@@ -775,6 +830,9 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NAVIGATION)) {
     return DEVICE_SCREEN_NAVIGATION;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_WORLD_RADIO)) {
+    return DEVICE_SCREEN_WORLD_RADIO;
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_BATTERY_STATUS)) {
     return DEVICE_SCREEN_BATTERY_STATUS;
@@ -1680,6 +1738,202 @@ static bool notifyAuthenticatedNavigation(NimBLECharacteristic *characteristic,
       data, length, "navigation");
 }
 
+static void resetScreenConfigurationTransport() {
+  if (screenConfigurationMutex != nullptr &&
+      xSemaphoreTake(screenConfigurationMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    screenConfigurationUpload.reset();
+    pendingScreenConfiguration = {};
+    xSemaphoreGive(screenConfigurationMutex);
+  }
+  // Outgoing snapshot/ACK state and the legacy debounce are owned by the UI
+  // task. Ask that task to clear them instead of writing the same fields from
+  // NimBLE's callback task.
+  screenConfigurationResetRequested.store(true, std::memory_order_release);
+}
+
+static void queueScreenConfigurationAcknowledgement(
+    uint32_t requestID, const screen_configuration::CommitOutcome &outcome) {
+  screenConfigurationAckRequestID = requestID;
+  screenConfigurationAckOutcome = outcome;
+  screenConfigurationAckPending = true;
+}
+
+static bool beginScreenConfigurationSnapshot(uint32_t requestID) {
+  if (screenConfigurationSnapshotActive.load(std::memory_order_acquire) ||
+      requestID == 0)
+    return false;
+  const auto &snapshot = screen_configuration::activeSnapshot();
+  const std::size_t length = screen_configuration_protocol::encodeDocument(
+      snapshot.document, outgoingScreenConfiguration.document.data(),
+      outgoingScreenConfiguration.document.size());
+  const uint16_t peerMtu = activePeerMtu.load(std::memory_order_acquire);
+  const std::size_t wireBytes = std::min<std::size_t>(
+      kDeferredNotificationBytes, peerMtu >= 3 ? peerMtu - 3 : 0);
+  const std::size_t overhead =
+      ride_ble_protocol_generated::PROTECTED_FRAME_OVERHEAD +
+      screen_configuration_protocol::CHUNK_HEADER_BYTES;
+  if (length == 0 || wireBytes <= overhead)
+    return false;
+  const std::size_t payloadBytes = wireBytes - overhead;
+  const std::size_t chunkCount = (length + payloadBytes - 1) / payloadBytes;
+  if (chunkCount == 0 ||
+      chunkCount > screen_configuration_protocol::MAX_CHUNKS)
+    return false;
+  outgoingScreenConfiguration.active = true;
+  outgoingScreenConfiguration.requestID = requestID;
+  outgoingScreenConfiguration.revision = snapshot.revision;
+  outgoingScreenConfiguration.documentLength = length;
+  outgoingScreenConfiguration.chunkPayloadBytes = payloadBytes;
+  outgoingScreenConfiguration.chunkCount = static_cast<uint8_t>(chunkCount);
+  outgoingScreenConfiguration.nextChunk = 0;
+  screenConfigurationSnapshotActive.store(true,
+                                          std::memory_order_release);
+  return true;
+}
+
+static void pumpScreenConfigurationNotifications() {
+  if (!screen_configuration::isReady() ||
+      screenConfigurationCharacteristic == nullptr ||
+      deferredNotificationAvailableCapacity() == 0)
+    return;
+  if (screenConfigurationAckPending) {
+    uint8_t frame[screen_configuration_protocol::ACK_BYTES]{};
+    const std::size_t length =
+        screen_configuration_protocol::encodeAcknowledgement(
+            screenConfigurationAckRequestID,
+            static_cast<
+                ride_ble_protocol_generated::ScreenConfigurationResult>(
+                screenConfigurationAckOutcome.result),
+            screenConfigurationAckOutcome.revision,
+            screenConfigurationAckOutcome.documentCRC, frame,
+            sizeof(frame));
+    if (length != 0 && notifyAuthenticatedPayload(
+                           screenConfigurationCharacteristic,
+                           device_ownership::AuthenticatedChannel::
+                               ScreenConfiguration,
+                           frame, length, "screen configuration ack")) {
+      screenConfigurationAckPending = false;
+    }
+    return;
+  }
+  if (!outgoingScreenConfiguration.active)
+    return;
+  const std::size_t offset =
+      outgoingScreenConfiguration.nextChunk *
+      outgoingScreenConfiguration.chunkPayloadBytes;
+  const std::size_t remaining =
+      outgoingScreenConfiguration.documentLength - offset;
+  const std::size_t payloadLength = std::min(
+      remaining, outgoingScreenConfiguration.chunkPayloadBytes);
+  uint8_t frame[kDeferredNotificationBytes]{};
+  const std::size_t length = screen_configuration_protocol::encodeChunk(
+      ride_ble_protocol_generated::SCREEN_CONFIGURATION_DOWNLOAD_MAGIC,
+      outgoingScreenConfiguration.requestID,
+      outgoingScreenConfiguration.revision,
+      outgoingScreenConfiguration.nextChunk,
+      outgoingScreenConfiguration.chunkCount,
+      outgoingScreenConfiguration.document.data() + offset, payloadLength,
+      frame, sizeof(frame));
+  if (length == 0 || !notifyAuthenticatedPayload(
+                         screenConfigurationCharacteristic,
+                         device_ownership::AuthenticatedChannel::
+                             ScreenConfiguration,
+                         frame, length, "screen configuration snapshot")) {
+    return;
+  }
+  ++outgoingScreenConfiguration.nextChunk;
+  if (outgoingScreenConfiguration.nextChunk ==
+      outgoingScreenConfiguration.chunkCount) {
+    outgoingScreenConfiguration.active = false;
+    screenConfigurationSnapshotActive.store(false,
+                                            std::memory_order_release);
+  }
+}
+
+static void processPendingScreenConfiguration() {
+  if (!screen_configuration::isReady() ||
+      screenConfigurationMutex == nullptr)
+    return;
+  if (screenConfigurationResetRequested.exchange(
+          false, std::memory_order_acq_rel)) {
+    outgoingScreenConfiguration = {};
+    screenConfigurationSnapshotActive.store(false,
+                                            std::memory_order_release);
+    screenConfigurationAckPending = false;
+    screen_configuration::resetTransferState();
+  }
+  uint32_t snapshotRequestID = 0;
+  uint32_t uploadRequestID = 0;
+  uint32_t baseRevision = 0;
+  std::size_t documentLength = 0;
+  uint32_t rejectedRequestID = 0;
+  screen_configuration::CommitResult rejectedResult =
+      screen_configuration::CommitResult::Malformed;
+  if (xSemaphoreTake(screenConfigurationMutex, 0) == pdTRUE) {
+    // Consume at most one control result per pass. This keeps the single
+    // bounded ACK slot from being overwritten when a busy/malformed request,
+    // a completed upload, and a snapshot request arrive close together.
+    if (screenConfigurationAckPending) {
+      // Leave all pending work staged until the queued acknowledgement is
+      // accepted by the deferred notification queue.
+    } else if (pendingScreenConfiguration.acknowledgementReady) {
+      rejectedRequestID =
+          pendingScreenConfiguration.acknowledgementRequestID;
+      rejectedResult = pendingScreenConfiguration.acknowledgementResult;
+      pendingScreenConfiguration.acknowledgementReady = false;
+    } else if (pendingScreenConfiguration.uploadReady) {
+      uploadRequestID = pendingScreenConfiguration.uploadRequestID;
+      baseRevision = pendingScreenConfiguration.baseRevision;
+      documentLength = pendingScreenConfiguration.documentLength;
+      std::memcpy(processingScreenConfigurationDocument.data(),
+                  pendingScreenConfiguration.document.data(), documentLength);
+      pendingScreenConfiguration.uploadReady = false;
+    } else if (pendingScreenConfiguration.snapshotRequested &&
+               !screenConfigurationSnapshotActive.load(
+                   std::memory_order_acquire)) {
+      snapshotRequestID = pendingScreenConfiguration.snapshotRequestID;
+      pendingScreenConfiguration.snapshotRequested = false;
+    }
+    xSemaphoreGive(screenConfigurationMutex);
+  }
+  if (snapshotRequestID != 0 &&
+      !beginScreenConfigurationSnapshot(snapshotRequestID)) {
+    screen_configuration::CommitOutcome busy{};
+    busy.result = screen_configuration::CommitResult::Busy;
+    busy.revision = screen_configuration::activeSnapshot().revision;
+    queueScreenConfigurationAcknowledgement(snapshotRequestID, busy);
+  }
+  if (rejectedRequestID != 0) {
+    screen_configuration::CommitOutcome rejected{};
+    rejected.result = rejectedResult;
+    rejected.revision = screen_configuration::activeSnapshot().revision;
+    queueScreenConfigurationAcknowledgement(rejectedRequestID, rejected);
+    Serial.printf("BLE screens: request=%lu result=%u revision=%lu bytes=0\n",
+                  static_cast<unsigned long>(rejectedRequestID),
+                  static_cast<unsigned>(rejectedResult),
+                  static_cast<unsigned long>(rejected.revision));
+  }
+  if (uploadRequestID != 0) {
+    const auto outcome = screen_configuration::commit(
+        uploadRequestID, baseRevision,
+        processingScreenConfigurationDocument.data(), documentLength);
+    if (outcome.published)
+      applyDeviceScreenConfiguration();
+    queueScreenConfigurationAcknowledgement(uploadRequestID, outcome);
+    Serial.printf(
+        "BLE screens: request=%lu result=%u revision=%lu bytes=%u\n",
+        static_cast<unsigned long>(uploadRequestID),
+        static_cast<unsigned>(outcome.result),
+        static_cast<unsigned long>(outcome.revision),
+        static_cast<unsigned>(documentLength));
+  }
+  if (screen_configuration::processLegacySettings(mapRenderSettings,
+                                                   millis())) {
+    applyDeviceScreenConfiguration();
+  }
+  pumpScreenConfigurationNotifications();
+}
+
 static uint32_t currentAuthoritativeRideLeaseGeneration(
     TickType_t waitTicks) {
   if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
@@ -2038,8 +2292,16 @@ static void handleAuthPayload(const std::string &frame) {
         false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsWorkoutZones.store(false, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    bleSessionSupportsWorldRadio.store(false,
+                                       std::memory_order_release);
+#endif
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    world_radio_runtime::reset();
+#endif
     rideDeliveryLeaseGenerationSnapshot.store(0,
                                                std::memory_order_release);
     advanceRidePayloadGeneration();
@@ -3419,6 +3681,9 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
   waveshare_board::speaker::PowerButtonHonkConfig config{};
   uint8_t powerPayload[
       waveshare_board::speaker::POWER_BUTTON_HONK_PAYLOAD_SIZE]{};
+  uint8_t screenConfigurationTLV[
+      2 + screen_configuration_protocol::CAPABILITIES_TLV_VALUE_BYTES]{};
+  std::size_t screenConfigurationTLVLength = 0;
   if (includePowerButtonConfig && powerButtonHonkAvailable) {
     if (!waveshare_board::speaker::getPowerButtonHonkConfig(config) ||
         !waveshare_board::speaker::encodePowerButtonHonkPayload(
@@ -3463,6 +3728,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
                              AUTOMATIC_DISPLAY_OFF_CLIENT_VERSION) {
       featureFlags |=
           device_capabilities_protocol::AUTOMATIC_DISPLAY_OFF_FEATURE;
+    }
+    if (clientVersion >= device_capabilities_protocol::
+                             DISPLAY_INACTIVITY_TIMEOUTS_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE;
     }
 #endif
     if (clientVersion >= device_capabilities_protocol::
@@ -3518,7 +3788,7 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
                              RIDE_DIAGNOSTICS_CLIENT_VERSION) {
       featureFlags |= device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE;
     }
-#if defined(RIDE_AUTOMATION_SHADOW)
+#if defined(DETAILED_RIDE_DIAGNOSTICS) && DETAILED_RIDE_DIAGNOSTICS
     if (clientVersion >= device_capabilities_protocol::
                              DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION) {
       featureFlags |=
@@ -3531,10 +3801,30 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE;
     }
+    if (world_radio_config::supportsClient(clientVersion)) {
+      featureFlags |= device_capabilities_protocol::WORLD_RADIO_FEATURE;
+    }
+    if (screen_configuration::isReady() &&
+        screenConfigurationCharacteristic != nullptr &&
+        clientVersion >= device_capabilities_protocol::
+                             SCREEN_CONFIGURATION_CLIENT_VERSION) {
+      screenConfigurationTLVLength =
+          screen_configuration_protocol::encodeCapabilitiesTLV(
+              screenConfigurationTLV, sizeof(screenConfigurationTLV));
+      if (screenConfigurationTLVLength != 0) {
+        featureFlags |=
+            device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE;
+      }
+    }
+    if (workout_zones::ENABLED && clientVersion >=
+        ride_ble_protocol_generated::WORKOUT_ZONES_V1_MINIMUM_CLIENT_VERSION) {
+      featureFlags |= ride_ble_protocol_generated::WORKOUT_ZONES_V1_FEATURE;
+    }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
-        sizeof(response));
+        sizeof(response), screenConfigurationTLV,
+        screenConfigurationTLVLength);
     if (responseSize == 0) {
       Serial.println("BLE Capabilities: CAP2 encoding failed");
       return;
@@ -3602,10 +3892,18 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
     bleSessionSupportsMapNavigationOrientation =
         device_capabilities_protocol::supportsMapNavigationOrientation(
             clientVersion, map_profile_protocol::STABLE_CAMERA_ENABLED);
+    const bool supportsZones = workout_zones::ENABLED && clientVersion >=
+        ride_ble_protocol_generated::WORKOUT_ZONES_V1_MINIMUM_CLIENT_VERSION;
+    bleSessionSupportsWorkoutZones.store(supportsZones, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(
         clientVersion >=
             device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION,
         std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    bleSessionSupportsWorldRadio.store(
+        world_radio_config::supportsClient(clientVersion),
+        std::memory_order_release);
+#endif
     bleSessionSupportsExplicitInvalidGpsHeading.store(
         clientVersion >=
             device_capabilities_protocol::EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION,
@@ -4317,6 +4615,10 @@ handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
   if (!requireAuthenticated("workout telemetry")) {
     return workout_telemetry::ApplyResult::RejectedUnauthenticated;
   }
+  if (data && len && data[0] == workout_zone_wire::FRAME_KIND &&
+      (!workout_zones::ENABLED || !bleSessionSupportsWorkoutZones.load(std::memory_order_acquire))) {
+    return workout_telemetry::ApplyResult::RejectedKind;
+  }
   const workout_telemetry::ApplyResult result =
       workout_telemetry_runtime::ingestFrame(data, len, millis(), true);
   static int lastDiagnosticWorkoutResult = -1;
@@ -4490,6 +4792,32 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.println("BLE Settings: automatic display-off unsupported on this target");
 #endif
     return;
+  case display_power::kDisplayInactivityTimeoutsSettingID: {
+#ifdef USE_ARDUINO_GFX
+    display_power::InactivityTimeouts timeouts;
+    if (!display_power::decodeInactivityTimeouts(settingValue, timeouts)) {
+      Serial.printf(
+          "BLE Settings: rejected display inactivity timeouts value %ld from %s\n",
+          (long)settingValue, source == nullptr ? "unknown" : source);
+      return;
+    }
+    if (!displayPowerManager.requestDisplayInactivityTimeouts(
+            timeouts.dimAfterSeconds, timeouts.displayOffAfterSeconds)) {
+      Serial.printf(
+          "BLE Settings: display inactivity timeout persistence failed from %s\n",
+          source == nullptr ? "unknown" : source);
+      return;
+    }
+    Serial.printf(
+        "BLE Settings: display inactivity timeouts dim=%us off=%us (saved)\n",
+        static_cast<unsigned>(timeouts.dimAfterSeconds),
+        static_cast<unsigned>(timeouts.displayOffAfterSeconds));
+#else
+    Serial.println(
+        "BLE Settings: display inactivity timeouts unsupported on this target");
+#endif
+    return;
+  }
   case 13: {
     settingValue = device_screen_protocol::applyCompatibility(
         settingValue, mapRenderSettings.enabledScreensMask);
@@ -4735,6 +5063,17 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                          ? map_render_policy::Reason::Zoom
                          : map_render_policy::Reason::Style);
   }
+  const bool changesScreenDocument =
+      (settingId >= 1 && settingId <= 3) || settingId == 6 ||
+      (settingId >= 7 && settingId <= 10) || settingId == 13 ||
+      settingId == 14 || (settingId >= 16 && settingId <= 22) ||
+      settingId == map_profile_protocol::MAP_NAVIGATION_ROTATION_SETTING_ID ||
+      (settingId >=
+           map_profile_protocol::MAP_NAVIGATION_BIRDS_EYE_SETTING_ID &&
+       settingId <=
+           map_profile_protocol::MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID);
+  if (changesScreenDocument)
+    screen_configuration::noteLegacySettingsChanged(millis(), settingId);
 }
 
 static void handleMapSettingPayload(const uint8_t *data, size_t len,
@@ -4994,6 +5333,7 @@ public:
 
   void acceptConnection() {
     clearAuthenticatedBleGpsRideObservation();
+    resetScreenConfigurationTransport();
     server->connected = true;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
@@ -5008,8 +5348,16 @@ public:
         false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsWorkoutZones.store(false, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    bleSessionSupportsWorldRadio.store(false,
+                                       std::memory_order_release);
+#endif
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    world_radio_runtime::reset();
+#endif
     rideDeliveryLeaseGenerationSnapshot.store(0,
                                                std::memory_order_release);
     advanceRidePayloadGeneration();
@@ -5079,6 +5427,7 @@ public:
     // Revoke the session token, hotspot secret, and request generation on
     // NimBLE's serialized host callback before a reconnect can authenticate.
     deviceTransferHttp.clearAuthenticatedBleSession();
+    resetScreenConfigurationTransport();
     queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
                          ble_transfer::NotifyNone);
     server->connected = false;
@@ -5095,8 +5444,16 @@ public:
         false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsWorkoutZones.store(false, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    bleSessionSupportsWorldRadio.store(false,
+                                       std::memory_order_release);
+#endif
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    world_radio_runtime::reset();
+#endif
     rideDeliveryLeaseGenerationSnapshot.store(0,
                                                std::memory_order_release);
     advanceRidePayloadGeneration();
@@ -5217,6 +5574,28 @@ public:
       }
       return;
     }
+
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+    if (value.size() >= 4 &&
+        std::memcmp(value.data(),
+                    ride_ble_protocol_generated::WORLD_RADIO_STATUS_MAGIC,
+                    4) == 0) {
+      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+      if (!requireAuthenticated("world radio status") ||
+          !bleSessionSupportsWorldRadio.load(std::memory_order_acquire)) {
+        return;
+      }
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+      if (!world_radio_runtime::ingestStatus(
+              reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
+        Serial.println("BLE World Radio: rejected malformed or stale status");
+      } else {
+        ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+      }
+#endif
+      return;
+    }
+#endif
 
     if (handleDestinationPickerPayload(value, "destination picker")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
@@ -5543,12 +5922,17 @@ public:
             return;
           }
           if (hasDeliveryMember) {
-            const bool canonicalMember =
-                deliveryMember.payloadLength > 0 &&
-                deliveryMember.memberCount <= 3 &&
-                deliveryMember.memberIndex < deliveryMember.memberCount &&
-                deliveryMember.payload[0] ==
+            const bool zonesNegotiated = bleSessionSupportsWorkoutZones.load(std::memory_order_acquire);
+            const bool legacyMember = deliveryMember.memberIndex < 3 &&
+                deliveryMember.payloadLength > 0 && deliveryMember.payload[0] ==
                     static_cast<uint8_t>(deliveryMember.memberIndex + 1);
+            const bool zoneMember = zonesNegotiated && deliveryMember.memberCount == 5 &&
+                deliveryMember.memberIndex >= 3 && deliveryMember.payloadLength >= workout_zone_wire::HEADER_BYTES &&
+                deliveryMember.payload[0] == workout_zone_wire::FRAME_KIND &&
+                deliveryMember.payload[2] == deliveryMember.memberIndex - 2;
+            const bool canonicalMember =
+                (deliveryMember.memberCount <= 3 || (zonesNegotiated && deliveryMember.memberCount == 5)) &&
+                deliveryMember.memberIndex < deliveryMember.memberCount && (legacyMember || zoneMember);
             if (!canonicalMember) {
               noteRideDeliveryMember(
                   deliveryMember, ride_delivery_protocol::Result::Malformed,
@@ -5576,6 +5960,7 @@ public:
           case ApplyResult::IgnoredMotionEpoch:
           case ApplyResult::IgnoredMotionSequence:
           case ApplyResult::IgnoredLifecyclePhase:
+          case ApplyResult::IgnoredZoneSequence:
             deliveryResult = ride_delivery_protocol::Result::Stale;
             break;
           case ApplyResult::RejectedUnauthenticated:
@@ -5612,6 +5997,92 @@ public:
             reinterpret_cast<const uint8_t *>(payload.data()), payload.size(),
             millis()))
       Serial.println("BLE Ride Automation: rejected native frame");
+  }
+};
+
+class MyScreenConfigurationCharacteristicCallbacks
+    : public NimBLECharacteristicCallbacks {
+public:
+  void onWrite(NimBLECharacteristic *pChar) override {
+    ScopedNimbleCallback callbackScope;
+    const std::string frame = pChar->getValue();
+    std::string payload;
+    if (!screen_configuration::isReady() ||
+        !unwrapOwnerAuthenticatedPayload(
+            device_ownership::AuthenticatedChannel::ScreenConfiguration,
+            frame, payload, "screen configuration characteristic") ||
+        !requireAuthenticated("screen configuration")) {
+      return;
+    }
+    const auto *bytes =
+        reinterpret_cast<const uint8_t *>(payload.data());
+    uint32_t requestID = 0;
+    if (screen_configuration_protocol::decodeRequest(
+            bytes, payload.size(), requestID)) {
+      if (screenConfigurationMutex == nullptr ||
+          xSemaphoreTake(screenConfigurationMutex, 0) != pdTRUE) {
+        return;
+      }
+      if (pendingScreenConfiguration.snapshotRequested ||
+          screenConfigurationSnapshotActive.load(
+              std::memory_order_acquire)) {
+        pendingScreenConfiguration.acknowledgementReady = true;
+        pendingScreenConfiguration.acknowledgementRequestID = requestID;
+        pendingScreenConfiguration.acknowledgementResult =
+            screen_configuration::CommitResult::Busy;
+      } else {
+        pendingScreenConfiguration.snapshotRequested = true;
+        pendingScreenConfiguration.snapshotRequestID = requestID;
+      }
+      xSemaphoreGive(screenConfigurationMutex);
+      ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+      return;
+    }
+    if (!screen_configuration_protocol::hasMagic(
+            bytes, payload.size(),
+            ride_ble_protocol_generated::SCREEN_CONFIGURATION_UPLOAD_MAGIC)) {
+      return;
+    }
+    if (payload.size() >= 8)
+      requestID = screen_configuration_protocol::readUInt32LE(bytes + 4);
+    if (screenConfigurationMutex == nullptr ||
+        xSemaphoreTake(screenConfigurationMutex, 0) != pdTRUE) {
+      return;
+    }
+    const auto result = screenConfigurationUpload.consume(
+        bytes, payload.size(), millis());
+    if (result == screen_configuration_protocol::ChunkResult::Rejected) {
+      if (requestID != 0) {
+        pendingScreenConfiguration.acknowledgementReady = true;
+        pendingScreenConfiguration.acknowledgementRequestID = requestID;
+        pendingScreenConfiguration.acknowledgementResult =
+            screen_configuration::CommitResult::Malformed;
+      }
+    } else if (result ==
+               screen_configuration_protocol::ChunkResult::Complete) {
+      if (pendingScreenConfiguration.uploadReady ||
+          screenConfigurationSnapshotActive.load(std::memory_order_acquire)) {
+        pendingScreenConfiguration.acknowledgementReady = true;
+        pendingScreenConfiguration.acknowledgementRequestID =
+            screenConfigurationUpload.requestID();
+        pendingScreenConfiguration.acknowledgementResult =
+            screen_configuration::CommitResult::Busy;
+      } else {
+        pendingScreenConfiguration.uploadReady = true;
+        pendingScreenConfiguration.uploadRequestID =
+            screenConfigurationUpload.requestID();
+        pendingScreenConfiguration.baseRevision =
+            screenConfigurationUpload.baseRevision();
+        pendingScreenConfiguration.documentLength =
+            screenConfigurationUpload.payloadLength();
+        std::memcpy(pendingScreenConfiguration.document.data(),
+                    screenConfigurationUpload.payload(),
+                    pendingScreenConfiguration.documentLength);
+      }
+      screenConfigurationUpload.reset();
+    }
+    xSemaphoreGive(screenConfigurationMutex);
+    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   }
 };
 
@@ -5763,7 +6234,7 @@ static void loadSettingsFromNVS() {
       map_profile_persistence::loadNavigationRotation(prefs);
   mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
   uint8_t storedScreenMask =
-      prefs.getUChar("screenMask", DEVICE_SCREEN_SUPPORTED_MASK);
+      prefs.getUChar("screenMask", DEVICE_SCREEN_DEFAULT_MASK);
   if (!prefs.getBool("batteryScrV1", false)) {
     storedScreenMask |= deviceScreenBit(DEVICE_SCREEN_BATTERY_STATUS);
     prefs.putUChar("screenMask", storedScreenMask);
@@ -5809,6 +6280,16 @@ void BLENavigationServer::init(const char *deviceName) {
 
   // Load persisted settings from NVS
   loadSettingsFromNVS();
+
+  screenConfigurationMutex = xSemaphoreCreateMutexStatic(
+      &screenConfigurationMutexStorage);
+  const bool screenConfigurationReady =
+      screenConfigurationMutex != nullptr &&
+      screen_configuration::initialize(mapRenderSettings);
+  if (!screenConfigurationReady) {
+    Serial.println(
+        "BLE screens: initialization failed; capability remains disabled");
+  }
 
   if (!ensurePendingSettingInputs()) {
     Serial.println("BLE: failed to allocate map setting mailbox in PSRAM");
@@ -5958,6 +6439,15 @@ void BLENavigationServer::init(const char *deviceName) {
   pRideAutomationCharacteristic->setCallbacks(
       new MyRideAutomationCharacteristicCallbacks());
 
+  if (screenConfigurationReady) {
+    pScreenConfigurationCharacteristic = pService->createCharacteristic(
+        SCREEN_CONFIGURATION_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+    pScreenConfigurationCharacteristic->setCallbacks(
+        new MyScreenConfigurationCharacteristicCallbacks());
+    screenConfigurationCharacteristic = pScreenConfigurationCharacteristic;
+  }
+
   // Start service
   pService->start();
 
@@ -6011,6 +6501,7 @@ void BLENavigationServer::process() {
   // renderer-visible route, GPS, and per-setting state on the UI task so a
   // synchronous rolling build sees one stable generation throughout.
   processPendingMapInputs();
+  processPendingScreenConfiguration();
   if (ownershipRestartRequested &&
       static_cast<uint32_t>(millis() - ownershipRestartRequestedMs) >= 500) {
     Serial.println("BLE: Restarting after ownership removal");
@@ -6159,6 +6650,29 @@ void BLENavigationServer::setNavigationActivity(bool active) {
 #else
   (void)active;
 #endif
+}
+
+bool BLENavigationServer::canRequestWorldRadio() const {
+#if !defined(FIRMWARE_DIAGNOSTICS) || !FIRMWARE_DIAGNOSTICS
+  return false;
+#else
+  return world_radio_config::ENABLED && connected && bleSessionAuthenticated &&
+         pNavCharacteristic != nullptr &&
+         bleSessionSupportsWorldRadio.load(std::memory_order_acquire);
+#endif
+}
+
+bool BLENavigationServer::requestWorldRadio(
+    const world_radio_protocol::Request &request) {
+  if (!canRequestWorldRadio()) {
+    return false;
+  }
+  uint8_t payload[world_radio_protocol::REQUEST_BYTES]{};
+  if (!world_radio_protocol::encodeRequest(request, payload, sizeof(payload))) {
+    return false;
+  }
+  return notifyAuthenticatedNavigation(pNavCharacteristic, payload,
+                                       sizeof(payload));
 }
 
 BLEDebugStats BLENavigationServer::getDebugStats() const {

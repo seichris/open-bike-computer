@@ -7,18 +7,10 @@ struct CyclingSensorProfilesSection: View {
     @AccessibilityFocusState private var isSensorSectionFocused: Bool
     var focusOnAppear = false
 
+    @ViewBuilder
     var body: some View {
-        Section {
-            if sensorStore.profiles.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("No Sensors", systemImage: "gauge")
-                    Text(
-                        "Add a sensor after Bicino receives cadence or power data from your Apple Watch."
-                    )
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                }
-            } else {
+        if !sensorStore.profiles.isEmpty {
+            Section {
                 ForEach(sensorStore.profiles) { profile in
                     NavigationLink {
                         CyclingSensorDetailView(
@@ -35,17 +27,17 @@ struct CyclingSensorProfilesSection: View {
                         )
                     }
                 }
-            }
-        } header: {
-            Text("My Sensors")
-                .accessibilityFocused($isSensorSectionFocused)
-                .onAppear {
-                    guard focusOnAppear else { return }
-                    Task { @MainActor in
-                        await Task.yield()
-                        isSensorSectionFocused = true
+            } header: {
+                Text("My Sensors")
+                    .accessibilityFocused($isSensorSectionFocused)
+                    .onAppear {
+                        guard focusOnAppear else { return }
+                        Task { @MainActor in
+                            await Task.yield()
+                            isSensorSectionFocused = true
+                        }
                     }
-                }
+            }
         }
     }
 }
@@ -54,7 +46,9 @@ struct CyclingSensorConnectionSection: View {
     @ObservedObject var sensorStore: CyclingSensorStore
     @ObservedObject var detectionCoordinator:
         CyclingSensorDetectionCoordinator
+    @AccessibilityFocusState private var isSetupActionFocused: Bool
     @State private var selectedCandidate: CyclingSensorCandidate?
+    var focusOnAppear = false
 
     var body: some View {
         Group {
@@ -94,14 +88,21 @@ struct CyclingSensorConnectionSection: View {
                         detectionCoordinator.beginLooking()
                     } label: {
                         Label(
-                            "Connect a new Sensor",
+                            sensorStore.profiles.isEmpty
+                                ? "Set Up a Sensor"
+                                : "Connect a new Sensor",
                             systemImage: "plus.circle"
                         )
                     }
-                } footer: {
-                    Text(
-                        "This connects sensors like cadence or power meters to your Apple Watch and shows their data on your Bike Computer."
-                    )
+                    .accessibilityFocused($isSetupActionFocused)
+                    .onAppear {
+                        guard focusOnAppear,
+                              sensorStore.profiles.isEmpty else { return }
+                        Task { @MainActor in
+                            await Task.yield()
+                            isSetupActionFocused = true
+                        }
+                    }
                 }
             }
         }

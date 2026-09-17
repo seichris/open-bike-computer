@@ -17,16 +17,27 @@ def load_plist(path: Path) -> dict:
         return plistlib.load(handle)
 
 
-def load_xcconfig(path: Path) -> dict[str, str]:
+def load_xcconfig(path: Path, ancestors: tuple[Path, ...] = ()) -> dict[str, str]:
+    path = path.resolve()
+    if path in ancestors:
+        raise AssertionError(f"recursive xcconfig include: {path}")
     values = {}
     for line in path.read_text().splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("//"):
             continue
-        key, separator, value = stripped.partition("=")
-        if not separator:
+        include = re.fullmatch(r'#include "([^"\n]+)"', stripped)
+        if include:
+            included = (path.parent / include.group(1)).resolve()
+            if included.parent != path.parent:
+                raise AssertionError(f"xcconfig include escapes Configuration: {included}")
+            values.update(load_xcconfig(included, (*ancestors, path)))
+            continue
+        assignment = re.fullmatch(r"([A-Z_][A-Z_0-9]*(?:\[[^\]]+\])*)\s*=\s*(.*)", stripped)
+        if assignment is None:
             raise AssertionError(f"invalid xcconfig line in {path}: {line}")
-        values[key.strip()] = value.strip()
+        # Retain selectors as keys; identity tests don't simulate an SDK choice.
+        values[assignment.group(1)] = assignment.group(2).strip()
     return values
 
 
@@ -163,8 +174,18 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID": "",
             "BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX": "",
         }
-        self.assertEqual(development, expected_development)
-        self.assertEqual(production, expected_production)
+        expected_zone_flags = {
+            "BICINO_HEALTHKIT_ZONE_FLAGS": "",
+            "BICINO_HEALTHKIT_ZONE_FLAGS[sdk=watchos27*]": "BICINO_HEALTHKIT_WORKOUT_ZONES",
+            "BICINO_HEALTHKIT_ZONE_FLAGS[sdk=watchsimulator27*]": "BICINO_HEALTHKIT_WORKOUT_ZONES",
+            "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "$(inherited) $(BICINO_HEALTHKIT_ZONE_FLAGS)",
+        }
+        self.assertEqual(
+            load_xcconfig(IOS_PROJECT / "Configuration" / "HealthKitZones.xcconfig"),
+            expected_zone_flags,
+        )
+        self.assertEqual(development, {**expected_zone_flags, **expected_development})
+        self.assertEqual(production, {**expected_zone_flags, **expected_production})
 
         development_key_id = development[
             "BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID"

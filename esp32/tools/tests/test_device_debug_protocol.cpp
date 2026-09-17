@@ -24,6 +24,14 @@ int main() {
   assert(bottomRight.x == 465 && bottomRight.y == 0);
   const auto center = panelToLvgl(kWaveshareAmoled175Geometry, {233, 233});
   assert(center.x == 233 && center.y == 232);
+  // Invert LVGL's actual rotate270 RGB565 loop across the full square.
+  for (uint16_t y = 0; y < 466; ++y) {
+    for (uint16_t x = 0; x < 466; ++x) {
+      const Point panel{static_cast<uint16_t>(465 - y), x};
+      const auto recovered = panelToLvgl(kWaveshareAmoled175Geometry, panel);
+      assert(recovered.x == x && recovered.y == y);
+    }
+  }
   const auto nativeTopLeft =
       panelToLvgl(kWaveshareAmoled206Geometry, {0, 0});
   assert(nativeTopLeft.x == 0 && nativeTopLeft.y == 0);
