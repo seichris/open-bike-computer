@@ -45,13 +45,13 @@
 
 	<!-- Location Permissions -->
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Bicino uses background location for navigation and, when Ride Start is enabled, to detect cycling motion for your bike computer while the app is not visible.</string>
+	<string>Bicino uses background location for navigation, iPhone cycling workout routes, and optional ride detection while the app is not visible.</string>
 	
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Bicino uses your location for turn-by-turn navigation and optional ride detection on your bike computer.</string>
+	<string>Bicino uses your location for navigation, iPhone cycling workout routes and distance, and optional ride detection.</string>
 	
 	<key>NSLocationAlwaysUsageDescription</key>
-	<string>Bicino uses background location to continue navigation and optional ride detection when the app is not visible.</string>
+	<string>Bicino uses background location to continue navigation, iPhone workout routes, and optional ride detection when the app is not visible.</string>
 
 	<!-- Bluetooth Permission -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
@@ -62,9 +62,9 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Bicino connects to your bike computer over local Wi-Fi for device transfers and diagnostics.</string>
 	<key>NSHealthShareUsageDescription</key>
-	<string>Bicino receives live workout metrics from your Apple Watch and can read your completed Bicino workout summary.</string>
+	<string>Bicino reads live and completed cycling workout metrics from your selected recorder: iPhone or Apple Watch. Heart rate on iPhone requires a compatible external monitor.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>Bicino allows cycling workouts started on your Apple Watch to be saved to HealthKit.</string>
+	<string>Bicino saves cycling workouts, cycling distance, and permitted workout routes to HealthKit from your selected recorder: iPhone or Apple Watch.</string>
 
 	<!-- Location Accuracy -->
 	<key>NSLocationTemporaryUsageDescriptionDictionary</key>

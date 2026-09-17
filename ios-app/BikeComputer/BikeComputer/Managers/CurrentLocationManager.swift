@@ -351,6 +351,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private var isNavigating = false
     private var isViewingMap = false
     private var isWorkoutActive = false
+    private var isPhoneWorkoutActive = false
     private var isRideDetectionArmed = false
     private var isLocationUpdating = false
     private var isDeviceDestinationRequestsEnabled = false
@@ -458,9 +459,11 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         updateLocationTracking()
     }
 
-    func setWorkoutActive(_ active: Bool) {
-        guard isWorkoutActive != active else { return }
+    func setWorkoutActive(_ active: Bool, phoneOwned: Bool = false) {
+        let phoneActive = active && phoneOwned
+        guard isWorkoutActive != active || isPhoneWorkoutActive != phoneActive else { return }
         isWorkoutActive = active
+        isPhoneWorkoutActive = phoneActive
         updateLocationTracking()
     }
 
@@ -473,10 +476,12 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 
     @MainActor
     func bindWorkoutMetricsStore(_ store: WorkoutMetricsStore) {
-        workoutActivityCancellable = store.$shouldMaintainWorkoutServices
-            .removeDuplicates()
-            .sink { [weak self] isWorkoutActive in
-                self?.setWorkoutActive(isWorkoutActive)
+        workoutActivityCancellable = Publishers.CombineLatest(
+            store.$shouldMaintainWorkoutServices, store.$recordingOwner
+        )
+            .removeDuplicates { $0.0 == $1.0 && $0.1 == $1.1 }
+            .sink { [weak self] active, owner in
+                self?.setWorkoutActive(active, phoneOwned: owner == .iphone)
             }
     }
 
@@ -518,18 +523,26 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         if shouldTrackInBackground &&
             locationManager.authorizationLevel == .whenInUse &&
             isApplicationActive &&
+            (!isPhoneWorkoutActive || isNavigating || isRideDetectionArmed) &&
             !hasRequestedAlwaysAuthorizationForRideActivity {
             hasRequestedAlwaysAuthorizationForRideActivity = true
             locationManager.requestAlwaysAuthorization()
         }
 
+        // A phone workout explicitly started in foreground may continue the
+        // same When-In-Use location stream with the system background indicator.
+        // Do not grant this exception to navigation, Watch mirroring or passive
+        // ride detection, and never cold-start When-In-Use GPS in background.
+        let phoneWhenInUse = isPhoneWorkoutActive
+            && locationManager.authorizationLevel == .whenInUse
         let canTrackInBackground = shouldTrackInBackground &&
-            locationManager.authorizationLevel == .always
+            (locationManager.authorizationLevel == .always || phoneWhenInUse)
         locationManager.setBackgroundTrackingEnabled(canTrackInBackground)
 
         let canStartUpdates =
             locationManager.authorizationLevel == .always
                 || isApplicationActive
+                || (phoneWhenInUse && isLocationUpdating)
         
         if shouldTrack &&
             isLocationAuthorized &&

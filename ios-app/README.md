@@ -6,6 +6,7 @@ not require opening Xcode; use the command-line entry point below.
 ## Requirements
 
 - Navigation requires iOS 16.4 or later.
+- iPhone-owned workout recording requires iOS 26 or later; no Watch is required.
 - The mirrored workout experience requires iOS 17 or later and a paired Apple
   Watch running watchOS 10 or later.
 - Real workout validation requires physical devices. HealthKit workout
@@ -110,7 +111,34 @@ If the Watch tunnel times out, keep the Watch near the iPhone and Mac, restore
 the connection in Xcode's Devices and Simulators window, then retry the same
 artifact before rebuilding.
 
-## First run
+## Recording without Apple Watch (iOS 26+)
+
+**Start Workout** uses iPhone when WatchConnectivity has finished activation and
+confirmed that no Watch is paired. With a configured reachable Watch, the default
+is still Watch recording. **Choose Recorder** in the workout dashboard offers an
+explicit **Record with iPhone** choice; an unreachable or incompletely configured
+Watch opens this choice instead of silently falling back.
+
+The recorder is fixed for the ride. Reconnection cannot migrate it, change which
+device saves, or start another workout. Finish and acknowledge the current ride
+before choosing another recorder. Recovery and unresolved Watch starts are checked
+before a new recording is admitted.
+
+Phone recording supports outdoor cycling, pause/resume, segments, elapsed/active
+time, GPS route/distance/speed, available HealthKit heart rate/energy, and
+save/discard. It requests Health permission on iPhone. There is no phone heart-rate
+sensor; a compatible externally paired monitor is required. Cadence/power and
+automatic ride detection remain on the existing Watch path in this change.
+
+Foreground-started phone GPS may continue with When-In-Use location permission
+and the system background indicator. A cold background GPS restart still requires
+Always location; otherwise open Bicino after recovery. Route access and precise
+location remain permission-dependent. Missing measurements are not fabricated.
+
+See [iPhone workout architecture and validation](../docs/iphone-owned-workouts.md)
+for recovery behavior, conflict handling, and physical release gates.
+
+## First run with Apple Watch
 
 1. Build the `BikeComputer` scheme for the paired iPhone. The Watch app is
    embedded; verify its installation on the paired Watch separately.
@@ -175,11 +203,16 @@ physical validation even though the same join succeeded directly on the phone.
 
 ## Workout behavior
 
-The Watch owns the `HKWorkoutSession`, `HKLiveWorkoutBuilder`, sensor collection,
+For Watch-owned rides, the Watch owns the `HKWorkoutSession`, `HKLiveWorkoutBuilder`, sensor collection,
 route builder, final save or discard decision, and recovery record. The iPhone
 is a mirrored display and control surface. It may relay the latest live snapshot
 to authenticated compatible ESP32 firmware, but it never writes a second
 Health workout.
+
+For iPhone-owned rides, the separate local recorder owns the native session and
+HealthKit save. The existing Watch mirror manager remains read/control-only.
+One selected recorder feeds the iPhone, Live Activity, and authenticated bike
+computer display; late metrics from another recorder cannot replace it.
 
 Navigation and workout state are deliberately independent. Either can start or
 end without implicitly changing the other.
@@ -363,7 +396,7 @@ workout so the Watch can collect cadence or power through HealthKit.
 
 When BikeComputer first receives one of these measurements, the active workout
 sheet offers **Connect sensor?**. Open **Settings > My Bike Computer**, or tap
-that prompt, then use **My Sensors > Connect a new Sensor**. The app listens for
+that prompt, then use **Set Up a Sensor**. The app listens for
 current workout data and lets you name a cadence sensor, power sensor, or
 combined cadence-and-power sensor.
 

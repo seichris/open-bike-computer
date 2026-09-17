@@ -14,6 +14,8 @@ struct OfflineMapOnboardingView: View {
     let step: OfflineMapOnboardingStep
     let location: CLLocation?
     let locationAuthorizationStatus: CLAuthorizationStatus
+    let onAddBicino: () -> Void
+    let onUseIPhone: () -> Void
     let onRequestLocation: () -> Void
     let onChooseArea: () -> Void
     let onClose: () -> Void
@@ -91,6 +93,12 @@ struct OfflineMapOnboardingView: View {
                     .accessibilityLabel("Bicino")
             }
 
+        case .location:
+            Image(systemName: "location.circle")
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundColor(.accentColor)
+                .frame(height: 48)
+
         case .download:
             Image(systemName: "map.circle")
                 .font(.system(size: 42, weight: .semibold))
@@ -103,11 +111,22 @@ struct OfflineMapOnboardingView: View {
     private var actionContent: some View {
         switch step {
         case .welcome:
-            Button(action: onClose) {
-                Text("Get Started")
-                    .frame(maxWidth: .infinity)
+            VStack(spacing: 12) {
+                Button(action: onAddBicino) {
+                    Label("Connect your Bicino", systemImage: "bicycle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button(action: onUseIPhone) {
+                    Text("Skip")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.borderedProminent)
+
+        case .location:
+            locationActions
 
         case .download:
             VStack(spacing: 12) {
@@ -176,10 +195,14 @@ struct OfflineMapOnboardingView: View {
     }
 
     private var allowsClose: Bool {
-        step != .download ||
-            LocationAuthorizationRemediationPolicy.allowsDismissal(
+        switch step {
+        case .welcome:
+            return false
+        case .location, .download:
+            return LocationAuthorizationRemediationPolicy.allowsDismissal(
                 for: locationAuthorizationStatus
             )
+        }
     }
 }
 
@@ -188,6 +211,8 @@ private extension OfflineMapOnboardingStep {
         switch self {
         case .welcome:
             return "Welcome to Bicino"
+        case .location:
+            return "Allow Location Access"
         case .download:
             return "Download Map"
         }
@@ -198,7 +223,16 @@ private extension OfflineMapOnboardingStep {
     ) -> String {
         switch self {
         case .welcome:
-            return "Plan your rides, connect your Bicino One, or turn your iPhone into a cycling computer."
+            return "Set up your Bicino One, or continue with your iPhone as a cycling computer."
+        case .location:
+            switch locationAuthorizationAction {
+            case .requestInApp:
+                return "Bicino uses your location for maps, navigation, and ride tracking."
+            case .openSettings:
+                return "Location access is needed for maps, navigation, and ride tracking. You can grant access in iPhone Settings."
+            case .none:
+                return "Location access is ready for maps, navigation, and ride tracking."
+            }
         case .download:
             switch locationAuthorizationAction {
             case .requestInApp:

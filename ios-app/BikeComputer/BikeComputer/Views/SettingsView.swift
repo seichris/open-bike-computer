@@ -173,17 +173,6 @@ struct SettingsView: View {
                     manager: offlineMapManager,
                     focusedPackFilename: $focusedSavedMapFilename
                 )
-                if OfflineMapDownloadingSectionPresentation.isVisible(
-                    isBusy: offlineMapManager.isBusy,
-                    hasPendingJob: offlineMapManager.hasPendingMapJob,
-                    hasPendingActivation: offlineMapManager.hasPendingDeviceActivation,
-                    isServerRecoveryCheckPending: offlineMapManager.isServerRecoveryCheckPending,
-                    hasCurrentJob: offlineMapManager.currentJob != nil,
-                    hasDownloadedPack: offlineMapManager.downloadedPackURL != nil,
-                    errorMessage: offlineMapManager.errorMessage
-                ) {
-                    DownloadingMapsSettingsSection(manager: offlineMapManager)
-                }
 
                 SavedRoutesSettingsSection(
                     routeLibrary: routeLibrary,
@@ -233,6 +222,7 @@ struct SettingsView: View {
                             cyclingSensorStore: cyclingSensorStore,
                             cyclingSensorDetectionCoordinator:
                                 cyclingSensorDetectionCoordinator,
+                            rideDiagnosticsRecorder: rideDiagnosticsRecorder,
                             currentLocation: currentLocation,
                             isNavigationActive: isNavigationActive,
                             onStartTestNavigation: { destination in
@@ -242,14 +232,6 @@ struct SettingsView: View {
                         )
                     } label: {
                         Label("Developer Settings", systemImage: "wrench.and.screwdriver")
-                    }
-
-                    NavigationLink {
-                        RideDiagnosticsSettingsView(
-                            recorder: rideDiagnosticsRecorder
-                        )
-                    } label: {
-                        Label("Diagnostics", systemImage: "stethoscope")
                     }
                 }
 
@@ -362,7 +344,9 @@ struct SettingsView: View {
             BikeComputersSettingsView(
                 sensorStore: cyclingSensorStore,
                 sensorDetectionCoordinator:
-                    cyclingSensorDetectionCoordinator
+                    cyclingSensorDetectionCoordinator,
+                startsBikeComputerDiscoveryOnAppear:
+                    shouldPromoteBikeComputerSettings
             )
         } label: {
             Label(
@@ -897,22 +881,30 @@ private struct DownloadingMapsSettingsSection: View {
                     .foregroundColor(.red)
             }
 
-            if manager.isMapJobProcessing, manager.hasPendingMapJob {
-                Button(role: .destructive) {
-                    manager.pausePendingMapJob()
-                } label: {
-                    Label("Pause Map Preparation", systemImage: "pause.circle")
-                }
-            } else if manager.hasPendingMapJob {
-                Button {
-                    manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
-                } label: {
-                    Label("Resume Map Preparation", systemImage: "play.circle")
+            if manager.hasPendingMapJob {
+                if manager.currentJob?.mapId != nil {
+                    Button {
+                        manager.retryPendingMapJob(bleManager: bleManager)
+                    } label: {
+                        Label("Retry Map Download", systemImage: "arrow.clockwise")
+                    }
+                } else if manager.isMapJobProcessing {
+                    Button {
+                        manager.pausePendingMapJob()
+                    } label: {
+                        Label("Pause Map Preparation", systemImage: "pause.circle")
+                    }
+                } else {
+                    Button {
+                        manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
+                    } label: {
+                        Label("Resume Map Preparation", systemImage: "play.circle")
+                    }
                 }
                 Button(role: .destructive) {
                     manager.forgetPendingMapJob()
                 } label: {
-                    Label("Forget Pending Map", systemImage: "trash")
+                    Label("Discard Pending Map", systemImage: "trash")
                 }
             }
         }
@@ -1081,14 +1073,18 @@ private struct SavedMapsSettingsSection: View {
     @FocusState.Binding var focusedPackFilename: String?
     var scope: SavedMapListScope = .savedMaps
     @State private var renameInteraction = SavedMapRenameInteraction()
+    @State private var isShowingPendingMapChoice = false
 
     var body: some View {
         let savedMaps = manager.savedMapListItems(
             activeDeviceMap: bleManager.activeDeviceMap,
             scope: scope
         )
+        let hasPendingMapRow = scope == .savedMaps &&
+            manager.hasPendingMapJob &&
+            !manager.hasDownloadedPendingDeviceInstall
         Section(header: Text(scope == .developerMaps ? "Development Maps" : "Saved Maps")) {
-            if savedMaps.isEmpty {
+            if savedMaps.isEmpty && !hasPendingMapRow {
                 Group {
                     if scope == .developerMaps {
                         Text("No development-only maps")
@@ -1110,20 +1106,42 @@ private struct SavedMapsSettingsSection: View {
                 }
             }
 
+            if hasPendingMapRow {
+                PendingSavedMapRow(
+                    manager: manager,
+                    onChooseAnotherMap: {
+                        isShowingPendingMapChoice = true
+                    }
+                )
+                .environmentObject(bleManager)
+                .listRowBackground(Color(uiColor: .systemGray6))
+            }
+
             if scope == .savedMaps {
                 Button {
-                    if let commit = renameInteraction.finish() {
-                        commitRename(commit)
-                    }
-                    focusedPackFilename = nil
-                    manager.beginMapAreaSelection()
-                    if manager.isMapAreaSelectionActive {
-                        dismiss()
-                    }
+                    requestNewMapSelection()
                 } label: {
                     Label("Download a new Map", systemImage: "rectangle.dashed")
                 }
             }
+        }
+        .confirmationDialog(
+            "A Map Download Is Pending",
+            isPresented: $isShowingPendingMapChoice,
+            titleVisibility: .visible
+        ) {
+            Button("Retry Existing Map") {
+                manager.retryPendingMapJob(bleManager: bleManager)
+            }
+            Button("Discard and Choose New Map", role: .destructive) {
+                beginNewMapSelection(discardPendingMap: true)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(
+                "Retry the existing map with a fresh download link, or discard " +
+                    "its local pending state before choosing another area."
+            )
         }
         .onChange(of: focusedPackFilename) { newValue in
             scheduleRenameCommitIfNeeded(focusedFilename: newValue)
@@ -1188,6 +1206,193 @@ private struct SavedMapsSettingsSection: View {
             return
         }
         manager.renameCachedPack(at: packURL, to: commit.proposedName)
+    }
+
+    private func requestNewMapSelection() {
+        if manager.hasPendingMapJob {
+            isShowingPendingMapChoice = true
+            return
+        }
+        beginNewMapSelection(discardPendingMap: false)
+    }
+
+    private func beginNewMapSelection(discardPendingMap: Bool) {
+        if let commit = renameInteraction.finish() {
+            commitRename(commit)
+        }
+        focusedPackFilename = nil
+        if discardPendingMap {
+            manager.discardPendingMapAndBeginSelection()
+        } else {
+            manager.beginMapAreaSelection()
+        }
+        if manager.isMapAreaSelectionActive {
+            dismiss()
+        }
+    }
+}
+
+private struct PendingSavedMapRow: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @ObservedObject var manager: OfflineMapManager
+    let onChooseAnotherMap: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                SavedMapThumbnail(image: nil)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(sourceSummary ?? "Pending Offline Map")
+                        .font(.body.weight(.semibold))
+                        .lineLimit(2)
+                    Text("Downloading to this iPhone")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let downloadProgress = manager.downloadByteProgress {
+                OfflineMapProgressRow(
+                    title: "Download Progress",
+                    percentage: downloadProgress.percentage,
+                    fraction: downloadProgress.fraction,
+                    detail: nil
+                )
+            }
+
+            if let overallGenerationProgress {
+                OfflineMapProgressRow(
+                    title: "Generation Progress",
+                    percentage: overallGenerationProgress.percentage,
+                    fraction: overallGenerationProgress.fraction,
+                    detail: overallGenerationProgress.detail
+                )
+            }
+
+            if let generationProgress {
+                OfflineMapProgressRow(
+                    title: "Feature Conversion",
+                    percentage: generationProgress.displayFraction == nil
+                        ? nil
+                        : generationProgress.percentage,
+                    fraction: generationProgress.displayFraction,
+                    detail: generationProgress.detail
+                )
+            }
+
+            if let preparationEstimatePresentation {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(preparationEstimatePresentation.title)
+                    Spacer()
+                    Text(preparationEstimatePresentation.value)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                }
+                .font(.caption)
+            }
+
+            if manager.downloadByteProgress == nil,
+               overallGenerationProgress == nil,
+               generationProgress == nil,
+               !manager.statusMessage.isEmpty {
+                Text(manager.statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let error = manager.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack(spacing: 16) {
+                if manager.currentJob?.mapId != nil {
+                    Button {
+                        manager.retryPendingMapJob(bleManager: bleManager)
+                    } label: {
+                        Label("Retry Download", systemImage: "arrow.clockwise")
+                    }
+                } else if manager.isMapJobProcessing {
+                    Button {
+                        manager.pausePendingMapJob()
+                    } label: {
+                        Label("Pause", systemImage: "pause.circle")
+                    }
+                } else {
+                    Button {
+                        manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
+                    } label: {
+                        Label("Resume", systemImage: "play.circle")
+                    }
+                }
+
+                Button("Choose Another Map", role: .destructive) {
+                    onChooseAnotherMap()
+                }
+            }
+            .font(.subheadline)
+            .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var sourceSummary: String? {
+        guard let regionName = manager.currentJob?.sourceRegion?.name else { return nil }
+        if let area = manager.currentJob?.geometry?.areaKm2 {
+            return "\(regionName) \(Int(area.rounded())) km²"
+        }
+        return regionName
+    }
+
+    private var preparationEstimatePresentation:
+        OfflineMapPreparationEstimatePresentation? {
+        guard let job = manager.currentJob else { return nil }
+        return OfflineMapPreparationEstimatePresentation.presentation(for: job)
+    }
+
+    private var generationProgress: OfflineMapJobProgress? {
+        guard manager.currentJob?.status == "converting_features" else { return nil }
+        return manager.currentJob?.progress
+    }
+
+    private var overallGenerationProgress: OfflineMapBuildingProgress? {
+        guard manager.currentJob?.status == "converting_features" else { return nil }
+        return manager.currentJob?.buildingProgress
+    }
+}
+
+private struct OfflineMapProgressRow: View {
+    let title: String
+    let percentage: Int?
+    let fraction: Double?
+    let detail: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(title)
+                Spacer()
+                if let percentage {
+                    Text("\(percentage)%")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            if let fraction {
+                ProgressView(value: fraction)
+            } else {
+                ProgressView()
+            }
+            if let detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1266,6 +1471,10 @@ private struct SavedMapRow: View {
         let previewImage = manager.previewImage(for: item)
         let catalogAvailability = item.catalogMap.map(manager.catalogAvailability(for:))
         let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(for: item)
+        let uploadProgress = packURL.flatMap(manager.mapUploadProgress(for:))
+        let activationProgress = item.localRecord?.mapID == manager.lastTransferMapId
+            ? manager.activationProgress
+            : nil
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -1466,6 +1675,24 @@ private struct SavedMapRow: View {
                         .frame(width: 32, height: 32)
                         .accessibilityHidden(true)
                 }
+            }
+
+            if let activationProgress {
+                OfflineMapProgressRow(
+                    title: manager.lastTransferOutcome == "uploading"
+                        ? "Uploading to Bike Computer"
+                        : "Installing on Bike Computer",
+                    percentage: activationProgress.percentage,
+                    fraction: activationProgress.fraction,
+                    detail: activationProgress.label
+                )
+            } else if let uploadProgress {
+                OfflineMapProgressRow(
+                    title: "Uploading to Bike Computer",
+                    percentage: Int((uploadProgress * 100).rounded()),
+                    fraction: uploadProgress,
+                    detail: nil
+                )
             }
 
             if let status = catalogAvailability?.statusText {
@@ -3492,16 +3719,27 @@ private struct DeveloperSettingsView: View {
     @ObservedObject var cyclingSensorStore: CyclingSensorStore
     @ObservedObject var cyclingSensorDetectionCoordinator:
         CyclingSensorDetectionCoordinator
+    @ObservedObject var rideDiagnosticsRecorder: RideDiagnosticsRecorder
     let currentLocation: CLLocation?
     let isNavigationActive: Bool
     let onStartTestNavigation: (String) -> Void
 
     var body: some View {
         Form {
-            connectionSummary
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
+            if OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: offlineMapManager.isBusy ||
+                    offlineMapManager.isDeviceTransferBusy ||
+                    offlineMapManager.hasActiveBackgroundUpload,
+                hasPendingJob: offlineMapManager.hasPendingMapJob,
+                hasPendingActivation: offlineMapManager.hasPendingDeviceActivation,
+                isServerRecoveryCheckPending:
+                    offlineMapManager.isServerRecoveryCheckPending,
+                hasCurrentJob: offlineMapManager.currentJob != nil,
+                hasDownloadedPack: offlineMapManager.downloadedPackURL != nil,
+                errorMessage: offlineMapManager.errorMessage
+            ) {
+                DownloadingMapsSettingsSection(manager: offlineMapManager)
+            }
 
             Section(header: Text("Map Server")) {
                 SettingsValueRow(title: "Service", value: offlineMapManager.serverURLString)
@@ -3514,6 +3752,32 @@ private struct DeveloperSettingsView: View {
                 }
 #endif
             }
+
+            Section {
+                NavigationLink {
+                    RideDiagnosticsSettingsView(
+                        recorder: rideDiagnosticsRecorder
+                    )
+                } label: {
+                    Label("Diagnostics", systemImage: "stethoscope")
+                }
+            }
+
+#if DEBUG
+            RemoteDeviceDebugSettingsSection()
+            RendererBenchmarkReplaySettingsSection(
+                isNavigationActive: isNavigationActive
+            )
+#endif
+            TestNavigationSettingsSection(
+                currentLocation: currentLocation,
+                onStartNavigation: onStartTestNavigation
+            )
+
+            connectionSummary
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
 
             Section {
                 NavigationLink {
@@ -3565,16 +3829,6 @@ private struct DeveloperSettingsView: View {
             OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
             FirmwareUpdateSettingsSection(manager: firmwareUpdateManager)
             DiagnosticsTransferNetworkSettingsSection()
-#if DEBUG
-            RemoteDeviceDebugSettingsSection()
-            RendererBenchmarkReplaySettingsSection(
-                isNavigationActive: isNavigationActive
-            )
-#endif
-            TestNavigationSettingsSection(
-                currentLocation: currentLocation,
-                onStartNavigation: onStartTestNavigation
-            )
 
             Section {
                 HStack {

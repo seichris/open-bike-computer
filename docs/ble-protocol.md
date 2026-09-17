@@ -760,11 +760,11 @@ screen cycling remain unchanged.
 
 ## Ride Automation (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004`)
 
-Ride automation is an internal-build protocol while the physical false-start,
-recovery, and board-stability gates in
+Ride automation is enabled in the production profiles, while the physical
+false-start, recovery, and board-stability gates in
 `docs/plans/automatic-ride-detection-implementation-plan.md` remain open.
-Production firmware neither advertises CAP2 bit `15` nor runs this control
-path. Manual `WREQ` and workout telemetry remain available.
+Production advertises CAP2 bit `15` and runs the bounded control path. Manual
+`WREQ` and workout telemetry remain available.
 
 The native characteristic carries authenticated notifications and writes on
 ownership-v2 channel `7`. A cached GATT table uses:
@@ -1235,8 +1235,9 @@ released automatic-display setting. Version `18` requests bit `20`, version
 `19` requests bit `21`, version `20` requests bit `22`, and version `21`
 requests bit `23`. Version `22` requests bit `24`, independent Map + Navigation
 orientation (setting ID `37`). Firmware advertises bit `24` only with
-`MAP_STABLE_CAMERA=1`; production profiles keep it clear pending per-target
-physical qualification. This capability is independent of label orientation.
+`MAP_STABLE_CAMERA=1`; both Waveshare production profiles now set it, while
+physical qualification remains tracked separately for each panel. This
+capability is independent of label orientation.
 Version `23` requests bit `25`, Watch GPS motion evidence.
 Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
 Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
@@ -1246,14 +1247,15 @@ version `27`; older direct Watch clients remain valid at version `23`. Bit `23` 
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
 Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
-omits both the screen and capability pending physical and OTA-size qualification.
+omits both the screen and capability pending physical interaction qualification.
 Its owner-authenticated `WRQ1` requests and `WRS1` status use the existing
 navigation characteristic; stream discovery and playback run on the iPhone.
 See [World Radio](world-radio.md) and the bounded codecs in
 `esp32/lib/world_radio/world_radio_protocol.hpp` and
 `ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift`.
-Production builds keep bit `15` clear until the
-ride-detection physical gates pass. Firmware sets bit `16` only in
+Production builds now advertise bit `15` because the RAUT control path is
+enabled; physical ride-detection gates remain outstanding. Firmware sets bit
+`16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
 Firmware sets bit `18` only when `FIRMWARE_DIAGNOSTICS=1`; production builds
 therefore expose neither the snapshot nor experimental profile control. GFX
@@ -1265,9 +1267,11 @@ the two timeout pickers and sends ID `38` only after this bit is received.
 The bounded persistent recorder may advertise bit `20` in ordinary and
 production profiles; it never enables USB serial diagnostics or the
 remote-debug service.
-Firmware advertises bit `21` only when the read-only ride-automation shadow
-producer is compiled. Production firmware keeps it clear, and iOS downgrades
-an otherwise detailed capture binding to standard correlation when it is absent.
+Firmware advertises bit `21` only when detailed ride diagnostics are compiled.
+Development profiles include both detailed diagnostics and the normalized
+ride-automation trace producer; production keeps the control path but omits
+both to stay within the dual-OTA image budget. Detailed capture binding is
+therefore unavailable in production.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
@@ -1837,7 +1841,10 @@ for the complete boot. When removable SD was mounted at boot, diagnostics uses
 that mount without unmounting it beneath map/font readers. When the boot is
 already using the bounded internal FFat fallback, diagnostics exports FFat and
 does not switch to a newly inserted removable card while recorder or map file
-handles may still be open; adopting removable storage requires a reboot.
+handles may still be open; adopting removable storage requires a reboot. FFat
+uses a 1 MiB diagnostics retention ceiling and preserves 2 MiB of free space,
+while removable SD retains the original 32 MiB ceiling and 8 MiB reserve. See
+[Ride diagnostics format](ride-diagnostics-format.md#device-storage-retention).
 
 The diagnostics-entry `DSTS.lastError` codes are stable and stage-specific:
 
@@ -2052,7 +2059,7 @@ come from `screen_types` in `protocol/ride-ble-contract-v1.json`; generated
 Swift/C++ adapters preserve legacy masks and configurable-screen payload IDs.
 The common request/status fixtures in `protocol/fixtures/world-radio-v1.txt`
 are consumed by firmware and phone host tests. See `docs/world-radio.md` for
-playback intent, item/search generation and drag-settlement behavior.
+playback intent, item/search generation, and vector-Earth coordinate selection.
 
 ### Native HealthKit zones and legacy workout frames
 

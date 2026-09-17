@@ -6,7 +6,8 @@ namespace ride_automation {
 
 // All detector constants live in this profile so traces remain attributable to
 // the policy that produced them. This profile may control only internal builds;
-// production remains capability-off until the physical trace gates pass.
+// production rollout is enabled only for the bounded control path; detailed
+// trace capture remains a separate developer-only capability.
 struct RideDetectionProfile {
   uint16_t version = 4;
 
@@ -31,14 +32,20 @@ struct RideDetectionProfile {
   float maximumWatchGpsHorizontalUncertaintyMeters = 12.5F;
 
   uint8_t sensorStartPositiveSeconds = 8;
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
   uint8_t sensorAutomaticPositiveSeconds = 10;
+#endif
   uint8_t sensorStartWindowSeconds = 10;
   uint8_t gpsImuAskPositiveSeconds = 8;
   uint8_t gpsImuAskWindowSeconds = 12;
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
   uint8_t gpsImuAutomaticPositiveSeconds = 20;
   uint8_t gpsImuAutomaticWindowSeconds = 20;
+#endif
   float gpsImuAskDisplacementMeters = 30.0F;
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
   float gpsImuAutomaticDisplacementMeters = 60.0F;
+#endif
 
   uint32_t sensorPauseMs = 5'000;
   uint32_t gpsImuPauseMs = 10'000;

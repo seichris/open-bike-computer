@@ -1040,12 +1040,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published var centralStateDescription: String = "unknown"
     @Published var trustedPeripheralDescription: String = "none"
     @Published private(set) var knownDevices: [KnownBikeComputerDevice] = []
+    @Published private(set) var hasEverConnectedBikeComputer = false
     @Published private(set) var discoveredDevices: [DiscoveredBikeComputerDevice] = []
     @Published private(set) var isDiscoveringDevices = false
     @Published private(set) var currentScanPurpose: BLEScanPurpose = .none
     @Published private(set) var nearbyBicinoCandidate: DiscoveredBikeComputerDevice?
     @Published private(set) var isApplicationActive = false
     @Published private(set) var isOpportunisticDiscoverySuppressed = false
+    private var isOpportunisticDiscoveryEnabled = true
     @Published private(set) var observedIdentityMismatchDeviceIDs: Set<String> = []
     @Published private(set) var activeDeviceID: String?
     @Published private(set) var connectedDeviceID: String?
@@ -1986,6 +1988,8 @@ class BLEManager: NSObject, ObservableObject {
 
     private func refreshKnownDevices() {
         knownDevices = deviceRegistry.devices
+        hasEverConnectedBikeComputer =
+            deviceRegistry.hasEverConnectedBikeComputer
         observedIdentityMismatchDeviceIDs.formIntersection(
             Set(knownDevices.map(\.deviceID))
         )
@@ -2302,6 +2306,19 @@ class BLEManager: NSObject, ObservableObject {
         )
     }
 
+    func setOpportunisticDiscoveryEnabled(_ isEnabled: Bool) {
+        guard isOpportunisticDiscoveryEnabled != isEnabled else { return }
+        isOpportunisticDiscoveryEnabled = isEnabled
+        if !isEnabled {
+            clearUnknownDiscoveryState()
+        }
+        reconcileScanning(
+            reason: isEnabled
+                ? "opportunistic discovery enabled"
+                : "opportunistic discovery disabled"
+        )
+    }
+
     /// Temporarily yields unknown-device scanning to another foreground BLE
     /// enrollment flow without discarding an explicit Bike Computer request.
     /// Trusted reconnect is unaffected because it does not discover new devices.
@@ -2392,6 +2409,7 @@ class BLEManager: NSObject, ObservableObject {
                 selectedPeripheralIdentifier:
                     pendingScannedConnectionIdentifier,
                 isUnknownDiscoverySuppressed:
+                    !isOpportunisticDiscoveryEnabled ||
                     isOpportunisticDiscoverySuppressed ||
                     isUnknownDeviceDiscoverySuspended,
                 isExclusiveOperationActive:

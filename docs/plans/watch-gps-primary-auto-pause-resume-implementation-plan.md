@@ -20,8 +20,9 @@ profile-3 coasting and route-continuity safety fixes:
 
 Older trace schemas remain replayable for compatibility but are not the current
 acceptance contract. The new transport uses CAP2 bit `25`, client version `23`,
-workout schema `1.6`, and remains internal-control-only until the physical gates
-pass.
+and workout schema `1.6`. An explicit production rollout now enables the
+bounded control path before the physical gates pass; detailed traces remain
+development-only and the physical gates remain outstanding release evidence.
 
 ## Outcome
 
@@ -850,7 +851,8 @@ The feature is complete only when all of these pass:
     SD, map, power, and recovery gates.
 
 CI and host replay are necessary but not sufficient. Production capability
-advertisement remains off until the physical gates pass.
+advertisement is now explicitly enabled, but that rollout does not satisfy the
+physical qualification gates above.
 
 ## Non-goals
 

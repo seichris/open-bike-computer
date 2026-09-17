@@ -717,6 +717,7 @@ struct NavigationProtocolTests {
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
         testRideActivityRuntimeIntegration()
+        testPhoneWorkoutLocationContinuation()
         testCoordinatorRejectsStaleRerouteLocations()
         testCoordinatorDetectsDeviationFromCurrentStep()
         testCoordinatorEnforcesRerouteCooldown()
@@ -4202,6 +4203,32 @@ struct NavigationProtocolTests {
             coordinator.isNavigating,
             "ending the workout must not stop navigation"
         )
+    }
+
+    @MainActor
+    static func testPhoneWorkoutLocationContinuation() {
+        var foreground = true
+        let client = TestLocationManagerClient(authorizationLevel: .whenInUse)
+        let manager = CurrentLocationManager(locationManager: client,
+            applicationIsActive: { foreground })
+        manager.setWorkoutActive(true, phoneOwned: true)
+        assertEqual(client.startUpdatingLocationCallCount, 1,
+                    "Phone ride starts When-In-Use GPS in foreground")
+        assert(client.backgroundTrackingEnabledHistory.last == true,
+               "Phone ride enables visible background location delivery")
+        foreground = false
+        manager.applicationStateDidChange()
+        assertEqual(client.stopUpdatingLocationCallCount, 0,
+                    "Locking phone retains the existing workout GPS stream")
+        manager.setWorkoutActive(false)
+        assertEqual(client.stopUpdatingLocationCallCount, 1,
+                    "Finished phone ride releases its GPS demand")
+        let coldClient = TestLocationManagerClient(authorizationLevel: .whenInUse)
+        let coldManager = CurrentLocationManager(locationManager: coldClient,
+            applicationIsActive: { false })
+        coldManager.setWorkoutActive(true, phoneOwned: true)
+        assertEqual(coldClient.startUpdatingLocationCallCount, 0,
+                    "Cold background recovery does not pretend When-In-Use is Always")
     }
 
     @MainActor
@@ -8475,6 +8502,8 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: false,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: true,
                 confirmedDeviceMapMissing: false
             ),
             .step(.welcome),
@@ -8483,6 +8512,38 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: true,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: true,
+                confirmedDeviceMapMissing: false
+            ),
+            .step(.location),
+            "first launch explains location before requesting native access"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.presentation(
+                hasCompletedFirstRun: true,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: true,
+                confirmedDeviceMapMissing: true
+            ),
+            .step(.location),
+            "first-run location consent precedes device map setup"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.presentation(
+                hasCompletedFirstRun: true,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: false,
+                confirmedDeviceMapMissing: false
+            ),
+            .hidden,
+            "existing location access skips the first-run permission step"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.presentation(
+                hasCompletedFirstRun: true,
+                hasCompletedLocationStep: true,
+                needsLocationAuthorization: false,
                 confirmedDeviceMapMissing: true
             ),
             .step(.download),
@@ -8491,10 +8552,57 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: true,
+                hasCompletedLocationStep: true,
+                needsLocationAuthorization: false,
                 confirmedDeviceMapMissing: false
             ),
             .hidden,
             "completed onboarding stays hidden while maps are available"
+        )
+
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.welcome),
+                isStatePrepared: true,
+                isDismissed: false,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: true
+            ),
+            .welcome,
+            "first-run welcome is independent from offline map startup state"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.location),
+                isStatePrepared: true,
+                isDismissed: false,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: true
+            ),
+            .location,
+            "first-run location consent is independent from map operations"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.download),
+                isStatePrepared: true,
+                isDismissed: false,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: true
+            ),
+            nil,
+            "map download onboarding still waits for map operations"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.welcome),
+                isStatePrepared: true,
+                isDismissed: true,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: false
+            ),
+            nil,
+            "dismissed onboarding remains hidden"
         )
 
         assert(
@@ -9357,6 +9465,18 @@ struct NavigationProtocolTests {
             nil,
             "completed activation hides the in-progress presentation"
         )
+        assert(
+            MapActivationProgressPresentation.shouldClear(
+                forTransferOutcome: "installed"
+            ) &&
+                MapActivationProgressPresentation.shouldClear(
+                    forTransferOutcome: "failed"
+                ) &&
+                !MapActivationProgressPresentation.shouldClear(
+                    forTransferOutcome: "unconfirmed"
+                ),
+            "terminal transfer outcomes clear restored activation progress"
+        )
     }
 
     static func testMapUploadProgressReconciliation() {
@@ -9585,16 +9705,15 @@ struct NavigationProtocolTests {
             "all creation ingresses preserve the paused job recovery ID"
         )
 
-        manager.forgetPendingMapJob()
-        manager.beginMapAreaSelection()
+        manager.discardPendingMapAndBeginSelection()
         assertEqual(
             OfflineMapJobPersistence.activeJobId(defaults: defaults),
             nil,
-            "forgetting an unrecoverable job clears its durable lock"
+            "discarding an unrecoverable job clears its durable lock"
         )
         assert(
             manager.isMapAreaSelectionActive,
-            "forgetting an unrecoverable job restores new-map creation"
+            "discarding a pending job atomically starts new-map selection"
         )
         assert(
             OfflineMapRecoveryHistory.handledJobIds(defaults: defaults).contains("job-existing"),
@@ -10464,6 +10583,122 @@ struct NavigationProtocolTests {
             "same-map replacement preserves explicit user-name provenance"
         )
         downloadRetryManager.deleteCachedPack(at: downloadRetryPack)
+
+        let stalledSuite = "offline-map-stalled-retry-\(UUID().uuidString)"
+        let stalledDefaults = UserDefaults(suiteName: stalledSuite)!
+        defer { stalledDefaults.removePersistentDomain(forName: stalledSuite) }
+        stalledDefaults.set(
+            "https://stalled-retry.example",
+            forKey: "offlineMap.serverURL"
+        )
+        OfflineMapJobPersistence.save(
+            jobId: "job-stalled-retry",
+            serverURLString: "https://stalled-retry.example",
+            defaults: stalledDefaults
+        )
+        let stalledCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "offline-map-stalled-retry-cache-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: stalledCache) }
+        var stalledDownloadURLCount = 0
+        var stalledPackAttemptCount = 0
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-stalled-retry" {
+                return (
+                    200,
+                    jobData(
+                        jobId: "job-stalled-retry",
+                        mapId: "map-stalled-retry",
+                        sourceRegionName: "Shanghai"
+                    )
+                )
+            }
+            if request.url?.path == "/v1/map-packs/map-stalled-retry/download-url" {
+                stalledDownloadURLCount += 1
+                return (
+                    200,
+                    try! JSONSerialization.data(withJSONObject: [
+                        "mapId": "map-stalled-retry",
+                        "url": "/downloads/map-stalled-retry-\(stalledDownloadURLCount).zip",
+                        "expiresAt": 2_000_000_000,
+                        "expiresInSeconds": 900,
+                    ])
+                )
+            }
+            return (404, Data())
+        }
+        let stalledManager = OfflineMapManager(
+            defaults: stalledDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: stalledCache,
+            packDownload: { _, _, onProgress, onByteProgress in
+                stalledPackAttemptCount += 1
+                if stalledPackAttemptCount == 1 {
+                    onProgress(0.49)
+                    onByteProgress(
+                        OfflineMapByteProgress(
+                            completedBytes: 49,
+                            totalBytes: 100
+                        )
+                    )
+                    try await Task.sleep(nanoseconds: 60_000_000_000)
+                    throw URLError(.timedOut)
+                }
+                onProgress(1)
+                onByteProgress(
+                    OfflineMapByteProgress(
+                        completedBytes: 100,
+                        totalBytes: 100
+                    )
+                )
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-stalled-retry").write(to: url)
+                return url
+            }
+        )
+        stalledManager.resumePendingMapJobIfNeeded()
+        let stalledDeadline = Date().addingTimeInterval(3)
+        while stalledManager.downloadByteProgress?.percentage != 49,
+              Date() < stalledDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assertEqual(
+            stalledManager.downloadByteProgress?.percentage,
+            49,
+            "the fixture reaches the same visible stalled state as production"
+        )
+        stalledManager.retryPendingMapJob()
+        let stalledRetryCompleted = await waitForMapTaskCompletion(
+            stalledManager,
+            timeout: 5
+        )
+        assert(stalledRetryCompleted, "retry cancels the stalled attempt and finishes")
+        assertEqual(
+            stalledDownloadURLCount,
+            2,
+            "retry obtains a fresh signed URL for the same pending job"
+        )
+        assertEqual(
+            stalledPackAttemptCount,
+            2,
+            "retry starts exactly one replacement transfer"
+        )
+        assert(
+            !stalledManager.hasPendingMapJob,
+            "successful replacement clears the durable pending lock"
+        )
+        assertEqual(
+            stalledManager.downloadProgress,
+            1,
+            "replacement progress reaches completion instead of retaining 49 percent"
+        )
+        if let url = stalledManager.downloadedPackURL {
+            stalledManager.deleteCachedPack(at: url)
+        }
 
         let retrySuite = "offline-map-discovery-retry-\(UUID().uuidString)"
         let retryDefaults = UserDefaults(suiteName: retrySuite)!
@@ -11561,12 +11796,30 @@ struct NavigationProtocolTests {
             source.contains("Spacer()\n                    .contentShape(Rectangle())\n                    .onTapGesture {\n                        focusedPackFilename = nil\n                    }"),
             "tapping outside the saved-map name clears focus without covering form controls"
         )
+        let normalizedSource = source.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: "\n")
         assert(
-            source.split(separator: "\n")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .joined(separator: "\n")
-                .contains("manager.beginMapAreaSelection()\nif manager.isMapAreaSelectionActive {\ndismiss()\n}"),
-            "Download a new Map starts selection and explicitly dismisses Settings"
+            normalizedSource.contains(
+                "manager.beginMapAreaSelection()\n}\nif manager.isMapAreaSelectionActive {\ndismiss()"
+            ) &&
+                source.contains("manager.discardPendingMapAndBeginSelection()") &&
+                source.contains("requestNewMapSelection()"),
+            "Download a new Map resolves a pending map before selection and dismisses Settings"
+        )
+        assert(
+            savedMapsSectionSource.contains("let hasPendingMapRow") &&
+                savedMapsSectionSource.contains(
+                    "!manager.hasDownloadedPendingDeviceInstall"
+                ) &&
+                savedMapsSectionSource.contains("PendingSavedMapRow(") &&
+                source.contains("private struct PendingSavedMapRow") &&
+                source.contains("Color(uiColor: .systemGray6)") &&
+                source.contains("title: \"Generation Progress\"") &&
+                source.contains("preparationEstimatePresentation") &&
+                source.contains("Label(\"Retry Download\"") &&
+                source.contains("Button(\"Choose Another Map\""),
+            "the pending download is the final light-gray multi-row item in Saved Maps"
         )
         assert(
             source.contains(".onChange(of: focusedPackFilename) { newValue in\n            scheduleRenameCommitIfNeeded(focusedFilename: newValue)\n        }"),
@@ -11656,8 +11909,15 @@ struct NavigationProtocolTests {
             source.contains("SavedMapDeviceTransferPolicy.canStart(") &&
                 source.contains("isDeviceTransferBusy: manager.isDeviceTransferBusy") &&
                 source.contains("manager.hasActiveBackgroundUpload") &&
-                source.contains("if manager.isMapJobProcessing, manager.hasPendingMapJob"),
+                source.contains("manager.retryPendingMapJob(bleManager: bleManager)"),
             "map controls separate server work from conflicting device transfers"
+        )
+        assert(
+            source.contains("let uploadProgress = packURL.flatMap") &&
+                source.contains("title: \"Uploading to Bike Computer\"") &&
+                source.contains("title: manager.lastTransferOutcome == \"uploading\"") &&
+                source.contains("\"Installing on Bike Computer\""),
+            "the matching Saved Maps row shows upload and activation progress beneath its name"
         )
         assert(
             source.contains("SavedMapThumbnail(") &&
@@ -12125,6 +12385,22 @@ struct NavigationProtocolTests {
                 ),
             "Map Library is available only from Developer Settings"
         )
+        let developerDownloadStatus = developerSource.range(
+            of: "DownloadingMapsSettingsSection(manager: offlineMapManager)"
+        )
+        let developerMapServer = developerSource.range(
+            of: "Section(header: Text(\"Map Server\"))"
+        )
+        assert(
+            !rootBodySource.contains(
+                "DownloadingMapsSettingsSection(manager: offlineMapManager)"
+            ) &&
+                developerSource.contains("offlineMapManager.hasActiveBackgroundUpload") &&
+                developerDownloadStatus != nil &&
+                developerMapServer != nil &&
+                developerDownloadStatus!.lowerBound < developerMapServer!.lowerBound,
+            "the full active map status appears only at the top of Developer Settings"
+        )
         assert(
             developerSource.contains("Button(action: useProductionMapServer)") &&
                 developerSource.contains(
@@ -12358,12 +12634,20 @@ struct NavigationProtocolTests {
         let bleManager = BLEManager()
         bleManager.mapTransferActiveMapId = "map-1"
         bleManager.mapTransferActiveSessionId = "map-1-manifest"
-        bleManager.mapTransferActivationStatus = "idle"
+        bleManager.mapTransferActivationStatus = "finalizing"
+        bleManager.mapTransferActivationStep = 2
+        bleManager.mapTransferActivationStepCount = 3
+        bleManager.mapTransferActivationProgress = 90
         manager.reconcileLastTransfer(bleManager: bleManager)
 
         assertEqual(manager.lastTransferOutcome, "installed", "durable exact-session status reconciles after device restart")
         assert(!manager.hasPendingDeviceActivation,
                "installed reconciliation clears pending activation status")
+        assertEqual(
+            manager.activationProgress,
+            nil,
+            "installed reconciliation clears restored in-progress presentation"
+        )
     }
 
     @MainActor
@@ -19076,7 +19360,7 @@ struct NavigationProtocolTests {
 
         assertEqual(
             BikeComputersMenuPolicy.title(knownDeviceCount: 0),
-            "Connect Bike Computer",
+            "Connect your Bicino",
             "an empty registry presents the connect menu"
         )
         assertEqual(
@@ -19168,14 +19452,14 @@ struct NavigationProtocolTests {
                 knownDeviceCount: 0,
                 isExplicitBikeComputerSetup: false
             ),
-            "Add a Bicino Bike Computer",
+            "Connect your Bicino",
             "empty settings presents the bike-computer setup title"
         )
         assertEqual(
             BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
                 knownDeviceCount: 0
             ),
-            "Connect a Bicino Bike Computer!",
+            "Connect your Bicino!",
             "empty settings presents a clear add-device action"
         )
         assertEqual(
@@ -19208,6 +19492,49 @@ struct NavigationProtocolTests {
                 knownDeviceCount: 1
             ),
             "a registered bike computer keeps device screen settings"
+        )
+        assert(
+            !BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: false,
+                sensorProfileCount: 0
+            ),
+            "first-time Bicino setup stays focused on connecting the device"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: true,
+                sensorProfileCount: 0
+            ),
+            "sensor setup remains available after a Bicino was connected"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: false,
+                sensorProfileCount: 1
+            ),
+            "an existing sensor profile preserves sensor management during migration"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: false,
+                sensorProfileCount: 0,
+                isExplicitSensorSetup: true
+            ),
+            "an explicit sensor prompt remains actionable before Bicino setup"
+        )
+        assert(
+            BikeComputerOnboardingPreferencePolicy.prefersIPhoneOnly(
+                storedPreference: true,
+                knownDeviceCount: 0
+            ),
+            "skipping setup keeps automatic discovery disabled without a Bicino"
+        )
+        assert(
+            !BikeComputerOnboardingPreferencePolicy.prefersIPhoneOnly(
+                storedPreference: true,
+                knownDeviceCount: 1
+            ),
+            "successfully adding a Bicino clears the earlier skip preference"
         )
         assert(
             !BikeComputerSettingsPresentationPolicy.shouldStartDiscovery(
@@ -19639,6 +19966,8 @@ struct NavigationProtocolTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let credentials = InMemoryDeviceCredentialStore()
         let registry = BikeComputerDeviceRegistry(defaults: defaults, credentialStore: credentials)
+        assert(!registry.hasEverConnectedBikeComputer,
+               "a fresh registry has not completed Bicino setup")
         let generatedOwnerID = registry.installationOwnerID()
         assertEqual(generatedOwnerID?.count, 16, "registry creates a 128-bit installation owner ID")
         assertEqual(registry.installationOwnerID(), generatedOwnerID, "installation owner ID is stable")
@@ -19668,6 +19997,8 @@ struct NavigationProtocolTests {
         registry.upsert(legacyAlias, makeActive: true)
         registry.upsert(first)
         registry.upsert(second)
+        assert(registry.hasEverConnectedBikeComputer,
+               "registering a Bicino records the durable setup milestone")
         assertEqual(registry.devices.count, 2, "registry supports multiple Bike Computers")
         assert(!registry.devices.contains(where: { $0.isLegacy && $0.peripheralIdentifier == peripheralID }),
                "a stable v2 identity replaces its legacy peripheral alias")
@@ -19708,6 +20039,37 @@ struct NavigationProtocolTests {
         assertEqual(registry.activeDeviceID, second.deviceID, "removing the current device selects the remaining device")
         assertEqual(registry.ownerKey(deviceID: first.deviceID), nil, "deregistering deletes the owner key")
         assertEqual(registry.ownerKey(deviceID: second.deviceID), secondKey, "deregistering one device preserves another device credential")
+        assert(registry.remove(deviceID: second.deviceID),
+               "the final registered device can be removed")
+        assert(registry.devices.isEmpty,
+               "removing the final device empties the current registry")
+        assert(registry.hasEverConnectedBikeComputer,
+               "removing every Bicino preserves the setup milestone")
+        let reloadedRegistry = BikeComputerDeviceRegistry(
+            defaults: defaults,
+            credentialStore: credentials
+        )
+        assert(reloadedRegistry.hasEverConnectedBikeComputer,
+               "the Bicino setup milestone survives registry reload")
+
+        let migrationSuiteName =
+            "DeviceOwnershipMilestoneMigrationTests.\(UUID().uuidString)"
+        let migrationDefaults = UserDefaults(suiteName: migrationSuiteName)!
+        defer {
+            migrationDefaults.removePersistentDomain(
+                forName: migrationSuiteName
+            )
+        }
+        migrationDefaults.set(
+            try! JSONEncoder().encode([first]),
+            forKey: "ble.knownDevices.v2"
+        )
+        let migratedRegistry = BikeComputerDeviceRegistry(
+            defaults: migrationDefaults,
+            credentialStore: InMemoryDeviceCredentialStore()
+        )
+        assert(migratedRegistry.hasEverConnectedBikeComputer,
+               "an existing registered Bicino migrates the setup milestone")
 
         let failureSuiteName = "DeviceOwnershipRemovalFailureTests.\(UUID().uuidString)"
         let failureDefaults = UserDefaults(suiteName: failureSuiteName)!
@@ -20260,6 +20622,23 @@ struct NavigationProtocolTests {
                     "foreground entry starts exactly one physical scan")
         assert(driver.starts[0].allowsDuplicates,
                "unknown-device discovery requests duplicate observations")
+
+        let phoneOnlyManager = BLEManager()
+        let phoneOnlyDriver = BLEScanDriverForTesting()
+        phoneOnlyManager.installScanDriverForTesting(phoneOnlyDriver)
+        phoneOnlyManager.setOpportunisticDiscoveryEnabled(false)
+        phoneOnlyManager.setApplicationActive(true)
+        assertEqual(
+            phoneOnlyManager.currentScanPurpose,
+            .none,
+            "the iPhone-only onboarding choice suppresses automatic device discovery"
+        )
+        phoneOnlyManager.startDeviceDiscovery()
+        assertEqual(
+            phoneOnlyManager.currentScanPurpose,
+            .explicitDiscovery,
+            "the iPhone-only choice still permits user-initiated device setup"
+        )
 
         manager.setUnknownDeviceDiscoverySuspended(true)
         assertEqual(
