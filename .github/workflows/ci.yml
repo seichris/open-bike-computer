@@ -423,8 +423,7 @@ jobs:
           python -m pip install -r tools/preconnection-assets-requirements.txt
           python tools/generate_preconnection_assets.py --check
           python -m unittest tools.tests.test_preconnection_assets
-          python tools/generate_world_radio_map.py --check
-          python -m unittest tools.tests.test_world_radio_map_assets tools.tests.test_world_radio_font
+          python -m unittest tools.tests.test_world_radio_assets
       - name: GUI layout host tests
         run: |
           PYTHONPATH=tools python -m unittest \
@@ -677,9 +676,7 @@ jobs:
           /tmp/test_device_screen_protocol
       - name: World Radio protocol and screen registry host tests
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror tools/tests/test_world_radio_flags.cpp lib/gui/src/worldRadioFlags.cpp -o /tmp/test_world_radio_flags
-          /tmp/test_world_radio_flags
-          for test in test_world_radio_protocol test_world_radio_presentation test_world_radio_viewport test_world_radio_raster test_main_screen_registry; do
+          for test in test_world_radio_protocol test_world_radio_presentation test_world_radio_globe test_main_screen_registry; do
             g++ -std=c++17 -Wall -Wextra -Werror \
               "tools/tests/${test}.cpp" \
               -o "/tmp/${test}"
@@ -689,12 +686,6 @@ jobs:
             tools/tests/test_main_screen_registry.cpp \
             -o /tmp/test_main_screen_registry_development
           /tmp/test_main_screen_registry_development
-          for mode in 0 1; do
-            g++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=$mode \
-              tools/tests/test_world_radio_map.cpp lib/world_radio/world_radio_map.cpp \
-              -o "/tmp/test_world_radio_map_$mode"
-            "/tmp/test_world_radio_map_$mode"
-          done
       - name: Device ownership crypto host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \

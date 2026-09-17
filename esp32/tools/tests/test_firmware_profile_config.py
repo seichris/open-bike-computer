@@ -170,7 +170,7 @@ for environment, target in expected_targets.items():
     assert "-DFIRMWARE_DIAGNOSTICS=1" not in flags
     assert "-DARDUINO_USB_CDC_ON_BOOT=1" not in flags
     assert "-DRIDE_AUTOMATION_SHADOW=1" in flags
-    assert "-DMAP_STABLE_CAMERA=1" not in flags
+    assert "-DMAP_STABLE_CAMERA=1" in flags
     assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" in flags
     assert "-DDETAILED_RIDE_DIAGNOSTICS=0" in flags
     assert "-DRIDE_AUTOMATION_TRACE=1" not in flags
