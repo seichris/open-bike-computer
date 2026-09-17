@@ -106,8 +106,10 @@ struct OfflineMapsView: View {
                         )
                     }
 
-                    if manager.downloadedPackURL == nil && !manager.isBusy {
-                        Button(action: manager.downloadPack) {
+                    if manager.downloadedPackURL == nil && manager.hasPendingMapJob {
+                        Button {
+                            manager.retryPendingMapJob()
+                        } label: {
                             Label("Retry Download", systemImage: "arrow.clockwise")
                         }
                     }

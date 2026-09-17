@@ -2374,73 +2374,56 @@ final class OfflineMapManager: ObservableObject {
         guard mapJobTask == nil, !isBusy else {
             return
         }
-        let persistedJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults)
-        let persistedInstallIntent = OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults)
-        let persistedServerURL = OfflineMapJobPersistence.serverURLString(defaults: defaults)
-        if persistedJobId == nil {
+        if OfflineMapJobPersistence.activeJobId(defaults: defaults) == nil {
             isServerRecoveryCheckPending = true
         }
-
         startMapJobTask { manager in
-            if let persistedJobId,
-               try await manager.finishDownloadedRecoveredJobIfAvailable(
-                    jobId: persistedJobId,
-                    installOnDevice: persistedInstallIntent,
-                    bleManager: bleManager
-               ) {
-                return
-            }
-            let recoveryServerURL = manager.recoveryServerURL(
-                persistedServerURL: persistedServerURL
-            )
-            var client = try manager.makeClient(serverURLString: recoveryServerURL)
-            client = try await manager.ensureRegisteredInstallationWithRetry(
-                client: client
-            )
-            var jobId = persistedJobId
-            var shouldInstallOnDevice = persistedInstallIntent
+            try await manager.recoverPendingMapJob(bleManager: bleManager)
+        }
+    }
 
-            if jobId == nil {
-                manager.statusMessage = "checking for server maps"
-                let jobs = try await manager.listJobsWithRetry(client: client)
-                if manager.consumeForgottenDiscovery(
-                    jobs: jobs,
-                    serverURLString: recoveryServerURL,
-                    clientInstallationId: client.clientInstallationId
-                ) {
-                    manager.isServerRecoveryCheckPending = false
-                    manager.statusMessage = ""
-                    return
-                }
-                guard let recovered = manager.selectOwnedRecoverableJob(
-                    from: jobs,
-                    clientInstallationId: client.clientInstallationId
-                ) else {
-                    manager.isServerRecoveryCheckPending = false
-                    manager.statusMessage = ""
-                    return
-                }
-                manager.adoptRecoveredJob(recovered)
-                jobId = recovered.jobId
-                shouldInstallOnDevice = recovered.installOnDevice == true
-                manager.persistCurrentJob(installOnDevice: shouldInstallOnDevice)
-                manager.isServerRecoveryCheckPending = false
-            }
+    func retryPendingMapJob(bleManager: BLEManager? = nil) {
+        guard hasPendingMapJob else { return }
+        guard mapJobTask != nil || !isBusy else { return }
+        syncDownloadedMapInventoryIfNeeded()
+        syncCatalogLibraryIfNeeded()
 
-            guard let jobId else { return }
-            try await manager.finishRecoveredJob(
-                jobId: jobId,
-                installOnDevice: shouldInstallOnDevice,
-                client: client,
-                bleManager: bleManager
-            )
+        let previousTask = mapJobTask
+        previousTask?.cancel()
+        let taskID = UUID()
+        mapJobTaskID = taskID
+        isMapJobProcessing = true
+        mapJobTask = Task { [weak self] in
+            if let previousTask {
+                await previousTask.value
+            }
+            guard let self, mapJobTaskID == taskID else { return }
+
+            downloadURL = nil
+            downloadProgress = 0
+            downloadByteProgress = nil
+            errorMessage = nil
+            statusMessage = currentJob?.mapId == nil
+                ? "resuming map preparation"
+                : "retrying map download"
+
+            await runBusy {
+                try await self.recoverPendingMapJob(bleManager: bleManager)
+            }
+            if mapJobTaskID == taskID {
+                mapJobTask = nil
+                mapJobTaskID = nil
+                isMapJobProcessing = false
+            }
         }
     }
 
     func pausePendingMapJob() {
         guard mapJobTask != nil else { return }
         mapJobTask?.cancel()
-        statusMessage = "map preparation paused"
+        statusMessage = currentJob?.mapId == nil
+            ? "map preparation paused"
+            : "map download paused"
     }
 
     func forgetPendingMapJob() {
@@ -2464,6 +2447,11 @@ final class OfflineMapManager: ObservableObject {
         transferProgress = 0
         statusMessage = "pending map forgotten"
         errorMessage = nil
+    }
+
+    func discardPendingMapAndBeginSelection() {
+        forgetPendingMapJob()
+        beginMapAreaSelection()
     }
 
     func refreshJob() {
@@ -3949,6 +3937,66 @@ final class OfflineMapManager: ObservableObject {
                 isMapJobProcessing = false
             }
         }
+    }
+
+    private func recoverPendingMapJob(bleManager: BLEManager?) async throws {
+        let persistedJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults)
+        let persistedInstallIntent = OfflineMapJobPersistence.shouldInstallOnDevice(
+            defaults: defaults
+        )
+        let persistedServerURL = OfflineMapJobPersistence.serverURLString(
+            defaults: defaults
+        )
+        if let persistedJobId,
+           try await finishDownloadedRecoveredJobIfAvailable(
+                jobId: persistedJobId,
+                installOnDevice: persistedInstallIntent,
+                bleManager: bleManager
+           ) {
+            return
+        }
+        let recoveryServerURL = recoveryServerURL(
+            persistedServerURL: persistedServerURL
+        )
+        var client = try makeClient(serverURLString: recoveryServerURL)
+        client = try await ensureRegisteredInstallationWithRetry(client: client)
+        var jobId = persistedJobId
+        var shouldInstallOnDevice = persistedInstallIntent
+
+        if jobId == nil {
+            statusMessage = "checking for server maps"
+            let jobs = try await listJobsWithRetry(client: client)
+            if consumeForgottenDiscovery(
+                jobs: jobs,
+                serverURLString: recoveryServerURL,
+                clientInstallationId: client.clientInstallationId
+            ) {
+                isServerRecoveryCheckPending = false
+                statusMessage = ""
+                return
+            }
+            guard let recovered = selectOwnedRecoverableJob(
+                from: jobs,
+                clientInstallationId: client.clientInstallationId
+            ) else {
+                isServerRecoveryCheckPending = false
+                statusMessage = ""
+                return
+            }
+            adoptRecoveredJob(recovered)
+            jobId = recovered.jobId
+            shouldInstallOnDevice = recovered.installOnDevice == true
+            persistCurrentJob(installOnDevice: shouldInstallOnDevice)
+            isServerRecoveryCheckPending = false
+        }
+
+        guard let jobId else { return }
+        try await finishRecoveredJob(
+            jobId: jobId,
+            installOnDevice: shouldInstallOnDevice,
+            client: client,
+            bleManager: bleManager
+        )
     }
 
     private func createJob(
@@ -5828,6 +5876,11 @@ final class OfflineMapManager: ObservableObject {
     private func updateLastTransferOutcome(_ outcome: String) {
         lastTransferOutcome = outcome
         defaults.set(outcome, forKey: OfflineMapDefaults.lastTransferOutcomeKey)
+        if MapActivationProgressPresentation.shouldClear(
+            forTransferOutcome: outcome
+        ) {
+            activationProgress = nil
+        }
         if !lastTransferMapId.isEmpty {
             let protocolVersion = defaults.object(
                 forKey: OfflineMapDefaults.lastTransferProtocolKey
