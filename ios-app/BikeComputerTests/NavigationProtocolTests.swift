@@ -19314,6 +19314,28 @@ struct NavigationProtocolTests {
             "an existing sensor profile preserves sensor management during migration"
         )
         assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: false,
+                sensorProfileCount: 0,
+                isExplicitSensorSetup: true
+            ),
+            "an explicit sensor prompt remains actionable before Bicino setup"
+        )
+        assert(
+            BikeComputerOnboardingPreferencePolicy.prefersIPhoneOnly(
+                storedPreference: true,
+                knownDeviceCount: 0
+            ),
+            "skipping setup keeps automatic discovery disabled without a Bicino"
+        )
+        assert(
+            !BikeComputerOnboardingPreferencePolicy.prefersIPhoneOnly(
+                storedPreference: true,
+                knownDeviceCount: 1
+            ),
+            "successfully adding a Bicino clears the earlier skip preference"
+        )
+        assert(
             !BikeComputerSettingsPresentationPolicy.shouldStartDiscovery(
                 knownDeviceCount: 0,
                 isExplicitBikeComputerSetup: false,

@@ -571,9 +571,11 @@ enum BikeComputerSettingsPresentationPolicy {
 
     static func shouldShowSensorManagement(
         hasEverConnectedBikeComputer: Bool,
-        sensorProfileCount: Int
+        sensorProfileCount: Int,
+        isExplicitSensorSetup: Bool = false
     ) -> Bool {
-        hasEverConnectedBikeComputer || sensorProfileCount > 0
+        isExplicitSensorSetup || hasEverConnectedBikeComputer ||
+            sensorProfileCount > 0
     }
 
     static func title(
@@ -630,6 +632,15 @@ enum BikeComputerSettingsPresentationPolicy {
     ) -> Bool {
         baseEligibility && scanPurpose != .explicitDiscovery &&
             !isExplicitDiscoveryPending
+    }
+}
+
+nonisolated enum BikeComputerOnboardingPreferencePolicy {
+    static func prefersIPhoneOnly(
+        storedPreference: Bool,
+        knownDeviceCount: Int
+    ) -> Bool {
+        storedPreference && knownDeviceCount == 0
     }
 }
 

@@ -252,7 +252,8 @@ struct BikeComputersSettingsView: View {
         BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
             hasEverConnectedBikeComputer:
                 bleManager.hasEverConnectedBikeComputer,
-            sensorProfileCount: sensorStore.profiles.count
+            sensorProfileCount: sensorStore.profiles.count,
+            isExplicitSensorSetup: focusSensorsOnAppear
         )
     }
 

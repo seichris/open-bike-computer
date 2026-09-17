@@ -438,9 +438,7 @@ struct ContentView: View {
             if identity == nil { synchronizeRideMetricsSheet() }
         }
         .onAppear {
-            coordinator.bleManager.setOpportunisticDiscoveryEnabled(
-                !prefersIPhoneOnly
-            )
+            reconcileIPhoneOnlyPreference()
             onApplicationActiveChange(scenePhase == .active)
             migrateExistingInstallOnboardingIfNeeded()
             isOfflineMapOnboardingStatePrepared = true
@@ -565,6 +563,7 @@ struct ContentView: View {
             presentNearbyBicinoIfEligible()
         }
         .onChange(of: coordinator.bleManager.knownDevices.count) { _ in
+            reconcileIPhoneOnlyPreference()
             presentNearbyBicinoIfEligible()
         }
         .onChange(of: coordinator.locationAuthorizationStatus) { status in
@@ -1345,6 +1344,21 @@ struct ContentView: View {
         hasCompletedFirstRunWelcome = true
         prefersIPhoneOnly = true
         coordinator.bleManager.setOpportunisticDiscoveryEnabled(false)
+    }
+
+    private func reconcileIPhoneOnlyPreference() {
+        let reconciledPreference =
+            BikeComputerOnboardingPreferencePolicy.prefersIPhoneOnly(
+                storedPreference: prefersIPhoneOnly,
+                knownDeviceCount:
+                    coordinator.bleManager.knownDevices.count
+            )
+        if prefersIPhoneOnly != reconciledPreference {
+            prefersIPhoneOnly = reconciledPreference
+        }
+        coordinator.bleManager.setOpportunisticDiscoveryEnabled(
+            !reconciledPreference
+        )
     }
 
     private func completeFirstRunLocationStepAndRequestAccess() {
