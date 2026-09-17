@@ -119,7 +119,7 @@ struct OfflineMapOnboardingView: View {
                 .buttonStyle(.borderedProminent)
 
                 Button(action: onUseIPhone) {
-                    Text("Continue with iPhone")
+                    Text("Skip")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)

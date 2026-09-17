@@ -80,7 +80,7 @@ struct BikeComputersSettingsView: View {
                             bleManager.isConnecting
                                 ? "Cancel and Search Nearby"
                                 : bleManager.knownDevices.isEmpty
-                                ? "Search Nearby"
+                                ? "Find your Bicino"
                                 : "Connect a new Bike Computer",
                             systemImage: bleManager.isConnecting
                                 ? "xmark.circle"
@@ -195,18 +195,8 @@ struct BikeComputersSettingsView: View {
 
     @ViewBuilder
     private var bikeComputerSection: some View {
-        Section {
-            if bleManager.knownDevices.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("Add your Bicino One", systemImage: "bicycle")
-                    Text(
-                        "Your Bicino One will appear automatically when it’s "
-                            + "nearby, or you can search for it here."
-                    )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
+        if !bleManager.knownDevices.isEmpty {
+            Section {
                 ForEach(bleManager.knownDevices) { device in
                     NavigationLink {
                         BikeComputerDetailView(deviceID: device.deviceID)
@@ -214,9 +204,7 @@ struct BikeComputersSettingsView: View {
                         KnownBikeComputerRow(device: device)
                     }
                 }
-            }
-        } header: {
-            if !bleManager.knownDevices.isEmpty {
+            } header: {
                 Text(
                     bleManager.knownDevices.count == 1
                         ? "My Bike Computer"
@@ -237,7 +225,8 @@ struct BikeComputersSettingsView: View {
     private var sensorConnectionSection: some View {
         CyclingSensorConnectionSection(
             sensorStore: sensorStore,
-            detectionCoordinator: sensorDetectionCoordinator
+            detectionCoordinator: sensorDetectionCoordinator,
+            focusOnAppear: focusSensorsOnAppear
         )
     }
 

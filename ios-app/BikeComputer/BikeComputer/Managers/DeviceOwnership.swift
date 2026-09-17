@@ -463,7 +463,7 @@ enum BikeComputersMenuPolicy {
     static func title(knownDeviceCount: Int) -> String {
         switch knownDeviceCount {
         case 0:
-            return "Connect Bike Computer"
+            return "Connect your Bicino"
         case 1:
             return "My Bike Computer"
         default:
@@ -579,7 +579,7 @@ enum BikeComputerSettingsPresentationPolicy {
             )
         }
         if knownDeviceCount == 0 {
-            return "Add a Bicino Bike Computer"
+            return "Connect your Bicino"
         }
         return knownDeviceCount > 1
             ? "My Bike Computers"

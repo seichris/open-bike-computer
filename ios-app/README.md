@@ -396,7 +396,7 @@ workout so the Watch can collect cadence or power through HealthKit.
 
 When BikeComputer first receives one of these measurements, the active workout
 sheet offers **Connect sensor?**. Open **Settings > My Bike Computer**, or tap
-that prompt, then use **My Sensors > Connect a new Sensor**. The app listens for
+that prompt, then use **Set Up a Sensor**. The app listens for
 current workout data and lets you name a cadence sensor, power sensor, or
 combined cadence-and-power sensor.
 

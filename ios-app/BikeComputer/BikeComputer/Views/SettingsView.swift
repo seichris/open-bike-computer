@@ -355,7 +355,9 @@ struct SettingsView: View {
             BikeComputersSettingsView(
                 sensorStore: cyclingSensorStore,
                 sensorDetectionCoordinator:
-                    cyclingSensorDetectionCoordinator
+                    cyclingSensorDetectionCoordinator,
+                startsBikeComputerDiscoveryOnAppear:
+                    shouldPromoteBikeComputerSettings
             )
         } label: {
             Label(

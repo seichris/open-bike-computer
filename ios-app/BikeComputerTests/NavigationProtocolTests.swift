@@ -19159,7 +19159,7 @@ struct NavigationProtocolTests {
 
         assertEqual(
             BikeComputersMenuPolicy.title(knownDeviceCount: 0),
-            "Connect Bike Computer",
+            "Connect your Bicino",
             "an empty registry presents the connect menu"
         )
         assertEqual(
@@ -19251,7 +19251,7 @@ struct NavigationProtocolTests {
                 knownDeviceCount: 0,
                 isExplicitBikeComputerSetup: false
             ),
-            "Add a Bicino Bike Computer",
+            "Connect your Bicino",
             "empty settings presents the bike-computer setup title"
         )
         assertEqual(
