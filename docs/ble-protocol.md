@@ -1235,8 +1235,9 @@ released automatic-display setting. Version `18` requests bit `20`, version
 `19` requests bit `21`, version `20` requests bit `22`, and version `21`
 requests bit `23`. Version `22` requests bit `24`, independent Map + Navigation
 orientation (setting ID `37`). Firmware advertises bit `24` only with
-`MAP_STABLE_CAMERA=1`; production profiles keep it clear pending per-target
-physical qualification. This capability is independent of label orientation.
+`MAP_STABLE_CAMERA=1`; both Waveshare production profiles now set it, while
+physical qualification remains tracked separately for each panel. This
+capability is independent of label orientation.
 Version `23` requests bit `25`, Watch GPS motion evidence.
 Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
 Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
@@ -1246,7 +1247,7 @@ version `27`; older direct Watch clients remain valid at version `23`. Bit `23` 
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
 Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
-omits both the screen and capability pending physical and OTA-size qualification.
+omits both the screen and capability pending physical interaction qualification.
 Its owner-authenticated `WRQ1` requests and `WRS1` status use the existing
 navigation characteristic; stream discovery and playback run on the iPhone.
 See [World Radio](world-radio.md) and the bounded codecs in
@@ -2058,7 +2059,7 @@ come from `screen_types` in `protocol/ride-ble-contract-v1.json`; generated
 Swift/C++ adapters preserve legacy masks and configurable-screen payload IDs.
 The common request/status fixtures in `protocol/fixtures/world-radio-v1.txt`
 are consumed by firmware and phone host tests. See `docs/world-radio.md` for
-playback intent, item/search generation and drag-settlement behavior.
+playback intent, item/search generation, and vector-Earth coordinate selection.
 
 ### Native HealthKit zones and legacy workout frames
 

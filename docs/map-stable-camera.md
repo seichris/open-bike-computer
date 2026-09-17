@@ -4,20 +4,21 @@
 
 The implementation follows [the orientation plan](map-orientation-implementation-plan.md)
 on GitHub main `e10aa7fa341366dd3b8e3ed74c0e069d414b8f0d`.
-`MAP_STABLE_CAMERA=1` selects the new path in ordinary Waveshare 1.75-inch and
-2.06-inch development profiles (and their derived remote-debug profiles).
-The default is off; production profiles retain the legacy renderer and do not
-advertise the orientation capability. No map-format, backend, extrusion-quota,
-benchmark-ranking threshold, or production activation change is included.
+`MAP_STABLE_CAMERA=1` selects the new path in ordinary and production Waveshare
+1.75-inch and 2.06-inch profiles (including derived diagnostic profiles). The
+macro default remains off for unrelated targets. Production now advertises the
+orientation capability; no map-format, backend, extrusion-quota, or benchmark-
+ranking threshold changes with that rollout.
 
 | Target | Source path | Physical acceptance | Production activation |
 | --- | --- | --- | --- |
-| WAVESHARE_AMOLED_175 | Implemented, development enabled | Pending | Disabled |
-| WAVESHARE_AMOLED_206 | Implemented, development enabled | Pending | Disabled |
+| WAVESHARE_AMOLED_175 | Implemented | Pending | Enabled |
+| WAVESHARE_AMOLED_206 | Implemented | Pending | Enabled |
 
 Do not treat host tests, a firmware build, or green CI as physical acceptance.
-Activating production requires a separate tracked change after the gates below
-pass, or explicit recorded maintainer acceptance of the residual risk.
+Production activation records explicit maintainer acceptance of the residual
+risk; the gates below remain required before calling either panel physically
+qualified.
 
 ## Display contract
 
@@ -126,12 +127,13 @@ remain readable; malformed present headers fail closed.
 5. Measure moving-camera lag p95 <=250 ms and maximum <=500 ms, plus existing
    memory, UI/flush, SD, watchdog, transport and benchmark gates unchanged.
    Prepared-scene reuse avoids block preparation but does not eliminate raster
-   cost; these performance targets are not yet demonstrated. If missed, keep
-   production disabled and optimize the view pass, not the acceptance limits.
+   cost; these performance targets are not yet demonstrated. If missed, disable
+   the production flag again and optimize the view pass, not the acceptance
+   limits.
 6. Repeat normal physical navigation with real course noise/BLE jitter. Record
    daylight readability, tearing, battery/thermal behavior and both targets
    independently. Commit sanitized evidence and qualification decisions before
    proposing production activation.
 
-Rollback removes the development enable flag/capability without deleting either
+Rollback removes the production enable flag/capability without deleting either
 stored rotation preference. The app falls back to its capability-absent state.

@@ -35,8 +35,10 @@ target:
   boot and does not wait for a serial host. It does, however, include the
   bounded RAUT detector/control path for Watch-GPS Ask-to-Start and automatic
   pause/resume; it omits the developer-only one-Hz normalized RAUT trace to
-  remain within the dual-OTA image budget. The separate automatic-start rollout
-  remains disabled by default. GitHub firmware releases use these profiles.
+  remain within the dual-OTA image budget. It also enables the stable map camera
+  and advertises independent map orientation. The separate automatic-start
+  rollout remains disabled by default. GitHub firmware releases use these
+  profiles. World Radio remains development-only.
 
 Production keeps native USB hardware support (`ARDUINO_USB_MODE=1`) but sets
 `ARDUINO_USB_CDC_ON_BOOT=0`. The application therefore avoids the steady USB
