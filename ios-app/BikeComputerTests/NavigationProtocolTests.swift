@@ -9668,16 +9668,15 @@ struct NavigationProtocolTests {
             "all creation ingresses preserve the paused job recovery ID"
         )
 
-        manager.forgetPendingMapJob()
-        manager.beginMapAreaSelection()
+        manager.discardPendingMapAndBeginSelection()
         assertEqual(
             OfflineMapJobPersistence.activeJobId(defaults: defaults),
             nil,
-            "forgetting an unrecoverable job clears its durable lock"
+            "discarding an unrecoverable job clears its durable lock"
         )
         assert(
             manager.isMapAreaSelectionActive,
-            "forgetting an unrecoverable job restores new-map creation"
+            "discarding a pending job atomically starts new-map selection"
         )
         assert(
             OfflineMapRecoveryHistory.handledJobIds(defaults: defaults).contains("job-existing"),
@@ -10547,6 +10546,122 @@ struct NavigationProtocolTests {
             "same-map replacement preserves explicit user-name provenance"
         )
         downloadRetryManager.deleteCachedPack(at: downloadRetryPack)
+
+        let stalledSuite = "offline-map-stalled-retry-\(UUID().uuidString)"
+        let stalledDefaults = UserDefaults(suiteName: stalledSuite)!
+        defer { stalledDefaults.removePersistentDomain(forName: stalledSuite) }
+        stalledDefaults.set(
+            "https://stalled-retry.example",
+            forKey: "offlineMap.serverURL"
+        )
+        OfflineMapJobPersistence.save(
+            jobId: "job-stalled-retry",
+            serverURLString: "https://stalled-retry.example",
+            defaults: stalledDefaults
+        )
+        let stalledCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "offline-map-stalled-retry-cache-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        defer { try? FileManager.default.removeItem(at: stalledCache) }
+        var stalledDownloadURLCount = 0
+        var stalledPackAttemptCount = 0
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-stalled-retry" {
+                return (
+                    200,
+                    jobData(
+                        jobId: "job-stalled-retry",
+                        mapId: "map-stalled-retry",
+                        sourceRegionName: "Shanghai"
+                    )
+                )
+            }
+            if request.url?.path == "/v1/map-packs/map-stalled-retry/download-url" {
+                stalledDownloadURLCount += 1
+                return (
+                    200,
+                    try! JSONSerialization.data(withJSONObject: [
+                        "mapId": "map-stalled-retry",
+                        "url": "/downloads/map-stalled-retry-\(stalledDownloadURLCount).zip",
+                        "expiresAt": 2_000_000_000,
+                        "expiresInSeconds": 900,
+                    ])
+                )
+            }
+            return (404, Data())
+        }
+        let stalledManager = OfflineMapManager(
+            defaults: stalledDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: stalledCache,
+            packDownload: { _, _, onProgress, onByteProgress in
+                stalledPackAttemptCount += 1
+                if stalledPackAttemptCount == 1 {
+                    onProgress(0.49)
+                    onByteProgress(
+                        OfflineMapByteProgress(
+                            completedBytes: 49,
+                            totalBytes: 100
+                        )
+                    )
+                    try await Task.sleep(nanoseconds: 60_000_000_000)
+                    throw URLError(.timedOut)
+                }
+                onProgress(1)
+                onByteProgress(
+                    OfflineMapByteProgress(
+                        completedBytes: 100,
+                        totalBytes: 100
+                    )
+                )
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString)
+                    .appendingPathExtension("zip")
+                try packData(mapId: "map-stalled-retry").write(to: url)
+                return url
+            }
+        )
+        stalledManager.resumePendingMapJobIfNeeded()
+        let stalledDeadline = Date().addingTimeInterval(3)
+        while stalledManager.downloadByteProgress?.percentage != 49,
+              Date() < stalledDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assertEqual(
+            stalledManager.downloadByteProgress?.percentage,
+            49,
+            "the fixture reaches the same visible stalled state as production"
+        )
+        stalledManager.retryPendingMapJob()
+        let stalledRetryCompleted = await waitForMapTaskCompletion(
+            stalledManager,
+            timeout: 5
+        )
+        assert(stalledRetryCompleted, "retry cancels the stalled attempt and finishes")
+        assertEqual(
+            stalledDownloadURLCount,
+            2,
+            "retry obtains a fresh signed URL for the same pending job"
+        )
+        assertEqual(
+            stalledPackAttemptCount,
+            2,
+            "retry starts exactly one replacement transfer"
+        )
+        assert(
+            !stalledManager.hasPendingMapJob,
+            "successful replacement clears the durable pending lock"
+        )
+        assertEqual(
+            stalledManager.downloadProgress,
+            1,
+            "replacement progress reaches completion instead of retaining 49 percent"
+        )
+        if let url = stalledManager.downloadedPackURL {
+            stalledManager.deleteCachedPack(at: url)
+        }
 
         let retrySuite = "offline-map-discovery-retry-\(UUID().uuidString)"
         let retryDefaults = UserDefaults(suiteName: retrySuite)!
@@ -11644,12 +11759,30 @@ struct NavigationProtocolTests {
             source.contains("Spacer()\n                    .contentShape(Rectangle())\n                    .onTapGesture {\n                        focusedPackFilename = nil\n                    }"),
             "tapping outside the saved-map name clears focus without covering form controls"
         )
+        let normalizedSource = source.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: "\n")
         assert(
-            source.split(separator: "\n")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .joined(separator: "\n")
-                .contains("manager.beginMapAreaSelection()\nif manager.isMapAreaSelectionActive {\ndismiss()\n}"),
-            "Download a new Map starts selection and explicitly dismisses Settings"
+            normalizedSource.contains(
+                "manager.beginMapAreaSelection()\n}\nif manager.isMapAreaSelectionActive {\ndismiss()"
+            ) &&
+                source.contains("manager.discardPendingMapAndBeginSelection()") &&
+                source.contains("requestNewMapSelection()"),
+            "Download a new Map resolves a pending map before selection and dismisses Settings"
+        )
+        assert(
+            savedMapsSectionSource.contains("let hasPendingMapRow") &&
+                savedMapsSectionSource.contains(
+                    "!manager.hasDownloadedPendingDeviceInstall"
+                ) &&
+                savedMapsSectionSource.contains("PendingSavedMapRow(") &&
+                source.contains("private struct PendingSavedMapRow") &&
+                source.contains("Color(uiColor: .systemGray6)") &&
+                source.contains("title: \"Generation Progress\"") &&
+                source.contains("preparationEstimatePresentation") &&
+                source.contains("Label(\"Retry Download\"") &&
+                source.contains("Button(\"Choose Another Map\""),
+            "the pending download is the final light-gray multi-row item in Saved Maps"
         )
         assert(
             source.contains(".onChange(of: focusedPackFilename) { newValue in\n            scheduleRenameCommitIfNeeded(focusedFilename: newValue)\n        }"),
@@ -11739,8 +11872,15 @@ struct NavigationProtocolTests {
             source.contains("SavedMapDeviceTransferPolicy.canStart(") &&
                 source.contains("isDeviceTransferBusy: manager.isDeviceTransferBusy") &&
                 source.contains("manager.hasActiveBackgroundUpload") &&
-                source.contains("if manager.isMapJobProcessing, manager.hasPendingMapJob"),
+                source.contains("manager.retryPendingMapJob(bleManager: bleManager)"),
             "map controls separate server work from conflicting device transfers"
+        )
+        assert(
+            source.contains("let uploadProgress = packURL.flatMap") &&
+                source.contains("title: \"Uploading to Bike Computer\"") &&
+                source.contains("title: manager.lastTransferOutcome == \"uploading\"") &&
+                source.contains("\"Installing on Bike Computer\""),
+            "the matching Saved Maps row shows upload and activation progress beneath its name"
         )
         assert(
             source.contains("SavedMapThumbnail(") &&
@@ -12207,6 +12347,22 @@ struct NavigationProtocolTests {
                     "Label(\"Map Library\", systemImage: \"map.circle\")"
                 ),
             "Map Library is available only from Developer Settings"
+        )
+        let developerDownloadStatus = developerSource.range(
+            of: "DownloadingMapsSettingsSection(manager: offlineMapManager)"
+        )
+        let developerMapServer = developerSource.range(
+            of: "Section(header: Text(\"Map Server\"))"
+        )
+        assert(
+            !rootBodySource.contains(
+                "DownloadingMapsSettingsSection(manager: offlineMapManager)"
+            ) &&
+                developerSource.contains("offlineMapManager.hasActiveBackgroundUpload") &&
+                developerDownloadStatus != nil &&
+                developerMapServer != nil &&
+                developerDownloadStatus!.lowerBound < developerMapServer!.lowerBound,
+            "the full active map status appears only at the top of Developer Settings"
         )
         assert(
             developerSource.contains("Button(action: useProductionMapServer)") &&
