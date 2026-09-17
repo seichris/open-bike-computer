@@ -30,13 +30,13 @@
 	
 	<!-- Location Permissions -->
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Bicino uses background location for navigation and, when Ride Start is enabled, to detect cycling motion for your bike computer while the app is not visible.</string>
+	<string>Bicino uses background location for navigation, iPhone cycling workout routes, and optional ride detection while the app is not visible.</string>
 	
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Bicino uses your location for turn-by-turn navigation and optional ride detection on your bike computer.</string>
+	<string>Bicino uses your location for navigation, iPhone cycling workout routes and distance, and optional ride detection.</string>
 	
 	<key>NSLocationAlwaysUsageDescription</key>
-	<string>Bicino uses background location to continue navigation and optional ride detection when the app is not visible.</string>
+	<string>Bicino uses background location to continue navigation, iPhone workout routes, and optional ride detection when the app is not visible.</string>
 
 	<!-- Bluetooth Permission -->
 	<key>NSBluetoothAlwaysUsageDescription</key>
@@ -48,6 +48,11 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Bicino connects to your bike computer over local Wi-Fi for device transfers and diagnostics.</string>
 	
+	<key>NSHealthShareUsageDescription</key>
+	<string>Bicino reads cycling workout metrics and summaries from iPhone or Apple Watch.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Bicino saves cycling workouts, cycling distance, and permitted routes to HealthKit from your selected recorder.</string>
+
 	<!-- Background Modes -->
 	<key>UIBackgroundModes</key>
 	<array>

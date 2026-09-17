@@ -717,6 +717,7 @@ struct NavigationProtocolTests {
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
         testRideActivityRuntimeIntegration()
+        testPhoneWorkoutLocationContinuation()
         testCoordinatorRejectsStaleRerouteLocations()
         testCoordinatorDetectsDeviationFromCurrentStep()
         testCoordinatorEnforcesRerouteCooldown()
@@ -4202,6 +4203,32 @@ struct NavigationProtocolTests {
             coordinator.isNavigating,
             "ending the workout must not stop navigation"
         )
+    }
+
+    @MainActor
+    static func testPhoneWorkoutLocationContinuation() {
+        var foreground = true
+        let client = TestLocationManagerClient(authorizationLevel: .whenInUse)
+        let manager = CurrentLocationManager(locationManager: client,
+            applicationIsActive: { foreground })
+        manager.setWorkoutActive(true, phoneOwned: true)
+        assertEqual(client.startUpdatingLocationCallCount, 1,
+                    "Phone ride starts When-In-Use GPS in foreground")
+        assert(client.backgroundTrackingEnabledHistory.last == true,
+               "Phone ride enables visible background location delivery")
+        foreground = false
+        manager.applicationStateDidChange()
+        assertEqual(client.stopUpdatingLocationCallCount, 0,
+                    "Locking phone retains the existing workout GPS stream")
+        manager.setWorkoutActive(false)
+        assertEqual(client.stopUpdatingLocationCallCount, 1,
+                    "Finished phone ride releases its GPS demand")
+        let coldClient = TestLocationManagerClient(authorizationLevel: .whenInUse)
+        let coldManager = CurrentLocationManager(locationManager: coldClient,
+            applicationIsActive: { false })
+        coldManager.setWorkoutActive(true, phoneOwned: true)
+        assertEqual(coldClient.startUpdatingLocationCallCount, 0,
+                    "Cold background recovery does not pretend When-In-Use is Always")
     }
 
     @MainActor

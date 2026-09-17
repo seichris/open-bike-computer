@@ -27,6 +27,8 @@ xcrun swiftc -D HOST_TESTING -parse-as-library -o "${OUT_DIR}/tests" \
   ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift \
   ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift \
   ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \

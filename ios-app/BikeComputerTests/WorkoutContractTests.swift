@@ -7919,10 +7919,10 @@ private struct WorkoutContractTestSuite {
                 && source.contains("connectionState == .disconnected")
                 && source.contains("connectionState == .ended")
                 && source.contains("Waiting for the final saved or discarded result")
-                && source.contains("Saved by Apple Watch")
+                && source.contains("Saved by \\(store.recordingOwner.displayName)")
                 && source.contains("Not saved to Health")
-                && source.contains("Finished on Apple Watch"),
-            "dashboard must retain unsupported, disconnected, final-wait, and terminal summary states"
+                && source.contains("Finished on \\(store.recordingOwner.displayName)"),
+            "dashboard must retain unsupported, disconnected, final-wait, and recorder-labelled terminal summary states"
         )
 
         let compactSource = source.filter { !$0.isWhitespace }
@@ -8074,12 +8074,12 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactContentView.contains(
-                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()},onOpen:{presentedSheet=.workoutDashboard})"
+                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onOpen:{presentedSheet=.workoutDashboard})"
             )
                 && compactContentView.contains(
-                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()},onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)"
+                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onPause:workoutSessionCoordinator.pause,onResume:workoutSessionCoordinator.resume,onMarkSegment:workoutSessionCoordinator.markSegment,onEndAndSave:workoutSessionCoordinator.endAndSave,onDiscard:workoutSessionCoordinator.discard,onDone:workoutSessionCoordinator.resetTerminalPresentation)"
                 ),
-            "ContentView must present the dashboard from its exact state and inject each production manager action"
+            "ContentView must present the dashboard from its exact state and route every production action through the selected recording owner"
         )
 
         let compactLiveWatchView = liveWatchViewSource.filter {
@@ -8284,15 +8284,15 @@ private struct WorkoutContractTestSuite {
                     "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\")"
                 )
                 && compactContent.contains(
-                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()})"
+                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutSessionCoordinator.requestStart()})"
                 )
                 && compactContent.contains(
                     "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)"
                 )
                 && compactContent.contains(
-                    ".buttonStyle(.plain).fixedSize(horizontal:true,vertical:false).layoutPriority(1).accessibilityLabel(\"StartworkoutonAppleWatch\")"
+                    ".buttonStyle(.plain).fixedSize(horizontal:true,vertical:false).layoutPriority(1).accessibilityLabel(\"Startworkoutwiththeselectedrecorder\")"
                 ),
-            "the collapsed destination row must keep the full blue Watch-gated Start Workout label visible"
+            "the collapsed destination row must keep the full blue Start Workout label visible and honor recording ownership"
         )
         expect(
             compactContent.contains(
@@ -8637,7 +8637,7 @@ private struct WorkoutContractTestSuite {
                     "presentation.pendingControl==nil"
                 )
                 && compactContent.contains(
-                    "onMarkSegment:workoutMirrorManager.markSegment"
+                    "onMarkSegment:workoutSessionCoordinator.markSegment"
                 ),
             "the ride sheet must expose the numbered segment action with safe production wiring"
         )

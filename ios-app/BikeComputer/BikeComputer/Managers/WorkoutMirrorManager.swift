@@ -794,7 +794,7 @@ final class WorkoutMirrorManager: NSObject {
     }
 
     @available(iOS 17.0, *)
-    private func acceptMirroredSession(_ session: HKWorkoutSession) {
+    func acceptMirroredSession(_ session: HKWorkoutSession) {
         acceptMirroredTransport(
             HealthKitMirroredSessionTransport(session: session)
         )
