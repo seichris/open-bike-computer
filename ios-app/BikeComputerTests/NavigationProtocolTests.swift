@@ -8477,6 +8477,8 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: false,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: true,
                 confirmedDeviceMapMissing: false
             ),
             .step(.welcome),
@@ -8485,6 +8487,38 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: true,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: true,
+                confirmedDeviceMapMissing: false
+            ),
+            .step(.location),
+            "first launch explains location before requesting native access"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.presentation(
+                hasCompletedFirstRun: true,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: true,
+                confirmedDeviceMapMissing: true
+            ),
+            .step(.location),
+            "first-run location consent precedes device map setup"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.presentation(
+                hasCompletedFirstRun: true,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: false,
+                confirmedDeviceMapMissing: false
+            ),
+            .hidden,
+            "existing location access skips the first-run permission step"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.presentation(
+                hasCompletedFirstRun: true,
+                hasCompletedLocationStep: true,
+                needsLocationAuthorization: false,
                 confirmedDeviceMapMissing: true
             ),
             .step(.download),
@@ -8493,10 +8527,57 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: true,
+                hasCompletedLocationStep: true,
+                needsLocationAuthorization: false,
                 confirmedDeviceMapMissing: false
             ),
             .hidden,
             "completed onboarding stays hidden while maps are available"
+        )
+
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.welcome),
+                isStatePrepared: true,
+                isDismissed: false,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: true
+            ),
+            .welcome,
+            "first-run welcome is independent from offline map startup state"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.location),
+                isStatePrepared: true,
+                isDismissed: false,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: true
+            ),
+            .location,
+            "first-run location consent is independent from map operations"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.download),
+                isStatePrepared: true,
+                isDismissed: false,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: true
+            ),
+            nil,
+            "map download onboarding still waits for map operations"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.welcome),
+                isStatePrepared: true,
+                isDismissed: true,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: false
+            ),
+            nil,
+            "dismissed onboarding remains hidden"
         )
 
         assert(
@@ -19078,7 +19159,7 @@ struct NavigationProtocolTests {
 
         assertEqual(
             BikeComputersMenuPolicy.title(knownDeviceCount: 0),
-            "Connect Bike Computer",
+            "Connect your Bicino",
             "an empty registry presents the connect menu"
         )
         assertEqual(
@@ -19170,14 +19251,14 @@ struct NavigationProtocolTests {
                 knownDeviceCount: 0,
                 isExplicitBikeComputerSetup: false
             ),
-            "Add a Bicino Bike Computer",
+            "Connect your Bicino",
             "empty settings presents the bike-computer setup title"
         )
         assertEqual(
             BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
                 knownDeviceCount: 0
             ),
-            "Connect a Bicino Bike Computer!",
+            "Connect your Bicino!",
             "empty settings presents a clear add-device action"
         )
         assertEqual(
@@ -19210,6 +19291,49 @@ struct NavigationProtocolTests {
                 knownDeviceCount: 1
             ),
             "a registered bike computer keeps device screen settings"
+        )
+        assert(
+            !BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: false,
+                sensorProfileCount: 0
+            ),
+            "first-time Bicino setup stays focused on connecting the device"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: true,
+                sensorProfileCount: 0
+            ),
+            "sensor setup remains available after a Bicino was connected"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: false,
+                sensorProfileCount: 1
+            ),
+            "an existing sensor profile preserves sensor management during migration"
+        )
+        assert(
+            BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+                hasEverConnectedBikeComputer: false,
+                sensorProfileCount: 0,
+                isExplicitSensorSetup: true
+            ),
+            "an explicit sensor prompt remains actionable before Bicino setup"
+        )
+        assert(
+            BikeComputerOnboardingPreferencePolicy.prefersIPhoneOnly(
+                storedPreference: true,
+                knownDeviceCount: 0
+            ),
+            "skipping setup keeps automatic discovery disabled without a Bicino"
+        )
+        assert(
+            !BikeComputerOnboardingPreferencePolicy.prefersIPhoneOnly(
+                storedPreference: true,
+                knownDeviceCount: 1
+            ),
+            "successfully adding a Bicino clears the earlier skip preference"
         )
         assert(
             !BikeComputerSettingsPresentationPolicy.shouldStartDiscovery(
@@ -19641,6 +19765,8 @@ struct NavigationProtocolTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let credentials = InMemoryDeviceCredentialStore()
         let registry = BikeComputerDeviceRegistry(defaults: defaults, credentialStore: credentials)
+        assert(!registry.hasEverConnectedBikeComputer,
+               "a fresh registry has not completed Bicino setup")
         let generatedOwnerID = registry.installationOwnerID()
         assertEqual(generatedOwnerID?.count, 16, "registry creates a 128-bit installation owner ID")
         assertEqual(registry.installationOwnerID(), generatedOwnerID, "installation owner ID is stable")
@@ -19670,6 +19796,8 @@ struct NavigationProtocolTests {
         registry.upsert(legacyAlias, makeActive: true)
         registry.upsert(first)
         registry.upsert(second)
+        assert(registry.hasEverConnectedBikeComputer,
+               "registering a Bicino records the durable setup milestone")
         assertEqual(registry.devices.count, 2, "registry supports multiple Bike Computers")
         assert(!registry.devices.contains(where: { $0.isLegacy && $0.peripheralIdentifier == peripheralID }),
                "a stable v2 identity replaces its legacy peripheral alias")
@@ -19710,6 +19838,37 @@ struct NavigationProtocolTests {
         assertEqual(registry.activeDeviceID, second.deviceID, "removing the current device selects the remaining device")
         assertEqual(registry.ownerKey(deviceID: first.deviceID), nil, "deregistering deletes the owner key")
         assertEqual(registry.ownerKey(deviceID: second.deviceID), secondKey, "deregistering one device preserves another device credential")
+        assert(registry.remove(deviceID: second.deviceID),
+               "the final registered device can be removed")
+        assert(registry.devices.isEmpty,
+               "removing the final device empties the current registry")
+        assert(registry.hasEverConnectedBikeComputer,
+               "removing every Bicino preserves the setup milestone")
+        let reloadedRegistry = BikeComputerDeviceRegistry(
+            defaults: defaults,
+            credentialStore: credentials
+        )
+        assert(reloadedRegistry.hasEverConnectedBikeComputer,
+               "the Bicino setup milestone survives registry reload")
+
+        let migrationSuiteName =
+            "DeviceOwnershipMilestoneMigrationTests.\(UUID().uuidString)"
+        let migrationDefaults = UserDefaults(suiteName: migrationSuiteName)!
+        defer {
+            migrationDefaults.removePersistentDomain(
+                forName: migrationSuiteName
+            )
+        }
+        migrationDefaults.set(
+            try! JSONEncoder().encode([first]),
+            forKey: "ble.knownDevices.v2"
+        )
+        let migratedRegistry = BikeComputerDeviceRegistry(
+            defaults: migrationDefaults,
+            credentialStore: InMemoryDeviceCredentialStore()
+        )
+        assert(migratedRegistry.hasEverConnectedBikeComputer,
+               "an existing registered Bicino migrates the setup milestone")
 
         let failureSuiteName = "DeviceOwnershipRemovalFailureTests.\(UUID().uuidString)"
         let failureDefaults = UserDefaults(suiteName: failureSuiteName)!
@@ -20262,6 +20421,23 @@ struct NavigationProtocolTests {
                     "foreground entry starts exactly one physical scan")
         assert(driver.starts[0].allowsDuplicates,
                "unknown-device discovery requests duplicate observations")
+
+        let phoneOnlyManager = BLEManager()
+        let phoneOnlyDriver = BLEScanDriverForTesting()
+        phoneOnlyManager.installScanDriverForTesting(phoneOnlyDriver)
+        phoneOnlyManager.setOpportunisticDiscoveryEnabled(false)
+        phoneOnlyManager.setApplicationActive(true)
+        assertEqual(
+            phoneOnlyManager.currentScanPurpose,
+            .none,
+            "the iPhone-only onboarding choice suppresses automatic device discovery"
+        )
+        phoneOnlyManager.startDeviceDiscovery()
+        assertEqual(
+            phoneOnlyManager.currentScanPurpose,
+            .explicitDiscovery,
+            "the iPhone-only choice still permits user-initiated device setup"
+        )
 
         manager.setUnknownDeviceDiscoverySuspended(true)
         assertEqual(

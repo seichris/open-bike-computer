@@ -106,10 +106,17 @@ struct ContentView: View {
     @State private var dismissedOfflineMapOnboarding = false
     @State private var confirmedDeviceMapMissing = false
     @State private var isOfflineMapOnboardingStatePrepared = false
+    @State private var isAwaitingFirstRunLocationDecision = false
     // Preserve the original key so users who completed the previous first-run
     // flow are not shown a new welcome after updating.
     @AppStorage("offlineMapOnboarding.firstRunCompleted.v1")
     private var hasCompletedFirstRunWelcome = false
+    @AppStorage("offlineMapOnboarding.locationStepCompleted.v1")
+    private var hasCompletedFirstRunLocationStep = false
+    @AppStorage("offlineMapOnboarding.locationStepMigrationCompleted.v1")
+    private var hasMigratedFirstRunLocationStep = false
+    @AppStorage("bikeComputerOnboarding.prefersIPhoneOnly.v1")
+    private var prefersIPhoneOnly = false
     @AppStorage("offlineMapOnboarding.existingInstallMigrationCompleted.v1")
     private var hasMigratedExistingInstallOnboarding = false
     @AppStorage(IPhoneMapAppearance.baseStyleDefaultsKey)
@@ -369,9 +376,10 @@ struct ContentView: View {
                         location: coordinator.currentLocation,
                         locationAuthorizationStatus:
                             coordinator.locationAuthorizationStatus,
-                        onRequestLocation: {
-                            coordinator.requestLocationAuthorization()
-                        },
+                        onAddBicino: beginFirstRunBicinoSetup,
+                        onUseIPhone: continueFirstRunWithIPhone,
+                        onRequestLocation:
+                            completeFirstRunLocationStepAndRequestAccess,
                         onChooseArea: beginOnboardingMapSelection,
                         onClose: {
                             dismissOfflineMapOnboarding(step: onboardingStep)
@@ -430,6 +438,7 @@ struct ContentView: View {
             if identity == nil { synchronizeRideMetricsSheet() }
         }
         .onAppear {
+            reconcileIPhoneOnlyPreference()
             onApplicationActiveChange(scenePhase == .active)
             migrateExistingInstallOnboardingIfNeeded()
             isOfflineMapOnboardingStatePrepared = true
@@ -554,6 +563,15 @@ struct ContentView: View {
             presentNearbyBicinoIfEligible()
         }
         .onChange(of: coordinator.bleManager.knownDevices.count) { _ in
+            reconcileIPhoneOnlyPreference()
+            presentNearbyBicinoIfEligible()
+        }
+        .onChange(of: coordinator.locationAuthorizationStatus) { status in
+            if coordinator.isLocationAuthorized {
+                hasCompletedFirstRunLocationStep = true
+            }
+            guard status != .notDetermined else { return }
+            isAwaitingFirstRunLocationDecision = false
             presentNearbyBicinoIfEligible()
         }
         .onChange(of: visibleOfflineMapOnboardingStep) { step in
@@ -1066,9 +1084,8 @@ struct ContentView: View {
                     visibleOfflineMapOnboardingStep != nil,
                 isMapAreaSelectionActive:
                     offlineMapManager.isMapAreaSelectionActive,
-                // A sealed candidate suppresses additional scanning, but is
-                // still eligible for this one presentation.
-                isSuppressed: false
+                isSuppressed: prefersIPhoneOnly ||
+                    isAwaitingFirstRunLocationDecision
               ) else { return }
         coordinator.bleManager.markNearbyBicinoCandidatePresented(
             peripheralIdentifier: candidate.peripheralIdentifier
@@ -1270,45 +1287,109 @@ struct ContentView: View {
     private var offlineMapOnboardingPresentation: OfflineMapOnboardingPresentation {
         OfflineMapOnboardingPolicy.presentation(
             hasCompletedFirstRun: hasCompletedFirstRunWelcome,
+            hasCompletedLocationStep: hasCompletedFirstRunLocationStep,
+            needsLocationAuthorization:
+                LocationAuthorizationRemediationPolicy.action(
+                    for: coordinator.locationAuthorizationStatus
+                ) != .none,
             confirmedDeviceMapMissing: confirmedDeviceMapMissing
         )
     }
 
     private var visibleOfflineMapOnboardingStep: OfflineMapOnboardingStep? {
-        guard isOfflineMapOnboardingStatePrepared else { return nil }
-        guard !dismissedOfflineMapOnboarding else { return nil }
-        guard !offlineMapManager.isMapAreaSelectionActive else { return nil }
-        guard !offlineMapManager.isBusy,
-              !offlineMapManager.hasPendingMapJob,
-              offlineMapManager.currentJob == nil,
-              offlineMapManager.downloadedPackURL == nil,
-              offlineMapManager.errorMessage == nil else { return nil }
-        guard case .step(let step) = offlineMapOnboardingPresentation else {
-            return nil
-        }
-        return step
+        OfflineMapOnboardingPolicy.visibleStep(
+            presentation: offlineMapOnboardingPresentation,
+            isStatePrepared: isOfflineMapOnboardingStatePrepared,
+            isDismissed: dismissedOfflineMapOnboarding,
+            isMapAreaSelectionActive:
+                offlineMapManager.isMapAreaSelectionActive,
+            isOfflineMapOperationBlocking:
+                offlineMapManager.isBusy ||
+                offlineMapManager.hasPendingMapJob ||
+                offlineMapManager.currentJob != nil ||
+                offlineMapManager.downloadedPackURL != nil ||
+                offlineMapManager.errorMessage != nil
+        )
     }
 
     private func beginOnboardingMapSelection() {
         hasCompletedFirstRunWelcome = true
+        hasCompletedFirstRunLocationStep = true
         offlineMapManager.beginMapAreaSelection()
+    }
+
+    private func beginFirstRunBicinoSetup() {
+        hasCompletedFirstRunWelcome = true
+        prefersIPhoneOnly = false
+        coordinator.bleManager.setOpportunisticDiscoveryEnabled(true)
+
+        if let candidate = coordinator.bleManager.nearbyBicinoCandidate,
+           Date().timeIntervalSince(candidate.lastSeenAt) <=
+                BLEDiscoveryFreshnessPolicy.maximumAge,
+           coordinator.bleManager.knownDevices.isEmpty,
+           !coordinator.bleManager.hasActiveTransportSession {
+            coordinator.bleManager.markNearbyBicinoCandidatePresented(
+                peripheralIdentifier: candidate.peripheralIdentifier
+            )
+            presentedSheet = .nearbyBicino(
+                peripheralIdentifier: candidate.peripheralIdentifier
+            )
+            return
+        }
+
+        presentedSheet = .bikeComputerSetup
+    }
+
+    private func continueFirstRunWithIPhone() {
+        hasCompletedFirstRunWelcome = true
+        prefersIPhoneOnly = true
+        coordinator.bleManager.setOpportunisticDiscoveryEnabled(false)
+    }
+
+    private func reconcileIPhoneOnlyPreference() {
+        let reconciledPreference =
+            BikeComputerOnboardingPreferencePolicy.prefersIPhoneOnly(
+                storedPreference: prefersIPhoneOnly,
+                knownDeviceCount:
+                    coordinator.bleManager.knownDevices.count
+            )
+        if prefersIPhoneOnly != reconciledPreference {
+            prefersIPhoneOnly = reconciledPreference
+        }
+        coordinator.bleManager.setOpportunisticDiscoveryEnabled(
+            !reconciledPreference
+        )
+    }
+
+    private func completeFirstRunLocationStepAndRequestAccess() {
+        hasCompletedFirstRunLocationStep = true
+        isAwaitingFirstRunLocationDecision = true
+        coordinator.requestLocationAuthorization()
     }
 
     private func dismissOfflineMapOnboarding(
         step: OfflineMapOnboardingStep
     ) {
         dismissedOfflineMapOnboarding = true
-        if step == .welcome {
-            hasCompletedFirstRunWelcome = true
+        if step == .location {
+            hasCompletedFirstRunLocationStep = true
         }
     }
 
     private func migrateExistingInstallOnboardingIfNeeded() {
+        if !hasMigratedFirstRunLocationStep {
+            hasMigratedFirstRunLocationStep = true
+            if hasCompletedFirstRunWelcome || coordinator.isLocationAuthorized {
+                hasCompletedFirstRunLocationStep = true
+            }
+        }
+
         guard !hasMigratedExistingInstallOnboarding else { return }
         hasMigratedExistingInstallOnboarding = true
 
         guard !coordinator.bleManager.knownDevices.isEmpty else { return }
         hasCompletedFirstRunWelcome = true
+        hasCompletedFirstRunLocationStep = true
     }
 
     private var topOverlay: some View {

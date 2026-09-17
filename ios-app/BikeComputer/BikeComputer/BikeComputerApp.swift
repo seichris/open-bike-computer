@@ -325,20 +325,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         return true
     }
 
-    func application(
-        _ application: UIApplication,
-        configurationForConnecting connectingSceneSession: UISceneSession,
-        options: UIScene.ConnectionOptions
-    ) -> UISceneConfiguration {
-        // Recovery is also started at process launch. Coalesce each scene
-        // connection with it instead of depending on a recovery-only UIKit
-        // option absent from some supported SDKs. Never create a new workout.
-        if #available(iOS 26.0, *) {
-            workoutSessionCoordinator.retryRecovery()
-        }
-        return connectingSceneSession.configuration
-    }
-
     func applicationDidBecomeActive(_ application: UIApplication) {
         rideDiagnosticsRecorder.recordApplicationLifecycle(
             "app_active",
