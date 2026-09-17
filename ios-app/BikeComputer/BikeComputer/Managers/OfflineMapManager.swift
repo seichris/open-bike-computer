@@ -1090,6 +1090,7 @@ nonisolated enum OfflineMapPollingRetryPolicy {
 
 nonisolated enum OfflineMapOnboardingStep: Equatable {
     case welcome
+    case location
     case download
 }
 
@@ -1101,10 +1102,16 @@ nonisolated enum OfflineMapOnboardingPresentation: Equatable {
 nonisolated enum OfflineMapOnboardingPolicy {
     static func presentation(
         hasCompletedFirstRun: Bool,
+        hasCompletedLocationStep: Bool,
+        needsLocationAuthorization: Bool,
         confirmedDeviceMapMissing: Bool
     ) -> OfflineMapOnboardingPresentation {
         if !hasCompletedFirstRun {
             return .step(.welcome)
+        }
+
+        if !hasCompletedLocationStep && needsLocationAuthorization {
+            return .step(.location)
         }
 
         return confirmedDeviceMapMissing ? .step(.download) : .hidden

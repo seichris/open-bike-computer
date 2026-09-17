@@ -8477,6 +8477,8 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: false,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: true,
                 confirmedDeviceMapMissing: false
             ),
             .step(.welcome),
@@ -8485,6 +8487,38 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: true,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: true,
+                confirmedDeviceMapMissing: false
+            ),
+            .step(.location),
+            "first launch explains location before requesting native access"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.presentation(
+                hasCompletedFirstRun: true,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: true,
+                confirmedDeviceMapMissing: true
+            ),
+            .step(.location),
+            "first-run location consent precedes device map setup"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.presentation(
+                hasCompletedFirstRun: true,
+                hasCompletedLocationStep: false,
+                needsLocationAuthorization: false,
+                confirmedDeviceMapMissing: false
+            ),
+            .hidden,
+            "existing location access skips the first-run permission step"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.presentation(
+                hasCompletedFirstRun: true,
+                hasCompletedLocationStep: true,
+                needsLocationAuthorization: false,
                 confirmedDeviceMapMissing: true
             ),
             .step(.download),
@@ -8493,6 +8527,8 @@ struct NavigationProtocolTests {
         assertEqual(
             OfflineMapOnboardingPolicy.presentation(
                 hasCompletedFirstRun: true,
+                hasCompletedLocationStep: true,
+                needsLocationAuthorization: false,
                 confirmedDeviceMapMissing: false
             ),
             .hidden,
@@ -20262,6 +20298,23 @@ struct NavigationProtocolTests {
                     "foreground entry starts exactly one physical scan")
         assert(driver.starts[0].allowsDuplicates,
                "unknown-device discovery requests duplicate observations")
+
+        let phoneOnlyManager = BLEManager()
+        let phoneOnlyDriver = BLEScanDriverForTesting()
+        phoneOnlyManager.installScanDriverForTesting(phoneOnlyDriver)
+        phoneOnlyManager.setOpportunisticDiscoveryEnabled(false)
+        phoneOnlyManager.setApplicationActive(true)
+        assertEqual(
+            phoneOnlyManager.currentScanPurpose,
+            .none,
+            "the iPhone-only onboarding choice suppresses automatic device discovery"
+        )
+        phoneOnlyManager.startDeviceDiscovery()
+        assertEqual(
+            phoneOnlyManager.currentScanPurpose,
+            .explicitDiscovery,
+            "the iPhone-only choice still permits user-initiated device setup"
+        )
 
         manager.setUnknownDeviceDiscoverySuspended(true)
         assertEqual(
