@@ -1117,6 +1117,28 @@ nonisolated enum OfflineMapOnboardingPolicy {
         return confirmedDeviceMapMissing ? .step(.download) : .hidden
     }
 
+    static func visibleStep(
+        presentation: OfflineMapOnboardingPresentation,
+        isStatePrepared: Bool,
+        isDismissed: Bool,
+        isMapAreaSelectionActive: Bool,
+        isOfflineMapOperationBlocking: Bool
+    ) -> OfflineMapOnboardingStep? {
+        guard isStatePrepared,
+              !isDismissed,
+              !isMapAreaSelectionActive,
+              case .step(let step) = presentation else {
+            return nil
+        }
+
+        switch step {
+        case .welcome, .location:
+            return step
+        case .download:
+            return isOfflineMapOperationBlocking ? nil : step
+        }
+    }
+
     static func shouldOfferDownload(
         isLocationAuthorized: Bool,
         isNavigationReady: Bool,

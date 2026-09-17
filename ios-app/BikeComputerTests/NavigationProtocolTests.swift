@@ -8535,6 +8535,51 @@ struct NavigationProtocolTests {
             "completed onboarding stays hidden while maps are available"
         )
 
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.welcome),
+                isStatePrepared: true,
+                isDismissed: false,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: true
+            ),
+            .welcome,
+            "first-run welcome is independent from offline map startup state"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.location),
+                isStatePrepared: true,
+                isDismissed: false,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: true
+            ),
+            .location,
+            "first-run location consent is independent from map operations"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.download),
+                isStatePrepared: true,
+                isDismissed: false,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: true
+            ),
+            nil,
+            "map download onboarding still waits for map operations"
+        )
+        assertEqual(
+            OfflineMapOnboardingPolicy.visibleStep(
+                presentation: .step(.welcome),
+                isStatePrepared: true,
+                isDismissed: true,
+                isMapAreaSelectionActive: false,
+                isOfflineMapOperationBlocking: false
+            ),
+            nil,
+            "dismissed onboarding remains hidden"
+        )
+
         assert(
             OfflineMapOnboardingPolicy.shouldOfferDownload(
                 isLocationAuthorized: true,

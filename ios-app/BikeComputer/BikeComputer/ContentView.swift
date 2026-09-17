@@ -1298,18 +1298,19 @@ struct ContentView: View {
     }
 
     private var visibleOfflineMapOnboardingStep: OfflineMapOnboardingStep? {
-        guard isOfflineMapOnboardingStatePrepared else { return nil }
-        guard !dismissedOfflineMapOnboarding else { return nil }
-        guard !offlineMapManager.isMapAreaSelectionActive else { return nil }
-        guard !offlineMapManager.isBusy,
-              !offlineMapManager.hasPendingMapJob,
-              offlineMapManager.currentJob == nil,
-              offlineMapManager.downloadedPackURL == nil,
-              offlineMapManager.errorMessage == nil else { return nil }
-        guard case .step(let step) = offlineMapOnboardingPresentation else {
-            return nil
-        }
-        return step
+        OfflineMapOnboardingPolicy.visibleStep(
+            presentation: offlineMapOnboardingPresentation,
+            isStatePrepared: isOfflineMapOnboardingStatePrepared,
+            isDismissed: dismissedOfflineMapOnboarding,
+            isMapAreaSelectionActive:
+                offlineMapManager.isMapAreaSelectionActive,
+            isOfflineMapOperationBlocking:
+                offlineMapManager.isBusy ||
+                offlineMapManager.hasPendingMapJob ||
+                offlineMapManager.currentJob != nil ||
+                offlineMapManager.downloadedPackURL != nil ||
+                offlineMapManager.errorMessage != nil
+        )
     }
 
     private func beginOnboardingMapSelection() {
