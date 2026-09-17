@@ -405,6 +405,12 @@ lv_obj_t *makeBottomControl(bool right, const char *icon, lv_event_cb_t callback
 
 void worldRadioScr(lv_obj_t *screen,
                    const WorldRadioScreenCallbacks &callbacks) {
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+  // Stable artifact marker for the preview-profile CI gate. Keep this
+  // independent of the renderer so visual implementation changes do not
+  // silently change the build-profile contract.
+  Serial.println("World Radio preview artifact v1");
+#endif
   screenRoot = screen;
   screenCallbacks = callbacks;
   pendingStationFocus = 0;

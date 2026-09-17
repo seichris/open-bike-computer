@@ -222,11 +222,10 @@ jobs:
         env:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
         run: |
-          # The screen title is intentionally hidden; use a diagnostics-only
-          # runtime marker to verify that preview firmware still carries the
-          # World Radio implementation without putting it in production.
+          # Use the stable diagnostics-only marker emitted by the preview
+          # screen instead of a renderer-specific log message.
           has_radio=false
-          if grep -aFq "World Radio raster frames" ".pio/build/${BUILD_ENVIRONMENT}/firmware.bin"; then
+          if grep -aFq "World Radio preview artifact v1" ".pio/build/${BUILD_ENVIRONMENT}/firmware.bin"; then
             has_radio=true
           fi
           case "$BUILD_ENVIRONMENT" in
