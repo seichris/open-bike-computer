@@ -220,7 +220,10 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         )
         self.assertEqual(
             entitlements["com.apple.developer.associated-domains"],
-            ["applinks:$(BICINO_MAP_CATALOG_HOST)"],
+            [
+                "applinks:bicino.com",
+                "applinks:$(BICINO_MAP_CATALOG_HOST)",
+            ],
         )
         self.assertEqual(
             entitlements[
