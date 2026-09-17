@@ -45,6 +45,7 @@ private enum WorkoutStartAvailabilityAlert: String, Identifiable {
 }
 
 struct WorkoutStartButton<Label: View>: View {
+    @Environment(\.workoutSessionCoordinator) private var recordingCoordinator
     @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
     let action: () -> Void
     @ViewBuilder let label: () -> Label
@@ -71,6 +72,7 @@ struct WorkoutStartButton<Label: View>: View {
     }
 
     private func requestStart() {
+        if recordingCoordinator != nil { action(); return }
         handle(watchAvailability.availability)
     }
 
@@ -217,7 +219,9 @@ struct WorkoutFinishButton<Label: View>: View {
                     }
                 }
             } message: {
-                Text("Apple Watch performs the save. If it is unreachable, the workout continues there.")
+                Text(store.recordingOwner == .iphone
+                    ? "iPhone performs the save. This does not end or save any separate Apple Watch workout."
+                    : "Apple Watch performs the save. If it is unreachable, the workout continues there.")
             }
             .alert(
                 WorkoutDiscardDisclosureV1.title,
@@ -359,19 +363,19 @@ struct WorkoutCompactCard: View {
         case .launchingWatch:
             return "Starting on Apple Watch"
         case .awaitingFirstSnapshot:
-            return "Connecting to Apple Watch"
+            return store.recordingOwner == .iphone ? "Starting on iPhone" : "Connecting to Apple Watch"
         case .connected:
             if presentation.sessionState == .paused,
                presentation.snapshot.pauseOrigin == .automatic {
                 return "Auto-Paused"
             }
-            return stateLabel(presentation.sessionState)
+            return stateLabel(presentation.sessionState, owner: store.recordingOwner)
         case .stale:
             return "Workout data delayed"
         case .disconnected:
             return "Apple Watch disconnected"
         case .ended:
-            return terminalTitle(presentation.finalSnapshot ?? presentation.snapshot)
+            return terminalTitle(presentation.finalSnapshot ?? presentation.snapshot, owner: store.recordingOwner)
         case .failed:
             return errorTitle(presentation.errorCode)
         }
@@ -384,7 +388,7 @@ struct WorkoutCompactCard: View {
         case .unsupported:
             Text("Requires iOS 17 and watchOS 10")
         case .idle:
-            Text("Recorded and saved by Apple Watch")
+            Text("Choose Apple Watch or iPhone to record")
         case .launchingWatch:
             Text("Keep your Watch unlocked")
         case .awaitingFirstSnapshot:
@@ -392,6 +396,7 @@ struct WorkoutCompactCard: View {
         case .failed:
             Text(
                 errorDetail(
+                    for: store,
                     presentation.errorCode,
                     context: WorkoutErrorCopyV1.context(for: presentation)
                 )
@@ -406,6 +411,7 @@ struct WorkoutCompactCard: View {
             if !presentation.isWorkoutActive {
                 Text(
                     errorDetail(
+                    for: store,
                         presentation.errorCode ?? .watchUnavailable,
                         context: WorkoutErrorCopyV1.context(for: presentation)
                     )
@@ -413,6 +419,7 @@ struct WorkoutCompactCard: View {
             } else if let errorCode = presentation.errorCode {
                 Text(
                     errorDetail(
+                    for: store,
                         errorCode,
                         context: WorkoutErrorCopyV1.context(for: presentation)
                     )
@@ -424,6 +431,7 @@ struct WorkoutCompactCard: View {
             if let errorCode = presentation.errorCode {
                 Text(
                     errorDetail(
+                    for: store,
                         errorCode,
                         context: WorkoutErrorCopyV1.context(for: presentation)
                     )
@@ -495,17 +503,18 @@ struct WorkoutCompactCard: View {
         let prefix: String
         switch snapshot.terminalOutcome {
         case .saved:
-            prefix = "Saved by Apple Watch"
+            prefix = "Saved by \(store.recordingOwner.displayName)"
         case .discarded:
             prefix = "Not saved to Health"
         case nil:
-            prefix = "Finished on Apple Watch"
+            prefix = "Finished on \(store.recordingOwner.displayName)"
         }
         return "\(prefix)  •  \(elapsed)  •  \(distance) \(unit)"
     }
 }
 
 struct WorkoutDashboardView: View {
+    @Environment(\.workoutSessionCoordinator) private var recordingCoordinator
     @ObservedObject var store: WorkoutMetricsStore
     @ObservedObject var watchAvailability: WorkoutWatchAvailabilityMonitor
     let onStart: () -> Void
@@ -526,6 +535,9 @@ struct WorkoutDashboardView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     connectionBanner
+                    if let recordingCoordinator {
+                        WorkoutRecordingStatusView(coordinator: recordingCoordinator, store: store)
+                    }
 
                     if store.presentation.connectionState == .idle {
                         idleContent
@@ -619,14 +631,14 @@ struct WorkoutDashboardView: View {
             Image(systemName: "figure.outdoor.cycle")
                 .font(.system(size: 44))
                 .foregroundStyle(Color.accentColor)
-            Text("Start an outdoor cycling workout on Apple Watch. Your Watch remains the workout owner and the only device that saves to Health.")
+            Text("Record with Apple Watch, or use iPhone on iOS 26 or later. One recorder is selected for the entire ride and saves it to Health.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
             WorkoutStartButton(
                 watchAvailability: watchAvailability,
                 action: onStart
             ) {
-                Text("Start on Apple Watch")
+                Text("Start Workout")
             }
                 .buttonStyle(.borderedProminent)
         }
@@ -684,23 +696,32 @@ struct WorkoutDashboardView: View {
                     .foregroundStyle(.secondary)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    HeartRateZoneStrip(
-                        currentZone: snapshot.currentHeartRateZone
+                if let native = snapshot.nativeZones?.heartRate {
+                    WorkoutNativeZoneCard(
+                        group: native,
+                        showCurrent: store.presentation.connectionState == .connected
                     )
-                    Text(
-                        snapshot.currentHeartRateZone == nil
-                            ? "Waiting for heart rate"
-                            : "Configured max HR"
-                    )
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HeartRateZoneStrip(currentZone: snapshot.currentHeartRateZone)
+                        Text("Bicino zones · configured maximum heart rate")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 14))
                 }
-                .padding(12)
-                .background(
-                    .background,
-                    in: RoundedRectangle(cornerRadius: 14)
-                )
+                if let native = snapshot.nativeZones?.cyclingPower {
+                    WorkoutNativeZoneCard(
+                        group: native,
+                        showCurrent: store.presentation.connectionState == .connected
+                    )
+                }
+                if snapshot.nativeZones != nil {
+                    Text("Compatible bike firmware shows these HealthKit zones. Older firmware continues to use Bicino’s five-zone fallback.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
 
                 LazyVGrid(columns: columns, spacing: 12) {
                     metric(
@@ -775,9 +796,11 @@ struct WorkoutDashboardView: View {
                 }
 
                 if store.presentation.connectionState == .ended {
-                    HeartRateZoneBreakdown(
-                        durations: snapshot.heartRateZoneDurations
-                    )
+                    if snapshot.nativeZones?.heartRate == nil {
+                        HeartRateZoneBreakdown(
+                            durations: snapshot.heartRateZoneDurations
+                        )
+                    }
                 }
 
                 controls
@@ -822,7 +845,7 @@ struct WorkoutDashboardView: View {
                 || presentation.pendingControl == .discard {
                 VStack(spacing: 8) {
                     ProgressView()
-                    Text("Confirming the finish choice with Apple Watch…")
+                    Text("Confirming the finish choice with \(store.recordingOwner.displayName)…")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -837,7 +860,7 @@ struct WorkoutDashboardView: View {
             } else {
                 VStack(spacing: 8) {
                     ProgressView()
-                    Text("Waiting for the final saved or discarded result from Apple Watch…")
+                    Text("Waiting for the final saved or discarded result from \(store.recordingOwner.displayName)…")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -848,7 +871,9 @@ struct WorkoutDashboardView: View {
             VStack(spacing: 10) {
                 if presentation.errorCode == .setupRequired
                     || presentation.errorCode == .authorizationDenied {
-                    Text("Open Bicino on Apple Watch and set up Health.")
+                    Text(store.recordingOwner == .iphone
+                        ? "Allow Workouts for Bicino in Health on iPhone."
+                        : "Open Bicino on Apple Watch and set up Health.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -1040,6 +1065,7 @@ struct WorkoutDashboardView: View {
                 .foregroundStyle(.orange)
             Text(
                 errorDetail(
+                    for: store,
                     code,
                     context: WorkoutErrorCopyV1.context(
                         for: store.presentation
@@ -1062,8 +1088,8 @@ struct WorkoutDashboardView: View {
         case .unsupported: return "Unavailable"
         case .idle: return "Ready"
         case .launchingWatch: return "Starting on Apple Watch"
-        case .awaitingFirstSnapshot: return "Waiting for Watch metrics"
-        case .connected: return stateLabel(store.presentation.sessionState)
+        case .awaitingFirstSnapshot: return "Waiting for \(store.recordingOwner.displayName) metrics"
+        case .connected: return stateLabel(store.presentation.sessionState, owner: store.recordingOwner)
         case .stale: return "Delayed data"
         case .disconnected:
             return store.presentation.isWorkoutActive
@@ -1071,7 +1097,8 @@ struct WorkoutDashboardView: View {
                 : "Watch disconnected — verify workout on Watch"
         case .ended:
             return terminalTitle(
-                store.presentation.finalSnapshot ?? store.presentation.snapshot
+                store.presentation.finalSnapshot ?? store.presentation.snapshot,
+                owner: store.recordingOwner
             )
         case .failed: return errorTitle(store.presentation.errorCode)
         }
@@ -1138,23 +1165,23 @@ struct WorkoutSegmentNumberBadge: View {
     }
 }
 
-private func stateLabel(_ state: WorkoutSessionStateV1) -> String {
+private func stateLabel(_ state: WorkoutSessionStateV1, owner: WorkoutRecordingOwner = .watch) -> String {
     switch state {
     case .idle: return "Ready"
     case .starting: return "Starting"
     case .running: return "Live workout"
     case .paused: return "Workout paused"
-    case .ending: return "Finishing on Apple Watch"
+    case .ending: return "Finishing on \(owner.displayName)"
     case .ended: return "Ride finished"
     case .failed: return "Workout failed"
     }
 }
 
-private func terminalTitle(_ snapshot: WorkoutSnapshotV1) -> String {
+private func terminalTitle(_ snapshot: WorkoutSnapshotV1, owner: WorkoutRecordingOwner = .watch) -> String {
     switch snapshot.terminalOutcome {
-    case .saved: return "Workout saved on Apple Watch"
+    case .saved: return "Workout saved on \(owner.displayName)"
     case .discarded: return "Workout discarded"
-    case nil: return "Ride finished on Apple Watch"
+    case nil: return "Ride finished on \(owner.displayName)"
     }
 }
 
@@ -1162,9 +1189,14 @@ private func errorTitle(_ code: WorkoutSafeErrorCodeV1?) -> String {
     WorkoutErrorCopyV1.title(code)
 }
 
+@MainActor
 private func errorDetail(
+    for store: WorkoutMetricsStore,
     _ code: WorkoutSafeErrorCodeV1?,
     context: WorkoutErrorCopyContextV1 = .general
 ) -> String {
-    WorkoutErrorCopyV1.detail(code, context: context)
+    if store.recordingOwner == .iphone {
+        return store.recordingMessage ?? "The iPhone recording needs attention. Review its current state before trying another action."
+    }
+    return WorkoutErrorCopyV1.detail(code, context: context)
 }

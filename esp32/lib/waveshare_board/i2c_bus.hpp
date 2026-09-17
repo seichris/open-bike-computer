@@ -68,6 +68,11 @@ bool readRegister8(uint8_t address, uint8_t reg, uint8_t &value,
 bool readRegisterBlock8(uint8_t address, uint8_t reg, uint8_t *data,
                         uint8_t len, const char *label = nullptr,
                         uint8_t attempts = 3);
+// Passive diagnostic read: one attempt, existing bus only, at most 16 bytes.
+// No recovery, reconfiguration or retry; leaves data unchanged on any failure.
+bool readRegisterBlock8Once(uint8_t address, uint8_t reg, uint8_t *data,
+                            uint8_t len);
+
 bool readRegister16(uint8_t address, uint16_t reg, uint8_t *data, uint8_t len,
                     const char *label = nullptr, uint8_t attempts = 3);
 

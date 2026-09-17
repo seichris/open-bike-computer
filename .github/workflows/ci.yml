@@ -173,6 +173,26 @@ jobs:
           fi
           env -u LD_LIBRARY_PATH python3 tools/build_firmware.py \
             "${BUILD_ENVIRONMENT}" "${factory_args[@]}"
+      - name: Report largest firmware symbols after build failure
+        if: failure()
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          elf=".pio/build/${BUILD_ENVIRONMENT}/firmware.elf"
+          if [[ ! -f "${elf}" ]]; then
+            echo "No linked firmware image is available for symbol analysis"
+            exit 0
+          fi
+          nm_bin="$(find .pio/open-bike-build -type f \
+            \( -name 'xtensa-esp-elf-nm' -o \
+               -name 'xtensa-esp32s3-elf-nm' \) \
+            -perm -111 -print -quit)"
+          if [[ -z "${nm_bin}" ]]; then
+            echo "No Xtensa nm executable is available for symbol analysis"
+            exit 0
+          fi
+          "${nm_bin}" --print-size --size-sort --radix=d "${elf}" | tail -n 120
       - name: Verify production factory bundle packaging
         if: endsWith(matrix.target, '_PRODUCTION')
         env:
@@ -198,6 +218,24 @@ jobs:
             echo "Non-debug firmware contains the development map signer"
             exit 1
           fi
+      - name: Verify World Radio preview artifact gate
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          # Use the stable diagnostics-only marker emitted by the preview
+          # screen instead of a renderer-specific log message.
+          has_radio=false
+          if grep -aFq "World Radio preview artifact v1" ".pio/build/${BUILD_ENVIRONMENT}/firmware.bin"; then
+            has_radio=true
+          fi
+          case "$BUILD_ENVIRONMENT" in
+            *_PRODUCTION)
+              test "$has_radio" = false
+              ;;
+            *)
+              test "$has_radio" = true
+              ;;
+          esac
       - name: Verify ordinary artifacts include persistent diagnostics capability
         if: ${{ !contains(matrix.target, '_REMOTE_DEBUG') }}
         run: |
@@ -384,6 +422,7 @@ jobs:
           python -m pip install -r tools/preconnection-assets-requirements.txt
           python tools/generate_preconnection_assets.py --check
           python -m unittest tools.tests.test_preconnection_assets
+          python -m unittest tools.tests.test_world_radio_assets
       - name: GUI layout host tests
         run: |
           PYTHONPATH=tools python -m unittest \
@@ -457,6 +496,7 @@ jobs:
             tools/tests/test_speaker_playback_policy.cpp \
             -o /tmp/test_speaker_playback_policy
           /tmp/test_speaker_playback_policy
+          python3 -m unittest tools.tests.test_speaker_pcm_assets
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_speaker_resource_state.cpp \
             -o /tmp/test_speaker_resource_state
@@ -561,6 +601,29 @@ jobs:
             tools/tests/test_device_capabilities_protocol.cpp \
             -o /tmp/test_device_capabilities_protocol
           /tmp/test_device_capabilities_protocol
+      - name: Screen configuration protocol and Ride Stats widget host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_screen_configuration_protocol.cpp \
+            -o /tmp/test_screen_configuration_protocol
+          /tmp/test_screen_configuration_protocol
+          g++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 \
+            tools/tests/test_screen_configuration_protocol.cpp \
+            -o /tmp/test_screen_configuration_protocol_development
+          /tmp/test_screen_configuration_protocol_development
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_screen_configuration_policy.cpp \
+            -o /tmp/test_screen_configuration_policy
+          /tmp/test_screen_configuration_policy
+          g++ -std=c++17 -Wall -Wextra -Werror -Itools/tests/host_stubs \
+            tools/tests/test_screen_configuration_store.cpp \
+            -o /tmp/test_screen_configuration_store
+          /tmp/test_screen_configuration_store
+          /tmp/test_screen_configuration_store legacy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_ride_stats_widget.cpp \
+            -o /tmp/test_ride_stats_widget
+          /tmp/test_ride_stats_widget
       - name: Ride controller lease host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
@@ -610,6 +673,18 @@ jobs:
             tools/tests/test_device_screen_protocol.cpp \
             -o /tmp/test_device_screen_protocol
           /tmp/test_device_screen_protocol
+      - name: World Radio protocol and screen registry host tests
+        run: |
+          for test in test_world_radio_protocol test_world_radio_presentation test_world_radio_globe test_main_screen_registry; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              "tools/tests/${test}.cpp" \
+              -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
+          g++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 \
+            tools/tests/test_main_screen_registry.cpp \
+            -o /tmp/test_main_screen_registry_development
+          /tmp/test_main_screen_registry_development
       - name: Device ownership crypto host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
@@ -652,8 +727,13 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_ride_automation_policy.cpp \
-            -o /tmp/test_ride_automation_policy
-          /tmp/test_ride_automation_policy
+            -o /tmp/test_ride_automation_policy_production
+          /tmp/test_ride_automation_policy_production
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -DRIDE_AUTOMATION_AUTOMATIC_START=1 \
+            tools/tests/test_ride_automation_policy.cpp \
+            -o /tmp/test_ride_automation_policy_automatic_start
+          /tmp/test_ride_automation_policy_automatic_start
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_ride_automation_protocol.cpp \
             -o /tmp/test_ride_automation_protocol

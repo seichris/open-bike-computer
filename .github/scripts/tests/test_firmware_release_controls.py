@@ -74,6 +74,12 @@ class ReleaseControlsTests(unittest.TestCase):
         self.assertLess(workflow.index("uses: ./.github/actions/require-firmware-release-controls"),
                         workflow.index("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets."))
 
+    def test_ruleset_actor_readback_requests_required_administration_scope(self):
+        action = (Path(__file__).resolve().parents[2] /
+                  "actions/require-firmware-release-controls/action.yml").read_text()
+        self.assertIn("permission-administration: write", action)
+        self.assertNotIn("permission-administration: read", action)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,8 @@
     "settings": "2A73",
     "auth": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1002",
     "workout": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003",
-    "ride_automation": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004"
+    "ride_automation": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004",
+    "screen_configuration": "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005"
   },
   "protected_frame_overhead": 22,
   "protected_channels": {
@@ -18,7 +19,8 @@
     "gps": 4,
     "settings": 5,
     "workout": 6,
-    "ride_automation": 7
+    "ride_automation": 7,
+    "screen_configuration": 8
   },
   "controller_roles": {
     "none": 0,
@@ -29,7 +31,7 @@
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 23,
+    "current_client_version": 27,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -56,7 +58,40 @@
       "ride_delivery_ack": {"bit": 22, "minimum_client_version": 20},
       "renderer_benchmark_sample": {"bit": 23, "minimum_client_version": 21},
       "map_navigation_orientation": {"bit": 24, "minimum_client_version": 22},
-      "watch_gps_motion_evidence_v1": {"bit": 25, "minimum_client_version": 23}
+      "watch_gps_motion_evidence_v1": {"bit": 25, "minimum_client_version": 23},
+      "screen_configuration_v1": {"bit": 26, "minimum_client_version": 24},
+      "world_radio": {"bit": 27, "minimum_client_version": 25},
+      "display_inactivity_timeouts": {"bit": 28, "minimum_client_version": 26},
+      "workout_zones_v1": {"bit": 29, "minimum_client_version": 27}
+    }
+  },
+  "screen_types": {
+    "map": 0,
+    "navigation": 1,
+    "ride_stats": 2,
+    "map_plus_navigation": 3,
+    "battery_status": 4,
+    "world_radio": 5
+  },
+  "screen_configuration": {
+    "schema_version": 1,
+    "capability_tlv_type": 2,
+    "maximum_instances": 16,
+    "maximum_name_bytes": 24,
+    "ride_stats_slot_count": 7,
+    "maximum_document_bytes": 4096,
+    "request_magic": "SCRQ",
+    "upload_magic": "SCUP",
+    "download_magic": "SCDN",
+    "ack_magic": "SCAK",
+    "results": {
+      "applied": 0,
+      "conflict": 1,
+      "malformed": 2,
+      "unsupported": 3,
+      "persistence_failed": 4,
+      "busy": 5,
+      "unauthorized": 6
     }
   },
   "automation_source_health": {
@@ -68,7 +103,9 @@
   },
   "device_requests": {
     "workout_start_magic": "WREQ",
-    "destination_magic": "DREQ"
+    "destination_magic": "DREQ",
+    "world_radio_request_magic": "WRQ1",
+    "world_radio_status_magic": "WRS1"
   },
   "application_delivery": {
     "command_magic": "RCM1",
@@ -94,5 +131,71 @@
       "command_hex": "52434d310102010300112233445566778899aabbccddeeff78563412aabb",
       "ack_hex": "52414b310102000000112233445566778899aabbccddeeff7856341209000000"
     }
+  },
+  "workout_zones": {
+    "version": 1,
+    "frame_kind": 5,
+    "header_bytes": 32,
+    "maximum_zones": 9,
+    "minimum_zones": 3,
+    "maximum_frame_bytes": 132,
+    "heart_rate_maximum_age_ms": 30000,
+    "power_maximum_age_ms": 5000,
+    "stream_maximum_age_ms": 10000,
+    "flags": {
+      "final": 1,
+      "lower_bound_zero": 2,
+      "durations": 4
+    },
+    "metrics": {
+      "heart_rate": 1,
+      "cycling_power": 2
+    },
+    "sources": {
+      "bicino": 0,
+      "healthkit_system": 1,
+      "healthkit_user": 2,
+      "healthkit_app": 3,
+      "healthkit_unknown": 4
+    },
+    "offsets": {
+      "kind": 0,
+      "version": 1,
+      "metric": 2,
+      "source": 3,
+      "flags": 4,
+      "count": 5,
+      "current_zone": 6,
+      "state": 7,
+      "session_token": 8,
+      "sample_age_ms": 10,
+      "sequence": 12,
+      "session_uuid": 16,
+      "boundaries": 32
+    }
+  },
+  "ride_stats_widgets": {
+    "empty": 0,
+    "speed": 1,
+    "heart_rate": 2,
+    "heart_rate_zone": 3,
+    "distance": 4,
+    "moving_time": 5,
+    "elapsed_time": 6,
+    "altitude": 7,
+    "route_remaining": 8,
+    "power": 9,
+    "cadence": 10,
+    "average_speed": 11,
+    "maximum_speed": 12,
+    "calories": 13,
+    "average_heart_rate": 14,
+    "smart_metric1": 15,
+    "smart_metric2": 16,
+    "power_zone": 17,
+    "heart_rate_zone_time": 18,
+    "power_zone_time": 19,
+    "heart_rate_zone_range": 20,
+    "power_zone_range": 21
   }
 }

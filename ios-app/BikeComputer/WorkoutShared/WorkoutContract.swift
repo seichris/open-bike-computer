@@ -1,7 +1,7 @@
 import Foundation
 
 nonisolated struct WorkoutSchemaVersion: Codable, Equatable, Sendable {
-    static let current = Self(major: 1, minor: 6)
+    static let current = Self(major: 1, minor: 7)
     static let rideAutomationControlContextMinor: UInt16 = 5
     static let watchGPSMotionEvidenceMinor: UInt16 = 6
 
@@ -272,6 +272,7 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
     let currentHeartRateZone: UInt8?
     let heartRateZoneCount: UInt8?
     let heartRateZoneDurations: WorkoutZoneDurationsV1?
+    let nativeZones: WorkoutNativeZonesV1?
     let location: WorkoutLocationV1?
     let lastCompletedSegment: WorkoutCompletedSegmentV1?
     let availability: WorkoutAvailabilityMaskV1
@@ -300,6 +301,7 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
         currentHeartRateZone: UInt8? = nil,
         heartRateZoneCount: UInt8? = nil,
         heartRateZoneDurations: WorkoutZoneDurationsV1? = nil,
+        nativeZones: WorkoutNativeZonesV1? = nil,
         location: WorkoutLocationV1? = nil,
         lastCompletedSegment: WorkoutCompletedSegmentV1? = nil,
         availability: WorkoutAvailabilityMaskV1 = [],
@@ -324,6 +326,7 @@ nonisolated struct WorkoutSnapshotV1: Codable, Equatable, Sendable {
         self.currentHeartRateZone = currentHeartRateZone
         self.heartRateZoneCount = heartRateZoneCount
         self.heartRateZoneDurations = heartRateZoneDurations
+        self.nativeZones = nativeZones
         self.location = location
         self.lastCompletedSegment = lastCompletedSegment
         self.availability = availability
@@ -450,7 +453,7 @@ nonisolated enum WorkoutContractError: Error, Equatable, CustomStringConvertible
         case .invalidMetric:
             "Workout envelope contains an invalid metric"
         case .invalidZone:
-            "Workout envelope contains invalid heart-rate zone data"
+            "Workout envelope contains invalid workout zone data"
         case .invalidLocation:
             "Workout envelope contains an invalid location"
         }
@@ -471,6 +474,7 @@ nonisolated enum WorkoutContractCodec {
         }
         plist["schemaVersion"] = ["major": 1, "minor": 5]
         if var snapshot = plist["snapshot"] as? [String: Any] {
+            snapshot.removeValue(forKey: "nativeZones")
             if envelope.snapshot?.currentSpeed?.source == .healthKit {
                 snapshot.removeValue(forKey: "currentSpeed")
                 // Availability describes the projected metric, not its source.
@@ -705,6 +709,35 @@ nonisolated enum WorkoutContractCodec {
             earliestCapturedAt: earliestComponentDate,
             latestCapturedAt: envelopeCapturedAt
         )
+
+        if let native = snapshot.nativeZones {
+            guard native.isValid,
+                  let startDate = snapshot.startDate,
+                  snapshot.state.isActive || snapshot.terminalOutcome == .saved else {
+                throw WorkoutContractError.invalidZone
+            }
+            let saved = snapshot.state == .ended && snapshot.terminalOutcome == .saved
+            let durationLimit = snapshot.elapsedTime?.value
+                ?? envelopeCapturedAt.timeIntervalSince(startDate)
+            for group in native.groups {
+                guard group.isFinal == saved,
+                      isWithinComponentWindow(group.observedAt, earliest: startDate, latest: envelopeCapturedAt),
+                      group.secondsByZone.reduce(0, +) <= durationLimit + 1,
+                      group.currentZoneSampleAt.map({
+                          isWithinComponentWindow($0, earliest: startDate, latest: group.observedAt)
+                      }) ?? true else { throw WorkoutContractError.invalidZone }
+                if let currentZone = group.currentZone {
+                    let metric = group.configuration.metric == .heartRate
+                        ? snapshot.currentHeartRate : snapshot.cyclingPower
+                    guard snapshot.state == .running,
+                          let metric, let nativeSampleAt = group.currentZoneSampleAt,
+                          metric.capturedAt >= nativeSampleAt,
+                          group.configuration.ranges[Int(currentZone) - 1].mayContain(metric.value) else {
+                        throw WorkoutContractError.invalidZone
+                    }
+                }
+            }
+        }
 
         let hasZonePayload = snapshot.heartRateZoneCount != nil
             || snapshot.currentHeartRateZone != nil

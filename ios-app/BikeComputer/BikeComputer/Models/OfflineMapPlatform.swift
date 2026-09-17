@@ -726,6 +726,10 @@ struct MapActivationProgressPresentation: Equatable {
             percentage: min(max(percentage, 0), 100)
         )
     }
+
+    static func shouldClear(forTransferOutcome outcome: String) -> Bool {
+        outcome == "installed" || outcome == "failed"
+    }
 }
 
 nonisolated enum MapUploadProgressReconciler {

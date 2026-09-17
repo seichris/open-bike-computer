@@ -131,6 +131,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
     private var leaseReleaseAckTask: Task<Void, Never>?
     private var latestWorkoutFrames: WorkoutDeviceFrames?
+    private var workoutZoneSequence: UInt32 = 0
     private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
     private var latestWorkoutMotion: WorkoutDeviceMotionUpdate?
     private var workoutPairGeneration: UInt8 = 0
@@ -149,6 +150,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         WatchDirectRidePreparationRestorationGateV1(
             restoredOperation: nil
         )
+    private var initialDemandRestorationCompleted = false
+    private var pendingPhonePreparationReconciliation:
+        WatchDirectRideReconciliationRequestV1?
+    private let pendingPhonePreparationReconciliationKey =
+        "watchBLE.pendingPhonePreparationReconciliation.v1"
 
     private let peripheralMapKey =
         "watchDeviceLink.peripheralByDeviceID.v1"
@@ -180,6 +186,12 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             phonePreparationRestorationGate = .init(
                 restoredOperation: intent.operation
             )
+        }
+        if let data = defaults.data(
+            forKey: pendingPhonePreparationReconciliationKey
+        ) {
+            pendingPhonePreparationReconciliation = try?
+                WatchDirectRideReconciliationRequestV1.decode(data)
         }
         super.init()
     }
@@ -403,6 +415,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     func directRidePreparationAvailabilityDidChange() {
         guard !gracefulStopPending else { return }
+        reconcilePendingPhonePreparationRequest()
         if hasDemand {
             reconcileDemand()
         } else if phonePreparationReleasePending {
@@ -412,6 +425,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     func completeInitialDemandRestoration() {
         guard !gracefulStopPending else { return }
+        initialDemandRestorationCompleted = true
         switch phonePreparationRestorationGate.complete(
             hasRecoveredDemand: hasDemand
         ) {
@@ -422,6 +436,21 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         case .none:
             break
         }
+        reconcilePendingPhonePreparationRequest()
+    }
+
+    func requestPhonePreparationReconciliation(
+        _ request: WatchDirectRideReconciliationRequestV1
+    ) {
+        guard (try? request.validated()) != nil else { return }
+        pendingPhonePreparationReconciliation = request
+        if let data = try? request.encoded() {
+            defaults.set(
+                data,
+                forKey: pendingPhonePreparationReconciliationKey
+            )
+        }
+        reconcilePendingPhonePreparationRequest()
     }
 
     func updateNavigation(
@@ -681,12 +710,59 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             preparationID
         ) ?? .transportUnavailable
         guard disposition == .submitted else { return false }
+        clearPendingPhonePreparationReconciliation(
+            deviceID: deviceID,
+            preparationID: preparationID
+        )
         preparedPhoneDeviceID = nil
         preparedPhonePreparationID = nil
         phonePreparationReleasePending = false
         phonePreparationAttempt = 0
         defaults.removeObject(forKey: directRidePreparationIntentKey)
         return true
+    }
+
+    private func reconcilePendingPhonePreparationRequest() {
+        guard initialDemandRestorationCompleted,
+              let request = pendingPhonePreparationReconciliation else {
+            return
+        }
+        let matchesCurrentPreparation =
+            preparedPhoneDeviceID == request.deviceID &&
+            preparedPhonePreparationID == request.preparationID
+        guard matchesCurrentPreparation else {
+            let disposition = onDirectRidePreparationChange?(
+                .release,
+                request.deviceID,
+                request.preparationID
+            ) ?? .transportUnavailable
+            if disposition == .submitted {
+                clearPendingPhonePreparationReconciliation(
+                    deviceID: request.deviceID,
+                    preparationID: request.preparationID
+                )
+            }
+            return
+        }
+        guard !hasDemand else { return }
+        if transportStateMachine.phase == .idle {
+            _ = releasePhonePreparationIfNeeded()
+        } else {
+            reconcileDemand()
+        }
+    }
+
+    private func clearPendingPhonePreparationReconciliation(
+        deviceID: String,
+        preparationID: UUID
+    ) {
+        guard pendingPhonePreparationReconciliation?.deviceID == deviceID,
+              pendingPhonePreparationReconciliation?.preparationID ==
+                preparationID else { return }
+        pendingPhonePreparationReconciliation = nil
+        defaults.removeObject(
+            forKey: pendingPhonePreparationReconciliationKey
+        )
     }
 
     private func persistPhonePreparationIntent(
@@ -935,6 +1011,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         challenge = nil
         protectedSession = nil
         capabilities = nil
+        workoutZoneSequence = 0
         authCharacteristic = nil
         navigationCharacteristic = nil
         routeCharacteristic = nil
@@ -1314,10 +1391,21 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         workoutPairGeneration = workoutPairGeneration == 3
             ? 1
             : workoutPairGeneration + 1
+        let zonesSupported = capabilities?.supportsWorkoutZonesV1 == true
+            && (peripheral?.maximumWriteValueLength(for: .withResponse) ?? 0) >=
+                RideBLEGeneratedProtocolV1.workoutZoneMaximumFrameBytes +
+                RideBLEGeneratedProtocolV1.protectedFrameOverhead +
+                RideBLEGeneratedProtocolV1.applicationCommandHeaderBytes
+        var zoneSequence: UInt32 = 0
+        if zonesSupported && workoutZoneSequence < UInt32.max {
+            workoutZoneSequence += 1
+            zoneSequence = workoutZoneSequence
+        }
         let payloads = WorkoutDeviceFrameBuilder.transportFrames(
             for: frames,
             generation: workoutPairGeneration,
-            includeOrigin: capabilities?.supportsRideAutomation == true
+            includeOrigin: capabilities?.supportsRideAutomation == true,
+            zoneSequence: zoneSequence
         )
         let isCritical = [
             WorkoutDeviceSessionState.ending,
@@ -1331,7 +1419,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             applicationCommandType: isCritical ? .workoutState : nil,
             coalescingKey: "workout",
             writes: payloads.map {
-                .init(target: .workout, payload: $0)
+                .init(target: .workout, payload: $0,
+                      zoneDispatch: $0.first == 5 ? RideBLEZoneDispatch(frame: $0) : nil)
             }
         )
     }
@@ -1483,6 +1572,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 }
                 payload = freshPayload
             }
+            if let zone = write.zoneDispatch { payload = zone.payload() }
             if shouldUseApplicationAcknowledgement(for: group) {
                 guard let commandType = group.applicationCommandType,
                       let wrapped = RideBLEApplicationCommandEnvelopeV1(

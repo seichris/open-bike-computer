@@ -9,7 +9,9 @@
 #pragma once
 
 #include "maps.hpp"
+#include "mainScreenTypes.hpp"
 #include "mapRenderPolicy.hpp"
+#include "../../ble_navigation/screen_configuration_protocol.hpp"
 
 #include "buttonBar.hpp"
 #include "batteryStatusScr.hpp"
@@ -35,15 +37,6 @@ extern bool isScrollingMap; // Flag to indicate if map is scrolling
 extern uint8_t activeTile; // Active Tile in TileView control
 extern int heading;        // Heading value (Compass or GPS)
 
-enum tileName {
-  COMPASS = 0,
-  MAP = 1,
-  NAV = 2,
-  SATTRACK = 3,
-  RIDESTATS = 4,
-  MAP_GUIDANCE = 5,
-  BATTERY_STATUS = 6,
-};
 
 /**
  * @brief Main Screen Tiles
@@ -53,6 +46,7 @@ extern lv_obj_t *compassTile;
 extern lv_obj_t *navTile;
 extern lv_obj_t *rideStatsTile;
 extern lv_obj_t *batteryStatusTile;
+extern lv_obj_t *worldRadioTile;
 extern lv_obj_t *mapTile;
 extern lv_obj_t *satTrackTile;
 extern lv_obj_t *tilesScreen;
@@ -87,6 +81,11 @@ void updateNavEvent(lv_event_t *event);
 void showNextMainScreen();
 bool isMapScreenActive();
 bool isMapGuidanceScreenActive();
+uint32_t currentScreenInstanceID();
+uint32_t currentMapRenderInstanceID();
+uint8_t currentMapRenderInstanceType();
+uint32_t currentMapRenderProfileSignature();
+const screen_configuration_protocol::RideStatsLayout &currentRideStatsLayout();
 bool shouldInterruptMapRenderForScreenCycle();
 bool mapPinchOwnsInput();
 bool mapPinchBlocksMapRender();
@@ -99,3 +98,4 @@ void createMainScr();
 void toggleNavigationScreen();
 void showConfiguredDefaultMainScreen();
 void applyDeviceScreenSettings();
+void applyDeviceScreenConfiguration();

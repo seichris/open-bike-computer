@@ -37,6 +37,7 @@ navigation-ready.
 | `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer, device-screen, and phone-status values. |
 | `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003` | iOS/Watch -> ESP32 | Fixed 16-byte core/extended/Watch-motion or 28-byte origin workout frame | Watch-owned workout state, optional live metrics/provenance, and capability-gated raw Watch GPS motion evidence. |
 | `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004` | bidirectional | Fixed 52-byte `RAUT` v2 frame | Internal, feature-gated ride-detection decisions, configuration, prompt responses, cancellations, acknowledgements, confirmations, and resynchronization. |
+| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005` | bidirectional | Chunked binary screen-configuration document | Owner-only atomic read/write of ordered, duplicate-capable screen instances and per-instance settings. |
 
 `DistanceMeters` is an unsigned 16-bit decimal value (`0...65535`). The iOS
 sender saturates larger maneuver distances at `65535` instead of allowing the
@@ -141,7 +142,8 @@ completes.
 ### Protected session frames
 
 After `OK2`, all app-to-device writes on the auth, navigation, route, GPS,
-settings, and workout characteristics use AES-256-GCM. Auth replies and every
+settings, workout, ride-automation, and screen-configuration characteristics
+use AES-256-GCM. Auth replies and every
 device-to-app navigation notification—including destination requests,
 capabilities, acknowledgements, and transfer status—use the reverse protected
 direction. Plaintext notifications are rejected while a v2 session exists. The
@@ -162,7 +164,8 @@ Tag: 16-byte AES-GCM tag
 ```
 
 Channels are `1=auth`, `2=navigation`, `3=route`, `4=GPS`, `5=settings`,
-`6=workout`, and `7=ride automation`.
+`6=workout`, `7=ride automation`, and `8=screen configuration`. Channel `8`
+is owner-only; a scoped Watch controller cannot read or change screen layouts.
 Each direction has an independent strictly increasing sequence per channel.
 Receivers reject zero, replayed, out-of-order, wrong-channel, or invalid-tag
 frames. Sequence gaps are accepted; this lets a newer replaceable-state frame
@@ -757,11 +760,11 @@ screen cycling remain unchanged.
 
 ## Ride Automation (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004`)
 
-Ride automation is an internal-build protocol while the physical false-start,
-recovery, and board-stability gates in
+Ride automation is enabled in the production profiles, while the physical
+false-start, recovery, and board-stability gates in
 `docs/plans/automatic-ride-detection-implementation-plan.md` remain open.
-Production firmware neither advertises CAP2 bit `15` nor runs this control
-path. Manual `WREQ` and workout telemetry remain available.
+Production advertises CAP2 bit `15` and runs the bounded control path. Manual
+`WREQ` and workout telemetry remain available.
 
 The native characteristic carries authenticated notifications and writes on
 ownership-v2 channel `7`. A cached GATT table uses:
@@ -900,7 +903,9 @@ Current setting IDs:
 | `33` | Map + Navigation street-label size | Same values as ID `29` |
 | `34` | Map + Navigation street-label orientation | Same values as ID `30` |
 | `35` | Map + Navigation 3D buildings | `0` flat footprints, `1` LoD1 walls and roofs in the bird's-eye Map + Navigation view; defaults to enabled and is persisted as `nav3DBuild` |
-| `36` | Automatic display off | `0` disabled, `1` enabled; defaults to enabled and is persisted as `autoDisplayOff`. When enabled, the connected display dims after 15 seconds and turns off after 45 seconds without meaningful activity, except for navigation, workout, transfer, or attention holds. |
+| `36` | Automatic display off | `0` disabled, `1` enabled; defaults to enabled and is persisted as `autoDisplayOff`. When enabled, the connected display uses the configured inactivity timeouts (15 seconds before dimming and 45 seconds before panel off by default), except for navigation, workout, transfer, or attention holds. |
+| `37` | Map + Navigation rotation | `0` North Up, `1` Course Up; defaults to Course Up and is persisted as `navRotation`. |
+| `38` | Display inactivity timeouts | Atomic `Int32LE` pair: low 16 bits are seconds before dimming and high 16 bits are seconds before panel off. Defaults are `15` and `45`. Firmware accepts dim `5...600`, off `10...3600`, and requires off to be at least five seconds later than dim. The pair is persisted as one NVS value. |
 
 In a dense scene, firmware reserves its bounded extrusion workspace from the
 nearest eligible buildings outward, preserves global back-to-front drawing,
@@ -954,6 +959,86 @@ Legacy v1 map blocks do not contain feature type IDs, so the renderer also
 combines Local with Service and Paths with Tracks for those blocks. Downloading
 a current v2 map is required for independent road-class visibility.
 
+## Configurable screen instances
+
+Clients at version `24` can negotiate CAP2 feature bit `26` and TLV type `2`.
+The feature is advertised only after the firmware configuration store and the
+dedicated characteristic both initialize. The 14-byte TLV value is:
+
+```text
+Schema: UInt8 (=1)
+MaximumInstances: UInt8 (=16)
+MaximumNameBytes: UInt8 (=24)
+RideStatsSlotCount: UInt8 (=7)
+SupportedScreenTypes: UInt32LE
+SupportedRideStatsWidgets: UInt32LE
+MaximumDocumentBytes: UInt16LE (=4096)
+```
+
+Screen types are `0=Map`, `1=Navigation`, `2=Ride Stats`, `3=Map +
+Navigation`, and `4=Battery Status`. Multiple instances may use the same type.
+Each instance has a nonzero stable `UInt32` ID, an independent enabled flag and
+name, and type-specific payload. The ordered enabled instances define the
+device's tap/PWR-button cycle; `DefaultInstanceID` must identify an enabled
+instance.
+
+The schema-1 document is CRC-protected and bounded to 4096 bytes:
+
+```text
+"SCV1" | Schema: UInt8 | InstanceCount: UInt8 | DefaultInstanceID: UInt32LE
+repeat InstanceCount times:
+  InstanceID: UInt32LE | Type: UInt8 | Flags: UInt8
+  NameLength: UInt8 | PayloadLength: UInt16LE | UTF8Name | Payload
+DocumentCRC32: UInt32LE
+```
+
+Flag bit `0` means enabled; other flag bits are invalid. Navigation and Battery
+Status payloads contain only payload version `1`. Map and Map + Navigation
+payloads carry the complete independent map profile (detail, widths, zoom,
+visibility, labels, rotation, and the type-specific bird's-eye fields). Map +
+Navigation appends its independent rotation byte (`0` north-up, `1` course-up)
+after the 3D-buildings flag, for a 19-byte payload. A pre-integration 18-byte
+payload is accepted with the legacy course-up default. The orientation control
+is effective only when the device also advertises bit `24`; production retains
+its existing hardware-qualification gate. Ride
+Stats uses payload version `1`, layout kind `1`, slot count `7`, then seven
+widget IDs. Widget IDs are `0=Empty`, `1=Speed`, `2=Heart Rate`, `3=Heart-Rate
+Zone`, `4=Distance`, `5=Moving Time`, `6=Elapsed Time`, `7=Altitude`, `8=Route
+Remaining`, `9=Power`, `10=Cadence`, `11=Average Speed`, `12=Maximum Speed`,
+`13=Calories`, `14=Average Heart Rate`, and `15...16=Smart Metric 1...2`.
+At least one Ride Stats slot and one screen instance must be visible.
+
+All transfer messages use protected channel `8`. iOS uses acknowledged GATT
+writes and queues every upload batch atomically. Chunk count is at most 160 and
+in-order reassembly expires after five seconds:
+
+```text
+Read:     "SCRQ" | RequestID: UInt32LE
+Upload:   "SCUP" | RequestID: UInt32LE | BaseRevision: UInt32LE |
+          ChunkIndex: UInt8 | ChunkCount: UInt8 | Bytes...
+Download: "SCDN" | RequestID: UInt32LE | Revision: UInt32LE |
+          ChunkIndex: UInt8 | ChunkCount: UInt8 | Bytes...
+Ack:      "SCAK" | RequestID: UInt32LE | Result: UInt8 |
+          Revision: UInt32LE | DocumentCRC32: UInt32LE
+```
+
+Acknowledgement results are `0=Applied`, `1=Conflict`, `2=Malformed`,
+`3=Unsupported`, `4=Persistence Failed`, `5=Busy`, and `6=Unauthorized`.
+Applied acknowledgements echo the committed document CRC and the new nonzero
+revision. Firmware rejects stale `BaseRevision` values without partial changes,
+and remembers a bounded set of completed request IDs so a repeated transfer is
+idempotent.
+
+Persistence uses CRC-checked A/B document slots, an active-head record written
+after the inactive slot verifies, and a mirror-transaction marker for the
+legacy settings projection. On first boot it migrates the five legacy screen
+types in their existing order. Older apps continue to read and write setting
+IDs `13` and `14`; those values project to the primary instance of each type
+and are imported back into the schema-1 document after a short debounce. New
+apps keep an acknowledged per-device cache, always request a fresh snapshot on
+connect, preserve unsaved same-device edits across a transient reconnect, and
+offer an explicit choice after a revision conflict.
+
 ## Device Sound Playback
 
 The authenticated command channel accepts a sound-play frame on either the
@@ -1002,8 +1087,9 @@ after an AXP2101 short-press event, so the button works without an active app
 connection. Firmware configures the AXP2101's hard power-off threshold to four
 seconds; this remains independent of the short-press honk behavior.
 
-Independently of hard power-off, connected firmware dims after 15 seconds and
-turns the panel off after 45 seconds without meaningful activity when no
+Independently of hard power-off, connected firmware dims after the selected
+delay (15 seconds by default) and turns the panel off after the selected later
+delay (45 seconds by default) without meaningful activity when no
 navigation is active. GPS and workout telemetry alone do not keep the panel
 awake. A
 changed maneuver instruction/icon, a closer maneuver-distance threshold,
@@ -1136,7 +1222,10 @@ one-Hz ride-automation trace. Bit `22` reports the application-confirmed
 critical ride-delivery contract described above. Bit `23` reports the atomic
 renderer replay sample described below. Bit `24` reports independent map navigation
 orientation. Bit `25` reports the Watch GPS
-motion-evidence frame and is advertised only with internal ride control. Client version `11` requests
+motion-evidence frame and is advertised only with internal ride control. Bit `26`
+reports the complete configurable-screen store, characteristic, codec, and runtime
+path described above. Bit `27` reports World Radio. Bit `28` reports the
+atomic configurable display-inactivity timeout pair (setting ID `38`). Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
@@ -1146,26 +1235,47 @@ released automatic-display setting. Version `18` requests bit `20`, version
 `19` requests bit `21`, version `20` requests bit `22`, and version `21`
 requests bit `23`. Version `22` requests bit `24`, independent Map + Navigation
 orientation (setting ID `37`). Firmware advertises bit `24` only with
-`MAP_STABLE_CAMERA=1`; production profiles keep it clear pending per-target
-physical qualification. This capability is independent of label orientation.
+`MAP_STABLE_CAMERA=1`; both Waveshare production profiles now set it, while
+physical qualification remains tracked separately for each panel. This
+capability is independent of label orientation.
 Version `23` requests bit `25`, Watch GPS motion evidence.
-Production builds keep bit `15` clear until the
-ride-detection physical gates pass. Firmware sets bit `16` only in
+Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
+Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
+configurable display inactivity timeouts. Version `27` requests bit `29`,
+versioned workout zones. The current iPhone and direct Watch clients negotiate
+version `27`; older direct Watch clients remain valid at version `23`. Bit `23` remains the
+renderer replay capability and must never be interpreted as World Radio.
+World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
+Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
+omits both the screen and capability pending physical interaction qualification.
+Its owner-authenticated `WRQ1` requests and `WRS1` status use the existing
+navigation characteristic; stream discovery and playback run on the iPhone.
+See [World Radio](world-radio.md) and the bounded codecs in
+`esp32/lib/world_radio/world_radio_protocol.hpp` and
+`ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift`.
+Production builds now advertise bit `15` because the RAUT control path is
+enabled; physical ride-detection gates remain outstanding. Firmware sets bit
+`16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
 Firmware sets bit `18` only when `FIRMWARE_DIAGNOSTICS=1`; production builds
 therefore expose neither the snapshot nor experimental profile control. GFX
 firmware advertises bit `19` for client version `16` and newer; iOS enables the
 toggle and sends ID `36` only after this bit is received, so legacy firmware
 with the generic settings characteristic never receives an unsupported setting.
+GFX firmware advertises bit `28` for client version `26` and newer. iOS shows
+the two timeout pickers and sends ID `38` only after this bit is received.
 The bounded persistent recorder may advertise bit `20` in ordinary and
 production profiles; it never enables USB serial diagnostics or the
 remote-debug service.
-Firmware advertises bit `21` only when the read-only ride-automation shadow
-producer is compiled. Production firmware keeps it clear, and iOS downgrades
-an otherwise detailed capture binding to standard correlation when it is absent.
+Firmware advertises bit `21` only when detailed ride diagnostics are compiled.
+Development profiles include both detailed diagnostics and the normalized
+ride-automation trace producer; production keeps the control path but omits
+both to stay within the dual-OTA image budget. Detailed capture binding is
+therefore unavailable in production.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
-exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
+exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
+carries the 14-byte screen-configuration limits and support masks. Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
 well-formed types are skipped. Firmware sends legacy `CAPS` to clients below
 version `10`, preserving the version `7...9` extended-byte contract, and current
@@ -1207,11 +1317,20 @@ Detailed ride diagnostics, CAP2 schema 1, only feature bit 21:
 Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
 43 41 50 32 01 00 00 40 00
 
+Configurable screens, CAP2 schema 1, feature bit 26 and TLV type 2:
+43 41 50 32 01 00 00 00 04 02 0e 01 10 18 07 1f 00 00 00 ff ff 01 00 00 10
+
 Atomic renderer replay sample, CAP2 schema 1, only feature bit 23:
 43 41 50 32 01 00 00 80 00
 
 Watch GPS motion evidence, CAP2 schema 1, only feature bit 25:
 43 41 50 32 01 00 00 00 02
+
+World Radio, CAP2 schema 1, only feature bit 27:
+43 41 50 32 01 00 00 00 08
+
+Display inactivity timeouts, CAP2 schema 1, only feature bit 28:
+43 41 50 32 01 00 00 00 10
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1371,6 +1490,11 @@ ID `36` is sent only after a valid `CAP2` response advertises bit `19`.
 Firmware without that bit is never offered the Automatic Display Off toggle;
 the setting remains app-local until a compatible connected display is
 negotiated.
+
+ID `38` is sent only after a valid `CAP2` response advertises bit `28`. The app
+presents separate Dim After and Turn Off After pickers but sends both values in
+one atomic setting. Older firmware retains the fixed 15/45-second policy and is
+not offered the timeout pickers.
 
 ### Independent navigation orientation setting
 
@@ -1717,7 +1841,10 @@ for the complete boot. When removable SD was mounted at boot, diagnostics uses
 that mount without unmounting it beneath map/font readers. When the boot is
 already using the bounded internal FFat fallback, diagnostics exports FFat and
 does not switch to a newly inserted removable card while recorder or map file
-handles may still be open; adopting removable storage requires a reboot.
+handles may still be open; adopting removable storage requires a reboot. FFat
+uses a 1 MiB diagnostics retention ceiling and preserves 2 MiB of free space,
+while removable SD retains the original 32 MiB ceiling and 8 MiB reserve. See
+[Ride diagnostics format](ride-diagnostics-format.md#device-storage-retention).
 
 The diagnostics-entry `DSTS.lastError` codes are stable and stage-specific:
 
@@ -1923,3 +2050,50 @@ The HTTPS service is configured by firmware at boot but remains disabled until
 BLE transfer control binds it to an authenticated owner session. BLE disconnect
 synchronously clears the token, hotspot secret, binding, and request generation,
 stops the listener, and schedules mode-specific cleanup.
+
+### World Radio reuse invariants
+
+The World Radio reuse/lifecycle follow-up does not change WRQ1/WRS1 bytes,
+CAP2 bit 27, client version 25, or screen type 5. Stable screen identifiers now
+come from `screen_types` in `protocol/ride-ble-contract-v1.json`; generated
+Swift/C++ adapters preserve legacy masks and configurable-screen payload IDs.
+The common request/status fixtures in `protocol/fixtures/world-radio-v1.txt`
+are consumed by firmware and phone host tests. See `docs/world-radio.md` for
+playback intent, item/search generation, and vector-Earth coordinate selection.
+
+### Native HealthKit zones and legacy workout frames
+
+Workout mirror schema 1.7 adds optional `snapshot.nativeZones` for iPhone/Watch. It carries separate heart-rate and cycling-power groups, exact thresholds,
+configuration provenance, native durations, observation timestamps and an
+explicit final/saved distinction. The property-list addition is distinct from the versioned device sidecar below. Unknown legacy phone projection strips
+this optional payload; known schema-1.6 peers may ignore its unknown key.
+
+`WEXT` and its five-band Bicino heart-rate model remain byte-for-byte unchanged.
+Never copy a native ordinal (including a five-zone native ordinal with different
+thresholds) into that legacy field. Native power zones do not replace watts.
+Native zones on the ESP32 use the separately versioned kind-5 sidecar; they do
+not change WEXT, watts, cadence, or the old source-flag meanings.
+
+### Versioned workout zone device sidecars
+
+Client version 27 requests CAP2 bit 29 (`workout_zones_v1`). Updated iOS 26 and
+older supported Watch systems retain the explicitly labelled Bicino HR fallback.
+Native HealthKit groups require the SDK/runtime-gated Watch API; power zones are
+unavailable rather than estimated without it. Firmware advertises this feature
+and new widget IDs 17–21 only in diagnostic/development profiles pending physical
+qualification. Older peers, production firmware and insufficient-MTU connections
+continue the original legacy telemetry path.
+
+Kind 5 uses a 32-byte header, exact binary64 thresholds, a full workout UUID,
+ordered sequence, per-metric source age and bounded millisecond durations, for
+3–9 zones and at most 132 bytes. HR and power packets are self-contained rather
+than referring to an unacknowledged configuration cache. Capability-negotiated
+critical workout ACK groups have exactly five members (core, extended, origin,
+HR zones, power zones); existing 1–3-member groups remain valid. Both relays use
+the shared encoder and age queued samples immediately before encryption/retry.
+
+See [Workout zone device protocol](workout-zone-device-protocol.md) for the
+normative offsets, validation, replay/expiry and compatibility matrix. The JSON
+contract generates Swift/C++ constants and append-only widget IDs. Golden
+packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
+by both languages.

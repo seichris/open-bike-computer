@@ -8,6 +8,7 @@ trap 'rm -rf "${OUT_DIR}"' EXIT
 OUT="${OUT_DIR}/runner"
 
 cd "${REPO_DIR}"
+"${SCRIPT_DIR}/run-workout-recording-tests.sh"
 
 xcrun swiftc \
   -parse-as-library \
@@ -17,6 +18,9 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -24,10 +28,11 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
-  ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
   ios-app/BikeComputer/WorkoutShared/WatchWorkoutLaunchRequest.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputerWatch/Managers/WatchWorkoutRecoveryStore.swift \
   ios-app/BikeComputerTests/WorkoutContractTests.swift

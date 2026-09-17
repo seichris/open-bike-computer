@@ -41,6 +41,8 @@ struct Context {
   bool automaticDisplayOffEnabled = true;
   bool transferActive = false;
   bool attentionActive = false;
+  uint32_t dimAfterMs = kDimAfterMs;
+  uint32_t displayOffAfterMs = kDisplayOffAfterMs;
 };
 
 struct Update {
@@ -131,6 +133,13 @@ public:
       lastMeaningfulActivityMs_ = nowMs;
     }
 
+    if (dimAfterMs_ != context.dimAfterMs ||
+        displayOffAfterMs_ != context.displayOffAfterMs) {
+      dimAfterMs_ = context.dimAfterMs;
+      displayOffAfterMs_ = context.displayOffAfterMs;
+      lastMeaningfulActivityMs_ = nowMs;
+    }
+
     const bool heldAwake =
         context.navigating || context.workoutActive || context.transferActive ||
         context.attentionActive;
@@ -152,9 +161,9 @@ public:
       requested = Mode::Active;
     } else {
       const uint32_t idleMs = elapsedMs(nowMs, lastMeaningfulActivityMs_);
-      if (idleMs >= kDisplayOffAfterMs) {
+      if (idleMs >= displayOffAfterMs_) {
         requested = Mode::DisplayOff;
-      } else if (idleMs >= kDimAfterMs) {
+      } else if (idleMs >= dimAfterMs_) {
         requested = Mode::Dimmed;
       }
     }
@@ -179,6 +188,8 @@ private:
   bool heldAwake_ = false;
   bool automaticDisplayOffEnabled_ = true;
   uint32_t lastMeaningfulActivityMs_ = 0;
+  uint32_t dimAfterMs_ = kDimAfterMs;
+  uint32_t displayOffAfterMs_ = kDisplayOffAfterMs;
   Mode mode_ = Mode::Active;
 };
 

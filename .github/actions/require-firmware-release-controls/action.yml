@@ -3,7 +3,7 @@ description: Fail before signing unless the explicit review policy, environment 
 inputs:
   app-id:
     required: true
-    description: Repository-scoped read-only preflight App ID
+    description: Repository-scoped preflight App ID (Administration write is required for ruleset actor read-back)
   private-key:
     required: true
     description: Environment-scoped preflight App private key
@@ -17,7 +17,11 @@ runs:
         private-key: ${{ inputs.private-key }}
         owner: ${{ github.repository_owner }}
         repositories: ${{ github.event.repository.name }}
-        permission-administration: read
+        # GitHub redacts ruleset bypass_actors unless the caller has write
+        # access to the ruleset. The script only reads metadata and has no
+        # mutation endpoint; this is the minimum permission that exposes the
+        # configured actor for the fail-closed check.
+        permission-administration: write
         permission-environments: read
         permission-secrets: read
         permission-contents: read

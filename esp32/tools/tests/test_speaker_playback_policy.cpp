@@ -8,6 +8,7 @@ using waveshare_board::speaker::TrackedPlaybackResult;
 using waveshare_board::speaker::classifyPlaybackCompletion;
 using waveshare_board::speaker::decodePlaybackCompletion;
 using waveshare_board::speaker::encodePlaybackCompletion;
+using waveshare_board::speaker::expandMonoPcm16ToStereo;
 using waveshare_board::speaker::kPlaybackRequestIdMask;
 using waveshare_board::speaker::playbackRequestLifecycleSucceeded;
 
@@ -46,6 +47,17 @@ int main() {
   assert(playbackRequestLifecycleSucceeded(true, true, true));
   assert(!playbackRequestLifecycleSucceeded(true, true, false));
   assert(!playbackRequestLifecycleSucceeded(false, false, true));
+
+  const uint8_t mono[] = {0x34, 0x12, 0x00, 0x80, 0xff, 0x7f};
+  uint8_t stereo[12]{};
+  assert(expandMonoPcm16ToStereo(mono, sizeof(mono), stereo, 3) == 3);
+  const uint8_t expectedStereo[] = {
+      0x34, 0x12, 0x34, 0x12, 0x00, 0x80,
+      0x00, 0x80, 0xff, 0x7f, 0xff, 0x7f};
+  for (std::size_t index = 0; index < sizeof(stereo); ++index)
+    assert(stereo[index] == expectedStereo[index]);
+  assert(expandMonoPcm16ToStereo(mono, sizeof(mono), stereo, 1) == 1);
+  assert(expandMonoPcm16ToStereo(nullptr, sizeof(mono), stereo, 3) == 0);
 
   return 0;
 }

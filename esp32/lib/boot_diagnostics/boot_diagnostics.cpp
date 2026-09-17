@@ -21,6 +21,7 @@ namespace {
 
 RTC_NOINIT_ATTR policy::PersistentState persistentState;
 bool initialized = false;
+StageCompletionObserver stageObserver = nullptr;
 bool runtimeSafeMode = false;
 uint32_t bootStartedAtMs = 0;
 
@@ -212,6 +213,10 @@ void begin() {
            runtimeSafeMode ? Stage::SafeMode : Stage::Startup);
 }
 
+void setStageCompletionObserver(StageCompletionObserver observer) {
+  stageObserver = observer;
+}
+
 bool safeModeActive() { return runtimeSafeMode; }
 
 Snapshot snapshot() {
@@ -254,6 +259,7 @@ void completeStage(Stage stage) {
   }
   if (policy::completeStage(persistentState, stage)) {
     logStage("complete", stage);
+    if (stageObserver != nullptr) stageObserver(stage);
   } else if (kLogEnabled) {
     Serial.printf(
         "BOOT_DIAGNOSTICS_ERROR schema=1 operation=complete stage=%s\n",
@@ -267,6 +273,7 @@ void markReady() {
   }
   if (policy::markReady(persistentState)) {
     logStage("ready", Stage::Ready);
+    if (stageObserver != nullptr) stageObserver(Stage::Ready);
   } else if (kLogEnabled) {
     Serial.println("BOOT_DIAGNOSTICS_ERROR schema=1 operation=ready");
   }
