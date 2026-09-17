@@ -427,7 +427,6 @@ private struct RideDetectionSettingsView: View {
     let currentLocation: CLLocation?
     let onRequestLocationAuthorization: () -> Void
     @State private var showAutomaticStartWarning = false
-    @State private var showLocationUseWarning = false
 
     var body: some View {
         Form {
@@ -470,32 +469,6 @@ private struct RideDetectionSettingsView: View {
                 }
 
                 if store.settings.startMode != .off &&
-                    !store.hasAcknowledgedLocationUse {
-                    Button("Use iPhone GPS for Detection") {
-                        showLocationUseWarning = true
-                    }
-                    .alert(
-                        "Use iPhone GPS for Ride Detection?",
-                        isPresented: $showLocationUseWarning
-                    ) {
-                        Button("Continue") {
-                            store.acknowledgeLocationUse()
-                            if authorizationStatus == .notDetermined {
-                                onRequestLocationAuthorization()
-                            }
-                        }
-                    } message: {
-                        Text(
-                            "When Ride Start is enabled and your bike "
-                            + "computer is connected, Bicino keeps precise "
-                            + "location active in the background so GPS and "
-                            + "motion can detect a ride. You can turn Ride "
-                            + "Start off at any time."
-                        )
-                    }
-                }
-
-                if store.settings.startMode != .off &&
                     rideDetectionLocationStatus == .permissionNeeded {
                     Button {
                         if authorizationStatus == .notDetermined {
@@ -530,16 +503,6 @@ private struct RideDetectionSettingsView: View {
                 Text("Detect Ride Start")
             } footer: {
                 Text(rideDetectionFooterText)
-            }
-
-            Section("iPhone GPS") {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    let status = rideDetectionLocationStatus(at: context.date)
-                    LabeledContent("Status", value: status.label)
-                    Text(rideDetectionLocationStatusDetail(status))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
             }
 
             Section {
@@ -577,16 +540,18 @@ private struct RideDetectionSettingsView: View {
 
     private var rideDetectionFooterText: String {
         if RideAutomationRollout.allowsAutomaticStart {
-            return "Ride detection uses iPhone GPS in the background while "
-                + "the compatible bike computer is connected. Automatic "
-                + "start requires a separate opt-in and the bike "
-                + "computer, iPhone, and Apple Watch to be reachable."
+            return "When enabled, Bicino automatically uses iPhone GPS in "
+                + "the background while the compatible bike computer is "
+                + "connected. iOS may request location access the first "
+                + "time. Automatic start requires a separate opt-in "
+                + "and the bike computer, iPhone, and Apple Watch to be "
+                + "reachable."
         }
-        return "Ride detection uses iPhone GPS in the background while the "
-            + "compatible bike computer is connected. Ask to Start is the "
-            + "current rollout ceiling. Automatic start "
-            + "remains gated until the physical false-start validation is "
-            + "complete."
+        return "When enabled, Bicino automatically uses iPhone GPS in the "
+            + "background while the compatible bike computer is connected. "
+            + "iOS may request location access the first time. Ask to Start "
+            + "is the current rollout ceiling. Automatic start remains "
+            + "gated until the physical false-start validation is complete."
     }
 
     private var rideDetectionLocationStatus: RideDetectionLocationStatus {
@@ -598,7 +563,6 @@ private struct RideDetectionSettingsView: View {
     ) -> RideDetectionLocationStatus {
         RideDetectionLocationStatusResolver.resolve(
             startMode: store.settings.startMode,
-            locationUseAcknowledged: store.hasAcknowledgedLocationUse,
             isNavigationReady: bleManager.isNavigationReady,
             supportsRideAutomation: bleManager.supportsRideAutomation,
             supportsGPSPositionQualityV1:
@@ -608,27 +572,6 @@ private struct RideDetectionSettingsView: View {
             location: currentLocation,
             now: now
         )
-    }
-
-    private func rideDetectionLocationStatusDetail(
-        _ status: RideDetectionLocationStatus
-    ) -> String {
-        switch status {
-        case .disabled:
-            "Enable Ride Start and confirm iPhone GPS use to arm detection."
-        case .waitingForCompatibleDevice:
-            "Connect a bike computer that supports ride detection and GPS quality."
-        case .permissionNeeded:
-            "Location permission is required before iPhone GPS can be used."
-        case .foregroundOnly:
-            "Detection works while Bicino is open. Allow Always access for reliable background detection."
-        case .waitingForPreciseLocation:
-            "Waiting for a fresh precise fix with measured cycling speed."
-        case .sending:
-            "Fresh iPhone GPS and quality are being sent to the connected bike computer."
-        case .stale:
-            "The last fix is too old for detection; the device will fail closed until GPS refreshes."
-        }
     }
 
     private var locationAuthorizationLevel: LocationAuthorizationLevel {
