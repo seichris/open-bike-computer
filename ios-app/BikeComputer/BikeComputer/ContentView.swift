@@ -64,6 +64,7 @@ struct ContentView: View {
     @StateObject private var mapViewControlState: MapViewControlState
     @StateObject private var offlineMapManager: OfflineMapManager
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
+    @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
     @ObservedObject private var routeLibrary: PhoneRouteLibrary
     @ObservedObject private var stravaIntegrationCoordinator:
         StravaIntegrationCoordinator
@@ -218,6 +219,9 @@ struct ContentView: View {
             wrappedValue: rideAutomationCoordinator
         )
         _watchAvailability = StateObject(wrappedValue: watchAvailability)
+        _firmwareUpdateManager = ObservedObject(
+            wrappedValue: coordinator.firmwareUpdateManager
+        )
         _routeLibrary = ObservedObject(wrappedValue: routeLibrary)
         _stravaIntegrationCoordinator = ObservedObject(
             wrappedValue: stravaIntegrationCoordinator
@@ -850,7 +854,7 @@ struct ContentView: View {
                 currentLocation: coordinator.currentLocation,
                 isNavigationActive: coordinator.isNavigating,
                 offlineMapManager: offlineMapManager,
-                firmwareUpdateManager: coordinator.firmwareUpdateManager,
+                firmwareUpdateManager: firmwareUpdateManager,
                 routeLibrary: routeLibrary,
                 stravaIntegrationCoordinator:
                     stravaIntegrationCoordinator,
@@ -1480,10 +1484,18 @@ struct ContentView: View {
     private var mapControlRailContent: some View {
         VStack(spacing: 0) {
             Button(action: { presentedSheet = .settings }) {
-                mapControlIcon("gearshape.fill")
+                mapControlIcon(
+                    "gearshape.fill",
+                    showsNotificationDot: hasFirmwareUpdateAvailable
+                )
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Settings")
+            .accessibilityValue(
+                hasFirmwareUpdateAvailable
+                    ? "Firmware update available"
+                    : ""
+            )
 
             mapControlDivider
 
@@ -1517,10 +1529,33 @@ struct ContentView: View {
         .accessibilityElement(children: .contain)
     }
 
-    private func mapControlIcon(_ systemName: String) -> some View {
-        Image(systemName: systemName)
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(.primary)
+    private var hasFirmwareUpdateAvailable: Bool {
+        guard let manifest = firmwareUpdateManager.latestManifest else {
+            return false
+        }
+        return firmwareUpdateManager.isNewerUpdateAvailable(
+            manifest,
+            bleManager: coordinator.bleManager
+        )
+    }
+
+    private func mapControlIcon(
+        _ systemName: String,
+        showsNotificationDot: Bool = false
+    ) -> some View {
+        ZStack(alignment: .topTrailing) {
+            Image(systemName: systemName)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.primary)
+
+            if showsNotificationDot {
+                Circle()
+                    .fill(.blue)
+                    .frame(width: 8, height: 8)
+                    .offset(x: 4, y: -4)
+                    .accessibilityHidden(true)
+            }
+        }
             .frame(width: 52, height: 50)
             .contentShape(Rectangle())
     }

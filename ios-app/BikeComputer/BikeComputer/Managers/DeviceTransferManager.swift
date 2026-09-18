@@ -1026,49 +1026,79 @@ final class DeviceTransferManager {
         }
         let initialDeviceTransferStatusRevision =
             bleManager.deviceTransferStatusRevision
+        let initialDeviceTransferErrorSequence =
+            bleManager.deviceTransferLastErrorSequence
+        var enterWasQueued = false
 
-        guard bleManager.requestDeviceTransferMode(.firmware) else {
-            throw FirmwareUpdateError.transferCommandNotSent
-        }
+        do {
+            guard bleManager.requestDeviceTransferMode(.firmware) else {
+                throw FirmwareUpdateError.transferCommandNotSent
+            }
+            enterWasQueued = true
 
-        for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
-            if bleManager.deviceTransferStatusRevision !=
-                   initialDeviceTransferStatusRevision,
-               let session = try secureSession(
-                mode: .firmware,
-                bleManager: bleManager
-               ) {
-                do {
+            for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
+                let hasFreshDeviceStatus =
+                    bleManager.deviceTransferStatusRevision !=
+                    initialDeviceTransferStatusRevision
+                if hasFreshDeviceStatus,
+                   let session = try secureSession(
+                    mode: .firmware,
+                    bleManager: bleManager
+                   ) {
                     try await joinDeviceNetworkIfNeeded(
                         session: session,
                         statusPath: "firmware-update/status",
                         status: status
                     )
-                } catch {
-                    exitFirmwareTransfer(bleManager: bleManager)
-                    throw error
+                    record(
+                        mode: .firmware,
+                        event: "transfer_ready",
+                        fields: [
+                            "networkTransport": session.networkTransport ?? "unknown",
+                            "fallback": String(session.hotspotFallback),
+                        ]
+                    )
+                    return session
                 }
-                record(
-                    mode: .firmware,
-                    event: "transfer_ready",
-                    fields: [
-                        "networkTransport": session.networkTransport ?? "unknown",
-                        "fallback": String(session.hotspotFallback),
-                    ]
+
+                if hasFreshDeviceStatus,
+                   let failure = DeviceTransferFreshFailurePolicy.failure(
+                    after: initialDeviceTransferErrorSequence,
+                    currentSequence:
+                        bleManager.deviceTransferLastErrorSequence,
+                    code: bleManager.deviceTransferLastErrorCode,
+                    message: bleManager.deviceTransferLastErrorMessage
+                   ) {
+                    throw FirmwareUpdateError.deviceTransferRejected(
+                        code: failure.code,
+                        message: failure.message
+                    )
+                }
+                if DeviceTransferHandshakePolicy.shouldRequestStatus(
+                    attempt: attempt
+                ) {
+                    _ = bleManager.requestDeviceTransferStatus()
+                }
+                try await Task.sleep(
+                    nanoseconds:
+                        DeviceTransferHandshakePolicy.retryIntervalNanoseconds
                 )
-                return session
             }
-            if DeviceTransferHandshakePolicy.shouldRequestStatus(
-                attempt: attempt
-            ) {
-                _ = bleManager.requestDeviceTransferStatus()
+            throw FirmwareUpdateError.missingTransferSession
+        } catch {
+            if enterWasQueued {
+                exitFirmwareTransfer(bleManager: bleManager)
+                _ = await bleManager.waitForNavigationWritesToDrain(
+                    timeoutSeconds: 2
+                )
             }
-            try await Task.sleep(
-                nanoseconds:
-                    DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            record(
+                mode: .firmware,
+                event: "transfer_entry_failed",
+                fields: ["error": String(describing: error)]
             )
+            throw error
         }
-        throw FirmwareUpdateError.missingTransferSession
     }
 
     func exitFirmwareTransfer(bleManager: BLEManager) {
