@@ -8278,6 +8278,24 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactContent.contains(
+                "ifshowsSupplementaryMapChrome{HStack{Spacer()mapControlCluster}"
+            )
+                && compactContent.contains(
+                    "ifshouldShowOfflineMapStatusChip,showsSupplementaryMapChrome{offlineMapStatusChip"
+                )
+                && compactContent.contains(
+                    "ifshowsSupplementaryMapChrome&&coordinator.bleManager.deviceSoundsEnabled&&"
+                )
+                && compactContent.contains(
+                    ".layoutPriority(isSearchPanelExpanded?1:0)"
+                )
+                && compactContent.contains(
+                    "MainMapSearchLayoutPolicy.showsSupplementaryMapChrome(isSearchPanelExpanded:isSearchPanelExpanded)"
+                ),
+            "expanded destination search must own the keyboard-safe layout ahead of supporting map chrome"
+        )
+        expect(
+            compactContent.contains(
                 "HStack(alignment:.bottom,spacing:8){RouteSearchPanel("
             )
                 && compactContent.contains(
