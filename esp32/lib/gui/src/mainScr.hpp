@@ -97,6 +97,7 @@ extern volatile bool waveshareBootScreenCyclePending;
 
 void createMainScr();
 void toggleNavigationScreen();
+void togglePreviousNavigationScreen();
 void showConfiguredDefaultMainScreen();
 void applyDeviceScreenSettings();
 void applyDeviceScreenConfiguration();

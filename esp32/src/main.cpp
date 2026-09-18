@@ -316,8 +316,8 @@ static bool processWavesharePowerButton() {
         bleNavServer.confirmOwnershipPairing()) {
       log_i("Waveshare PWR pressed; handled ownership pairing");
     }
-    // Never honk while a pairing comparison is active, including before the
-    // screen has flushed and the fresh-edge gate has been armed.
+    // Never navigate while a pairing comparison is active, including before
+    // the screen has flushed and the fresh-edge gate has been armed.
     return hadInput;
   }
 
@@ -325,7 +325,7 @@ static bool processWavesharePowerButton() {
   wavesharePowerPairingGeneration = 0;
   if (events.shortPress) {
     log_i("Waveshare PWR short press; handling backward action");
-    showPreviousMainScreen();
+    togglePreviousNavigationScreen();
   }
   return hadInput;
 }

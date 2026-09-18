@@ -2271,6 +2271,16 @@ void toggleNavigationScreen() {
   showNextMainScreen();
 }
 
+void togglePreviousNavigationScreen() {
+  if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
+    return;
+  }
+
+  showPreviousMainScreen();
+}
+
 /**
  * @brief Create Main Screen - SIMPLIFIED: Map Only
  *
