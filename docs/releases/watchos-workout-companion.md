@@ -1,27 +1,21 @@
 # Watch workout companion release notes
 
-Release candidate: **1.6 (16)**. App Store version 1.5 is already distributed,
-and App Store Connect already contains builds through 15, so both the marketing
+Release candidate: **1.7 (17)**. App Store version 1.6 is already distributed,
+and App Store Connect already contains builds through 16, so both the marketing
 version and build number advance for this release.
 
 ## App Store What's New
 
-Record rides from Apple Watch and keep the important numbers visible across
-Watch, iPhone, and compatible Bike Computer hardware.
+Pair your Bicino more easily and get ready for your first ride with clearer
+setup guidance.
 
-- Start an outdoor cycling workout from Watch or iPhone.
-- See live heart rate, time, distance, speed, energy, and available cycling
-  sensor data.
-- Pause, resume, save, or discard from either Apple device.
-- Recover an active Watch workout after an interruption.
-- Follow an active workout from the iPhone Lock Screen and Dynamic Island,
-  including Segment and Pause/Resume controls.
-- Keep navigation and workout controls independent.
-- Show current Watch metrics on the ESP32 Ride Stats pages with compatible
-  firmware.
-
-The workout companion requires iOS 17 and watchOS 10 or later. iPhone
-navigation requires iOS 16.4 or later.
+- Open Bicino setup directly from the QR code on your bike computer.
+- Confirm pairing with clearer code instructions and a device illustration.
+- Learn the left and right button controls after connecting.
+- Download an offline map or resolve a missing microSD card from the new
+  onboarding flow.
+- Manage your device more clearly in My Bicino.
+- Enjoy the refreshed Bicino app icon.
 
 ## App Review notes
 
