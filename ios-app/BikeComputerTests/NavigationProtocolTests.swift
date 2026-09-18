@@ -875,6 +875,8 @@ struct NavigationProtocolTests {
         await testDeviceTransferManagerCompensatesCancelledDebugEntry()
         await testDeviceTransferManagerConfirmsDebugExit()
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
+        await testFirmwareTransferSurfacesFreshRejectionAndExits()
+        await testFirmwareTransferCancellationExits()
         await testDeviceDiagnosticsTransferPolicy()
         await testDeviceDiagnosticsFailsFastOnFirmwareRejection()
         await testDeviceDiagnosticsRecordsEntryFailure()
@@ -22949,6 +22951,105 @@ struct NavigationProtocolTests {
                     "cancelled debug entry was queued before cancellation")
         assert(sentPackets.contains(Data("DTRNexit".utf8)),
                "post-enqueue cancellation queues a compensating debug exit")
+    }
+
+    @MainActor
+    static func testFirmwareTransferSurfacesFreshRejectionAndExits() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+
+        let staleStatus = """
+        {"configured":true,"enabled":false,"mode":"","lastError":{"code":"old_error","message":"old failure","sequence":7}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(staleStatus.utf8)
+        )
+
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let started = Date()
+        let task = Task {
+            try await DeviceTransferManager().enterFirmwareTransfer(
+                bleManager: bleManager,
+                status: { _ in }
+            )
+        }
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assertEqual(
+            String(data: sentPackets.first ?? Data(), encoding: .utf8),
+            "DTRNenter|firmware",
+            "firmware entry starts with the authenticated enter command"
+        )
+
+        let rejectedStatus = """
+        {"configured":true,"enabled":false,"mode":"","lastError":{"code":"http_worker","message":"could not start transfer HTTP worker","sequence":8}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(rejectedStatus.utf8)
+        )
+
+        do {
+            _ = try await task.value
+            assert(false, "firmware rejection must fail entry")
+        } catch FirmwareUpdateError.deviceTransferRejected(
+            let code,
+            let message
+        ) {
+            assertEqual(code, "http_worker",
+                        "firmware rejection retains the device error code")
+            assertEqual(message, "could not start transfer HTTP worker",
+                        "firmware rejection retains the device message")
+            assert(Date().timeIntervalSince(started) < 1.5,
+                   "fresh firmware rejection bypasses the polling timeout")
+        } catch {
+            assert(false, "firmware rejection has the right error: \(error)")
+        }
+
+        assert(sentPackets.contains(Data("DTRNexit".utf8)),
+               "rejected firmware entry queues a compensating exit")
+    }
+
+    @MainActor
+    static func testFirmwareTransferCancellationExits() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let task = Task {
+            try await DeviceTransferManager().enterFirmwareTransfer(
+                bleManager: bleManager,
+                status: { _ in }
+            )
+        }
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        task.cancel()
+        _ = try? await task.value
+
+        assertEqual(
+            String(data: sentPackets.first ?? Data(), encoding: .utf8),
+            "DTRNenter|firmware",
+            "cancelled firmware entry was queued before cancellation"
+        )
+        assert(sentPackets.contains(Data("DTRNexit".utf8)),
+               "post-enqueue firmware cancellation queues a compensating exit")
     }
 
     static func testDeviceTransferManagerWaitsForMapToken() async {

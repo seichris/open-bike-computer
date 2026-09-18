@@ -13,6 +13,7 @@ enum FirmwareUpdateError: LocalizedError, Equatable {
     case deviceNotReady
     case transferCommandNotSent
     case missingTransferSession
+    case deviceTransferRejected(code: String, message: String)
     case missingFirmwareTarget
     case invalidManifest
     case updateNotAvailable
@@ -33,6 +34,11 @@ enum FirmwareUpdateError: LocalizedError, Equatable {
             return "Could not send transfer command"
         case .missingTransferSession:
             return "Device did not report a firmware transfer session"
+        case .deviceTransferRejected(let code, let message):
+            if message == code {
+                return "Device rejected firmware transfer (\(code))"
+            }
+            return "Device rejected firmware transfer: \(message) [\(code)]"
         case .missingFirmwareTarget:
             return "Device firmware target is unknown"
         case .invalidManifest:
