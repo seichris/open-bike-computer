@@ -8284,6 +8284,9 @@ private struct WorkoutContractTestSuite {
                     "ifshouldShowOfflineMapStatusChip,showsSupplementaryMapChrome{offlineMapStatusChip"
                 )
                 && compactContent.contains(
+                    "ifshowsSupplementaryMapChrome&&coordinator.bleManager.deviceSoundsEnabled&&"
+                )
+                && compactContent.contains(
                     ".layoutPriority(isSearchPanelExpanded?1:0)"
                 )
                 && compactContent.contains(

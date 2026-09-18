@@ -373,7 +373,8 @@ struct ContentView: View {
                 }
                 .ignoresSafeArea(.container, edges: .bottom)
 
-                if coordinator.bleManager.deviceSoundsEnabled &&
+                if showsSupplementaryMapChrome &&
+                    coordinator.bleManager.deviceSoundsEnabled &&
                     coordinator.bleManager.supportsDeviceSounds &&
                     !offlineMapManager.isMapAreaSelectionActive &&
                     visibleOfflineMapOnboardingStep == nil {
