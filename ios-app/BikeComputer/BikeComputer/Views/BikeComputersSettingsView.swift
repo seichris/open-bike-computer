@@ -584,19 +584,15 @@ private struct BikeComputerDetailView: View {
     var body: some View {
         Form {
             if let device {
-                Section("Bike Computer") {
-                    TextField("Name", text: $editedName)
-                        .disabled(!bleManager.isConnected(to: device) || device.isLegacy)
-                    DeviceValueRow(title: "Device ID", value: device.shortIdentifier)
-                    DeviceValueRow(
-                        title: "Status",
-                        value: bleManager.isConnected(to: device) ? "Connected" : "Disconnected"
-                    )
-                }
+                Section("My Bicino") {
+                    HStack(spacing: 12) {
+                        TextField("Name", text: $editedName)
+                            .disabled(
+                                !bleManager.isConnected(to: device) ||
+                                device.isLegacy
+                            )
 
-                if !bleManager.isConnected(to: device) || !device.isLegacy {
-                    Section {
-                        if bleManager.isConnected(to: device) {
+                        if bleManager.isConnected(to: device) && !device.isLegacy {
                             Button("Save Name") {
                                 bleManager.rename(device: device, to: editedName)
                             }
@@ -604,14 +600,14 @@ private struct BikeComputerDetailView: View {
                                 bleManager.deviceOperationDeviceID != nil ||
                                 DeviceOwnershipProtocol.normalizedName(editedName) == device.name
                             )
-                        } else {
-                            Button("Set as Current and Connect") {
-                                bleManager.connect(to: device)
-                            }
                         }
                     }
+                    DeviceValueRow(title: "Device ID", value: device.shortIdentifier)
+                    DeviceValueRow(
+                        title: "Status",
+                        value: bleManager.isConnected(to: device) ? "Connected" : "Disconnected"
+                    )
                 }
-
 
                 if !device.isLegacy {
                     watchControllerSection(device: device)
@@ -634,6 +630,12 @@ private struct BikeComputerDetailView: View {
                 }
 
                 Section {
+                    if !bleManager.isConnected(to: device) {
+                        Button("Set as current device and connect") {
+                            bleManager.connect(to: device)
+                        }
+                    }
+
                     if BikeComputerRemovalPolicy.action(
                         isConnected: bleManager.isConnected(to: device),
                         isLegacy: device.isLegacy
@@ -646,7 +648,7 @@ private struct BikeComputerDetailView: View {
                             bleManager.deviceOperationDeviceID != nil
                         )
                     } else {
-                        Button("Forget on This iPhone", role: .destructive) {
+                        Button("Forget device on this iPhone", role: .destructive) {
                             showingForgetConfirmation = true
                         }
                         .disabled(bleManager.deviceOperationDeviceID != nil)
