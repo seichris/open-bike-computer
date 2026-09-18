@@ -332,24 +332,26 @@ struct ContentView: View {
 
                     Spacer()
 
-                    HStack {
-                        Spacer()
-                        mapControlCluster
+                    if showsSupplementaryMapChrome {
+                        HStack {
+                            Spacer()
+                            mapControlCluster
+                        }
+                        .padding(.trailing, 12)
+                        .padding(
+                            .bottom,
+                            mapControlsBottomPadding(in: proxy)
+                        )
+                        .animation(
+                            .easeInOut(duration: 0.25),
+                            value: rideMetricsDetent
+                        )
+                        .animation(
+                            .easeInOut(duration: 0.25),
+                            value: presentedSheet
+                        )
+                        .zIndex(10)
                     }
-                    .padding(.trailing, 12)
-                    .padding(
-                        .bottom,
-                        mapControlsBottomPadding(in: proxy)
-                    )
-                    .animation(
-                        .easeInOut(duration: 0.25),
-                        value: rideMetricsDetent
-                    )
-                    .animation(
-                        .easeInOut(duration: 0.25),
-                        value: presentedSheet
-                    )
-                    .zIndex(10)
 
                     bottomOverlay(
                         maxHeight: proxy.size.height * 0.68,
@@ -1703,7 +1705,8 @@ struct ContentView: View {
             }
 
             if !coordinator.isNavigating {
-                if shouldShowOfflineMapStatusChip {
+                if shouldShowOfflineMapStatusChip,
+                   showsSupplementaryMapChrome {
                     offlineMapStatusChip
                         .padding(.horizontal, 18)
                 }
@@ -1712,6 +1715,7 @@ struct ContentView: View {
                     if coordinator.routeAlternatives.isEmpty {
                         routeAndWorkoutStartRow(maxHeight: maxHeight)
                             .padding(.horizontal, 12)
+                            .layoutPriority(isSearchPanelExpanded ? 1 : 0)
                     } else {
                         routeAlternativesPanel
                             .padding(.horizontal, 12)
@@ -2005,6 +2009,12 @@ struct ContentView: View {
             offlineMapManager.currentJob != nil ||
             offlineMapManager.downloadedPackURL != nil ||
             offlineMapManager.errorMessage != nil
+    }
+
+    private var showsSupplementaryMapChrome: Bool {
+        MainMapSearchLayoutPolicy.showsSupplementaryMapChrome(
+            isSearchPanelExpanded: isSearchPanelExpanded
+        )
     }
 
     private var isOnlyCheckingForServerMaps: Bool {
