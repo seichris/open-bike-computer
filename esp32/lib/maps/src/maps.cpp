@@ -3661,7 +3661,7 @@ void Maps::showNoMap(lv_obj_t *canvas, bool sdPresent) {
   title_dsc.opa = LV_OPA_COVER;
   title_dsc.font = &lv_font_montserrat_24;
   title_dsc.align = LV_TEXT_ALIGN_CENTER;
-  title_dsc.text = "No map data";
+  title_dsc.text = sdPresent ? "No map for this area" : "No microSD card";
   lv_area_t title_area = {0, (int16_t)(h / 2 - 46), (int16_t)(w - 1),
                           (int16_t)(h / 2 - 16)};
   lv_draw_label(&layer, &title_dsc, &title_area);
@@ -3672,7 +3672,8 @@ void Maps::showNoMap(lv_obj_t *canvas, bool sdPresent) {
   hint_dsc.opa = LV_OPA_COVER;
   hint_dsc.font = &lv_font_montserrat_16;
   hint_dsc.align = LV_TEXT_ALIGN_CENTER;
-  hint_dsc.text = sdPresent ? "Download map\nfor this area" : "Insert SD card";
+  hint_dsc.text = sdPresent ? "Download a map\nin the Bicino app"
+                            : "Insert a microSD card";
   lv_area_t hint_area = {16, (int16_t)(h / 2 - 6), (int16_t)(w - 17),
                          (int16_t)(h / 2 + 58)};
   lv_draw_label(&layer, &hint_dsc, &hint_area);

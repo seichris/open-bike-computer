@@ -17,6 +17,7 @@ private enum ContentSheetDestination: Identifiable, Equatable {
     case sensorSettings
     case workoutDashboard
     case rideMetrics
+    case deviceIntroduction(deviceID: String)
     case nearbyBicino(peripheralIdentifier: UUID)
 
     var id: String {
@@ -28,6 +29,8 @@ private enum ContentSheetDestination: Identifiable, Equatable {
         case .sensorSettings: return "sensor-settings"
         case .workoutDashboard: return "workout-dashboard"
         case .rideMetrics: return "ride-metrics"
+        case .deviceIntroduction(let deviceID):
+            return "device-introduction:\(deviceID)"
         case .nearbyBicino(let identifier):
             return NearbyBicinoPresentationPolicy.routeID(
                 peripheralIdentifier: identifier
@@ -96,6 +99,8 @@ struct ContentView: View {
         ContentSheetDestination?
     @State private var activeSheetDestination: ContentSheetDestination?
     @State private var isSheetDismissalInFlight = false
+    @State private var shouldBeginMapSetupAfterSheetDismissal = false
+    @State private var observedPairingCompletionGeneration: UInt64
     @State private var rideMetricsDetent = PresentationDetent.rideMetricsCompact
     @State private var workoutSegmentToast: WorkoutCompletedSegmentV1?
     @State private var observedWorkoutSegmentIndex: UInt32?
@@ -119,6 +124,8 @@ struct ContentView: View {
     private var hasMigratedFirstRunLocationStep = false
     @AppStorage("bikeComputerOnboarding.prefersIPhoneOnly.v1")
     private var prefersIPhoneOnly = false
+    @AppStorage("bikeComputerOnboarding.deviceIntroduction.v1")
+    private var introducedDeviceTokens = ""
     @AppStorage("offlineMapOnboarding.existingInstallMigrationCompleted.v1")
     private var hasMigratedExistingInstallOnboarding = false
     @AppStorage(IPhoneMapAppearance.baseStyleDefaultsKey)
@@ -237,6 +244,9 @@ struct ContentView: View {
         )
         _coordinator = StateObject(
             wrappedValue: coordinator
+        )
+        _observedPairingCompletionGeneration = State(
+            initialValue: coordinator.bleManager.completedPairingGeneration
         )
         _mapViewControlState = StateObject(
             wrappedValue: MapViewControlState()
@@ -597,6 +607,10 @@ struct ContentView: View {
                 }
             }
         }
+        .onChange(of: coordinator.bleManager.completedPairingGeneration) {
+            generation in
+            presentDeviceIntroductionAfterPairing(generation: generation)
+        }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
                 if presentedSheet == .settings {
@@ -928,6 +942,26 @@ struct ContentView: View {
             .presentationDetents([.large])
             .presentationBackgroundInteraction(.disabled)
 
+        case .deviceIntroduction(let deviceID):
+            BicinoDeviceIntroductionView(
+                bleManager: coordinator.bleManager,
+                onComplete: {
+                    completeDeviceIntroduction(deviceID: deviceID)
+                },
+                onChooseMapArea: {
+                    shouldBeginMapSetupAfterSheetDismissal = true
+                    completeDeviceIntroduction(deviceID: deviceID)
+                },
+                onOpenDeviceSettings: {
+                    queuedSheetAfterDismiss = .settings
+                    completeDeviceIntroduction(deviceID: deviceID)
+                }
+            )
+            .presentationDetents([.large])
+            .presentationDragIndicator(.hidden)
+            .presentationBackgroundInteraction(.disabled)
+            .interactiveDismissDisabled()
+
         case .nearbyBicino(let peripheralIdentifier):
             if let candidate = coordinator.bleManager.nearbyCandidate(
                 peripheralIdentifier: peripheralIdentifier
@@ -1034,6 +1068,19 @@ struct ContentView: View {
         isSheetDismissalInFlight = true
         let dismissedDestination = activeSheetDestination
         activeSheetDestination = nil
+        if shouldBeginMapSetupAfterSheetDismissal {
+            shouldBeginMapSetupAfterSheetDismissal = false
+            queuedSheetAfterDismiss = nil
+            isSheetDismissalInFlight = false
+            dismissedOfflineMapOnboarding = false
+            hasCompletedFirstRunWelcome = true
+            if LocationAuthorizationRemediationPolicy.action(
+                for: coordinator.locationAuthorizationStatus
+            ) == .none {
+                beginOnboardingMapSelection()
+            }
+            return
+        }
         if hasPendingRouteSearchAfterSheetDismissal {
             let destination = pendingRouteSearchAfterSheetDismissal
             pendingRouteSearchAfterSheetDismissal = nil
@@ -1072,6 +1119,37 @@ struct ContentView: View {
             isSheetDismissalInFlight = false
             presentNearbyBicinoIfEligible()
         }
+    }
+
+    private func presentDeviceIntroductionAfterPairing(generation: UInt64) {
+        guard generation != observedPairingCompletionGeneration else { return }
+        observedPairingCompletionGeneration = generation
+        guard let deviceID = coordinator.bleManager.connectedDeviceID,
+              !BicinoDeviceIntroductionHistory.contains(
+                deviceID: deviceID,
+                storedTokens: introducedDeviceTokens
+              ) else {
+            return
+        }
+
+        let destination = ContentSheetDestination.deviceIntroduction(
+            deviceID: deviceID
+        )
+        if presentedSheet != nil ||
+            activeSheetDestination != nil ||
+            isSheetDismissalInFlight {
+            queuedSheetAfterDismiss = destination
+        } else {
+            presentedSheet = destination
+        }
+    }
+
+    private func completeDeviceIntroduction(deviceID: String) {
+        introducedDeviceTokens = BicinoDeviceIntroductionHistory.adding(
+            deviceID: deviceID,
+            to: introducedDeviceTokens
+        )
+        presentedSheet = nil
     }
 
     private func presentNearbyBicinoIfEligible() {
@@ -1317,6 +1395,7 @@ struct ContentView: View {
             isNavigationReady: coordinator.bleManager.isNavigationReady,
             hasSDCard: coordinator.bleManager.deviceHasSDCard,
             activeMapId: coordinator.bleManager.mapTransferActiveMapId,
+            mapStateKnown: coordinator.bleManager.deviceMapStateKnown,
             mapFoundForCurrentLocation: coordinator.bleManager.deviceMapFoundForCurrentLocation
         )
     }

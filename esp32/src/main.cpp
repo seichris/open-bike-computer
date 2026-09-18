@@ -2455,6 +2455,7 @@ void loop() {
 
   Maps::MapAvailabilityTransition mapAvailability;
   if (mapView.takeMapAvailabilityTransition(mapAvailability)) {
+    bleNavServer.noteMapAvailabilityChanged();
     const bool hasActiveIdentity =
         !rendererMapDiagnosticIdentity.mapId.empty();
     recordMapDiagnostic(

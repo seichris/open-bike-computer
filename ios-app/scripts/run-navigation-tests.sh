@@ -45,6 +45,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift \
+  ios-app/BikeComputer/BikeComputer/Models/BicinoDeviceIntroductionPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift \

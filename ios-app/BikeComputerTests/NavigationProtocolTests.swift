@@ -892,6 +892,7 @@ struct NavigationProtocolTests {
         testOfflineMapProgressPresentation()
         testOfflineMapByteProgressPresentation()
         testOfflineMapOnboardingPolicy()
+        testBicinoDeviceIntroductionPolicies()
         testMapActivationProgressPresentation()
         testMapUploadProgressReconciliation()
         testOfflineMapDownloadingSectionPresentation()
@@ -8614,6 +8615,7 @@ struct NavigationProtocolTests {
                 isNavigationReady: true,
                 hasSDCard: true,
                 activeMapId: "",
+                mapStateKnown: false,
                 mapFoundForCurrentLocation: false
             ),
             "a ready device with no installed map offers the download onboarding"
@@ -8624,16 +8626,29 @@ struct NavigationProtocolTests {
                 isNavigationReady: true,
                 hasSDCard: true,
                 activeMapId: "custom-map-6354c43431",
+                mapStateKnown: false,
                 mapFoundForCurrentLocation: false
             ),
-            "an installed map suppresses onboarding even outside its current coverage"
+            "an installed map waits for an authoritative renderer result"
+        )
+        assert(
+            OfflineMapOnboardingPolicy.shouldOfferDownload(
+                isLocationAuthorized: true,
+                isNavigationReady: true,
+                hasSDCard: true,
+                activeMapId: "custom-map-6354c43431",
+                mapStateKnown: true,
+                mapFoundForCurrentLocation: false
+            ),
+            "a known out-of-coverage map offers the download onboarding"
         )
         assert(
             !OfflineMapOnboardingPolicy.shouldOfferDownload(
                 isLocationAuthorized: true,
                 isNavigationReady: true,
                 hasSDCard: true,
-                activeMapId: "",
+                activeMapId: "custom-map-6354c43431",
+                mapStateKnown: true,
                 mapFoundForCurrentLocation: nil
             ),
             "unknown device coverage does not show a premature download prompt"
@@ -8643,7 +8658,8 @@ struct NavigationProtocolTests {
                 isLocationAuthorized: true,
                 isNavigationReady: true,
                 hasSDCard: true,
-                activeMapId: "",
+                activeMapId: "custom-map-6354c43431",
+                mapStateKnown: true,
                 mapFoundForCurrentLocation: true
             ),
             "current map coverage suppresses onboarding"
@@ -8654,9 +8670,102 @@ struct NavigationProtocolTests {
                 isNavigationReady: true,
                 hasSDCard: true,
                 activeMapId: "",
+                mapStateKnown: true,
                 mapFoundForCurrentLocation: false
             ),
             "the device-specific prompt waits for location authorization"
+        )
+    }
+
+    static func testBicinoDeviceIntroductionPolicies() {
+        assertEqual(
+            BicinoDeviceMapReadiness.resolve(
+                hasSDCard: nil,
+                activeMapID: "",
+                mapStateKnown: false,
+                mapFoundForCurrentLocation: nil
+            ),
+            .checking,
+            "the guide waits for the first device status"
+        )
+        assertEqual(
+            BicinoDeviceMapReadiness.resolve(
+                hasSDCard: false,
+                activeMapID: "",
+                mapStateKnown: false,
+                mapFoundForCurrentLocation: false
+            ),
+            .needsSDCard,
+            "the guide distinguishes missing storage from missing coverage"
+        )
+        assertEqual(
+            BicinoDeviceMapReadiness.resolve(
+                hasSDCard: true,
+                activeMapID: "",
+                mapStateKnown: false,
+                mapFoundForCurrentLocation: false
+            ),
+            .needsMap,
+            "the absence of an active map is immediately actionable"
+        )
+        assertEqual(
+            BicinoDeviceMapReadiness.resolve(
+                hasSDCard: true,
+                activeMapID: "installed-map",
+                mapStateKnown: false,
+                mapFoundForCurrentLocation: false
+            ),
+            .checking,
+            "installed maps wait for authoritative renderer coverage"
+        )
+        assertEqual(
+            BicinoDeviceMapReadiness.resolve(
+                hasSDCard: true,
+                activeMapID: "installed-map",
+                mapStateKnown: true,
+                mapFoundForCurrentLocation: false
+            ),
+            .needsMap,
+            "known out-of-coverage maps offer setup"
+        )
+        assertEqual(
+            BicinoDeviceMapReadiness.resolve(
+                hasSDCard: true,
+                activeMapID: "installed-map",
+                mapStateKnown: true,
+                mapFoundForCurrentLocation: true
+            ),
+            .ready,
+            "known coverage completes map setup"
+        )
+
+        let firstDevice = "0123456789abcdef"
+        let secondDevice = "fedcba9876543210"
+        let stored = BicinoDeviceIntroductionHistory.adding(
+            deviceID: firstDevice,
+            to: ""
+        )
+        assert(
+            BicinoDeviceIntroductionHistory.contains(
+                deviceID: firstDevice,
+                storedTokens: stored
+            ),
+            "completed introductions persist by stable device identity"
+        )
+        assert(
+            !BicinoDeviceIntroductionHistory.contains(
+                deviceID: secondDevice,
+                storedTokens: stored
+            ),
+            "another Bicino still receives its first-connection guide"
+        )
+        assertEqual(
+            BicinoDeviceIntroductionHistory.adding(
+                deviceID: firstDevice,
+                to: stored
+            ),
+            stored,
+            "recording the same device is idempotent"
         )
     }
 
@@ -23203,7 +23312,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeMapDisplayName":"Kyoto Hills","activeMapBoundsE7":[1356000000,349000000,1360000000,352000000],"activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapStateKnown":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeMapDisplayName":"Kyoto Hills","activeMapBoundsE7":[1356000000,349000000,1360000000,352000000],"activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -23237,6 +23346,8 @@ struct NavigationProtocolTests {
         assertEqual(manager.mapTransferActivationStepCount, 5, "status parser exposes activation step count")
         assertEqual(manager.mapTransferActivationProgress, 6, "status parser exposes activation percentage")
         assertEqual(manager.deviceHasSDCard, true, "status parser exposes physical SD state")
+        assert(manager.deviceMapStateKnown,
+               "status parser exposes authoritative renderer coverage state")
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
         assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
@@ -23250,6 +23361,8 @@ struct NavigationProtocolTests {
                     "older firmware still creates a conservative device-only descriptor")
         assertEqual(manager.activeDeviceMap?.sessionID, nil,
                     "older firmware without a session cannot merge with a local pack")
+        assert(!manager.deviceMapStateKnown,
+               "older firmware never turns an initial false into an authoritative miss")
 
         let malformedPresentationPacket =
             Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
