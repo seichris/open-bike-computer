@@ -107,6 +107,7 @@ struct ContentView: View {
     @State private var confirmedDeviceMapMissing = false
     @State private var isOfflineMapOnboardingStatePrepared = false
     @State private var isAwaitingFirstRunLocationDecision = false
+    @State private var hasPendingBicinoSetupAppLink = false
     // Preserve the original key so users who completed the previous first-run
     // flow are not shown a new welcome after updating.
     @AppStorage("offlineMapOnboarding.firstRunCompleted.v1")
@@ -453,9 +454,13 @@ struct ContentView: View {
             stravaIntegrationCoordinator.activate()
             synchronizeRideMetricsSheet()
             presentNearbyBicinoIfEligible()
+            presentPendingBicinoSetupAppLinkIfEligible()
         }
         .onOpenURL { url in
-            if !stravaIntegrationCoordinator.handleOpenURL(url) {
+            if BicinoAppLinkPolicy.isDeviceConnectionLink(url) {
+                hasPendingBicinoSetupAppLink = true
+                presentPendingBicinoSetupAppLinkIfEligible()
+            } else if !stravaIntegrationCoordinator.handleOpenURL(url) {
                 offlineMapManager.handleShareURL(url)
             }
         }
@@ -511,6 +516,7 @@ struct ContentView: View {
             routeLibrary.reload()
             stravaIntegrationCoordinator.activate()
             presentNearbyBicinoIfEligible()
+            presentPendingBicinoSetupAppLinkIfEligible()
         }
         .onChange(of: coordinator.isNavigating) { _ in
             updateIdleTimer()
@@ -1095,6 +1101,33 @@ struct ContentView: View {
         )
         activeSheetDestination = destination
         presentedSheet = destination
+    }
+
+    private func presentPendingBicinoSetupAppLinkIfEligible() {
+        guard hasPendingBicinoSetupAppLink,
+              scenePhase == .active,
+              isOfflineMapOnboardingStatePrepared else {
+            return
+        }
+
+        // Consume the request once the app is ready. A QR scan must not
+        // replace an already-present welcome, add-device, or unrelated modal.
+        hasPendingBicinoSetupAppLink = false
+        guard BicinoAppLinkPresentationPolicy.shouldPresent(
+            isApplicationActive: scenePhase == .active,
+            isOnboardingStatePrepared: isOfflineMapOnboardingStatePrepared,
+            hasVisibleOnboarding: visibleOfflineMapOnboardingStep != nil,
+            hasPresentedSheet: presentedSheet != nil,
+            hasActiveSheet: activeSheetDestination != nil,
+            isSheetDismissalInFlight: isSheetDismissalInFlight,
+            hasQueuedSheet: queuedSheetAfterDismiss != nil,
+            hasSavedRouteMapPreview: savedRouteMapPreview != nil,
+            isMapAreaSelectionActive: offlineMapManager.isMapAreaSelectionActive
+        ) else {
+            return
+        }
+
+        presentedSheet = .bikeComputerSetup
     }
 
     private func saveSelectedRouteOffline() {

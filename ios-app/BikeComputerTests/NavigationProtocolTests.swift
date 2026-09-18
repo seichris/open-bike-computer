@@ -735,6 +735,7 @@ struct NavigationProtocolTests {
         testMapTrackingPolicy()
         testDeveloperLocationOverride()
         testLocationAuthorizationRemediationPolicy()
+        testBicinoAppLinkPolicy()
         testRideActivityPolicy()
         testRideDetectionLocationStatusResolver()
         testDeviceGPSPacketBuilder()
@@ -8655,6 +8656,77 @@ struct NavigationProtocolTests {
             ),
             "the device-specific prompt waits for location authorization"
         )
+    }
+
+    static func testBicinoAppLinkPolicy() {
+        assert(
+            BicinoAppLinkPolicy.isDeviceConnectionLink(
+                URL(string: "https://bicino.com/app")!
+            ),
+            "the pre-connection QR destination is a Bicino connection link"
+        )
+        assert(
+            BicinoAppLinkPolicy.isDeviceConnectionLink(
+                URL(string: "https://bicino.com/app/?source=qr")!
+            ),
+            "the connection link tolerates a trailing slash and query items"
+        )
+        for invalidURL in [
+            "http://bicino.com/app",
+            "https://www.bicino.com/app",
+            "https://bicino.com/",
+            "https://bicino.com/app/extra",
+            "bikecomputer://connect"
+        ] {
+            assert(
+                !BicinoAppLinkPolicy.isDeviceConnectionLink(
+                    URL(string: invalidURL)!
+                ),
+                "only the canonical HTTPS Bicino app path is handled"
+            )
+        }
+
+        assert(
+            BicinoAppLinkPresentationPolicy.shouldPresent(
+                isApplicationActive: true,
+                isOnboardingStatePrepared: true,
+                hasVisibleOnboarding: false,
+                hasPresentedSheet: false,
+                hasActiveSheet: false,
+                isSheetDismissalInFlight: false,
+                hasQueuedSheet: false,
+                hasSavedRouteMapPreview: false,
+                isMapAreaSelectionActive: false
+            ),
+            "a ready app presents the add-device sheet for the connection link"
+        )
+        let blockingStates: [(String, Bool, Bool, Bool, Bool, Bool, Bool, Bool, Bool)] = [
+            ("inactive app", false, true, false, false, false, false, false, false),
+            ("unprepared onboarding state", true, false, false, false, false, false, false, false),
+            ("visible welcome", true, true, true, false, false, false, false, false),
+            ("presented sheet", true, true, false, true, false, false, false, false),
+            ("active sheet", true, true, false, false, true, false, false, false),
+            ("sheet dismissal", true, true, false, false, false, true, false, false),
+            ("queued sheet", true, true, false, false, false, false, true, false),
+            ("saved route preview", true, true, false, false, false, false, false, true),
+            ("map area selection", true, true, false, false, false, false, false, false)
+        ]
+        for state in blockingStates {
+            assert(
+                !BicinoAppLinkPresentationPolicy.shouldPresent(
+                    isApplicationActive: state.1,
+                    isOnboardingStatePrepared: state.2,
+                    hasVisibleOnboarding: state.3,
+                    hasPresentedSheet: state.4,
+                    hasActiveSheet: state.5,
+                    isSheetDismissalInFlight: state.6,
+                    hasQueuedSheet: state.7,
+                    hasSavedRouteMapPreview: state.8,
+                    isMapAreaSelectionActive: state.0 == "map area selection"
+                ),
+                "the connection link is ignored while \(state.0)"
+            )
+        }
     }
 
     static func testOfflineMapPreparationTimeEstimate() {
