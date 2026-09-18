@@ -267,6 +267,10 @@ public:
    */
   void process();
 
+  /** Queue a fresh map-status snapshot after the renderer learns whether the
+   * current location is covered by the active map. */
+  void noteMapAvailabilityChanged();
+
   /** Record physical input that should reopen the fast-advertising window. */
   void noteUserWake();
 

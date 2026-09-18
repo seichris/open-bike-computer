@@ -1123,6 +1123,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var firmwareUpdateTotalBytes: Int = 0
     @Published var firmwareUpdateLastError: String?
     @Published var deviceHasSDCard: Bool?
+    @Published var deviceMapStateKnown = false
     @Published var deviceMapFoundForCurrentLocation: Bool?
     @Published var deviceMapBlockCount: Int = 0
     
@@ -6423,6 +6424,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceGPSOverrideToken = nil
         clearTransferState()
         deviceHasSDCard = nil
+        deviceMapStateKnown = false
         deviceMapFoundForCurrentLocation = nil
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
@@ -9386,6 +9388,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         deviceGPSOverrideToken = nil
         clearTransferState()
         deviceHasSDCard = nil
+        deviceMapStateKnown = false
         deviceMapFoundForCurrentLocation = nil
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
@@ -10882,6 +10885,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferActivationError = nil
         }
         deviceHasSDCard = object["sdPresent"] as? Bool
+        deviceMapStateKnown = object["mapStateKnown"] as? Bool ?? false
         deviceMapFoundForCurrentLocation = object["mapFound"] as? Bool
         deviceMapBlockCount = object["mapBlocks"] as? Int ?? 0
 

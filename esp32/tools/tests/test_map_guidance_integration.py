@@ -539,6 +539,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("probeVectorMapFolderDetailed", setup)
         self.assertIn('recordHealth("ready")', setup)
         self.assertIn("takeMapAvailabilityTransition", loop)
+        self.assertIn("bleNavServer.noteMapAvailabilityChanged()", loop)
         self.assertIn('"runtime_map_unavailable"', loop)
         self.assertIn('"map_data_not_found"', loop)
 
@@ -550,6 +551,17 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             "mapAvailabilityAvailable != result.mapFound",
             publish,
         )
+
+        ble_source = (
+            ESP32_ROOT / "lib" / "ble_navigation" / "ble_navigation.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn("mapStateKnown", ble_source)
+        self.assertIn("mapView.hasPublishedMapFrame()", ble_source)
+
+        self.assertIn('"No map for this area"', MAP_RENDERER_SOURCE)
+        self.assertIn('"Download a map\\nin the Bicino app"', MAP_RENDERER_SOURCE)
+        self.assertIn('"No microSD card"', MAP_RENDERER_SOURCE)
+        self.assertIn('"Insert a microSD card"', MAP_RENDERER_SOURCE)
 
     def test_initial_map_canvas_allocation_does_not_stop_control_worker(self):
         create = function_body(MAP_RENDERER_SOURCE, "void Maps::createMapScrSprites")

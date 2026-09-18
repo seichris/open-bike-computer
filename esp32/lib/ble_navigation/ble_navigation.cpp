@@ -163,6 +163,7 @@ static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static map_transfer_status_protocol::ChunkTransmission
     pendingMapTransferStatusChunks;
 static std::atomic<bool> pendingMapTransferStatusContinuation{false};
+static std::atomic<bool> pendingMapAvailabilityStatus{false};
 static map_transfer_status_protocol::ChunkTransmission
     pendingDeviceTransferStatusChunks;
 static std::atomic<bool> pendingDeviceTransferStatusContinuation{false};
@@ -2655,6 +2656,8 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                           : "") +
                      ",\"sdPresent\":" +
                      (storage.getSdLoaded() ? "true" : "false") +
+                     ",\"mapStateKnown\":" +
+                     (mapView.hasPublishedMapFrame() ? "true" : "false") +
                      ",\"mapFound\":" +
                      (mapView.debugIsMapFound() ? "true" : "false") +
                      ",\"mapBlocks\":" +
@@ -6510,6 +6513,14 @@ void BLENavigationServer::process() {
   }
   processPendingTransferControl();
   pumpPendingMapTransferStatusChunks();
+  if (pendingMapAvailabilityStatus.load(std::memory_order_acquire) &&
+      !pendingMapTransferStatusChunks.active() && bleSessionAuthenticated &&
+      activeConnHandle != BLE_HS_CONN_HANDLE_NONE &&
+      mapTransferStatusCharacteristic != nullptr &&
+      pendingMapAvailabilityStatus.exchange(false,
+                                            std::memory_order_acq_rel)) {
+    notifyMapTransferStatus(mapTransferStatusCharacteristic);
+  }
   pumpPendingDeviceTransferStatusChunks();
   pumpPendingRendererDiagnosticsChunks();
   scheduleDeferredNotificationEvent();
@@ -6636,6 +6647,10 @@ void BLENavigationServer::process() {
 #else
   (void)lastLog;
 #endif
+}
+
+void BLENavigationServer::noteMapAvailabilityChanged() {
+  pendingMapAvailabilityStatus.store(true, std::memory_order_release);
 }
 
 void BLENavigationServer::noteUserWake() {

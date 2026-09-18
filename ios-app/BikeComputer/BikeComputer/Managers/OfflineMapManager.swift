@@ -1144,13 +1144,18 @@ nonisolated enum OfflineMapOnboardingPolicy {
         isNavigationReady: Bool,
         hasSDCard: Bool?,
         activeMapId: String,
+        mapStateKnown: Bool,
         mapFoundForCurrentLocation: Bool?
     ) -> Bool {
-        isLocationAuthorized &&
-            isNavigationReady &&
-            hasSDCard == true &&
-            activeMapId.isEmpty &&
-            mapFoundForCurrentLocation == false
+        guard isLocationAuthorized,
+              isNavigationReady,
+              hasSDCard == true else {
+            return false
+        }
+        if activeMapId.isEmpty {
+            return true
+        }
+        return mapStateKnown && mapFoundForCurrentLocation == false
     }
 }
 

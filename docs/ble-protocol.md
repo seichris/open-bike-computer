@@ -1887,6 +1887,13 @@ order.
 
 Status responses should include:
 
+- `sdPresent`: whether firmware initialized the microSD storage used for maps.
+- `mapStateKnown`: `true` only after the renderer has published a frame for the
+  current location. Clients must not treat `mapFound: false` as an
+  out-of-coverage result until this is true.
+- `mapFound`: whether the active map contains data for the current rendered
+  location.
+- `mapBlocks`: number of map blocks currently held by the renderer cache.
 - `activeMapId`: map id from `/sdcard/VECTMAP/active-map.json`, if present.
 - `activeSessionId`: durable content-derived session selected by
   `active-map.json`, when installed by transfer-capable firmware. This
