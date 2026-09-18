@@ -406,20 +406,11 @@ struct BikeComputerPairingFlow: View {
 
     @State private var deviceName = DeviceOwnershipProtocol.defaultDeviceName
     @State private var didStart = false
+    @FocusState private var isDeviceNameFocused: Bool
 
     var body: some View {
         NavigationView {
             Form {
-                Section {
-                    DeviceValueRow(title: "Device", value: candidate.shortIdentifier)
-                    DeviceValueRow(
-                        title: "Signal",
-                        value: BLEDiscoverySignalPolicy.description(
-                            for: candidate.rssi
-                        )
-                    )
-                }
-
                 if let prompt = matchingPrompt {
                     if bleManager.isPairingConfirmationSubmitting {
                         Section {
@@ -457,11 +448,10 @@ struct BikeComputerPairingFlow: View {
                         TextField("Bike name", text: $deviceName)
                             .textInputAutocapitalization(.words)
                             .submitLabel(.continue)
+                            .focused($isDeviceNameFocused)
                             .onSubmit(startPairing)
                     } header: {
                         Text("Name Your Bike")
-                    } footer: {
-                        Text("You can change this later. iOS does not expose the owner’s Apple ID name, so the app starts with “My bike.”")
                     }
 
                     Section {
@@ -491,6 +481,11 @@ struct BikeComputerPairingFlow: View {
             }
             .navigationTitle("Add Bike Computer")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                DispatchQueue.main.async {
+                    isDeviceNameFocused = true
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -529,6 +524,7 @@ struct BikeComputerPairingFlow: View {
     }
 
     private func startPairing() {
+        isDeviceNameFocused = false
         didStart = true
         bleManager.pair(with: candidate, name: deviceName)
     }
