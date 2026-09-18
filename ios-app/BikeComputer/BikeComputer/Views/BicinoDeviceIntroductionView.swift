@@ -66,18 +66,18 @@ struct BicinoDeviceIntroductionView: View {
 
                 instructionRow(
                     icon: "button.programmable",
-                    title: "BOOT button",
+                    title: "Left button",
                     detail: "Press it to move through your enabled screens."
                 )
                 instructionRow(
                     icon: "speaker.wave.2.fill",
-                    title: "PWR button",
+                    title: "Right button",
                     detail: "It confirms pairing and can honk when that option is enabled in settings."
                 )
                 instructionRow(
                     icon: "power",
                     title: "Sleep and wake",
-                    detail: "Bicino sleeps automatically after it is disconnected. Press BOOT to wake it."
+                    detail: "Bicino sleeps automatically after it is disconnected. Press the left button to wake it."
                 )
             }
             .padding(.horizontal, 20)
