@@ -200,22 +200,47 @@ function escapeHTML(value: string): string {
     .replaceAll("'", "&#39;");
 }
 
+function appStoreID(appStoreURL: string): string | null {
+  try {
+    const url = new URL(appStoreURL);
+    if (
+      url.protocol !== "https:" ||
+      url.hostname !== "apps.apple.com" ||
+      url.username ||
+      url.password ||
+      url.port
+    ) {
+      return null;
+    }
+    return url.pathname.match(/(?:^|\/)id([0-9]+)(?:\/|$)/)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function shareLanding(env: Env, token: string): Promise<Response> {
   const preview = await sharePreview(env, token);
   const features = preview.features.map(escapeHTML).join(", ") || "offline map";
   const size = preview.approximateBytes
     ? `${Math.max(1, Math.round(preview.approximateBytes / (1024 * 1024)))} MB`
     : "size calculated in the app";
+  const shareURL = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/s/${encodeURIComponent(token)}`;
   const devURL = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/dev/s/${encodeURIComponent(token)}`;
   const appStoreURL = escapeHTML(env.APP_STORE_URL);
+  const smartAppBanner = appStoreID(env.APP_STORE_URL);
+  const smartAppBannerMeta = smartAppBanner
+    ? `<meta name="apple-itunes-app" content="app-id=${smartAppBanner}, app-argument=${escapeHTML(shareURL)}">`
+    : "";
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+${smartAppBannerMeta}
 <title>${escapeHTML(preview.title)} — Bicino offline map</title>
 <style>body{font:17px system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1.25rem;color:#161616}main{border:1px solid #ddd;border-radius:18px;padding:1.5rem}h1{margin-top:0}a{display:inline-block;margin:.6rem .8rem .2rem 0;padding:.7rem 1rem;border-radius:999px;background:#111;color:#fff;text-decoration:none}.secondary{background:#eee;color:#111}small{color:#666}</style></head>
 <body><main><small>Shared Bicino map</small><h1>${escapeHTML(preview.title)}</h1>
 <p>${escapeHTML(features)} · approximately ${escapeHTML(size)}</p>
 <p>Open this link in Bicino to preview the map. Adding it is always an explicit step; opening this page does not download or install anything.</p>
 <a href="${appStoreURL}">Get Bicino</a><a class="secondary" href="${escapeHTML(devURL)}">Open in Bicino Dev</a>
+<p><small>If Bicino is already installed, tap Open in the app banner above.</small></p>
 <p><small>Map data attribution is included with the downloaded map.</small></p></main></body></html>`;
   return new Response(html, {
     headers: {
