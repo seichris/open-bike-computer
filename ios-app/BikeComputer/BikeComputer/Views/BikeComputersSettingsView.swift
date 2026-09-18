@@ -421,18 +421,22 @@ struct BikeComputerPairingFlow: View {
                         }
                     } else {
                         Section {
-                            Text(prompt.formattedCode)
-                                .font(.system(size: 44, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
-                                .frame(maxWidth: .infinity)
-                                .accessibilityLabel("Pairing code \(prompt.formattedCode)")
+                            VStack(spacing: 16) {
+                                Text(prompt.formattedCode)
+                                    .font(.system(size: 44, weight: .semibold, design: .rounded))
+                                    .monospacedDigit()
+                                    .accessibilityLabel("Pairing code \(prompt.formattedCode)")
+
+                                BikeComputerPairingConfirmationIllustration(
+                                    code: prompt.formattedCode
+                                )
+                            }
+                            .frame(maxWidth: .infinity)
                         } header: {
-                            Text("Confirm the Code")
+                            Text("Confirm the Code on your Bicino")
                         } footer: {
                             if prompt.isReplacingExistingRegistration {
                                 Text("This Bike Computer was reset. Match this code, then press either button on the device to replace its old registration on this iPhone.")
-                            } else {
-                                Text("If this exact code is also displayed on your Bike Computer, press either button on the device to confirm physical access.")
                             }
                         }
                     }
@@ -527,6 +531,41 @@ struct BikeComputerPairingFlow: View {
         isDeviceNameFocused = false
         didStart = true
         bleManager.pair(with: candidate, name: deviceName)
+    }
+}
+
+private struct BikeComputerPairingConfirmationIllustration: View {
+    let code: String
+
+    var body: some View {
+        Image("PairingConfirmationBicino")
+            .resizable()
+            .scaledToFit()
+            .overlay {
+                GeometryReader { geometry in
+                    Text(code)
+                        .font(
+                            .system(
+                                size: geometry.size.width * 0.10,
+                                weight: .black,
+                                design: .rounded
+                            )
+                        )
+                        .monospacedDigit()
+                        .foregroundStyle(
+                            Color(red: 1.0, green: 0.72, blue: 0.04)
+                        )
+                        .position(
+                            x: geometry.size.width * 0.5,
+                            y: geometry.size.height * 0.64
+                        )
+                }
+            }
+            .frame(maxWidth: 360)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                "On your Bicino, confirm code \(code) by pressing either button"
+            )
     }
 }
 
