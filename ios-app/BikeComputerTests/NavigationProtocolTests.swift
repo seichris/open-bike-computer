@@ -25040,6 +25040,18 @@ struct NavigationProtocolTests {
     }
 
     static func testMapTrackingPolicy() {
+        assert(
+            MainMapSearchLayoutPolicy.showsSupplementaryMapChrome(
+                isSearchPanelExpanded: false
+            ),
+            "collapsed search should leave supporting map controls visible"
+        )
+        assert(
+            !MainMapSearchLayoutPolicy.showsSupplementaryMapChrome(
+                isSearchPanelExpanded: true
+            ),
+            "expanded search should own the keyboard-safe layout"
+        )
         assertEqual(
             MapTrackingPolicy.desiredMode(
                 isNavigating: false,
