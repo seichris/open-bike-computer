@@ -79,6 +79,7 @@ void zoomOutEvent(lv_event_t *event);
 void zoomInEvent(lv_event_t *event);
 void updateNavEvent(lv_event_t *event);
 void showNextMainScreen();
+void showPreviousMainScreen();
 bool isMapScreenActive();
 bool isMapGuidanceScreenActive();
 uint32_t currentScreenInstanceID();

@@ -710,21 +710,11 @@ bool begin() {
   Serial.println("Speaker: playback task ready");
 
   loadPowerButtonHonkConfig();
-  powerButtonHonkAvailable =
-      axp2101::isAvailable() && powerButtonConfigMutex != nullptr;
-  if (powerButtonHonkAvailable) {
-    PowerButtonConfigLock lock(
-        pdMS_TO_TICKS(POWER_BUTTON_CONFIG_LOCK_TIMEOUT_MS));
-    if (!lock.ok() || !configurePowerButtonMonitoringLocked()) {
-      Serial.println("Speaker: PWR honk monitoring setup will retry");
-    }
-    Serial.printf("Speaker: PWR honk %s sound %u at %u%%\n",
-                  powerButtonHonkConfig.enabled ? "enabled" : "disabled",
-                  static_cast<unsigned>(powerButtonHonkConfig.sound),
-                  powerButtonHonkConfig.volumePercent);
-  } else {
-    Serial.println("Speaker: PWR honk unavailable because AXP2101 is missing");
-  }
+  // PWR short presses belong to reverse screen navigation. Keep the legacy
+  // configuration decoder for protocol compatibility, but do not advertise or
+  // activate the old honk action.
+  powerButtonHonkAvailable = false;
+  Serial.println("Speaker: PWR button reserved for screen navigation");
   return true;
 }
 

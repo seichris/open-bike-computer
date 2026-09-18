@@ -324,7 +324,8 @@ static bool processWavesharePowerButton() {
   wavesharePowerPairingGate.cancel();
   wavesharePowerPairingGeneration = 0;
   if (events.shortPress) {
-    waveshare_board::speaker::handlePowerButtonHonkPress();
+    log_i("Waveshare PWR short press; handling backward action");
+    showPreviousMainScreen();
   }
   return hadInput;
 }

@@ -730,6 +730,11 @@ static tileName nextEnabledTile(tileName current) {
                                            normalizedEnabledScreensMask());
 }
 
+static tileName previousEnabledTile(tileName current) {
+  return main_screen_registry::previousEnabled(
+      current, normalizedEnabledScreensMask());
+}
+
 static bool nextEnabledMapBackedTile(tileName current, tileName &next) {
   return main_screen_registry::nextEnabledMapBacked(
       current, normalizedEnabledScreensMask(), next);
@@ -2174,6 +2179,16 @@ void showNextMainScreen() {
     return;
   }
   showMainTile(nextEnabledTile((tileName)activeTile));
+}
+
+void showPreviousMainScreen() {
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    showScreenInstance(screen_configuration::previousEnabledInstanceIndex(
+        document, activeScreenInstanceIndex));
+    return;
+  }
+  showMainTile(previousEnabledTile((tileName)activeTile));
 }
 
 void showConfiguredDefaultMainScreen() {
