@@ -42,7 +42,7 @@ struct NavigationLocationSampleV1 {
     let altitudeMeters: Double
     let timestamp: Date
 }
-struct NavigationSnapshotV1 {
+struct NavigationSnapshotV1: Equatable {
     var routeWindow = Data()
     var navigationGeneration = 1
     var routeID = "test-route"

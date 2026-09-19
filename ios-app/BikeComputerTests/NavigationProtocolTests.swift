@@ -390,6 +390,8 @@ func testLocation(
 final class TestBLEManager: BLEManager {
     var sentPackets: [String] = []
     var sentRouteGeometry: [Data] = []
+    var acceptsRouteGeometry = true
+    var routeGeometryAttempts = 0
     var sentGPSPositions: [Data] = []
 
     override func centralManagerDidUpdateState(_ central: CBCentralManager) {
@@ -410,6 +412,8 @@ final class TestBLEManager: BLEManager {
             return false
         }
 
+        routeGeometryAttempts += 1
+        guard acceptsRouteGeometry else { return false }
         sentRouteGeometry.append(data)
         return true
     }
@@ -826,6 +830,7 @@ struct NavigationProtocolTests {
         testNavigationEngineDefersReconnectGPSUntilReadinessCommits()
         testNavigationEngineResendsGPSWhenQualityCapabilityArrives()
         testNavigationEngineResendsRouteGeometryNearLastLocation()
+        testNavigationEngineRetriesRejectedRouteGeometryOnSameSegment()
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
         testNavigationEngineRefreshesElapsedWithoutLocationChange()
@@ -24774,6 +24779,36 @@ struct NavigationProtocolTests {
                          latitude: coordinates[2].latitude,
                          longitude: coordinates[2].longitude,
                          "route geometry resend should use the latest device location window")
+    }
+
+    static func testNavigationEngineRetriesRejectedRouteGeometryOnSameSegment() {
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.acceptsRouteGeometry = false
+        let clock = TestClock()
+        let engine = NavigationEngine(now: clock.now)
+        engine.setBLEManager(manager)
+        let coordinates = [
+            CLLocationCoordinate2D(latitude: 37, longitude: -122),
+            CLLocationCoordinate2D(latitude: 37.01, longitude: -122)
+        ]
+        let location = testLocation(latitude: 37, longitude: -122)
+        engine.startNavigation(
+            with: TestRoute(instructions: "Continue", coordinates: coordinates),
+            initialLocation: location
+        )
+        assert(manager.routeGeometryAttempts > 0, "initial geometry must reach the transport")
+        assert(manager.sentRouteGeometry.isEmpty, "simulate temporary queue rejection")
+        let rejectedAttempts = manager.routeGeometryAttempts
+        manager.acceptsRouteGeometry = true
+        clock.advance(by: 3)
+        engine.sendRouteGeometryIfNeeded(currentLocation: location)
+        assertEqual(manager.routeGeometryAttempts, rejectedAttempts + 1,
+                    "rejected geometry must retry without requiring movement to another segment")
+        assertEqual(manager.sentRouteGeometry.count, 1,
+                    "the recovered transport must receive the initial route window")
+        engine.stopNavigation()
     }
 
     static func testNavigationEngineClearsRouteGeometryOnStop() {
