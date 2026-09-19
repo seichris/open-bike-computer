@@ -71,6 +71,14 @@ inline bool decode(const uint8_t *bytes, std::size_t length, Packet &packet) {
       static_cast<int32_t>(readUInt32LE(bytes, 0));
   decoded.longitudeMicrodegrees =
       static_cast<int32_t>(readUInt32LE(bytes, 4));
+  // Legacy and quality-v1 packets share the same WGS-84 coordinate domain.
+  // Reject before mutating the map or recording mailbox arrival freshness.
+  if (decoded.latitudeMicrodegrees < -90'000'000 ||
+      decoded.latitudeMicrodegrees > 90'000'000 ||
+      decoded.longitudeMicrodegrees < -180'000'000 ||
+      decoded.longitudeMicrodegrees > 180'000'000) {
+    return false;
+  }
   if (length >= 10) {
     const uint16_t heading = readUInt16LE(bytes, 8);
     decoded.hasHeading = heading < 360U;
@@ -112,13 +120,8 @@ inline bool decode(const uint8_t *bytes, std::size_t length, Packet &packet) {
         (flags & QUALITY_ACCURACY_AVAILABLE) != 0;
     const bool accuracySentinel = accuracy == UINT16_MAX;
     const bool sampleAgeAvailable = sampleAge != UINT16_MAX;
-    const bool validCoordinates =
-        decoded.latitudeMicrodegrees >= -90'000'000 &&
-        decoded.latitudeMicrodegrees <= 90'000'000 &&
-        decoded.longitudeMicrodegrees >= -180'000'000 &&
-        decoded.longitudeMicrodegrees <= 180'000'000;
     if (schema != QUALITY_V1_SCHEMA || (flags & ~QUALITY_KNOWN_FLAGS) != 0 ||
-        accuracyAvailable == accuracySentinel || !validCoordinates ||
+        accuracyAvailable == accuracySentinel ||
         (((flags & QUALITY_FIX_VALID) != 0) &&
          (!decoded.hasSpeed || !accuracyAvailable || !sampleAgeAvailable))) {
       return false;

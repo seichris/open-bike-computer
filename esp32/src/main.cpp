@@ -2478,7 +2478,9 @@ void loop() {
     (defined(WAVESHARE_IMU_DIAGNOSTICS) || defined(RIDE_AUTOMATION_SHADOW))
   waveshare_board::imu::process();
 #endif
-  ride_automation_runtime::processFirmwareShadow(now);
+  // IMU acquisition and UI work can advance the clock beyond loop entry.
+  // Evaluate freshness only after the latest sample has been timestamped.
+  ride_automation_runtime::processFirmwareShadow(millis());
 
   logSystemDebugHeartbeat();
   logPowerMetricsReport();
