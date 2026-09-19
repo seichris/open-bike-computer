@@ -969,7 +969,7 @@ extension NavigationEngine {
             projection: projection
         ) else { return }
 
-        bleManager.sendRouteGeometry(geometryData)
+        guard bleManager.sendRouteGeometry(geometryData) else { return }
         lastGeometrySendTime = currentTime
         lastSentGeometrySegmentIndex = projection.segmentIndex
     }

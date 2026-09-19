@@ -735,6 +735,7 @@ struct WatchBLEOutboundWriteV1: Equatable, Sendable {
     let protection: WatchBLEOutboundProtectionV1
     let motionDispatch: RideBLEMotionDispatch?
     let zoneDispatch: RideBLEZoneDispatch?
+    let navigationSnapshot: NavigationSnapshotV1?
 
     init(
         target: WatchBLEOutboundTargetV1,
@@ -742,7 +743,8 @@ struct WatchBLEOutboundWriteV1: Equatable, Sendable {
         gpsSampleTimestamp: Date? = nil,
         protection: WatchBLEOutboundProtectionV1 = .protected,
         motionDispatch: RideBLEMotionDispatch? = nil,
-        zoneDispatch: RideBLEZoneDispatch? = nil
+        zoneDispatch: RideBLEZoneDispatch? = nil,
+        navigationSnapshot: NavigationSnapshotV1? = nil
     ) {
         self.target = target
         self.payload = payload
@@ -750,6 +752,7 @@ struct WatchBLEOutboundWriteV1: Equatable, Sendable {
         self.protection = protection
         self.motionDispatch = motionDispatch
         self.zoneDispatch = zoneDispatch
+        self.navigationSnapshot = navigationSnapshot
     }
 }
 
@@ -1107,6 +1110,13 @@ struct WatchBLEOutboundQueueV1: Equatable {
 
     mutating func removeAll() {
         entries.removeAll(keepingCapacity: true)
+    }
+
+    mutating func removeReplaceableGroups(coalescingKeys: Set<String>) {
+        entries.removeAll {
+            $0.group.disposition == .replaceable &&
+                $0.group.coalescingKey.map(coalescingKeys.contains) == true
+        }
     }
 
     private mutating func reject(
