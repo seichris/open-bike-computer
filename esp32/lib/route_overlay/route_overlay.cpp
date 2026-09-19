@@ -28,13 +28,24 @@
 RouteOverlay routeOverlay;
 
 bool RouteOverlay::parseRouteData(const uint8_t *data, size_t len) try {
+  // Only the explicit empty packet clears a route. Reject incomplete points
+  // before replacing geometry that is already being displayed.
+  if (len != 0 && (data == nullptr || len < 8 || (len - 8) % 4 != 0)) {
+    return false;
+  }
+  const auto validCoordinate = [](int64_t lat, int64_t lon) {
+    return lat >= -90'000'000 && lat <= 90'000'000 &&
+           lon >= -180'000'000 && lon <= 180'000'000;
+  };
   std::vector<GeoPoint, PsramAllocator<GeoPoint>> parsed;
-  if (data != nullptr && len >= 8) {
+  if (len >= 8) {
     parsed.reserve(1U + (len - 8U) / 4U);
     int32_t lat = 0;
     int32_t lon = 0;
     memcpy(&lat, data, 4);
     memcpy(&lon, data + 4, 4);
+    if (!validCoordinate(lat, lon))
+      return false;
     parsed.push_back({lat, lon});
 
     size_t offset = 8;
@@ -43,8 +54,12 @@ bool RouteOverlay::parseRouteData(const uint8_t *data, size_t len) try {
       int16_t dLon = 0;
       memcpy(&dLat, data + offset, 2);
       memcpy(&dLon, data + offset + 2, 2);
-      lat += dLat;
-      lon += dLon;
+      const int64_t nextLat = static_cast<int64_t>(lat) + dLat;
+      const int64_t nextLon = static_cast<int64_t>(lon) + dLon;
+      if (!validCoordinate(nextLat, nextLon))
+        return false;
+      lat = static_cast<int32_t>(nextLat);
+      lon = static_cast<int32_t>(nextLon);
       parsed.push_back({lat, lon});
       offset += 4;
     }
@@ -56,11 +71,6 @@ bool RouteOverlay::parseRouteData(const uint8_t *data, size_t len) try {
   ++revisionCounter;
   portEXIT_CRITICAL(&routeMutex);
 
-  if (data == nullptr || len < 8) {
-    Serial.println(
-        "Route data too short (need at least 8 bytes for start point)");
-    return true;
-  }
   Serial.printf("Route parsed: %u points from %u bytes\n",
                 static_cast<unsigned>(parsedCount),
                 static_cast<unsigned>(len));
@@ -68,6 +78,34 @@ bool RouteOverlay::parseRouteData(const uint8_t *data, size_t len) try {
 } catch (const std::bad_alloc &) {
   Serial.println("ROUTE_RESOURCE_REJECTED: preserving prior route");
   return false;
+}
+
+bool RouteOverlay::matchesRouteData(const uint8_t *data, size_t len) const {
+  if (data == nullptr || len < 8 || (len - 8) % 4 != 0)
+    return false;
+
+  int32_t lat = 0;
+  int32_t lon = 0;
+  memcpy(&lat, data, 4);
+  memcpy(&lon, data + 4, 4);
+  portENTER_CRITICAL(&routeMutex);
+  bool matches = points.size() == 1U + (len - 8U) / 4U;
+  if (matches) {
+    matches = points[0].lat == lat && points[0].lon == lon;
+    for (size_t index = 1; matches && index < points.size(); ++index) {
+      int16_t dLat = 0;
+      int16_t dLon = 0;
+      const size_t offset = 8U + (index - 1U) * 4U;
+      memcpy(&dLat, data + offset, 2);
+      memcpy(&dLon, data + offset + 2, 2);
+      matches = static_cast<int64_t>(points[index].lat) -
+                        points[index - 1].lat == dLat &&
+                static_cast<int64_t>(points[index].lon) -
+                        points[index - 1].lon == dLon;
+    }
+  }
+  portEXIT_CRITICAL(&routeMutex);
+  return matches;
 }
 
 void RouteOverlay::clear() {

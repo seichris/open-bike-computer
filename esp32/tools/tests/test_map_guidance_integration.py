@@ -607,7 +607,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertEqual(gps_handler.count("noteNavigationInputForMapEntry()"), 1)
         self.assertLess(
             route_handler.index("noteNavigationInputForMapEntry()"),
-            route_handler.index("if (hash == lastRouteHash"),
+            route_handler.index("if (routeUnchanged)"),
         )
         self.assertIn("mapReentryPolicy.updatePhase(phase)", ownership_update)
         self.assertIn("pendingTransitionToMap = false", ownership_update)

@@ -4454,6 +4454,21 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     return;
   }
 
+  uint32_t hash = 0;
+  for (size_t i = 0; i < len; i++) {
+    hash = hash * 31 + data[i];
+  }
+
+  const bool hadRoute = routeOverlay.hasRoute();
+  // The checksum is only a fast prefilter: different valid packets can share
+  // it, and a collision must not bypass route validation or replace GPS alone.
+  const bool routeUnchanged = hash == lastRouteHash && len == lastRouteLen &&
+                              routeOverlay.matchesRouteData(data, len);
+  if (!routeUnchanged) {
+    if (!routeOverlay.parseRouteData(data, len))
+      return; // Rejected input must not change map position or screen entry.
+  }
+
   if (len >= 8) {
     const bool seedMapStart = !gpsReceivedFromApp;
     int32_t routeStartLat = 0;
@@ -4474,15 +4489,9 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     }
   }
 
-  uint32_t hash = 0;
-  for (size_t i = 0; i < len; i++) {
-    hash = hash * 31 + data[i];
-  }
-
-  if (hash == lastRouteHash && len == lastRouteLen) {
+  if (routeUnchanged) {
     return;
   }
-
 
   Serial.printf("BLE: %s route geometry received: %u bytes\n",
                 source == nullptr ? "unknown" : source, (unsigned)len);
@@ -4491,17 +4500,13 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     stats.lastRoutePacketMs = millis();
   });
 
-  const bool hadRoute = routeOverlay.hasRoute();
-  if (!routeOverlay.parseRouteData(data, len))
-    return; // Preserve retry admission and the previous route on resource rejection.
   lastRouteHash = hash;
   lastRouteLen = len;
   // Route geometry is a live foreground input, not part of the expensive base
   // frame. Only a transition into or out of usable route geometry forces a
   // base request; ordinary sliding-window replacement is picked up on the next
-  // UI tick and must not cancel a long 3D render. The reverse transition also
-  // covers a short/malformed replacement without leaving stale course-up
-  // semantics behind.
+  // UI tick and must not cancel a long 3D render. A valid single-point route
+  // also retires the previous usable route's course-up semantics.
   if (hadRoute != routeOverlay.hasRoute())
     requestMapRender(map_render_policy::Reason::Route);
 }
