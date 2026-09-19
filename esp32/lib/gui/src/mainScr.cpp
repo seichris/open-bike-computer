@@ -730,6 +730,11 @@ static tileName nextEnabledTile(tileName current) {
                                            normalizedEnabledScreensMask());
 }
 
+static tileName previousEnabledTile(tileName current) {
+  return main_screen_registry::previousEnabled(
+      current, normalizedEnabledScreensMask());
+}
+
 static bool nextEnabledMapBackedTile(tileName current, tileName &next) {
   return main_screen_registry::nextEnabledMapBacked(
       current, normalizedEnabledScreensMask(), next);
@@ -2176,6 +2181,16 @@ void showNextMainScreen() {
   showMainTile(nextEnabledTile((tileName)activeTile));
 }
 
+void showPreviousMainScreen() {
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    showScreenInstance(screen_configuration::previousEnabledInstanceIndex(
+        document, activeScreenInstanceIndex));
+    return;
+  }
+  showMainTile(previousEnabledTile((tileName)activeTile));
+}
+
 void showConfiguredDefaultMainScreen() {
   if (screen_configuration::isReady()) {
     showScreenInstance(screen_configuration::defaultInstanceIndex(
@@ -2254,6 +2269,16 @@ void toggleNavigationScreen() {
   }
 
   showNextMainScreen();
+}
+
+void togglePreviousNavigationScreen() {
+  if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
+    return;
+  }
+
+  showPreviousMainScreen();
 }
 
 /**

@@ -36,6 +36,17 @@ int main() {
   assert(nextEnabled(COMPASS, SUPPORTED_MASK) == NAV);
   assert(nextEnabled(NAV, static_cast<uint8_t>(SUPPORTED_MASK & ~screenBit(DeviceScreenId::WorldRadio))) ==
          BATTERY_STATUS);
+  assert(previousEnabled(BATTERY_STATUS, SUPPORTED_MASK) ==
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+         WORLD_RADIO
+#else
+         NAV
+#endif
+  );
+  assert(previousEnabled(MAP_GUIDANCE, SUPPORTED_MASK) == BATTERY_STATUS);
+  assert(previousEnabled(BATTERY_STATUS,
+                         screenBit(DeviceScreenId::MapPlusNavigation)) ==
+         MAP_GUIDANCE);
   tileName next = WORLD_RADIO;
   assert(nextEnabledMapBacked(RIDESTATS, SUPPORTED_MASK, next));
   assert(next == MAP);

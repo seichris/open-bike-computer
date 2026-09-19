@@ -16,6 +16,7 @@ INPUT = (ROOT / "lib/device_debug/device_debug_input.cpp").read_text(
     encoding="utf-8"
 )
 MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+MAIN_SCREEN = (ROOT / "lib/gui/src/mainScr.cpp").read_text(encoding="utf-8")
 RENDERER_DIAGNOSTICS = (
     ROOT / "lib/renderer_diagnostics/renderer_diagnostics.cpp"
 ).read_text(encoding="utf-8")
@@ -464,6 +465,18 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("const bool latchedPress =", button)
         self.assertIn("toggleNavigationScreen();", button)
         self.assertIn("confirmOwnershipPairing();", button)
+
+    def test_power_button_reverse_navigation_uses_main_screen_guard(self):
+        button = MAIN[
+            MAIN.index("static bool processWavesharePowerButton") :
+            MAIN.index("static void armOwnershipPairingAfterRenderedComparison")
+        ]
+        self.assertIn("togglePreviousNavigationScreen();", button)
+
+        toggle_start = MAIN_SCREEN.index("void togglePreviousNavigationScreen()")
+        toggle = MAIN_SCREEN[toggle_start : MAIN_SCREEN.index("/**", toggle_start)]
+        self.assertIn("!isMainScreen", toggle)
+        self.assertIn("showPreviousMainScreen();", toggle)
 
     def test_shell_security_headers_are_present(self):
         for header in (

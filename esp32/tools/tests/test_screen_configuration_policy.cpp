@@ -59,6 +59,9 @@ int main() {
   assert(nextEnabledInstanceIndex(document, 0) == 2);
   assert(nextEnabledInstanceIndex(document, 2) == 3);
   assert(nextEnabledInstanceIndex(document, 3) == 0);
+  assert(previousEnabledInstanceIndex(document, 0) == 3);
+  assert(previousEnabledInstanceIndex(document, 3) == 2);
+  assert(previousEnabledInstanceIndex(document, 2) == 0);
   assert(nextEnabledInstanceOfType(document, 0, ScreenType::Map,
                                    ScreenType::MapNavigation) == 3);
 

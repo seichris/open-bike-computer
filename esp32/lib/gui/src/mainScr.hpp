@@ -79,6 +79,7 @@ void zoomOutEvent(lv_event_t *event);
 void zoomInEvent(lv_event_t *event);
 void updateNavEvent(lv_event_t *event);
 void showNextMainScreen();
+void showPreviousMainScreen();
 bool isMapScreenActive();
 bool isMapGuidanceScreenActive();
 uint32_t currentScreenInstanceID();
@@ -96,6 +97,7 @@ extern volatile bool waveshareBootScreenCyclePending;
 
 void createMainScr();
 void toggleNavigationScreen();
+void togglePreviousNavigationScreen();
 void showConfiguredDefaultMainScreen();
 void applyDeviceScreenSettings();
 void applyDeviceScreenConfiguration();
