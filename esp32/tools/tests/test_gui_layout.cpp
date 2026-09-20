@@ -55,6 +55,10 @@ int main() {
   assert(!mapTransition.canReveal(false, false));
 
 #if defined(WAVESHARE_AMOLED_206)
+  // Drag preview moves the map canvas by the inverse of mapDragDelta().
+  // A finger moving right/down must move the visible map right/down too.
+  assert(-gui_layout::mapDragDelta(36) == 36);
+  assert(-gui_layout::mapDragDelta(-24) == -24);
   // 2.06-inch viewport: 502px screen with 72px reserved UI space.
   assert(gui_layout::mapViewportHeight(502) == 430);
   assert(gui_layout::mapScreenAnchorX(410, 410) == 205);
@@ -66,7 +70,10 @@ int main() {
   static_assert(!ride_telemetry_layout::useLargeMetricValueFont(
       rideLayout.screenWidth));
   static_assert(!waitingLayout.round);
-#else
+#elif defined(WAVESHARE_AMOLED_175)
+  // The calibrated CST9217 coordinates now follow the physical finger.
+  assert(-gui_layout::mapDragDelta(36) == 36);
+  assert(-gui_layout::mapDragDelta(-24) == -24);
   // 1.75-inch viewport: 466px screen with 100px reserved UI space.
   assert(gui_layout::mapViewportHeight(466) == 366);
   assert(gui_layout::mapScreenAnchorX(466, 466) == 233);
