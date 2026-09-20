@@ -438,7 +438,7 @@ jobs:
             tools.tests.test_device_registry \
             tools.tests.test_map_guidance_integration \
             tools.tests.test_map_memory_diagnostics
-          g++ -std=c++17 \
+          g++ -std=c++17 -DWAVESHARE_AMOLED_175 \
             tools/tests/test_gui_layout.cpp \
             -o /tmp/test_gui_layout_175
           /tmp/test_gui_layout_175
