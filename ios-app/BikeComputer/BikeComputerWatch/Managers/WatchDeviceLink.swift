@@ -137,6 +137,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var workoutPairGeneration: UInt8 = 0
     private var latestLocation: NavigationLocationSampleV1?
     private var latestNavigationSnapshot: NavigationSnapshotV1?
+    private var lastDispatchedNavigationSnapshot: NavigationSnapshotV1?
     private var latestRouteWindow = Data()
     private var preparedPhoneDeviceID: String?
     private var preparedPhonePreparationID: UUID?
@@ -457,23 +458,25 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         location: NavigationLocationSampleV1,
         snapshot: NavigationSnapshotV1
     ) {
-        let previousSnapshot = latestNavigationSnapshot
         latestLocation = location
         latestNavigationSnapshot = snapshot
         latestRouteWindow = snapshot.routeWindow
         guard transportStateMachine.isReady else { return }
         enqueueLiveNavigation(
             location: location,
-            snapshot: snapshot,
-            previousSnapshot: previousSnapshot
+            snapshot: snapshot
         )
     }
 
     func clearNavigation() {
         latestLocation = nil
         latestNavigationSnapshot = nil
+        lastDispatchedNavigationSnapshot = nil
         latestRouteWindow = Data()
         guard transportStateMachine.isReady else { return }
+        // These snapshots predate the clear. Leave an already dispatched
+        // group to finish, but never replay queued navigation after the clear.
+        queue.removeReplaceableGroups(coalescingKeys: ["route", "maneuver", "gps"])
         _ = enqueueGroup(
             priority: .control,
             disposition: .critical,
@@ -1011,6 +1014,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         challenge = nil
         protectedSession = nil
         capabilities = nil
+        lastDispatchedNavigationSnapshot = nil
         workoutZoneSequence = 0
         authCharacteristic = nil
         navigationCharacteristic = nil
@@ -1320,7 +1324,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     target: .navigation,
                     payload: WatchRidePacketEncoderV1.maneuver(
                         latestNavigationSnapshot
-                    )
+                    ),
+                    navigationSnapshot: latestNavigationSnapshot
                 )]
             )
         }
@@ -1328,8 +1333,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     private func enqueueLiveNavigation(
         location: NavigationLocationSampleV1,
-        snapshot: NavigationSnapshotV1,
-        previousSnapshot: NavigationSnapshotV1?
+        snapshot: NavigationSnapshotV1
     ) {
         _ = enqueueGroup(
             priority: .livePosition,
@@ -1354,7 +1358,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         )
         if Self.shouldSendManeuver(
             snapshot,
-            after: previousSnapshot
+            after: lastDispatchedNavigationSnapshot
         ) {
             _ = enqueueGroup(
                 priority: .navigationBoundary,
@@ -1362,7 +1366,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 coalescingKey: "maneuver",
                 writes: [.init(
                     target: .navigation,
-                    payload: WatchRidePacketEncoderV1.maneuver(snapshot)
+                    payload: WatchRidePacketEncoderV1.maneuver(snapshot),
+                    navigationSnapshot: snapshot
                 )]
             )
         }
@@ -1639,6 +1644,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     peripheralID: peripheral.identifier,
                     characteristicID: characteristic.uuid
                 )
+            }
+            if let snapshot = write.navigationSnapshot {
+                // Compare movement with the value submitted to the transport,
+                // not with the preceding GPS sample or an evicted queue entry.
+                lastDispatchedNavigationSnapshot = snapshot
             }
             peripheral.writeValue(
                 frame,
