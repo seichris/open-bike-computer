@@ -475,6 +475,11 @@ loops or self-intersections from making firmware reacquire an older segment;
 ordinary window revisions update the live foreground and do not cancel a 3D
 base render.
 
+Nonempty route packets must contain the complete eight-byte start point and
+complete four-byte delta pairs. Every decoded coordinate must be within WGS-84
+latitude/longitude bounds. Malformed packets and allocation failures retain the
+previous route, map position, and screen-entry state.
+
 A zero-length route geometry packet clears the route overlay on the ESP32. The
 iOS app sends this when navigation stops so stale route geometry is not used for
 route-overlay rendering or Course Up rotation.
@@ -498,6 +503,9 @@ QualityFlags: UInt8, bit 0 fix valid, bit 1 horizontal accuracy available
 HorizontalAccuracy: UInt16 decimeters, 0xFFFF unavailable
 SampleAge: UInt16 milliseconds, 0xFFFF unavailable
 ```
+
+All GPS packet versions reject latitude outside -90...90 degrees or longitude
+outside -180...180 degrees before updating map state or arrival freshness.
 
 Live CoreLocation coordinates are sent as WGS-84. Simulated or MapKit route
 coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts

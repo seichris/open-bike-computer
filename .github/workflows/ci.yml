@@ -402,6 +402,7 @@ jobs:
           /tmp/test_runtime_ownership
           python3 tools/tests/test_runtime_ownership_contract.py
           python3 tools/tests/test_runtime_rollback_failure.py
+          python3 tools/tests/test_firmware_runtime_boundaries.py
       - name: Ride diagnostics and watchdog host tests
         run: |
           for test in \
