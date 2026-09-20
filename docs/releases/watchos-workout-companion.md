@@ -1,21 +1,17 @@
 # Watch workout companion release notes
 
-Release candidate: **1.7 (17)**. App Store version 1.6 is already distributed,
-and App Store Connect already contains builds through 16, so both the marketing
+Release candidate: **1.8 (18)**. App Store version 1.7 is already distributed,
+and App Store Connect already contains builds through 17, so both the marketing
 version and build number advance for this release.
 
 ## App Store What's New
 
-Pair your Bicino more easily and get ready for your first ride with clearer
-setup guidance.
+Find destinations and navigate more reliably on your Bicino.
 
-- Open Bicino setup directly from the QR code on your bike computer.
-- Confirm pairing with clearer code instructions and a device illustration.
-- Learn the left and right button controls after connecting.
-- Download an offline map or resolve a missing microSD card from the new
-  onboarding flow.
-- Manage your device more clearly in My Bicino.
-- Enjoy the refreshed Bicino app icon.
+- Keep destination search visible while using the keyboard.
+- Open shared map links more reliably from Safari.
+- Receive more consistent navigation updates over Bluetooth.
+- Use the right button to move backward through bike computer screens.
 
 ## App Review notes
 
