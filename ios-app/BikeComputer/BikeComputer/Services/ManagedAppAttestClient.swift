@@ -267,8 +267,17 @@ nonisolated struct OfflineMapAppAttestKeyStore {
 nonisolated struct OfflineMapPendingAppAttestEnrollment: Codable, Equatable {
     let keyID: String
     let previousKeyID: String?
+    let clientInstallationID: String?
     let challenge: OfflineMapAppAttestChallenge
     let attestationObject: String?
+}
+
+private struct OfflineMapAppAttestErrorEnvelope: Decodable {
+    struct Detail: Decodable {
+        let code: String
+    }
+
+    let detail: Detail
 }
 
 nonisolated struct OfflineMapAppAttestChallenge: Codable, Equatable {
@@ -459,6 +468,18 @@ final class ManagedOfflineMapAppAttestClient {
         baseURL: URL,
         existingCredential: OfflineMapInstallationCredential? = nil
     ) async throws -> OfflineMapInstallationCredential {
+        try await enroll(
+            baseURL: baseURL,
+            existingCredential: existingCredential,
+            retryingInvalidInitialChallenge: false
+        )
+    }
+
+    private func enroll(
+        baseURL: URL,
+        existingCredential: OfflineMapInstallationCredential?,
+        retryingInvalidInitialChallenge: Bool
+    ) async throws -> OfflineMapInstallationCredential {
         guard service.isSupported else {
             throw ManagedAppAttestError.unsupported
         }
@@ -469,10 +490,15 @@ final class ManagedOfflineMapAppAttestClient {
             throw ManagedAppAttestError.invalidConfiguration
         }
         let serverURLString = baseURL.absoluteString
-        let previousKeyID = existingCredential?.appAttestKeyId
+        let clientInstallationID = existingCredential?.clientInstallationId
         var pending = keyStore.pending(serverURLString: serverURLString)
         if let candidate = pending,
-           candidate.previousKeyID != previousKeyID ||
+           candidate.clientInstallationID != clientInstallationID ||
+            candidate.previousKeyID != candidate.challenge.keyId ||
+            (
+                candidate.previousKeyID != nil &&
+                candidate.previousKeyID != existingCredential?.appAttestKeyId
+            ) ||
             candidate.challenge.expiresAt <= Int64(Date().timeIntervalSince1970) {
             keyStore.clearPending(serverURLString: serverURLString)
             pending = nil
@@ -481,9 +507,14 @@ final class ManagedOfflineMapAppAttestClient {
             let challenge = try await fetchChallenge(
                 baseURL: baseURL,
                 purpose: "attestation",
-                credential: previousKeyID == nil ? nil : existingCredential
+                credential: existingCredential
             )
-            guard challenge.keyId == previousKeyID,
+            guard (
+                existingCredential == nil
+                    ? challenge.keyId == nil
+                    : challenge.keyId == nil ||
+                        challenge.keyId == existingCredential?.appAttestKeyId
+            ),
                   let _ = OfflineMapAppAttestClientData.decodeChallenge(
                     challenge.challenge
                   ) else {
@@ -495,7 +526,8 @@ final class ManagedOfflineMapAppAttestClient {
             }
             let created = OfflineMapPendingAppAttestEnrollment(
                 keyID: keyID,
-                previousKeyID: previousKeyID,
+                previousKeyID: challenge.keyId,
+                clientInstallationID: clientInstallationID,
                 challenge: challenge,
                 attestationObject: nil
             )
@@ -527,6 +559,7 @@ final class ManagedOfflineMapAppAttestClient {
             pending = OfflineMapPendingAppAttestEnrollment(
                 keyID: pending.keyID,
                 previousKeyID: pending.previousKeyID,
+                clientInstallationID: pending.clientInstallationID,
                 challenge: pending.challenge,
                 attestationObject: attestation.base64EncodedString()
             )
@@ -538,7 +571,7 @@ final class ManagedOfflineMapAppAttestClient {
                 keyId: pending.keyID,
                 attestationObject: attestation.base64EncodedString(),
                 appBuild: appBuild,
-                previousKeyId: previousKeyID
+                previousKeyId: pending.previousKeyID
             )
         )
         var request = URLRequest(
@@ -556,7 +589,34 @@ final class ManagedOfflineMapAppAttestClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONEncoder.offlineMap.encode(body)
-        let credential: OfflineMapInstallationCredential = try await send(request)
+        let credential: OfflineMapInstallationCredential
+        do {
+            credential = try await send(request)
+        } catch let error as OfflineMapPlatformError {
+            guard existingCredential == nil,
+                  !retryingInvalidInitialChallenge,
+                  case .serverStatus(let status, let responseBody) = error,
+                  status == 401,
+                  let responseData = responseBody.data(using: .utf8),
+                  let envelope = try? JSONDecoder().decode(
+                    OfflineMapAppAttestErrorEnvelope.self,
+                    from: responseData
+                  ),
+                  envelope.detail.code == "app_attest_invalid_challenge" else {
+                throw error
+            }
+            // A first enrollment has no installation token with which to
+            // reconcile a server commit whose response was lost. Discard only
+            // this unowned pending attempt and retry once with a fresh key and
+            // challenge; authenticated rotations retain pending state so a
+            // refresh can recover the stable owner instead.
+            keyStore.clearPending(serverURLString: serverURLString)
+            return try await enroll(
+                baseURL: baseURL,
+                existingCredential: nil,
+                retryingInvalidInitialChallenge: true
+            )
+        }
         guard credential.appAttestKeyId == pending.keyID,
               credential.clientInstallationId.range(of: "^inst_v2_[0-9a-f]{32}$", options: .regularExpression) != nil,
               credential.clientInstallationToken.range(of: "^v1\\.[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil,

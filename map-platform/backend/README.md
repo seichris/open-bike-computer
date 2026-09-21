@@ -74,6 +74,9 @@ attestation plus `previousKeyId`. The backend atomically replaces only that
 exact binding, retains the installation ID and owned maps, resets the assertion
 counter, and records the retired key so it cannot be reused. A plain server
 mismatch or transient DeviceCheck failure never authorizes rotation.
+If a database restore removes the server binding entirely, the same owner token
+can request a scoped challenge with no previous key and re-establish the binding
+without changing the installation ID or abandoning owned maps.
 
 ### Strava route import
 

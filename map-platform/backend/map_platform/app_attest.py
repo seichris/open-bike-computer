@@ -959,12 +959,13 @@ class AppAttestStore:
                         "SELECT key_id FROM app_attest_keys WHERE installation_id = ?",
                         (installation_id,),
                     ).fetchone()
-                    if row is None:
+                    if row is None and purpose == APP_ATTEST_MAP_CREATE_PURPOSE:
                         raise AppAttestError(
                             "installation_attestation_required",
                             "installation App Attest enrollment is required",
                         )
-                    key_id = str(row["key_id"])
+                    if row is not None:
+                        key_id = str(row["key_id"])
                 connection.execute(
                     """
                     INSERT INTO app_attest_challenges(
@@ -1004,19 +1005,26 @@ class AppAttestStore:
         attestation_object: bytes,
         app_build: str,
         replacing_key_id: str | None = None,
+        challenge_installation_id: str | None = None,
+        allow_unbound_challenge: bool = False,
     ) -> VerifiedAttestation:
         now = int(self.clock())
         try:
             with self._connect() as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                expected_challenge_installation_id = challenge_installation_id
+                if (
+                    expected_challenge_installation_id is None
+                    and replacing_key_id is not None
+                ):
+                    expected_challenge_installation_id = installation_id
                 row = self._active_challenge(
                     connection,
                     challenge_id=challenge_id,
                     purpose=APP_ATTEST_ATTESTATION_PURPOSE,
-                    installation_id=(
-                        installation_id if replacing_key_id is not None else None
-                    ),
+                    installation_id=expected_challenge_installation_id,
                     now=now,
+                    allow_unbound_installation=allow_unbound_challenge,
                 )
                 verified = self.verifier.verify_attestation(
                     attestation_object=attestation_object,
@@ -1317,6 +1325,7 @@ class AppAttestStore:
         purpose: str,
         installation_id: str | None,
         now: int,
+        allow_unbound_installation: bool = False,
     ) -> sqlite3.Row:
         if not isinstance(challenge_id, str) or not re.fullmatch(
             r"[0-9a-f]{32}", challenge_id
@@ -1333,10 +1342,17 @@ class AppAttestStore:
         ).fetchone()
         expected_installation = installation_id or ""
         actual_installation = "" if row is None else (row["installation_id"] or "")
+        installation_matches = secrets.compare_digest(
+            actual_installation,
+            expected_installation,
+        ) or (
+            allow_unbound_installation
+            and actual_installation == ""
+        )
         if (
             row is None
             or row["purpose"] != purpose
-            or not secrets.compare_digest(actual_installation, expected_installation)
+            or not installation_matches
             or row["consumed_at"] is not None
             or int(row["expires_at"]) < now
         ):

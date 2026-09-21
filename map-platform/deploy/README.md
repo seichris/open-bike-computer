@@ -156,9 +156,11 @@ production build. Existing installation credentials remain usable for reads,
 but only an attested installation can request a map-creation challenge.
 
 Back up `/data/app-attest.sqlite3` with the rest of the channel's persistent
-control-plane state. Restoring a snapshot that predates a device's enrollment
-causes that app to create a new attested installation; never copy this database
-between Development, hardware validation, and Production.
+control-plane state. If a restore removes a device's key binding while its
+stateless installation credential remains valid, the app uses an authenticated,
+installation-scoped challenge to attest a fresh key while preserving the same
+owner and maps. Never copy this database between Development, hardware
+validation, and Production.
 
 ## Strava route import configuration
 

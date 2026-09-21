@@ -348,7 +348,6 @@ final class BicinoServiceSession {
         } catch let error as OfflineMapPlatformError {
             guard case .serverStatus(let status, let body) = error,
                   status == 401,
-                  client.clientAppAttestKeyId == nil,
                   let data = body.data(using: .utf8),
                   let envelope = try? JSONDecoder().decode(InstallationMigrationError.self, from: data),
                   envelope.detail.code == "installation_attestation_required" else {

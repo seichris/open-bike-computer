@@ -748,6 +748,42 @@ class MapJobRunAPITests(unittest.TestCase):
         )
         self.assertEqual(created.status_code, 200)
 
+    def test_authenticated_reenrollment_recovers_missing_server_binding(self):
+        original = dict(self.installation)
+        with self.client.app.state.app_attest_store._connect() as connection:
+            connection.execute(
+                "DELETE FROM app_attest_keys WHERE installation_id = ?",
+                (original["clientInstallationId"],),
+            )
+
+        rebound = self.app_attest.rotate_installation(
+            self.client,
+            credential=original,
+        )
+
+        self.assertIsInstance(rebound, dict)
+        self.assertEqual(
+            rebound["clientInstallationId"],
+            original["clientInstallationId"],
+        )
+        self.assertEqual(
+            rebound["clientInstallationToken"],
+            original["clientInstallationToken"],
+        )
+        self.assertNotEqual(rebound["appAttestKeyId"], original["appAttestKeyId"])
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "clientInstallationId": rebound["clientInstallationId"],
+            "clientRequestId": "request-after-missing-binding-recovery",
+        }
+        created = self.app_attest.post_map_job(
+            self.client,
+            credential=rebound,
+            payload=payload,
+        )
+        self.assertEqual(created.status_code, 200)
+
     def test_app_attest_rotation_challenge_requires_owner_token(self):
         response = self.client.post(
             "/v1/installations/app-attest/challenges",

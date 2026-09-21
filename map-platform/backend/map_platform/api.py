@@ -819,6 +819,7 @@ def create_app(
         ),
     ) -> dict[str, Any]:
         installation_id = token = None
+        authenticated_existing_installation = clientInstallationId is not None
         if clientInstallationId is not None:
             try:
                 installation_id, token = installation_store.refresh(
@@ -869,6 +870,7 @@ def create_app(
                 field="App Attest object",
                 maximum_bytes=APP_ATTEST_MAX_OBJECT_BYTES,
             )
+            current_key_id: str | None = None
             if installation_id is None:
                 if previous_key_id is not None:
                     raise AppAttestError(
@@ -897,6 +899,19 @@ def create_app(
                 attestation_object=attestation_object,
                 app_build=app_build,
                 replacing_key_id=previous_key_id,
+                challenge_installation_id=(
+                    installation_id
+                    if authenticated_existing_installation
+                    else None
+                ),
+                # Released clients used an anonymous attestation challenge for
+                # the one-time migration of an authenticated installation.
+                # Continue accepting that shape only while the server has no
+                # binding; updated clients use the scoped challenge instead.
+                allow_unbound_challenge=(
+                    authenticated_existing_installation
+                    and current_key_id is None
+                ),
             )
         else:
             if payload is not None and payload != {}:

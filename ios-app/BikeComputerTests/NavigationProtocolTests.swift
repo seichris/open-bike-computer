@@ -914,6 +914,8 @@ struct NavigationProtocolTests {
         testOfflineMapAppAttestGoldenVector()
         await testManagedOfflineMapAppAttestContract()
         await testManagedAppAttestKeyRotation()
+        await testManagedAppAttestMissingServerBindingRecovery()
+        await testManagedInitialAppAttestConsumedChallengeRetry()
         await testManagedAppAttestCrashBeforeCredentialPersistence()
         await testManagedInstallationMigration()
         testOfflineMapPreparationTimeEstimate()
@@ -3346,6 +3348,209 @@ struct NavigationProtocolTests {
     }
 
     @MainActor
+    static func testManagedAppAttestMissingServerBindingRecovery() async {
+        let suite = "AppAttestMissingBinding-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); OfflineMapTestURLProtocol.reset() }
+        let origin = OfflineMapServiceConfig.productionServerURLString
+        let oldKeyID = Data(repeating: 0x51, count: 32).base64EncodedString()
+        let newKeyID = Data(repeating: 0x52, count: 32).base64EncodedString()
+        let old = OfflineMapInstallationCredential(
+            clientInstallationId: "inst_v2_11223344556677889900aabbccddeeff",
+            clientInstallationToken: "v1." + String(repeating: "M", count: 43),
+            appAttestKeyId: oldKeyID
+        )
+        let rebound = OfflineMapInstallationCredential(
+            clientInstallationId: old.clientInstallationId,
+            clientInstallationToken: old.clientInstallationToken,
+            appAttestKeyId: newKeyID
+        )
+        let challenge = OfflineMapAppAttestChallenge(
+            challengeId: String(repeating: "b", count: 32),
+            challenge: Data(repeating: 7, count: 32).base64EncodedString()
+                .replacingOccurrences(of: "=", with: ""),
+            purpose: "attestation",
+            expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+            keyId: nil
+        )
+        let keyStore = OfflineMapAppAttestKeyStore(defaults: defaults)
+        let credentialStore = OfflineMapInstallationCredentialStore(defaults: defaults)
+        var refreshRequests = 0
+        var challengeRequests = 0
+        var enrollmentRequests = 0
+        do {
+            try keyStore.saveActive(oldKeyID, serverURLString: origin)
+            try credentialStore.save(old, serverURLString: origin)
+            OfflineMapTestURLProtocol.configure { request in
+                if request.url?.path == "/v1/installations/app-attest/challenges" {
+                    challengeRequests += 1
+                    assertEqual(
+                        request.value(forHTTPHeaderField: "X-Installation-Token"),
+                        old.clientInstallationToken,
+                        "missing-binding recovery authenticates the scoped challenge"
+                    )
+                    let body = try! JSONSerialization.jsonObject(
+                        with: OfflineMapTestURLProtocol.bodyData(from: request)
+                    ) as! [String: Any]
+                    assertEqual(
+                        body["clientInstallationId"] as? String,
+                        old.clientInstallationId,
+                        "missing-binding recovery scopes the challenge to the owner"
+                    )
+                    return (200, try! JSONEncoder().encode(challenge))
+                }
+                let body = OfflineMapTestURLProtocol.bodyData(from: request)
+                if body.isEmpty {
+                    refreshRequests += 1
+                    return (
+                        401,
+                        Data(#"{"detail":{"code":"installation_attestation_required"}}"#.utf8)
+                    )
+                }
+                enrollmentRequests += 1
+                let document = try! JSONSerialization.jsonObject(with: body)
+                    as! [String: Any]
+                let attestation = document["appAttest"] as! [String: Any]
+                assert(
+                    attestation["previousKeyId"] == nil,
+                    "a missing server binding is not represented as key replacement"
+                )
+                assertEqual(
+                    request.value(forHTTPHeaderField: "X-Installation-Token"),
+                    old.clientInstallationToken,
+                    "re-enrollment preserves and proves the stable owner token"
+                )
+                return (200, try! JSONEncoder().encode(rebound))
+            }
+            let serviceSession = BicinoServiceSession(
+                defaults: defaults,
+                urlSession: session,
+                appAttestService: TestOfflineMapAppAttestService(keyID: newKeyID),
+                appAttestAppBuild: "123"
+            )
+            let client = try serviceSession.makeOfflineMapClient(
+                serverURLString: origin
+            )
+            let recovered = try await serviceSession.ensureRegisteredInstallation(
+                client: client,
+                honorRefreshBackoff: false
+            )
+            assertEqual(recovered.clientInstallationId, old.clientInstallationId,
+                "server-binding recovery keeps existing map ownership")
+            assertEqual(recovered.clientAppAttestKeyId, newKeyID,
+                "server-binding recovery adopts the freshly attested key")
+            assertEqual(refreshRequests, 1,
+                "server-binding recovery begins with one authenticated refresh")
+            assertEqual(challengeRequests, 1,
+                "server-binding recovery uses one scoped challenge")
+            assertEqual(enrollmentRequests, 1,
+                "server-binding recovery performs one re-enrollment")
+            assertEqual(credentialStore.load(serverURLString: origin), rebound,
+                "server-binding recovery durably keeps the owner credential")
+            assertEqual(keyStore.load(serverURLString: origin), newKeyID,
+                "server-binding recovery promotes the replacement local key")
+        } catch {
+            assert(false, "missing App Attest server binding recovers: \(error)")
+        }
+    }
+
+    @MainActor
+    static func testManagedInitialAppAttestConsumedChallengeRetry() async {
+        let suite = "AppAttestInitialRetry-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); OfflineMapTestURLProtocol.reset() }
+        let baseURL = URL(string: OfflineMapServiceConfig.productionServerURLString)!
+        let firstKeyID = Data(repeating: 0x61, count: 32).base64EncodedString()
+        let secondKeyID = Data(repeating: 0x62, count: 32).base64EncodedString()
+        let credential = OfflineMapInstallationCredential(
+            clientInstallationId: "inst_v2_ffeeddccbbaa00998877665544332211",
+            clientInstallationToken: "v1." + String(repeating: "N", count: 43),
+            appAttestKeyId: secondKeyID
+        )
+        let challenges = [
+            OfflineMapAppAttestChallenge(
+                challengeId: String(repeating: "c", count: 32),
+                challenge: Data(repeating: 8, count: 32).base64EncodedString()
+                    .replacingOccurrences(of: "=", with: ""),
+                purpose: "attestation",
+                expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+                keyId: nil
+            ),
+            OfflineMapAppAttestChallenge(
+                challengeId: String(repeating: "d", count: 32),
+                challenge: Data(repeating: 9, count: 32).base64EncodedString()
+                    .replacingOccurrences(of: "=", with: ""),
+                purpose: "attestation",
+                expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+                keyId: nil
+            ),
+        ]
+        let appAttestService = TestOfflineMapAppAttestService(
+            keyIDs: [firstKeyID, secondKeyID]
+        )
+        let managed = ManagedOfflineMapAppAttestClient(
+            defaults: defaults,
+            session: session,
+            service: appAttestService,
+            appBuild: "123"
+        )
+        var challengeRequests = 0
+        var enrollmentRequests = 0
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/installations/app-attest/challenges" {
+                let challenge = challenges[challengeRequests]
+                challengeRequests += 1
+                return (200, try! JSONEncoder().encode(challenge))
+            }
+            enrollmentRequests += 1
+            if enrollmentRequests == 1 {
+                throw URLError(.networkConnectionLost)
+            }
+            if enrollmentRequests == 2 {
+                return (
+                    401,
+                    Data(#"{"detail":{"code":"app_attest_invalid_challenge","message":"consumed"}}"#.utf8)
+                )
+            }
+            return (200, try! JSONEncoder().encode(credential))
+        }
+        do {
+            do {
+                _ = try await managed.enroll(baseURL: baseURL)
+                assert(false, "the lost initial enrollment response is surfaced")
+            } catch {}
+            let recovered = try await managed.enroll(baseURL: baseURL)
+            try managed.finalizeEnrollment(
+                recovered,
+                serverURLString: baseURL.absoluteString
+            )
+            assertEqual(recovered, credential,
+                "a consumed initial challenge is replaced immediately")
+            assertEqual(challengeRequests, 2,
+                "initial enrollment retries with exactly one fresh challenge")
+            assertEqual(enrollmentRequests, 3,
+                "the pending replay is followed by exactly one fresh enrollment")
+            assertEqual(appAttestService.generatedKeyCount, 2,
+                "a consumed unowned attempt receives one fresh App Attest key")
+            let keyStore = OfflineMapAppAttestKeyStore(defaults: defaults)
+            assertEqual(keyStore.load(serverURLString: baseURL.absoluteString),
+                secondKeyID, "the retried initial enrollment promotes its usable key")
+            assert(keyStore.pending(serverURLString: baseURL.absoluteString) == nil,
+                "the retried initial enrollment clears pending state after promotion")
+        } catch {
+            assert(false, "consumed initial App Attest challenge recovers: \(error)")
+        }
+    }
+
+    @MainActor
     static func testManagedAppAttestCrashBeforeCredentialPersistence() async {
         let suite = "AppAttestCrashRecovery-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -3376,6 +3581,7 @@ struct NavigationProtocolTests {
                 OfflineMapPendingAppAttestEnrollment(
                     keyID: newKeyID,
                     previousKeyID: oldKeyID,
+                    clientInstallationID: old.clientInstallationId,
                     challenge: OfflineMapAppAttestChallenge(
                         challengeId: String(repeating: "f", count: 32),
                         challenge: Data(repeating: 6, count: 32)

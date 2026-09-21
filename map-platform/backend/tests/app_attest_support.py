@@ -211,6 +211,21 @@ class AppAttestTestClient:
                 "appBuild": TEST_APP_BUILD,
             }
         )
+        attestation = {
+            "challengeId": challenge_document["challengeId"],
+            "keyId": key_id,
+            "attestationObject": base64.b64encode(
+                attestation_object
+            ).decode("ascii"),
+            "appBuild": TEST_APP_BUILD,
+        }
+        resolved_previous_key_id = (
+            challenge_document.get("keyId")
+            if previous_key_id is None
+            else previous_key_id
+        )
+        if resolved_previous_key_id is not None:
+            attestation["previousKeyId"] = resolved_previous_key_id
         response = client.post(
             "/v1/installations",
             params={
@@ -220,19 +235,7 @@ class AppAttestTestClient:
                 "X-Installation-Token": credential["clientInstallationToken"]
             },
             json={
-                "appAttest": {
-                    "challengeId": challenge_document["challengeId"],
-                    "keyId": key_id,
-                    "previousKeyId": (
-                        challenge_document["keyId"]
-                        if previous_key_id is None
-                        else previous_key_id
-                    ),
-                    "attestationObject": base64.b64encode(
-                        attestation_object
-                    ).decode("ascii"),
-                    "appBuild": TEST_APP_BUILD,
-                }
+                "appAttest": attestation
             },
         )
         if response.status_code != 200:
