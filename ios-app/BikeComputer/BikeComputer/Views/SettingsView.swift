@@ -1262,21 +1262,10 @@ private struct PendingSavedMapRow: View {
 
             if let overallGenerationProgress {
                 OfflineMapProgressRow(
-                    title: "Generation Progress",
+                    title: "Progress",
                     percentage: overallGenerationProgress.percentage,
                     fraction: overallGenerationProgress.fraction,
                     detail: overallGenerationProgress.detail
-                )
-            }
-
-            if let generationProgress {
-                OfflineMapProgressRow(
-                    title: "Feature Conversion",
-                    percentage: generationProgress.displayFraction == nil
-                        ? nil
-                        : generationProgress.percentage,
-                    fraction: generationProgress.displayFraction,
-                    detail: generationProgress.detail
                 )
             }
 
@@ -1293,7 +1282,6 @@ private struct PendingSavedMapRow: View {
 
             if manager.downloadByteProgress == nil,
                overallGenerationProgress == nil,
-               generationProgress == nil,
                !manager.statusMessage.isEmpty {
                 Text(manager.statusMessage)
                     .font(.caption)
@@ -1306,33 +1294,40 @@ private struct PendingSavedMapRow: View {
                     .foregroundStyle(.red)
             }
 
-            HStack(spacing: 16) {
-                if manager.currentJob?.mapId != nil {
+            if manager.errorMessage != nil {
+                HStack(spacing: 16) {
                     Button {
                         manager.retryPendingMapJob(bleManager: bleManager)
                     } label: {
                         Label("Retry Download", systemImage: "arrow.clockwise")
                     }
-                } else if manager.isMapJobProcessing {
+                    Button("Choose Another Map", role: .destructive) {
+                        onChooseAnotherMap()
+                    }
+                }
+                .font(.subheadline)
+                .buttonStyle(.borderless)
+            } else if manager.isMapJobProcessing {
+                HStack(spacing: 16) {
                     Button {
                         manager.pausePendingMapJob()
                     } label: {
                         Label("Pause", systemImage: "pause.circle")
                     }
-                } else {
+                }
+                .font(.subheadline)
+                .buttonStyle(.borderless)
+            } else {
+                HStack(spacing: 16) {
                     Button {
                         manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
                     } label: {
                         Label("Resume", systemImage: "play.circle")
                     }
                 }
-
-                Button("Choose Another Map", role: .destructive) {
-                    onChooseAnotherMap()
-                }
+                .font(.subheadline)
+                .buttonStyle(.borderless)
             }
-            .font(.subheadline)
-            .buttonStyle(.borderless)
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .contain)
@@ -1349,12 +1344,9 @@ private struct PendingSavedMapRow: View {
     private var preparationEstimatePresentation:
         OfflineMapPreparationEstimatePresentation? {
         guard let job = manager.currentJob else { return nil }
-        return OfflineMapPreparationEstimatePresentation.presentation(for: job)
-    }
-
-    private var generationProgress: OfflineMapJobProgress? {
-        guard manager.currentJob?.status == "converting_features" else { return nil }
-        return manager.currentJob?.progress
+        return OfflineMapPreparationEstimatePresentation.availablePresentation(
+            for: job
+        )
     }
 
     private var overallGenerationProgress: OfflineMapBuildingProgress? {
