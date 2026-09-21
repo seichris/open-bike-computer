@@ -1,17 +1,16 @@
 # Watch workout companion release notes
 
-Release candidate: **1.8 (18)**. App Store version 1.7 is already distributed,
-and App Store Connect already contains builds through 17, so both the marketing
+Release candidate: **1.9 (19)**. App Store version 1.8 is already distributed,
+and App Store Connect already contains builds through 18, so both the marketing
 version and build number advance for this release.
 
 ## App Store What's New
 
-Find destinations and navigate more reliably on your Bicino.
+Download offline maps more reliably on your Bicino.
 
-- Keep destination search visible while using the keyboard.
-- Open shared map links more reliably from Safari.
-- Receive more consistent navigation updates over Bluetooth.
-- Use the right button to move backward through bike computer screens.
+- Recover automatically if the app's map-security credential becomes
+  unavailable.
+- Retry map creation after securely restoring that credential.
 
 ## App Review notes
 
