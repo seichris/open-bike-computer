@@ -149,6 +149,8 @@ struct WorkoutSessionCoordinatorTests {
                 persistence: disk, phone: phone), watch, phone, availability, disk)
         }
         let (coordinator, watch, phone, availability, disk) = harness()
+        check(!coordinator.canOfferNewWorkout,
+              "Start stays hidden until ownership recovery completes")
         check(!coordinator.requestStart(), "Start awaits recovery")
         await spin { phone.starts == 1 }
         check(watch.starts == 0, "No paired Watch uses phone only")
@@ -210,6 +212,45 @@ struct WorkoutSessionCoordinatorTests {
         check(choose.requestStart(explicitOwner: .iphone), "Explicit phone override admitted")
         await spin { phone3.starts == 1 }
         check(choose.record?.owner == .iphone, "Explicit phone selection stays selected")
+
+        let finishedDisk = MemoryRecordingStore()
+        var finishedWatchRecord = WorkoutRecordingRecord(
+            owner: .watch,
+            sessionID: UUID(),
+            requestedAt: Date().addingTimeInterval(-120)
+        )
+        finishedWatchRecord.startedAt = Date().addingTimeInterval(-119)
+        finishedWatchRecord.finishChoice = .save
+        finishedWatchRecord.finishedChoice = .save
+        finishedWatchRecord.phase = .finished
+        try finishedDisk.save(finishedWatchRecord)
+        let restartWatch = FakeWatch()
+        let restartPhone = FakePhone(finishedDisk)
+        let restartAvailability = FakeAvailability()
+        restartAvailability.availability = .ready(isReachable: true)
+        let restart = WorkoutSessionCoordinator(
+            watch: restartWatch,
+            watchAvailability: restartAvailability,
+            persistence: finishedDisk,
+            phone: restartPhone
+        )
+        restart.recoverIfNeeded()
+        await spin { restart.recoveryComplete }
+        check(restart.record == finishedWatchRecord,
+              "Recovery keeps a finished tombstone until the rider continues")
+        check(restart.canOfferNewWorkout,
+              "A finished tombstone still offers the next workout")
+        check(restart.requestStart(),
+              "One start tap clears a finished tombstone and starts the next ride")
+        check(restartWatch.starts == 1 && restartPhone.starts == 0,
+              "The normal recorder policy selects the reachable Watch after cleanup")
+        check(restart.record?.phase == .starting
+                && restart.record?.sessionID != finishedWatchRecord.sessionID,
+              "The new ride gets fresh ownership instead of reusing the old summary")
+        check(!restart.canOfferNewWorkout,
+              "A reserved new ride immediately removes the start action")
+        check(restart.notice == nil,
+              "A successful restart does not request the workout attention sheet")
 
         let (recovery, watch4, phone4, _, disk4) = harness()
         phone4.recoveryFails = true

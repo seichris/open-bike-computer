@@ -1846,7 +1846,8 @@ struct ContentView: View {
             .layoutPriority(0)
 
             if !isSearchPanelExpanded,
-               workoutStore.presentation.canStartNewWorkout {
+               workoutStore.presentation.canStartNewWorkout,
+               workoutSessionCoordinator.canOfferNewWorkout {
                 WorkoutStartButton(
                     watchAvailability: watchAvailability,
                     action: {
