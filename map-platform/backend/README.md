@@ -226,7 +226,8 @@ The local compose shape defaults `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE` to
 `shadow` and passes the estimator settings to API, worker, and maintenance so
 local development records calibration revisions without exposing them to
 clients. The digest-pinned development lock also defaults to `shadow`; the
-production lock defaults to `off`.
+production lock now defaults to `shadow` so it records bounded estimate
+revisions and accuracy evidence without exposing unvalidated ranges to clients.
 
 Configure each Coolify resource with repository base directory `/` and only its
 own Compose location/watch path: `/map-platform/deploy/compose.yaml` for
@@ -429,8 +430,8 @@ Useful production environment variables:
   in-window timing samples loaded for an aggregate summary, default `50000`,
   maximum `1000000`. Responses report the matching count, sampled count, limit,
   and whether the summary was truncated.
-- `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE`: `off` (default for the pinned
-  Coolify compose; local development defaults to `shadow`), `shadow`, or
+- `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE`: `off`, `shadow` (default for the
+  pinned Coolify compose and local development), or
   `public`. `off` omits generation and the public field; `shadow` stores
   revisions for accuracy review but omits the public field; `public` returns
   the latest validated revision on the existing installation-scoped job API.

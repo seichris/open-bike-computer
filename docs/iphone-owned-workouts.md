@@ -30,7 +30,7 @@ protected until first unlock, excluded from backup, and contains no raw samples.
 | Watch launch times out | Retain unresolved Watch ownership; never auto-fallback |
 | Owner disconnects or another device reconnects | Keep the selected owner |
 | Another Watch session arrives during phone recording | Surface conflict; do not publish it over phone data or stop either ride |
-| Finish confirmed | Keep terminal tombstone until Done |
+| Finish confirmed | Keep the terminal tombstone until Done or the rider explicitly starts the next workout |
 
 The existing `WorkoutMirrorManager` still has no builder or Health write path.
 `PhoneWorkoutRecorder` has a separate builder, metrics store, and local native

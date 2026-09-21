@@ -1082,6 +1082,13 @@ private struct SavedMapsSettingsSection: View {
         )
         let hasPendingMapRow = scope == .savedMaps &&
             manager.hasPendingMapJob &&
+            !OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
+                isServerRecoveryCheckPending:
+                    manager.isServerRecoveryCheckPending,
+                hasCurrentJob: manager.currentJob != nil,
+                hasDownloadedPack: manager.downloadedPackURL != nil,
+                errorMessage: manager.errorMessage
+            ) &&
             !manager.hasDownloadedPendingDeviceInstall
         Section(header: Text(scope == .developerMaps ? "Development Maps" : "Saved Maps")) {
             if savedMaps.isEmpty && !hasPendingMapRow {
@@ -1114,7 +1121,6 @@ private struct SavedMapsSettingsSection: View {
                     }
                 )
                 .environmentObject(bleManager)
-                .listRowBackground(Color(uiColor: .systemGray6))
             }
 
             if scope == .savedMaps {
@@ -1251,21 +1257,13 @@ private struct PendingSavedMapRow: View {
                 }
             }
 
-            if let downloadProgress = manager.downloadByteProgress {
-                OfflineMapProgressRow(
-                    title: "Download Progress",
-                    percentage: downloadProgress.percentage,
-                    fraction: downloadProgress.fraction,
-                    detail: nil
-                )
-            }
-
-            if let overallGenerationProgress {
+            if manager.errorMessage == nil,
+               let progressFraction = manager.activityProgress {
                 OfflineMapProgressRow(
                     title: "Progress",
-                    percentage: overallGenerationProgress.percentage,
-                    fraction: overallGenerationProgress.fraction,
-                    detail: overallGenerationProgress.detail
+                    percentage: Int((progressFraction * 100).rounded()),
+                    fraction: progressFraction,
+                    detail: nil
                 )
             }
 
@@ -1278,14 +1276,6 @@ private struct PendingSavedMapRow: View {
                         .multilineTextAlignment(.trailing)
                 }
                 .font(.caption)
-            }
-
-            if manager.downloadByteProgress == nil,
-               overallGenerationProgress == nil,
-               !manager.statusMessage.isEmpty {
-                Text(manager.statusMessage)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             if let error = manager.errorMessage {
@@ -1344,15 +1334,9 @@ private struct PendingSavedMapRow: View {
     private var preparationEstimatePresentation:
         OfflineMapPreparationEstimatePresentation? {
         guard let job = manager.currentJob else { return nil }
-        return OfflineMapPreparationEstimatePresentation.availablePresentation(
-            for: job
-        )
+        return OfflineMapPreparationEstimatePresentation.presentation(for: job)
     }
 
-    private var overallGenerationProgress: OfflineMapBuildingProgress? {
-        guard manager.currentJob?.status == "converting_features" else { return nil }
-        return manager.currentJob?.buildingProgress
-    }
 }
 
 private struct OfflineMapProgressRow: View {

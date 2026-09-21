@@ -194,7 +194,6 @@ struct RideMetricsPanel: View {
     let onPauseWorkout: () -> Void
     let onResumeWorkout: () -> Void
     let onEndAndSaveWorkout: () -> Void
-    let onDiscardWorkout: () -> Void
     let enabledSensorCapabilities: CyclingSensorCapabilities
     let sensorPrompt: CyclingSensorPrompt?
     let onOpenSensorSettings: () -> Void
@@ -411,12 +410,7 @@ struct RideMetricsPanel: View {
                 group: heartRate, showCurrent: !suppressInstantaneousMetrics
             )
         } else {
-            VStack(spacing: 4) {
-                HeartRateZoneStrip(currentZone: displayedHeartRateZone)
-                Text("Bicino zones · configured maximum heart rate")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+            HeartRateZoneStrip(currentZone: displayedHeartRateZone)
         }
         if let power = native?.cyclingPower {
             WorkoutNativeZoneCard(
@@ -764,11 +758,7 @@ struct RideMetricsPanel: View {
                 )
             }
 
-            WorkoutFinishButton(
-                store: workoutStore,
-                onEndAndSave: onEndAndSaveWorkout,
-                onDiscard: onDiscardWorkout
-            ) {
+            Button(action: onEndAndSaveWorkout) {
                 RideControlLabel(
                     "End workout",
                     systemImage: "stop.fill"

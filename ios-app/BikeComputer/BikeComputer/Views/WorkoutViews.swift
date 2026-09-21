@@ -522,7 +522,6 @@ struct WorkoutDashboardView: View {
     let onResume: () -> Void
     let onMarkSegment: () -> Void
     let onEndAndSave: () -> Void
-    let onDiscard: () -> Void
     let onDone: () -> Bool
 
     @Environment(\.dismiss) private var dismiss
@@ -535,7 +534,8 @@ struct WorkoutDashboardView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     connectionBanner
-                    if let recordingCoordinator {
+                    if let recordingCoordinator,
+                       recordingCoordinator.record?.phase != .finished {
                         WorkoutRecordingStatusView(coordinator: recordingCoordinator, store: store)
                     }
 
@@ -607,9 +607,7 @@ struct WorkoutDashboardView: View {
     private var connectionBanner: some View {
         TimelineView(.periodic(from: Date(), by: 1)) { context in
             HStack(spacing: 10) {
-                Circle()
-                    .fill(connectionColor)
-                    .frame(width: 9, height: 9)
+                connectionIndicator
                 VStack(alignment: .leading, spacing: 2) {
                     Text(connectionLabel)
                         .font(.subheadline.weight(.semibold))
@@ -623,6 +621,26 @@ struct WorkoutDashboardView: View {
             }
             .padding(12)
             .background(.background, in: RoundedRectangle(cornerRadius: 14))
+        }
+    }
+
+    @ViewBuilder
+    private var connectionIndicator: some View {
+        if store.presentation.connectionState == .ended {
+            Image(
+                systemName: store.recordingOwner == .watch
+                    ? "applewatch"
+                    : "iphone"
+            )
+            .font(.body.weight(.semibold))
+            .frame(width: 18)
+            .accessibilityHidden(true)
+        } else {
+            Circle()
+                .fill(connectionColor)
+                .frame(width: 9, height: 9)
+                .frame(width: 18)
+                .accessibilityHidden(true)
         }
     }
 
@@ -702,12 +720,9 @@ struct WorkoutDashboardView: View {
                         showCurrent: store.presentation.connectionState == .connected
                     )
                 } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HeartRateZoneStrip(currentZone: snapshot.currentHeartRateZone)
-                        Text("Bicino zones · configured maximum heart rate")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
+                    HeartRateZoneStrip(
+                        currentZone: snapshot.currentHeartRateZone
+                    )
                     .padding(12)
                     .background(.background, in: RoundedRectangle(cornerRadius: 14))
                 }
@@ -963,13 +978,10 @@ struct WorkoutDashboardView: View {
                     )
                 }
 
-                WorkoutFinishButton(
-                    store: store,
-                    onEndAndSave: onEndAndSave,
-                    onDiscard: onDiscard
-                ) {
+                Button(action: onEndAndSave) {
                     Label("End", systemImage: "stop.fill")
                 }
+                .tint(.red)
                 .disabled(
                     presentation.sessionState == .ending
                         || (presentation.pendingControl != nil
