@@ -1677,7 +1677,8 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
 | `MSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Current map-transfer status notification. |
 | `DTRN` | iOS -> ESP32 | `enter\|map` | Preferred atomic map-mode entry; publishes both map status and generic device-transfer status. |
-| `DTRN` | iOS -> ESP32 | `enter\|firmware` | Enter firmware-update transfer mode. |
+| `DTRN` | iOS -> ESP32 | `prepare\|firmware` | Validate OTA eligibility, write a one-shot maintenance request, acknowledge `reboot_pending`, then reboot. |
+| `DTRN` | iOS -> ESP32 | `enter\|firmware` | Enter firmware-update transfer mode after reconnecting and authenticating in maintenance boot. Normal boot rejects this command. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug` | Enter opt-in real-device browser-debug mode when CAP2 bit `16` is present. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|lan1\|` plus bounded binary credentials | Enter browser-debug mode by trying a normal LAN first, with device-hotspot fallback. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|h1\|e` | Force the hotspot after authenticated LAN endpoint verification fails; `e` records `endpoint_unreachable`. |
@@ -1731,9 +1732,25 @@ transfer id and accepts both forms.
 Generic device-transfer status uses the equivalent `DSTS{...}` direct response
 or `DSTC` chunk header. Firmware keeps an incomplete `DSTC` snapshot on the
 owner task and resumes it only as the bounded authenticated-notification queue
-drains. A request received while that snapshot is pending continues the same
-transfer instead of assigning a new transfer id and stranding the iOS
-reassembler with another partial response.
+drains. A fresh status event supersedes an incomplete older snapshot and uses a
+new transfer id, so chunks from different `statusRevision` values cannot be
+combined.
+
+Firmware-update clients require `capabilities.firmwareMaintenanceV1`. Before
+downloading or rebooting, iOS checks `firmware.otaEligible`,
+`firmware.eligibilityCode`, `firmware.inactivePartition`, and
+`firmware.maxImageBytes`. Preparation publishes a `maintenance` object with
+`active: false`, stage `reboot_pending`, and a non-zero correlation. After the
+expected disconnect, iOS reconnects to the same device identity, authenticates
+again, and requires `maintenance.active: true` with the same correlation before
+sending `enter|firmware`.
+
+Maintenance stages are `awaiting_authentication`, `network_starting`, `ready`,
+`receiving`, `verifying`, `committing`, `rebooting`, `cancelling`, and `failed`.
+The status also carries non-secret `resources` counters for current and minimum
+internal/DMA free space, largest blocks, worker stack high-water bytes, and the
+measurement phase. Transfer tokens, hotspot passwords, and TLS private keys are
+never retained in resource evidence.
 
 The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic

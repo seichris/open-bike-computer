@@ -494,6 +494,14 @@ jobs:
             -o /tmp/test_boot_diagnostics_policy
           /tmp/test_boot_diagnostics_policy
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_firmware_maintenance_policy.cpp \
+            -o /tmp/test_firmware_maintenance_policy
+          /tmp/test_firmware_maintenance_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_firmware_update_policy.cpp \
+            -o /tmp/test_firmware_update_policy
+          /tmp/test_firmware_update_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_speaker_playback_policy.cpp \
             -o /tmp/test_speaker_playback_policy
           /tmp/test_speaker_playback_policy

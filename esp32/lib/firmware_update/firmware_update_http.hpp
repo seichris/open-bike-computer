@@ -20,6 +20,8 @@ struct FirmwareUpdateStatus {
   std::string runningGitSha;
   std::string runningPartition;
   std::string inactivePartition;
+  bool otaEligible = false;
+  std::string eligibilityCode;
   uint32_t maxImageBytes = 0;
   uint32_t receivedBytes = 0;
   uint32_t totalBytes = 0;

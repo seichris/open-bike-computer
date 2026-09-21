@@ -1,4 +1,6 @@
 #include "device_transfer_http.hpp"
+#include "commit_boundary_policy.hpp"
+#include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../power_management/power_management.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 #include "device_transfer_http_limits.hpp"
@@ -20,7 +22,9 @@ namespace {
 // also performs Wi-Fi station setup and hotspot fallback on this worker. Keep
 // its existing effective 16 KiB budget rather than reducing stack headroom on
 // the fully initialized device.
-constexpr uint32_t kTransferHttpWorkerStackBytes = 16384;
+constexpr uint32_t kMapHttpWorkerStackBytes = 16384;
+constexpr uint32_t kFirmwareHttpWorkerStackBytes = 16384;
+constexpr uint32_t kDiagnosticsHttpWorkerStackBytes = 16384;
 constexpr uint32_t kDebugHttpWorkerStackBytes = 16384;
 constexpr uint32_t kLanConnectTimeoutMs = 6000;
 constexpr uint32_t kLanConnectPollMs = 50;
@@ -196,6 +200,13 @@ void HttpTransferServer::configure(uint16_t port, std::string apSsid) {
   }
 }
 
+void HttpTransferServer::setStatusChangedCallback(
+    StatusChangedCallback callback) {
+  lockState();
+  statusChangedCallback_ = callback;
+  unlockState();
+}
+
 bool HttpTransferServer::registerHandler(std::string pathPrefix,
                                          HttpRequestHandler *handler) {
   if (handler == nullptr || pathPrefix.empty())
@@ -274,7 +285,16 @@ void HttpTransferServer::clearAuthenticatedBleSession() {
   lockState();
   const bool hadBinding = authenticatedBleSessionId_ != 0;
   const bool wasEnabled = enabled_;
+  const bool commitInProgress = commitInProgress_;
   authenticatedBleSessionId_ = 0;
+  if (commitInProgress) {
+    // The authenticated request already crossed the serialized activation
+    // boundary. A coincident BLE disconnect must not interrupt boot selection
+    // or its response/reboot path; no later request can be admitted because
+    // the BLE binding has still been cleared.
+    unlockState();
+    return;
+  }
   enabled_ = false;
   sessionToken_.clear();
   apPassphrase_.clear();
@@ -402,6 +422,14 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     acquiredPowerLock = true;
   }
   if (!enabled && wasEnabled) {
+    lockState();
+    const bool commitInProgress = commitInProgress_;
+    unlockState();
+    if (!commit_boundary_policy::cancellationAllowed(commitInProgress)) {
+      setLastError("commit_in_progress",
+                   "firmware activation has crossed the commit boundary");
+      return false;
+    }
     // Revoke the request generation before stopping the listener/AP. Network
     // teardown can take long enough for a nearly complete handler to advance;
     // it must observe cancellation before it can publish or activate anything.
@@ -451,12 +479,21 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     }
     unlockState();
   }
+  if (firmware_maintenance::active()) {
+    firmware_maintenance::setStage(
+        enabled ? firmware_maintenance::Stage::NetworkStarting
+                : firmware_maintenance::Stage::Cancelling);
+  }
 
   if (enabled && !wasEnabled) {
     TaskHandle_t worker = nullptr;
     const uint32_t workerStackBytes =
-        requestedMode == "debug" ? kDebugHttpWorkerStackBytes
-                                  : kTransferHttpWorkerStackBytes;
+        requestedMode == "debug"
+            ? kDebugHttpWorkerStackBytes
+            : (requestedMode == "firmware"
+                   ? kFirmwareHttpWorkerStackBytes
+                   : (requestedMode == "map" ? kMapHttpWorkerStackBytes
+                                               : kDiagnosticsHttpWorkerStackBytes));
     // The debug service is RAM-only and never performs firmware flash writes
     // or map activation. Keep its long-lived 16 KiB stack in PSRAM so the
     // pinned-TLS session cannot consume the internal/DMA headroom that BLE
@@ -507,9 +544,14 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
       if (acquiredPowerLock) {
         power_management::release(power_management::LockDomain::Transfer);
       }
+      if (firmware_maintenance::active())
+        firmware_maintenance::setStage(firmware_maintenance::Stage::Failed);
+      signalStatusChanged();
       return false;
     }
   }
+  observeResources(enabled ? "worker_created" : "disabled");
+  signalStatusChanged();
   return true;
 }
 
@@ -518,6 +560,16 @@ void HttpTransferServer::setLastError(const std::string &code,
   lockState();
   rememberError(code, message);
   unlockState();
+  signalStatusChanged();
+}
+
+void HttpTransferServer::noteStatusChanged(const char *resourcePhase) {
+  observeResources(resourcePhase);
+  signalStatusChanged();
+}
+
+void HttpTransferServer::sampleResources(const char *resourcePhase) {
+  observeResources(resourcePhase);
 }
 
 void HttpTransferServer::process() {}
@@ -624,6 +676,10 @@ bool HttpTransferServer::startNetwork() {
       "free_heap=%u\n",
       static_cast<unsigned>(port_), lanReady ? "lan" : "hotspot",
       static_cast<unsigned>(ESP.getFreeHeap()));
+  observeResources("network_ready");
+  if (firmware_maintenance::active())
+    firmware_maintenance::setStage(firmware_maintenance::Stage::Ready);
+  signalStatusChanged();
   return true;
 }
 
@@ -678,6 +734,9 @@ void HttpTransferServer::runWorker() {
     unlockState();
     if (releasePowerLock)
       power_management::release(power_management::LockDomain::Transfer);
+    if (firmware_maintenance::active())
+      firmware_maintenance::setStage(firmware_maintenance::Stage::Failed);
+    signalStatusChanged();
     return;
   }
   uint32_t lastHealthLogMs = 0;
@@ -707,6 +766,7 @@ void HttpTransferServer::runWorker() {
     }
     WiFiClient acceptedClient = server_.accept();
     if (acceptedClient) {
+      observeResources("client_accepted");
       const HttpTransferStatus networkStatus = status();
       Serial.printf(
           "DEVICE_TRANSFER_HTTP: accepted client transport=%s stations=%u "
@@ -758,8 +818,10 @@ void HttpTransferServer::runWorker() {
             "DEVICE_TRANSFER_HTTP: rejected client before secure request %s\n",
             message);
         vTaskDelay(pdMS_TO_TICKS(2));
+        observeResources("tls_failed");
         continue;
       }
+      observeResources("tls_ready");
       lockState();
       activeClient_ = &client;
       unlockState();
@@ -791,6 +853,7 @@ void HttpTransferServer::runWorker() {
       currentRequestAuthorized_ = false;
       unlockState();
       client.stop();
+      observeResources("client_closed");
       ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
     } else {
       const uint32_t now = millis();
@@ -840,6 +903,15 @@ HttpTransferStatus HttpTransferServer::status() const {
   const std::string lastErrorMessage = lastErrorMessage_;
   const uint32_t errorSequence = errorSequence_;
   const uint32_t lastUsefulTrafficMs = lastUsefulTrafficMs_;
+  const uint32_t statusRevision = statusRevision_;
+  const uint32_t minimumInternalFree = minimumInternalFree_;
+  const uint32_t minimumInternalLargest = minimumInternalLargest_;
+  const uint32_t minimumDmaFree = minimumDmaFree_;
+  const uint32_t minimumDmaLargest = minimumDmaLargest_;
+  const uint32_t minimumPsramFree = minimumPsramFree_;
+  const uint32_t minimumPsramLargest = minimumPsramLargest_;
+  const uint32_t workerStackHighWaterBytes = workerStackHighWaterBytes_;
+  const std::string resourcePhase = resourcePhase_;
   // Only authenticated work may extend the transfer lifetime. A client that
   // stalls before authorization must not keep the AP awake indefinitely.
   const bool authorizedRequestInProgress =
@@ -885,6 +957,7 @@ HttpTransferStatus HttpTransferServer::status() const {
   result.pendingTlsCertificateSha256 = pendingTlsCertificateSha256;
   result.pendingTlsIdentityVersion = pendingTlsIdentityVersion;
   result.transferGeneration = transferGeneration;
+  result.statusRevision = statusRevision;
   result.secureTransferV1 =
       tlsIdentityVersion != 0 &&
       validTlsCertificateSha256(tlsCertificateSha256);
@@ -895,6 +968,34 @@ HttpTransferStatus HttpTransferServer::status() const {
   result.errorSequence = errorSequence;
   result.lastUsefulTrafficMs = lastUsefulTrafficMs;
   result.authorizedRequestInProgress = authorizedRequestInProgress;
+  result.internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  result.internalLargest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  result.dmaFree = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+  result.dmaLargest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+  result.psramFree =
+      heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  result.psramLargest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  result.minimumInternalFree =
+      minimumInternalFree == UINT32_MAX ? result.internalFree : minimumInternalFree;
+  result.minimumInternalLargest = minimumInternalLargest == UINT32_MAX
+                                      ? result.internalLargest
+                                      : minimumInternalLargest;
+  result.minimumDmaFree =
+      minimumDmaFree == UINT32_MAX ? result.dmaFree : minimumDmaFree;
+  result.minimumDmaLargest = minimumDmaLargest == UINT32_MAX
+                                 ? result.dmaLargest
+                                 : minimumDmaLargest;
+  result.minimumPsramFree = minimumPsramFree == UINT32_MAX
+                                ? result.psramFree
+                                : minimumPsramFree;
+  result.minimumPsramLargest = minimumPsramLargest == UINT32_MAX
+                                   ? result.psramLargest
+                                   : minimumPsramLargest;
+  result.workerStackHighWaterBytes = workerStackHighWaterBytes;
+  result.resourcePhase = resourcePhase;
   return result;
 }
 
@@ -916,6 +1017,28 @@ bool HttpTransferServer::isRequestAuthorized(
   }
   unlockState();
   return authorized;
+}
+
+bool HttpTransferServer::beginAuthorizedCommit(const HttpRequest &request) {
+  lockState();
+  const bool authorized =
+      isHttpTransferGenerationCurrent(enabled_, transferGeneration_,
+                                      request.transferGeneration) &&
+      authenticatedBleSessionId_ != 0 && !sessionToken_.empty() &&
+      constantTimeEqual(request.transferToken, sessionToken_);
+  if (commit_boundary_policy::begin(authorized, commitInProgress_)) {
+    currentRequestAuthorized_ = true;
+    lastUsefulTrafficMs_ = millis();
+  }
+  unlockState();
+  return authorized;
+}
+
+void HttpTransferServer::endAuthorizedCommit() {
+  lockState();
+  commit_boundary_policy::end(commitInProgress_);
+  unlockState();
+  signalStatusChanged();
 }
 
 bool HttpTransferServer::waitUntilStopped(uint32_t timeoutMs) {
@@ -1133,6 +1256,46 @@ void HttpTransferServer::rememberError(const std::string &code,
   lastErrorCode_ = code;
   lastErrorMessage_ = message;
   errorSequence_ = nextHttpTransferGeneration(errorSequence_);
+}
+
+void HttpTransferServer::observeResources(const char *phase) {
+  const uint32_t internalFree =
+      heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const uint32_t internalLargest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  const uint32_t dmaFree =
+      heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+  const uint32_t dmaLargest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+  const uint32_t psramFree =
+      heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  const uint32_t psramLargest =
+      heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  const TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
+  lockState();
+  minimumInternalFree_ = std::min(minimumInternalFree_, internalFree);
+  minimumInternalLargest_ = std::min(minimumInternalLargest_, internalLargest);
+  minimumDmaFree_ = std::min(minimumDmaFree_, dmaFree);
+  minimumDmaLargest_ = std::min(minimumDmaLargest_, dmaLargest);
+  minimumPsramFree_ = std::min(minimumPsramFree_, psramFree);
+  minimumPsramLargest_ = std::min(minimumPsramLargest_, psramLargest);
+  if (workerTask_ != nullptr && currentTask == workerTask_) {
+    workerStackHighWaterBytes_ =
+        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)) *
+        sizeof(StackType_t);
+  }
+  resourcePhase_ = phase == nullptr ? "unknown" : phase;
+  unlockState();
+}
+
+void HttpTransferServer::signalStatusChanged() {
+  StatusChangedCallback callback = nullptr;
+  lockState();
+  statusRevision_ = nextHttpTransferGeneration(statusRevision_);
+  callback = statusChangedCallback_;
+  unlockState();
+  if (callback != nullptr)
+    callback();
 }
 
 void HttpTransferServer::lockState() const {

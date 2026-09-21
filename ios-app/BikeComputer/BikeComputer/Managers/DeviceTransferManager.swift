@@ -1101,6 +1101,112 @@ final class DeviceTransferManager {
         }
     }
 
+    func requireFirmwareMaintenanceEligibility(
+        bleManager: BLEManager
+    ) async throws {
+        guard bleManager.isNavigationReady else {
+            throw FirmwareUpdateError.deviceNotReady
+        }
+        let initialRevision = bleManager.deviceTransferStatusRevision
+        guard bleManager.requestDeviceTransferStatus() else {
+            throw FirmwareUpdateError.transferCommandNotSent
+        }
+        for _ in 0..<DeviceTransferHandshakePolicy.attemptCount {
+            if bleManager.deviceTransferStatusRevision != initialRevision {
+                guard bleManager.supportsFirmwareMaintenanceV1 else {
+                    throw FirmwareUpdateError.firmwareMaintenanceUnsupported
+                }
+                guard bleManager.firmwareOTAEligible == true else {
+                    throw FirmwareUpdateError.otaIneligible(
+                        bleManager.firmwareOTAEligibilityCode ??
+                            "inactive_ota_partition_missing"
+                    )
+                }
+                return
+            }
+            try await Task.sleep(
+                nanoseconds:
+                    DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
+        }
+        throw FirmwareUpdateError.firmwareMaintenanceUnsupported
+    }
+
+    func prepareFirmwareMaintenance(
+        bleManager: BLEManager,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws -> UInt32 {
+        guard bleManager.isNavigationReady else {
+            throw FirmwareUpdateError.deviceNotReady
+        }
+        let expectedDeviceID = bleManager.connectedDeviceID
+        let initialRevision = bleManager.deviceTransferStatusRevision
+        let initialErrorSequence = bleManager.deviceTransferLastErrorSequence
+        status("requesting firmware maintenance")
+        guard bleManager.requestFirmwareMaintenancePreparation() else {
+            throw FirmwareUpdateError.transferCommandNotSent
+        }
+
+        var expectedCorrelation: UInt32?
+        for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
+            if bleManager.deviceTransferStatusRevision != initialRevision {
+                if bleManager.firmwareMaintenanceStage == "reboot_pending" {
+                    expectedCorrelation =
+                        bleManager.firmwareMaintenanceCorrelation
+                    break
+                }
+                if let failure = DeviceTransferFreshFailurePolicy.failure(
+                    after: initialErrorSequence,
+                    currentSequence:
+                        bleManager.deviceTransferLastErrorSequence,
+                    code: bleManager.deviceTransferLastErrorCode,
+                    message: bleManager.deviceTransferLastErrorMessage
+                ) {
+                    throw FirmwareUpdateError.deviceTransferRejected(
+                        code: failure.code,
+                        message: failure.message
+                    )
+                }
+            }
+            if DeviceTransferHandshakePolicy.shouldRequestStatus(
+                attempt: attempt
+            ) {
+                _ = bleManager.requestDeviceTransferStatus()
+            }
+            try await Task.sleep(
+                nanoseconds:
+                    DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
+        }
+        guard let expectedCorrelation, expectedCorrelation != 0 else {
+            throw FirmwareUpdateError.maintenanceReconnectFailed
+        }
+
+        status("waiting for firmware maintenance")
+        var sawDisconnect = !bleManager.isNavigationReady
+        for attempt in 0..<120 {
+            if !bleManager.isNavigationReady {
+                sawDisconnect = true
+                if attempt % 8 == 0 {
+                    bleManager.reconnectToLastDevice()
+                }
+            } else if sawDisconnect,
+                      expectedDeviceID == nil ||
+                        bleManager.connectedDeviceID == expectedDeviceID {
+                _ = bleManager.requestDeviceTransferStatus()
+                try await Task.sleep(nanoseconds: 250_000_000)
+                if bleManager.firmwareMaintenanceActive,
+                   bleManager.firmwareMaintenanceCorrelation ==
+                    expectedCorrelation {
+                    status("firmware maintenance ready")
+                    return expectedCorrelation
+                }
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        throw FirmwareUpdateError.maintenanceReconnectFailed
+    }
+
     func exitFirmwareTransfer(bleManager: BLEManager) {
         bleManager.requestDeviceTransferExit()
         removeJoinedAccessPointIfNeeded()

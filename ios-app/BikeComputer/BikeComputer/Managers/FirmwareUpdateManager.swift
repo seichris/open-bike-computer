@@ -13,6 +13,9 @@ enum FirmwareUpdateError: LocalizedError, Equatable {
     case deviceNotReady
     case transferCommandNotSent
     case missingTransferSession
+    case firmwareMaintenanceUnsupported
+    case otaIneligible(String)
+    case maintenanceReconnectFailed
     case deviceTransferRejected(code: String, message: String)
     case missingFirmwareTarget
     case invalidManifest
@@ -34,6 +37,12 @@ enum FirmwareUpdateError: LocalizedError, Equatable {
             return "Could not send transfer command"
         case .missingTransferSession:
             return "Device did not report a firmware transfer session"
+        case .firmwareMaintenanceUnsupported:
+            return "Firmware update requires Bike Computer firmware with maintenance mode"
+        case .otaIneligible(let code):
+            return "Device cannot install OTA firmware (\(code))"
+        case .maintenanceReconnectFailed:
+            return "Device did not return in firmware maintenance mode"
         case .deviceTransferRejected(let code, let message):
             if message == code {
                 return "Device rejected firmware transfer (\(code))"
@@ -175,6 +184,8 @@ struct FirmwareDeviceStatus: Decodable, Equatable {
     let runningGitSha: String?
     let runningPartition: String
     let inactivePartition: String
+    let otaEligible: Bool?
+    let eligibilityCode: String?
     let otaState: String
     let maxImageBytes: Int
     let receivedBytes: Int
@@ -195,6 +206,8 @@ struct PendingFirmwareUpdate: Codable, Equatable {
     let gitSha: String
     let startedAt: Date
     var status: String
+    var deviceID: String? = nil
+    var maintenanceCorrelation: UInt32? = nil
 }
 
 struct FirmwareStorageMigrationNotice: Codable, Equatable {
@@ -335,6 +348,10 @@ final class FirmwareUpdateManager: ObservableObject {
                     manifest = try await self.fetchLatestManifest(bleManager: bleManager)
                 }
                 try self.validateInstall(manifest, bleManager: bleManager)
+                try await self.deviceTransferManager
+                    .requireFirmwareMaintenanceEligibility(
+                        bleManager: bleManager
+                    )
                 self.latestManifest = manifest
                 self.statusMessage = "downloading firmware"
                 self.persistPendingUpdate(manifest: manifest, status: self.statusMessage)
@@ -343,6 +360,19 @@ final class FirmwareUpdateManager: ObservableObject {
                 let image = try await self.downloadFirmware(manifest: manifest)
                 self.downloadProgress = 1
                 try self.verify(image: image, manifest: manifest)
+
+                self.statusMessage = "restarting in firmware maintenance"
+                self.updatePendingStatus(self.statusMessage)
+                let maintenanceCorrelation = try await self.deviceTransferManager.prepareFirmwareMaintenance(
+                    bleManager: bleManager
+                ) { message in
+                    self.statusMessage = message
+                    self.updatePendingStatus(message)
+                }
+                self.updatePendingMaintenanceCorrelation(
+                    maintenanceCorrelation,
+                    deviceID: bleManager.connectedDeviceID
+                )
 
                 var finalized = false
                 let transferSession = try await self.deviceTransferManager.enterFirmwareTransfer(
@@ -670,7 +700,19 @@ final class FirmwareUpdateManager: ObservableObject {
                                                 manifest.gitSha, target: manifest.target,
                                                 version: manifest.version, build: manifest.build) ?? manifest.gitSha,
                                             startedAt: Date(),
-                                            status: status)
+                                            status: status,
+                                            deviceID: nil,
+                                            maintenanceCorrelation: nil)
+        savePendingUpdate(pending)
+    }
+
+    private func updatePendingMaintenanceCorrelation(
+        _ correlation: UInt32,
+        deviceID: String?
+    ) {
+        guard var pending = loadPendingUpdate() else { return }
+        pending.maintenanceCorrelation = correlation
+        pending.deviceID = deviceID
         savePendingUpdate(pending)
     }
 

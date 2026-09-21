@@ -75,6 +75,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "device_transfer_http.hpp"
 #include "device_debug_http.hpp"
 #include "firmware_update_http.hpp"
+#include "firmware_maintenance.hpp"
 #include "firmware_metadata.hpp"
 #include "map_transfer.hpp"
 #include "map_transfer_http.hpp"
@@ -120,6 +121,72 @@ map_transfer::MapTransferHttpServer mapTransferHttp;
 firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
 device_debug::DeviceDebugHttp deviceDebugHttp;
 ride_diagnostics::RideDiagnosticsHttp rideDiagnosticsHttp;
+
+static void queueDeviceTransferStatusNotification() {
+  bleNavServer.requestDeviceTransferStatusNotification();
+}
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+static void setupFirmwareMaintenanceMode() {
+  deviceTransferHttp.configure(8080, "BikeComputer-Transfer");
+  firmwareUpdateHttp.configure(&deviceTransferHttp);
+  deviceTransferHttp.noteStatusChanged("maintenance_boot_baseline");
+  deviceTransferHttp.setStatusChangedCallback(
+      queueDeviceTransferStatusNotification);
+  boot_diagnostics::markFirmwareMaintenance();
+  firmware_maintenance::setStage(
+      firmware_maintenance::Stage::AwaitingAuthentication);
+  bleNavServer.init("BikeComputer");
+  power_management::completeStartup();
+  Serial.printf(
+      "FIRMWARE_MAINTENANCE: ready correlation=%lu internal_free=%u "
+      "dma_free=%u\n",
+      static_cast<unsigned long>(firmware_maintenance::correlation()),
+      static_cast<unsigned>(heap_caps_get_free_size(
+          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(
+          heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT)));
+}
+
+static void processFirmwareMaintenanceMode() {
+  const uint32_t now = millis();
+  bleNavServer.process();
+  deviceTransferHttp.process();
+
+  static uint32_t bootPressStartedMs = 0;
+  if (digitalRead(BOARD_BOOT_PIN) == LOW) {
+    if (bootPressStartedMs == 0)
+      bootPressStartedMs = now;
+    if (now - bootPressStartedMs >= 2000)
+      firmware_maintenance::requestExit();
+  } else {
+    bootPressStartedMs = 0;
+  }
+
+  const firmware_maintenance::Stage stage = firmware_maintenance::stage();
+  const bool commitOwnsReboot =
+      stage == firmware_maintenance::Stage::Committing ||
+      stage == firmware_maintenance::Stage::Rebooting;
+  if (!commitOwnsReboot &&
+      now - firmware_maintenance::activeSinceMs() >=
+          firmware_maintenance::kOverallDeadlineMs) {
+    deviceTransferHttp.setLastError(
+        "maintenance_deadline",
+        "firmware maintenance exceeded its overall deadline");
+    firmware_maintenance::requestExit();
+  }
+
+  if (firmware_maintenance::exitRequested() && !commitOwnsReboot) {
+    const bool disabled = firmwareUpdateHttp.setEnabled(false);
+    if (disabled && deviceTransferHttp.waitUntilStopped(5500)) {
+      Serial.println("FIRMWARE_MAINTENANCE: returning to normal boot");
+      delay(250);
+      ESP.restart();
+    }
+  }
+  delay(5);
+}
+#endif
 
 static bool diagnosticsStorageRecoveryAllowed() {
   const device_transfer::HttpTransferStatus status =
@@ -1467,6 +1534,8 @@ void setup() {
   boot_diagnostics::begin();
   const boot_diagnostics::Snapshot initialBoot =
       boot_diagnostics::snapshot();
+  (void)firmware_maintenance::consumeForCurrentBoot(
+      initialBoot.firmwareFingerprint, initialBoot.resetReason);
   runtime_watchdog_diagnostics::begin(
       initialBoot.bootSequence, initialBoot.firmwareFingerprint,
       initialBoot.resetReason == static_cast<uint32_t>(ESP_RST_TASK_WDT));
@@ -1497,7 +1566,8 @@ void setup() {
   power_management::setGpioWakeNotifier(notifyAutomaticLightSleepGpioWake);
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  displayPowerManager.begin();
+  if (!firmware_maintenance::active())
+    displayPowerManager.begin();
 #endif
   log_i("Starting Setup...");
 
@@ -1509,14 +1579,16 @@ void setup() {
   pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
-                  latchWaveshareBootScreenCycle, FALLING);
-  uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
+  if (!firmware_maintenance::active()) {
+    attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
+                    latchWaveshareBootScreenCycle, FALLING);
+    uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
 #ifdef WAVESHARE_AMOLED_175
-  ext1WakeMask |= 1ULL << TCH_I2C_INT;
+    ext1WakeMask |= 1ULL << TCH_I2C_INT;
 #endif
-  power_management::configureExt1Wakeup(ext1WakeMask);
-  configureTouchWakeInterrupt();
+    power_management::configureExt1Wakeup(ext1WakeMask);
+    configureTouchWakeInterrupt();
+  }
 #endif
 #ifdef POWER_SAVE
 #ifdef ICENAV_BOARD
@@ -1560,9 +1632,6 @@ void setup() {
   boot_diagnostics::enterStage(boot_diagnostics::Stage::PmicInspection);
   waveshare_board::initializePowerManagement();
   boot_diagnostics::completeStage(boot_diagnostics::Stage::PmicInspection);
-  boot_diagnostics::enterStage(boot_diagnostics::Stage::Display);
-  initTFT();
-  boot_diagnostics::completeStage(boot_diagnostics::Stage::Display);
 #ifdef WAVESHARE_DISPLAY_PROBE
   boot_diagnostics::markDiagnosticHold();
   Serial.println("Waveshare 2.06 display probe complete; holding before RTC/IMU/SD/LVGL/BLE/touch init");
@@ -1588,6 +1657,10 @@ void setup() {
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (firmware_maintenance::active()) {
+    setupFirmwareMaintenanceMode();
+    return;
+  }
   boot_diagnostics::enterStage(boot_diagnostics::Stage::ClockAndSensors);
 #ifdef WAVESHARE_DISPLAY_PROBE
   Serial.println("Waveshare display probe: skipping RTC and IMU init");
@@ -1623,12 +1696,11 @@ void setup() {
   // Preserve the established display-first board bring-up order. Waveshare
   // storage now uses the independent native SDMMC peripheral, so later QSPI
   // display traffic cannot change the card bus configuration.
-#ifndef WAVESHARE_AMOLED_206
-#if defined(WAVESHARE_AMOLED_175)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::Display);
 #endif
   initTFT();
-#if defined(WAVESHARE_AMOLED_175)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Display);
 #endif
 
@@ -1638,7 +1710,6 @@ void setup() {
   while (true) {
     delay(1000);
   }
-#endif
 #endif
 
   // Initialize removable storage after board display bring-up.
@@ -1880,6 +1951,8 @@ void setup() {
     return mapView.requestStorageControl(work, context);
   });
   firmwareUpdateHttp.configure(&deviceTransferHttp);
+  deviceTransferHttp.setStatusChangedCallback(
+      queueDeviceTransferStatusNotification);
   deviceDebugHttp.configure(&deviceTransferHttp);
   rideDiagnosticsHttp.configure(&deviceTransferHttp);
   deviceTransferHttp.registerHandler("/device-diagnostics/", &rideDiagnosticsHttp);
@@ -2017,6 +2090,17 @@ void loop() {
   if (boot_diagnostics::safeModeActive()) {
     delay(1000);
     return;
+  }
+  if (firmware_maintenance::active()) {
+    processFirmwareMaintenanceMode();
+    return;
+  }
+  if (firmware_maintenance::stage() ==
+          firmware_maintenance::Stage::RebootPending &&
+      millis() - firmware_maintenance::activeSinceMs() >= 750) {
+    Serial.println("FIRMWARE_MAINTENANCE: rebooting into maintenance");
+    Serial.flush();
+    ESP.restart();
   }
 #endif
   uint32_t now = millis();

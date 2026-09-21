@@ -906,6 +906,7 @@ struct NavigationProtocolTests {
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
         await testFirmwareTransferSurfacesFreshRejectionAndExits()
         await testFirmwareTransferCancellationExits()
+        await testFirmwareMaintenancePreparationFlow()
         await testDeviceDiagnosticsTransferPolicy()
         await testDeviceDiagnosticsFailsFastOnFirmwareRejection()
         await testDeviceDiagnosticsRecordsEntryFailure()
@@ -22315,15 +22316,17 @@ struct NavigationProtocolTests {
         ))
 
         assert(manager.requestDeviceTransferMode(.firmware), "firmware transfer enter should queue when BLE is ready")
+        assert(manager.requestFirmwareMaintenancePreparation(), "firmware maintenance prepare should queue when BLE is ready")
         assert(manager.requestDeviceTransferMode(.debug), "debug transfer enter should queue when BLE is ready")
         assert(manager.requestDeviceTransferStatus(), "device transfer status should queue when BLE is ready")
         assert(manager.requestDeviceTransferExit(), "device transfer exit should queue when BLE is ready")
 
-        assertEqual(sentPackets.count, 4, "device transfer control should write four packets")
+        assertEqual(sentPackets.count, 5, "device transfer control should write five packets")
         assertEqual(String(data: sentPackets[0], encoding: .utf8), "DTRNenter|firmware", "firmware enter command uses DTRN frame")
-        assertEqual(String(data: sentPackets[1], encoding: .utf8), "DTRNenter|debug", "debug enter command uses DTRN frame")
-        assertEqual(String(data: sentPackets[2], encoding: .utf8), "DSTS", "status command uses DSTS frame")
-        assertEqual(String(data: sentPackets[3], encoding: .utf8), "DTRNexit", "exit command uses DTRN frame")
+        assertEqual(String(data: sentPackets[1], encoding: .utf8), "DTRNprepare|firmware", "firmware maintenance uses the explicit prepare command")
+        assertEqual(String(data: sentPackets[2], encoding: .utf8), "DTRNenter|debug", "debug enter command uses DTRN frame")
+        assertEqual(String(data: sentPackets[3], encoding: .utf8), "DSTS", "status command uses DSTS frame")
+        assertEqual(String(data: sentPackets[4], encoding: .utf8), "DTRNexit", "exit command uses DTRN frame")
 
         let credentials = RemoteDebugLANCredentials(
             ssid: "Home Wi-Fi",
@@ -22334,7 +22337,7 @@ struct NavigationProtocolTests {
             .debug,
             remoteDebugLANCredentials: credentials
         ), "LAN-first debug command should fit one authenticated BLE write")
-        let lanPacket = sentPackets[4]
+        let lanPacket = sentPackets[5]
         let lanPrefix = Data("DTRNenter|debug|lan1|".utf8)
         assert(lanPacket.starts(with: lanPrefix),
                "LAN-first debug command uses the versioned binary envelope")
@@ -22354,7 +22357,7 @@ struct NavigationProtocolTests {
             .diagnostics,
             remoteDebugLANCredentials: credentials
         ), "LAN-first diagnostics command should fit one authenticated BLE write")
-        let diagnosticsLANPacket = sentPackets[5]
+        let diagnosticsLANPacket = sentPackets[6]
         assert(
             diagnosticsLANPacket.starts(with: Data("DTRNenter|diagnostics|lan1|".utf8)),
             "LAN-first diagnostics uses its versioned binary envelope"
@@ -22365,7 +22368,7 @@ struct NavigationProtocolTests {
             remoteDebugHotspotFallbackReason: .endpointUnreachable
         ), "endpoint-unreachable fallback command should fit one BLE write")
         assertEqual(
-            String(data: sentPackets[6], encoding: .utf8),
+            String(data: sentPackets[7], encoding: .utf8),
             "DTRNenter|debug|h1|e",
             "endpoint fallback reason is persisted by firmware, not only iOS"
         )
@@ -22374,7 +22377,7 @@ struct NavigationProtocolTests {
             remoteDebugHotspotFallbackReason: .endpointUnreachable
         ), "diagnostics endpoint fallback command should fit one BLE write")
         assertEqual(
-            String(data: sentPackets[7], encoding: .utf8),
+            String(data: sentPackets[8], encoding: .utf8),
             "DTRNenter|diagnostics|h1|e",
             "diagnostics endpoint fallback requests a protected hotspot"
         )
@@ -22395,17 +22398,17 @@ struct NavigationProtocolTests {
             "TLS identity cancellation queues on the authenticated channel"
         )
         assertEqual(
-            String(data: sentPackets[8], encoding: .utf8),
+            String(data: sentPackets[9], encoding: .utf8),
             "DTRNtls|prepare",
             "TLS preparation uses the documented DTRN frame"
         )
         assertEqual(
-            String(data: sentPackets[9], encoding: .utf8),
+            String(data: sentPackets[10], encoding: .utf8),
             "DTRNtls|commit|\(nextTLSFingerprint)",
             "TLS commit binds the exact lowercase pending leaf fingerprint"
         )
         assertEqual(
-            String(data: sentPackets[10], encoding: .utf8),
+            String(data: sentPackets[11], encoding: .utf8),
             "DTRNtls|cancel",
             "TLS cancellation uses the documented DTRN frame"
         )
@@ -23647,6 +23650,80 @@ struct NavigationProtocolTests {
                "post-enqueue firmware cancellation queues a compensating exit")
     }
 
+    @MainActor
+    static func testFirmwareMaintenancePreparationFlow() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 96,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+        let manager = DeviceTransferManager()
+
+        let eligibility = Task {
+            try await manager.requireFirmwareMaintenanceEligibility(
+                bleManager: bleManager
+            )
+        }
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
+                    "DSTS",
+                    "maintenance eligibility starts with a fresh status")
+        let eligibleStatus = """
+        {"enabled":false,"mode":"","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":false,"stage":"normal","correlation":0},"firmware":{"otaEligible":true,"eligibilityCode":"eligible"}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(eligibleStatus.utf8)
+        )
+        do {
+            try await eligibility.value
+        } catch {
+            assert(false, "eligible maintenance firmware is accepted: \(error)")
+        }
+
+        sentPackets.removeAll()
+        let preparation = Task {
+            try await manager.prepareFirmwareMaintenance(
+                bleManager: bleManager,
+                status: { _ in }
+            )
+        }
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
+                    "DTRNprepare|firmware",
+                    "maintenance preparation uses its explicit control frame")
+        let acceptedStatus = """
+        {"enabled":false,"mode":"","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":false,"stage":"reboot_pending","correlation":42},"firmware":{"otaEligible":true,"eligibilityCode":"eligible"}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(acceptedStatus.utf8)
+        )
+        bleManager.isNavigationReady = false
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        bleManager.isNavigationReady = true
+        let maintenanceStatus = """
+        {"enabled":false,"mode":"","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":true,"stage":"awaiting_authentication","correlation":42},"firmware":{"otaEligible":true,"eligibilityCode":"eligible"}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(maintenanceStatus.utf8)
+        )
+        do {
+            try await preparation.value
+        } catch {
+            assert(false, "correlated maintenance reconnect completes: \(error)")
+        }
+    }
+
     static func testDeviceTransferManagerWaitsForMapToken() async {
         let bleManager = BLEManager()
         bleManager.isConnected = true
@@ -24001,7 +24078,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","lastError":{"sequence":17,"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"debug","statusRevision":23,"baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":true,"stage":"ready","correlation":42},"lastError":{"sequence":17,"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"otaEligible":true,"eligibilityCode":"eligible","inactivePartition":"ota_1","maxImageBytes":3145728,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -24017,6 +24094,16 @@ struct NavigationProtocolTests {
                     "endpoint_unreachable",
                     "status parser exposes the persistent fallback reason")
         assertEqual(manager.deviceTransferSessionToken, "abc123", "status parser exposes session token")
+        assertEqual(manager.deviceTransferRemoteStatusRevision, 23,
+                    "status parser exposes the firmware status revision")
+        assert(manager.supportsFirmwareMaintenanceV1,
+               "status parser negotiates firmware maintenance")
+        assert(manager.firmwareMaintenanceActive,
+               "status parser exposes active maintenance mode")
+        assertEqual(manager.firmwareMaintenanceStage, "ready",
+                    "status parser exposes maintenance readiness")
+        assertEqual(manager.firmwareMaintenanceCorrelation, 42,
+                    "status parser preserves reboot correlation")
         assertEqual(manager.deviceTransferLastErrorCode, "transfer_busy", "status parser exposes transfer error code")
         assertEqual(manager.deviceTransferLastErrorMessage, "another transfer mode is active", "status parser exposes transfer error message")
         assertEqual(manager.deviceTransferLastErrorSequence, 17,
@@ -24031,6 +24118,14 @@ struct NavigationProtocolTests {
         assertEqual(manager.firmwareVersion, "0.2.2", "status parser exposes firmware version")
         assertEqual(manager.firmwareBuild, 86, "status parser exposes firmware build")
         assertEqual(manager.firmwareUpdateStatus, "receiving", "status parser exposes firmware update status")
+        assertEqual(manager.firmwareOTAEligible, true,
+                    "status parser exposes OTA partition eligibility")
+        assertEqual(manager.firmwareOTAEligibilityCode, "eligible",
+                    "status parser exposes the eligibility reason")
+        assertEqual(manager.firmwareInactivePartition, "ota_1",
+                    "status parser exposes the inactive slot")
+        assertEqual(manager.firmwareMaximumImageBytes, 3 * 1024 * 1024,
+                    "status parser exposes the slot capacity")
         assertEqual(manager.firmwareUpdateReceivedBytes, 1024, "status parser exposes received bytes")
         assertEqual(manager.firmwareUpdateTotalBytes, 2048, "status parser exposes total bytes")
         assertEqual(manager.firmwareUpdateLastError, "previous: previous update failed", "status parser exposes firmware error")

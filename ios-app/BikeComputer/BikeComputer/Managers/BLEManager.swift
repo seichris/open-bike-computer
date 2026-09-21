@@ -1105,13 +1105,18 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferPendingTLSCertificateSHA256: String?
     @Published private(set) var deviceTransferPendingTLSIdentityVersion: UInt32 = 0
     @Published private(set) var deviceTransferGeneration: UInt32 = 0
+    @Published private(set) var deviceTransferRemoteStatusRevision: UInt32 = 0
     @Published private(set) var supportsSecureDeviceTransferV1 = false
     @Published private(set) var supportsSignedMapStreamV1 = false
+    @Published private(set) var supportsFirmwareMaintenanceV1 = false
     @Published private(set) var deviceTransferLegacyArchivePolicy: String?
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferLastErrorSequence: UInt64?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
+    @Published private(set) var firmwareMaintenanceActive = false
+    @Published private(set) var firmwareMaintenanceStage = "normal"
+    @Published private(set) var firmwareMaintenanceCorrelation: UInt32 = 0
     @Published private(set) var deviceStorageBackend: String?
     @Published private(set) var deviceStoragePowerCycleRequired: Bool?
     @Published var firmwareTarget: String = ""
@@ -1119,6 +1124,10 @@ class BLEManager: NSObject, ObservableObject {
     @Published var firmwareBuild: Int = 0
     @Published var firmwareGitSha: String = ""
     @Published var firmwareUpdateStatus: String = "unknown"
+    @Published private(set) var firmwareOTAEligible: Bool?
+    @Published private(set) var firmwareOTAEligibilityCode: String?
+    @Published private(set) var firmwareInactivePartition: String?
+    @Published private(set) var firmwareMaximumImageBytes: Int?
     @Published var firmwareUpdateReceivedBytes: Int = 0
     @Published var firmwareUpdateTotalBytes: Int = 0
     @Published var firmwareUpdateLastError: String?
@@ -5851,6 +5860,17 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func requestFirmwareMaintenancePreparation() -> Bool {
+        var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
+        packet.append(Data("prepare|firmware".utf8))
+        return sendTransferControlPacket(
+            packet,
+            label: "firmware maintenance prepare",
+            coalescingKey: "transfer.device.control"
+        )
+    }
+
+    @discardableResult
     func requestDeviceTransferExit() -> Bool {
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
         packet.append(Data("exit".utf8))
@@ -6582,16 +6602,25 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferPendingTLSCertificateSHA256 = nil
         deviceTransferPendingTLSIdentityVersion = 0
         deviceTransferGeneration = 0
+        deviceTransferRemoteStatusRevision = 0
         supportsSecureDeviceTransferV1 = false
         supportsSignedMapStreamV1 = false
+        supportsFirmwareMaintenanceV1 = false
         deviceTransferLegacyArchivePolicy = nil
         deviceTransferLastErrorCode = nil
         deviceTransferLastErrorMessage = nil
         deviceTransferLastErrorSequence = nil
         deviceTransferStatusRevision = 0
+        firmwareMaintenanceActive = false
+        firmwareMaintenanceStage = "normal"
+        firmwareMaintenanceCorrelation = 0
         deviceStorageBackend = nil
         deviceStoragePowerCycleRequired = nil
         firmwareUpdateStatus = "unknown"
+        firmwareOTAEligible = nil
+        firmwareOTAEligibilityCode = nil
+        firmwareInactivePartition = nil
+        firmwareMaximumImageBytes = nil
         firmwareTarget = ""
         firmwareVersion = ""
         firmwareBuild = 0
@@ -10647,6 +10676,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         deviceTransferSessionToken = object["sessionToken"] as? String
         deviceTransferGeneration =
             (object["transferGeneration"] as? NSNumber)?.uint32Value ?? 0
+        deviceTransferRemoteStatusRevision =
+            (object["statusRevision"] as? NSNumber)?.uint32Value ?? 0
         if let tls = object["tls"] as? [String: Any] {
             deviceTransferTLSIdentityVersion =
                 (tls["identityVersion"] as? NSNumber)?.uint32Value ?? 0
@@ -10670,11 +10701,14 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 capabilities["secureTransferV1"] as? Bool ?? false
             supportsSignedMapStreamV1 =
                 capabilities["signedMapStreamV1"] as? Bool ?? false
+            supportsFirmwareMaintenanceV1 =
+                capabilities["firmwareMaintenanceV1"] as? Bool ?? false
             deviceTransferLegacyArchivePolicy =
                 capabilities["legacyArchivePolicy"] as? String
         } else {
             supportsSecureDeviceTransferV1 = false
             supportsSignedMapStreamV1 = false
+            supportsFirmwareMaintenanceV1 = false
             deviceTransferLegacyArchivePolicy = nil
         }
         if let lastError = object["lastError"] as? [String: Any] {
@@ -10708,10 +10742,28 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             deviceStorageBackend = nil
             deviceStoragePowerCycleRequired = nil
         }
+        if let maintenance = object["maintenance"] as? [String: Any] {
+            firmwareMaintenanceActive =
+                maintenance["active"] as? Bool ?? false
+            firmwareMaintenanceStage =
+                maintenance["stage"] as? String ?? "normal"
+            firmwareMaintenanceCorrelation =
+                (maintenance["correlation"] as? NSNumber)?.uint32Value ?? 0
+        } else {
+            firmwareMaintenanceActive = false
+            firmwareMaintenanceStage = "normal"
+            firmwareMaintenanceCorrelation = 0
+        }
         deviceTransferStatusRevision &+= 1
 
         if let firmware = object["firmware"] as? [String: Any] {
             firmwareUpdateStatus = firmware["status"] as? String ?? (enabled ? "unknown" : "idle")
+            firmwareOTAEligible = firmware["otaEligible"] as? Bool
+            firmwareOTAEligibilityCode =
+                firmware["eligibilityCode"] as? String
+            firmwareInactivePartition =
+                firmware["inactivePartition"] as? String
+            firmwareMaximumImageBytes = firmware["maxImageBytes"] as? Int
             firmwareTarget = firmware["target"] as? String ?? firmwareTarget
             firmwareVersion = firmware["version"] as? String ?? firmwareVersion
             firmwareBuild = firmware["build"] as? Int ?? firmwareBuild
