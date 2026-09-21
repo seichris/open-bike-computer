@@ -966,6 +966,25 @@ struct OfflineMapPreparationEstimatePresentation: Equatable {
         )
     }
 
+    static func availablePresentation(for job: OfflineMapJob) -> Self? {
+        guard !job.isTerminal,
+              let estimate = job.preparationEstimate,
+              let range = estimate.validRemainingRange else {
+            return nil
+        }
+        if let jobAttempt = job.attempts,
+           let estimateAttempt = estimate.attempt,
+           jobAttempt != estimateAttempt {
+            return nil
+        }
+        return Self(
+            title: job.status == "queued"
+                ? "Estimated Preparation"
+                : "Estimated Remaining",
+            value: description(for: range)
+        )
+    }
+
     static func description(
         for range: OfflineMapPreparationEstimateRange
     ) -> String {
