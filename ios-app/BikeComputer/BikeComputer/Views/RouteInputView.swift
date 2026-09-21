@@ -296,7 +296,7 @@ struct RouteSearchPanel: View {
             }
         } else if shouldShowSavedDestinations {
             savedDestinationsScroll
-        } else {
+        } else if !hasSelectedDestination {
             Spacer(minLength: 0)
         }
     }

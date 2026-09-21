@@ -116,6 +116,14 @@ final class WorkoutSessionCoordinator: ObservableObject {
             || !recoveryComplete || storageFailed
     }
 
+    /// The main screen should offer a new start only after ownership recovery
+    /// has completed and no unfinished ride is reserved. A finished record is
+    /// eligible because `requestStart()` acknowledges it before continuing.
+    var canOfferNewWorkout: Bool {
+        recoveryComplete && !storageFailed && startTask == nil
+            && (record == nil || record?.phase == .finished)
+    }
+
     /// Recovery is attempted on cold launch and for UIKit recovery requests.
     /// Repeated callbacks join the same attempt; they cannot create sessions.
     func recoverIfNeeded() {
@@ -174,6 +182,12 @@ final class WorkoutSessionCoordinator: ObservableObject {
     private func requestStart(using availability: WorkoutWatchAvailabilityV1,
                               explicitOwner: WorkoutRecordingOwner? = nil) -> Bool {
         guard !storageFailed, startTask == nil else { return false }
+        // An explicit new start also acknowledges the previous ride's
+        // completed summary. Clear only an authoritative terminal tombstone;
+        // unresolved, active, and recovering rides must continue to block.
+        if recoveryComplete, record?.phase == .finished {
+            guard resetTerminalPresentation() else { return false }
+        }
         // Native mirroring evidence can precede a custom snapshot/identity.
         if record == nil, watch.store.presentation.isWorkoutActive
             || watch.store.presentation.connectionState == .awaitingFirstSnapshot {
