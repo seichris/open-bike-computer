@@ -67,6 +67,9 @@ class RideDiagnosticsHttpContractTests(unittest.TestCase):
         self.assertIn("kIndexHashProgressBytes", hasher)
         self.assertIn("bytes == expectedBytes", hasher)
         self.assertIn("writeHttpBytes(client, &progress, 1)", hasher)
+        self.assertIn("while (bytes < expectedBytes)", hasher)
+        self.assertIn("expectedBytes - bytes", hasher)
+        self.assertNotIn("while (true)", hasher)
 
         chunk = HTTP[
             HTTP.index("http_policy::RouteKind::Chunk") :

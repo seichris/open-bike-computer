@@ -104,15 +104,22 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
   bytes = 0;
   uint32_t lastResponseProgressBytes = 0;
   bool ok = true;
-  while (true) {
+  // The index already snapshots the closed file's exact stat size. Read only
+  // those bytes instead of issuing one extra fread past EOF. Some embedded
+  // FAT/VFS paths report that probe as an I/O error even after all requested
+  // bytes were returned, which used to abort the response immediately after
+  // its final progress byte and before the chunk digest was emitted.
+  while (bytes < expectedBytes) {
     if (!requestStillAuthorized(server, request)) {
       ok = false;
       break;
     }
-    const size_t count = storage.read(file, buffer, sizeof(buffer));
+    const size_t remaining = expectedBytes - bytes;
+    const size_t count =
+        storage.read(file, buffer, std::min<std::size_t>(remaining,
+                                                        sizeof(buffer)));
     if (count == 0) {
-      if (storage.hasError(file))
-        ok = false;
+      ok = false;
       break;
     }
     if (mbedtls_sha256_update(&context, buffer, count) != 0) {
@@ -120,10 +127,6 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
       break;
     }
     bytes += static_cast<uint32_t>(count);
-    if (bytes > expectedBytes) {
-      ok = false;
-      break;
-    }
     if (bytes - lastResponseProgressBytes >= kIndexHashProgressBytes ||
         bytes == expectedBytes) {
       static constexpr uint8_t progress = ' ';
