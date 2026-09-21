@@ -8051,6 +8051,15 @@ private struct WorkoutContractTestSuite {
             ),
             "capture age must remain bound to the TimelineView's current date"
         )
+        expect(
+            compactSource.contains(
+                "ifletrecordingCoordinator,recordingCoordinator.record?.phase!=.finished{WorkoutRecordingStatusView"
+            )
+                && compactSource.contains(
+                    "ifstore.presentation.connectionState==.ended{Image(systemName:store.recordingOwner==.watch?\"applewatch\":\"iphone\")"
+                ),
+            "finished summaries must fold recorder identity into the saved banner without a duplicate ownership card"
+        )
 
         let compactContentView = contentViewSource.filter { !$0.isWhitespace }
         let compactAppSource = appSource.filter { !$0.isWhitespace }

@@ -535,7 +535,8 @@ struct WorkoutDashboardView: View {
             ScrollView {
                 VStack(spacing: 16) {
                     connectionBanner
-                    if let recordingCoordinator {
+                    if let recordingCoordinator,
+                       recordingCoordinator.record?.phase != .finished {
                         WorkoutRecordingStatusView(coordinator: recordingCoordinator, store: store)
                     }
 
@@ -607,9 +608,7 @@ struct WorkoutDashboardView: View {
     private var connectionBanner: some View {
         TimelineView(.periodic(from: Date(), by: 1)) { context in
             HStack(spacing: 10) {
-                Circle()
-                    .fill(connectionColor)
-                    .frame(width: 9, height: 9)
+                connectionIndicator
                 VStack(alignment: .leading, spacing: 2) {
                     Text(connectionLabel)
                         .font(.subheadline.weight(.semibold))
@@ -623,6 +622,26 @@ struct WorkoutDashboardView: View {
             }
             .padding(12)
             .background(.background, in: RoundedRectangle(cornerRadius: 14))
+        }
+    }
+
+    @ViewBuilder
+    private var connectionIndicator: some View {
+        if store.presentation.connectionState == .ended {
+            Image(
+                systemName: store.recordingOwner == .watch
+                    ? "applewatch"
+                    : "iphone"
+            )
+            .font(.body.weight(.semibold))
+            .frame(width: 18)
+            .accessibilityHidden(true)
+        } else {
+            Circle()
+                .fill(connectionColor)
+                .frame(width: 9, height: 9)
+                .frame(width: 18)
+                .accessibilityHidden(true)
         }
     }
 
