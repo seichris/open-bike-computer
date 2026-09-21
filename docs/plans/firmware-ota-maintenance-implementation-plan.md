@@ -2,11 +2,11 @@
 
 ## Status and scope
 
-Status: **implemented locally; locked firmware builds and physical qualification
-pending**.
+Status: **source implementation and automated host/iOS coverage complete;
+locked firmware builds, CI, and physical qualification pending**.
 
-Planning date: 2026-09-21. Branch baseline: freshly fetched GitHub `origin/main`,
-`b3c7f3b973b5123f6dc4e5ca00d3efa2ca5e528f`. The source review began at
+Planning date: 2026-09-21. The branch was rebased onto freshly fetched GitHub
+`origin/main`, `6e2f03b11794f877e1ef7475b3a5bd1eecea4276`. The source review began at
 `fd2fcb4ca2b2516c1ae4e6755a903915744e0a50`; the intervening main change only
 updated the map-platform production Compose lock. This document and its
 implementation are on `plan/firmware-ota-maintenance` in an isolated worktree;
@@ -34,11 +34,13 @@ Implementation update, 2026-09-21: the branch now contains the one-shot RTC
 boot request, explicit boot-diagnostics terminal state, minimal pre-display and
 pre-storage maintenance route, owner-authenticated BLE prepare and re-entry
 commands, OTA eligibility reporting, status revisions and resource telemetry,
-the serialized pre-commit cancellation boundary, and the iOS
-download/prepare/reconnect/re-authenticate flow. Host boot-policy checks and the
-portable Swift navigation/BLE suite pass, as does the unsigned generic iOS app
-build. No locked firmware build, device flash, physical memory measurement,
-repeated OTA cycle, CI result, or release claim is recorded here yet.
+named resource admission floors and inactivity deadlines, the serialized
+pre-commit cancellation boundary with deterministic race tests, an
+SD-independent boot checkpoint, and the durable iOS download/prepare/reconnect/
+re-authenticate/reconcile flow. Host boot-policy checks and the portable Swift
+navigation/BLE suite pass, as does the unsigned generic iOS Release build. No
+locked firmware build, device flash, physical memory measurement, repeated OTA
+cycle, CI result, or release claim is recorded here yet.
 
 ## Decision
 

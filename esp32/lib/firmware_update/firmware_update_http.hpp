@@ -7,6 +7,7 @@
 #include <freertos/semphr.h>
 
 #include "../device_transfer/device_transfer_http.hpp"
+#include "firmware_update_policy.hpp"
 
 #include <string>
 
@@ -18,8 +19,10 @@ struct FirmwareUpdateStatus {
   std::string runningVersion;
   uint32_t runningBuild = 0;
   std::string runningGitSha;
+  std::string runningProfile;
   std::string runningPartition;
   std::string inactivePartition;
+  std::string otaState;
   bool otaEligible = false;
   std::string eligibilityCode;
   uint32_t maxImageBytes = 0;
@@ -61,6 +64,7 @@ private:
   const esp_partition_t *updatePartition_ = nullptr;
   esp_ota_handle_t otaHandle_ = 0;
   bool otaOpen_ = false;
+  policy::Transaction transaction_;
 
   bool handleRequest(const device_transfer::HttpRequest &request,
                      device_transfer::TransferClient &client) override;

@@ -1752,6 +1752,31 @@ internal/DMA free space, largest blocks, worker stack high-water bytes, and the
 measurement phase. Transfer tokens, hotspot passwords, and TLS private keys are
 never retained in resource evidence.
 
+Before creating the firmware worker and again before accepting HTTPS clients,
+maintenance firmware applies named internal-heap and DMA-heap admission floors.
+It fails closed with a `maintenance_*_low` error when any free-space or
+largest-block floor is missed. The initial floors are conservative candidates;
+the per-target production qualification report records observed minima and may
+raise them. It must not lower them below the authenticated-control reserve.
+Waiting for owner authentication is bounded to two minutes, inactivity after
+transfer entry is bounded to 90 seconds, and the existing ten-minute overall
+maintenance deadline remains authoritative. Commit and reboot own their terminal
+path once the serialized commit boundary has been crossed.
+
+`DSTS.bootCheckpoint` is the SD-independent boot acceptance record. Schema 1
+contains `target`, `profile`, full `gitSha`, `version`, `build`, `bootSequence`,
+`bootFingerprint`, `normalReady`, `maintenance`, and `otaState`. The nested
+`firmware` object also reports `runningPartition`, `profile`, and `otaState`.
+iOS completes a pending update only when the exact requested image identity is
+reported with `normalReady: true` and `maintenance: false`. A matching active
+maintenance correlation resumes reconciliation; an old normal-ready image after
+commit is reported as rollback, while missing or contradictory evidence remains
+unresolved. The app runs this reconciliation after every fresh authenticated
+device-transfer status, including the first status after an app relaunch.
+Optional navigation and telemetry writes are suppressed while
+maintenance is active, but authentication and transfer status/control remain
+available.
+
 The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic
 device-transfer response in one application-level handshake. There is no

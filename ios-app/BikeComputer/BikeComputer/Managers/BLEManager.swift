@@ -1128,6 +1128,13 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var firmwareOTAEligibilityCode: String?
     @Published private(set) var firmwareInactivePartition: String?
     @Published private(set) var firmwareMaximumImageBytes: Int?
+    @Published private(set) var firmwareRunningPartition: String?
+    @Published private(set) var firmwareBuildProfile: String?
+    @Published private(set) var firmwareOTAState: String?
+    @Published private(set) var firmwareBootSequence: UInt32?
+    @Published private(set) var firmwareBootFingerprint: UInt32?
+    @Published private(set) var firmwareBootNormalReady = false
+    @Published private(set) var firmwareBootMaintenance = false
     @Published var firmwareUpdateReceivedBytes: Int = 0
     @Published var firmwareUpdateTotalBytes: Int = 0
     @Published var firmwareUpdateLastError: String?
@@ -2193,6 +2200,16 @@ class BLEManager: NSObject, ObservableObject {
         guard let scanDriverForTesting else { return }
         scanDriverForTesting.isPoweredOn = isPoweredOn
         handleCentralStateChange(isPoweredOn ? .poweredOn : .poweredOff)
+    }
+
+    func setFirmwareBootCheckpointForTesting(
+        normalReady: Bool,
+        maintenance: Bool = false,
+        otaState: String = "valid"
+    ) {
+        firmwareBootNormalReady = normalReady
+        firmwareBootMaintenance = maintenance
+        firmwareOTAState = otaState
     }
 
     func installNearbyCandidateForTesting(
@@ -6621,6 +6638,13 @@ class BLEManager: NSObject, ObservableObject {
         firmwareOTAEligibilityCode = nil
         firmwareInactivePartition = nil
         firmwareMaximumImageBytes = nil
+        firmwareRunningPartition = nil
+        firmwareBuildProfile = nil
+        firmwareOTAState = nil
+        firmwareBootSequence = nil
+        firmwareBootFingerprint = nil
+        firmwareBootNormalReady = false
+        firmwareBootMaintenance = false
         firmwareTarget = ""
         firmwareVersion = ""
         firmwareBuild = 0
@@ -7958,6 +7982,10 @@ class BLEManager: NSObject, ObservableObject {
         onDrop: (() -> Void)? = nil,
         onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
+        if firmwareMaintenanceActive && writeClass != .transfer {
+            log("Suppressed \(writeClass.rawValue) write during firmware maintenance")
+            return false
+        }
         let write = NavigationWrite(
             data: data,
             label: label,
@@ -10749,10 +10777,35 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 maintenance["stage"] as? String ?? "normal"
             firmwareMaintenanceCorrelation =
                 (maintenance["correlation"] as? NSNumber)?.uint32Value ?? 0
+            if firmwareMaintenanceActive {
+                for writeClass in NavigationWriteClass.allCases
+                    where writeClass != .transfer {
+                    navigationWriteQueue.removePendingWrites(
+                        ofClass: writeClass
+                    )
+                }
+            }
         } else {
             firmwareMaintenanceActive = false
             firmwareMaintenanceStage = "normal"
             firmwareMaintenanceCorrelation = 0
+        }
+        if let checkpoint = object["bootCheckpoint"] as? [String: Any] {
+            firmwareBootSequence =
+                (checkpoint["bootSequence"] as? NSNumber)?.uint32Value
+            firmwareBootFingerprint =
+                (checkpoint["bootFingerprint"] as? NSNumber)?.uint32Value
+            firmwareBootNormalReady =
+                checkpoint["normalReady"] as? Bool ?? false
+            firmwareBootMaintenance =
+                checkpoint["maintenance"] as? Bool ?? false
+            firmwareBuildProfile = checkpoint["profile"] as? String
+            firmwareOTAState = checkpoint["otaState"] as? String
+        } else {
+            firmwareBootSequence = nil
+            firmwareBootFingerprint = nil
+            firmwareBootNormalReady = false
+            firmwareBootMaintenance = false
         }
         deviceTransferStatusRevision &+= 1
 
@@ -10764,6 +10817,11 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             firmwareInactivePartition =
                 firmware["inactivePartition"] as? String
             firmwareMaximumImageBytes = firmware["maxImageBytes"] as? Int
+            firmwareRunningPartition = firmware["runningPartition"] as? String
+            firmwareBuildProfile =
+                firmware["profile"] as? String ?? firmwareBuildProfile
+            firmwareOTAState =
+                firmware["otaState"] as? String ?? firmwareOTAState
             firmwareTarget = firmware["target"] as? String ?? firmwareTarget
             firmwareVersion = firmware["version"] as? String ?? firmwareVersion
             firmwareBuild = firmware["build"] as? Int ?? firmwareBuild

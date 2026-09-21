@@ -827,6 +827,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsDeviceCapabilityFallback()
         testBLEManagerSendsMapTransferControlFrames()
         testBLEManagerSendsDeviceTransferControlFrames()
+        testBLEManagerSuppressesOptionalWritesDuringFirmwareMaintenance()
         testBLEManagerParsesMapTransferStatus()
         testBLEManagerReassemblesChunkedMapTransferStatus()
         testBLEManagerCompletesRetransmittedChunkedMapTransferStatus()
@@ -15024,6 +15025,7 @@ struct NavigationProtocolTests {
             ble.firmwareVersion = pending.version
             ble.firmwareBuild = pending.build
             ble.firmwareGitSha = String(repeating: "0", count: 40) // rollback/different image
+            ble.setFirmwareBootCheckpointForTesting(normalReady: true)
             manager.refreshDeviceFirmwareStatus(bleManager: ble)
             try? await Task.sleep(nanoseconds: 800_000_000)
             assert(defaults.data(forKey: "firmware.pendingUpdate") != nil, "different running image does not clear pending update")
@@ -15037,6 +15039,95 @@ struct NavigationProtocolTests {
                    "exact full running identity clears both new and legacy persisted updates")
             assertEqual(manager.statusMessage, "firmware update installed", "relaunch reports verified identity completion")
         }
+
+        let requested = PendingFirmwareUpdate(
+            target: "WAVESHARE_AMOLED_175",
+            version: "0.4.0",
+            build: 100,
+            gitSha: String(repeating: "b", count: 40),
+            startedAt: Date(),
+            status: "restarting in firmware maintenance",
+            deviceID: "device-a",
+            maintenanceCorrelation: 77,
+            transactionStage: .maintenanceReady
+        )
+        defaults.set(
+            try! JSONEncoder().encode(requested),
+            forKey: "firmware.pendingUpdate"
+        )
+        let cancelledManager = FirmwareUpdateManager(defaults: defaults)
+        let cancelledBLE = BLEManager()
+        cancelledBLE.setConnectedDeviceIDForTesting("device-a")
+        cancelledBLE.firmwareTarget = requested.target
+        cancelledBLE.firmwareVersion = "0.3.4"
+        cancelledBLE.firmwareBuild = 96
+        cancelledBLE.firmwareGitSha = String(repeating: "a", count: 40)
+        cancelledBLE.setFirmwareBootCheckpointForTesting(normalReady: true)
+        cancelledManager.refreshDeviceFirmwareStatus(bleManager: cancelledBLE)
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        assertEqual(
+            cancelledManager.statusMessage,
+            "firmware update cancelled",
+            "a pre-commit transaction returning to the old ready image is cancelled"
+        )
+
+        var postCommit = requested
+        postCommit.status = "device rebooting"
+        postCommit.transactionStage = .rebooting
+        defaults.set(
+            try! JSONEncoder().encode(postCommit),
+            forKey: "firmware.pendingUpdate"
+        )
+        let rollbackManager = FirmwareUpdateManager(defaults: defaults)
+        rollbackManager.refreshDeviceFirmwareStatus(bleManager: cancelledBLE)
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        assertEqual(
+            rollbackManager.statusMessage,
+            "firmware update rolled back",
+            "a post-commit transaction returning to the old ready image is rollback"
+        )
+
+        defaults.set(
+            try! JSONEncoder().encode(requested),
+            forKey: "firmware.pendingUpdate"
+        )
+        let maintenanceManager = FirmwareUpdateManager(defaults: defaults)
+        let maintenanceBLE = BLEManager()
+        maintenanceBLE.setConnectedDeviceIDForTesting("device-a")
+        let maintenanceStatus = """
+        {"enabled":false,"mode":"","maintenance":{"supported":true,"active":true,"stage":"awaiting_authentication","correlation":77},"bootCheckpoint":{"schemaVersion":1,"normalReady":false,"maintenance":true,"bootSequence":10,"bootFingerprint":5678},"firmware":{"status":"idle","target":"WAVESHARE_AMOLED_175","version":"0.3.4","build":96,"gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+        """
+        assert(maintenanceBLE.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(maintenanceStatus.utf8)
+        ), "maintenance reconciliation status should parse")
+        maintenanceManager.refreshDeviceFirmwareStatus(
+            bleManager: maintenanceBLE
+        )
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        assertEqual(
+            maintenanceManager.statusMessage,
+            "firmware update awaiting completion",
+            "app relaunch recognizes the same maintenance transaction without replay"
+        )
+
+        var lostAcknowledgement = requested
+        lostAcknowledgement.maintenanceCorrelation = nil
+        lostAcknowledgement.transactionStage = .maintenanceRequested
+        defaults.set(
+            try! JSONEncoder().encode(lostAcknowledgement),
+            forKey: "firmware.pendingUpdate"
+        )
+        let unresolvedManager = FirmwareUpdateManager(defaults: defaults)
+        unresolvedManager.refreshDeviceFirmwareStatus(
+            bleManager: maintenanceBLE
+        )
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        assertEqual(
+            unresolvedManager.statusMessage,
+            "firmware update status unresolved",
+            "lost acknowledgement remains unresolved and is never replayed blindly"
+        )
     }
 
     static func testFirmwareDeviceClientSendsSignedBeginRequest() {
@@ -22681,6 +22772,34 @@ struct NavigationProtocolTests {
         )
     }
 
+    static func testBLEManagerSuppressesOptionalWritesDuringFirmwareMaintenance() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 96,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let status = """
+        {"enabled":false,"mode":"","maintenance":{"supported":true,"active":true,"stage":"awaiting_authentication","correlation":42}}
+        """
+        assert(manager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(status.utf8)
+        ), "maintenance status should be consumed")
+
+        assert(!manager.sendNavigationData("2|120|Turn left"),
+               "optional navigation is rejected while maintenance is active")
+        assert(manager.requestDeviceTransferStatus(),
+               "maintenance status traffic remains available")
+        assertEqual(sentPackets, [Data("DSTS".utf8)],
+                    "only the required transfer-control write reaches BLE")
+    }
+
     @MainActor
     static func testDeviceDiagnosticsTransferPolicy() async {
         let configuration = URLSessionConfiguration.ephemeral
@@ -24078,7 +24197,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"debug","statusRevision":23,"baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":true,"stage":"ready","correlation":42},"lastError":{"sequence":17,"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"updaterProtocol":1,"otaEligible":true,"eligibilityCode":"eligible","inactivePartition":"ota_1","maxImageBytes":3145728,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"debug","statusRevision":23,"baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":true,"stage":"ready","correlation":42},"bootCheckpoint":{"schemaVersion":1,"target":"WAVESHARE_AMOLED_206","profile":"WAVESHARE_AMOLED_206_PRODUCTION","gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"0.2.2","build":86,"bootSequence":9,"bootFingerprint":1234,"normalReady":false,"maintenance":true,"otaState":"valid"},"lastError":{"sequence":17,"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updaterProtocol":1,"otaEligible":true,"eligibilityCode":"eligible","inactivePartition":"ota_1","runningPartition":"ota_0","profile":"WAVESHARE_AMOLED_206_PRODUCTION","otaState":"valid","maxImageBytes":3145728,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -24104,6 +24223,14 @@ struct NavigationProtocolTests {
                     "status parser exposes maintenance readiness")
         assertEqual(manager.firmwareMaintenanceCorrelation, 42,
                     "status parser preserves reboot correlation")
+        assertEqual(manager.firmwareBootSequence, 9,
+                    "status parser exposes the authenticated boot sequence")
+        assertEqual(manager.firmwareBootFingerprint, 1234,
+                    "status parser exposes the boot identity fingerprint")
+        assert(!manager.firmwareBootNormalReady,
+               "maintenance readiness cannot masquerade as normal readiness")
+        assert(manager.firmwareBootMaintenance,
+               "status parser distinguishes the maintenance checkpoint")
         assertEqual(manager.deviceTransferLastErrorCode, "transfer_busy", "status parser exposes transfer error code")
         assertEqual(manager.deviceTransferLastErrorMessage, "another transfer mode is active", "status parser exposes transfer error message")
         assertEqual(manager.deviceTransferLastErrorSequence, 17,
@@ -24124,6 +24251,13 @@ struct NavigationProtocolTests {
                     "status parser exposes the eligibility reason")
         assertEqual(manager.firmwareInactivePartition, "ota_1",
                     "status parser exposes the inactive slot")
+        assertEqual(manager.firmwareRunningPartition, "ota_0",
+                    "status parser exposes the running slot")
+        assertEqual(manager.firmwareBuildProfile,
+                    "WAVESHARE_AMOLED_206_PRODUCTION",
+                    "status parser exposes the build profile")
+        assertEqual(manager.firmwareOTAState, "valid",
+                    "status parser exposes the OTA acceptance state")
         assertEqual(manager.firmwareMaximumImageBytes, 3 * 1024 * 1024,
                     "status parser exposes the slot capacity")
         assertEqual(manager.firmwareUpdateReceivedBytes, 1024, "status parser exposes received bytes")

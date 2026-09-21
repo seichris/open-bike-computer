@@ -30,5 +30,35 @@ int main() {
   assert(correlation == 10);
   assert(!valid(request));
 
+  const ResourceSnapshot abundant{128U * 1024U, 64U * 1024U,
+                                  96U * 1024U, 48U * 1024U};
+  assert(admit(ResourcePhase::BeforeWorker, abundant) ==
+         ResourceAdmission::Admitted);
+  ResourceSnapshot constrained = abundant;
+  constrained.internalFree = kBeforeWorkerMinimum.internalFree - 1;
+  assert(admit(ResourcePhase::BeforeWorker, constrained) ==
+         ResourceAdmission::InternalFreeLow);
+  constrained = abundant;
+  constrained.internalLargest = kBeforeWorkerMinimum.internalLargest - 1;
+  assert(admit(ResourcePhase::BeforeWorker, constrained) ==
+         ResourceAdmission::InternalLargestLow);
+  constrained = abundant;
+  constrained.dmaFree = kBeforeWorkerMinimum.dmaFree - 1;
+  assert(admit(ResourcePhase::BeforeWorker, constrained) ==
+         ResourceAdmission::DmaFreeLow);
+  constrained = abundant;
+  constrained.dmaLargest = kBeforeWorkerMinimum.dmaLargest - 1;
+  assert(admit(ResourcePhase::BeforeWorker, constrained) ==
+         ResourceAdmission::DmaLargestLow);
+  assert(!authenticationTimedOut(kAwaitingAuthenticationTimeoutMs - 1,
+                                 false));
+  assert(authenticationTimedOut(kAwaitingAuthenticationTimeoutMs, false));
+  assert(!authenticationTimedOut(kAwaitingAuthenticationTimeoutMs, true));
+  assert(!transferTimedOut(kTransferInactivityTimeoutMs - 1, 0, true,
+                           false));
+  assert(transferTimedOut(kTransferInactivityTimeoutMs, 0, true, false));
+  assert(!transferTimedOut(kTransferInactivityTimeoutMs, 0, true, true));
+  assert(!transferTimedOut(kTransferInactivityTimeoutMs, 0, false, false));
+
   return 0;
 }

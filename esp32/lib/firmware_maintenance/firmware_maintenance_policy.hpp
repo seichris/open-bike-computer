@@ -7,6 +7,82 @@ namespace firmware_maintenance::policy {
 constexpr uint32_t kRequestMagic = 0x4d41544f; // "OTAM" little-endian
 constexpr uint16_t kRequestSchema = 1;
 constexpr uint32_t kSoftwareResetReason = 3;
+constexpr uint32_t kAwaitingAuthenticationTimeoutMs = 2U * 60U * 1000U;
+constexpr uint32_t kTransferInactivityTimeoutMs = 90U * 1000U;
+
+enum class ResourcePhase : uint8_t {
+  BeforeWorker = 0,
+  BeforeListener,
+};
+
+enum class ResourceAdmission : uint8_t {
+  Admitted = 0,
+  InternalFreeLow,
+  InternalLargestLow,
+  DmaFreeLow,
+  DmaLargestLow,
+};
+
+struct ResourceSnapshot {
+  uint32_t internalFree;
+  uint32_t internalLargest;
+  uint32_t dmaFree;
+  uint32_t dmaLargest;
+};
+
+// Candidate fail-closed budgets. Physical qualification records the observed
+// margins and may raise these floors; it must never silently lower them below
+// the authenticated-control emergency reserve.
+constexpr ResourceSnapshot kBeforeWorkerMinimum{96U * 1024U, 48U * 1024U,
+                                                64U * 1024U, 32U * 1024U};
+constexpr ResourceSnapshot kBeforeListenerMinimum{48U * 1024U, 24U * 1024U,
+                                                  32U * 1024U, 16U * 1024U};
+
+constexpr ResourceSnapshot minimumFor(ResourcePhase phase) {
+  return phase == ResourcePhase::BeforeWorker ? kBeforeWorkerMinimum
+                                               : kBeforeListenerMinimum;
+}
+
+constexpr ResourceAdmission admit(ResourcePhase phase,
+                                  const ResourceSnapshot &available) {
+  const ResourceSnapshot minimum = minimumFor(phase);
+  if (available.internalFree < minimum.internalFree)
+    return ResourceAdmission::InternalFreeLow;
+  if (available.internalLargest < minimum.internalLargest)
+    return ResourceAdmission::InternalLargestLow;
+  if (available.dmaFree < minimum.dmaFree)
+    return ResourceAdmission::DmaFreeLow;
+  if (available.dmaLargest < minimum.dmaLargest)
+    return ResourceAdmission::DmaLargestLow;
+  return ResourceAdmission::Admitted;
+}
+
+constexpr const char *resourceAdmissionCode(ResourceAdmission admission) {
+  switch (admission) {
+  case ResourceAdmission::Admitted:
+    return "admitted";
+  case ResourceAdmission::InternalFreeLow:
+    return "maintenance_internal_free_low";
+  case ResourceAdmission::InternalLargestLow:
+    return "maintenance_internal_largest_low";
+  case ResourceAdmission::DmaFreeLow:
+    return "maintenance_dma_free_low";
+  case ResourceAdmission::DmaLargestLow:
+    return "maintenance_dma_largest_low";
+  }
+  return "maintenance_resource_unknown";
+}
+
+constexpr bool authenticationTimedOut(uint32_t elapsedMs, bool authenticated) {
+  return !authenticated && elapsedMs >= kAwaitingAuthenticationTimeoutMs;
+}
+
+constexpr bool transferTimedOut(uint32_t nowMs, uint32_t lastUsefulTrafficMs,
+                                bool transferEnabled,
+                                bool authorizedRequestInProgress) {
+  return transferEnabled && !authorizedRequestInProgress &&
+         nowMs - lastUsefulTrafficMs >= kTransferInactivityTimeoutMs;
+}
 
 struct Request {
   uint32_t magic;

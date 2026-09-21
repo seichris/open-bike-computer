@@ -2871,6 +2871,25 @@ static std::string genericTransferStatusJson() {
           "\"}";
   firmware_update::FirmwareUpdateStatus firmwareStatus =
       firmwareUpdateHttp.status();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  const boot_diagnostics::Snapshot bootStatus = boot_diagnostics::snapshot();
+  body += ",\"bootCheckpoint\":{\"schemaVersion\":1,\"target\":\"" +
+          jsonEscape(firmwareStatus.target) + "\",\"profile\":\"" +
+          jsonEscape(firmwareStatus.runningProfile) +
+          "\",\"gitSha\":\"" + jsonEscape(firmwareStatus.runningGitSha) +
+          "\",\"version\":\"" +
+          jsonEscape(firmwareStatus.runningVersion) + "\",\"build\":" +
+          std::to_string(firmwareStatus.runningBuild) +
+          ",\"bootSequence\":" + std::to_string(bootStatus.bootSequence) +
+          ",\"bootFingerprint\":" +
+          std::to_string(bootStatus.firmwareFingerprint) +
+          ",\"normalReady\":" +
+          std::string(bootStatus.ready ? "true" : "false") +
+          ",\"maintenance\":" +
+          std::string(bootStatus.firmwareMaintenance ? "true" : "false") +
+          ",\"otaState\":\"" + jsonEscape(firmwareStatus.otaState) +
+          "\"}";
+#endif
   body += ",\"firmware\":{\"status\":\"" +
           jsonEscape(firmwareStatus.status) + "\",\"target\":\"" +
           jsonEscape(firmwareStatus.target) + "\",\"version\":\"" +
@@ -2885,6 +2904,11 @@ static std::string genericTransferStatusJson() {
           jsonEscape(firmwareStatus.eligibilityCode) + "\"" +
           ",\"inactivePartition\":\"" +
           jsonEscape(firmwareStatus.inactivePartition) + "\"" +
+          ",\"runningPartition\":\"" +
+          jsonEscape(firmwareStatus.runningPartition) + "\"" +
+          ",\"profile\":\"" +
+          jsonEscape(firmwareStatus.runningProfile) + "\"" +
+          ",\"otaState\":\"" + jsonEscape(firmwareStatus.otaState) + "\"" +
           ",\"maxImageBytes\":" +
           std::to_string(firmwareStatus.maxImageBytes) +
           ",\"receivedBytes\":" +

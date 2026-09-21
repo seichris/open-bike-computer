@@ -199,6 +199,20 @@ struct FirmwareStatusError: Codable, Equatable {
     let message: String
 }
 
+enum FirmwareUpdateTransactionStage: String, Codable, Equatable {
+    case downloading
+    case imageVerified = "image_verified"
+    case maintenanceRequested = "maintenance_requested"
+    case maintenanceReady = "maintenance_ready"
+    case uploading
+    case finalizing
+    case rebooting
+    case unresolved
+    case cancelled
+    case rolledBack = "rolled_back"
+    case failed
+}
+
 struct PendingFirmwareUpdate: Codable, Equatable {
     let target: String
     let version: String
@@ -208,6 +222,7 @@ struct PendingFirmwareUpdate: Codable, Equatable {
     var status: String
     var deviceID: String? = nil
     var maintenanceCorrelation: UInt32? = nil
+    var transactionStage: FirmwareUpdateTransactionStage? = nil
 }
 
 struct FirmwareStorageMigrationNotice: Codable, Equatable {
@@ -360,9 +375,19 @@ final class FirmwareUpdateManager: ObservableObject {
                 let image = try await self.downloadFirmware(manifest: manifest)
                 self.downloadProgress = 1
                 try self.verify(image: image, manifest: manifest)
+                self.updatePending(
+                    status: "firmware image verified",
+                    stage: .imageVerified
+                )
 
                 self.statusMessage = "restarting in firmware maintenance"
-                self.updatePendingStatus(self.statusMessage)
+                self.updatePendingIdentity(
+                    deviceID: bleManager.connectedDeviceID
+                )
+                self.updatePending(
+                    status: self.statusMessage,
+                    stage: .maintenanceRequested
+                )
                 let maintenanceCorrelation = try await self.deviceTransferManager.prepareFirmwareMaintenance(
                     bleManager: bleManager
                 ) { message in
@@ -372,6 +397,10 @@ final class FirmwareUpdateManager: ObservableObject {
                 self.updatePendingMaintenanceCorrelation(
                     maintenanceCorrelation,
                     deviceID: bleManager.connectedDeviceID
+                )
+                self.updatePending(
+                    status: "firmware maintenance ready",
+                    stage: .maintenanceReady
                 )
 
                 var finalized = false
@@ -406,17 +435,26 @@ final class FirmwareUpdateManager: ObservableObject {
                 self.deviceStatus = try await client.begin(manifest: manifest,
                                                            allowDowngrade: self.allowDeveloperDowngrade)
                 self.statusMessage = "uploading firmware"
-                self.updatePendingStatus(self.statusMessage)
+                self.updatePending(
+                    status: self.statusMessage,
+                    stage: .uploading
+                )
                 self.uploadProgress = 0
                 self.deviceStatus = try await client.upload(image: image) { progress in
                     self.uploadProgress = progress
                 }
                 self.statusMessage = "finalizing firmware"
-                self.updatePendingStatus(self.statusMessage)
+                self.updatePending(
+                    status: self.statusMessage,
+                    stage: .finalizing
+                )
                 self.deviceStatus = try await client.finalize()
                 finalized = true
                 self.statusMessage = "device rebooting"
-                self.updatePendingStatus(self.statusMessage)
+                self.updatePending(
+                    status: self.statusMessage,
+                    stage: .rebooting
+                )
                 try await self.waitForPostRebootVerification(bleManager: bleManager,
                                                              manifest: manifest)
                 self.reconcileStorageMigrationStatus(bleManager: bleManager)
@@ -660,31 +698,68 @@ final class FirmwareUpdateManager: ObservableObject {
             }
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
-        updatePendingStatus("firmware update status unknown")
+        updatePending(
+            status: "firmware update status unresolved",
+            stage: .unresolved
+        )
         throw FirmwareUpdateError.postRebootVerificationFailed
     }
 
-    private func reconcilePendingUpdate(bleManager: BLEManager) {
-        guard let pending = loadPendingUpdate() else { return }
+    func reconcilePendingUpdate(bleManager: BLEManager) {
+        guard !isBusy, let pending = loadPendingUpdate() else { return }
+        if let expectedDeviceID = pending.deviceID,
+           bleManager.connectedDeviceID != expectedDeviceID {
+            statusMessage = "firmware update status unresolved"
+            updatePending(status: statusMessage, stage: .unresolved)
+            return
+        }
         if bleManager.firmwareTarget == pending.target &&
             bleManager.firmwareVersion == pending.version &&
             bleManager.firmwareBuild == pending.build &&
             bleManager.firmwareGitSha == FirmwareSourceIdentity.fullSHA(
-                pending.gitSha, target: pending.target, version: pending.version, build: pending.build) {
+                pending.gitSha, target: pending.target,
+                version: pending.version, build: pending.build) &&
+            bleManager.firmwareBootNormalReady &&
+            !bleManager.firmwareBootMaintenance {
             statusMessage = storageMigrationNotice == nil
                 ? "firmware update installed"
                 : FirmwareStorageMigrationNotice.statusMessage
             clearPendingUpdate()
         } else if let error = bleManager.firmwareUpdateLastError {
             statusMessage = "firmware update failed: \(error)"
-            updatePendingStatus(statusMessage)
+            updatePending(status: statusMessage, stage: .failed)
+        } else if bleManager.firmwareMaintenanceActive {
+            if let correlation = pending.maintenanceCorrelation,
+               correlation == bleManager.firmwareMaintenanceCorrelation {
+                statusMessage = "firmware update awaiting completion"
+                updatePending(
+                    status: statusMessage,
+                    stage: .maintenanceReady
+                )
+            } else {
+                statusMessage = "firmware update status unresolved"
+                updatePending(status: statusMessage, stage: .unresolved)
+            }
+        } else if bleManager.firmwareBootNormalReady,
+                  pending.maintenanceCorrelation != nil {
+            switch pending.transactionStage {
+            case .finalizing, .rebooting, .unresolved:
+                statusMessage = "firmware update rolled back"
+                updatePending(status: statusMessage, stage: .rolledBack)
+            default:
+                statusMessage = "firmware update cancelled"
+                updatePending(status: statusMessage, stage: .cancelled)
+            }
         } else {
-            statusMessage = pending.status
+            statusMessage = "firmware update status unresolved"
+            updatePending(status: statusMessage, stage: .unresolved)
         }
     }
 
     private func isDeviceRunning(_ manifest: FirmwareReleaseManifest,
                                  bleManager: BLEManager) -> Bool {
+        bleManager.firmwareBootNormalReady &&
+        !bleManager.firmwareBootMaintenance &&
         bleManager.firmwareTarget == manifest.target &&
         bleManager.firmwareVersion == manifest.version &&
         bleManager.firmwareBuild == manifest.build &&
@@ -702,7 +777,8 @@ final class FirmwareUpdateManager: ObservableObject {
                                             startedAt: Date(),
                                             status: status,
                                             deviceID: nil,
-                                            maintenanceCorrelation: nil)
+                                            maintenanceCorrelation: nil,
+                                            transactionStage: .downloading)
         savePendingUpdate(pending)
     }
 
@@ -713,6 +789,22 @@ final class FirmwareUpdateManager: ObservableObject {
         guard var pending = loadPendingUpdate() else { return }
         pending.maintenanceCorrelation = correlation
         pending.deviceID = deviceID
+        savePendingUpdate(pending)
+    }
+
+    private func updatePendingIdentity(deviceID: String?) {
+        guard var pending = loadPendingUpdate() else { return }
+        pending.deviceID = deviceID
+        savePendingUpdate(pending)
+    }
+
+    private func updatePending(
+        status: String,
+        stage: FirmwareUpdateTransactionStage
+    ) {
+        guard var pending = loadPendingUpdate() else { return }
+        pending.status = status
+        pending.transactionStage = stage
         savePendingUpdate(pending)
     }
 
@@ -769,7 +861,26 @@ final class FirmwareUpdateManager: ObservableObject {
         } catch {
             errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             statusMessage = errorMessage ?? "firmware update failed"
-            updatePendingStatus(errorMessage ?? "firmware update failed")
+            if let pending = loadPendingUpdate() {
+                switch pending.transactionStage {
+                case .maintenanceRequested, .finalizing, .rebooting, .unresolved:
+                    errorMessage = nil
+                    statusMessage = "firmware update status unresolved"
+                    updatePending(
+                        status: statusMessage,
+                        stage: .unresolved
+                    )
+                default:
+                    if error is CancellationError {
+                        errorMessage = nil
+                        statusMessage = "firmware update cancelled"
+                    }
+                    updatePending(
+                        status: statusMessage,
+                        stage: error is CancellationError ? .cancelled : .failed
+                    )
+                }
+            }
         }
         isBusy = false
     }

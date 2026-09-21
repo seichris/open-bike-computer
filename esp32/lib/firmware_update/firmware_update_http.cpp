@@ -321,8 +321,10 @@ FirmwareUpdateStatus FirmwareUpdateHttpServer::status() const {
   snapshot.runningVersion = firmware_metadata::version();
   snapshot.runningBuild = firmware_metadata::build();
   snapshot.runningGitSha = firmware_metadata::gitSha();
+  snapshot.runningProfile = firmware_metadata::buildProfile();
   snapshot.runningPartition = partitionLabel(running);
   snapshot.inactivePartition = partitionLabel(inactive);
+  snapshot.otaState = otaStateName(running);
   snapshot.otaEligible =
       otaPartitionEligible(running, inactive, snapshot.eligibilityCode);
   snapshot.maxImageBytes = inactive == nullptr ? 0 : inactive->size;
@@ -337,7 +339,6 @@ FirmwareUpdateStatus FirmwareUpdateHttpServer::status() const {
 
 std::string FirmwareUpdateHttpServer::statusJson() const {
   FirmwareUpdateStatus snapshot = status();
-  const esp_partition_t *running = esp_ota_get_running_partition();
   std::string body = std::string("{\"status\":\"") +
                      jsonEscape(snapshot.status) + "\",\"target\":\"" +
                      jsonEscape(snapshot.target) + "\",\"runningVersion\":\"" +
@@ -355,7 +356,9 @@ std::string FirmwareUpdateHttpServer::statusJson() const {
                      std::string(snapshot.otaEligible ? "true" : "false") +
                      ",\"eligibilityCode\":\"" +
                      jsonEscape(snapshot.eligibilityCode) +
-                     "\",\"otaState\":\"" + jsonEscape(otaStateName(running)) +
+                     "\",\"runningProfile\":\"" +
+                     jsonEscape(snapshot.runningProfile) +
+                     "\",\"otaState\":\"" + jsonEscape(snapshot.otaState) +
                      "\",\"maxImageBytes\":" +
                      std::to_string(snapshot.maxImageBytes) +
                      ",\"receivedBytes\":" +
@@ -551,6 +554,12 @@ void FirmwareUpdateHttpServer::handleBegin(
     fail(client, 500, "ota_begin_failed", esp_err_to_name(result));
     return;
   }
+  if (!transaction_.begin()) {
+    esp_ota_abort(handle);
+    fail(client, 409, "ota_owner_busy",
+         "another firmware transaction owns the OTA lifecycle");
+    return;
+  }
 
   lockState();
   status_ = "receiving";
@@ -665,6 +674,12 @@ void FirmwareUpdateHttpServer::handleImage(
     fail(client, 400, "sha256_mismatch", "firmware image hash mismatch");
     return;
   }
+  if (!transaction_.verify()) {
+    resetUploadState();
+    fail(client, 409, "ota_state_invalid",
+         "firmware transaction did not reach the verified state");
+    return;
+  }
 
   lockState();
   actualSha256_ = actualSha256;
@@ -735,6 +750,13 @@ void FirmwareUpdateHttpServer::handleFinalize(
          "firmware transfer authorization was revoked before activation");
     return;
   }
+  if (!transaction_.beginCommit()) {
+    transferServer_->endAuthorizedCommit();
+    resetUploadState();
+    fail(client, 409, "ota_commit_state_invalid",
+         "firmware transaction could not enter the commit boundary");
+    return;
+  }
 
   firmware_maintenance::setStage(firmware_maintenance::Stage::Committing);
   transferServer_->noteStatusChanged("commit_boundary");
@@ -745,6 +767,8 @@ void FirmwareUpdateHttpServer::handleFinalize(
     fail(client, 500, "set_boot_partition_failed", esp_err_to_name(result));
     return;
   }
+  const bool rebootSelected = transaction_.selectReboot();
+  configASSERT(rebootSelected);
 
   lockState();
   status_ = "rebooting";
@@ -763,6 +787,10 @@ void FirmwareUpdateHttpServer::handleFinalize(
 
 void FirmwareUpdateHttpServer::handleCancel(device_transfer::TransferClient &client) {
   resetUploadState();
+  (void)transaction_.cancel();
+  lockState();
+  status_ = "cancelled";
+  unlockState();
   firmware_maintenance::requestExit();
   transferServer_->noteStatusChanged("cancelled");
   device_transfer::sendHttpJson(client, 200, statusJson());
@@ -783,6 +811,7 @@ void FirmwareUpdateHttpServer::resetUploadState() {
   pendingBuild_ = 0;
   allowDowngrade_ = false;
   updatePartition_ = nullptr;
+  transaction_.reset();
   unlockState();
   if (otaOpen) {
     esp_ota_abort(handle);
@@ -799,6 +828,7 @@ void FirmwareUpdateHttpServer::reject(device_transfer::TransferClient &client, i
 void FirmwareUpdateHttpServer::fail(device_transfer::TransferClient &client, int httpStatus,
                                     const std::string &code,
                                     const std::string &message) {
+  transaction_.fail();
   lockState();
   status_ = "failed";
   unlockState();

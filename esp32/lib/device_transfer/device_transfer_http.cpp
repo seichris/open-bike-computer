@@ -1,6 +1,7 @@
 #include "device_transfer_http.hpp"
 #include "commit_boundary_policy.hpp"
 #include "../firmware_maintenance/firmware_maintenance.hpp"
+#include "../firmware_maintenance/firmware_maintenance_policy.hpp"
 #include "../power_management/power_management.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 #include "device_transfer_http_limits.hpp"
@@ -28,6 +29,19 @@ constexpr uint32_t kDiagnosticsHttpWorkerStackBytes = 16384;
 constexpr uint32_t kDebugHttpWorkerStackBytes = 16384;
 constexpr uint32_t kLanConnectTimeoutMs = 6000;
 constexpr uint32_t kLanConnectPollMs = 50;
+
+static firmware_maintenance::policy::ResourceSnapshot resourceSnapshot() {
+  return {
+      static_cast<uint32_t>(heap_caps_get_free_size(
+          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<uint32_t>(heap_caps_get_largest_free_block(
+          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<uint32_t>(
+          heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT)),
+      static_cast<uint32_t>(heap_caps_get_largest_free_block(
+          MALLOC_CAP_DMA | MALLOC_CAP_8BIT)),
+  };
+}
 
 static std::string trim(const std::string &value) {
   size_t begin = 0;
@@ -398,6 +412,21 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     unlockState();
     return false;
   }
+  if (enabled && !wasEnabled && requestedMode == "firmware" &&
+      firmware_maintenance::active()) {
+    const firmware_maintenance::policy::ResourceAdmission admission =
+        firmware_maintenance::policy::admit(
+            firmware_maintenance::policy::ResourcePhase::BeforeWorker,
+            resourceSnapshot());
+    if (admission !=
+        firmware_maintenance::policy::ResourceAdmission::Admitted) {
+      firmware_maintenance::setStage(firmware_maintenance::Stage::Failed);
+      setLastError(
+          firmware_maintenance::policy::resourceAdmissionCode(admission),
+          "maintenance resource admission failed before worker creation");
+      return false;
+    }
+  }
 
   // A prior mode can revoke the service while its worker is still unwinding
   // an HTTP request. Do not publish a new enabled session until that task has
@@ -667,6 +696,22 @@ bool HttpTransferServer::startNetwork() {
         "ip=%s\n",
         !fallbackReason.empty(), fallbackReason.c_str(), apSsid.c_str(),
         WiFi.softAPIP().toString().c_str());
+  }
+
+  if (mode == "firmware" && firmware_maintenance::active()) {
+    observeResources("before_listener_admission");
+    const firmware_maintenance::policy::ResourceAdmission admission =
+        firmware_maintenance::policy::admit(
+            firmware_maintenance::policy::ResourcePhase::BeforeListener,
+            resourceSnapshot());
+    if (admission !=
+        firmware_maintenance::policy::ResourceAdmission::Admitted) {
+      firmware_maintenance::setStage(firmware_maintenance::Stage::Failed);
+      setLastError(
+          firmware_maintenance::policy::resourceAdmissionCode(admission),
+          "maintenance resource admission failed before HTTPS listener");
+      return false;
+    }
   }
 
   server_.begin();

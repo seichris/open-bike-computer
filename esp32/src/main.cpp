@@ -76,6 +76,7 @@ extern xSemaphoreHandle gpsMutex;
 #include "device_debug_http.hpp"
 #include "firmware_update_http.hpp"
 #include "firmware_maintenance.hpp"
+#include "firmware_maintenance_policy.hpp"
 #include "firmware_metadata.hpp"
 #include "map_transfer.hpp"
 #include "map_transfer_http.hpp"
@@ -152,6 +153,8 @@ static void processFirmwareMaintenanceMode() {
   const uint32_t now = millis();
   bleNavServer.process();
   deviceTransferHttp.process();
+  const device_transfer::HttpTransferStatus transferStatus =
+      deviceTransferHttp.status();
 
   static uint32_t bootPressStartedMs = 0;
   if (digitalRead(BOARD_BOOT_PIN) == LOW) {
@@ -167,8 +170,27 @@ static void processFirmwareMaintenanceMode() {
   const bool commitOwnsReboot =
       stage == firmware_maintenance::Stage::Committing ||
       stage == firmware_maintenance::Stage::Rebooting;
+  const uint32_t maintenanceElapsed =
+      now - firmware_maintenance::activeSinceMs();
+  if (stage == firmware_maintenance::Stage::AwaitingAuthentication &&
+      firmware_maintenance::policy::authenticationTimedOut(
+          maintenanceElapsed, false)) {
+    deviceTransferHttp.setLastError(
+        "maintenance_authentication_timeout",
+        "owner authentication did not complete before the deadline");
+    firmware_maintenance::requestExit();
+  } else if (!commitOwnsReboot &&
+             firmware_maintenance::policy::transferTimedOut(
+                 now, transferStatus.lastUsefulTrafficMs,
+                 transferStatus.enabled,
+                 transferStatus.authorizedRequestInProgress)) {
+    deviceTransferHttp.setLastError(
+        "maintenance_inactivity_timeout",
+        "firmware transfer made no useful progress before the deadline");
+    firmware_maintenance::requestExit();
+  }
   if (!commitOwnsReboot &&
-      now - firmware_maintenance::activeSinceMs() >=
+      maintenanceElapsed >=
           firmware_maintenance::kOverallDeadlineMs) {
     deviceTransferHttp.setLastError(
         "maintenance_deadline",
