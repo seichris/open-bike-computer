@@ -23,9 +23,7 @@ namespace {
 // also performs Wi-Fi station setup and hotspot fallback on this worker. Keep
 // its existing effective 16 KiB budget rather than reducing stack headroom on
 // the fully initialized device.
-constexpr uint32_t kMapHttpWorkerStackBytes = 16384;
-constexpr uint32_t kFirmwareHttpWorkerStackBytes = 16384;
-constexpr uint32_t kDiagnosticsHttpWorkerStackBytes = 16384;
+constexpr uint32_t kTransferHttpWorkerStackBytes = 16384;
 constexpr uint32_t kDebugHttpWorkerStackBytes = 16384;
 constexpr uint32_t kLanConnectTimeoutMs = 6000;
 constexpr uint32_t kLanConnectPollMs = 50;
@@ -516,13 +514,8 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
 
   if (enabled && !wasEnabled) {
     TaskHandle_t worker = nullptr;
-    const uint32_t workerStackBytes =
-        requestedMode == "debug"
-            ? kDebugHttpWorkerStackBytes
-            : (requestedMode == "firmware"
-                   ? kFirmwareHttpWorkerStackBytes
-                   : (requestedMode == "map" ? kMapHttpWorkerStackBytes
-                                               : kDiagnosticsHttpWorkerStackBytes));
+    const uint32_t workerStackBytes = requestedMode == "debug" ? kDebugHttpWorkerStackBytes
+                                                                : kTransferHttpWorkerStackBytes;
     // The debug service is RAM-only and never performs firmware flash writes
     // or map activation. Keep its long-lived 16 KiB stack in PSRAM so the
     // pinned-TLS session cannot consume the internal/DMA headroom that BLE
