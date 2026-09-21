@@ -2833,18 +2833,28 @@ static std::string genericTransferStatusJson() {
     appendJsonStringField(body, "baseUrl", transferStatus.baseUrl);
   if (!transferStatus.apSsid.empty())
     appendJsonStringField(body, "apSsid", transferStatus.apSsid);
-  if (!transferStatus.apPassphrase.empty())
-    appendJsonStringField(body, "apPassphrase", transferStatus.apPassphrase);
-  if (!transferStatus.networkTransport.empty())
-    appendJsonStringField(body, "networkTransport",
-                          transferStatus.networkTransport);
-  if (!transferStatus.networkSsid.empty())
-    appendJsonStringField(body, "networkSsid", transferStatus.networkSsid);
+  if (!transferStatus.apPassphrase.empty()) {
+    body += ",\"apPassphrase\":\"";
+    body += jsonEscape(transferStatus.apPassphrase);
+    body += "\"";
+  }
+  if (!transferStatus.networkTransport.empty()) {
+    body += ",\"networkTransport\":\"";
+    body += jsonEscape(transferStatus.networkTransport);
+    body += "\"";
+  }
+  if (!transferStatus.networkSsid.empty()) {
+    body += ",\"networkSsid\":\"";
+    body += jsonEscape(transferStatus.networkSsid);
+    body += "\"";
+  }
   if (transferStatus.hotspotFallback)
-    appendJsonBoolField(body, "hotspotFallback", true);
-  if (!transferStatus.hotspotFallbackReason.empty())
-    appendJsonStringField(body, "hotspotFallbackReason",
-                          transferStatus.hotspotFallbackReason);
+    body += ",\"hotspotFallback\":true";
+  if (!transferStatus.hotspotFallbackReason.empty()) {
+    body += ",\"hotspotFallbackReason\":\"";
+    body += jsonEscape(transferStatus.hotspotFallbackReason);
+    body += "\"";
+  }
   if (!transferStatus.sessionToken.empty())
     appendJsonStringField(body, "sessionToken", transferStatus.sessionToken);
   if (!transferStatus.lastErrorCode.empty()) {
