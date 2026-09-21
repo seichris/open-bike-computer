@@ -3344,6 +3344,11 @@ static void cancelDiagnosticsSessionStart() {
 static void diagnosticsSessionStartTask(void *context) {
   const uint32_t generation = static_cast<uint32_t>(
       reinterpret_cast<uintptr_t>(context));
+  // Own the retained-file snapshot before asking the writer to seal. The
+  // writer serializes pruning and sealing, so completion proves that a prune
+  // which began before this lease has finished while every later prune is
+  // suppressed for the authenticated diagnostics session.
+  ride_diagnostics::armTransferSnapshotLease();
   const ride_diagnostics::transfer_policy::StoragePreparation storageResult =
       storage.prepareDiagnosticsStorage();
   const bool storageReady =
@@ -3356,6 +3361,7 @@ static void diagnosticsSessionStartTask(void *context) {
                      ride_diagnostics::transfer_policy::sealReady(sealResult);
 
   bool stillCurrent = false;
+  bool keepSnapshotLease = false;
   if (diagnosticsSessionMutex != nullptr &&
       xSemaphoreTake(diagnosticsSessionMutex, portMAX_DELAY) == pdTRUE) {
     stillCurrent =
@@ -3369,6 +3375,8 @@ static void diagnosticsSessionStartTask(void *context) {
         deviceTransferHttp.setLastError(
             "diagnostics_start_failed",
             "diagnostics storage was ready but the transfer server did not start");
+      } else {
+        keepSnapshotLease = true;
       }
       (void)ride_diagnostics::record(
           enabled ? ride_diagnostics::Level::Info
@@ -3404,6 +3412,8 @@ static void diagnosticsSessionStartTask(void *context) {
     }
     xSemaphoreGive(diagnosticsSessionMutex);
   }
+  if (!keepSnapshotLease)
+    ride_diagnostics::endTransferSnapshotLease();
   if (diagnosticsSessionActiveGeneration.load(std::memory_order_acquire) ==
       generation) {
     diagnosticsSessionStartInProgress.store(false,

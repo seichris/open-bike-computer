@@ -1884,9 +1884,13 @@ the existing bearer token. The read-only API is:
 Every route requires the authenticated transfer token and an active
 `diagnostics` mode. The device never accepts an arbitrary filesystem path or a
 remote-delete request. Before enabling the HTTP session, the firmware writer
-performs a fresh directory and write/flush/close/remove probe, drains all
-earlier queue entries, and seals its current chunk; short, normal rides are
-therefore included without exposing a mutable tail. The recorder root is stable
+acquires the bounded transfer snapshot lease, performs a fresh directory and
+write/flush/close/remove probe, drains all earlier queue entries, and seals its
+current chunk; short, normal rides are therefore included without exposing a
+mutable tail. Acquiring the lease before the seal keeps retention enumeration
+out of the seal deadline. Because the writer serializes pruning and sealing,
+seal completion also proves that any prune which began before the lease has
+finished. The recorder root is stable
 for the complete boot. When removable SD was mounted at boot, diagnostics uses
 that mount without unmounting it beneath map/font readers. When the boot is
 already using the bounded internal FFat fallback, diagnostics exports FFat and
@@ -1923,9 +1927,11 @@ streaming, verifies length, SHA-256, JSONL schema/source, per-field types, and
 sequence ordering within and across chunks, then atomically
 retains it under its local diagnostics root. Repeating a download skips an
 already-imported chunk with the same hash.
-Creating the index starts a bounded transfer snapshot lease. Retention pruning
-cannot delete indexed closed chunks while that authenticated session is active;
-each non-exit request refreshes the lease and session exit releases it.
+Diagnostics entry starts a bounded transfer snapshot lease before the recorder
+seal. Retention pruning cannot delete the sealed or indexed closed chunks while
+that authenticated session is active; index creation and each non-exit request
+refresh the lease, while setup failure, disconnect, timeout, or session exit
+releases it.
 
 The browser API and binary RGB565 frame contract are documented in
 [Remote device debugging](remote-device-debugging.md). BLE exit, browser exit,
