@@ -663,10 +663,37 @@ struct OfflineMapJobProgress: Decodable, Equatable {
 
 enum OfflineMapProgressPresentation {
     static func value(job: OfflineMapJob?, downloadProgress: Double) -> Double? {
-        if job?.status == "converting_features", let progress = job?.progress {
-            return progress.displayFraction
+        if downloadProgress > 0,
+           job == nil || job?.status == "ready" {
+            return 0.95 + (clamped(downloadProgress) * 0.05)
         }
-        return downloadProgress > 0 ? downloadProgress : nil
+
+        guard let job else { return 0.01 }
+        switch job.status {
+        case "queued":
+            return 0.02
+        case "validating":
+            return 0.04
+        case "resolving_source":
+            return 0.06
+        case "extracting_pbf":
+            return 0.08
+        case "converting_features":
+            let phaseProgress = job.buildingProgress?.fraction
+                ?? job.progress?.displayFraction
+                ?? 0
+            return 0.10 + (clamped(phaseProgress) * 0.80)
+        case "packaging", "ready":
+            return 0.95
+        case "failed", "expired", "cancelled":
+            return nil
+        default:
+            return job.isTerminal ? nil : 0.01
+        }
+    }
+
+    private static func clamped(_ value: Double) -> Double {
+        min(max(value, 0), 1)
     }
 }
 

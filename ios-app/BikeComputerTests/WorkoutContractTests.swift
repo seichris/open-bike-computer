@@ -8276,6 +8276,13 @@ private struct WorkoutContractTestSuite {
                 && !route.contains("Search for a destination"),
             "all destination search surfaces must use the concise label"
         )
+        let compactRoute = route.filter { !$0.isWhitespace }
+        expect(
+            compactRoute.contains(
+                "}elseif!hasSelectedDestination{Spacer(minLength:0)}"
+            ),
+            "a selected destination must not stretch the route panel with an empty spacer"
+        )
         expect(
             compactContent.contains(
                 "ifshowsSupplementaryMapChrome{HStack{Spacer()mapControlCluster}"

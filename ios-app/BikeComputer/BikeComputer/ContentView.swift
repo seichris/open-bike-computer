@@ -2050,10 +2050,12 @@ struct ContentView: View {
             return "Map download needs attention"
         }
         if offlineMapManager.downloadedPackURL != nil {
-            return "Map pack ready to upload"
+            return "Map is ready to upload to your Bicino"
         }
-        if !offlineMapManager.statusMessage.isEmpty {
-            return offlineMapManager.statusMessage
+        if offlineMapManager.isBusy ||
+            offlineMapManager.hasPendingMapJob ||
+            offlineMapManager.currentJob != nil {
+            return "Map is downloading"
         }
         return "Preparing offline map"
     }

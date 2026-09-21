@@ -10097,28 +10097,67 @@ struct NavigationProtocolTests {
 
         assertEqual(
             OfflineMapProgressPresentation.value(job: legacy, downloadProgress: 0),
-            nil,
-            "older servers keep the indeterminate progress view"
+            0.1,
+            "conversion begins at a stable staged percentage on older servers"
         )
-        assertEqual(
-            OfflineMapProgressPresentation.value(job: progressJob, downloadProgress: 0),
-            0.4,
-            "generation block progress drives the determinate progress view"
+        assert(
+            abs(
+                (OfflineMapProgressPresentation.value(
+                    job: progressJob,
+                    downloadProgress: 0
+                ) ?? 0) - 0.42
+            ) < 0.000_001,
+            "generation block progress advances through the conversion range"
         )
-        assertEqual(
-            OfflineMapProgressPresentation.value(job: progressJob, downloadProgress: 0.75),
-            0.4,
+        assert(
+            abs(
+                (OfflineMapProgressPresentation.value(
+                    job: progressJob,
+                    downloadProgress: 0.75
+                ) ?? 0) - 0.42
+            ) < 0.000_001,
             "generation progress takes precedence while conversion is active"
         )
         assertEqual(
             OfflineMapProgressPresentation.value(job: cacheWaitJob, downloadProgress: 0),
-            nil,
-            "source cache waits remain indeterminate"
+            0.1,
+            "source cache waits retain a determinate staged percentage"
         )
         assertEqual(
             cacheWaitJob?.progress?.detail,
             "Waiting for the verified map source",
             "source cache waits have a distinct progress explanation"
+        )
+        let stagedStatuses: [(String, Double)] = [
+            ("queued", 0.02),
+            ("validating", 0.04),
+            ("resolving_source", 0.06),
+            ("extracting_pbf", 0.08),
+            ("packaging", 0.95),
+        ]
+        assertEqual(
+            OfflineMapProgressPresentation.value(job: nil, downloadProgress: 0),
+            0.01,
+            "job creation starts with visible progress"
+        )
+        for (status, expected) in stagedStatuses {
+            assertEqual(
+                OfflineMapProgressPresentation.value(
+                    job: offlineMapJob(status: status),
+                    downloadProgress: 0
+                ),
+                expected,
+                "\(status) uses a friendly staged percentage"
+            )
+        }
+        assert(
+            abs(
+                (OfflineMapProgressPresentation.value(
+                    job: offlineMapJob(status: "ready"),
+                    downloadProgress: 0.5
+                ) ?? 0) - 0.975
+            ) < 0.000_001,
+            "file download completes the final five percent"
         )
     }
 
@@ -12554,9 +12593,11 @@ struct NavigationProtocolTests {
                 ) &&
                 savedMapsSectionSource.contains("PendingSavedMapRow(") &&
                 source.contains("private struct PendingSavedMapRow") &&
-                source.contains("Color(uiColor: .systemGray6)") &&
+                !savedMapsSectionSource.contains(".listRowBackground(") &&
                 source.contains("title: \"Progress\"") &&
+                source.contains("let progressFraction = manager.activityProgress") &&
                 !source.contains("title: \"Feature Conversion\"") &&
+                !source.contains("title: \"Download Progress\"") &&
                 source.contains("preparationEstimatePresentation") &&
                 source.contains(
                     "OfflineMapPreparationEstimatePresentation.presentation(for: job)"
@@ -12564,7 +12605,7 @@ struct NavigationProtocolTests {
                 source.contains("Label(\"Retry Download\"") &&
                 source.contains("Button(\"Choose Another Map\"") &&
                 source.contains("if manager.errorMessage != nil"),
-            "the pending download is the final light-gray multi-row item in Saved Maps"
+            "the pending download uses one friendly progress row and the normal Saved Maps background"
         )
         assert(
             source.contains(".onChange(of: focusedPackFilename) { newValue in\n            scheduleRenameCommitIfNeeded(focusedFilename: newValue)\n        }"),
@@ -12967,6 +13008,27 @@ struct NavigationProtocolTests {
                 overlaySource.contains(".frame(maxWidth: .infinity, alignment: .center)") &&
                 overlaySource.contains(".offset(y: -8)"),
             "the landing map raises the Bicino connection status without changing its layout space"
+        )
+        guard let statusTitleStart = source.range(
+            of: "private var offlineMapStatusTitle: String"
+        )?.lowerBound,
+        let mapViewStart = source.range(
+            of: "// MARK: - Map View",
+            range: statusTitleStart..<source.endIndex
+        )?.lowerBound else {
+            assert(false, "offline-map status title source boundaries should be present")
+            return
+        }
+        let statusTitleSource = String(source[statusTitleStart..<mapViewStart])
+        assert(
+            statusTitleSource.contains("Map is downloading") &&
+                statusTitleSource.contains(
+                    "Map is ready to upload to your Bicino"
+                ) &&
+                !statusTitleSource.contains(
+                    "return offlineMapManager.statusMessage"
+                ),
+            "the landing map uses friendly stable download and upload-ready copy"
         )
     }
 
