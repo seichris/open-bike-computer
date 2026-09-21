@@ -671,6 +671,18 @@ enum OfflineMapProgressPresentation {
 }
 
 enum OfflineMapDownloadingSectionPresentation {
+    static func isRecoveryOnly(
+        isServerRecoveryCheckPending: Bool,
+        hasCurrentJob: Bool,
+        hasDownloadedPack: Bool,
+        errorMessage: String?
+    ) -> Bool {
+        isServerRecoveryCheckPending &&
+            !hasCurrentJob &&
+            !hasDownloadedPack &&
+            errorMessage == nil
+    }
+
     static func isVisible(
         isBusy: Bool,
         hasPendingJob: Bool,
@@ -680,11 +692,12 @@ enum OfflineMapDownloadingSectionPresentation {
         hasDownloadedPack: Bool,
         errorMessage: String?
     ) -> Bool {
-        let isOnlyCheckingForServerMaps = isServerRecoveryCheckPending &&
-            !hasCurrentJob &&
-            !hasDownloadedPack &&
-            !hasPendingActivation &&
-            errorMessage == nil
+        let isOnlyCheckingForServerMaps = isRecoveryOnly(
+            isServerRecoveryCheckPending: isServerRecoveryCheckPending,
+            hasCurrentJob: hasCurrentJob,
+            hasDownloadedPack: hasDownloadedPack,
+            errorMessage: errorMessage
+        ) && !hasPendingActivation
         guard !isOnlyCheckingForServerMaps else { return false }
 
         return isBusy || hasPendingJob || hasPendingActivation || errorMessage != nil
@@ -915,7 +928,22 @@ struct OfflineMapPreparationEstimatePresentation: Equatable {
     let title: String
     let value: String
 
-    static let fallbackGraceSeconds: TimeInterval = 10
+    // These conservative bootstrap ranges mirror the checked-in
+    // map-preparation-v1 selected-area profile. They keep the UI useful while
+    // production collects shadow evidence. A valid server estimate always
+    // takes precedence, so publishing a calibrated model needs no app update.
+    private static let bootstrapFullRange = OfflineMapPreparationEstimateRange(
+        lowerSeconds: 137,
+        upperSeconds: 6_080
+    )
+    private static let bootstrapEncodingRange = OfflineMapPreparationEstimateRange(
+        lowerSeconds: 22,
+        upperSeconds: 725
+    )
+    private static let bootstrapPackagingRange = OfflineMapPreparationEstimateRange(
+        lowerSeconds: 2,
+        upperSeconds: 95
+    )
 
     static func presentation(
         for job: OfflineMapJob,
@@ -925,45 +953,35 @@ struct OfflineMapPreparationEstimatePresentation: Equatable {
         let title = job.status == "queued"
             ? "Estimated Preparation"
             : "Estimated Remaining"
-        if job.status == "queued", job.errorCode != nil {
-            return Self(
-                title: title,
-                value: "Re-estimating after retry…"
-            )
-        }
         if let estimate = job.preparationEstimate {
             if let jobAttempt = job.attempts,
                let estimateAttempt = estimate.attempt,
                jobAttempt != estimateAttempt {
-                return Self(
-                    title: title,
-                    value: "Re-estimating after retry…"
-                )
-            }
-            if let range = estimate.validRemainingRange {
+                // A previous attempt's estimate is stale. Use the conservative
+                // bootstrap until the server publishes this attempt's range.
+            } else if let range = estimate.validRemainingRange {
                 return Self(
                     title: title,
                     value: description(for: range)
                 )
             }
-            if estimate.schemaVersion == 1,
-               estimate.state == "pending",
-               (estimate.attempt ?? 0) > 1 {
-                return Self(
-                    title: title,
-                    value: "Re-estimating after retry…"
-                )
-            }
-        }
-        let age = job.createdAt.flatMap(date(from:)).map {
-            max(0, now.timeIntervalSince($0))
         }
         return Self(
             title: title,
-            value: age.map { $0 < fallbackGraceSeconds } == true
-                ? "Estimating preparation time…"
-                : "Preparation time depends on map complexity"
+            value: description(for: bootstrapRange(for: job))
         )
+    }
+
+    private static func bootstrapRange(
+        for job: OfflineMapJob
+    ) -> OfflineMapPreparationEstimateRange {
+        if job.status == "packaging" {
+            return bootstrapPackagingRange
+        }
+        if job.progress?.phase == "block_encoding" {
+            return bootstrapEncodingRange
+        }
+        return bootstrapFullRange
     }
 
     static func availablePresentation(for job: OfflineMapJob) -> Self? {

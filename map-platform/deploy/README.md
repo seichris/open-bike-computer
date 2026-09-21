@@ -111,7 +111,8 @@ The lock defaults `MAP_PLATFORM_DEPLOYMENT_CHANNEL` and
 `MAP_PLATFORM_CATALOG_CHANNEL` to `development`; an explicit Coolify value may
 remain as defense in depth. For estimator calibration, the development lock
 defaults `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE=shadow`, while production
-defaults to `off`.
+also defaults to `shadow` so production records calibration evidence without
+publishing unvalidated estimates to clients. Hardware validation remains `off`.
 Shadow mode records bounded estimate revisions without returning them in public
 job responses; promote to `public` only after the documented sample and accuracy
 gates pass.

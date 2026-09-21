@@ -9386,15 +9386,15 @@ struct NavigationProtocolTests {
                 for: oldBackend,
                 now: Date(timeIntervalSince1970: 1_786_330_020)
             )?.value,
-            "Preparation time depends on map complexity",
-            "old backend never falls back to requested-area numeric buckets"
+            "Up to 1 hr 45 min remaining",
+            "the checked-in bootstrap gives old backends a conservative time"
         )
         assertEqual(
             OfflineMapPreparationEstimatePresentation.availablePresentation(
                 for: oldBackend
             ),
             nil,
-            "the main settings row hides unavailable estimates instead of guessing"
+            "the server-only presentation remains unavailable without an estimate"
         )
         assertEqual(
             OfflineMapPreparationEstimatePresentation.availablePresentation(
@@ -9429,8 +9429,8 @@ struct NavigationProtocolTests {
                 for: pendingRetry,
                 now: now
             )?.value,
-            "Re-estimating after retry…",
-            "retry pending state has explicit copy"
+            "Up to 1 hr 45 min remaining",
+            "a retry uses the bootstrap until its server estimate arrives"
         )
         let retryWithStaleAvailableEstimate = decode(
             """
@@ -9460,8 +9460,8 @@ struct NavigationProtocolTests {
                 for: retryWithStaleAvailableEstimate,
                 now: now
             )?.value,
-            "Re-estimating after retry…",
-            "newly claimed retry suppresses the previous attempt's stale estimate"
+            "Up to 1 hr 45 min remaining",
+            "a newly claimed retry replaces the stale estimate with the bootstrap"
         )
         let malformed = decode(
             """
@@ -9490,8 +9490,41 @@ struct NavigationProtocolTests {
                 for: malformed,
                 now: now
             )?.value,
-            "Preparation time depends on map complexity",
-            "malformed range does not break job decoding"
+            "Up to 1 hr 45 min remaining",
+            "a malformed server range falls back to the conservative bootstrap"
+        )
+        let encoding = decode(
+            """
+            {
+              "jobId": "estimate-encoding-bootstrap",
+              "status": "converting_features",
+              "progress": {"phase": "block_encoding"}
+            }
+            """
+        )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.presentation(
+                for: encoding,
+                now: now
+            )?.value,
+            "Up to 15 min remaining",
+            "the bootstrap narrows after preprocessing reaches block encoding"
+        )
+        let packaging = decode(
+            """
+            {
+              "jobId": "estimate-packaging-bootstrap",
+              "status": "packaging"
+            }
+            """
+        )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.presentation(
+                for: packaging,
+                now: now
+            )?.value,
+            "Up to 2 min remaining",
+            "the bootstrap narrows for final packaging"
         )
         assertEqual(
             OfflineMapPreparationEstimatePresentation.description(
@@ -10193,6 +10226,24 @@ struct NavigationProtocolTests {
     }
 
     static func testOfflineMapDownloadingSectionPresentation() {
+        assert(
+            OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
+                isServerRecoveryCheckPending: true,
+                hasCurrentJob: false,
+                hasDownloadedPack: false,
+                errorMessage: nil
+            ),
+            "a background server probe without map state is recovery-only"
+        )
+        assert(
+            !OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
+                isServerRecoveryCheckPending: true,
+                hasCurrentJob: true,
+                hasDownloadedPack: false,
+                errorMessage: nil
+            ),
+            "a recovered job is user-visible map state"
+        )
         assert(
             OfflineMapDownloadingSectionPresentation.isVisible(
                 isBusy: false,
@@ -12496,6 +12547,9 @@ struct NavigationProtocolTests {
         assert(
             savedMapsSectionSource.contains("let hasPendingMapRow") &&
                 savedMapsSectionSource.contains(
+                    "OfflineMapDownloadingSectionPresentation.isRecoveryOnly("
+                ) &&
+                savedMapsSectionSource.contains(
                     "!manager.hasDownloadedPendingDeviceInstall"
                 ) &&
                 savedMapsSectionSource.contains("PendingSavedMapRow(") &&
@@ -12504,6 +12558,9 @@ struct NavigationProtocolTests {
                 source.contains("title: \"Progress\"") &&
                 !source.contains("title: \"Feature Conversion\"") &&
                 source.contains("preparationEstimatePresentation") &&
+                source.contains(
+                    "OfflineMapPreparationEstimatePresentation.presentation(for: job)"
+                ) &&
                 source.contains("Label(\"Retry Download\"") &&
                 source.contains("Button(\"Choose Another Map\"") &&
                 source.contains("if manager.errorMessage != nil"),

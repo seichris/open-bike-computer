@@ -1082,6 +1082,13 @@ private struct SavedMapsSettingsSection: View {
         )
         let hasPendingMapRow = scope == .savedMaps &&
             manager.hasPendingMapJob &&
+            !OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
+                isServerRecoveryCheckPending:
+                    manager.isServerRecoveryCheckPending,
+                hasCurrentJob: manager.currentJob != nil,
+                hasDownloadedPack: manager.downloadedPackURL != nil,
+                errorMessage: manager.errorMessage
+            ) &&
             !manager.hasDownloadedPendingDeviceInstall
         Section(header: Text(scope == .developerMaps ? "Development Maps" : "Saved Maps")) {
             if savedMaps.isEmpty && !hasPendingMapRow {
@@ -1344,9 +1351,7 @@ private struct PendingSavedMapRow: View {
     private var preparationEstimatePresentation:
         OfflineMapPreparationEstimatePresentation? {
         guard let job = manager.currentJob else { return nil }
-        return OfflineMapPreparationEstimatePresentation.availablePresentation(
-            for: job
-        )
+        return OfflineMapPreparationEstimatePresentation.presentation(for: job)
     }
 
     private var overallGenerationProgress: OfflineMapBuildingProgress? {
