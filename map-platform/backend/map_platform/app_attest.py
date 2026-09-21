@@ -912,6 +912,14 @@ class AppAttestStore:
                     CHECK(environment IN ('development', 'production')),
                     CHECK(assertion_counter >= 0)
                 );
+                CREATE TABLE IF NOT EXISTS app_attest_retired_keys(
+                    key_id TEXT PRIMARY KEY,
+                    installation_id TEXT NOT NULL,
+                    replacement_key_id TEXT NOT NULL,
+                    retired_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS app_attest_retired_keys_installation
+                    ON app_attest_retired_keys(installation_id, retired_at);
                 """
             )
         try:
@@ -931,11 +939,6 @@ class AppAttestStore:
         }:
             raise AppAttestError(
                 "app_attest_invalid_purpose", "App Attest purpose is invalid",
-                status_code=400,
-            )
-        if purpose == APP_ATTEST_ATTESTATION_PURPOSE and installation_id is not None:
-            raise AppAttestError(
-                "app_attest_invalid_purpose", "App Attest principal is not allowed",
                 status_code=400,
             )
         if purpose == APP_ATTEST_MAP_CREATE_PURPOSE and installation_id is None:
@@ -1000,6 +1003,7 @@ class AppAttestStore:
         key_id: str,
         attestation_object: bytes,
         app_build: str,
+        replacing_key_id: str | None = None,
     ) -> VerifiedAttestation:
         now = int(self.clock())
         try:
@@ -1009,7 +1013,9 @@ class AppAttestStore:
                     connection,
                     challenge_id=challenge_id,
                     purpose=APP_ATTEST_ATTESTATION_PURPOSE,
-                    installation_id=None,
+                    installation_id=(
+                        installation_id if replacing_key_id is not None else None
+                    ),
                     now=now,
                 )
                 verified = self.verifier.verify_attestation(
@@ -1018,33 +1024,93 @@ class AppAttestStore:
                     challenge=bytes(row["challenge"]),
                     app_build=app_build,
                 )
-                try:
-                    connection.execute(
-                        """
-                        INSERT INTO app_attest_keys(
-                            key_id, installation_id, public_key_x963, receipt,
-                            app_id, environment, validation_category,
-                            bundle_version, assertion_counter, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-                        """,
-                        (
-                            key_id,
-                            installation_id,
-                            verified.public_key_x963,
-                            verified.receipt,
-                            verified.app_id,
-                            verified.environment,
-                            verified.validation_category,
-                            verified.bundle_version,
-                            now,
-                        ),
+                retired = connection.execute(
+                    "SELECT 1 FROM app_attest_retired_keys WHERE key_id = ?",
+                    (key_id,),
+                ).fetchone()
+                if retired is not None:
+                    raise AppAttestError(
+                        "app_attest_key_already_bound",
+                        "App Attest key is already associated with an installation",
                     )
+                try:
+                    if replacing_key_id is None:
+                        connection.execute(
+                            """
+                            INSERT INTO app_attest_keys(
+                                key_id, installation_id, public_key_x963, receipt,
+                                app_id, environment, validation_category,
+                                bundle_version, assertion_counter, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                            """,
+                            (
+                                key_id,
+                                installation_id,
+                                verified.public_key_x963,
+                                verified.receipt,
+                                verified.app_id,
+                                verified.environment,
+                                verified.validation_category,
+                                verified.bundle_version,
+                                now,
+                            ),
+                        )
+                    else:
+                        if key_id == replacing_key_id:
+                            raise AppAttestError(
+                                "app_attest_invalid_attestation",
+                                "replacement App Attest key must be new",
+                            )
+                        updated = connection.execute(
+                            """
+                            UPDATE app_attest_keys
+                            SET key_id = ?, public_key_x963 = ?, receipt = ?,
+                                app_id = ?, environment = ?, validation_category = ?,
+                                bundle_version = ?, assertion_counter = 0,
+                                created_at = ?
+                            WHERE installation_id = ? AND key_id = ?
+                            """,
+                            (
+                                key_id,
+                                verified.public_key_x963,
+                                verified.receipt,
+                                verified.app_id,
+                                verified.environment,
+                                verified.validation_category,
+                                verified.bundle_version,
+                                now,
+                                installation_id,
+                                replacing_key_id,
+                            ),
+                        )
+                        if updated.rowcount != 1:
+                            raise AppAttestError(
+                                "app_attest_key_mismatch",
+                                "installation App Attest key changed",
+                            )
+                        connection.execute(
+                            """
+                            INSERT INTO app_attest_retired_keys(
+                                key_id, installation_id, replacement_key_id, retired_at
+                            ) VALUES (?, ?, ?, ?)
+                            """,
+                            (replacing_key_id, installation_id, key_id, now),
+                        )
                 except sqlite3.IntegrityError as exc:
                     raise AppAttestError(
                         "app_attest_key_already_bound",
                         "App Attest key is already associated with an installation",
                     ) from exc
                 self._consume_challenge(connection, challenge_id, now)
+                if replacing_key_id is not None:
+                    connection.execute(
+                        """
+                        UPDATE app_attest_challenges
+                        SET consumed_at = ?
+                        WHERE installation_id = ? AND consumed_at IS NULL
+                        """,
+                        (now, installation_id),
+                    )
                 return verified
         except AppAttestError:
             raise

@@ -1,3 +1,4 @@
+import base64
 import json
 import hashlib
 import os
@@ -715,6 +716,132 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(credential["clientInstallationToken"], old_token)
         rejected = self.app_attest.issue_installation(self.client, existing_credential=old)
         self.assertEqual(rejected.status_code, 401)
+
+    def test_authenticated_app_attest_rotation_preserves_owner(self):
+        original = dict(self.installation)
+
+        rotated = self.app_attest.rotate_installation(
+            self.client,
+            credential=original,
+        )
+
+        self.assertIsInstance(rotated, dict)
+        self.assertEqual(
+            rotated["clientInstallationId"],
+            original["clientInstallationId"],
+        )
+        self.assertEqual(
+            rotated["clientInstallationToken"],
+            original["clientInstallationToken"],
+        )
+        self.assertNotEqual(rotated["appAttestKeyId"], original["appAttestKeyId"])
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "clientInstallationId": rotated["clientInstallationId"],
+            "clientRequestId": "request-after-key-rotation",
+        }
+        created = self.app_attest.post_map_job(
+            self.client,
+            credential=rotated,
+            payload=payload,
+        )
+        self.assertEqual(created.status_code, 200)
+
+    def test_app_attest_rotation_challenge_requires_owner_token(self):
+        response = self.client.post(
+            "/v1/installations/app-attest/challenges",
+            json={
+                "purpose": "attestation",
+                "clientInstallationId": self.installation[
+                    "clientInstallationId"
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["detail"]["code"],
+            "app_attest_invalid_challenge_request",
+        )
+
+    def test_app_attest_rotation_rejects_stale_previous_key(self):
+        response = self.app_attest.rotate_installation(
+            self.client,
+            credential=self.installation,
+            previous_key_id=base64.b64encode(b"x" * 32).decode("ascii"),
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"]["code"], "app_attest_key_mismatch")
+        refreshed = self.client.post(
+            "/v1/installations",
+            params={
+                "clientInstallationId": self.installation[
+                    "clientInstallationId"
+                ]
+            },
+            headers={
+                "X-Installation-Token": self.installation[
+                    "clientInstallationToken"
+                ]
+            },
+        )
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertEqual(
+            refreshed.json()["appAttestKeyId"],
+            self.installation["appAttestKeyId"],
+        )
+
+    def test_app_attest_rotation_is_rate_limited_per_installation(self):
+        limited_root = Path(self.tmp.name) / "rotation-limit"
+        with patch.dict(
+            os.environ,
+            {
+                "MAP_PLATFORM_DATA_ROOT": str(limited_root),
+                "MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY": "10000",
+                "MAP_PLATFORM_APP_ATTEST_ROTATION_LIMIT_PER_DAY": "1",
+            },
+            clear=False,
+        ):
+            client = TestClient(
+                create_app(app_attest_verifier=self.app_attest.verifier)
+            )
+            try:
+                credential = self.app_attest.issue_installation(client)
+                first = client.post(
+                    "/v1/installations/app-attest/challenges",
+                    headers={
+                        "X-Installation-Token": credential[
+                            "clientInstallationToken"
+                        ]
+                    },
+                    json={
+                        "purpose": "attestation",
+                        "clientInstallationId": credential[
+                            "clientInstallationId"
+                        ],
+                    },
+                )
+                blocked = client.post(
+                    "/v1/installations/app-attest/challenges",
+                    headers={
+                        "X-Installation-Token": credential[
+                            "clientInstallationToken"
+                        ]
+                    },
+                    json={
+                        "purpose": "attestation",
+                        "clientInstallationId": credential[
+                            "clientInstallationId"
+                        ],
+                    },
+                )
+            finally:
+                client.close()
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(blocked.status_code, 429)
 
     def test_installation_issuance_requires_app_attest(self):
         response = self.client.post("/v1/installations")

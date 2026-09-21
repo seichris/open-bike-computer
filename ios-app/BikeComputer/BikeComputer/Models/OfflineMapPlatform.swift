@@ -3198,13 +3198,6 @@ struct OfflineMapPlatformClient {
                         retryingAppAttestFailure: true
                     )
                 }
-                if Self.appAttestInvalidationCodes.contains(
-                    envelope.detail.code
-                ) {
-                    await managedAppAttestClient?.invalidate(
-                        serverURLString: baseURL.absoluteString
-                    )
-                }
             }
             throw error
         }
@@ -3570,12 +3563,6 @@ struct OfflineMapPlatformClient {
             String(data: data, encoding: .utf8) ?? ""
         )
     }
-
-    private static let appAttestInvalidationCodes = [
-        "installation_attestation_required",
-        "app_attest_key_mismatch",
-        "app_attest_invalid_key",
-    ]
 
     private static let appAttestRetryableCodes = [
         "app_attest_invalid_challenge",

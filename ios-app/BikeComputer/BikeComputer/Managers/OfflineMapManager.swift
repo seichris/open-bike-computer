@@ -4008,13 +4008,25 @@ final class OfflineMapManager: ObservableObject {
         _ request: OfflineMapJobRequest,
         client: OfflineMapPlatformClient
     ) async throws -> OfflineMapJob {
-        try await OfflineMapJobCreator.create(
+        var activeClient = client
+        var recoveredUnavailableKey = false
+        return try await OfflineMapJobCreator.create(
             request: request,
             create: { identifiedRequest in
-                try await client.createJob(identifiedRequest)
+                do {
+                    return try await activeClient.createJob(identifiedRequest)
+                } catch ManagedAppAttestError.keyUnavailable
+                    where !recoveredUnavailableKey {
+                    recoveredUnavailableKey = true
+                    activeClient = try await self.ensureRegisteredInstallation(
+                        client: activeClient,
+                        honorRefreshBackoff: false
+                    )
+                    return try await activeClient.createJob(identifiedRequest)
+                }
             },
             list: {
-                try await client.jobs()
+                try await activeClient.jobs()
             },
             sleep: { nanoseconds in
                 try await Task.sleep(nanoseconds: nanoseconds)

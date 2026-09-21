@@ -258,8 +258,11 @@ final class OfflineMapTestURLProtocol: URLProtocol {
 @MainActor
 final class TestOfflineMapAppAttestService: OfflineMapAppAttestServicing {
     let keyID: String
+    let keyIDs: [String]
     let attestationObject: Data
     let assertionObject: Data
+    var nextAttestationError: Error?
+    var nextAssertionError: Error?
     private(set) var generatedKeyCount = 0
     private(set) var attestationHashes: [Data] = []
     private(set) var assertionHashes: [Data] = []
@@ -270,6 +273,19 @@ final class TestOfflineMapAppAttestService: OfflineMapAppAttestServicing {
         assertionObject: Data = Data("test-assertion".utf8)
     ) {
         self.keyID = keyID
+        self.keyIDs = [keyID]
+        self.attestationObject = attestationObject
+        self.assertionObject = assertionObject
+    }
+
+    init(
+        keyIDs: [String],
+        attestationObject: Data = Data("test-attestation".utf8),
+        assertionObject: Data = Data("test-assertion".utf8)
+    ) {
+        precondition(!keyIDs.isEmpty)
+        keyID = keyIDs[0]
+        self.keyIDs = keyIDs
         self.attestationObject = attestationObject
         self.assertionObject = assertionObject
     }
@@ -278,11 +294,15 @@ final class TestOfflineMapAppAttestService: OfflineMapAppAttestServicing {
 
     func generateKey() async throws -> String {
         generatedKeyCount += 1
-        return keyID
+        return keyIDs[min(generatedKeyCount - 1, keyIDs.count - 1)]
     }
 
     func attestKey(_: String, clientDataHash: Data) async throws -> Data {
         attestationHashes.append(clientDataHash)
+        if let error = nextAttestationError {
+            nextAttestationError = nil
+            throw error
+        }
         return attestationObject
     }
 
@@ -291,6 +311,10 @@ final class TestOfflineMapAppAttestService: OfflineMapAppAttestServicing {
         clientDataHash: Data
     ) async throws -> Data {
         assertionHashes.append(clientDataHash)
+        if let error = nextAssertionError {
+            nextAssertionError = nil
+            throw error
+        }
         return assertionObject
     }
 }
@@ -889,6 +913,8 @@ struct NavigationProtocolTests {
         await testOfflineMapInstallationCredentialClient()
         testOfflineMapAppAttestGoldenVector()
         await testManagedOfflineMapAppAttestContract()
+        await testManagedAppAttestKeyRotation()
+        await testManagedAppAttestCrashBeforeCredentialPersistence()
         await testManagedInstallationMigration()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
@@ -3166,6 +3192,251 @@ struct NavigationProtocolTests {
     }
 
     @MainActor
+    static func testManagedAppAttestKeyRotation() async {
+        let suite = "AppAttestRotation-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); OfflineMapTestURLProtocol.reset() }
+        let baseURL = URL(string: OfflineMapServiceConfig.productionServerURLString)!
+        let oldKeyID = Data(repeating: 0x31, count: 32).base64EncodedString()
+        let newKeyID = Data(repeating: 0x32, count: 32).base64EncodedString()
+        let credential = OfflineMapInstallationCredential(
+            clientInstallationId: "inst_v2_abcdefabcdefabcdefabcdefabcdefab",
+            clientInstallationToken: "v1." + String(repeating: "R", count: 43),
+            appAttestKeyId: oldKeyID
+        )
+        let rotated = OfflineMapInstallationCredential(
+            clientInstallationId: credential.clientInstallationId,
+            clientInstallationToken: credential.clientInstallationToken,
+            appAttestKeyId: newKeyID
+        )
+        let service = TestOfflineMapAppAttestService(keyIDs: [newKeyID])
+        let keyStore = OfflineMapAppAttestKeyStore(defaults: defaults)
+        let credentialStore = OfflineMapInstallationCredentialStore(defaults: defaults)
+        let managed = ManagedOfflineMapAppAttestClient(
+            defaults: defaults, session: session, service: service, appBuild: "123"
+        )
+        let assertionChallenge = OfflineMapAppAttestChallenge(
+            challengeId: String(repeating: "d", count: 32),
+            challenge: Data(repeating: 4, count: 32).base64EncodedString()
+                .replacingOccurrences(of: "=", with: ""),
+            purpose: "map-create",
+            expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+            keyId: oldKeyID
+        )
+        let rotationChallenge = OfflineMapAppAttestChallenge(
+            challengeId: String(repeating: "e", count: 32),
+            challenge: Data(repeating: 5, count: 32).base64EncodedString()
+                .replacingOccurrences(of: "=", with: ""),
+            purpose: "attestation",
+            expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+            keyId: oldKeyID
+        )
+        let jobRequest = OfflineMapJobRequest.customBBox(
+            OfflineMapBounds(
+                minLon: 103.75, minLat: 1.24,
+                maxLon: 103.93, maxLat: 1.37
+            )
+        ).identified(
+            clientInstallationId: credential.clientInstallationId,
+            clientRequestId: "request-key-rotation",
+            installOnDevice: true
+        )
+        do {
+            try keyStore.saveActive(oldKeyID, serverURLString: baseURL.absoluteString)
+            try credentialStore.save(credential, serverURLString: baseURL.absoluteString)
+            OfflineMapTestURLProtocol.configure { request in
+                assertEqual(request.url?.path,
+                    "/v1/installations/app-attest/challenges",
+                    "assertion failures only request a map-create challenge")
+                return (200, try! JSONEncoder().encode(assertionChallenge))
+            }
+            let unsigned = try OfflineMapPlatformClient.makeCreateJobURLRequest(
+                baseURL: baseURL, jobRequest: jobRequest
+            )
+            service.nextAssertionError = URLError(.timedOut)
+            do {
+                _ = try await managed.authorizeMapCreate(
+                    request: unsigned, jobRequest: jobRequest,
+                    credential: credential, baseURL: baseURL
+                )
+                assert(false, "transient assertion failure is surfaced")
+            } catch {}
+            assertEqual(try managed.reconcile(
+                serverKeyID: oldKeyID,
+                serverURLString: baseURL.absoluteString
+            ), .usable, "transient assertion failure keeps the active key")
+
+            service.nextAssertionError = ManagedAppAttestError.keyUnavailable
+            do {
+                _ = try await managed.authorizeMapCreate(
+                    request: unsigned, jobRequest: jobRequest,
+                    credential: credential, baseURL: baseURL
+                )
+                assert(false, "invalid local key is surfaced")
+            } catch let error as ManagedAppAttestError {
+                assertEqual(error, .keyUnavailable, "invalid local key is classified")
+            }
+            assertEqual(try managed.reconcile(
+                serverKeyID: oldKeyID,
+                serverURLString: baseURL.absoluteString
+            ), .rotationRequired, "only confirmed local key loss enables rotation")
+
+            var rotationChallengeRequests = 0
+            OfflineMapTestURLProtocol.configure { request in
+                if request.url?.path == "/v1/installations/app-attest/challenges" {
+                    rotationChallengeRequests += 1
+                    let body = try! JSONSerialization.jsonObject(
+                        with: OfflineMapTestURLProtocol.bodyData(from: request)
+                    ) as! [String: Any]
+                    assertEqual(body["purpose"] as? String, "attestation",
+                        "recovery requests a fresh attestation challenge")
+                    assertEqual(body["clientInstallationId"] as? String,
+                        credential.clientInstallationId,
+                        "rotation challenge is scoped to the stable owner")
+                    assertEqual(request.value(forHTTPHeaderField: "X-Installation-Token"),
+                        credential.clientInstallationToken,
+                        "rotation challenge proves the existing owner token")
+                    return (200, try! JSONEncoder().encode(rotationChallenge))
+                }
+                let body = OfflineMapTestURLProtocol.bodyData(from: request)
+                if body.isEmpty { return (200, try! JSONEncoder().encode(credential)) }
+                let document = try! JSONSerialization.jsonObject(with: body)
+                    as! [String: Any]
+                let attestation = document["appAttest"] as! [String: Any]
+                assertEqual(attestation["previousKeyId"] as? String, oldKeyID,
+                    "rotation compare-and-swaps the server's current key")
+                assertEqual(attestation["keyId"] as? String, newKeyID,
+                    "rotation submits the freshly generated key")
+                return (200, try! JSONEncoder().encode(rotated))
+            }
+            let serviceSession = BicinoServiceSession(
+                defaults: defaults, urlSession: session,
+                appAttestService: service, appAttestAppBuild: "123"
+            )
+            let client = try serviceSession.makeOfflineMapClient(
+                serverURLString: baseURL.absoluteString
+            )
+            service.nextAttestationError = URLError(.cannotConnectToHost)
+            do {
+                _ = try await serviceSession.ensureRegisteredInstallation(
+                    client: client, honorRefreshBackoff: false
+                )
+                assert(false, "transient Apple attestation failure is surfaced")
+            } catch {}
+            let recovered = try await serviceSession.ensureRegisteredInstallation(
+                client: client, honorRefreshBackoff: false
+            )
+            assertEqual(recovered.clientInstallationId, credential.clientInstallationId,
+                "key rotation preserves the installation owner")
+            assertEqual(recovered.clientAppAttestKeyId, newKeyID,
+                "key rotation adopts the replacement key")
+            assertEqual(service.generatedKeyCount, 1,
+                "Apple retry reuses the same pending replacement key")
+            assertEqual(rotationChallengeRequests, 1,
+                "Apple retry reuses the same challenge and client-data hash")
+            assertEqual(credentialStore.load(serverURLString: baseURL.absoluteString), rotated,
+                "the stable owner credential records the replacement key")
+        } catch {
+            assert(false, "managed App Attest key rotation succeeds: \(error)")
+        }
+    }
+
+    @MainActor
+    static func testManagedAppAttestCrashBeforeCredentialPersistence() async {
+        let suite = "AppAttestCrashRecovery-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); OfflineMapTestURLProtocol.reset() }
+        let origin = OfflineMapServiceConfig.productionServerURLString
+        let oldKeyID = Data(repeating: 0x41, count: 32).base64EncodedString()
+        let newKeyID = Data(repeating: 0x42, count: 32).base64EncodedString()
+        let old = OfflineMapInstallationCredential(
+            clientInstallationId: "inst_v2_0123456789abcdef0123456789abcdef",
+            clientInstallationToken: "v1." + String(repeating: "C", count: 43),
+            appAttestKeyId: oldKeyID
+        )
+        let rotated = OfflineMapInstallationCredential(
+            clientInstallationId: old.clientInstallationId,
+            clientInstallationToken: old.clientInstallationToken,
+            appAttestKeyId: newKeyID
+        )
+        let keyStore = OfflineMapAppAttestKeyStore(defaults: defaults)
+        let credentialStore = OfflineMapInstallationCredentialStore(defaults: defaults)
+        do {
+            try keyStore.saveActive(oldKeyID, serverURLString: origin)
+            keyStore.markRotationRequired(serverURLString: origin)
+            try keyStore.savePending(
+                OfflineMapPendingAppAttestEnrollment(
+                    keyID: newKeyID,
+                    previousKeyID: oldKeyID,
+                    challenge: OfflineMapAppAttestChallenge(
+                        challengeId: String(repeating: "f", count: 32),
+                        challenge: Data(repeating: 6, count: 32)
+                            .base64EncodedString()
+                            .replacingOccurrences(of: "=", with: ""),
+                        purpose: "attestation",
+                        expiresAt: Int64(Date().timeIntervalSince1970) + 300,
+                        keyId: oldKeyID
+                    ),
+                    attestationObject: Data("attestation".utf8).base64EncodedString()
+                ),
+                serverURLString: origin
+            )
+            try credentialStore.save(old, serverURLString: origin)
+            OfflineMapTestURLProtocol.configure { request in
+                assertEqual(request.url?.path, "/v1/installations",
+                    "crash recovery performs an authenticated refresh")
+                assert(OfflineMapTestURLProtocol.bodyData(from: request).isEmpty,
+                    "crash recovery does not authorize another rotation")
+                assertEqual(request.value(forHTTPHeaderField: "X-Installation-Token"),
+                    old.clientInstallationToken,
+                    "crash recovery proves the stable owner token")
+                return (200, try! JSONEncoder().encode(rotated))
+            }
+            let serviceSession = BicinoServiceSession(
+                defaults: defaults,
+                urlSession: session,
+                appAttestService: TestOfflineMapAppAttestService(keyID: newKeyID),
+                appAttestAppBuild: "123"
+            )
+            let client = try serviceSession.makeOfflineMapClient(
+                serverURLString: origin
+            )
+            let recovered = try await serviceSession.ensureRegisteredInstallation(
+                client: client,
+                honorRefreshBackoff: false
+            )
+            assertEqual(recovered.clientAppAttestKeyId, newKeyID,
+                "refresh adopts the backend-committed pending key")
+            assertEqual(credentialStore.load(serverURLString: origin), rotated,
+                "new credential becomes durable before pending state is cleared")
+            assertEqual(keyStore.load(serverURLString: origin), newKeyID,
+                "pending key is promoted after credential persistence")
+            assert(keyStore.pending(serverURLString: origin) == nil,
+                "pending state clears only after crash recovery completes")
+            let verifier = ManagedOfflineMapAppAttestClient(
+                defaults: defaults,
+                session: session,
+                service: TestOfflineMapAppAttestService(keyID: newKeyID),
+                appBuild: "123"
+            )
+            assertEqual(try verifier.reconcile(
+                serverKeyID: newKeyID,
+                serverURLString: origin
+            ), .usable, "completed promotion cannot rotate the healthy new key again")
+        } catch {
+            assert(false, "crash-window key rotation recovery succeeds: \(error)")
+        }
+    }
+
+    @MainActor
     static func testManagedOfflineMapAppAttestContract() async {
         let suite = "OfflineMapAppAttestTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -3337,6 +3608,10 @@ struct NavigationProtocolTests {
         do {
             let enrolled = try await managedClient.enroll(baseURL: baseURL)
             assertEqual(enrolled, credential, "App Attest enrollment returns its bound identity")
+            try managedClient.finalizeEnrollment(
+                enrolled,
+                serverURLString: baseURL.absoluteString
+            )
             assert(
                 managedClient.hasKey(keyID, serverURLString: baseURL.absoluteString),
                 "the device-only key identifier is retained for later assertions"

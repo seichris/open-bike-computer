@@ -141,6 +141,12 @@ the allowed App ID, environment, and launch-validation categories from
 The Compose locks pass
 `MAP_PLATFORM_APP_ATTEST_CHALLENGE_TTL_SECONDS` with a `300`-second default;
 keep it between `30` and `900` seconds.
+Authenticated key replacement is limited separately by
+`MAP_PLATFORM_APP_ATTEST_ROTATION_IP_LIMIT_PER_DAY` (default `12`) and
+`MAP_PLATFORM_APP_ATTEST_ROTATION_LIMIT_PER_DAY` (default `3` per
+installation). It preserves the installation owner and is accepted only with
+the existing installation token, a scoped challenge, the exact previous key,
+and a fresh Apple attestation.
 
 Before releasing the iOS client, enable App Attest for both Apple App IDs and
 regenerate the corresponding provisioning profiles. Promote the compatible API
