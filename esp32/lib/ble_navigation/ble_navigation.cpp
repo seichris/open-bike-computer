@@ -61,6 +61,7 @@
 #include "../ride_diagnostics/ride_diagnostics_control.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
+#include "../status_json/status_json.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "../waveshare_board/pcf85063.hpp"
@@ -2480,57 +2481,6 @@ static bool handlePowerButtonHonkCommand(const std::string &value,
   return true;
 }
 
-static std::string jsonEscape(const std::string &value) {
-  std::string out;
-  out.reserve(value.size() + 8);
-  for (char c : value) {
-    if (c == '"' || c == '\\') {
-      out.push_back('\\');
-      out.push_back(c);
-    } else if (c == '\n') {
-      out += "\\n";
-    } else if (c == '\r') {
-      out += "\\r";
-    } else if (static_cast<unsigned char>(c) < 0x20) {
-      static constexpr char kHex[] = "0123456789abcdef";
-      const unsigned char value = static_cast<unsigned char>(c);
-      out += "\\u00";
-      out.push_back(kHex[value >> 4]);
-      out.push_back(kHex[value & 0x0f]);
-    } else {
-      out.push_back(c);
-    }
-  }
-  return out;
-}
-
-__attribute__((noinline)) static void appendJsonFieldPrefix(
-    std::string &body, const char *key) {
-  body += ",\"";
-  body += key;
-  body += "\":";
-}
-
-__attribute__((noinline)) static void appendJsonStringField(
-    std::string &body, const char *key, const std::string &value) {
-  appendJsonFieldPrefix(body, key);
-  body += "\"";
-  body += jsonEscape(value);
-  body += "\"";
-}
-
-__attribute__((noinline)) static void appendJsonUnsignedField(
-    std::string &body, const char *key, uint64_t value) {
-  appendJsonFieldPrefix(body, key);
-  body += std::to_string(value);
-}
-
-__attribute__((noinline)) static void appendJsonBoolField(
-    std::string &body, const char *key, bool value) {
-  appendJsonFieldPrefix(body, key);
-  body += value ? "true" : "false";
-}
-
 struct ActivePresentationCache {
   bool available = false;
   std::string mapId;
@@ -2678,11 +2628,11 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                      (transferStatus.enabled ? "true" : "false") +
                      ",\"port\":" + std::to_string(transferStatus.port) +
                      ",\"firmwareVersion\":\"" +
-                     jsonEscape(firmware_metadata::version()) +
+                     status_json::escape(firmware_metadata::version()) +
                      "\",\"firmwareBuild\":" +
                      std::to_string(firmware_metadata::build()) +
                      ",\"firmwareGitSha\":\"" +
-                     jsonEscape(firmware_metadata::gitSha()) + "\"" +
+                     status_json::escape(firmware_metadata::gitSha()) + "\"" +
                      ",\"protocols\":" +
                      (streamSupported ? "[2]" : "[]") +
                      (streamSupported
@@ -2703,45 +2653,45 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
           ",\"tls\":{\"identityVersion\":" +
           std::to_string(transferStatus.tlsIdentityVersion) +
           ",\"certificateSha256\":\"" +
-          jsonEscape(transferStatus.tlsCertificateSha256) + "\"}" +
+          status_json::escape(transferStatus.tlsCertificateSha256) + "\"}" +
           ",\"capabilities\":{\"secureTransferV1\":" +
           (transferStatus.secureTransferV1 ? "true" : "false") +
           ",\"signedMapStreamV1\":" +
           (transferStatus.signedMapStreamV1 ? "true" : "false") +
           ",\"legacyArchivePolicy\":\"" +
-          jsonEscape(transferStatus.legacyArchivePolicy) + "\"}";
+          status_json::escape(transferStatus.legacyArchivePolicy) + "\"}";
 
   if (!transferStatus.baseUrl.empty()) {
-    body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
+    body += ",\"baseUrl\":\"" + status_json::escape(transferStatus.baseUrl) + "\"";
   }
 
   if (!transferStatus.apSsid.empty()) {
-    body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
+    body += ",\"apSsid\":\"" + status_json::escape(transferStatus.apSsid) + "\"";
   }
   if (!transferStatus.networkTransport.empty()) {
     body += ",\"networkTransport\":\"" +
-            jsonEscape(transferStatus.networkTransport) + "\"";
+            status_json::escape(transferStatus.networkTransport) + "\"";
   }
   if (!transferStatus.networkSsid.empty()) {
     body += ",\"networkSsid\":\"" +
-            jsonEscape(transferStatus.networkSsid) + "\"";
+            status_json::escape(transferStatus.networkSsid) + "\"";
   }
   if (transferStatus.hotspotFallback) {
     body += ",\"hotspotFallback\":true";
   }
   if (!transferStatus.hotspotFallbackReason.empty()) {
     body += ",\"hotspotFallbackReason\":\"" +
-            jsonEscape(transferStatus.hotspotFallbackReason) + "\"";
+            status_json::escape(transferStatus.hotspotFallbackReason) + "\"";
   }
   if (activeMapStatus.available) {
-    body += ",\"activeMapId\":\"" + jsonEscape(activeMap.mapId) + "\"";
+    body += ",\"activeMapId\":\"" + status_json::escape(activeMap.mapId) + "\"";
     if (!activeMap.sessionId.empty()) {
       body += ",\"activeSessionId\":\"" +
-              jsonEscape(activeMap.sessionId) + "\"";
+              status_json::escape(activeMap.sessionId) + "\"";
     }
     if (!activeMap.manifestReceipt.empty()) {
       body += ",\"activeManifestReceipt\":\"" +
-              jsonEscape(activeMap.manifestReceipt) + "\"";
+              status_json::escape(activeMap.manifestReceipt) + "\"";
     }
     appendActiveMapPresentationStatus(body, activeMapStatus.presentation);
     if (activeMap.target.formatVersion != 0) {
@@ -2755,7 +2705,7 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
         if (index != 0)
           body += ",";
         body +=
-            "\"" + jsonEscape(activeMap.target.labelLanguages[index]) + "\"";
+            "\"" + status_json::escape(activeMap.target.labelLanguages[index]) + "\"";
       }
       body += "],\"fontAssetHealthy\":";
       body += activeMap.target.formatVersion >= 2 &&
@@ -2765,7 +2715,7 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
     }
   } else {
     body += ",\"activeError\":{\"code\":\"" +
-            jsonEscape(activeMapStatus.errorCode) +
+            status_json::escape(activeMapStatus.errorCode) +
             "\"}";
   }
 
@@ -2774,7 +2724,7 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
   if (!transferStatus.lastErrorCode.empty() &&
       !mapTransferHttp.activationHasError()) {
     body += ",\"lastError\":{\"code\":\"" +
-            jsonEscape(transferStatus.lastErrorCode) + "\",\"sequence\":" +
+            status_json::escape(transferStatus.lastErrorCode) + "\",\"sequence\":" +
             std::to_string(transferStatus.errorSequence) + "}";
   }
 
@@ -2793,174 +2743,174 @@ static std::string genericTransferStatusJson() {
   body.reserve(1536);
   body = "{\"configured\":";
   body += transferStatus.configured ? "true" : "false";
-  appendJsonBoolField(body, "enabled", transferStatus.enabled);
-  appendJsonUnsignedField(body, "port", transferStatus.port);
-  appendJsonStringField(body, "mode", transferStatus.mode);
-  appendJsonUnsignedField(body, "transferGeneration",
+  status_json::appendBoolField(body, "enabled", transferStatus.enabled);
+  status_json::appendUnsignedField(body, "port", transferStatus.port);
+  status_json::appendStringField(body, "mode", transferStatus.mode);
+  status_json::appendUnsignedField(body, "transferGeneration",
                           transferStatus.transferGeneration);
-  appendJsonUnsignedField(body, "statusRevision",
+  status_json::appendUnsignedField(body, "statusRevision",
                           transferStatus.statusRevision);
 
-  appendJsonFieldPrefix(body, "tls");
+  status_json::appendFieldPrefix(body, "tls");
   body += "{\"identityVersion\":";
   body += std::to_string(transferStatus.tlsIdentityVersion);
-  appendJsonStringField(body, "certificateSha256",
+  status_json::appendStringField(body, "certificateSha256",
                         transferStatus.tlsCertificateSha256);
   body += "}";
 
-  appendJsonFieldPrefix(body, "capabilities");
+  status_json::appendFieldPrefix(body, "capabilities");
   body += "{\"secureTransferV1\":";
   body += transferStatus.secureTransferV1 ? "true" : "false";
-  appendJsonBoolField(body, "signedMapStreamV1",
+  status_json::appendBoolField(body, "signedMapStreamV1",
                       transferStatus.signedMapStreamV1);
-  appendJsonBoolField(body, "firmwareMaintenanceV1",
+  status_json::appendBoolField(body, "firmwareMaintenanceV1",
                       kFirmwareMaintenanceSupported);
-  appendJsonStringField(body, "legacyArchivePolicy",
+  status_json::appendStringField(body, "legacyArchivePolicy",
                         transferStatus.legacyArchivePolicy);
   body += "}";
 
   if (transferStatus.pendingTlsIdentityVersion != 0 &&
       !transferStatus.pendingTlsCertificateSha256.empty()) {
-    appendJsonFieldPrefix(body, "pendingTls");
+    status_json::appendFieldPrefix(body, "pendingTls");
     body += "{\"identityVersion\":";
     body += std::to_string(transferStatus.pendingTlsIdentityVersion);
-    appendJsonStringField(body, "certificateSha256",
+    status_json::appendStringField(body, "certificateSha256",
                           transferStatus.pendingTlsCertificateSha256);
     body += "}";
   }
 
   if (!transferStatus.baseUrl.empty())
-    appendJsonStringField(body, "baseUrl", transferStatus.baseUrl);
+    status_json::appendStringField(body, "baseUrl", transferStatus.baseUrl);
   if (!transferStatus.apSsid.empty())
-    appendJsonStringField(body, "apSsid", transferStatus.apSsid);
+    status_json::appendStringField(body, "apSsid", transferStatus.apSsid);
   if (!transferStatus.apPassphrase.empty()) {
     body += ",\"apPassphrase\":\"";
-    body += jsonEscape(transferStatus.apPassphrase);
+    body += status_json::escape(transferStatus.apPassphrase);
     body += "\"";
   }
   if (!transferStatus.networkTransport.empty()) {
     body += ",\"networkTransport\":\"";
-    body += jsonEscape(transferStatus.networkTransport);
+    body += status_json::escape(transferStatus.networkTransport);
     body += "\"";
   }
   if (!transferStatus.networkSsid.empty()) {
     body += ",\"networkSsid\":\"";
-    body += jsonEscape(transferStatus.networkSsid);
+    body += status_json::escape(transferStatus.networkSsid);
     body += "\"";
   }
   if (transferStatus.hotspotFallback)
     body += ",\"hotspotFallback\":true";
   if (!transferStatus.hotspotFallbackReason.empty()) {
     body += ",\"hotspotFallbackReason\":\"";
-    body += jsonEscape(transferStatus.hotspotFallbackReason);
+    body += status_json::escape(transferStatus.hotspotFallbackReason);
     body += "\"";
   }
   if (!transferStatus.sessionToken.empty())
-    appendJsonStringField(body, "sessionToken", transferStatus.sessionToken);
+    status_json::appendStringField(body, "sessionToken", transferStatus.sessionToken);
   if (!transferStatus.lastErrorCode.empty()) {
-    appendJsonFieldPrefix(body, "lastError");
+    status_json::appendFieldPrefix(body, "lastError");
     body += "{\"code\":\"";
-    body += jsonEscape(transferStatus.lastErrorCode);
+    body += status_json::escape(transferStatus.lastErrorCode);
     body += "\"";
-    appendJsonStringField(body, "message", transferStatus.lastErrorMessage);
-    appendJsonUnsignedField(body, "sequence", transferStatus.errorSequence);
+    status_json::appendStringField(body, "message", transferStatus.lastErrorMessage);
+    status_json::appendUnsignedField(body, "sequence", transferStatus.errorSequence);
     body += "}";
   }
   if (!firmware_maintenance::active()) {
-    appendJsonFieldPrefix(body, "storage");
+    status_json::appendFieldPrefix(body, "storage");
     body += "{\"backend\":\"";
-    body += jsonEscape(storage.storageBackendName());
+    body += status_json::escape(storage.storageBackendName());
     body += "\"";
-    appendJsonBoolField(body, "powerCycleRequired",
+    status_json::appendBoolField(body, "powerCycleRequired",
                         storage.storagePowerCycleRequired());
     body += "}";
   }
-  appendJsonFieldPrefix(body, "maintenance");
+  status_json::appendFieldPrefix(body, "maintenance");
   body += "{\"supported\":";
   body += kFirmwareMaintenanceSupported ? "true" : "false";
-  appendJsonBoolField(body, "active", firmware_maintenance::active());
-  appendJsonStringField(
+  status_json::appendBoolField(body, "active", firmware_maintenance::active());
+  status_json::appendStringField(
       body, "stage",
       firmware_maintenance::stageName(firmware_maintenance::stage()));
-  appendJsonUnsignedField(body, "correlation",
+  status_json::appendUnsignedField(body, "correlation",
                           firmware_maintenance::correlation());
   body += "}";
 
-  appendJsonFieldPrefix(body, "resources");
+  status_json::appendFieldPrefix(body, "resources");
   body += "{\"internalFree\":";
   body += std::to_string(transferStatus.internalFree);
-  appendJsonUnsignedField(body, "internalLargest",
+  status_json::appendUnsignedField(body, "internalLargest",
                           transferStatus.internalLargest);
-  appendJsonUnsignedField(body, "dmaFree", transferStatus.dmaFree);
-  appendJsonUnsignedField(body, "dmaLargest", transferStatus.dmaLargest);
-  appendJsonUnsignedField(body, "psramFree", transferStatus.psramFree);
-  appendJsonUnsignedField(body, "psramLargest", transferStatus.psramLargest);
-  appendJsonUnsignedField(body, "minimumInternalFree",
+  status_json::appendUnsignedField(body, "dmaFree", transferStatus.dmaFree);
+  status_json::appendUnsignedField(body, "dmaLargest", transferStatus.dmaLargest);
+  status_json::appendUnsignedField(body, "psramFree", transferStatus.psramFree);
+  status_json::appendUnsignedField(body, "psramLargest", transferStatus.psramLargest);
+  status_json::appendUnsignedField(body, "minimumInternalFree",
                           transferStatus.minimumInternalFree);
-  appendJsonUnsignedField(body, "minimumInternalLargest",
+  status_json::appendUnsignedField(body, "minimumInternalLargest",
                           transferStatus.minimumInternalLargest);
-  appendJsonUnsignedField(body, "minimumDmaFree",
+  status_json::appendUnsignedField(body, "minimumDmaFree",
                           transferStatus.minimumDmaFree);
-  appendJsonUnsignedField(body, "minimumDmaLargest",
+  status_json::appendUnsignedField(body, "minimumDmaLargest",
                           transferStatus.minimumDmaLargest);
-  appendJsonUnsignedField(body, "minimumPsramFree",
+  status_json::appendUnsignedField(body, "minimumPsramFree",
                           transferStatus.minimumPsramFree);
-  appendJsonUnsignedField(body, "minimumPsramLargest",
+  status_json::appendUnsignedField(body, "minimumPsramLargest",
                           transferStatus.minimumPsramLargest);
-  appendJsonUnsignedField(body, "workerStackHighWaterBytes",
+  status_json::appendUnsignedField(body, "workerStackHighWaterBytes",
                           transferStatus.workerStackHighWaterBytes);
-  appendJsonStringField(body, "phase", transferStatus.resourcePhase);
+  status_json::appendStringField(body, "phase", transferStatus.resourcePhase);
   body += "}";
 
   firmware_update::FirmwareUpdateStatus firmwareStatus =
       firmwareUpdateHttp.status();
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   const boot_diagnostics::Snapshot bootStatus = boot_diagnostics::snapshot();
-  appendJsonFieldPrefix(body, "bootCheckpoint");
+  status_json::appendFieldPrefix(body, "bootCheckpoint");
   body += "{\"schemaVersion\":1";
-  appendJsonStringField(body, "target", firmwareStatus.target);
-  appendJsonStringField(body, "profile", firmwareStatus.runningProfile);
-  appendJsonStringField(body, "gitSha", firmwareStatus.runningGitSha);
-  appendJsonStringField(body, "version", firmwareStatus.runningVersion);
-  appendJsonUnsignedField(body, "build", firmwareStatus.runningBuild);
-  appendJsonUnsignedField(body, "bootSequence", bootStatus.bootSequence);
-  appendJsonUnsignedField(body, "bootFingerprint",
+  status_json::appendStringField(body, "target", firmwareStatus.target);
+  status_json::appendStringField(body, "profile", firmwareStatus.runningProfile);
+  status_json::appendStringField(body, "gitSha", firmwareStatus.runningGitSha);
+  status_json::appendStringField(body, "version", firmwareStatus.runningVersion);
+  status_json::appendUnsignedField(body, "build", firmwareStatus.runningBuild);
+  status_json::appendUnsignedField(body, "bootSequence", bootStatus.bootSequence);
+  status_json::appendUnsignedField(body, "bootFingerprint",
                           bootStatus.firmwareFingerprint);
-  appendJsonBoolField(body, "normalReady", bootStatus.ready);
-  appendJsonBoolField(body, "maintenance", bootStatus.firmwareMaintenance);
-  appendJsonStringField(body, "otaState", firmwareStatus.otaState);
+  status_json::appendBoolField(body, "normalReady", bootStatus.ready);
+  status_json::appendBoolField(body, "maintenance", bootStatus.firmwareMaintenance);
+  status_json::appendStringField(body, "otaState", firmwareStatus.otaState);
   body += "}";
 #endif
-  appendJsonFieldPrefix(body, "firmware");
+  status_json::appendFieldPrefix(body, "firmware");
   body += "{\"status\":\"";
-  body += jsonEscape(firmwareStatus.status);
+  body += status_json::escape(firmwareStatus.status);
   body += "\"";
-  appendJsonStringField(body, "target", firmwareStatus.target);
-  appendJsonStringField(body, "version", firmwareStatus.runningVersion);
-  appendJsonUnsignedField(body, "build", firmwareStatus.runningBuild);
-  appendJsonStringField(body, "gitSha", firmwareStatus.runningGitSha);
-  appendJsonUnsignedField(body, "updaterProtocol",
+  status_json::appendStringField(body, "target", firmwareStatus.target);
+  status_json::appendStringField(body, "version", firmwareStatus.runningVersion);
+  status_json::appendUnsignedField(body, "build", firmwareStatus.runningBuild);
+  status_json::appendStringField(body, "gitSha", firmwareStatus.runningGitSha);
+  status_json::appendUnsignedField(body, "updaterProtocol",
                           firmware_metadata::kUpdaterProtocolVersion);
-  appendJsonBoolField(body, "otaEligible", firmwareStatus.otaEligible);
-  appendJsonStringField(body, "eligibilityCode",
+  status_json::appendBoolField(body, "otaEligible", firmwareStatus.otaEligible);
+  status_json::appendStringField(body, "eligibilityCode",
                         firmwareStatus.eligibilityCode);
-  appendJsonStringField(body, "inactivePartition",
+  status_json::appendStringField(body, "inactivePartition",
                         firmwareStatus.inactivePartition);
-  appendJsonStringField(body, "runningPartition",
+  status_json::appendStringField(body, "runningPartition",
                         firmwareStatus.runningPartition);
-  appendJsonStringField(body, "profile", firmwareStatus.runningProfile);
-  appendJsonStringField(body, "otaState", firmwareStatus.otaState);
-  appendJsonUnsignedField(body, "maxImageBytes",
+  status_json::appendStringField(body, "profile", firmwareStatus.runningProfile);
+  status_json::appendStringField(body, "otaState", firmwareStatus.otaState);
+  status_json::appendUnsignedField(body, "maxImageBytes",
                           firmwareStatus.maxImageBytes);
-  appendJsonUnsignedField(body, "receivedBytes",
+  status_json::appendUnsignedField(body, "receivedBytes",
                           firmwareStatus.receivedBytes);
-  appendJsonUnsignedField(body, "totalBytes", firmwareStatus.totalBytes);
+  status_json::appendUnsignedField(body, "totalBytes", firmwareStatus.totalBytes);
   if (!firmwareStatus.errorCode.empty()) {
-    appendJsonFieldPrefix(body, "lastError");
+    status_json::appendFieldPrefix(body, "lastError");
     body += "{\"code\":\"";
-    body += jsonEscape(firmwareStatus.errorCode);
+    body += status_json::escape(firmwareStatus.errorCode);
     body += "\"";
-    appendJsonStringField(body, "message", firmwareStatus.errorMessage);
+    status_json::appendStringField(body, "message", firmwareStatus.errorMessage);
     body += "}";
   }
   body += "}}";

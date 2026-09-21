@@ -3,6 +3,7 @@
 
 #include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_metadata/firmware_metadata.hpp"
+#include "../status_json/status_json.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -30,24 +31,6 @@ static constexpr const char *kManifestSigningPublicKeyPem =
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEtohCWc591a7u6+lRHZX82FuT3ab3\n"
     "kEv4w/ai84IAaR/g3R4OEw0fhxOIPyDqqbQiACLb/F7Sw04y8IwZjA+UKw==\n"
     "-----END PUBLIC KEY-----\n";
-
-static std::string jsonEscape(const std::string &value) {
-  std::string out;
-  out.reserve(value.size() + 8);
-  for (char c : value) {
-    if (c == '"' || c == '\\') {
-      out.push_back('\\');
-      out.push_back(c);
-    } else if (c == '\n') {
-      out += "\\n";
-    } else if (c == '\r') {
-      out += "\\r";
-    } else {
-      out.push_back(c);
-    }
-  }
-  return out;
-}
 
 static bool startsWith(const std::string &value, const std::string &prefix) {
   return value.size() >= prefix.size() &&
@@ -339,40 +322,45 @@ FirmwareUpdateStatus FirmwareUpdateHttpServer::status() const {
 
 std::string FirmwareUpdateHttpServer::statusJson() const {
   FirmwareUpdateStatus snapshot = status();
-  std::string body = std::string("{\"status\":\"") +
-                     jsonEscape(snapshot.status) + "\",\"target\":\"" +
-                     jsonEscape(snapshot.target) + "\",\"runningVersion\":\"" +
-                     jsonEscape(snapshot.runningVersion) +
-                     "\",\"runningBuild\":" +
-                     std::to_string(snapshot.runningBuild) +
-                     ",\"runningGitSha\":\"" +
-                     jsonEscape(snapshot.runningGitSha) +
-                     "\"" +
-                     ",\"runningPartition\":\"" +
-                     jsonEscape(snapshot.runningPartition) +
-                     "\",\"inactivePartition\":\"" +
-                     jsonEscape(snapshot.inactivePartition) +
-                     "\",\"otaEligible\":" +
-                     std::string(snapshot.otaEligible ? "true" : "false") +
-                     ",\"eligibilityCode\":\"" +
-                     jsonEscape(snapshot.eligibilityCode) +
-                     "\",\"runningProfile\":\"" +
-                     jsonEscape(snapshot.runningProfile) +
-                     "\",\"otaState\":\"" + jsonEscape(snapshot.otaState) +
-                     "\",\"maxImageBytes\":" +
-                     std::to_string(snapshot.maxImageBytes) +
-                     ",\"receivedBytes\":" +
-                     std::to_string(snapshot.receivedBytes) +
-                     ",\"totalBytes\":" +
-                     std::to_string(snapshot.totalBytes);
+  std::string body;
+  body.reserve(768);
+  body = "{\"status\":\"";
+  body += status_json::escape(snapshot.status);
+  body += "\"";
+  status_json::appendStringField(body, "target", snapshot.target);
+  status_json::appendStringField(body, "runningVersion",
+                                 snapshot.runningVersion);
+  status_json::appendUnsignedField(body, "runningBuild",
+                                   snapshot.runningBuild);
+  status_json::appendStringField(body, "runningGitSha",
+                                 snapshot.runningGitSha);
+  status_json::appendStringField(body, "runningPartition",
+                                 snapshot.runningPartition);
+  status_json::appendStringField(body, "inactivePartition",
+                                 snapshot.inactivePartition);
+  status_json::appendBoolField(body, "otaEligible", snapshot.otaEligible);
+  status_json::appendStringField(body, "eligibilityCode",
+                                 snapshot.eligibilityCode);
+  status_json::appendStringField(body, "runningProfile",
+                                 snapshot.runningProfile);
+  status_json::appendStringField(body, "otaState", snapshot.otaState);
+  status_json::appendUnsignedField(body, "maxImageBytes",
+                                   snapshot.maxImageBytes);
+  status_json::appendUnsignedField(body, "receivedBytes",
+                                   snapshot.receivedBytes);
+  status_json::appendUnsignedField(body, "totalBytes", snapshot.totalBytes);
   if (!snapshot.sha256.empty()) {
-    body += ",\"sha256\":\"" + jsonEscape(snapshot.sha256) + "\"";
+    status_json::appendStringField(body, "sha256", snapshot.sha256);
   } else {
     body += ",\"sha256\":null";
   }
   if (!snapshot.errorCode.empty()) {
-    body += ",\"lastError\":{\"code\":\"" + jsonEscape(snapshot.errorCode) +
-            "\",\"message\":\"" + jsonEscape(snapshot.errorMessage) + "\"}";
+    status_json::appendFieldPrefix(body, "lastError");
+    body += "{\"code\":\"";
+    body += status_json::escape(snapshot.errorCode);
+    body += "\"";
+    status_json::appendStringField(body, "message", snapshot.errorMessage);
+    body += "}";
   } else {
     body += ",\"lastError\":null";
   }

@@ -502,6 +502,11 @@ jobs:
             -o /tmp/test_firmware_update_policy
           /tmp/test_firmware_update_policy
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_status_json.cpp \
+            lib/status_json/status_json.cpp \
+            -o /tmp/test_status_json
+          /tmp/test_status_json
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_speaker_playback_policy.cpp \
             -o /tmp/test_speaker_playback_policy
           /tmp/test_speaker_playback_policy
