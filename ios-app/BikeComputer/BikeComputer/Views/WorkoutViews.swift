@@ -522,7 +522,6 @@ struct WorkoutDashboardView: View {
     let onResume: () -> Void
     let onMarkSegment: () -> Void
     let onEndAndSave: () -> Void
-    let onDiscard: () -> Void
     let onDone: () -> Bool
 
     @Environment(\.dismiss) private var dismiss
@@ -721,12 +720,9 @@ struct WorkoutDashboardView: View {
                         showCurrent: store.presentation.connectionState == .connected
                     )
                 } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HeartRateZoneStrip(currentZone: snapshot.currentHeartRateZone)
-                        Text("Bicino zones · configured maximum heart rate")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
+                    HeartRateZoneStrip(
+                        currentZone: snapshot.currentHeartRateZone
+                    )
                     .padding(12)
                     .background(.background, in: RoundedRectangle(cornerRadius: 14))
                 }
@@ -982,13 +978,10 @@ struct WorkoutDashboardView: View {
                     )
                 }
 
-                WorkoutFinishButton(
-                    store: store,
-                    onEndAndSave: onEndAndSave,
-                    onDiscard: onDiscard
-                ) {
+                Button(action: onEndAndSave) {
                     Label("End", systemImage: "stop.fill")
                 }
+                .tint(.red)
                 .disabled(
                     presentation.sessionState == .ending
                         || (presentation.pendingControl != nil

@@ -987,7 +987,6 @@ struct ContentView: View {
                 onResume: workoutSessionCoordinator.resume,
                 onMarkSegment: workoutSessionCoordinator.markSegment,
                 onEndAndSave: workoutSessionCoordinator.endAndSave,
-                onDiscard: workoutSessionCoordinator.discard,
                 onDone: workoutSessionCoordinator.resetTerminalPresentation
             )
             .presentationDetents([.large])
@@ -1747,7 +1746,6 @@ struct ContentView: View {
             onPauseWorkout: workoutSessionCoordinator.pause,
             onResumeWorkout: workoutSessionCoordinator.resume,
             onEndAndSaveWorkout: workoutSessionCoordinator.endAndSave,
-            onDiscardWorkout: workoutSessionCoordinator.discard,
             enabledSensorCapabilities:
                 cyclingSensorStore.enabledCapabilities,
             sensorPrompt:

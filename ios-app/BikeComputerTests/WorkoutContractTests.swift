@@ -8005,9 +8005,25 @@ private struct WorkoutContractTestSuite {
                     "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
                 )
                 && compactSource.contains(
-                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard){Label(\"End\""
+                    "Button(action:onEndAndSave){Label(\"End\",systemImage:\"stop.fill\")}"
+                )
+                && !compactSource.contains(
+                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard)"
+                )
+                && compactNavigationDetailsViewSource.contains(
+                    "Button(action:onEndAndSaveWorkout){RideControlLabel(\"Endworkout\",systemImage:\"stop.fill\")}"
+                )
+                && !compactNavigationDetailsViewSource.contains(
+                    "WorkoutFinishButton(store:workoutStore,onEndAndSave:onEndAndSaveWorkout,onDiscard:onDiscardWorkout)"
                 ),
-            "dashboard labels must remain bound to the matching control closures"
+            "live workout end controls must save immediately while recovery retains explicit discard handling"
+        )
+        expect(
+            !source.contains("Bicino zones · configured maximum heart rate")
+                && !navigationDetailsViewSource.contains(
+                    "Bicino zones · configured maximum heart rate"
+                ),
+            "live workout zone strips must not show the maximum-heart-rate configuration caption"
         )
         expect(
             compactSource.contains(
@@ -8086,7 +8102,7 @@ private struct WorkoutContractTestSuite {
                 "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onOpen:{presentedSheet=.workoutDashboard})"
             )
                 && compactContentView.contains(
-                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onPause:workoutSessionCoordinator.pause,onResume:workoutSessionCoordinator.resume,onMarkSegment:workoutSessionCoordinator.markSegment,onEndAndSave:workoutSessionCoordinator.endAndSave,onDiscard:workoutSessionCoordinator.discard,onDone:workoutSessionCoordinator.resetTerminalPresentation)"
+                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onPause:workoutSessionCoordinator.pause,onResume:workoutSessionCoordinator.resume,onMarkSegment:workoutSessionCoordinator.markSegment,onEndAndSave:workoutSessionCoordinator.endAndSave,onDone:workoutSessionCoordinator.resetTerminalPresentation)"
                 ),
             "ContentView must present the dashboard from its exact state and route every production action through the selected recording owner"
         )
@@ -8656,7 +8672,6 @@ private struct WorkoutContractTestSuite {
             "onPauseWorkout",
             "onResumeWorkout",
             "onEndAndSaveWorkout",
-            "onDiscardWorkout",
         ] {
             expect(
                 compactNavigation.contains(control),
