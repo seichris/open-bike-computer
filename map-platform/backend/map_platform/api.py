@@ -237,6 +237,16 @@ def create_app(
         int(os.environ.get("MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY", "3")),
         86_400,
     )
+    app_attest_rotation_ip_policy = RateLimitPolicy(
+        "app-attest-rotation-ip",
+        int(os.environ.get("MAP_PLATFORM_APP_ATTEST_ROTATION_IP_LIMIT_PER_DAY", "12")),
+        86_400,
+    )
+    app_attest_rotation_installation_policy = RateLimitPolicy(
+        "app-attest-rotation-installation",
+        int(os.environ.get("MAP_PLATFORM_APP_ATTEST_ROTATION_LIMIT_PER_DAY", "3")),
+        86_400,
+    )
     map_create_ip_policy = RateLimitPolicy(
         "map-create-ip",
         int(os.environ.get("MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY", "20")),
@@ -750,7 +760,26 @@ def create_app(
         purpose = payload.get("purpose")
         installation_id = payload.get("clientInstallationId")
         if purpose == APP_ATTEST_ATTESTATION_PURPOSE:
-            if installation_id is not None or x_installation_token is not None:
+            if installation_id is None and x_installation_token is None:
+                enforce_rate_limits((installation_issue_policy, client_ip(request)))
+                challenge = app_attest_store.issue_challenge(purpose=purpose)
+            elif installation_id is not None and x_installation_token is not None:
+                registered_installation_id = verify_registered_installation(
+                    installation_id,
+                    x_installation_token,
+                )
+                enforce_rate_limits(
+                    (app_attest_rotation_ip_policy, client_ip(request)),
+                    (
+                        app_attest_rotation_installation_policy,
+                        registered_installation_id,
+                    ),
+                )
+                challenge = app_attest_store.issue_challenge(
+                    purpose=purpose,
+                    installation_id=registered_installation_id,
+                )
+            else:
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -758,8 +787,6 @@ def create_app(
                         "message": "App Attest enrollment challenge is invalid",
                     },
                 )
-            enforce_rate_limits((installation_issue_policy, client_ip(request)))
-            challenge = app_attest_store.issue_challenge(purpose=purpose)
         elif purpose == APP_ATTEST_MAP_CREATE_PURPOSE:
             registered_installation_id = verify_registered_installation(
                 installation_id,
@@ -792,6 +819,7 @@ def create_app(
         ),
     ) -> dict[str, Any]:
         installation_id = token = None
+        authenticated_existing_installation = clientInstallationId is not None
         if clientInstallationId is not None:
             try:
                 installation_id, token = installation_store.refresh(
@@ -807,12 +835,16 @@ def create_app(
                     "installation App Attest enrollment is required",
                 )
             attestation = payload["appAttest"]
-            if not isinstance(attestation, dict) or set(attestation) != {
+            required_attestation_fields = {
                 "challengeId",
                 "keyId",
                 "attestationObject",
                 "appBuild",
-            }:
+            }
+            if not isinstance(attestation, dict) or not (
+                required_attestation_fields <= set(attestation)
+                and set(attestation) <= required_attestation_fields | {"previousKeyId"}
+            ):
                 raise AppAttestError(
                     "app_attest_invalid_attestation",
                     "App Attest enrollment is invalid",
@@ -820,11 +852,15 @@ def create_app(
             challenge_id = attestation["challengeId"]
             key_id = attestation["keyId"]
             app_build = attestation["appBuild"]
+            previous_key_id = attestation.get("previousKeyId")
             if not all(isinstance(value, str) for value in (
                 challenge_id,
                 key_id,
                 app_build,
-            )):
+            )) or (
+                previous_key_id is not None
+                and not isinstance(previous_key_id, str)
+            ):
                 raise AppAttestError(
                     "app_attest_invalid_attestation",
                     "App Attest enrollment is invalid",
@@ -834,19 +870,48 @@ def create_app(
                 field="App Attest object",
                 maximum_bytes=APP_ATTEST_MAX_OBJECT_BYTES,
             )
+            current_key_id: str | None = None
             if installation_id is None:
+                if previous_key_id is not None:
+                    raise AppAttestError(
+                        "app_attest_invalid_attestation",
+                        "App Attest enrollment is invalid",
+                    )
                 installation_id, token = installation_store.issue()
-            elif app_attest_store.key_id_for_installation(installation_id) is not None:
-                raise AppAttestError(
-                    "app_attest_invalid_attestation",
-                    "installation is already bound to an App Attest key",
+            else:
+                current_key_id = app_attest_store.key_id_for_installation(
+                    installation_id
                 )
+                if current_key_id is None and previous_key_id is not None:
+                    raise AppAttestError(
+                        "app_attest_key_mismatch",
+                        "installation App Attest key changed",
+                    )
+                if current_key_id is not None and previous_key_id != current_key_id:
+                    raise AppAttestError(
+                        "app_attest_key_mismatch",
+                        "installation App Attest key changed",
+                    )
             app_attest_store.enroll(
                 installation_id=installation_id,
                 challenge_id=challenge_id,
                 key_id=key_id,
                 attestation_object=attestation_object,
                 app_build=app_build,
+                replacing_key_id=previous_key_id,
+                challenge_installation_id=(
+                    installation_id
+                    if authenticated_existing_installation
+                    else None
+                ),
+                # Released clients used an anonymous attestation challenge for
+                # the one-time migration of an authenticated installation.
+                # Continue accepting that shape only while the server has no
+                # binding; updated clients use the scoped challenge instead.
+                allow_unbound_challenge=(
+                    authenticated_existing_installation
+                    and current_key_id is None
+                ),
             )
         else:
             if payload is not None and payload != {}:

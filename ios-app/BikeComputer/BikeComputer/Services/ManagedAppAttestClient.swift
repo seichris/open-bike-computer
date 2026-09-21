@@ -12,6 +12,7 @@ nonisolated enum ManagedAppAttestError: LocalizedError, Equatable {
     case invalidConfiguration
     case invalidChallenge
     case invalidCredential
+    case keyUnavailable
     case keyMismatch
     case persistenceFailure(Int32)
 
@@ -25,6 +26,8 @@ nonisolated enum ManagedAppAttestError: LocalizedError, Equatable {
             return "The map service returned an invalid app-integrity challenge."
         case .invalidCredential:
             return "The map service returned an invalid app-integrity credential."
+        case .keyUnavailable:
+            return "This app installation's map-security key is no longer available."
         case .keyMismatch:
             return "The saved map-service identity no longer matches this app installation. Try again to create a new identity."
         case .persistenceFailure(let status):
@@ -115,6 +118,8 @@ final class UnsupportedOfflineMapAppAttestService: OfflineMapAppAttestServicing 
 nonisolated struct OfflineMapAppAttestKeyStore {
     private static let service = "org.openbikecomputer.map-platform-app-attest-v1"
     private static let fallbackKeyPrefix = "offlineMap.appAttestKey."
+    private static let pendingKeyPrefix = "offlineMap.pendingAppAttestEnrollment."
+    private static let rotationKeyPrefix = "offlineMap.appAttestRotationRequired."
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults) {
@@ -123,6 +128,11 @@ nonisolated struct OfflineMapAppAttestKeyStore {
 
     func load(serverURLString: String) -> String? {
         let account = OfflineMapServerIdentity.normalized(serverURLString)
+        if let data = defaults.data(forKey: Self.fallbackKeyPrefix + account),
+           let keyID = String(data: data, encoding: .utf8),
+           Self.isValidKeyID(keyID) {
+            return keyID
+        }
 #if os(iOS)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -133,66 +143,114 @@ nonisolated struct OfflineMapAppAttestKeyStore {
         ]
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else {
-            return nil
-        }
-#else
-        guard let data = defaults.data(forKey: Self.fallbackKeyPrefix + account) else {
-            return nil
-        }
-#endif
-        guard let keyID = String(data: data, encoding: .utf8),
+              let data = item as? Data,
+              let keyID = String(data: data, encoding: .utf8),
               Self.isValidKeyID(keyID) else {
             return nil
         }
+        // App Attest keys follow the app installation lifecycle. Migrate the
+        // released Keychain value once, then keep the identifier in the app
+        // container so uninstall/restore cannot resurrect a stale identifier.
+        defaults.set(data, forKey: Self.fallbackKeyPrefix + account)
+        deleteLegacyKeychainItem(account: account)
         return keyID
+#else
+        return nil
+#endif
     }
 
-    func save(_ keyID: String, serverURLString: String) throws {
+    func saveActive(_ keyID: String, serverURLString: String) throws {
         guard Self.isValidKeyID(keyID) else {
             throw ManagedAppAttestError.invalidCredential
         }
         let account = OfflineMapServerIdentity.normalized(serverURLString)
         let data = Data(keyID.utf8)
-#if os(iOS)
-        let identity: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: account,
-        ]
-        let updateStatus = SecItemUpdate(
-            identity as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
-        )
-        if updateStatus == errSecItemNotFound {
-            var item = identity
-            item[kSecValueData as String] = data
-            item[kSecAttrAccessible as String] =
-                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            let addStatus = SecItemAdd(item as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                throw ManagedAppAttestError.persistenceFailure(addStatus)
-            }
-        } else if updateStatus != errSecSuccess {
-            throw ManagedAppAttestError.persistenceFailure(updateStatus)
-        }
-#else
         defaults.set(data, forKey: Self.fallbackKeyPrefix + account)
-#endif
+    }
+
+    func pending(serverURLString: String) -> OfflineMapPendingAppAttestEnrollment? {
+        let account = OfflineMapServerIdentity.normalized(serverURLString)
+        guard let data = defaults.data(forKey: Self.pendingKeyPrefix + account),
+              let pending = try? JSONDecoder().decode(
+                OfflineMapPendingAppAttestEnrollment.self,
+                from: data
+              ) else {
+            return nil
+        }
+        return pending
+    }
+
+    func savePending(
+        _ pending: OfflineMapPendingAppAttestEnrollment,
+        serverURLString: String
+    ) throws {
+        guard Self.isValidKeyID(pending.keyID),
+              pending.previousKeyID == nil || Self.isValidKeyID(
+                pending.previousKeyID!
+              ) else {
+            throw ManagedAppAttestError.invalidCredential
+        }
+        let account = OfflineMapServerIdentity.normalized(serverURLString)
+        defaults.set(
+            try JSONEncoder().encode(pending),
+            forKey: Self.pendingKeyPrefix + account
+        )
+    }
+
+    func promotePending(
+        keyID: String,
+        serverURLString: String
+    ) throws {
+        guard pending(serverURLString: serverURLString)?.keyID == keyID else {
+            throw ManagedAppAttestError.keyMismatch
+        }
+        try saveActive(keyID, serverURLString: serverURLString)
+        // Pending is the last crash-recovery marker removed. If the process
+        // stops after either earlier write, the next refresh can still
+        // reconcile and finish this promotion without rotating again.
+        clearRotationRequired(serverURLString: serverURLString)
+        clearPending(serverURLString: serverURLString)
+    }
+
+    func clearPending(serverURLString: String) {
+        let account = OfflineMapServerIdentity.normalized(serverURLString)
+        defaults.removeObject(forKey: Self.pendingKeyPrefix + account)
+    }
+
+    func markRotationRequired(serverURLString: String) {
+        let account = OfflineMapServerIdentity.normalized(serverURLString)
+        defaults.set(true, forKey: Self.rotationKeyPrefix + account)
+    }
+
+    func rotationRequired(serverURLString: String) -> Bool {
+        let account = OfflineMapServerIdentity.normalized(serverURLString)
+        return defaults.bool(forKey: Self.rotationKeyPrefix + account)
+    }
+
+    func clearRotationRequired(serverURLString: String) {
+        let account = OfflineMapServerIdentity.normalized(serverURLString)
+        defaults.removeObject(forKey: Self.rotationKeyPrefix + account)
     }
 
     func delete(serverURLString: String) {
         let account = OfflineMapServerIdentity.normalized(serverURLString)
+        defaults.removeObject(forKey: Self.fallbackKeyPrefix + account)
+        defaults.removeObject(forKey: Self.pendingKeyPrefix + account)
+        defaults.removeObject(forKey: Self.rotationKeyPrefix + account)
 #if os(iOS)
+        deleteLegacyKeychainItem(account: account)
+#endif
+    }
+
+#if os(iOS)
+    private func deleteLegacyKeychainItem(account: String) {
         _ = SecItemDelete([
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
             kSecAttrAccount as String: account,
         ] as CFDictionary)
-#else
-        defaults.removeObject(forKey: Self.fallbackKeyPrefix + account)
-#endif
     }
+#endif
 
     static func isValidKeyID(_ value: String) -> Bool {
         guard value.range(
@@ -204,6 +262,22 @@ nonisolated struct OfflineMapAppAttestKeyStore {
         }
         return decoded.base64EncodedString() == value
     }
+}
+
+nonisolated struct OfflineMapPendingAppAttestEnrollment: Codable, Equatable {
+    let keyID: String
+    let previousKeyID: String?
+    let clientInstallationID: String?
+    let challenge: OfflineMapAppAttestChallenge
+    let attestationObject: String?
+}
+
+private struct OfflineMapAppAttestErrorEnvelope: Decodable {
+    struct Detail: Decodable {
+        let code: String
+    }
+
+    let detail: Detail
 }
 
 nonisolated struct OfflineMapAppAttestChallenge: Codable, Equatable {
@@ -225,6 +299,7 @@ private struct OfflineMapAppAttestEnrollmentRequest: Encodable {
         let keyId: String
         let attestationObject: String
         let appBuild: String
+        let previousKeyId: String?
     }
 
     let appAttest: Attestation
@@ -349,9 +424,61 @@ final class ManagedOfflineMapAppAttestClient {
         return keyStore.load(serverURLString: serverURLString) == keyID
     }
 
+    enum ReconciledKeyState: Equatable {
+        case usable
+        case pendingAccepted
+        case rotationRequired
+        case mismatch
+    }
+
+    func reconcile(
+        serverKeyID: String?,
+        serverURLString: String
+    ) throws -> ReconciledKeyState {
+        guard let serverKeyID else { return .mismatch }
+        if keyStore.pending(serverURLString: serverURLString)?.keyID == serverKeyID {
+            return .pendingAccepted
+        }
+        guard let activeKeyID = keyStore.load(
+            serverURLString: serverURLString
+        ) else {
+            keyStore.markRotationRequired(serverURLString: serverURLString)
+            return .rotationRequired
+        }
+        guard activeKeyID == serverKeyID else { return .mismatch }
+        return keyStore.rotationRequired(serverURLString: serverURLString)
+            ? .rotationRequired
+            : .usable
+    }
+
+    func finalizeEnrollment(
+        _ credential: OfflineMapInstallationCredential,
+        serverURLString: String
+    ) throws {
+        guard let keyID = credential.appAttestKeyId else {
+            throw ManagedAppAttestError.invalidCredential
+        }
+        try keyStore.promotePending(
+            keyID: keyID,
+            serverURLString: serverURLString
+        )
+    }
+
     func enroll(
         baseURL: URL,
         existingCredential: OfflineMapInstallationCredential? = nil
+    ) async throws -> OfflineMapInstallationCredential {
+        try await enroll(
+            baseURL: baseURL,
+            existingCredential: existingCredential,
+            retryingInvalidInitialChallenge: false
+        )
+    }
+
+    private func enroll(
+        baseURL: URL,
+        existingCredential: OfflineMapInstallationCredential?,
+        retryingInvalidInitialChallenge: Bool
     ) async throws -> OfflineMapInstallationCredential {
         guard service.isSupported else {
             throw ManagedAppAttestError.unsupported
@@ -362,32 +489,89 @@ final class ManagedOfflineMapAppAttestClient {
         ) != nil else {
             throw ManagedAppAttestError.invalidConfiguration
         }
-        let challenge = try await fetchChallenge(
-            baseURL: baseURL,
-            purpose: "attestation",
-            credential: nil
-        )
-        guard challenge.keyId == nil,
+        let serverURLString = baseURL.absoluteString
+        let clientInstallationID = existingCredential?.clientInstallationId
+        var pending = keyStore.pending(serverURLString: serverURLString)
+        if let candidate = pending,
+           candidate.clientInstallationID != clientInstallationID ||
+            candidate.previousKeyID != candidate.challenge.keyId ||
+            (
+                candidate.previousKeyID != nil &&
+                candidate.previousKeyID != existingCredential?.appAttestKeyId
+            ) ||
+            candidate.challenge.expiresAt <= Int64(Date().timeIntervalSince1970) {
+            keyStore.clearPending(serverURLString: serverURLString)
+            pending = nil
+        }
+        if pending == nil {
+            let challenge = try await fetchChallenge(
+                baseURL: baseURL,
+                purpose: "attestation",
+                credential: existingCredential
+            )
+            guard (
+                existingCredential == nil
+                    ? challenge.keyId == nil
+                    : challenge.keyId == nil ||
+                        challenge.keyId == existingCredential?.appAttestKeyId
+            ),
+                  let _ = OfflineMapAppAttestClientData.decodeChallenge(
+                    challenge.challenge
+                  ) else {
+                throw ManagedAppAttestError.invalidChallenge
+            }
+            let keyID = try await service.generateKey()
+            guard OfflineMapAppAttestKeyStore.isValidKeyID(keyID) else {
+                throw ManagedAppAttestError.invalidCredential
+            }
+            let created = OfflineMapPendingAppAttestEnrollment(
+                keyID: keyID,
+                previousKeyID: challenge.keyId,
+                clientInstallationID: clientInstallationID,
+                challenge: challenge,
+                attestationObject: nil
+            )
+            try keyStore.savePending(created, serverURLString: serverURLString)
+            pending = created
+        }
+        guard var pending,
               let challengeData = OfflineMapAppAttestClientData.decodeChallenge(
-                challenge.challenge
+                pending.challenge.challenge
               ) else {
             throw ManagedAppAttestError.invalidChallenge
         }
-        let keyID = try await service.generateKey()
-        guard OfflineMapAppAttestKeyStore.isValidKeyID(keyID) else {
-            throw ManagedAppAttestError.invalidCredential
+        let attestation: Data
+        if let encoded = pending.attestationObject,
+           let saved = Data(base64Encoded: encoded) {
+            attestation = saved
+        } else {
+            do {
+                attestation = try await service.attestKey(
+                    pending.keyID,
+                    clientDataHash: Data(SHA256.hash(data: challengeData))
+                )
+            } catch {
+                if Self.isDeviceCheckInvalidKey(error) {
+                    keyStore.clearPending(serverURLString: serverURLString)
+                }
+                throw error
+            }
+            pending = OfflineMapPendingAppAttestEnrollment(
+                keyID: pending.keyID,
+                previousKeyID: pending.previousKeyID,
+                clientInstallationID: pending.clientInstallationID,
+                challenge: pending.challenge,
+                attestationObject: attestation.base64EncodedString()
+            )
+            try keyStore.savePending(pending, serverURLString: serverURLString)
         }
-        let clientDataHash = Data(SHA256.hash(data: challengeData))
-        let attestation = try await service.attestKey(
-            keyID,
-            clientDataHash: clientDataHash
-        )
         let body = OfflineMapAppAttestEnrollmentRequest(
             appAttest: .init(
-                challengeId: challenge.challengeId,
-                keyId: keyID,
+                challengeId: pending.challenge.challengeId,
+                keyId: pending.keyID,
                 attestationObject: attestation.base64EncodedString(),
-                appBuild: appBuild
+                appBuild: appBuild,
+                previousKeyId: pending.previousKeyID
             )
         )
         var request = URLRequest(
@@ -405,11 +589,35 @@ final class ManagedOfflineMapAppAttestClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONEncoder.offlineMap.encode(body)
-        // Keep the key before submission so an authenticated refresh can recover
-        // an enrollment that committed on the server but lost its response.
-        try keyStore.save(keyID, serverURLString: baseURL.absoluteString)
-        let credential: OfflineMapInstallationCredential = try await send(request)
-        guard credential.appAttestKeyId == keyID,
+        let credential: OfflineMapInstallationCredential
+        do {
+            credential = try await send(request)
+        } catch let error as OfflineMapPlatformError {
+            guard existingCredential == nil,
+                  !retryingInvalidInitialChallenge,
+                  case .serverStatus(let status, let responseBody) = error,
+                  status == 401,
+                  let responseData = responseBody.data(using: .utf8),
+                  let envelope = try? JSONDecoder().decode(
+                    OfflineMapAppAttestErrorEnvelope.self,
+                    from: responseData
+                  ),
+                  envelope.detail.code == "app_attest_invalid_challenge" else {
+                throw error
+            }
+            // A first enrollment has no installation token with which to
+            // reconcile a server commit whose response was lost. Discard only
+            // this unowned pending attempt and retry once with a fresh key and
+            // challenge; authenticated rotations retain pending state so a
+            // refresh can recover the stable owner instead.
+            keyStore.clearPending(serverURLString: serverURLString)
+            return try await enroll(
+                baseURL: baseURL,
+                existingCredential: nil,
+                retryingInvalidInitialChallenge: true
+            )
+        }
+        guard credential.appAttestKeyId == pending.keyID,
               credential.clientInstallationId.range(of: "^inst_v2_[0-9a-f]{32}$", options: .regularExpression) != nil,
               credential.clientInstallationToken.range(of: "^v1\\.[A-Za-z0-9_-]{43}$", options: .regularExpression) != nil,
               existingCredential == nil || credential.clientInstallationId == existingCredential?.clientInstallationId else {
@@ -429,7 +637,12 @@ final class ManagedOfflineMapAppAttestClient {
         }
         guard let keyID = credential.appAttestKeyId,
               hasKey(keyID, serverURLString: baseURL.absoluteString) else {
-            keyStore.delete(serverURLString: baseURL.absoluteString)
+            if keyStore.load(serverURLString: baseURL.absoluteString) == nil {
+                keyStore.markRotationRequired(
+                    serverURLString: baseURL.absoluteString
+                )
+                throw ManagedAppAttestError.keyUnavailable
+            }
             throw ManagedAppAttestError.keyMismatch
         }
         let challenge = try await fetchChallenge(
@@ -438,7 +651,6 @@ final class ManagedOfflineMapAppAttestClient {
             credential: credential
         )
         guard challenge.keyId == keyID else {
-            keyStore.delete(serverURLString: baseURL.absoluteString)
             throw ManagedAppAttestError.keyMismatch
         }
         let clientData = try OfflineMapAppAttestClientData.mapCreate(
@@ -455,8 +667,14 @@ final class ManagedOfflineMapAppAttestClient {
                 clientDataHash: Data(SHA256.hash(data: clientData))
             )
         } catch {
-            keyStore.delete(serverURLString: baseURL.absoluteString)
-            throw error
+            guard Self.isDeviceCheckInvalidKey(error) else { throw error }
+            keyStore.markRotationRequired(
+                serverURLString: baseURL.absoluteString
+            )
+            throw ManagedAppAttestError.keyUnavailable
+        }
+        guard !assertion.isEmpty else {
+            throw ManagedAppAttestError.invalidCredential
         }
         var authorized = request
         authorized.setValue(
@@ -473,6 +691,22 @@ final class ManagedOfflineMapAppAttestClient {
             forHTTPHeaderField: "X-App-Attest-App-Build"
         )
         return authorized
+    }
+
+    private nonisolated static func isDeviceCheckInvalidKey(
+        _ error: Error
+    ) -> Bool {
+#if os(iOS) && !HOST_TESTING
+        let nsError = error as NSError
+        return nsError.domain == DCError.errorDomain &&
+            nsError.code == DCError.Code.invalidKey.rawValue
+#else
+        if let managed = error as? ManagedAppAttestError,
+           managed == .keyUnavailable {
+            return true
+        }
+        return false
+#endif
     }
 
     func invalidate(serverURLString: String) {
