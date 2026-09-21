@@ -203,15 +203,27 @@ struct WorkoutSessionCoordinatorTests {
         check(watchCoordinator.record?.sessionID == id3 && watchCoordinator.record?.finishedChoice == nil,
               "Next Watch ride cannot inherit previous terminal disposition")
 
-        let (choose, watch3, phone3, availability3, _) = harness()
+        let (unreachable, watch3, phone3, availability3, _) = harness()
         availability3.availability = .ready(isReachable: false)
+        unreachable.recoverIfNeeded()
+        await spin { unreachable.recoveryComplete }
+        check(unreachable.requestStart(),
+              "Paired installed Watch starts through HealthKit when WCSession is unreachable")
+        check(watch3.starts == 1 && phone3.starts == 0,
+              "Transient Watch reachability never redirects recording to iPhone")
+        check(unreachable.record?.owner == .watch && unreachable.notice == nil,
+              "HealthKit Watch launch reserves Watch ownership without an attention sheet")
+
+        let (choose, _, _, availability4, _) = harness()
+        availability4.availability = .activationFailed
         choose.recoverIfNeeded()
         await spin { choose.recoveryComplete }
-        check(!choose.requestStart() && choose.notice?.kind == .chooseRecorder, "Unreachable Watch asks explicitly")
-        check(watch3.starts == 0 && phone3.starts == 0, "No recorder silently starts")
-        check(choose.requestStart(explicitOwner: .iphone), "Explicit phone override admitted")
-        await spin { phone3.starts == 1 }
-        check(choose.record?.owner == .iphone, "Explicit phone selection stays selected")
+        check(!choose.requestStart() && choose.notice?.kind == .chooseRecorder,
+              "Ambiguous Watch activation still asks for an explicit recorder")
+        choose.dismissNotice()
+        check(choose.notice == nil, "Closing workout attention clears transient notice state")
+        check(!choose.requestStart() && choose.notice?.kind == .chooseRecorder,
+              "The same start request can present its notice again after dismissal")
 
         let finishedDisk = MemoryRecordingStore()
         var finishedWatchRecord = WorkoutRecordingRecord(

@@ -1098,6 +1098,12 @@ struct ContentView: View {
                 peripheralIdentifier: peripheralIdentifier
             )
         }
+        // A notice is presentation state, not workout ownership. Clearing it
+        // lets an identical result from a later start request present the
+        // workout sheet again instead of being swallowed by onChange.
+        if dismissedDestination == .workoutDashboard {
+            workoutSessionCoordinator.dismissNotice()
+        }
         switch SensorSettingsRoutingPolicy.dismissalDecision(
             hasQueuedSheet: queuedSheetAfterDismiss != nil,
             isWorkoutActive: workoutStore.presentation.isWorkoutActive

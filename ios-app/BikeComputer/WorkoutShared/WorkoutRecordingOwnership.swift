@@ -92,12 +92,14 @@ nonisolated enum WorkoutRecordingStartPolicy {
             return .waitForWatchActivation
         case .noPairedWatch:
             return phoneSupported ? .start(.iphone) : .phoneUnsupported
-        case .ready(isReachable: true):
+        case .ready:
+            // WCSession reachability only describes whether the Watch app can
+            // receive an immediate interactive message. A paired Watch with
+            // Bicino installed remains a valid recorder because HealthKit can
+            // wake the app to start the workout.
             return .start(.watch)
-        case .ready(isReachable: false), .companionAppNotInstalled,
-             .activationFailed, .unsupported:
+        case .companionAppNotInstalled, .activationFailed, .unsupported:
             // Explicitly choosing Watch still attempts HealthKit's wake path.
-            // isReachable=false must NEVER start a phone recorder implicitly.
             return .chooseRecorder
         }
     }
