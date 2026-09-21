@@ -137,6 +137,9 @@ static void setupFirmwareMaintenanceMode() {
   boot_diagnostics::markFirmwareMaintenance();
   firmware_maintenance::setStage(
       firmware_maintenance::Stage::AwaitingAuthentication);
+  // Preserve boot diagnostics before NimBLE allocates its tasks and buffers,
+  // matching the normal startup ordering contract.
+  (void)std::fflush(stdout);
   bleNavServer.init("BikeComputer");
   power_management::completeStartup();
   Serial.printf(
