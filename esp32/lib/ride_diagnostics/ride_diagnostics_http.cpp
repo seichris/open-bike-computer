@@ -26,6 +26,7 @@ namespace {
 constexpr const char *kPrefix = "/device-diagnostics/v1/";
 constexpr std::size_t kMaximumChunks = 256;
 constexpr std::size_t kMaximumIndexBytes = 64 * 1024;
+constexpr uint32_t kIndexHashProgressBytes = 32U * 1024U;
 
 struct Chunk {
   uint32_t boot = 0;
@@ -85,6 +86,8 @@ bool requestStillAuthorized(
 }
 
 bool sha256File(const char *path, std::string &out, uint32_t &bytes,
+                uint32_t expectedBytes,
+                device_transfer::TransferClient &client,
                 device_transfer::HttpTransferServer *server,
                 const device_transfer::HttpRequest &request) {
   FILE *file = storage.open(path, "rb");
@@ -99,6 +102,7 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
   }
   uint8_t buffer[4096];
   bytes = 0;
+  uint32_t lastResponseProgressBytes = 0;
   bool ok = true;
   while (true) {
     if (!requestStillAuthorized(server, request)) {
@@ -116,6 +120,19 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
       break;
     }
     bytes += static_cast<uint32_t>(count);
+    if (bytes > expectedBytes) {
+      ok = false;
+      break;
+    }
+    if (bytes - lastResponseProgressBytes >= kIndexHashProgressBytes ||
+        bytes == expectedBytes) {
+      static constexpr uint8_t progress = ' ';
+      if (!device_transfer::writeHttpBytes(client, &progress, 1)) {
+        ok = false;
+        break;
+      }
+      lastResponseProgressBytes = bytes;
+    }
   }
   uint8_t digest[32] = {};
   if (ok)
@@ -133,6 +150,11 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
     out.push_back(hex[byte & 0x0f]);
   }
   return true;
+}
+
+std::size_t indexHashProgressCharacters(uint32_t bytes) {
+  return (static_cast<std::size_t>(bytes) + kIndexHashProgressBytes - 1U) /
+         kIndexHashProgressBytes;
 }
 
 ChunkIndex listChunks(
@@ -290,6 +312,7 @@ bool sendIndex(device_transfer::TransferClient &client,
   std::size_t contentLength = prefix.size() + suffix.size();
   for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
     contentLength += (chunkIndex == 0 ? 0 : 1) +
+                     indexHashProgressCharacters(chunks[chunkIndex].bytes) +
                      indexEntryPrefix(chunks[chunkIndex]).size() +
                      kDigestCharacters + kEntrySuffixCharacters;
     if (contentLength > kMaximumIndexBytes) {
@@ -302,8 +325,10 @@ bool sendIndex(device_transfer::TransferClient &client,
 
   // Send the fixed-length prefix before hashing retained chunks. A full
   // retention window can take longer to hash than iOS permits a connected
-  // response to remain silent, while each bounded chunk can be hashed between
-  // streamed index entries without weakening the exact-byte contract.
+  // response to remain silent. sha256File emits pre-counted JSON whitespace
+  // while reading each bounded chunk, so even a slow SD file keeps the stream
+  // active without exposing an unverified digest or weakening the exact-byte
+  // contract.
   if (!requestStillAuthorized(server, request) ||
       !device_transfer::sendHttpHead(client, 200, contentLength,
                                      "application/json") ||
@@ -321,7 +346,8 @@ bool sendIndex(device_transfer::TransferClient &client,
     const Chunk &chunk = chunks[chunkIndex];
     uint32_t bytes = 0;
     std::string digest;
-    if (!sha256File(chunk.path.c_str(), digest, bytes, server, request) ||
+    if (!sha256File(chunk.path.c_str(), digest, bytes, chunk.bytes, client,
+                    server, request) ||
         bytes == 0 || bytes != chunk.bytes || bytes > kChunkBytes ||
         digest.size() != kDigestCharacters) {
       endTransferSnapshotLease();

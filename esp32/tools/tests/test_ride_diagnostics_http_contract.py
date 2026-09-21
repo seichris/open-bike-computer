@@ -50,14 +50,23 @@ class RideDiagnosticsHttpContractTests(unittest.TestCase):
             HTTP.index("bool sendFile")
         ]
         header = streamed_index.index("sendHttpHead")
-        first_hash = streamed_index.index("sha256File")
+        first_hash = streamed_index.index("sha256File(chunk.path")
         first_body = streamed_index.index("writeBodySegment(client, prefix)")
         self.assertLess(header, first_hash)
         self.assertLess(first_body, first_hash)
         self.assertIn("contentLength > kMaximumIndexBytes", streamed_index)
+        self.assertIn("indexHashProgressCharacters", streamed_index)
         self.assertIn("snapshot.dropped", streamed_index)
         self.assertIn("bytes != chunk.bytes", streamed_index)
         self.assertIn("endTransferSnapshotLease()", streamed_index)
+
+        hasher = HTTP[
+            HTTP.index("bool sha256File") :
+            HTTP.index("std::size_t indexHashProgressCharacters")
+        ]
+        self.assertIn("kIndexHashProgressBytes", hasher)
+        self.assertIn("bytes == expectedBytes", hasher)
+        self.assertIn("writeHttpBytes(client, &progress, 1)", hasher)
 
         chunk = HTTP[
             HTTP.index("http_policy::RouteKind::Chunk") :
