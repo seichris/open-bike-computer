@@ -9391,6 +9391,23 @@ struct NavigationProtocolTests {
             "Preparation time depends on map complexity",
             "old backend never falls back to requested-area numeric buckets"
         )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.availablePresentation(
+                for: oldBackend
+            ),
+            nil,
+            "the main settings row hides unavailable estimates instead of guessing"
+        )
+        assertEqual(
+            OfflineMapPreparationEstimatePresentation.availablePresentation(
+                for: available
+            ),
+            OfflineMapPreparationEstimatePresentation(
+                title: "Estimated Remaining",
+                value: "Less than a minute"
+            ),
+            "the main settings row shows a validated server estimate"
+        )
         let pendingRetry = decode(
             """
             {
@@ -12486,10 +12503,12 @@ struct NavigationProtocolTests {
                 savedMapsSectionSource.contains("PendingSavedMapRow(") &&
                 source.contains("private struct PendingSavedMapRow") &&
                 source.contains("Color(uiColor: .systemGray6)") &&
-                source.contains("title: \"Generation Progress\"") &&
+                source.contains("title: \"Progress\"") &&
+                !source.contains("title: \"Feature Conversion\"") &&
                 source.contains("preparationEstimatePresentation") &&
                 source.contains("Label(\"Retry Download\"") &&
-                source.contains("Button(\"Choose Another Map\""),
+                source.contains("Button(\"Choose Another Map\"") &&
+                source.contains("if manager.errorMessage != nil"),
             "the pending download is the final light-gray multi-row item in Saved Maps"
         )
         assert(
