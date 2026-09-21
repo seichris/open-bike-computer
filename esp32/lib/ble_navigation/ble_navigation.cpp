@@ -3559,7 +3559,8 @@ static void processPendingTransferControl() {
       deviceTransferHttp.setLastError(
           firmware.eligibilityCode,
           "a distinct inactive OTA partition is required");
-    } else if (!firmware_maintenance::requestNextBoot(boot.fingerprint)) {
+    } else if (!firmware_maintenance::requestNextBoot(
+                   boot.firmwareFingerprint)) {
       deviceTransferHttp.setLastError(
           "maintenance_request_failed",
           "firmware maintenance reboot could not be scheduled");
