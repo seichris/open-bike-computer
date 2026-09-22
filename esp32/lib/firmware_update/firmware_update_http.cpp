@@ -264,6 +264,7 @@ void FirmwareUpdateHttpServer::configure(
   configASSERT(stateMutex_ != nullptr);
   transferServer_ = sharedServer == nullptr ? &ownedTransferServer_ : sharedServer;
   flashOwner_.configure();
+  transferServer_->setNetworkOperationOwner(&flashOwner_);
   if (sharedServer == nullptr)
     transferServer_->configure(port, "BikeComputer-Transfer");
   transferServer_->registerHandler("/firmware-update", this);

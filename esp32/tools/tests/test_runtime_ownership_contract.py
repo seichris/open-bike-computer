@@ -45,6 +45,39 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         self.assertIn("uxTaskGetStackHighWaterMark", flash)
         self.assertIn("flashOwnerStackHighWaterBytes", ota)
 
+    def test_wifi_mutation_and_ota_share_internal_stack_owner(self):
+        flash = source("lib/firmware_update/firmware_flash_owner.cpp")
+        http = source("lib/device_transfer/device_transfer_http.cpp")
+        for operation in (
+            "WiFi.persistent(false)",
+            "WiFi.mode(WIFI_STA)",
+            "WiFi.begin(",
+            "WiFi.disconnect(",
+            "WiFi.mode(WIFI_AP)",
+            "WiFi.softAP(",
+            "WiFi.softAPdisconnect(",
+            "WiFi.mode(WIFI_OFF)",
+        ):
+            self.assertIn(operation, flash)
+            self.assertNotIn(operation, http)
+        self.assertIn("setNetworkOperationOwner(&flashOwner_)",
+                      source("lib/firmware_update/firmware_update_http.cpp"))
+        self.assertGreaterEqual(
+            flash.count("esp_wifi_set_storage(WIFI_STORAGE_RAM)"), 2
+        )
+        self.assertIn("internalOwnerStackHighWaterBytes", http)
+
+    def test_internal_owner_timeout_is_terminal_for_this_boot(self):
+        flash = source("lib/firmware_update/firmware_flash_owner.cpp")
+        policy = source(
+            "lib/firmware_update/firmware_internal_owner_policy.hpp"
+        )
+        self.assertIn("commandTimedOut", flash)
+        self.assertIn("result.commandId == queuedCommand.id", flash)
+        self.assertIn("DispatchState::Poisoned", policy)
+        self.assertIn("state == DispatchState::InFlight && matchingResult",
+                      policy)
+
     def test_all_socket_close_paths_withdraw_interrupt_capability(self):
         tls = source("lib/device_transfer/device_transfer_tls.cpp")
         close = tls[tls.index("void TransferClient::stop()") :]

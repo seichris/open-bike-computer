@@ -2859,6 +2859,8 @@ static std::string genericTransferStatusJson() {
                           transferStatus.minimumPsramLargest);
   status_json::appendUnsignedField(body, "workerStackHighWaterBytes",
                           transferStatus.workerStackHighWaterBytes);
+  status_json::appendUnsignedField(body, "internalOwnerStackHighWaterBytes",
+                          transferStatus.internalOwnerStackHighWaterBytes);
   status_json::appendStringField(body, "phase", transferStatus.resourcePhase);
   body += "}";
 

@@ -104,10 +104,23 @@ session, uploaded zero image bytes, and returned to the original build 98. This
 isolated the remaining failure to device-side transfer startup rather than the
 iPhone's background BLE traffic or Wi-Fi state.
 
-The build-100 candidate moves the firmware-maintenance TLS worker stack to PSRAM
-and delegates every cache-disabling OTA begin/write/end/abort/description/boot
-selection call to one serialized internal-stack flash owner with a bounded
-2 KiB staging buffer. Both worker stack margins are observable, but a successful
+Review of the first build-100 candidate found that moving only direct OTA calls
+was incomplete. The PSRAM worker still initialized and stopped Wi-Fi, while the
+hotspot-only path retained Arduino's default flash-backed Wi-Fi persistence.
+The same review found that a timed-out owner command could complete late, leave
+an untagged result for the next caller, and outlive protection of the shared
+write buffer. These are source-derived hazards; neither was reproduced as the
+cause of the build-98 reset.
+
+The corrected build-100 candidate moves the firmware-maintenance TLS worker
+stack to PSRAM and delegates Wi-Fi initialization/configuration/teardown plus
+every cache-disabling OTA begin/write/end/abort/description/boot-selection call
+to one serialized internal-stack owner. Wi-Fi persistence is disabled before
+either station or hotspot initialization. The owner uses a bounded 2 KiB staging
+buffer and enters a terminal poisoned state after a command timeout or mismatched
+result, so a late operation cannot be paired with or have its buffer overwritten
+by a later caller in the same boot. DSTS and app logs retain phase, correlation,
+boot identity, memory extrema, and both worker stack margins. A successful
 compile is not hardware evidence. The 1.75-inch gate remains open until the
 production bytes start a fresh session, complete signed OTA, and pass the boot
 acceptance validator; the independent 2.06-inch gate also remains open.

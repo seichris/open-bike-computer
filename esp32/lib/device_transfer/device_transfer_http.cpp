@@ -220,6 +220,13 @@ void HttpTransferServer::setStatusChangedCallback(
   unlockState();
 }
 
+void HttpTransferServer::setNetworkOperationOwner(
+    NetworkOperationOwner *owner) {
+  lockState();
+  networkOperationOwner_ = owner;
+  unlockState();
+}
+
 bool HttpTransferServer::registerHandler(std::string pathPrefix,
                                          HttpRequestHandler *handler) {
   if (handler == nullptr || pathPrefix.empty())
@@ -619,6 +626,7 @@ void HttpTransferServer::process() {}
 bool HttpTransferServer::startNetwork() {
   lockState();
   const bool enabled = enabled_;
+  NetworkOperationOwner *networkOwner = networkOperationOwner_;
   const LanCredentials preferredNetwork = preferredNetwork_;
   preferredNetwork_ = {};
   const std::string requestedHotspotFallbackReason =
@@ -630,6 +638,11 @@ bool HttpTransferServer::startNetwork() {
   unlockState();
   if (!enabled)
     return false;
+  if (networkOwner == nullptr) {
+    setLastError("network_owner_unavailable",
+                 "internal network operation owner is unavailable");
+    return false;
+  }
 
   const bool preferLan = validLanCredentials(preferredNetwork);
   if (preferLan) {
@@ -638,18 +651,19 @@ bool HttpTransferServer::startNetwork() {
     networkSsid_ = preferredNetwork.ssid;
     unlockState();
 
-    WiFi.persistent(false);
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(false);
-    WiFi.begin(preferredNetwork.ssid.c_str(),
-               preferredNetwork.password.c_str());
+    if (!networkOwner->startStation(preferredNetwork.ssid,
+                                    preferredNetwork.password)) {
+      setLastError("wifi_station_start",
+                   "could not start transfer Wi-Fi station safely");
+      return false;
+    }
     const uint32_t started = millis();
     while (millis() - started < kLanConnectTimeoutMs) {
       lockState();
       const bool stillEnabled = enabled_;
       unlockState();
       if (!stillEnabled) {
-        WiFi.disconnect(true, false);
+        (void)networkOwner->disconnectStation(true);
         return false;
       }
       if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress()) {
@@ -673,7 +687,7 @@ bool HttpTransferServer::startNetwork() {
   const bool stillEnabled = enabled_;
   unlockState();
   if (!stillEnabled) {
-    WiFi.disconnect(true, false);
+    (void)networkOwner->disconnectStation(true);
     return false;
   }
 
@@ -684,17 +698,20 @@ bool HttpTransferServer::startNetwork() {
       fallbackReason = lanFallbackReasonForStatus(
           static_cast<int>(stationStatus), static_cast<int>(WL_NO_SSID_AVAIL),
           static_cast<int>(WL_CONNECT_FAILED));
-      WiFi.disconnect(true, false);
+      if (!networkOwner->disconnectStation(true)) {
+        setLastError("wifi_station_stop",
+                     "could not stop transfer Wi-Fi station safely");
+        return false;
+      }
       vTaskDelay(pdMS_TO_TICKS(50));
     }
-    WiFi.mode(WIFI_AP);
     const bool apStarted =
-        WiFi.softAP(apSsid.c_str(), apPassphrase.c_str());
+        networkOwner->startAccessPoint(apSsid, apPassphrase);
     if (!apStarted) {
       lockState();
       rememberError("wifi_ap", "could not start transfer Wi-Fi fallback");
       unlockState();
-      WiFi.mode(WIFI_OFF);
+      (void)networkOwner->stopWiFi();
       return false;
     }
     lockState();
@@ -746,6 +763,7 @@ void HttpTransferServer::stopNetwork() {
   const bool startedAp = startedAp_;
   const bool startedStation = startedStation_;
   const bool hadNetworkActivity = !networkTransport_.empty();
+  NetworkOperationOwner *networkOwner = networkOperationOwner_;
   startedAp_ = false;
   startedStation_ = false;
   hotspotFallback_ = false;
@@ -758,12 +776,14 @@ void HttpTransferServer::stopNetwork() {
   unlockState();
 
   server_.stop();
+  if (networkOwner == nullptr)
+    return;
   if (startedAp)
-    WiFi.softAPdisconnect(true);
+    (void)networkOwner->stopAccessPoint(true);
   if (startedStation)
-    WiFi.disconnect(true, false);
+    (void)networkOwner->disconnectStation(true);
   if (hadNetworkActivity)
-    WiFi.mode(WIFI_OFF);
+    (void)networkOwner->stopWiFi();
 }
 
 void HttpTransferServer::runWorker() {
@@ -969,6 +989,7 @@ HttpTransferStatus HttpTransferServer::status() const {
   const uint32_t minimumPsramFree = minimumPsramFree_;
   const uint32_t minimumPsramLargest = minimumPsramLargest_;
   const uint32_t workerStackHighWaterBytes = workerStackHighWaterBytes_;
+  NetworkOperationOwner *networkOwner = networkOperationOwner_;
   const std::string resourcePhase = resourcePhase_;
   // Only authenticated work may extend the transfer lifetime. A client that
   // stalls before authorization must not keep the AP awake indefinitely.
@@ -1053,6 +1074,8 @@ HttpTransferStatus HttpTransferServer::status() const {
                                    ? result.psramLargest
                                    : minimumPsramLargest;
   result.workerStackHighWaterBytes = workerStackHighWaterBytes;
+  result.internalOwnerStackHighWaterBytes =
+      networkOwner == nullptr ? 0 : networkOwner->stackHighWaterBytes();
   result.resourcePhase = resourcePhase;
   return result;
 }

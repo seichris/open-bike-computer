@@ -11,6 +11,7 @@
 #include <string>
 
 #include "device_transfer_network_protocol.hpp"
+#include "device_transfer_network_owner.hpp"
 #include "device_transfer_tls.hpp"
 
 namespace device_transfer {
@@ -55,6 +56,7 @@ struct HttpTransferStatus {
   uint32_t minimumPsramFree = 0;
   uint32_t minimumPsramLargest = 0;
   uint32_t workerStackHighWaterBytes = 0;
+  uint32_t internalOwnerStackHighWaterBytes = 0;
   std::string resourcePhase;
 };
 
@@ -97,6 +99,7 @@ public:
                  std::string apSsid = "BikeComputer-Transfer");
   bool registerHandler(std::string pathPrefix, HttpRequestHandler *handler);
   void setStatusChangedCallback(StatusChangedCallback callback);
+  void setNetworkOperationOwner(NetworkOperationOwner *owner);
   bool setEnabled(bool enabled);
   bool setEnabled(bool enabled, std::string mode);
   bool setPreferredNetwork(const LanCredentials &credentials);
@@ -167,6 +170,7 @@ private:
   size_t handlerCount_ = 0;
   TaskHandle_t workerTask_ = nullptr;
   TransferClient *activeClient_ = nullptr;
+  NetworkOperationOwner *networkOperationOwner_ = nullptr;
 
   bool handleClient(TransferClient &client, size_t requestIndex);
   void runWorker();

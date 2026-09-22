@@ -2,6 +2,8 @@
 
 #include <cstring>
 #include <esp_heap_caps.h>
+#include <esp_wifi.h>
+#include <WiFi.h>
 
 namespace firmware_update {
 
@@ -39,6 +41,11 @@ bool FirmwareFlashOwner::start() {
 
 bool FirmwareFlashOwner::started() const { return workerTask_ != nullptr; }
 
+bool FirmwareFlashOwner::healthy() const {
+  return started() && internal_owner_policy::canIssue(
+                          dispatchState_.load(std::memory_order_acquire));
+}
+
 uint32_t FirmwareFlashOwner::stackHighWaterBytes() const {
   const TaskHandle_t worker = workerTask_;
   if (worker == nullptr)
@@ -49,19 +56,55 @@ uint32_t FirmwareFlashOwner::stackHighWaterBytes() const {
 
 FirmwarePartitionSnapshot FirmwareFlashOwner::partitionSnapshot() {
   Result result;
-  if (!execute(Command{Operation::Snapshot}, result))
+  if (execute(Command{Operation::Snapshot}, result) != ESP_OK)
     return {};
   return result.snapshot;
+}
+
+bool FirmwareFlashOwner::startStation(const std::string &ssid,
+                                      const std::string &password) {
+  Result result;
+  return execute(Command{Operation::StartStation}, result, nullptr, &ssid,
+                 &password) == ESP_OK &&
+         result.error == ESP_OK;
+}
+
+bool FirmwareFlashOwner::disconnectStation(bool wifiOff) {
+  Result result;
+  Command command{Operation::DisconnectStation};
+  command.wifiOff = wifiOff;
+  return execute(command, result) == ESP_OK && result.error == ESP_OK;
+}
+
+bool FirmwareFlashOwner::startAccessPoint(
+    const std::string &ssid, const std::string &passphrase) {
+  Result result;
+  return execute(Command{Operation::StartAccessPoint}, result, nullptr, &ssid,
+                 &passphrase) == ESP_OK &&
+         result.error == ESP_OK;
+}
+
+bool FirmwareFlashOwner::stopAccessPoint(bool wifiOff) {
+  Result result;
+  Command command{Operation::StopAccessPoint};
+  command.wifiOff = wifiOff;
+  return execute(command, result) == ESP_OK && result.error == ESP_OK;
+}
+
+bool FirmwareFlashOwner::stopWiFi() {
+  Result result;
+  return execute(Command{Operation::StopWiFi}, result) == ESP_OK &&
+         result.error == ESP_OK;
 }
 
 esp_err_t FirmwareFlashOwner::begin(const esp_partition_t *partition,
                                     std::size_t imageSize,
                                     esp_ota_handle_t &handle) {
   Result result;
-  const bool completed = execute(
+  const esp_err_t dispatch = execute(
       Command{Operation::Begin, partition, 0, imageSize}, result);
-  handle = completed ? result.handle : 0;
-  return completed ? result.error : ESP_FAIL;
+  handle = dispatch == ESP_OK ? result.handle : 0;
+  return dispatch == ESP_OK ? result.error : dispatch;
 }
 
 esp_err_t FirmwareFlashOwner::write(esp_ota_handle_t handle,
@@ -70,68 +113,120 @@ esp_err_t FirmwareFlashOwner::write(esp_ota_handle_t handle,
   if (data == nullptr || size == 0 || size > kMaximumWriteBytes)
     return ESP_ERR_INVALID_ARG;
   Result result;
-  return execute(Command{Operation::Write, nullptr, handle, size}, result,
-                 data)
-             ? result.error
-             : ESP_FAIL;
+  const esp_err_t dispatch = execute(
+      Command{Operation::Write, nullptr, handle, size}, result, data);
+  return dispatch == ESP_OK ? result.error : dispatch;
 }
 
 esp_err_t FirmwareFlashOwner::end(esp_ota_handle_t handle) {
   Result result;
-  return execute(Command{Operation::End, nullptr, handle}, result)
-             ? result.error
-             : ESP_FAIL;
+  const esp_err_t dispatch =
+      execute(Command{Operation::End, nullptr, handle}, result);
+  return dispatch == ESP_OK ? result.error : dispatch;
 }
 
 esp_err_t FirmwareFlashOwner::abort(esp_ota_handle_t handle) {
   Result result;
-  return execute(Command{Operation::Abort, nullptr, handle}, result)
-             ? result.error
-             : ESP_FAIL;
+  const esp_err_t dispatch =
+      execute(Command{Operation::Abort, nullptr, handle}, result);
+  return dispatch == ESP_OK ? result.error : dispatch;
 }
 
 esp_err_t FirmwareFlashOwner::description(
     const esp_partition_t *partition, esp_app_desc_t &description) {
   Result result;
-  const bool completed = execute(
+  const esp_err_t dispatch = execute(
       Command{Operation::Description, partition}, result);
-  if (completed && result.error == ESP_OK)
+  if (dispatch == ESP_OK && result.error == ESP_OK)
     description = result.description;
-  return completed ? result.error : ESP_FAIL;
+  return dispatch == ESP_OK ? result.error : dispatch;
 }
 
 esp_err_t FirmwareFlashOwner::selectBootPartition(
     const esp_partition_t *partition) {
   Result result;
-  return execute(Command{Operation::SelectBoot, partition}, result)
-             ? result.error
-             : ESP_FAIL;
+  const esp_err_t dispatch =
+      execute(Command{Operation::SelectBoot, partition}, result);
+  return dispatch == ESP_OK ? result.error : dispatch;
 }
 
-bool FirmwareFlashOwner::execute(const Command &command, Result &result,
-                                 const uint8_t *writeData) {
-  if (!start() ||
-      xSemaphoreTake(callMutex_, kCommandTimeoutTicks) != pdTRUE) {
-    return false;
+esp_err_t FirmwareFlashOwner::execute(
+    const Command &command, Result &result, const uint8_t *writeData,
+    const std::string *networkSsid,
+    const std::string *networkPassword) {
+  if (!start())
+    return ESP_ERR_NO_MEM;
+  if (xSemaphoreTake(callMutex_, kCommandTimeoutTicks) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
   }
 
-  bool completed = false;
+  esp_err_t dispatch = ESP_FAIL;
   do {
+    if (!internal_owner_policy::canIssue(
+            dispatchState_.load(std::memory_order_acquire))) {
+      dispatch = ESP_ERR_INVALID_STATE;
+      break;
+    }
     if (command.operation == Operation::Write) {
       if (writeData == nullptr || command.size == 0 ||
           command.size > sizeof(writeBuffer_)) {
+        dispatch = ESP_ERR_INVALID_ARG;
         break;
       }
       std::memcpy(writeBuffer_, writeData, command.size);
     }
-    if (xQueueSend(commandQueue_, &command, kCommandTimeoutTicks) != pdTRUE)
+    if (networkSsid != nullptr) {
+      if (networkSsid->empty() || networkSsid->size() >= sizeof(networkSsid_) ||
+          networkPassword == nullptr ||
+          networkPassword->size() >= sizeof(networkPassword_)) {
+        dispatch = ESP_ERR_INVALID_ARG;
+        break;
+      }
+      std::memcpy(networkSsid_, networkSsid->c_str(), networkSsid->size() + 1);
+      std::memcpy(networkPassword_, networkPassword->c_str(),
+                  networkPassword->size() + 1);
+    }
+    Command queuedCommand = command;
+    queuedCommand.id = nextCommandId_++;
+    if (queuedCommand.id == 0)
+      queuedCommand.id = nextCommandId_++;
+    if (xQueueSend(commandQueue_, &queuedCommand,
+                   kCommandTimeoutTicks) != pdTRUE) {
+      dispatchState_.store(internal_owner_policy::commandTimedOut(
+                               dispatchState_.load(std::memory_order_relaxed)),
+                           std::memory_order_release);
+      dispatch = ESP_ERR_TIMEOUT;
       break;
-    completed =
-        xQueueReceive(resultQueue_, &result, kCommandTimeoutTicks) == pdTRUE;
+    }
+    dispatchState_.store(internal_owner_policy::commandIssued(
+                             dispatchState_.load(std::memory_order_relaxed)),
+                         std::memory_order_release);
+    if (xQueueReceive(resultQueue_, &result,
+                      kCommandTimeoutTicks) != pdTRUE) {
+      // The issued operation may still be using the staging buffers or may
+      // complete later. Permanently reject subsequent commands in this boot
+      // so a late result cannot be paired with a new caller and the shared
+      // write buffer cannot be overwritten while flash still consumes it.
+      dispatchState_.store(internal_owner_policy::commandTimedOut(
+                               dispatchState_.load(std::memory_order_relaxed)),
+                           std::memory_order_release);
+      dispatch = ESP_ERR_TIMEOUT;
+      break;
+    }
+    const bool matchingResult = result.commandId == queuedCommand.id;
+    dispatchState_.store(internal_owner_policy::commandCompleted(
+                             dispatchState_.load(std::memory_order_relaxed),
+                             matchingResult),
+                         std::memory_order_release);
+    if (!matchingResult) {
+      dispatch = ESP_ERR_INVALID_STATE;
+      break;
+    }
+    dispatch = ESP_OK;
   } while (false);
 
   xSemaphoreGive(callMutex_);
-  return completed;
+  return dispatch;
 }
 
 void FirmwareFlashOwner::run() {
@@ -141,6 +236,7 @@ void FirmwareFlashOwner::run() {
       continue;
 
     Result result;
+    result.commandId = command.id;
     switch (command.operation) {
     case Operation::Snapshot:
       result.snapshot.running = esp_ota_get_running_partition();
@@ -170,6 +266,41 @@ void FirmwareFlashOwner::run() {
       break;
     case Operation::SelectBoot:
       result.error = esp_ota_set_boot_partition(command.partition);
+      break;
+    case Operation::StartStation:
+      WiFi.persistent(false);
+      if (!WiFi.mode(WIFI_STA)) {
+        result.error = ESP_FAIL;
+        break;
+      }
+      if (esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK) {
+        result.error = ESP_FAIL;
+        break;
+      }
+      WiFi.setAutoReconnect(false);
+      (void)WiFi.begin(networkSsid_, networkPassword_);
+      result.error = ESP_OK;
+      break;
+    case Operation::DisconnectStation:
+      result.error = WiFi.disconnect(command.wifiOff, false) ? ESP_OK
+                                                              : ESP_FAIL;
+      break;
+    case Operation::StartAccessPoint:
+      WiFi.persistent(false);
+      if (!WiFi.mode(WIFI_AP) ||
+          esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK) {
+        result.error = ESP_FAIL;
+        break;
+      }
+      result.error = WiFi.softAP(networkSsid_, networkPassword_) ? ESP_OK
+                                                                  : ESP_FAIL;
+      break;
+    case Operation::StopAccessPoint:
+      result.error = WiFi.softAPdisconnect(command.wifiOff) ? ESP_OK
+                                                             : ESP_FAIL;
+      break;
+    case Operation::StopWiFi:
+      result.error = WiFi.mode(WIFI_OFF) ? ESP_OK : ESP_FAIL;
       break;
     }
     (void)xQueueSend(resultQueue_, &result, portMAX_DELAY);

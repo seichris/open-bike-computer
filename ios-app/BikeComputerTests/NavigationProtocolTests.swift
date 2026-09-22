@@ -24529,7 +24529,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"debug","statusRevision":23,"baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":true,"stage":"ready","correlation":42},"bootCheckpoint":{"schemaVersion":1,"target":"WAVESHARE_AMOLED_206","profile":"WAVESHARE_AMOLED_206_PRODUCTION","gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"0.2.2","build":86,"bootSequence":9,"bootFingerprint":1234,"normalReady":false,"maintenance":true,"otaState":"valid"},"lastError":{"sequence":17,"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updaterProtocol":1,"otaEligible":true,"eligibilityCode":"eligible","inactivePartition":"ota_1","runningPartition":"ota_0","profile":"WAVESHARE_AMOLED_206_PRODUCTION","otaState":"valid","maxImageBytes":3145728,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"debug","statusRevision":23,"baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":true,"stage":"ready","correlation":42},"resources":{"internalFree":65536,"internalLargest":32768,"dmaFree":49152,"dmaLargest":24576,"psramFree":4194304,"psramLargest":3145728,"minimumInternalFree":61440,"minimumInternalLargest":28672,"minimumDmaFree":45056,"minimumDmaLargest":20480,"minimumPsramFree":4000000,"minimumPsramLargest":3000000,"workerStackHighWaterBytes":7168,"internalOwnerStackHighWaterBytes":4096,"phase":"network_ready"},"bootCheckpoint":{"schemaVersion":1,"target":"WAVESHARE_AMOLED_206","profile":"WAVESHARE_AMOLED_206_PRODUCTION","gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"0.2.2","build":86,"bootSequence":9,"bootFingerprint":1234,"normalReady":false,"maintenance":true,"otaState":"valid"},"lastError":{"sequence":17,"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updaterProtocol":1,"otaEligible":true,"eligibilityCode":"eligible","inactivePartition":"ota_1","runningPartition":"ota_0","profile":"WAVESHARE_AMOLED_206_PRODUCTION","otaState":"valid","maxImageBytes":3145728,"receivedBytes":1024,"totalBytes":2048,"flashOwnerStackHighWaterBytes":4096,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -24555,6 +24555,18 @@ struct NavigationProtocolTests {
                     "status parser exposes maintenance readiness")
         assertEqual(manager.firmwareMaintenanceCorrelation, 42,
                     "status parser preserves reboot correlation")
+        assertEqual(manager.deviceTransferResourceSnapshot?.phase,
+                    "network_ready",
+                    "status parser retains the resource sampling phase")
+        assertEqual(manager.deviceTransferResourceSnapshot?.minimumDmaFree,
+                    45056,
+                    "status parser retains the minimum DMA evidence")
+        assertEqual(
+            manager.deviceTransferResourceSnapshot?
+                .internalOwnerStackHighWaterBytes,
+            4096,
+            "status parser retains the internal-owner stack margin"
+        )
         assertEqual(manager.firmwareBootSequence, 9,
                     "status parser exposes the authenticated boot sequence")
         assertEqual(manager.firmwareBootFingerprint, 1234,
@@ -24594,6 +24606,8 @@ struct NavigationProtocolTests {
                     "status parser exposes the slot capacity")
         assertEqual(manager.firmwareUpdateReceivedBytes, 1024, "status parser exposes received bytes")
         assertEqual(manager.firmwareUpdateTotalBytes, 2048, "status parser exposes total bytes")
+        assertEqual(manager.firmwareFlashOwnerStackHighWaterBytes, 4096,
+                    "status parser retains the flash-owner stack margin")
         assertEqual(manager.firmwareUpdateLastError, "previous: previous update failed", "status parser exposes firmware error")
 
         let clearedPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +

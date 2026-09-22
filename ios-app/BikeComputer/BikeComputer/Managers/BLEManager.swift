@@ -964,6 +964,24 @@ private final class WeakBLEManagerSendableBox: @unchecked Sendable {
     }
 }
 
+struct DeviceTransferResourceSnapshot: Equatable {
+    let internalFree: UInt32
+    let internalLargest: UInt32
+    let dmaFree: UInt32
+    let dmaLargest: UInt32
+    let psramFree: UInt32
+    let psramLargest: UInt32
+    let minimumInternalFree: UInt32
+    let minimumInternalLargest: UInt32
+    let minimumDmaFree: UInt32
+    let minimumDmaLargest: UInt32
+    let minimumPsramFree: UInt32
+    let minimumPsramLargest: UInt32
+    let workerStackHighWaterBytes: UInt32
+    let internalOwnerStackHighWaterBytes: UInt32
+    let phase: String
+}
+
 #if HOST_TESTING
 final class BLEScanDriverForTesting {
     struct Start: Equatable {
@@ -1123,6 +1141,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferLastErrorSequence: UInt64?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
+    @Published private(set) var deviceTransferResourceSnapshot:
+        DeviceTransferResourceSnapshot?
     @Published private(set) var firmwareMaintenanceActive = false
     @Published private(set) var firmwareMaintenanceStage = "normal"
     @Published private(set) var firmwareMaintenanceCorrelation: UInt32 = 0
@@ -1147,6 +1167,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var firmwareBootMaintenance = false
     @Published var firmwareUpdateReceivedBytes: Int = 0
     @Published var firmwareUpdateTotalBytes: Int = 0
+    @Published private(set) var firmwareFlashOwnerStackHighWaterBytes: UInt32?
     @Published var firmwareUpdateLastError: String?
     @Published var deviceHasSDCard: Bool?
     @Published var deviceMapStateKnown = false
@@ -6672,6 +6693,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferLastErrorMessage = nil
         deviceTransferLastErrorSequence = nil
         deviceTransferStatusRevision = 0
+        deviceTransferResourceSnapshot = nil
         firmwareMaintenanceActive = false
         firmwareMaintenanceStage = "normal"
         firmwareMaintenanceCorrelation = 0
@@ -6695,6 +6717,7 @@ class BLEManager: NSObject, ObservableObject {
         firmwareGitSha = ""
         firmwareUpdateReceivedBytes = 0
         firmwareUpdateTotalBytes = 0
+        firmwareFlashOwnerStackHighWaterBytes = nil
         firmwareUpdateLastError = nil
         supportsDeviceSounds = false
         supportsAutomaticDisplayOff = false
@@ -10837,6 +10860,27 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             deviceStorageBackend = nil
             deviceStoragePowerCycleRequired = nil
         }
+        if let resources = object["resources"] as? [String: Any] {
+            deviceTransferResourceSnapshot = DeviceTransferResourceSnapshot(
+                internalFree: (resources["internalFree"] as? NSNumber)?.uint32Value ?? 0,
+                internalLargest: (resources["internalLargest"] as? NSNumber)?.uint32Value ?? 0,
+                dmaFree: (resources["dmaFree"] as? NSNumber)?.uint32Value ?? 0,
+                dmaLargest: (resources["dmaLargest"] as? NSNumber)?.uint32Value ?? 0,
+                psramFree: (resources["psramFree"] as? NSNumber)?.uint32Value ?? 0,
+                psramLargest: (resources["psramLargest"] as? NSNumber)?.uint32Value ?? 0,
+                minimumInternalFree: (resources["minimumInternalFree"] as? NSNumber)?.uint32Value ?? 0,
+                minimumInternalLargest: (resources["minimumInternalLargest"] as? NSNumber)?.uint32Value ?? 0,
+                minimumDmaFree: (resources["minimumDmaFree"] as? NSNumber)?.uint32Value ?? 0,
+                minimumDmaLargest: (resources["minimumDmaLargest"] as? NSNumber)?.uint32Value ?? 0,
+                minimumPsramFree: (resources["minimumPsramFree"] as? NSNumber)?.uint32Value ?? 0,
+                minimumPsramLargest: (resources["minimumPsramLargest"] as? NSNumber)?.uint32Value ?? 0,
+                workerStackHighWaterBytes: (resources["workerStackHighWaterBytes"] as? NSNumber)?.uint32Value ?? 0,
+                internalOwnerStackHighWaterBytes: (resources["internalOwnerStackHighWaterBytes"] as? NSNumber)?.uint32Value ?? 0,
+                phase: resources["phase"] as? String ?? "unknown"
+            )
+        } else {
+            deviceTransferResourceSnapshot = nil
+        }
         if let maintenance = object["maintenance"] as? [String: Any] {
             firmwareMaintenanceActive =
                 maintenance["active"] as? Bool ?? false
@@ -10895,6 +10939,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             firmwareGitSha = firmware["gitSha"] as? String ?? firmwareGitSha
             firmwareUpdateReceivedBytes = firmware["receivedBytes"] as? Int ?? 0
             firmwareUpdateTotalBytes = firmware["totalBytes"] as? Int ?? 0
+            firmwareFlashOwnerStackHighWaterBytes =
+                (firmware["flashOwnerStackHighWaterBytes"] as? NSNumber)?.uint32Value
             if let lastError = firmware["lastError"] as? [String: Any] {
                 let code = lastError["code"] as? String ?? "error"
                 let message = lastError["message"] as? String ?? ""
@@ -10905,6 +10951,21 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         }
 
         let modeDescription = deviceTransferMode.isEmpty ? "none" : deviceTransferMode
+        if let resources = deviceTransferResourceSnapshot {
+            let flashStack = firmwareFlashOwnerStackHighWaterBytes
+                .map(String.init) ?? "unknown"
+            log(
+                "Device transfer resources: phase=\(resources.phase) " +
+                "correlation=\(firmwareMaintenanceCorrelation) " +
+                "build=\(firmwareBuild) git=\(firmwareGitSha) " +
+                "internal=\(resources.internalFree)/\(resources.minimumInternalFree) " +
+                "dma=\(resources.dmaFree)/\(resources.minimumDmaFree) " +
+                "psram=\(resources.psramFree)/\(resources.minimumPsramFree) " +
+                "workerStack=\(resources.workerStackHighWaterBytes) " +
+                "internalOwnerStack=\(resources.internalOwnerStackHighWaterBytes) " +
+                "flashOwnerStack=\(flashStack)"
+            )
+        }
         if let code = deviceTransferLastErrorCode {
             let sequence = deviceTransferLastErrorSequence.map(String.init) ?? "unknown"
             let message = deviceTransferLastErrorMessage ?? "none"

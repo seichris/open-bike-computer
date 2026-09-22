@@ -190,6 +190,7 @@ struct FirmwareDeviceStatus: Decodable, Equatable {
     let maxImageBytes: Int
     let receivedBytes: Int
     let totalBytes: Int
+    let flashOwnerStackHighWaterBytes: Int?
     let sha256: String?
     let lastError: FirmwareStatusError?
 }
@@ -283,7 +284,21 @@ final class FirmwareUpdateManager: ObservableObject {
         didSet { defaults.set(allowDeveloperDowngrade, forKey: Defaults.allowDowngradeKey) }
     }
     @Published private(set) var latestManifest: FirmwareReleaseManifest?
-    @Published private(set) var deviceStatus: FirmwareDeviceStatus?
+    @Published private(set) var deviceStatus: FirmwareDeviceStatus? {
+        didSet {
+#if DEBUG
+            guard let status = deviceStatus else { return }
+            let flashStack = status.flashOwnerStackHighWaterBytes
+                .map(String.init) ?? "unknown"
+            print(
+                "Firmware device status: status=\(status.status) " +
+                "build=\(status.runningBuild) received=\(status.receivedBytes)/" +
+                "\(status.totalBytes) flashOwnerStackHighWaterBytes=" +
+                flashStack
+            )
+#endif
+        }
+    }
     @Published private(set) var downloadProgress: Double = 0
     @Published private(set) var uploadProgress: Double = 0
     @Published private(set) var statusMessage: String = ""
