@@ -5668,7 +5668,7 @@ public:
     // the full fail-closed teardown.
     const bool suspendedFirmwareTransfer =
         firmware_maintenance::active() &&
-        deviceTransferHttp.suspendAuthenticatedBleSession();
+        deviceTransferHttp.suspendFirmwareAuthenticatedBleSession();
     if (!suspendedFirmwareTransfer)
       deviceTransferHttp.clearAuthenticatedBleSession();
     resetScreenConfigurationTransport();

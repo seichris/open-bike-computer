@@ -291,16 +291,14 @@ bool HttpTransferServer::bindAuthenticatedBleSession(uint64_t sessionId) {
     if (enabled_ && sessionToken_.empty())
       sessionToken_ = generateSessionToken();
     transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
-    if (enabled_)
-      lastUsefulTrafficMs_ = millis();
   }
   unlockState();
   return true;
 }
 
-bool HttpTransferServer::suspendAuthenticatedBleSession() {
+bool HttpTransferServer::suspendFirmwareAuthenticatedBleSession() {
   lockState();
-  if (!enabled_ || mode_ != "firmware" || commitInProgress_) {
+  if (!enabled_ || commitInProgress_) {
     unlockState();
     return false;
   }

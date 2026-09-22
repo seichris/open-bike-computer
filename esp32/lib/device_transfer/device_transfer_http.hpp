@@ -104,7 +104,7 @@ public:
   void clearPreferredNetwork();
   bool bindAuthenticatedBleSession(uint64_t sessionId);
   void clearAuthenticatedBleSession();
-  bool suspendAuthenticatedBleSession();
+  bool suspendFirmwareAuthenticatedBleSession();
   bool prepareTlsIdentityRotation();
   bool commitTlsIdentityRotation(
       const std::string &expectedCertificateSha256);

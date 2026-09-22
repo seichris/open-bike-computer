@@ -75,7 +75,7 @@ class FirmwareMaintenanceBleContractTests(unittest.TestCase):
             "class MyNavCharacteristicCallbacks", disconnect_start
         )
         disconnect = self.ble_cpp[disconnect_start:disconnect_end]
-        self.assertIn("suspendAuthenticatedBleSession()", disconnect)
+        self.assertIn("suspendFirmwareAuthenticatedBleSession()", disconnect)
         self.assertIn("!suspendedFirmwareTransfer", disconnect)
 
         maintenance_start = self.ble_cpp.index(

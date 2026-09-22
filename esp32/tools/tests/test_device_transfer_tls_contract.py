@@ -326,7 +326,9 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
             HTTP_SOURCE.index("bool HttpTransferServer::prepareTlsIdentityRotation")
         ]
         suspend_ble = HTTP_SOURCE[
-            HTTP_SOURCE.index("bool HttpTransferServer::suspendAuthenticatedBleSession") :
+            HTTP_SOURCE.index(
+                "bool HttpTransferServer::suspendFirmwareAuthenticatedBleSession"
+            ) :
             HTTP_SOURCE.index("void HttpTransferServer::clearAuthenticatedBleSession")
         ]
         disable = HTTP_SOURCE[
