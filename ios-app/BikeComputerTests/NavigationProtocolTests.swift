@@ -906,6 +906,7 @@ struct NavigationProtocolTests {
         await testDeviceTransferManagerCompensatesCancelledDebugEntry()
         await testDeviceTransferManagerConfirmsDebugExit()
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
+        await testFirmwareTransferSurvivesNetworkStartupReconnect()
         await testFirmwareTransferSurfacesFreshRejectionAndExits()
         await testFirmwareTransferCancellationExits()
         await testFirmwareMaintenancePreparationFlow()
@@ -23852,6 +23853,77 @@ struct NavigationProtocolTests {
                     "cancelled debug entry was queued before cancellation")
         assert(sentPackets.contains(Data("DTRNexit".utf8)),
                "post-enqueue cancellation queues a compensating debug exit")
+    }
+
+    @MainActor
+    static func testFirmwareTransferSurvivesNetworkStartupReconnect() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        bleManager.setConnectedDeviceIDForTesting("device-a")
+
+        let maintenanceStatus = """
+        {"configured":true,"enabled":false,"mode":"","maintenance":{"supported":true,"active":true,"stage":"awaiting_authentication","correlation":42}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(maintenanceStatus.utf8)
+        )
+
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 96,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let task = Task {
+            try await DeviceTransferManager().enterFirmwareTransfer(
+                bleManager: bleManager,
+                status: { _ in }
+            )
+        }
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assertEqual(
+            String(data: sentPackets.first ?? Data(), encoding: .utf8),
+            "DTRNenter|firmware",
+            "maintenance firmware entry uses the authenticated fallback"
+        )
+
+        bleManager.isConnected = false
+        bleManager.isNavigationReady = false
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        for _ in 0..<100 where
+            !sentPackets.dropFirst().contains(Data("DSTS".utf8)) {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(
+            sentPackets.dropFirst().contains(Data("DSTS".utf8)),
+            "the first post-reconnect status request uses Navigation"
+        )
+
+        let tlsFingerprint = String(repeating: "c", count: 64)
+        let readyStatus = """
+        {"configured":true,"enabled":true,"mode":"firmware","baseUrl":"https://192.168.31.195:8080","networkTransport":"lan","networkSsid":"Home Wi-Fi","sessionToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":3,"capabilities":{"secureTransferV1":true},"maintenance":{"supported":true,"active":true,"stage":"ready","correlation":42}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(readyStatus.utf8)
+        )
+
+        do {
+            let session = try await task.value
+            assertEqual(session.mode, .firmware,
+                        "firmware transfer survives the Wi-Fi startup reconnect")
+            assertEqual(session.networkTransport, "lan",
+                        "reconnected firmware transfer retains its network")
+        } catch {
+            assert(false, "firmware reconnect should complete: \(error)")
+        }
     }
 
     @MainActor
