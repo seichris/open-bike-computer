@@ -95,6 +95,33 @@ def ready_job() -> MapJob:
     )
 
 
+def topographic_ready_job() -> MapJob:
+    job = ready_job()
+    content_receipt = job.artifacts[-1].manifest_receipt
+    assert content_receipt is not None
+    companion_sha256 = "3" * 64
+    job.request["target"]["rendererFormatVersion"] = 4
+    job.artifacts.append(
+        ArtifactRecord(
+            format="topography-ios-v1",
+            media_type="application/vnd.bicino.topography+sqlite3",
+            filename="shanghai-test.btopo",
+            object_key=(
+                "maps/shanghai-test/topography-ios-v1/"
+                f"{content_receipt}/{companion_sha256}.btopo"
+            ),
+            bytes=512,
+            sha256=companion_sha256,
+            manifest_receipt=content_receipt,
+            map_content_receipt=content_receipt,
+            intermediate_sha256="8" * 64,
+            source_policy_sha256="9" * 64,
+            attribution_sha256="a" * 64,
+        )
+    )
+    return job
+
+
 class SuccessfulCatalog:
     channel = "production"
 
@@ -207,6 +234,72 @@ class CatalogTests(unittest.TestCase):
             manifest_receipt="9" * 64,
         )
         self.assertEqual(map_entry_id(job), first)
+
+    def test_topographic_publication_requires_one_exact_companion(self):
+        job = topographic_ready_job()
+        payload = publication_payload(job, "development")
+        self.assertEqual(
+            payload["features"],
+            ["3d-buildings", "contours", "street-labels"],
+        )
+        companion = next(
+            artifact
+            for artifact in payload["artifacts"]
+            if artifact["format"] == "topography-ios-v1"
+        )
+        self.assertEqual(
+            companion["companionRequirements"],
+            {
+                "schemaVersion": 1,
+                "role": "topography-ios-v1",
+                "mapContentReceipt": payload["contentReceipt"],
+                "mapId": "shanghai-test",
+                "profileVersion": 1,
+                "intermediateSha256": "8" * 64,
+                "sourcePolicySha256": "9" * 64,
+                "attributionSha256": "a" * 64,
+            },
+        )
+
+        missing = topographic_ready_job()
+        missing.artifacts = [
+            artifact
+            for artifact in missing.artifacts
+            if artifact.format != "topography-ios-v1"
+        ]
+        with self.assertRaisesRegex(
+            CatalogPublicationError,
+            "requires one exact companion",
+        ):
+            publication_payload(missing, "development")
+
+        mismatched = topographic_ready_job()
+        companion_index = next(
+            index
+            for index, artifact in enumerate(mismatched.artifacts)
+            if artifact.format == "topography-ios-v1"
+        )
+        mismatched.artifacts[companion_index] = replace(
+            mismatched.artifacts[companion_index],
+            object_key=(
+                "maps/shanghai-test/topography-ios-v1/"
+                f"{'f' * 64}/{'3' * 64}.btopo"
+            ),
+            map_content_receipt="f" * 64,
+        )
+        with self.assertRaisesRegex(
+            CatalogPublicationError,
+            "requires one exact companion",
+        ):
+            publication_payload(mismatched, "development")
+
+        non_topographic = topographic_ready_job()
+        non_topographic.request["target"]["rendererFormatVersion"] = 3
+        with self.assertRaisesRegex(
+            CatalogPublicationError,
+            "non-topographic map contains a companion",
+        ):
+            publication_payload(non_topographic, "development")
 
     def test_ready_publication_is_persisted_without_changing_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:

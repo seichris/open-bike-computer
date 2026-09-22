@@ -820,6 +820,7 @@ struct NavigationProtocolTests {
         testRideApplicationAcknowledgementWaitsForATTCallback()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()
+        testBLEManagerGatesTopographicContourVisibility()
         testBLEManagerFoldsExtendedVisibilityForLegacyFirmware()
         testBLEManagerSendsDeviceSoundFallback()
         testBLEManagerSendsPowerButtonHonkFallback()
@@ -8818,7 +8819,8 @@ struct NavigationProtocolTests {
             SavedMapRendererCompatibilityPolicy.isCompatible(
                 rendererFormatVersion: 1,
                 supportsStreetLabels: false,
-                supports3DBuildings: false
+                supports3DBuildings: false,
+                supportsTopographicContours: false
             ),
             "renderer target 1 remains compatible with legacy firmware"
         )
@@ -8826,7 +8828,8 @@ struct NavigationProtocolTests {
             SavedMapRendererCompatibilityPolicy.isCompatible(
                 rendererFormatVersion: 2,
                 supportsStreetLabels: true,
-                supports3DBuildings: false
+                supports3DBuildings: false,
+                supportsTopographicContours: false
             ),
             "renderer target 2 requires street-label support"
         )
@@ -8834,7 +8837,8 @@ struct NavigationProtocolTests {
             !SavedMapRendererCompatibilityPolicy.isCompatible(
                 rendererFormatVersion: 2,
                 supportsStreetLabels: false,
-                supports3DBuildings: false
+                supports3DBuildings: false,
+                supportsTopographicContours: false
             ),
             "renderer target 2 is refused on legacy firmware"
         )
@@ -8842,7 +8846,8 @@ struct NavigationProtocolTests {
             SavedMapRendererCompatibilityPolicy.isCompatible(
                 rendererFormatVersion: 3,
                 supportsStreetLabels: true,
-                supports3DBuildings: true
+                supports3DBuildings: true,
+                supportsTopographicContours: false
             ),
             "renderer target 3 requires 3D-building support"
         )
@@ -8850,17 +8855,28 @@ struct NavigationProtocolTests {
             !SavedMapRendererCompatibilityPolicy.isCompatible(
                 rendererFormatVersion: 3,
                 supportsStreetLabels: true,
-                supports3DBuildings: false
+                supports3DBuildings: false,
+                supportsTopographicContours: false
             ),
             "renderer target 3 is refused before transfer to label-only firmware"
+        )
+        assert(
+            SavedMapRendererCompatibilityPolicy.isCompatible(
+                rendererFormatVersion: 4,
+                supportsStreetLabels: true,
+                supports3DBuildings: true,
+                supportsTopographicContours: true
+            ),
+            "renderer target 4 requires the complete contour capability stack"
         )
         assert(
             !SavedMapRendererCompatibilityPolicy.isCompatible(
                 rendererFormatVersion: 4,
                 supportsStreetLabels: true,
-                supports3DBuildings: true
+                supports3DBuildings: true,
+                supportsTopographicContours: false
             ),
-            "unknown renderer targets fail closed"
+            "renderer target 4 is refused before transfer without contour support"
         )
     }
 
@@ -17621,9 +17637,11 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 27, "capability version negotiates workout zones and configurable display inactivity timeouts alongside existing capabilities")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 28, "capability version negotiates signed topographic contours alongside existing capabilities")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1Feature, 1 << 29, "CAP2 bit 29 advertises versioned workout zones without reusing the display inactivity capability")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1MinimumClientVersion, 27, "zone negotiation requires protocol 27, independent of the iOS version")
+        assertEqual(DeviceBLEProtocol.topographicContoursCapabilityMask, 1 << 30, "CAP2 bit 30 advertises signed topographic contour support")
+        assertEqual(RideBLEGeneratedProtocolV1.topographicContoursMinimumClientVersion, 28, "topographic contour negotiation requires protocol 28")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZoneMaximumFrameBytes, 132, "bounded zone frames fit the documented protected ATT write budget")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
@@ -17645,6 +17663,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
         assertEqual(DeviceBLEProtocol.tracksVisibilityMask, 0x800, "tracks use visibility bit 11")
         assertEqual(DeviceBLEProtocol.extendedVisibilityMarker, 0x1000, "extended visibility uses marker bit 12")
+        assertEqual(DeviceBLEProtocol.topographicContoursVisibilityMask, 0x2000, "topographic contours use visibility bit 13")
         assertEqual(DeviceBLEProtocol.defaultStreetWidth, 4, "street width defaults to 4 px")
         assertEqual(DeviceBLEProtocol.absoluteStreetWidth(fromLegacyBoost: 0), 4, "legacy zero boost migrates to the default absolute width")
         assertEqual(DeviceBLEProtocol.absoluteStreetWidth(fromLegacyBoost: 4), 8, "legacy boosts migrate relative to the default width")
@@ -22244,6 +22263,71 @@ struct NavigationProtocolTests {
         assertEqual(sentPackets.count, 1, "legacy firmware receives one visibility packet")
         assertEqual(readInt32LE(sentPackets[0], offset: 5), 0x14,
                     "legacy firmware folds tracks into paths and service roads into local streets")
+    }
+
+    static func testBLEManagerGatesTopographicContourVisibility() {
+        let manager = BLEManager()
+        let capabilities =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0, 0x40])
+        assert(manager.handleDeviceCapabilitiesNotification(capabilities),
+               "CAP2 topographic contour capability is accepted")
+        assert(manager.supportsTopographicContours,
+               "CAP2 bit 30 enables contour-aware transfer and settings")
+        let status = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+            """
+            {"enabled":true,"activeMapId":"topo-map","activeRendererFormat":4,"topographyProfileVersion":1,"topographyQualityMode":"standard-20m-v1","contourMinorIntervalM":20,"contourIndexIntervalM":100,"contourNoDataMillionths":0,"containsContours":true,"topographySourcePolicyReceiptPrefix":"abcdef012345","topographySectionHealthy":true}
+            """.utf8
+        )
+        assert(manager.handleMapTransferStatusNotification(status),
+               "format-4 active map status is accepted")
+        assert(manager.topographicContoursAvailable,
+               "capability and verified active-map health unlock contour settings")
+        assertEqual(manager.activeMapTopographyQualityMode,
+                    "standard-20m-v1",
+                    "active map exposes its contour quality mode")
+        assertEqual(manager.activeMapContourMinorIntervalM, 20,
+                    "active map exposes its minor contour interval")
+        assertEqual(manager.activeMapContourIndexIntervalM, 100,
+                    "active map exposes its index contour interval")
+        assert(manager.activeMapContainsContours,
+               "active map reports whether contour records exist")
+
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.showBuildings = false
+        manager.showGreenSpace = false
+        manager.showPaths = false
+        manager.showTracks = false
+        manager.showMajorRoads = false
+        manager.showLocalStreets = false
+        manager.showServiceRoads = false
+        manager.showWater = false
+        manager.showRailways = false
+        manager.showOtherAreas = false
+        manager.showRouteOverlay = false
+        manager.showCurrentPosition = false
+        manager.showContours = true
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+        manager.sendVisibilityMask(for: .map)
+        assertEqual(readInt32LE(sentPackets[0], offset: 5), 1 << 13,
+                    "healthy format-4 maps send the independent contour bit")
+
+        let legacyStatus = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) +
+            Data("{\"enabled\":true,\"activeMapId\":\"legacy\",\"activeRendererFormat\":3}".utf8)
+        assert(manager.handleMapTransferStatusNotification(legacyStatus),
+               "legacy active map status is accepted")
+        assert(!manager.topographicContoursAvailable,
+               "a non-topographic active map closes the contour gate")
+        sentPackets.removeAll()
+        manager.sendVisibilityMask(for: .map)
+        assertEqual(readInt32LE(sentPackets[0], offset: 5), 0,
+                    "saved contour preference cannot leak to an incompatible map")
     }
 
     static func testBLEManagerSendsDeviceSoundFallback() {

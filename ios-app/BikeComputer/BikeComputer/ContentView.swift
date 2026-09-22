@@ -2111,6 +2111,7 @@ struct ContentView: View {
             savedRoutePreview: visibleSavedRouteMapPreview?.overlay,
             savedRoutePreviewBottomPadding: savedRoutePreviewBottomPadding,
             isRouteCalculationActive: coordinator.routeCalculation.isCalculating,
+            topographyOverlay: offlineMapManager.topographyOverlay,
             offlineNavigationPolyline: coordinator.offlineRoutePolyline
         )
     }

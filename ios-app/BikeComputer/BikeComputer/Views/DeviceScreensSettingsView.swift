@@ -246,7 +246,9 @@ private struct DeviceScreenInstanceEditorView: View {
                 DeviceScreenMapProfileEditor(
                     profile: mapProfileBinding,
                     type: instance.type,
-                    supportsNavigationOrientation: bleManager.supportsMapNavigationOrientation
+                    supportsNavigationOrientation: bleManager.supportsMapNavigationOrientation,
+                    topographicContoursAvailable:
+                        bleManager.topographicContoursAvailable
                 )
             }
 
@@ -330,6 +332,7 @@ private struct DeviceScreenMapProfileEditor: View {
     @Binding var profile: DeviceScreenMapProfile
     let type: ConfiguredDeviceScreenType
     let supportsNavigationOrientation: Bool
+    let topographicContoursAvailable: Bool
 
     private let visibilityOptions: [(String, UInt32)] = [
         ("Buildings", 1 << 0), ("Green Space", 1 << 1),
@@ -354,6 +357,13 @@ private struct DeviceScreenMapProfileEditor: View {
             ForEach(visibilityOptions, id: \.1) { option in
                 Toggle(option.0, isOn: visibilityBinding(option.1))
             }
+            Toggle(
+                "Topographic Contours",
+                isOn: visibilityBinding(
+                    DeviceScreenMapProfile.contoursVisibilityMask
+                )
+            )
+            .disabled(!topographicContoursAvailable)
         }
 
         Section("Labels") {

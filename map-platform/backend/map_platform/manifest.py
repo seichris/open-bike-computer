@@ -9,13 +9,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .map_artifact_validation import summarize_fmb4_buildings, validate_renderer_artifacts
+from .map_artifact_validation import (
+    summarize_fmb_buildings,
+    validate_fmb5,
+    validate_renderer_artifacts,
+)
 from .map_buildings import (
     BUILDING_PROFILE_VERSION,
-    BUILDING_RENDERER_FORMAT_VERSION,
     manifest_building_summary,
 )
-from .map_labels import LABEL_RENDERER_FORMAT_VERSION, renderer_format_version
+from .map_labels import renderer_format_version
 from .models import MapJob
 from .preview import (
     DEFAULT_PREVIEW_HEIGHT,
@@ -23,6 +26,12 @@ from .preview import (
     DEFAULT_PREVIEW_TYPE,
     DEFAULT_PREVIEW_WIDTH,
     render_boundary_preview,
+)
+from .topography_artifacts import (
+    TOPOGRAPHY_PROFILE_VERSION,
+    TOPOGRAPHY_RENDERER_FORMAT_VERSION,
+    renderer_has_buildings,
+    renderer_has_labels,
 )
 
 ALLOWED_PACK_FILE_RE = re.compile(
@@ -183,6 +192,7 @@ def build_manifest(
     *,
     building_stats: dict[str, Any] | None = None,
     building_preprocessing: dict[str, Any] | None = None,
+    topography: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     map_id = job.map_id or stable_map_id(job)
     files = collect_map_files(map_root, map_id)
@@ -196,10 +206,7 @@ def build_manifest(
     format_version = renderer_format_version(job.request)
     font_asset_path = f"VECTMAP/{map_id}/assets/street-labels.fma"
     file_paths = {entry["path"] for entry in files}
-    if format_version in {
-        LABEL_RENDERER_FORMAT_VERSION,
-        BUILDING_RENDERER_FORMAT_VERSION,
-    }:
+    if renderer_has_labels(format_version):
         if font_asset_path not in file_paths:
             raise ValueError(
                 f"renderer target {format_version} map pack is missing street-labels.fma"
@@ -257,22 +264,20 @@ def build_manifest(
     build_identity = build_identity_manifest(job, building_preprocessing)
     if build_identity is not None:
         manifest["buildIdentity"] = build_identity
-    if format_version in {
-        LABEL_RENDERER_FORMAT_VERSION,
-        BUILDING_RENDERER_FORMAT_VERSION,
-    }:
+    if renderer_has_labels(format_version):
         labels = job.request["labels"]
         manifest["target"]["labelProfileVersion"] = labels["profileVersion"]
         manifest["target"]["labelLanguages"] = labels["preferredLanguages"]
         manifest["target"]["internationalFallback"] = labels["internationalFallback"]
-    if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+    if renderer_has_buildings(format_version):
         manifest["target"]["buildingProfileVersion"] = BUILDING_PROFILE_VERSION
-        artifact_summary = summarize_fmb4_buildings(
+        artifact_summary = summarize_fmb_buildings(
             [
                 map_root / entry["path"]
                 for entry in files
                 if entry["path"].endswith(".fmb")
-            ]
+            ],
+            format_version,
         )
         if building_stats is not None:
             reported_summary = manifest_building_summary(building_stats)
@@ -282,9 +287,138 @@ def build_manifest(
         if building_preprocessing is not None:
             manifest["buildingPreprocessing"] = building_preprocessing
     elif building_stats is not None:
-        raise ValueError("building statistics require renderer target 3")
+        raise ValueError("building statistics require renderer target 3 or 4")
     elif building_preprocessing is not None:
-        raise ValueError("building preprocessing metadata requires renderer target 3")
+        raise ValueError("building preprocessing metadata requires renderer target 3 or 4")
+    if format_version == TOPOGRAPHY_RENDERER_FORMAT_VERSION:
+        if not isinstance(topography, dict):
+            raise ValueError("renderer target 4 is missing topography metadata")
+        required = {
+            "profileVersion",
+            "qualityMode",
+            "minorIntervalM",
+            "indexIntervalM",
+            "recordCount",
+            "pointCount",
+            "noDataMillionths",
+            "sourcePolicySha256",
+            "intermediateSha256",
+            "attributionSha256",
+            "sources",
+            "inputs",
+            "sourcePixels",
+            "surfaceModel",
+            "horizontalCrs",
+            "verticalDatum",
+            "buildingCount",
+        }
+        if not required.issubset(topography):
+            raise ValueError("renderer target 4 topography metadata is incomplete")
+        if (
+            topography["profileVersion"] != TOPOGRAPHY_PROFILE_VERSION
+            or topography["surfaceModel"] != "dsm"
+            or topography["horizontalCrs"] != "EPSG:4326"
+            or topography["verticalDatum"] != "EPSG:3855"
+            or topography["qualityMode"]
+            not in {"standard-20m-v1", "coarse-50m-v1"}
+            or (topography["minorIntervalM"], topography["indexIntervalM"])
+            not in {(20, 100), (50, 250)}
+            or any(
+                not isinstance(topography[key], str)
+                or re.fullmatch(r"[0-9a-f]{64}", topography[key]) is None
+                for key in (
+                    "sourcePolicySha256",
+                    "intermediateSha256",
+                    "attributionSha256",
+                )
+            )
+        ):
+            raise ValueError("renderer target 4 topography identity is invalid")
+        block_metadata = [
+            validate_fmb5(map_root / entry["path"])
+            for entry in files
+            if entry["path"].endswith(".fmb")
+        ]
+        if (
+            sum(value.contour_records for value in block_metadata)
+            != topography["recordCount"]
+            or sum(value.contour_points for value in block_metadata)
+            != topography["pointCount"]
+            or sum(value.building_records for value in block_metadata)
+            != topography["buildingCount"]
+            or any(
+                value.contour_intervals
+                != (topography["minorIntervalM"], topography["indexIntervalM"])
+                for value in block_metadata
+            )
+        ):
+            raise ValueError("renderer target 4 summary differs from FMB v5 artifacts")
+        source_pixels = topography["sourcePixels"]
+        sources = topography["sources"]
+        inputs = topography["inputs"]
+        if (
+            not isinstance(source_pixels, dict)
+            or not isinstance(sources, list)
+            or not sources
+            or not isinstance(inputs, list)
+            or any(not isinstance(entry, dict) for entry in inputs)
+            or any(
+                not isinstance(source, dict)
+                or not isinstance(source.get("sourceId"), str)
+                for source in sources
+            )
+        ):
+            raise ValueError("renderer target 4 source provenance is invalid")
+        total_source_pixels = sum(source_pixels.values())
+        if (
+            any(type(value) is not int or value <= 0 for value in source_pixels.values())
+            or total_source_pixels <= 0
+        ):
+            raise ValueError("renderer target 4 source coverage is invalid")
+        manifest_sources = []
+        for source in sources:
+            source_id = source["sourceId"]
+            source_inputs = sorted(
+                (entry for entry in inputs if entry.get("sourceId") == source_id),
+                key=lambda entry: (entry.get("cell"), entry.get("sha256")),
+            )
+            if source_id not in source_pixels or not source_inputs:
+                raise ValueError("renderer target 4 source receipt is incomplete")
+            receipt_sha256 = hashlib.sha256(
+                (json.dumps(source_inputs, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+            ).hexdigest()
+            manifest_sources.append(
+                {
+                    "id": source_id,
+                    "release": source["datasetRelease"],
+                    "coverageMillionths": round(
+                        source_pixels[source_id] * 1_000_000 / total_source_pixels
+                    ),
+                    "surfaceModel": topography["surfaceModel"],
+                    "horizontalCrs": topography["horizontalCrs"],
+                    "verticalDatum": topography["verticalDatum"],
+                    "datasetReceiptSha256": receipt_sha256,
+                    "termsUrl": source["termsUrl"],
+                    "attributionUrl": source["attributionUrl"],
+                    "accessReviewedAt": source["accessReviewedAt"],
+                }
+            )
+        manifest["target"]["topographyProfileVersion"] = TOPOGRAPHY_PROFILE_VERSION
+        manifest["topography"] = {
+            "profileVersion": TOPOGRAPHY_PROFILE_VERSION,
+            "qualityMode": topography["qualityMode"],
+            "minorIntervalM": topography["minorIntervalM"],
+            "indexIntervalM": topography["indexIntervalM"],
+            "recordCount": topography["recordCount"],
+            "pointCount": topography["pointCount"],
+            "noDataMillionths": topography["noDataMillionths"],
+            "sourcePolicySha256": topography["sourcePolicySha256"],
+            "intermediateSha256": topography["intermediateSha256"],
+            "attributionSha256": topography["attributionSha256"],
+            "sources": manifest_sources,
+        }
+    elif topography is not None:
+        raise ValueError("topography metadata requires renderer target 4")
     return manifest
 
 
@@ -299,7 +433,7 @@ def write_pack_archive(map_root: Path, manifest: dict[str, Any], archive_path: P
     manifest_path = map_root / "manifest.json"
     manifest_path.write_text(json.dumps(archive_manifest, indent=2, sort_keys=True) + "\n")
     attribution_path = map_root / "ATTRIBUTION.txt"
-    attribution_path.write_text(
+    attribution_text = (
         "Map data from OpenStreetMap contributors. OpenStreetMap data is available under the ODbL.\n"
     )
     license_dir = map_root / "LICENSES"
@@ -307,6 +441,17 @@ def write_pack_archive(map_root: Path, manifest: dict[str, Any], archive_path: P
     (license_dir / "OpenStreetMap-ODbL.txt").write_text(
         "OpenStreetMap data is licensed under the Open Data Commons Open Database License (ODbL).\n"
     )
+    elevation_license = license_dir / "Elevation-Sources.txt"
+    if "topography" in manifest:
+        if not elevation_license.is_file():
+            raise ValueError("topographic map is missing elevation source notices")
+        elevation_notice = elevation_license.read_bytes()
+        if hashlib.sha256(elevation_notice).hexdigest() != manifest["topography"]["attributionSha256"]:
+            raise ValueError("elevation source notices differ from the manifest")
+        attribution_text += "\n" + elevation_notice.decode("utf-8")
+    elif elevation_license.exists():
+        raise ValueError("non-topographic map contains elevation source notices")
+    attribution_path.write_text(attribution_text)
 
     archived_paths = {
         "manifest.json",
@@ -314,6 +459,8 @@ def write_pack_archive(map_root: Path, manifest: dict[str, Any], archive_path: P
         "LICENSES/OpenStreetMap-ODbL.txt",
         *(file["path"] for file in manifest["files"]),
     }
+    if "topography" in manifest:
+        archived_paths.add("LICENSES/Elevation-Sources.txt")
     if isinstance(preview, dict) and preview.get("path") == DEFAULT_PREVIEW_PATH:
         archived_paths.add(DEFAULT_PREVIEW_PATH)
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:

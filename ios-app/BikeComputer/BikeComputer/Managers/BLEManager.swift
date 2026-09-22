@@ -431,6 +431,8 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.rendererBenchmarkSampleFeature
     static let watchGPSMotionEvidenceV1CapabilityMask =
         RideBLEGeneratedProtocolV1.watchGpsMotionEvidenceV1Feature
+    static let topographicContoursCapabilityMask =
+        RideBLEGeneratedProtocolV1.topographicContoursFeature
     static let deviceCapabilitiesVersion =
         RideBLEGeneratedProtocolV1.currentClientVersion
     static let workoutTelemetryFrameLength = 16
@@ -456,6 +458,7 @@ enum DeviceBLEProtocol {
     static let serviceRoadsVisibilityMask: Int32 = 1 << 10
     static let tracksVisibilityMask: Int32 = 1 << 11
     static let extendedVisibilityMarker: Int32 = 1 << 12
+    static let contoursVisibilityMask: Int32 = 1 << 13
     static let defaultStreetWidth: Int32 = 4
 
     static let brightnessSettingID: UInt8 = 12
@@ -945,6 +948,7 @@ private enum MapPlusNavigationDefaults {
     static let showWater = true
     static let showRailways = false
     static let showOtherAreas = false
+    static let showContours = false
 }
 
 private final class WeakBLEManagerSendableBox: @unchecked Sendable {
@@ -1006,6 +1010,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsStreetLabels: Bool = false
     @Published private(set) var supports3DBuildings: Bool = false
     @Published private(set) var supportsMapNavigationOrientation = false
+    @Published private(set) var supportsTopographicContours = false
     @Published private(set) var supportsExplicitInvalidGPSHeading: Bool = false
     @Published private(set) var supportsScopedWatchController: Bool = false
     @Published private(set) var watchControllerIDHex: String?
@@ -1081,6 +1086,20 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeMapLabelProfileVersion: Int?
     @Published private(set) var activeMapLabelLanguages: [String] = []
     @Published private(set) var activeMapFontAssetHealthy: Bool = false
+    @Published private(set) var activeMapTopographyProfileVersion: Int?
+    @Published private(set) var activeMapTopographySectionHealthy = false
+    @Published private(set) var activeMapTopographyQualityMode = ""
+    @Published private(set) var activeMapContourMinorIntervalM: Int?
+    @Published private(set) var activeMapContourIndexIntervalM: Int?
+    @Published private(set) var activeMapContourNoDataMillionths: Int?
+    @Published private(set) var activeMapContainsContours = false
+    @Published private(set) var activeMapTopographySourcePolicyReceiptPrefix = ""
+    var topographicContoursAvailable: Bool {
+        supportsTopographicContours &&
+            activeMapRendererFormat == 4 &&
+            activeMapTopographyProfileVersion == 1 &&
+            activeMapTopographySectionHealthy
+    }
     @Published var mapTransferActivationStatus: String = "idle"
     @Published var mapTransferActivationSequence: UInt32?
     @Published var mapTransferActivationSessionId: String = ""
@@ -1198,6 +1217,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var showWater: Bool = true
     @Published var showRailways: Bool = true
     @Published var showOtherAreas: Bool = true
+    @Published var showContours = false
     @Published var mapPlusNavigationShowBuildings = MapPlusNavigationDefaults.showBuildings {
         didSet {
             if !isLoadingSettings && oldValue != mapPlusNavigationShowBuildings {
@@ -1222,6 +1242,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationShowWater = MapPlusNavigationDefaults.showWater
     @Published var mapPlusNavigationShowRailways = MapPlusNavigationDefaults.showRailways
     @Published var mapPlusNavigationShowOtherAreas = MapPlusNavigationDefaults.showOtherAreas
+    @Published var mapPlusNavigationShowContours = MapPlusNavigationDefaults.showContours
     @Published var showRouteOverlay: Bool = true
     @Published var showCurrentPosition: Bool = true
     
@@ -1516,6 +1537,7 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationShowWater = "mapPlusNavigationSettings.showWater"
         static let mapPlusNavigationShowRailways = "mapPlusNavigationSettings.showRailways"
         static let mapPlusNavigationShowOtherAreas = "mapPlusNavigationSettings.showOtherAreas"
+        static let mapPlusNavigationShowContours = "mapPlusNavigationSettings.showContours"
         static let mapPlusNavigationProfileMigrated = "mapPlusNavigationSettings.migrated.v1"
         static let recommendedMapDefaultsMigrated = "mapSettings.recommendedDefaults.v2"
         static let streetLabelDefaultsMigrated = "streetLabels.defaults.v1"
@@ -1547,6 +1569,7 @@ class BLEManager: NSObject, ObservableObject {
         static let showWater = "mapSettings.showWater"
         static let showRailways = "mapSettings.showRailways"
         static let showOtherAreas = "mapSettings.showOtherAreas"
+        static let showContours = "mapSettings.showContours"
         static let showRouteOverlay = "mapSettings.showRouteOverlay"
         static let showCurrentPosition = "mapSettings.showCurrentPosition"
         static let legacyShowNature = "mapSettings.showNature"
@@ -1807,6 +1830,7 @@ class BLEManager: NSObject, ObservableObject {
         showWater = defaults.object(forKey: SettingsKeys.showWater) as? Bool ?? legacyNature
         showRailways = defaults.object(forKey: SettingsKeys.showRailways) as? Bool ?? true
         showOtherAreas = defaults.object(forKey: SettingsKeys.showOtherAreas) as? Bool ?? true
+        showContours = defaults.object(forKey: SettingsKeys.showContours) as? Bool ?? false
         let persistedMapProfileKeys = [
             SettingsKeys.minPolygonSize,
             SettingsKeys.detailLevel,
@@ -1864,6 +1888,7 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationShowWater = showWater
             mapPlusNavigationShowRailways = showRailways
             mapPlusNavigationShowOtherAreas = showOtherAreas
+            mapPlusNavigationShowContours = showContours
         } else if !shouldMigrateMapPlusNavigationProfile {
             mapPlusNavigationMinPolygonSize = defaults.double(
                 forKey: SettingsKeys.mapPlusNavigationMinPolygonSize
@@ -1925,6 +1950,9 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationShowOtherAreas = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowOtherAreas
             ) as? Bool ?? MapPlusNavigationDefaults.showOtherAreas
+            mapPlusNavigationShowContours = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowContours
+            ) as? Bool ?? MapPlusNavigationDefaults.showContours
         }
         mapPlusNavigationBirdsEyeViewEnabled = defaults.object(
             forKey: SettingsKeys.mapPlusNavigationBirdsEyeViewEnabled
@@ -2091,6 +2119,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(showWater, forKey: SettingsKeys.showWater)
         defaults.set(showRailways, forKey: SettingsKeys.showRailways)
         defaults.set(showOtherAreas, forKey: SettingsKeys.showOtherAreas)
+        defaults.set(showContours, forKey: SettingsKeys.showContours)
         defaults.set(mapPlusNavigationShowBuildings, forKey: SettingsKeys.mapPlusNavigationShowBuildings)
         defaults.set(mapPlusNavigationShowGreenSpace, forKey: SettingsKeys.mapPlusNavigationShowGreenSpace)
         defaults.set(mapPlusNavigationShowPaths, forKey: SettingsKeys.mapPlusNavigationShowPaths)
@@ -2101,6 +2130,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapPlusNavigationShowWater, forKey: SettingsKeys.mapPlusNavigationShowWater)
         defaults.set(mapPlusNavigationShowRailways, forKey: SettingsKeys.mapPlusNavigationShowRailways)
         defaults.set(mapPlusNavigationShowOtherAreas, forKey: SettingsKeys.mapPlusNavigationShowOtherAreas)
+        defaults.set(mapPlusNavigationShowContours, forKey: SettingsKeys.mapPlusNavigationShowContours)
         defaults.set(true, forKey: SettingsKeys.mapPlusNavigationProfileMigrated)
         defaults.set(showRouteOverlay, forKey: SettingsKeys.showRouteOverlay)
         defaults.set(showCurrentPosition, forKey: SettingsKeys.showCurrentPosition)
@@ -5288,6 +5318,7 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationShowWater = showWater
             mapPlusNavigationShowRailways = showRailways
             mapPlusNavigationShowOtherAreas = showOtherAreas
+            mapPlusNavigationShowContours = showContours
         case 9:
             mapPlusNavigationStreetLineWidth = streetLineWidth
         case 10:
@@ -5408,6 +5439,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsStreetLabels = false
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
+        supportsTopographicContours = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -5470,6 +5502,9 @@ class BLEManager: NSObject, ObservableObject {
                 if showTracks { mask |= DeviceBLEProtocol.tracksVisibilityMask }
                 mask |= DeviceBLEProtocol.extendedVisibilityMarker
             }
+            if topographicContoursAvailable && showContours {
+                mask |= DeviceBLEProtocol.contoursVisibilityMask
+            }
             settingID = 8
         case .mapPlusNavigation:
             if mapPlusNavigationShowBuildings { mask |= (1 << 0) }
@@ -5484,6 +5519,9 @@ class BLEManager: NSObject, ObservableObject {
                 if mapPlusNavigationShowServiceRoads { mask |= DeviceBLEProtocol.serviceRoadsVisibilityMask }
                 if mapPlusNavigationShowTracks { mask |= DeviceBLEProtocol.tracksVisibilityMask }
                 mask |= DeviceBLEProtocol.extendedVisibilityMarker
+            }
+            if topographicContoursAvailable && mapPlusNavigationShowContours {
+                mask |= DeviceBLEProtocol.contoursVisibilityMask
             }
             settingID = DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
         case .navigation, .rideStats, .batteryStatus, .worldRadio:
@@ -6589,6 +6627,14 @@ class BLEManager: NSObject, ObservableObject {
         activeMapLabelProfileVersion = nil
         activeMapLabelLanguages = []
         activeMapFontAssetHealthy = false
+        activeMapTopographyProfileVersion = nil
+        activeMapTopographySectionHealthy = false
+        activeMapTopographyQualityMode = ""
+        activeMapContourMinorIntervalM = nil
+        activeMapContourIndexIntervalM = nil
+        activeMapContourNoDataMillionths = nil
+        activeMapContainsContours = false
+        activeMapTopographySourcePolicyReceiptPrefix = ""
         mapTransferActivationStatus = "idle"
         mapTransferActivationSequence = nil
         mapTransferActivationSessionId = ""
@@ -6667,6 +6713,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsStreetLabels = false
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
+        supportsTopographicContours = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -9967,6 +10014,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsStreetLabels = false
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
+        supportsTopographicContours = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -10118,6 +10166,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.streetLabelsCapabilityMask != 0
         let has3DBuildings =
             flags & DeviceBLEProtocol.osm3DBuildingsCapabilityMask != 0
+        let hasTopographicContours =
+            flags & DeviceBLEProtocol.topographicContoursCapabilityMask != 0
         let hasRideAutomation =
             flags & DeviceBLEProtocol.rideAutomationCapabilityMask != 0
         let hasExplicitInvalidGPSHeading =
@@ -10221,6 +10271,11 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             hasSentMapNavigationProfileForConnection = false
         }
         if hasReceivedDeviceCapabilities &&
+            supportsTopographicContours != hasTopographicContours {
+            hasSentMapProfileForConnection = false
+            hasSentMapNavigationProfileForConnection = false
+        }
+        if hasReceivedDeviceCapabilities &&
             (supportsBatteryStatusScreen != hasBatteryStatusScreen ||
              supportsWorldRadio != hasWorldRadio) {
             hasSentScreenSettingsForConnection = false
@@ -10251,6 +10306,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supports3DBuildings = has3DBuildings
         supportsMapNavigationOrientation = flags &
             RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature != 0
+        supportsTopographicContours = hasTopographicContours
         supportsRideAutomation = hasRideAutomation
         supportsExplicitInvalidGPSHeading = hasExplicitInvalidGPSHeading
         supportsScopedWatchController = hasScopedWatchController
@@ -10968,6 +11024,21 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             (object["labelProfileVersion"] as? NSNumber)?.intValue
         activeMapLabelLanguages = object["labelLanguages"] as? [String] ?? []
         activeMapFontAssetHealthy = object["fontAssetHealthy"] as? Bool ?? false
+        activeMapTopographyProfileVersion =
+            (object["topographyProfileVersion"] as? NSNumber)?.intValue
+        activeMapTopographySectionHealthy =
+            object["topographySectionHealthy"] as? Bool ?? false
+        activeMapTopographyQualityMode =
+            object["topographyQualityMode"] as? String ?? ""
+        activeMapContourMinorIntervalM =
+            (object["contourMinorIntervalM"] as? NSNumber)?.intValue
+        activeMapContourIndexIntervalM =
+            (object["contourIndexIntervalM"] as? NSNumber)?.intValue
+        activeMapContourNoDataMillionths =
+            (object["contourNoDataMillionths"] as? NSNumber)?.intValue
+        activeMapContainsContours = object["containsContours"] as? Bool ?? false
+        activeMapTopographySourcePolicyReceiptPrefix =
+            object["topographySourcePolicyReceiptPrefix"] as? String ?? ""
         if let activation = object["activation"] as? [String: Any] {
             mapTransferActivationStatus = activation["status"] as? String ?? "idle"
             mapTransferActivationSequence =

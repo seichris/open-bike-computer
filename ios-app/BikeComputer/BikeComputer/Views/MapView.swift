@@ -466,7 +466,11 @@ struct MapViewContainer: UIViewRepresentable {
 
         func updateTopographyOverlay(_ overlay: MKTileOverlay?, on mapView: MKMapView) {
             guard displayedTopographyOverlay !== overlay else { return }
-            if let displayedTopographyOverlay { mapView.removeOverlay(displayedTopographyOverlay) }
+            if let displayedTopographyOverlay {
+                (displayedTopographyOverlay as? BicinoTopographyTileOverlay)?
+                    .cancelPendingLoads()
+                mapView.removeOverlay(displayedTopographyOverlay)
+            }
             displayedTopographyOverlay = overlay
             if let overlay { mapView.insertOverlay(overlay, at: 0, level: .aboveRoads) }
             // Navigation and saved-route overlays retain their own ownership.

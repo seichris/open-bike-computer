@@ -86,6 +86,11 @@ int main() {
 
   Document document = makeDocument();
   assert(validate(document) == ValidationError::None);
+  assert((document.instances[2].mapProfile.visibilityMask &
+          map_profile_protocol::VISIBILITY_CONTOURS) == 0);
+  document.instances[2].mapProfile.visibilityMask |=
+      map_profile_protocol::VISIBILITY_CONTOURS;
+  assert(validate(document) == ValidationError::None);
 
   std::array<uint8_t, MAX_DOCUMENT_BYTES> encoded{};
   const std::size_t size =
@@ -96,6 +101,8 @@ int main() {
   Document decoded{};
   assert(decodeDocument(encoded.data(), size, decoded) ==
          DecodeResult::Complete);
+  assert((decoded.instances[2].mapProfile.visibilityMask &
+          map_profile_protocol::VISIBILITY_CONTOURS) != 0);
   std::array<uint8_t, MAX_DOCUMENT_BYTES> reencoded{};
   const std::size_t reencodedSize =
       encodeDocument(decoded, reencoded.data(), reencoded.size());

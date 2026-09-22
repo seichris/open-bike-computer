@@ -28,9 +28,12 @@ from .artifacts import (
     BIKE_MAP_STREAM_MEDIA_TYPE,
     ZIP_MEDIA_TYPE,
     ZIP_STORED_FORMAT,
+    TOPOGRAPHY_COMPANION_FORMAT,
+    TOPOGRAPHY_COMPANION_MEDIA_TYPE,
     ArtifactRecord,
     map_stream_object_key,
     sha256_file,
+    topography_companion_object_key,
     zip_object_key,
 )
 from .manifest import (
@@ -58,6 +61,17 @@ from .map_buildings import (
     BUILDING_RENDERER_FORMAT_VERSION,
     load_building_calibration_window,
 )
+from .topography_artifacts import (
+    TOPOGRAPHY_RENDERER_FORMAT_VERSION,
+    renderer_has_buildings,
+    renderer_has_labels,
+    vector_renderer_format_version,
+)
+from .topography_cache import ElevationCache
+from .topography_geometry import compile_contours
+from .topography_pack import assemble_topographic_pack
+from .topography_pipeline import contour_sample
+from .topography_sources import load_topography_source_policy
 from .building_scope import (
     BuildingScopeError,
     GlobalBuildingPlan,
@@ -1699,6 +1713,7 @@ class MapBuildPipeline:
         building_scope_mode: str = "shadow",
         building_block_workers: int = 4,
         building_task_store: BuildingTaskStore | None = None,
+        topography_builder: Callable[..., tuple[dict[str, Any], Path]] | None = None,
     ):
         self.paths = paths
         self.runner = runner or CommandRunner()
@@ -1709,6 +1724,7 @@ class MapBuildPipeline:
         self.producer_image_digest = producer_image_digest
         self.source_preview_geometry_resolver = source_preview_geometry_resolver
         self.building_task_store = building_task_store
+        self.topography_builder = topography_builder
         self._active_task_command_metrics_cursor: int | None = None
         if building_scope_mode not in {
             "legacy",
@@ -1882,13 +1898,13 @@ class MapBuildPipeline:
         format_version = renderer_format_version(job.request)
         processing_bounds = aligned_processing_bounds(
             job,
-            complete_blocks=format_version == BUILDING_RENDERER_FORMAT_VERSION,
+            complete_blocks=renderer_has_buildings(format_version),
         )
         scope_plan: ScopePlan | None = None
         scope_diagnostics: dict[str, Any] | None = None
         planned_scope_marker: dict[str, Any] | None = None
         selected_scope = False
-        if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+        if renderer_has_buildings(format_version):
             calibration = load_building_calibration_window(
                 self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"
             )
@@ -2134,7 +2150,7 @@ class MapBuildPipeline:
         source_extraction_started = time.perf_counter()
         source_extraction_metrics: dict[str, Any] | None = None
         try:
-            if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+            if renderer_has_buildings(format_version):
                 extract_kwargs = {"bounds": source_bounds, "force_bounds": True}
                 if selected_scope:
                     extract_kwargs["scope_plan"] = scope_plan
@@ -2487,7 +2503,7 @@ class MapBuildPipeline:
             )
         feature_kwargs = {"bounds": processing_bounds, "on_progress": on_progress}
         if (
-            format_version == BUILDING_RENDERER_FORMAT_VERSION
+            renderer_has_buildings(format_version)
             and on_phase_progress is not None
         ):
             feature_kwargs["on_phase_progress"] = on_phase_progress
@@ -2602,6 +2618,8 @@ class MapBuildPipeline:
             artifact_publication_lease=artifact_publication_lease,
             on_artifact_pending=on_artifact_pending,
             build_metrics=label_metrics,
+            on_phase_progress=on_phase_progress,
+            cancellation_check=cancellation_check,
         )
 
     def build_chunked(
@@ -3664,10 +3682,7 @@ class MapBuildPipeline:
         return self.building_task_store.workload_receipt(task_id)
 
     def uses_selected_preprocessing(self, job: MapJob) -> bool:
-        if (
-            renderer_format_version(job.request)
-            != BUILDING_RENDERER_FORMAT_VERSION
-        ):
+        if not renderer_has_buildings(renderer_format_version(job.request)):
             return False
         frozen_mode = job.building_preprocessing_mode
         if frozen_mode is None:
@@ -3686,7 +3701,7 @@ class MapBuildPipeline:
     def uses_chunked_preprocessing(self, job: MapJob) -> bool:
         """Return whether this target-3 job must use the durable chunk path."""
 
-        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+        if not renderer_has_buildings(renderer_format_version(job.request)):
             return False
         return self.building_scope_mode in {"chunked_allowlist", "chunked"}
 
@@ -4013,7 +4028,7 @@ class MapBuildPipeline:
         It is opt-in while the parent worker remains on the monolithic path.
         """
 
-        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+        if not renderer_has_buildings(renderer_format_version(job.request)):
             raise BuildingScopeError(
                 "building_scope_policy_invalid",
                 "building chunk assembly requires renderer format 3",
@@ -4242,6 +4257,8 @@ class MapBuildPipeline:
             max_archive_bytes=MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES,
             validate_final_artifact=True,
             on_archive_validated=mark_artifact_publication,
+            on_phase_progress=on_phase_progress,
+            cancellation_check=cancellation_check,
         )
         return result
 
@@ -4547,7 +4564,7 @@ class MapBuildPipeline:
         self._active_task_command_metrics_cursor = (
             self._command_execution_metrics_cursor()
         )
-        if renderer_format_version(job.request) != BUILDING_RENDERER_FORMAT_VERSION:
+        if not renderer_has_buildings(renderer_format_version(job.request)):
             raise BuildingScopeError(
                 "building_scope_policy_invalid",
                 "building chunks require renderer format 3",
@@ -4904,6 +4921,8 @@ class MapBuildPipeline:
         cancellation_check=None,
     ) -> MapReuseKeys | None:
         format_version = renderer_format_version(job.request)
+        if format_version == TOPOGRAPHY_RENDERER_FORMAT_VERSION:
+            return None
         selected_target_three = self.uses_selected_preprocessing(job)
         producer_identity_available = bool(
             re.fullmatch(r"[0-9a-f]{64}", self.producer_build_sha256 or "")
@@ -4995,8 +5014,7 @@ class MapBuildPipeline:
             )
         building_identity = None
         if (
-            renderer_format_version(job.request)
-            == BUILDING_RENDERER_FORMAT_VERSION
+            renderer_has_buildings(renderer_format_version(job.request))
             and self.building_scope_mode
             in {"selected", "chunked_allowlist", "chunked"}
         ):
@@ -5329,6 +5347,8 @@ class MapBuildPipeline:
                 artifact_publication_lease=artifact_publication_lease,
                 on_artifact_pending=on_artifact_pending,
                 build_metrics=build_metrics,
+                on_phase_progress=on_phase_progress,
+                cancellation_check=cancellation_check,
             )
         except Exception:
             job.build_cache_key = original_build_cache_key
@@ -5572,6 +5592,115 @@ class MapBuildPipeline:
             },
         }
 
+    @staticmethod
+    def _topography_selection(job: MapJob) -> dict[str, Any]:
+        if job.geometry.geometry is not None:
+            return job.geometry.geometry
+        bounds = job.geometry.bounds
+        return {
+            "type": "Polygon",
+            "coordinates": [[
+                [bounds.min_lon, bounds.min_lat],
+                [bounds.max_lon, bounds.min_lat],
+                [bounds.max_lon, bounds.max_lat],
+                [bounds.min_lon, bounds.max_lat],
+                [bounds.min_lon, bounds.min_lat],
+            ]],
+        }
+
+    @staticmethod
+    def _development_topography_attribution(sample: Mapping[str, Any]) -> bytes:
+        lines = [
+            "Bicino development topography source record.",
+            "These sources are not yet approved for production redistribution.",
+            "Contours describe a surface model and are not surveyed bare-earth elevations.",
+            "",
+        ]
+        sources = sample.get("sources")
+        if not isinstance(sources, list) or not sources:
+            raise ValueError("topography sample has no contributing sources")
+        for source in sources:
+            if not isinstance(source, Mapping):
+                raise ValueError("topography source attribution is invalid")
+            lines.extend(
+                [
+                    f"Source: {source.get('sourceId')}",
+                    f"Dataset release: {source.get('datasetRelease')}",
+                    f"Terms: {source.get('termsUrl')}",
+                    f"Attribution information: {source.get('attributionUrl')}",
+                    "",
+                ]
+            )
+        return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
+
+    def _build_topography_pair(
+        self,
+        job: MapJob,
+        pack_root: Path,
+        job_dir: Path,
+        cancellation_check=None,
+    ) -> tuple[dict[str, Any], Path]:
+        def cancel() -> None:
+            if cancellation_check is not None and cancellation_check():
+                raise CommandExecutionCancelled(
+                    "topography generation was cancelled"
+                )
+
+        policy = load_topography_source_policy(self.paths.repo_root)
+        cache = ElevationCache(
+            self.paths.work_root.parent / "topography-cache",
+            cancellation_check=cancel,
+        )
+        sample = contour_sample(
+            policy,
+            cache,
+            job.geometry.bounds.to_list(),
+            maximum_tiles=256,
+        )
+        compiled = compile_contours(
+            sample,
+            self._topography_selection(job),
+            corridor_width_m=job.geometry.corridor_width_m or 0,
+            cancel=cancel,
+        )
+        pair_root = job_dir / "topography-pair"
+        receipt = assemble_topographic_pack(
+            pack_root,
+            pair_root,
+            job.map_id or stable_map_id(job),
+            compiled,
+            sample,
+            self._development_topography_attribution(sample),
+            cancel=cancel,
+        )
+        generated_vectmap = pair_root / "device" / "VECTMAP"
+        current_vectmap = pack_root / "VECTMAP"
+        if not generated_vectmap.is_dir() or generated_vectmap.is_symlink():
+            raise RuntimeError("topography pair is missing its device map")
+        shutil.rmtree(current_vectmap)
+        os.replace(generated_vectmap, current_vectmap)
+        notice = pair_root / "ATTRIBUTION.txt"
+        license_dir = pack_root / "LICENSES"
+        license_dir.mkdir(parents=True, exist_ok=True)
+        (license_dir / "Elevation-Sources.txt").write_bytes(notice.read_bytes())
+        companion = pair_root / receipt["companion"]["filename"]
+        return receipt, companion
+
+    def _prepare_topography(
+        self,
+        job: MapJob,
+        pack_root: Path,
+        job_dir: Path,
+        cancellation_check=None,
+    ) -> tuple[dict[str, Any], Path]:
+        builder = self.topography_builder or self._build_topography_pair
+        return builder(
+            job,
+            pack_root,
+            job_dir,
+            cancellation_check=cancellation_check,
+        )
+
     def _package_map(
         self,
         job: MapJob,
@@ -5584,6 +5713,8 @@ class MapBuildPipeline:
         max_archive_bytes: int | None = None,
         validate_final_artifact: bool = False,
         on_archive_validated=None,
+        on_phase_progress=None,
+        cancellation_check=None,
     ) -> MapBuildResult:
         map_id = job.map_id or stable_map_id(job)
         job.map_id = map_id
@@ -5591,6 +5722,40 @@ class MapBuildPipeline:
         packaging_started = time.perf_counter()
         self._resolve_source_preview_geometry(job)
         metrics: dict[str, Any] = dict(build_metrics or {})
+        topography_receipt: dict[str, Any] | None = None
+        companion_path: Path | None = None
+        if renderer_format_version(job.request) == TOPOGRAPHY_RENDERER_FORMAT_VERSION:
+            self._emit_phase_progress(
+                on_phase_progress,
+                phase="topography_generation",
+                unit="artifact_pairs",
+                completed=0,
+                total=1,
+                indeterminate=True,
+            )
+            topography_started = time.perf_counter()
+            topography_receipt, companion_path = self._prepare_topography(
+                job,
+                pack_root,
+                job_dir,
+                cancellation_check=cancellation_check,
+            )
+            metrics["topographyGenerationSeconds"] = (
+                time.perf_counter() - topography_started
+            )
+            metrics["topography"] = {
+                key: value
+                for key, value in topography_receipt.items()
+                if key not in {"inputs", "files", "sources"}
+            }
+            self._emit_phase_progress(
+                on_phase_progress,
+                phase="topography_generation",
+                unit="artifact_pairs",
+                completed=1,
+                total=1,
+                indeterminate=False,
+            )
         building_preprocessing_summary = self._building_preprocessing_summary(
             metrics.get("buildingPreprocessing")
         )
@@ -5600,6 +5765,7 @@ class MapBuildPipeline:
             self._pipeline_metadata(),
             building_stats=metrics.get("buildingBuild"),
             building_preprocessing=building_preprocessing_summary,
+            topography=topography_receipt,
         )
         reserved_preview_sha256 = getattr(
             job, "_reserved_preview_sha256", None
@@ -5620,14 +5786,11 @@ class MapBuildPipeline:
                 )
         artifacts: list[ArtifactRecord] = []
         packaging_seconds = time.perf_counter() - packaging_started
-        if renderer_format_version(job.request) in {
-            LABEL_RENDERER_FORMAT_VERSION,
-            BUILDING_RENDERER_FORMAT_VERSION,
-        }:
+        if renderer_has_labels(renderer_format_version(job.request)):
             label_phase_timings = metrics.setdefault("labelPhaseTimings", {})
             if isinstance(label_phase_timings, dict):
                 label_phase_timings["labelPackaging"] = packaging_seconds
-        if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION:
+        if renderer_has_buildings(renderer_format_version(job.request)):
             building_phase_timings = metrics.setdefault("buildingPhaseTimings", {})
             if isinstance(building_phase_timings, dict):
                 building_phase_timings["packaging"] = packaging_seconds
@@ -5677,6 +5840,58 @@ class MapBuildPipeline:
             metrics["zipStorageSeconds"] = time.perf_counter() - storage_started
             artifacts.append(zip_record)
 
+            if topography_receipt is not None:
+                if companion_path is None or not companion_path.is_file():
+                    raise RuntimeError("topography companion is unavailable")
+                companion_metadata = topography_receipt.get("companion")
+                if not isinstance(companion_metadata, dict):
+                    raise RuntimeError("topography companion receipt is invalid")
+                companion_sha256 = sha256_file(companion_path)
+                if (
+                    companion_metadata.get("filename") != companion_path.name
+                    or companion_metadata.get("bytes") != companion_path.stat().st_size
+                    or companion_metadata.get("sha256") != companion_sha256
+                    or zip_record.manifest_receipt is None
+                ):
+                    raise RuntimeError("topography companion differs from its receipt")
+                companion_key = topography_companion_object_key(
+                    map_id,
+                    zip_record.manifest_receipt,
+                    companion_sha256,
+                )
+                companion_record = ArtifactRecord(
+                    format=TOPOGRAPHY_COMPANION_FORMAT,
+                    media_type=TOPOGRAPHY_COMPANION_MEDIA_TYPE,
+                    filename=companion_path.name,
+                    object_key=companion_key,
+                    bytes=companion_path.stat().st_size,
+                    sha256=companion_sha256,
+                    manifest_receipt=zip_record.manifest_receipt,
+                    map_content_receipt=zip_record.manifest_receipt,
+                    intermediate_sha256=topography_receipt["intermediateSha256"],
+                    source_policy_sha256=topography_receipt["sourcePolicySha256"],
+                    attribution_sha256=topography_receipt["attributionSha256"],
+                )
+                lease = (
+                    artifact_publication_lease(companion_key)
+                    if artifact_publication_lease
+                    else nullcontext()
+                )
+                with lease:
+                    if on_artifact_pending:
+                        on_artifact_pending(companion_key)
+                    storage_started = time.perf_counter()
+                    self.artifact_store.put(
+                        companion_path,
+                        companion_key,
+                        sha256=companion_sha256,
+                        media_type=TOPOGRAPHY_COMPANION_MEDIA_TYPE,
+                    )
+                metrics["topographyStorageSeconds"] = (
+                    time.perf_counter() - storage_started
+                )
+                artifacts.append(companion_record)
+
         if self.map_signer is not None:
             stream_path = job_dir / f"{map_id}.bmap"
             stream_manifest = deepcopy(manifest)
@@ -5717,10 +5932,7 @@ class MapBuildPipeline:
             metrics.update(
                 {f"stream{name[0].upper()}{name[1:]}": value for name, value in stream_build.timings.items()}
             )
-            if renderer_format_version(job.request) in {
-                LABEL_RENDERER_FORMAT_VERSION,
-                BUILDING_RENDERER_FORMAT_VERSION,
-            }:
+            if renderer_has_labels(renderer_format_version(job.request)):
                 label_phase_timings = metrics.setdefault("labelPhaseTimings", {})
                 if isinstance(label_phase_timings, dict):
                     label_phase_timings["labelSigning"] = stream_build.timings[
@@ -6318,7 +6530,7 @@ class MapBuildPipeline:
         extraction_metrics: dict[str, Any] = {"schemaVersion": 1}
         extraction_option = (
             ["--option=types=multipolygon,building"]
-            if renderer_format_version(job.request) == BUILDING_RENDERER_FORMAT_VERSION
+            if renderer_has_buildings(renderer_format_version(job.request))
             else []
         )
         if scope_plan is not None:
@@ -7198,11 +7410,10 @@ class MapBuildPipeline:
             str(raw_output_dir),
         ]
         format_version = renderer_format_version(job.request)
-        args.extend(["--renderer-format", str(format_version)])
-        if format_version in {
-            LABEL_RENDERER_FORMAT_VERSION,
-            BUILDING_RENDERER_FORMAT_VERSION,
-        }:
+        args.extend(
+            ["--renderer-format", str(vector_renderer_format_version(format_version))]
+        )
+        if renderer_has_labels(format_version):
             labels = job.request["labels"]
             for language in labels["preferredLanguages"]:
                 args.extend(["--preferred-language", language])
@@ -7236,7 +7447,7 @@ class MapBuildPipeline:
                 "cache-only building assembly requires a block cache identity"
             )
         if (
-            format_version == BUILDING_RENDERER_FORMAT_VERSION
+            renderer_has_buildings(format_version)
             and job.geometry.geometry is not None
             and job.geometry.mode.value in {"custom_polygon", "route_corridor"}
         ):
@@ -7401,10 +7612,7 @@ class MapBuildPipeline:
         *,
         require_building_scope: bool = False,
     ) -> dict[str, Any]:
-        if format_version not in {
-            LABEL_RENDERER_FORMAT_VERSION,
-            BUILDING_RENDERER_FORMAT_VERSION,
-        }:
+        if not renderer_has_labels(format_version):
             return {}
         if stats is None:
             raise RuntimeError("label-aware extraction did not emit LABEL_STATS")
@@ -7422,7 +7630,7 @@ class MapBuildPipeline:
             "labelBuild": stats,
             "labelPhaseTimings": phase_timings,
         }
-        if format_version == BUILDING_RENDERER_FORMAT_VERSION:
+        if renderer_has_buildings(format_version):
             if building_stats is None:
                 raise RuntimeError("building-aware extraction did not emit BUILDING_STATS")
             building_phase_timings = building_stats.pop("phaseTimings", {})
@@ -7616,13 +7824,7 @@ class MapBuildPipeline:
             raise SubsetReuseUnavailable(
                 "parent map does not contain every required binary block"
             )
-        if (
-            renderer_format_version(child.request) in {
-                LABEL_RENDERER_FORMAT_VERSION,
-                BUILDING_RENDERER_FORMAT_VERSION,
-            }
-            and not copied_font_asset
-        ):
+        if renderer_has_labels(renderer_format_version(child.request)) and not copied_font_asset:
             raise SubsetReuseUnavailable("parent label-aware map has no label font asset")
         return manifest
 

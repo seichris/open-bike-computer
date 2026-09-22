@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import SQLite3
 import ImageIO
+import Darwin
 
 /// Supplied by authenticated catalog publication metadata, never inferred from
 /// a filename or a downloaded database's self-declared identity.
@@ -60,6 +61,215 @@ nonisolated struct TopographyCompanionMetadata: Codable, Equatable, Sendable {
 
 nonisolated enum TopographyCompanionError: Error {
     case receipt, file, database, schema, metadata, tile, closed
+}
+
+/// Durable binding between one verified companion and the exact saved stream
+/// it decorates. A stale companion can remain on disk during crash recovery,
+/// but it is never selected unless every association identity still matches.
+nonisolated struct SavedTopographyCompanionAssociation: Codable, Equatable, Sendable {
+    static let currentSchemaVersion = 1
+
+    let schemaVersion: Int
+    let localArtifactFilename: String
+    let streamArtifactSHA256: String
+    let receipt: TopographyCompanionReceipt
+
+    func validate() throws {
+        try receipt.validate()
+        guard schemaVersion == Self.currentSchemaVersion,
+              localArtifactFilename == "topography-\(receipt.mapEntryID).btopo",
+              TopographyCompanionReceipt.isDigest(streamArtifactSHA256) else {
+            throw TopographyCompanionError.receipt
+        }
+    }
+}
+
+nonisolated enum SavedTopographyCompanionStorage {
+    static func filename(mapEntryID: String) -> String? {
+        let isCatalogID = mapEntryID.range(
+            of: "^map_v1_[A-Za-z0-9_-]{43}$",
+            options: .regularExpression
+        ) != nil
+        let isJobID = mapEntryID.range(
+            of: "^job_v1_[A-Za-z0-9_-]{8,64}$",
+            options: .regularExpression
+        ) != nil
+        guard isCatalogID || isJobID else { return nil }
+        return "topography-\(mapEntryID).btopo"
+    }
+
+    static func associationURL(for companionURL: URL) -> URL {
+        companionURL.appendingPathExtension("association.json")
+    }
+
+    static func load(
+        for companionURL: URL,
+        expectedMapEntryID: String,
+        expectedMapContentReceipt: String,
+        expectedStreamArtifactSHA256: String
+    ) -> SavedTopographyCompanionAssociation? {
+        guard let data = try? Data(contentsOf: associationURL(for: companionURL)),
+              let value = try? JSONDecoder().decode(
+                SavedTopographyCompanionAssociation.self,
+                from: data
+              ),
+              (try? value.validate()) != nil,
+              value.localArtifactFilename == companionURL.lastPathComponent,
+              value.receipt.mapEntryID == expectedMapEntryID,
+              value.receipt.mapContentReceipt == expectedMapContentReceipt,
+              value.streamArtifactSHA256 == expectedStreamArtifactSHA256 else {
+            return nil
+        }
+        return value
+    }
+
+    static func save(
+        _ value: SavedTopographyCompanionAssociation,
+        for companionURL: URL
+    ) throws {
+        try value.validate()
+        guard value.localArtifactFilename == companionURL.lastPathComponent else {
+            throw TopographyCompanionError.receipt
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        try encoder.encode(value).write(
+            to: associationURL(for: companionURL),
+            options: .atomic
+        )
+    }
+
+    static func delete(for companionURL: URL) throws {
+        let manager = FileManager.default
+        for url in [companionURL, associationURL(for: companionURL)]
+        where manager.fileExists(atPath: url.path) {
+            try manager.removeItem(at: url)
+        }
+    }
+}
+
+/// Crash-safe two-file replacement for a companion and its external binding.
+/// The journal is committed only after both new files and the directory have
+/// been synchronized. Recovery therefore keeps either the old pair or the new
+/// pair, never a newly trusted database with an old association.
+nonisolated struct SavedTopographyCompanionReplacementJournal: Codable {
+    static let suffix = ".topography-replacement.json"
+
+    let filename: String
+    let id: UUID
+    let hadArtifact: Bool
+    let hadAssociation: Bool
+    var committed: Bool
+
+    func artifact(in directory: URL) -> URL {
+        directory.appendingPathComponent(filename)
+    }
+
+    func backup(in directory: URL) -> URL {
+        directory.appendingPathComponent(".\(filename).\(id.uuidString).backup")
+    }
+
+    func url(in directory: URL) -> URL {
+        directory.appendingPathComponent(".\(filename)\(Self.suffix)")
+    }
+
+    static func sync(_ url: URL) throws {
+        let descriptor = Darwin.open(url.path, O_RDONLY)
+        guard descriptor >= 0 else { throw POSIXError(.EIO) }
+        defer { Darwin.close(descriptor) }
+        guard Darwin.fsync(descriptor) == 0 else { throw POSIXError(.EIO) }
+    }
+
+    func save(in directory: URL) throws {
+        try JSONEncoder().encode(self).write(to: url(in: directory), options: .atomic)
+        try Self.sync(url(in: directory))
+        try Self.sync(directory)
+    }
+
+    static func begin(at destination: URL) throws -> Self {
+        guard destination.pathExtension == "btopo",
+              destination.lastPathComponent == URL(
+                fileURLWithPath: destination.lastPathComponent
+              ).lastPathComponent else {
+            throw POSIXError(.EINVAL)
+        }
+        let manager = FileManager.default
+        let value = Self(
+            filename: destination.lastPathComponent,
+            id: UUID(),
+            hadArtifact: manager.fileExists(atPath: destination.path),
+            hadAssociation: manager.fileExists(
+                atPath: SavedTopographyCompanionStorage
+                    .associationURL(for: destination).path
+            ),
+            committed: false
+        )
+        try value.save(in: destination.deletingLastPathComponent())
+        return value
+    }
+
+    func finish(in directory: URL) throws {
+        let manager = FileManager.default
+        let destination = artifact(in: directory)
+        let previous = backup(in: directory)
+        let pairs = [
+            (destination, previous, hadArtifact),
+            (
+                SavedTopographyCompanionStorage.associationURL(for: destination),
+                SavedTopographyCompanionStorage.associationURL(for: previous),
+                hadAssociation
+            ),
+        ]
+        for (current, backup, existed) in pairs {
+            if manager.fileExists(atPath: backup.path) {
+                if committed {
+                    try manager.removeItem(at: backup)
+                } else {
+                    if manager.fileExists(atPath: current.path) {
+                        try manager.removeItem(at: current)
+                    }
+                    try manager.moveItem(at: backup, to: current)
+                }
+            } else if !committed && !existed && manager.fileExists(atPath: current.path) {
+                try manager.removeItem(at: current)
+            }
+        }
+        try Self.sync(directory)
+        try manager.removeItem(at: url(in: directory))
+        try Self.sync(directory)
+    }
+
+    static func recover(in directory: URL) throws {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        )
+        for file in files where file.lastPathComponent.hasSuffix(Self.suffix) {
+            let values = try file.resourceValues(
+                forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+            )
+            guard values.isRegularFile == true,
+                  values.isSymbolicLink != true,
+                  (values.fileSize ?? Int.max) <= 4096 else {
+                throw POSIXError(.EINVAL)
+            }
+            let value = try JSONDecoder().decode(Self.self, from: Data(contentsOf: file))
+            guard value.filename.hasPrefix("topography-"),
+                  value.filename.hasSuffix(".btopo"),
+                  !value.filename.contains("/"),
+                  !value.filename.contains("\\"),
+                  SavedTopographyCompanionStorage.filename(
+                    mapEntryID: String(
+                        value.filename.dropFirst("topography-".count).dropLast(".btopo".count)
+                    )
+                  ) == value.filename,
+                  value.url(in: directory).standardizedFileURL == file.standardizedFileURL else {
+                throw POSIXError(.EINVAL)
+            }
+            try value.finish(in: directory)
+        }
+    }
 }
 
 // Only accessed by the owning actor. The holder makes connection cleanup
@@ -238,6 +448,12 @@ actor TopographyCompanionStore {
     func close() {
         tileCache.removeAll(); cacheOrder.removeAll(); cacheBytes = 0
         metadata = nil; database = nil
+    }
+
+    func purgeCache() {
+        tileCache.removeAll()
+        cacheOrder.removeAll()
+        cacheBytes = 0
     }
 
     private static func valid(_ key: TileKey) -> Bool {

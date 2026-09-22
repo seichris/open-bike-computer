@@ -52,6 +52,14 @@ struct OfflineMapsView: View {
                         )
                     )
                 }
+
+                Toggle(
+                    "Topographic Contours",
+                    isOn: $manager.topographicMapsEnabled
+                )
+                Text(manager.topographyOverlayStatus)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
             }
 
             if !manager.statusMessage.isEmpty {

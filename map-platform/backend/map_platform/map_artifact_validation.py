@@ -463,10 +463,22 @@ def _validate_building_section(
 
 
 def summarize_fmb4_buildings(paths: list[Path]) -> dict[str, int]:
+    return summarize_fmb_buildings(paths, 3)
+
+
+def summarize_fmb_buildings(
+    paths: list[Path], renderer_format_version: int
+) -> dict[str, int]:
+    validator = {
+        3: validate_fmb4,
+        4: validate_fmb5,
+    }.get(renderer_format_version)
+    if validator is None:
+        raise ValueError("building summary requires renderer format 3 or 4")
     counts = [0, 0, 0, 0, 0]
     records = 0
     for path in paths:
-        metadata = validate_fmb4(path)
+        metadata = validator(path)
         records += metadata.building_records
         for index, value in enumerate(metadata.building_provenance):
             counts[index] += value

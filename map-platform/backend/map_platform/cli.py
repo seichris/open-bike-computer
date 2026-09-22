@@ -48,6 +48,7 @@ from .monitoring import (
     MapMonitoringStore,
 )
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
+from .topography_rollout import topography_target4_generation_allowlist
 from .preparation_estimates import load_estimate_coordinator
 from .rate_limits import purge_expired_rate_limits
 from .resource_report import worker_resource_report
@@ -783,6 +784,7 @@ def main() -> int:
     if args.command == "create-job":
         generation_controls = {
             "building_target3_allowlist": building_target3_generation_allowlist(),
+            "topography_target4_allowlist": topography_target4_generation_allowlist(),
             "generation_profile_policy": load_generation_profile_policy(repo_root),
             "deployment_channel": configured_deployment_channel(),
         }

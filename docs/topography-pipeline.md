@@ -1,6 +1,6 @@
 # Free global topography: acquisition, artifacts and readers
 
-Implementation status, 2026-09-13. Tracks [issue #190](https://github.com/seichris/open-bike-computer/issues/190)
+Implementation status, 2026-09-22. Tracks [issue #190](https://github.com/seichris/open-bike-computer/issues/190)
 and the [end-to-end plan](plans/issue-190-topographic-map-support-implementation-plan.md).
 
 The maintainer-supplied 2026-09-13 research is now incorporated in source
@@ -23,9 +23,11 @@ companion pairs. No provider has thereby gained production approval.
   deterministic contour evidence from actual elevation rasters.
 - Cache reuse rehashes the exact input bytes; evidence records source receipts,
   policy identity, CRS/datum, quality, missing pixels, and processing versions.
-- Generation-policy v2 can describe a **disabled** contour profile. Both channels
-  keep renderer format 4 disabled; even canary claims cannot enable it. The
-  default policy remains v1, with the existing formats 1–3 unchanged.
+- Generation-policy v2 exposes renderer format 4 only as a development canary.
+  An exact installation ID must also appear in
+  `MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST`. Production and global policy
+  activation are rejected in code. The deployed/default v1 policy remains
+  formats 1–3 until operators deliberately select v2.
 - `/healthz.topography` reports `access: free` and `generationEnabled: false`.
 
 - A bounded compiler clips one map-wide contour intermediate to polygon holes
@@ -43,16 +45,29 @@ companion pairs. No provider has thereby gained production approval.
 - Firmware decodes contours into flat PSRAM arrays and draws a bounded,
   index-first candidate set through the existing accepted-camera projection,
   below roads and navigation. Semantic cancellation is checked during decoding
-  and drawing. The existing production installer still rejects renderer 4.
-- A local MapKit tile overlay and independently owned map-view layer are
-  implemented. Replacement/removal does not change routes or camera state.
+  and drawing. Renderer format 4 metadata is validated and persisted by the
+  atomic installer; active-map status reports profile, intervals, source-policy
+  prefix, no-data summary, contour presence, and section health.
+- The signed stream, ZIP, and `.btopo` companion are generated and published as
+  one content-bound catalog contract. Development library grants authorize the
+  exact matching stream and companion together. The app validates, journals,
+  restores, replaces, and deletes that association without trusting filenames
+  or SQLite self-description.
+- The MapKit tile overlay is independently owned, cancellation-aware, and
+  purges its bounded encoded-tile cache on memory pressure. Replacement/removal
+  does not change routes or camera state. Saved-map details expose contour
+  quality, intervals, source releases, surface model, datum, and attribution.
+- CAP2 bit 30/client version 28, visibility bit 13, independent Map/Map +
+  Navigation preferences, configurable-screen persistence, and active-map
+  health gate the device toggle. Contours default off.
 
-This is **not yet an end-to-end topographic release**. User-job scheduling,
-signed manifest/installer capability, catalog/publication/retention, durable app
-download association, map selection controls, regional alignment policy, source
-approval and hardware qualification remain unfinished. The new local overlay
-has no user-visible saved-companion selector yet. No production generation,
-capability advertisement, deployment, or physical flash has been enabled.
+The source implementation is end-to-end for explicitly allowlisted development
+jobs. It is **not yet a production or physical-device release**. Production
+source approval, promotion eligibility, deployment configuration, representative
+iPhone performance, both-board hardware qualification, app/firmware builds, and
+any install or flash remain separate gates. The catalog intentionally omits
+renderer format 4 from automatic production-promotion discovery until those
+gates are recorded. No purchase or premium entitlement exists.
 
 ## Sources and actual global reach
 
@@ -273,24 +288,28 @@ oversized grids, contour complexity, negative coordinates, poles/antimeridian
 planning, failed downloads, cancellation, corrupt receipts, concurrent staging,
 and disabled profile gates. They do not download live provider data in CI.
 
-Local validation: the 770-test backend suite passes with two existing Linux-
-procfs tests skipped on macOS; all 55 deployment tests pass. The 24 topography
-and eight generation-policy tests also pass under Python 3.10 on Linux ARM64
-and AMD64 in OrbStack, with **no raster-test skips**. Minimal Linux containers
-need `libexpat1` for the raster wheel; the backend image explicitly includes it.
-A broken installed native dependency fails tests instead of being treated as
-an absent optional extra. Full production-image, GitHub CI, and hardware gates
-are separate from these local checks.
+Current source-only validation includes Python bytecode compilation, generated
+BLE-contract consistency, Swift parser checks, the complete 836-test backend
+suite (two existing platform-specific skips), catalog TypeScript type checking,
+and 70 catalog worker tests. App and firmware builds were deliberately not run
+for this post-main integration checkpoint, so these checks are not linker,
+signing, image-size, simulator, or physical-device evidence. Full production-
+image, GitHub CI, and hardware gates remain separate.
 
-## Next end-to-end gates
+## Remaining release gates
 
 1. Complete [source review](templates/topography-source-review.md), including
    exact attribution/disclaimers, retention rights, masks, and source-boundary
    quality samples. Do not treat a terms URL as a complete attribution notice.
-2. Specify/golden-test FMB v5 and companion readers together, including identity,
-   catalog sharing, promotion, and rejected/unsupported paths.
-3. Extend the durable generation pipeline with buffered geometry, final clipping,
-   packaging, progress, reuse, retention, and bounded worker execution.
-4. Add firmware and iPhone decoding, display, settings, and offline lifecycle.
-5. Qualify exact artifacts on both boards and representative iPhones, then use
-   the existing canary/promotion workflow. No purchase checks belong in any gate.
+2. Run app and firmware builds, unit/integration suites, image-size checks, and
+   simulator smoke tests for the exact branch head.
+3. Qualify one exact signed renderer-format-4 artifact on both Waveshare boards
+   (including the 1.75-inch target) and representative iPhones, with contour-on/
+   contour-off memory, frame-time, SD-I/O, power, cancellation, and route-contrast
+   evidence.
+4. Record regional alignment/source-boundary evidence and production legal
+   approval, then implement/enable companion-preserving production promotion and
+   switch the production policy only after the recorded gates pass.
+5. Deploy canary configuration deliberately and verify exact-head catalog,
+   download, transfer, restart, offline, sharing, deletion, and rollback flows.
+   No purchase checks belong in any gate.

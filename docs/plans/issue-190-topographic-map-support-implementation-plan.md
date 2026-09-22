@@ -3,17 +3,18 @@
 ## Planning snapshot
 
 - Issue: [#190 — Add topographic map support to the device and iOS MapKit](https://github.com/seichris/open-bike-computer/issues/190)
-- Baseline: GitHub `origin/main` at `222435161ab220e1e7d696eea1e75c3c63c1e36b`, fetched 2026-09-13
+- Original baseline: GitHub `origin/main` at `222435161ab220e1e7d696eea1e75c3c63c1e36b`, fetched 2026-09-13
+- Integrated baseline: GitHub `origin/main` at `d3cf298d1271c2f29074ebea267c7e3a236a72cc`, merged 2026-09-22
 - Previous baseline: `9ef7f09fce0e0d95e349e6ef9c54da137fcff286` (2026-08-31)
 - Planning branch: `plan/issue-190-topographic-maps`
 - Plan PR: [#374](https://github.com/seichris/open-bike-computer/pull/374)
-- Architecture refresh: 2026-09-13; the implementation branch includes the baseline above
-- Provider research date: 2026-08-31; public Copernicus acquisition and catalog coverage rechecked 2026-09-12. Regional source reviews still need renewal before implementation.
-- Research update: maintainer-supplied 2026-09-13 report incorporated in [source processing and qualification work](../research/topography-report-implementation-2026-09-13.md). Regional discovery is implemented for Swiss/Canadian/LINZ native terrain metadata; production rights, native ingestion and vertical conversions remain separate gates.
+- Architecture refresh: 2026-09-22; the implementation branch includes the integrated baseline above
+- Provider research date: 2026-08-31; public Copernicus acquisition and catalog coverage rechecked 2026-09-12. Regional source reviews still need renewal before production use.
+- Research update: maintainer-supplied 2026-09-13 report incorporated in [source processing and qualification work](../research/topography-report-implementation-2026-09-13.md). Regional discovery and bounded native ingestion are implemented for Swiss/Canadian/LINZ terrain metadata; production rights, complete provider acquisition adapters, and verified datum transformations remain separate gates.
 - Regional implementation update: [native staging, inspection, bounded adjacent-tile sampling, pinned offline transformation contracts and development-pair encoding](../topography-regional-ingestion.md) are implemented. Up to 16 explicitly selected non-overlapping tiles can share one reviewed native lattice, with interpolation across tile edges and masked gaps. Real provider transformations, cross-source residual QA and production approval remain pending.
 - Product decision, 2026-09-12: **free**, prioritizing the broadest practical global coverage; no purchase or subscription requirement.
 - Implementation branch: `feature/topographic-maps`, following the documentation-only PR above.
-- Status: global acquisition, bounded contour compilation, development FMB5/companion artifacts, cross-platform readers, a firmware render pass and local MapKit overlay are implemented. Public job/catalog/download/settings integration and production enablement remain unfinished. See [implementation status and operator runbook](../topography-pipeline.md).
+- Status: the source implementation now covers development-canary job selection, global acquisition, contour compilation, FMB5 and signed-stream packaging, exact companion publication/grants, durable iOS download/overlay lifecycle, firmware installation/rendering, and independent capability/status/settings contracts. Production source approval/promotion, builds, deployment, and physical qualification remain gated. See [implementation status and operator runbook](../topography-pipeline.md).
 
 ## Outcome
 
@@ -39,7 +40,7 @@ This is a durable offline-map capability, not a screenshot or web-tile experimen
 
 ## Current-main baseline
 
-Renderer formats 1, 2, and 3 still cover legacy vectors, street labels, and street labels plus 3D buildings. FMB v3 has extension sections 1-3; FMB v4 requires section 4 for buildings. Current production generation, promotion and installation still support only renderer formats 1-3. As of 2026-09-13 the acquisition registry, development contour compiler, FMB5 codec/firmware render pass, `.btopo` writer/Swift reader and independently owned MapKit overlay are implemented. They are not yet wired into the complete public job/catalog/download/settings flow. See [current implementation status](../topography-pipeline.md) for the exact boundary; the sections below describe the full target architecture, not a claim of completion.
+Renderer formats 1, 2, and 3 still cover legacy vectors, street labels, and street labels plus 3D buildings. FMB v3 has extension sections 1-3; FMB v4 requires section 4 for buildings. Renderer format 4/FMB v5 is implemented as a strict contour extension and is available only to exact development-canary installations. Current production generation and promotion remain formats 1-3. See [current implementation status](../topography-pipeline.md) for the exact source/build/deployment/physical-evidence boundary; the sections below describe the full release architecture, not a production claim.
 
 The following changes since the original plan affect implementation directly. These are findings from the recorded source revision and checked-in configuration, not fresh deployment or physical-device verification.
 
@@ -53,12 +54,12 @@ The following changes since the original plan affect implementation directly. Th
 | Firmware camera | [Stable camera contract](../map-stable-camera.md) and [mapCamera.hpp](../../esp32/lib/maps/src/mapCamera.hpp); #407 | Development profiles use accepted-camera projection and reusable decoded scenes; production still uses the legacy path. Contours must support both without implicitly enabling the new camera in production. |
 | Render/storage ownership | [Render scheduler](../firmware-map-render-scheduler.md), [MapRenderJob](../../esp32/lib/maps/src/mapRenderJob.hpp), and [runtime integration](../reviews/pr-424-integration-2026-09-08.md); #424 | Rendering, map-root probing, and activation share the existing worker. Position updates coalesce; semantic changes cancel. Contours must not introduce starvation or a second SD/cache owner. |
 | Benchmark and release evidence | [Renderer benchmark](../renderer-benchmark.md), [gate file](../../esp32/tools/renderer_benchmark_gates.json), and [factory qualification](../firmware-factory-release.md); #344, #368-#373, #384, #400, #401, #438 | Extend window-scoped diagnostics and existing memory/DMA/crypto gates. Qualify both boards and record the actual profile; production boot acceptance uses authenticated evidence rather than diagnostic serial output. |
-| BLE negotiation | [Generated ride contract](../../protocol/ride-ble-contract-v1.json), [capabilities](../../esp32/lib/ble_navigation/device_capabilities_protocol.hpp), and [visibility normalization](../../esp32/lib/ble_navigation/map_profile_protocol.hpp) | Client version is now 24, with CAP2 feature bits 0-26 allocated. Screen configuration (#391) owns bit 26/version 24. New capability allocation must preserve these and stay distinct from the map-visibility mask. |
+| BLE negotiation | [Generated ride contract](../../protocol/ride-ble-contract-v1.json), [capabilities](../../esp32/lib/ble_navigation/device_capabilities_protocol.hpp), and [visibility normalization](../../esp32/lib/ble_navigation/map_profile_protocol.hpp) | The rechecked allocation is client version 28/CAP2 bit 30 for topographic contours. It remains distinct from map-visibility bit 13 and preserves bits 0-29. |
 | Configurable screen instances | [Screen configuration](../../esp32/lib/ble_navigation/screen_configuration.hpp) and [app controller](../../ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift); #391 | Contour visibility must round-trip per screen instance, preserve independent Map/Map + Navigation profiles, and participate in the existing profile-override render generation. Do not implement only the legacy global settings path. |
 
 MapKit already offers Standard, Satellite, Hybrid, and realistic elevation presentation. Its delegate still treats `MKPolyline` overlays as route content, including separate saved-route/alternative styling. Add a dedicated tile-overlay renderer while retaining those identities, ordering, hit testing, and camera behavior. The original blanket-overlay-removal finding is resolved by #429 and is no longer implementation work.
 
-The baseline table describes `main` before this implementation branch. Source-policy/acquisition and contour-evidence work now exist, but no topographic app/device rendering has shipped. The free-access decision is settled; production source approval and the remaining end-to-end gates are not.
+The baseline table describes `main` before this implementation branch. The source paths now exist end to end for an allowlisted development canary, but no topographic app/device build has been produced, installed, flashed, or physically qualified in this work. The free-access decision is settled; production source approval and the remaining release gates are not.
 
 ## What “topographic” means here
 
@@ -581,7 +582,7 @@ If it changes device bytes, use renderer format 5 / FMB v6 with a sixth required
 
 ## Implementation phases
 
-These are implementation slices, not a claim that each phase has shipped. The [implementation status](../topography-pipeline.md) records the acquisition and evidence portions now implemented. Phase 1's profile/promotion/delivery gates must land before any Phase 2 development publication can become an automatic production-promotion candidate. Existing format-3 infrastructure is reused.
+These are implementation slices, not a claim that each phase has shipped. The [implementation status](../topography-pipeline.md) is authoritative for the current source/build/deployment boundary. Phases 1–4 now have source implementations for the allowlisted development path, including fail-closed production-promotion and catalog gates. Their build, performance, deployment, source-approval, and physical qualification steps remain open. Existing format-3 infrastructure is reused.
 
 ### Phase 0 — Evidence and source approval
 

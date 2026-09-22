@@ -2712,6 +2712,26 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                       mapView.debugStreetLabelFontHealthy()
                   ? "true"
                   : "false";
+      body += ",\"topographyProfileVersion\":" +
+              std::to_string(activeMap.target.topographyProfileVersion) +
+              ",\"topographyQualityMode\":\"" +
+              status_json::escape(activeMap.target.topographyQualityMode) +
+              "\",\"contourMinorIntervalM\":" +
+              std::to_string(activeMap.target.contourMinorIntervalM) +
+              ",\"contourIndexIntervalM\":" +
+              std::to_string(activeMap.target.contourIndexIntervalM) +
+              ",\"contourNoDataMillionths\":" +
+              std::to_string(activeMap.target.contourNoDataMillionths) +
+              ",\"containsContours\":" +
+              (activeMap.target.contourRecordCount > 0 ? "true" : "false") +
+              ",\"topographySourcePolicyReceiptPrefix\":\"" +
+              status_json::escape(
+                  activeMap.target.topographySourcePolicySha256.substr(0, 12)) +
+              "\",\"topographySectionHealthy\":";
+      body += activeMap.target.formatVersion == 4 &&
+                      activeMap.target.topographyProfileVersion == 1
+                  ? "true"
+                  : "false";
     }
   } else {
     body += ",\"activeError\":{\"code\":\"" +
@@ -3980,6 +4000,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
     if (workout_zones::ENABLED && clientVersion >=
         ride_ble_protocol_generated::WORKOUT_ZONES_V1_MINIMUM_CLIENT_VERSION) {
       featureFlags |= ride_ble_protocol_generated::WORKOUT_ZONES_V1_FEATURE;
+    }
+    if (clientVersion >=
+        device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE;
     }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,

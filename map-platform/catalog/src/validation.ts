@@ -29,6 +29,7 @@ export interface PublicationArtifactInput {
   producerBuildSha256?: string | null;
   producerImageDigest?: string | null;
   readerRequirements?: ReaderRequirements | null;
+  companionRequirements?: TopographyCompanionRequirements | null;
   requiredIosBuild?: string | null;
   requiredIosGitSha?: string | null;
   requiredIosBuildSha256?: string | null;
@@ -45,6 +46,17 @@ export interface ReaderRequirements {
   renderer: string;
   rendererFormatVersion: number;
   requiredFeatures: string[];
+}
+
+export interface TopographyCompanionRequirements {
+  schemaVersion: 1;
+  role: "topography-ios-v1";
+  mapContentReceipt: string;
+  mapId: string;
+  profileVersion: 1;
+  intermediateSha256: string;
+  sourcePolicySha256: string;
+  attributionSha256: string;
 }
 
 export interface PublicationInput {
@@ -137,6 +149,59 @@ function readerRequirements(value: unknown): ReaderRequirements | null {
     ),
     rendererFormatVersion: Number(requirements.rendererFormatVersion),
     requiredFeatures: requirements.requiredFeatures as string[],
+  };
+}
+
+function companionRequirements(
+  value: unknown,
+): TopographyCompanionRequirements | null {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value) || typeof value !== "object") {
+    throw new HttpError(400, "artifact companionRequirements are invalid");
+  }
+  const requirements = value as Record<string, unknown>;
+  requireExactKeys(requirements, [
+    "schemaVersion",
+    "role",
+    "mapContentReceipt",
+    "mapId",
+    "profileVersion",
+    "intermediateSha256",
+    "sourcePolicySha256",
+    "attributionSha256",
+  ]);
+  if (
+    requirements.schemaVersion !== 1 ||
+    requirements.role !== "topography-ios-v1" ||
+    requirements.profileVersion !== 1
+  ) {
+    throw new HttpError(400, "artifact companionRequirements are invalid");
+  }
+  return {
+    schemaVersion: 1,
+    role: "topography-ios-v1",
+    mapContentReceipt: stringField(
+      requirements.mapContentReceipt,
+      SHA256,
+      "companionRequirements mapContentReceipt",
+    ),
+    mapId: stringField(requirements.mapId, ID, "companionRequirements mapId"),
+    profileVersion: 1,
+    intermediateSha256: stringField(
+      requirements.intermediateSha256,
+      SHA256,
+      "companionRequirements intermediateSha256",
+    ),
+    sourcePolicySha256: stringField(
+      requirements.sourcePolicySha256,
+      SHA256,
+      "companionRequirements sourcePolicySha256",
+    ),
+    attributionSha256: stringField(
+      requirements.attributionSha256,
+      SHA256,
+      "companionRequirements attributionSha256",
+    ),
   };
 }
 
@@ -242,6 +307,7 @@ export function validatePublication(
         "producerBuildSha256",
         "producerImageDigest",
         "readerRequirements",
+        "companionRequirements",
         "requiredIosBuild",
         "requiredIosGitSha",
         "requiredIosBuildSha256",
@@ -301,6 +367,9 @@ export function validatePublication(
         "producerImageDigest",
       ),
       readerRequirements: readerRequirements(artifact.readerRequirements),
+      companionRequirements: companionRequirements(
+        artifact.companionRequirements,
+      ),
       requiredIosBuild: nullableString(
         artifact.requiredIosBuild,
         /^[0-9]{1,18}(?:\.[0-9]{1,18}){0,2}$/,
@@ -336,6 +405,7 @@ export function validatePublication(
   });
   for (const artifact of artifacts) {
     const requirements = artifact.readerRequirements ?? null;
+    const companion = artifact.companionRequirements ?? null;
     const iosIdentity = [
       artifact.requiredIosBuild,
       artifact.requiredIosGitSha,
@@ -384,12 +454,55 @@ export function validatePublication(
         "bike map stream artifact readerRequirements are required",
       );
     }
+    if (requirements !== null && companion !== null) {
+      throw new HttpError(
+        400,
+        "artifact cannot be both a stream and companion",
+      );
+    }
+    if (
+      artifact.format === "topography-ios-v1" &&
+      (companion === null ||
+        artifact.mediaType !== "application/vnd.bicino.topography+sqlite3" ||
+        !artifact.filename.endsWith(".btopo"))
+    ) {
+      throw new HttpError(400, "topography companion requirements are invalid");
+    }
+    if (artifact.format !== "topography-ios-v1" && companion !== null) {
+      throw new HttpError(
+        400,
+        "companion requirements require a topography artifact",
+      );
+    }
   }
   if (
     new Set(artifacts.map((artifact) => artifact.artifactId)).size !==
     artifacts.length
   ) {
     throw new HttpError(400, "artifact IDs are duplicated");
+  }
+  const topography = artifacts.filter(
+    (artifact) => artifact.format === "topography-ios-v1",
+  );
+  if (Number(value.rendererFormatVersion) === 4) {
+    if (
+      topography.length !== 1 ||
+      topography[0].companionRequirements?.mapContentReceipt !==
+        value.contentReceipt ||
+      topography[0].companionRequirements?.mapId !== value.legacyMapId ||
+      (value.features as string[]).join("\u0000") !==
+        ["3d-buildings", "contours", "street-labels"].join("\u0000")
+    ) {
+      throw new HttpError(
+        400,
+        "topographic map companion contract is incomplete",
+      );
+    }
+  } else if (topography.length !== 0) {
+    throw new HttpError(
+      400,
+      "non-topographic map contains a companion artifact",
+    );
   }
   return {
     publicationId: stringField(value.publicationId, ID, "publicationId"),

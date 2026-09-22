@@ -883,7 +883,7 @@ Current setting IDs:
 | `4` | Legacy display rotation | Ignored. Rotation is fixed by firmware target: 90° on the 1.75-inch device and 0° on the 2.06-inch device. |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Map zoom level | `0...5` |
-| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker |
+| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker, bit 13 topographic contours |
 | `9` | Map street width | Absolute rendered width is `1...24` px. The wire value remains `width - 4` (`-3...20`) so older apps that send a boost remain compatible. |
 | `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a route-blue dot when no route is loaded and a route-blue arrow while navigating. Both shapes are rendered at their final display resolution. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device through the enabled main screens. Map drags and long presses are ignored by this shortcut. |
@@ -967,12 +967,13 @@ Legacy v1 map blocks do not contain feature type IDs, so the renderer also
 combines Local with Service and Paths with Tracks for those blocks. Downloading
 a current v2 map is required for independent road-class visibility.
 
-Visibility bit `13` is reserved for FMB5 topographic contours. The development
-renderer preserves it during feature-mask normalization and ignores it for
-older blocks. It remains absent from default masks and app controls until the
-renderer-format-4 installer/capability and hardware gates are complete. This
-reservation does not allocate a CAP2 bit, raise the client protocol version, or
-advertise production contour support.
+Visibility bit `13` controls FMB5 topographic contours independently for Map
+and Map + Navigation. It remains off in fresh profiles. iOS exposes and sends
+the bit only when CAP2 bit `30`, active renderer format `4`, topography profile
+`1`, and a healthy active contour section all agree. Firmware preserves the bit
+through configurable-screen round trips and ignores it for older blocks. This
+source contract does not by itself enable production generation or establish
+physical performance qualification.
 
 ## Configurable screen instances
 
@@ -1240,7 +1241,9 @@ orientation. Bit `25` reports the Watch GPS
 motion-evidence frame and is advertised only with internal ride control. Bit `26`
 reports the complete configurable-screen store, characteristic, codec, and runtime
 path described above. Bit `27` reports World Radio. Bit `28` reports the
-atomic configurable display-inactivity timeout pair (setting ID `38`). Client version `11` requests
+atomic configurable display-inactivity timeout pair (setting ID `38`). Bit
+`29` reports versioned workout zones. Bit `30` reports the complete renderer
+format 4/FMB5 contour decode, installation, status, and visibility path. Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
@@ -1257,8 +1260,9 @@ Version `23` requests bit `25`, Watch GPS motion evidence.
 Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
 Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
 configurable display inactivity timeouts. Version `27` requests bit `29`,
-versioned workout zones. The current iPhone and direct Watch clients negotiate
-version `27`; older direct Watch clients remain valid at version `23`. Bit `23` remains the
+versioned workout zones. Version `28` requests bit `30`, topographic contours.
+The current iPhone client negotiates version `28`; older direct Watch clients
+remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
 Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
@@ -1346,6 +1350,9 @@ World Radio, CAP2 schema 1, only feature bit 27:
 
 Display inactivity timeouts, CAP2 schema 1, only feature bit 28:
 43 41 50 32 01 00 00 00 10
+
+Topographic contours, CAP2 schema 1, only feature bit 30:
+43 41 50 32 01 00 00 00 40
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1973,15 +1980,28 @@ Status responses should include:
   them to generate a local preview; preview image bytes are never sent over
   BLE.
 - `activeRendererFormat`: the installed renderer target format (`1` legacy,
-  `2` FMB v3 + FMA1 street labels, `3` FMB v4 + FMA1 + OSM buildings).
-- `labelProfileVersion`: `1` for the current target-2/3 label profile, otherwise
+  `2` FMB v3 + FMA1 street labels, `3` FMB v4 + FMA1 + OSM buildings, `4`
+  FMB v5 + FMA1 + OSM buildings + contours).
+- `labelProfileVersion`: `1` for the current target-2/3/4 label profile, otherwise
   `0`.
 - `labelLanguages`: the bounded ordered BCP-47 language tags embedded in the
   active pack.
-- `fontAssetHealthy`: `true` only when the target-2/3 FMA1 asset passed activation
+- `fontAssetHealthy`: `true` only when the target-2/3/4 FMA1 asset passed activation
   validation and the active renderer can open it. The app uses these fields to
   distinguish unsupported firmware, a legacy map that needs regeneration, and
   an unhealthy label asset.
+- `topographyProfileVersion`: `1` for the renderer-format-4 contour profile,
+  otherwise `0`.
+- `topographyQualityMode`, `contourMinorIntervalM`, and
+  `contourIndexIntervalM`: the signed active manifest's quality label and fixed
+  contour interval pair.
+- `contourNoDataMillionths` and `containsContours`: signed source-gap summary
+  and whether the installed sections contain any contour records.
+- `topographySourcePolicyReceiptPrefix`: the first 12 lowercase hexadecimal
+  characters of the signed source-policy receipt, for bounded diagnostics.
+- `topographySectionHealthy`: `true` only when renderer format 4 metadata and
+  every installed FMB5 contour section passed activation validation. The app
+  requires this field before it enables contour visibility.
 - `enabled`: whether Wi-Fi/HTTPS upload mode is enabled.
 - `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
   firmware identity. The git identity must be the full 40-character lowercase

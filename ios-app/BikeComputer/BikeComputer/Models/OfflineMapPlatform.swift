@@ -160,6 +160,29 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         )
     }
 
+    private static var targetFour: RendererTarget {
+        RendererTarget(
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 4,
+            firmwareVersion: nil
+        )
+    }
+
+    func withTopography(_ enabled: Bool) -> OfflineMapJobRequest {
+        OfflineMapJobRequest(
+            mode: mode,
+            bbox: bbox,
+            geometry: geometry,
+            route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId,
+            installOnDevice: installOnDevice,
+            target: enabled ? Self.targetFour : Self.targetThree,
+            labels: labels ?? Self.defaultLabelProfile
+        )
+    }
+
     static func customBBox(_ bounds: OfflineMapBounds) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
             mode: "custom_bbox",
@@ -236,7 +259,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             installOnDevice: installOnDevice,
             target: RendererTarget(
                 renderer: "esp32-fmb",
-                rendererFormatVersion: 3,
+                rendererFormatVersion: target?.rendererFormatVersion ?? 3,
                 firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
             ),
             labels: labels ?? Self.defaultLabelProfile
@@ -314,6 +337,7 @@ struct OfflineMapJob: Decodable, Equatable {
     let userLabel: String?
     let reuseStrategy: String?
     let preparationEstimate: OfflineMapPreparationEstimate?
+    let catalogMapEntryId: String?
     let downloadCount: Int?
     let firstDownloadedAt: String?
     let lastDownloadedAt: String?
@@ -383,6 +407,7 @@ struct OfflineMapBuildingProgress: Decodable, Equatable {
 nonisolated struct OfflineMapArtifact: Codable, Equatable {
     static let bikeMapStreamFormat = "bike-map-stream-v1"
     static let storedZipFormat = "zip-stored-v1"
+    static let topographyCompanionFormat = "topography-ios-v1"
 
     let format: String
     let mediaType: String
@@ -402,6 +427,10 @@ nonisolated struct OfflineMapArtifact: Codable, Equatable {
     let requiredFirmwareVersion: String?
     let requiredFirmwareBuild: UInt32?
     let requiredFirmwareGitSha: String?
+    let mapContentReceipt: String?
+    let intermediateSha256: String?
+    let sourcePolicySha256: String?
+    let attributionSha256: String?
 
     init(
         format: String,
@@ -421,7 +450,11 @@ nonisolated struct OfflineMapArtifact: Codable, Equatable {
         requiredIosBuildSha256: String? = nil,
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
-        requiredFirmwareGitSha: String? = nil
+        requiredFirmwareGitSha: String? = nil,
+        mapContentReceipt: String? = nil,
+        intermediateSha256: String? = nil,
+        sourcePolicySha256: String? = nil,
+        attributionSha256: String? = nil
     ) {
         self.format = format
         self.mediaType = mediaType
@@ -441,10 +474,15 @@ nonisolated struct OfflineMapArtifact: Codable, Equatable {
         self.requiredFirmwareVersion = requiredFirmwareVersion
         self.requiredFirmwareBuild = requiredFirmwareBuild
         self.requiredFirmwareGitSha = requiredFirmwareGitSha
+        self.mapContentReceipt = mapContentReceipt
+        self.intermediateSha256 = intermediateSha256
+        self.sourcePolicySha256 = sourcePolicySha256
+        self.attributionSha256 = attributionSha256
     }
 
     var isBikeMapStream: Bool { format == Self.bikeMapStreamFormat }
     var isStoredZip: Bool { format == Self.storedZipFormat }
+    var isTopographyCompanion: Bool { format == Self.topographyCompanionFormat }
 }
 
 nonisolated struct OfflineMapArtifactDownloadURL: Decodable, Equatable {
@@ -466,6 +504,10 @@ nonisolated struct OfflineMapArtifactDownloadURL: Decodable, Equatable {
     let requiredFirmwareVersion: String?
     let requiredFirmwareBuild: UInt32?
     let requiredFirmwareGitSha: String?
+    let mapContentReceipt: String?
+    let intermediateSha256: String?
+    let sourcePolicySha256: String?
+    let attributionSha256: String?
     let url: String
     let expiresAt: Int
     let expiresInSeconds: Int
@@ -1124,6 +1166,10 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
             1: ("legacy-vector-v1", []),
             2: ("street-labels-v1", ["street-labels"]),
             3: ("buildings-3d-v1", ["street-labels", "3d-buildings"]),
+            4: (
+                "topographic-contours-v1",
+                ["3d-buildings", "contours", "street-labels"]
+            ),
         ]
         guard schemaVersion == 1,
               ["development", "production"].contains(deploymentChannel),
@@ -3471,7 +3517,11 @@ struct OfflineMapPlatformClient {
               response.requiredIosBuildSha256 == artifact.requiredIosBuildSha256,
               response.requiredFirmwareVersion == artifact.requiredFirmwareVersion,
               response.requiredFirmwareBuild == artifact.requiredFirmwareBuild,
-              response.requiredFirmwareGitSha == artifact.requiredFirmwareGitSha else {
+              response.requiredFirmwareGitSha == artifact.requiredFirmwareGitSha,
+              response.mapContentReceipt == artifact.mapContentReceipt,
+              response.intermediateSha256 == artifact.intermediateSha256,
+              response.sourcePolicySha256 == artifact.sourcePolicySha256,
+              response.attributionSha256 == artifact.attributionSha256 else {
             throw OfflineMapPlatformError.invalidResponse
         }
         return try absoluteURL(for: response.url, baseURL: baseURL)

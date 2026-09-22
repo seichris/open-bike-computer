@@ -147,6 +147,84 @@ function developmentPublication(label: string) {
   return candidate;
 }
 
+function developmentTopographicPublication(label: string) {
+  const candidate = uniquePublication(label);
+  candidate.originChannel = "development";
+  candidate.deliveryState = "development";
+  candidate.rendererFormatVersion = 4;
+  candidate.features = ["3d-buildings", "contours", "street-labels"];
+  const stream = candidate.artifacts[0];
+  stream.bucketSlot = "development";
+  stream.deliveryTier = "development";
+  stream.readerRequirements = {
+    ...stream.readerRequirements!,
+    rendererFormatVersion: 4,
+    requiredFeatures: ["3d-buildings", "contours", "street-labels"],
+  };
+  candidate.artifacts.push(
+    {
+      artifactId: fixtureID("artifact"),
+      bucketSlot: "development",
+      objectKey: `maps/${candidate.legacyMapId}/topography-ios-v1/${candidate.contentReceipt}/${"8".repeat(64)}.btopo`,
+      format: "topography-ios-v1",
+      mediaType: "application/vnd.bicino.topography+sqlite3",
+      filename: `${candidate.legacyMapId}.btopo`,
+      bytes: 4096,
+      sha256: "8".repeat(64),
+      manifestReceipt: candidate.contentReceipt,
+      signedManifestReceipt: null,
+      signatureKeyId: null,
+      signatureKeySha256: null,
+      producerBuildSha256: null,
+      producerImageDigest: null,
+      readerRequirements: null,
+      companionRequirements: {
+        schemaVersion: 1,
+        role: "topography-ios-v1",
+        mapContentReceipt: candidate.contentReceipt,
+        mapId: candidate.legacyMapId,
+        profileVersion: 1,
+        intermediateSha256: "5".repeat(64),
+        sourcePolicySha256: "6".repeat(64),
+        attributionSha256: "7".repeat(64),
+      },
+      requiredIosBuild: null,
+      requiredIosGitSha: null,
+      requiredIosBuildSha256: null,
+      requiredFirmwareVersion: null,
+      requiredFirmwareBuild: null,
+      requiredFirmwareGitSha: null,
+      deliveryTier: "development",
+    },
+    {
+      artifactId: fixtureID("artifact"),
+      bucketSlot: "development",
+      objectKey: `maps/${candidate.legacyMapId}/zip-stored-v1/${"9".repeat(64)}.zip`,
+      format: "zip-stored-v1",
+      mediaType: "application/zip",
+      filename: `${candidate.legacyMapId}.zip`,
+      bytes: 8192,
+      sha256: "9".repeat(64),
+      manifestReceipt: candidate.contentReceipt,
+      signedManifestReceipt: null,
+      signatureKeyId: null,
+      signatureKeySha256: null,
+      producerBuildSha256: null,
+      producerImageDigest: null,
+      readerRequirements: null,
+      companionRequirements: null,
+      requiredIosBuild: null,
+      requiredIosGitSha: null,
+      requiredIosBuildSha256: null,
+      requiredFirmwareVersion: null,
+      requiredFirmwareBuild: null,
+      requiredFirmwareGitSha: null,
+      deliveryTier: "development",
+    },
+  );
+  return validatePublication(candidate as unknown as Record<string, unknown>);
+}
+
 function publication() {
   return validatePublication({
     publicationId: "job-test-publication",
@@ -194,6 +272,52 @@ function publication() {
       },
     ],
   });
+}
+
+function topographicPublication() {
+  const candidate = structuredClone(publication());
+  candidate.rendererFormatVersion = 4;
+  candidate.features = ["3d-buildings", "contours", "street-labels"];
+  candidate.artifacts[0].readerRequirements = {
+    ...candidate.artifacts[0].readerRequirements!,
+    rendererFormatVersion: 4,
+    requiredFeatures: ["3d-buildings", "contours", "street-labels"],
+  };
+  candidate.artifacts.push({
+    artifactId: `artifact_v1_${"t".repeat(43)}`,
+    bucketSlot: "production",
+    objectKey: `maps/test-map/topography-ios-v1/${receipt}/${"8".repeat(64)}.btopo`,
+    format: "topography-ios-v1",
+    mediaType: "application/vnd.bicino.topography+sqlite3",
+    filename: "test-map.btopo",
+    bytes: 4096,
+    sha256: "8".repeat(64),
+    manifestReceipt: receipt,
+    signedManifestReceipt: null,
+    signatureKeyId: null,
+    signatureKeySha256: null,
+    producerBuildSha256: null,
+    producerImageDigest: null,
+    readerRequirements: null,
+    companionRequirements: {
+      schemaVersion: 1,
+      role: "topography-ios-v1",
+      mapContentReceipt: receipt,
+      mapId: "test-map",
+      profileVersion: 1,
+      intermediateSha256: "5".repeat(64),
+      sourcePolicySha256: "6".repeat(64),
+      attributionSha256: "7".repeat(64),
+    },
+    requiredIosBuild: null,
+    requiredIosGitSha: null,
+    requiredIosBuildSha256: null,
+    requiredFirmwareVersion: null,
+    requiredFirmwareBuild: null,
+    requiredFirmwareGitSha: null,
+    deliveryTier: "production",
+  });
+  return validatePublication(candidate as unknown as Record<string, unknown>);
 }
 
 async function seededLibrary(): Promise<{
@@ -697,6 +821,55 @@ describe("catalog library", () => {
     );
     expect(grant.artifact.deliveryTier).toBe("production");
     expect(grant.downloadURL).not.toContain("map-artifacts");
+  });
+
+  it("grants a topographic stream and its exact companion together", async () => {
+    const candidate = developmentTopographicPublication("topography-grant");
+    await finalizePublication(
+      env,
+      candidate,
+      candidate.publicationId,
+      await sha256Hex(JSON.stringify(candidate)),
+      null,
+      verifyTestArtifact,
+    );
+    const library = await bootstrapLibrary(env);
+    await attachLibrary(
+      env,
+      candidate.publicationId,
+      library.libraryId,
+      undefined,
+      "development",
+    );
+    const grant = await createLibraryDownloadGrant(
+      env,
+      library.libraryId,
+      candidate.mapEntryId,
+      "development",
+      [{ keyId: "prod", keySha256: signerSha }],
+      appIdentity,
+      {
+        ...readerCapabilities,
+        renderers: [
+          {
+            renderer: "esp32-fmb",
+            formatVersions: [1, 2, 3, 4],
+            features: ["3d-buildings", "contours", "street-labels"],
+          },
+        ],
+      },
+    );
+    expect(grant.artifact.readerRequirements?.rendererFormatVersion).toBe(4);
+    expect(grant.companion?.artifact.companionRequirements).toMatchObject({
+      mapContentReceipt: candidate.contentReceipt,
+      mapId: candidate.legacyMapId,
+    });
+    const companionToken = new URL(grant.companion!.downloadURL).pathname
+      .split("/")
+      .at(-1)!;
+    expect(
+      (await resolveDownloadGrant(env, companionToken, "library")).id,
+    ).toBe(grant.companion!.artifact.artifactId);
   });
 
   it("delivery stop rejects new grants and existing bearer resolution, failing closed when unset", async () => {
@@ -2008,6 +2181,42 @@ describe("bounded artifact generations", () => {
 });
 
 describe("validation", () => {
+  it("binds renderer format 4 to one exact topography companion", () => {
+    const candidate = topographicPublication();
+    expect(candidate.artifacts.at(-1)?.companionRequirements).toMatchObject({
+      role: "topography-ios-v1",
+      mapContentReceipt: receipt,
+      mapId: "test-map",
+    });
+
+    const missing = structuredClone(candidate);
+    missing.artifacts = missing.artifacts.filter(
+      (artifact) => artifact.format !== "topography-ios-v1",
+    );
+    expect(() =>
+      validatePublication(missing as unknown as Record<string, unknown>),
+    ).toThrow("topographic map companion contract is incomplete");
+
+    const mismatched = structuredClone(candidate);
+    mismatched.artifacts.at(-1)!.companionRequirements!.mapContentReceipt =
+      "0".repeat(64);
+    expect(() =>
+      validatePublication(mismatched as unknown as Record<string, unknown>),
+    ).toThrow("topographic map companion contract is incomplete");
+
+    const ordinary = structuredClone(candidate);
+    ordinary.rendererFormatVersion = 3;
+    ordinary.features = ["3d-buildings", "street-labels"];
+    ordinary.artifacts[0].readerRequirements = {
+      ...ordinary.artifacts[0].readerRequirements!,
+      rendererFormatVersion: 3,
+      requiredFeatures: ["3d-buildings", "street-labels"],
+    };
+    expect(() =>
+      validatePublication(ordinary as unknown as Record<string, unknown>),
+    ).toThrow("non-topographic map contains a companion artifact");
+  });
+
   it("normalizes aliases using the cross-platform Unicode contract", () => {
     expect(normalizeAlias("  Cafe\u0301 route  ")).toBe("Café route");
     expect(normalizeAlias("\uFEFFMap name\uFEFF")).toBe("Map name");
@@ -2380,6 +2589,27 @@ describe("validation", () => {
 });
 
 describe("catalog lifecycle boundaries", () => {
+  it("keeps unqualified topographic maps out of every promotion entry point", async () => {
+    const candidate = developmentTopographicPublication("topography-gated");
+    await finalizePublication(
+      env,
+      candidate,
+      candidate.publicationId,
+      await sha256Hex(JSON.stringify(candidate)),
+      null,
+      verifyTestArtifact,
+    );
+    expect(
+      (await listPromotionCandidates(env, null, 100)).mapEntryIds,
+    ).not.toContain(candidate.mapEntryId);
+    await expect(
+      createPromotionGrant(env, candidate.mapEntryId),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "topographic promotion is not qualified",
+    });
+  });
+
   it("discovers development maps with bounded keyset pagination and excludes blocked maps", async () => {
     const maps = [
       developmentPublication("auto-a"),

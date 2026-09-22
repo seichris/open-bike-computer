@@ -40,8 +40,18 @@ struct MapManifest {
   std::vector<std::string> labelLanguages;
   std::string internationalFallback;
   uint32_t buildingProfileVersion = 0;
+  uint32_t topographyProfileVersion = 0;
   uint32_t buildingRecordCount = 0;
   uint32_t buildingProvenanceCounts[5] = {0, 0, 0, 0, 0};
+  uint32_t contourRecordCount = 0;
+  uint32_t contourPointCount = 0;
+  uint32_t contourMinorIntervalM = 0;
+  uint32_t contourIndexIntervalM = 0;
+  uint32_t contourNoDataMillionths = 0;
+  std::string contourQualityMode;
+  std::string topographySourcePolicySha256;
+  std::string topographyIntermediateSha256;
+  std::string topographyAttributionSha256;
   std::string minimumFirmwareVersion;
   std::vector<ManifestFile> files;
 };
@@ -69,6 +79,13 @@ struct MapTargetMetadata {
   std::vector<std::string> labelLanguages;
   std::string internationalFallback;
   uint32_t buildingProfileVersion = 0;
+  uint32_t topographyProfileVersion = 0;
+  std::string topographyQualityMode;
+  uint32_t contourMinorIntervalM = 0;
+  uint32_t contourIndexIntervalM = 0;
+  uint32_t contourRecordCount = 0;
+  uint32_t contourNoDataMillionths = 0;
+  std::string topographySourcePolicySha256;
 };
 
 struct ActiveMapSelection {

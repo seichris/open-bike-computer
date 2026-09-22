@@ -81,6 +81,7 @@ from .monitoring import (
     MapMonitoringStore,
 )
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
+from .topography_rollout import topography_target4_generation_allowlist
 from .preparation_estimates import (
     PreparationEstimateMode,
     load_estimate_coordinator,
@@ -379,6 +380,7 @@ def create_app(
         job_store,
         limits=limits,
         building_target3_allowlist=building_target3_generation_allowlist(),
+        topography_target4_allowlist=topography_target4_generation_allowlist(),
         generation_profile_policy=generation_profile_policy,
         deployment_channel=deployment_channel,
         estimate_coordinator=estimate_coordinator,

@@ -49,7 +49,7 @@ def _lines(geometry):
             yield from _lines(part)
 
 
-def compile_contours(sample: dict, selection: dict, *, corridor_width_m: int = 0,
+def compile_contours(sample: dict, selection: dict, *, corridor_width_m: float = 0,
                      cancel: Callable[[], None] = lambda: None) -> CompiledTopography:
     from rasterio.warp import transform as warp
 
@@ -82,7 +82,12 @@ def compile_contours(sample: dict, selection: dict, *, corridor_width_m: int = 0
 
     selected = transform(project("EPSG:4326", working_crs), region)
     if region.geom_type == "LineString":
-        if type(corridor_width_m) is not int or not 1 <= corridor_width_m <= 50_000:
+        if (
+            isinstance(corridor_width_m, bool)
+            or not isinstance(corridor_width_m, (int, float))
+            or not math.isfinite(float(corridor_width_m))
+            or not 1 <= corridor_width_m <= 50_000
+        ):
             raise ValueError("route requires a bounded full corridor width in metres")
         selected = selected.buffer(corridor_width_m / 2, resolution=8)
         if not transform(project("EPSG:4326", working_crs), box(*bounds)).covers(selected):

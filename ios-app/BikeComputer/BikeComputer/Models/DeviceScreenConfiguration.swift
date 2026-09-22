@@ -123,7 +123,10 @@ struct DeviceScreenConfigurationCapabilities: Equatable, Sendable {
 }
 
 struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
-    static let allowedVisibilityMask: UInt32 = 0x0fff
+    static let defaultVisibilityMask: UInt32 = 0x0fff
+    static let contoursVisibilityMask: UInt32 = 1 << 13
+    static let allowedVisibilityMask: UInt32 =
+        defaultVisibilityMask | contoursVisibilityMask
 
     var minimumPolygonSize: UInt8 = 0
     var detailLevel: UInt8 = 2
@@ -131,7 +134,7 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
     var streetLineWidth: UInt8 = 4
     var positionMarkerScale: UInt8 = 2
     var zoomLevel: UInt8 = 3
-    var visibilityMask: UInt32 = allowedVisibilityMask
+    var visibilityMask: UInt32 = defaultVisibilityMask
     var labelDensity: UInt8 = 2
     var labelLanguageMode: UInt8 = 2
     var labelTextSize: UInt8 = 0

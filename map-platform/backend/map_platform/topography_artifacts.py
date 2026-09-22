@@ -19,6 +19,29 @@ HEADER = struct.Struct("<BBHHHI")
 RECORD = struct.Struct("<hBBHhhhh")
 POINT = struct.Struct("<hh")
 INTERVALS = {(20, 100), (50, 250)}
+TOPOGRAPHY_RENDERER_FORMAT_VERSION = 4
+TOPOGRAPHY_BLOCK_FORMAT_VERSION = 5
+TOPOGRAPHY_PROFILE_VERSION = 1
+TOPOGRAPHY_COMPANION_FORMAT = "topography-ios-v1"
+TOPOGRAPHY_COMPANION_MEDIA_TYPE = "application/vnd.bicino.topography+sqlite3"
+
+
+def renderer_has_labels(format_version: int) -> bool:
+    return format_version in {2, 3, TOPOGRAPHY_RENDERER_FORMAT_VERSION}
+
+
+def renderer_has_buildings(format_version: int) -> bool:
+    return format_version in {3, TOPOGRAPHY_RENDERER_FORMAT_VERSION}
+
+
+def vector_renderer_format_version(format_version: int) -> int:
+    """Return the existing vector encoder target underlying a public format.
+
+    Renderer format 4 is a strict extension of the format-3 vectors. Contours
+    are attached afterwards from the single topography intermediate, so the
+    OSM feature encoder must continue producing byte-compatible FMB v4 input.
+    """
+    return 3 if format_version == TOPOGRAPHY_RENDERER_FORMAT_VERSION else format_version
 
 
 @dataclass(frozen=True)

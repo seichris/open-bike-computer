@@ -9,6 +9,7 @@ from typing import Any
 
 from .map_labels import renderer_format_version
 from .map_buildings import BUILDING_PROFILE_VERSION, BUILDING_RENDERER_FORMAT_VERSION
+from .topography_artifacts import TOPOGRAPHY_RENDERER_FORMAT_VERSION
 from .models import Bounds, GeometryMode, MapJob
 from .preview import render_boundary_preview
 
@@ -85,6 +86,11 @@ def reuse_keys(
     preview_sha256: str | None = None,
 ) -> MapReuseKeys | None:
     """Return fail-closed cache identities for an immutable worker build."""
+    # Target 4 must bind exact DEM tile receipts and the compiled intermediate.
+    # Those values do not exist until the topography stage has run, so reusing
+    # a pre-topography vector identity would be unsafe.
+    if renderer_format_version(job.request) == TOPOGRAPHY_RENDERER_FORMAT_VERSION:
+        return None
     if not _SHA256_RE.fullmatch(producer_build_sha256 or ""):
         return None
     if not _IMAGE_DIGEST_RE.fullmatch(producer_image_digest or ""):

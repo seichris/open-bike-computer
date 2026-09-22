@@ -1,5 +1,6 @@
 import Foundation
 import MapKit
+import UIKit
 
 /// Local transparent contours only. A caller must separately enforce saved-map
 /// scope and regional MapKit alignment eligibility before attaching the layer.
@@ -7,6 +8,9 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     let receipt: TopographyCompanionReceipt
     private let store: TopographyCompanionStore
     private let mapBounds: MKMapRect
+    private let taskLock = NSLock()
+    private var tileTasks: [UUID: Task<Void, Never>] = [:]
+    private var memoryWarningObserver: NSObjectProtocol?
 
     private init(store: TopographyCompanionStore, metadata: TopographyCompanionMetadata) {
         self.store = store
@@ -21,6 +25,20 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
         minimumZ = metadata.minimumZoom
         maximumZ = metadata.maximumZoom
         isGeometryFlipped = false
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.purgeDecodedTiles()
+        }
+    }
+
+    deinit {
+        if let memoryWarningObserver {
+            NotificationCenter.default.removeObserver(memoryWarningObserver)
+        }
+        cancelPendingLoads()
     }
 
     static func open(url: URL, receipt: TopographyCompanionReceipt) async throws -> BicinoTopographyTileOverlay {
@@ -40,14 +58,37 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
         let store = store
         let x = path.x, y = path.y, z = path.z
         let scale = path.contentScaleFactor > 1 ? 2 : 1
-        Task {
+        let taskID = UUID()
+        taskLock.lock()
+        tileTasks[taskID] = Task { [weak self] in
+            defer { self?.finishTask(taskID) }
             do {
                 let data = try await store.tile(z: z, x: x, y: y, scale: scale)
+                try Task.checkCancellation()
                 reply.complete(data ?? Self.transparentPNG, nil)
             } catch {
                 reply.complete(nil, error)
             }
         }
+        taskLock.unlock()
+    }
+
+    func cancelPendingLoads() {
+        taskLock.lock()
+        let tasks = Array(tileTasks.values)
+        tileTasks.removeAll()
+        taskLock.unlock()
+        tasks.forEach { $0.cancel() }
+    }
+
+    private func finishTask(_ id: UUID) {
+        taskLock.lock()
+        tileTasks.removeValue(forKey: id)
+        taskLock.unlock()
+    }
+
+    private func purgeDecodedTiles() {
+        Task { await store.purgeCache() }
     }
 
     // A transparent 1x1 PNG is sufficient for a missing tile: MapKit stretches

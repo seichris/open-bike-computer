@@ -29,7 +29,9 @@ class TopographyGeometryTests(unittest.TestCase):
             "kind": "bicino-contour-evidence-v1", "workingCrs": "EPSG:3857",
             "verticalDatum": "EPSG:3855", "minorIntervalM": 20, "indexIntervalM": 100,
             "boundsE7": [-1000000, -1000000, 1000000, 1000000], "noDataMillionths": 0,
-            "qualityMode": "standard-20m-v1", "sources": [], "inputs": [], "sourcePolicySha256": "a" * 64,
+            "qualityMode": "standard-20m-v1", "surfaceModel": "dsm",
+            "horizontalCrs": "EPSG:4326", "sourcePixels": {"fixture": 1},
+            "gridSize": [2, 2], "sources": [], "inputs": [], "sourcePolicySha256": "a" * 64,
             "contours": [{"elevationM": 100, "index": True, "pointsMm": [[-1000000, 2000000], [6000000, 2000000]]}],
         }
         self.selection = mapping(box(-0.09, -0.09, 0.09, 0.09))

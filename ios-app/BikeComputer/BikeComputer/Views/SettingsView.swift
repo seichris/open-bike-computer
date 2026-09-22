@@ -1685,6 +1685,21 @@ private struct SavedMapRow: View {
                     .accessibilityLabel("\(displayName): Updated map available")
             }
 
+            if let packURL,
+               let topography = SavedMapArtifactMetadataStore.load(
+                   for: packURL
+               )?.topography {
+                Label(
+                    topography.qualityLabel,
+                    systemImage: "mountain.2"
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .accessibilityLabel(
+                    "\(displayName): \(topography.qualityLabel)"
+                )
+            }
+
             if let mapEntryID = item.catalogMap?.mapEntryId,
                let aliasStatus = manager.catalogAliasStatus(for: mapEntryID) {
                 Label(aliasStatus, systemImage: "arrow.triangle.2.circlepath")
@@ -1792,6 +1807,9 @@ private struct SavedMapPreviewSheet: View {
     var body: some View {
         let image = manager.detailPreviewImage(for: preview.item) ??
             preview.fallbackImage
+        let topography = preview.item.packURL.flatMap {
+            SavedMapArtifactMetadataStore.load(for: $0)?.topography
+        }
 
         NavigationView {
             VStack(spacing: 16) {
@@ -1812,6 +1830,46 @@ private struct SavedMapPreviewSheet: View {
                             .background(.thinMaterial, in: Capsule())
                             .padding(.bottom, 12)
                     }
+                }
+
+                if let topography {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(topography.qualityLabel, systemImage: "mountain.2")
+                            .font(.headline)
+                        Text(
+                            "\(topography.minorIntervalM) m contours · " +
+                                "\(topography.indexIntervalM) m index lines"
+                        )
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        ForEach(
+                            Array(topography.sources.enumerated()),
+                            id: \.offset
+                        ) { _, source in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(source.id) · \(source.release)")
+                                    .font(.subheadline.weight(.semibold))
+                                Text(
+                                    "\(source.surfaceModel) · " +
+                                        source.verticalDatum
+                                )
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                if let attributionURL = URL(
+                                    string: source.attributionURL
+                                ) {
+                                    Link(
+                                        "Source attribution",
+                                        destination: attributionURL
+                                    )
+                                    .font(.caption)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+                    .accessibilityElement(children: .contain)
                 }
 
                 if preview.item.isAvailableInLibrary {
@@ -2334,6 +2392,34 @@ private struct MapStyleSettingsView: View {
         binding(map: \.showOtherAreas, mapPlusNavigation: \.mapPlusNavigationShowOtherAreas)
     }
 
+    private var showContours: Binding<Bool> {
+        binding(map: \.showContours, mapPlusNavigation: \.mapPlusNavigationShowContours)
+    }
+
+    private var topographicContoursFooter: String {
+        if !bleManager.hasReceivedDeviceCapabilities {
+            return "Connect to the Bike Computer to check contour support."
+        }
+        if !bleManager.supportsTopographicContours {
+            return "Update the Bike Computer firmware to render topographic contours."
+        }
+        if bleManager.activeMapRendererFormat != 4 ||
+            bleManager.activeMapTopographyProfileVersion != 1 {
+            return "Download and install a topographic map before enabling contours."
+        }
+        if !bleManager.activeMapTopographySectionHealthy {
+            return "The active map's contour section is unavailable. Reinstall the map."
+        }
+        if !bleManager.activeMapContainsContours {
+            return "The active map is valid but contains no contour lines for this area."
+        }
+        if let minor = bleManager.activeMapContourMinorIntervalM,
+           let index = bleManager.activeMapContourIndexIntervalM {
+            return "Shows \(minor) m contours with darker \(index) m index lines below roads and routes."
+        }
+        return "Contours are drawn below roads, labels, routes, and position markers."
+    }
+
     private var birdsEyeFooter: String {
         if !bleManager.hasReceivedDeviceCapabilities {
             return "Connect to the Bike Computer to check bird's-eye view support."
@@ -2485,7 +2571,7 @@ private struct MapStyleSettingsView: View {
                     .onChange(of: showRailways.wrappedValue) { _ in sendVisibilityMask() }
             }
 
-            Section(header: Text("Places & Terrain"), footer: Text("Control background map areas and lower-priority context on this screen.")) {
+            Section(header: Text("Places & Terrain"), footer: Text(topographicContoursFooter)) {
                 Toggle("Buildings", isOn: showBuildings)
                     .onChange(of: showBuildings.wrappedValue) { _ in sendVisibilityMask() }
                 Toggle("Parks & Nature", isOn: showGreenSpace)
@@ -2494,6 +2580,11 @@ private struct MapStyleSettingsView: View {
                     .onChange(of: showWater.wrappedValue) { _ in sendVisibilityMask() }
                 Toggle("Other Areas", isOn: showOtherAreas)
                     .onChange(of: showOtherAreas.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Topographic Contours", isOn: showContours)
+                    .disabled(!bleManager.topographicContoursAvailable)
+                    .onChange(of: showContours.wrappedValue) { _ in
+                        sendVisibilityMask()
+                    }
             }
 
             Section(header: Text("Map Rendering"), footer: Text("Feature toggles control map categories; polygon size filters tiny filled areas.")) {
