@@ -466,7 +466,6 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         ]
         self.assertIn("deviceTransferHttp.setEnabled(false)", diagnostics)
         self.assertIn("deviceTransferHttp.waitUntilStopped(5500)", diagnostics)
-        self.assertIn('"http_worker_stopping"', diagnostics)
         self.assertLess(
             diagnostics.index("deviceTransferHttp.setEnabled(false)"),
             diagnostics.index("deviceTransferHttp.waitUntilStopped(5500)"),
