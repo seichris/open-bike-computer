@@ -12551,6 +12551,20 @@ struct NavigationProtocolTests {
         let savedMapsSectionSource = String(
             source[savedMapsSectionStart..<savedMapRowStart]
         )
+        guard let pendingSavedMapRowStart = source.range(
+            of: "private struct PendingSavedMapRow",
+            range: savedMapsSectionStart..<source.endIndex
+        )?.lowerBound,
+        let offlineMapProgressRowStart = source.range(
+            of: "private struct OfflineMapProgressRow",
+            range: pendingSavedMapRowStart..<source.endIndex
+        )?.lowerBound else {
+            assert(false, "pending saved-map row source boundaries should be present")
+            return
+        }
+        let pendingSavedMapRowSource = String(
+            source[pendingSavedMapRowStart..<offlineMapProgressRowStart]
+        )
         assert(
             settingsRootSource.contains(
                 "item: settingsSheetPresentation,"
@@ -12601,6 +12615,15 @@ struct NavigationProtocolTests {
                 source.contains("preparationEstimatePresentation") &&
                 source.contains(
                     "OfflineMapPreparationEstimatePresentation.presentation(for: job)"
+                ) &&
+                pendingSavedMapRowSource.contains(
+                    "Text(preparationEstimatePresentation.value)"
+                ) &&
+                pendingSavedMapRowSource.contains(
+                    ".frame(maxWidth: .infinity, alignment: .trailing)"
+                ) &&
+                !pendingSavedMapRowSource.contains(
+                    "Text(preparationEstimatePresentation.title)"
                 ) &&
                 source.contains("Label(\"Retry Download\"") &&
                 source.contains("Button(\"Choose Another Map\"") &&

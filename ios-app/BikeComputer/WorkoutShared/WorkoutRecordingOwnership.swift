@@ -92,13 +92,14 @@ nonisolated enum WorkoutRecordingStartPolicy {
             return .waitForWatchActivation
         case .noPairedWatch:
             return phoneSupported ? .start(.iphone) : .phoneUnsupported
-        case .ready(isReachable: true):
+        case .ready, .companionAppNotInstalled, .activationFailed:
+            // WatchConnectivity's reachability, activation, and companion-app
+            // catalogue can all lag the actual Watch installation. HealthKit's
+            // Watch launch callback is the authoritative result, so transient
+            // WCSession state must not force a recorder-selection sheet.
             return .start(.watch)
-        case .ready(isReachable: false), .companionAppNotInstalled,
-             .activationFailed, .unsupported:
-            // Explicitly choosing Watch still attempts HealthKit's wake path.
-            // isReachable=false must NEVER start a phone recorder implicitly.
-            return .chooseRecorder
+        case .unsupported:
+            return phoneSupported ? .start(.iphone) : .phoneUnsupported
         }
     }
 

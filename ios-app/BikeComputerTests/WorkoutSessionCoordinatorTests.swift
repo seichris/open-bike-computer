@@ -35,6 +35,34 @@ private final class FakeAvailability: WorkoutRecordingWatchAvailability {
 }
 
 @MainActor
+private final class WorkoutStartDiagnosticsProbe:
+    RideDiagnosticsEventSink {
+    struct Event {
+        let level: RideDiagnosticLevel
+        let category: RideDiagnosticCategory
+        let name: String
+        let fields: [String: String]
+    }
+
+    var events: [Event] = []
+
+    func record(
+        level: RideDiagnosticLevel,
+        category: RideDiagnosticCategory,
+        event: String,
+        fields: [String: String],
+        captureId: UUID?
+    ) {
+        events.append(Event(
+            level: level,
+            category: category,
+            name: event,
+            fields: fields
+        ))
+    }
+}
+
+@MainActor
 private final class FakeWatch: WorkoutWatchRecording {
     let store = WorkoutMetricsStore()
     var starts = 0
@@ -203,15 +231,52 @@ struct WorkoutSessionCoordinatorTests {
         check(watchCoordinator.record?.sessionID == id3 && watchCoordinator.record?.finishedChoice == nil,
               "Next Watch ride cannot inherit previous terminal disposition")
 
-        let (choose, watch3, phone3, availability3, _) = harness()
+        let (unreachable, watch3, phone3, availability3, _) = harness()
         availability3.availability = .ready(isReachable: false)
-        choose.recoverIfNeeded()
-        await spin { choose.recoveryComplete }
-        check(!choose.requestStart() && choose.notice?.kind == .chooseRecorder, "Unreachable Watch asks explicitly")
-        check(watch3.starts == 0 && phone3.starts == 0, "No recorder silently starts")
-        check(choose.requestStart(explicitOwner: .iphone), "Explicit phone override admitted")
-        await spin { phone3.starts == 1 }
-        check(choose.record?.owner == .iphone, "Explicit phone selection stays selected")
+        unreachable.recoverIfNeeded()
+        await spin { unreachable.recoveryComplete }
+        check(unreachable.requestStart(),
+              "Paired installed Watch starts through HealthKit when WCSession is unreachable")
+        check(watch3.starts == 1 && phone3.starts == 0,
+              "Transient Watch reachability never redirects recording to iPhone")
+        check(unreachable.record?.owner == .watch && unreachable.notice == nil,
+              "HealthKit Watch launch reserves Watch ownership without an attention sheet")
+
+        let (transient, watch4, phone4, availability4, _) = harness()
+        let diagnostics = WorkoutStartDiagnosticsProbe()
+        transient.store.diagnosticsRecorder = diagnostics
+        availability4.availability = .activationFailed
+        transient.recoverIfNeeded()
+        await spin { transient.recoveryComplete }
+        check(transient.requestStart(),
+              "Transient Watch activation failure attempts authoritative HealthKit launch")
+        check(watch4.starts == 1 && phone4.starts == 0,
+              "Transient Watch state never opens recorder selection or redirects to iPhone")
+        check(transient.notice == nil,
+              "Accepted HealthKit Watch launch does not present a recorder sheet")
+        check(diagnostics.events.contains {
+            $0.name == "watch_availability_changed"
+                && $0.fields["state"] == "activationFailed"
+        }, "Availability transition is retained in privacy-safe diagnostics")
+        check(diagnostics.events.contains {
+            $0.name == "start_requested"
+                && $0.fields["state"] == "activationFailed"
+        }, "Start request records the observed Watch availability")
+        check(diagnostics.events.contains {
+            $0.name == "start_decision"
+                && $0.fields["outcome"] == "start"
+                && $0.fields["role"] == "watch"
+        }, "Start decision records the selected recorder")
+
+        let (catalogue, watch5, phone5, availability5, _) = harness()
+        availability5.availability = .companionAppNotInstalled
+        catalogue.recoverIfNeeded()
+        await spin { catalogue.recoveryComplete }
+        check(catalogue.requestStart(),
+              "Stale companion catalogue attempts authoritative HealthKit launch")
+        check(watch5.starts == 1 && phone5.starts == 0
+                && catalogue.notice == nil,
+              "Companion registration lag does not open recorder selection")
 
         let finishedDisk = MemoryRecordingStore()
         var finishedWatchRecord = WorkoutRecordingRecord(
@@ -252,18 +317,18 @@ struct WorkoutSessionCoordinatorTests {
         check(restart.notice == nil,
               "A successful restart does not request the workout attention sheet")
 
-        let (recovery, watch4, phone4, _, disk4) = harness()
-        phone4.recoveryFails = true
+        let (recovery, watch6, phone6, _, disk6) = harness()
+        phone6.recoveryFails = true
         recovery.recoverIfNeeded()
         await spin { recovery.notice?.kind == .recovery }
         check(!recovery.recoveryComplete && !recovery.requestStart(explicitOwner: .watch), "Recovery failure blocks even Watch starts")
-        check(watch4.starts == 0 && phone4.starts == 0, "Recovery never creates substitute workout")
-        phone4.recoveryFails = false
+        check(watch6.starts == 0 && phone6.starts == 0, "Recovery never creates substitute workout")
+        phone6.recoveryFails = false
         recovery.retryRecovery()
         await spin { recovery.recoveryComplete }
-        disk4.fails = true
+        disk6.fails = true
         check(!recovery.requestStart(explicitOwner: .iphone), "Storage failure prevents native start")
-        check(phone4.starts == 0, "No recording without durable owner")
+        check(phone6.starts == 0, "No recording without durable owner")
         print("Workout session coordinator: \(count) assertions passed")
     }
 

@@ -8361,6 +8361,9 @@ private struct WorkoutContractTestSuite {
                     ".sheet(item:$presentedSheet,onDismiss:handleSheetDismissal){destinationinpresentedSheetContent(for:destination)}"
                 )
                 && compactContent.contains(
+                    "ifdismissedDestination==.workoutDashboard{workoutSessionCoordinator.dismissNotice()}"
+                )
+                && compactContent.contains(
                     "SensorSettingsRoutingPolicy.openDecision("
                 )
                 && compactContent.contains(

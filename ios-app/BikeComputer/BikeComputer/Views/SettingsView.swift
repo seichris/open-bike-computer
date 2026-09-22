@@ -1268,14 +1268,14 @@ private struct PendingSavedMapRow: View {
             }
 
             if let preparationEstimatePresentation {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(preparationEstimatePresentation.title)
-                    Spacer()
-                    Text(preparationEstimatePresentation.value)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.trailing)
-                }
-                .font(.caption)
+                Text(preparationEstimatePresentation.value)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .font(.caption)
+                    .accessibilityLabel(
+                        "Map preparation \(preparationEstimatePresentation.value)"
+                    )
             }
 
             if let error = manager.errorMessage {
