@@ -19,12 +19,12 @@ namespace {
 // Map activation is handed off to this worker after the HTTP response completes
 // so the transfer and activation phases do not allocate two large stacks at
 // once. Activation reaches substantially deeper than the idle accept loop;
-// retain the 16 KiB budget required by that handoff path. Remote debugging now
-// also performs Wi-Fi station setup and hotspot fallback on this worker. Keep
-// its existing effective 16 KiB budget rather than reducing stack headroom on
-// the fully initialized device.
+// retain the 16 KiB budget required by that handoff path. Remote debugging and
+// diagnostics perform only RAM/network/file work on this worker, so keep their
+// equally deep TLS stacks in PSRAM instead of consuming scarce contiguous
+// internal/DMA-capable memory on the fully initialized device.
 constexpr uint32_t kTransferHttpWorkerStackBytes = 16384;
-constexpr uint32_t kDebugHttpWorkerStackBytes = 16384;
+constexpr uint32_t kPsramHttpWorkerStackBytes = 16384;
 constexpr uint32_t kLanConnectTimeoutMs = 6000;
 constexpr uint32_t kLanConnectPollMs = 50;
 
@@ -514,17 +514,20 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
 
   if (enabled && !wasEnabled) {
     TaskHandle_t worker = nullptr;
-    const uint32_t workerStackBytes = requestedMode == "debug" ? kDebugHttpWorkerStackBytes
-                                                                : kTransferHttpWorkerStackBytes;
-    // The debug service is RAM-only and never performs firmware flash writes
-    // or map activation. Keep its long-lived 16 KiB stack in PSRAM so the
-    // pinned-TLS session cannot consume the internal/DMA headroom that BLE
-    // authentication needs. Transfer/firmware modes retain an internal stack
-    // because their activation and flash paths may execute while external RAM
-    // is unavailable. Both variants use the capability-aware task API so the
-    // worker has one matching destruction path.
+    const bool workerStackInPsram =
+        requestedMode == "debug" || requestedMode == "diagnostics";
+    const uint32_t workerStackBytes =
+        workerStackInPsram ? kPsramHttpWorkerStackBytes
+                           : kTransferHttpWorkerStackBytes;
+    // Debug and diagnostics are RAM-only and never perform firmware flash
+    // writes or map activation. Keep their long-lived 16 KiB stacks in PSRAM
+    // so the pinned-TLS session cannot consume the internal/DMA headroom that
+    // BLE authentication and diagnostics setup need. Map/firmware modes retain
+    // an internal stack because their activation and flash paths may execute
+    // while external RAM is unavailable. Both variants use the capability-
+    // aware task API so the worker has one matching destruction path.
     const UBaseType_t workerStackCaps =
-        requestedMode == "debug"
+        workerStackInPsram
             ? static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
             : static_cast<UBaseType_t>(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     // Publish the worker handle and persistent power-lock ownership before the
@@ -544,7 +547,7 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
         "stack_bytes=%u stack_caps=%s free_heap=%u\n",
         static_cast<long>(created), static_cast<void *>(worker),
         static_cast<unsigned>(workerStackBytes),
-        requestedMode == "debug" ? "psram" : "internal",
+        workerStackInPsram ? "psram" : "internal",
         static_cast<unsigned>(ESP.getFreeHeap()));
     if (created != pdPASS) {
       server_.stop();

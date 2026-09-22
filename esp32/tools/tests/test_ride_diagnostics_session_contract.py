@@ -37,6 +37,21 @@ class RideDiagnosticsSessionContractTests(unittest.TestCase):
         self.assertLess(enabled, keep)
         self.assertLess(keep, release)
 
+    def test_server_start_failure_preserves_the_specific_cause(self):
+        start = BLE[
+            BLE.index("static void diagnosticsSessionStartTask") :
+            BLE.index("static bool startDiagnosticsSessionAsync")
+        ]
+        enabled = start.index(
+            'deviceTransferHttp.setEnabled(true, "diagnostics")'
+        )
+        failure = start.index("startFailure.lastErrorCode.empty()", enabled)
+        fallback = start.index('"diagnostics_start_failed"', failure)
+        record = start.index("startFailureCode", fallback)
+        self.assertLess(enabled, failure)
+        self.assertLess(failure, fallback)
+        self.assertLess(fallback, record)
+
     def test_preseal_lease_publication_never_waits_behind_pruning(self):
         arm = RECORDER[
             RECORDER.index("void armTransferSnapshotLease") :

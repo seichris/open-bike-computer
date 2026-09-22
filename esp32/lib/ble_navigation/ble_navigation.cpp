@@ -3372,22 +3372,38 @@ static void diagnosticsSessionStartTask(void *context) {
     if (ready && stillCurrent && !deviceTransferHttp.status().enabled) {
       const bool enabled = deviceTransferHttp.setEnabled(true, "diagnostics");
       if (!enabled) {
-        deviceTransferHttp.setLastError(
-            "diagnostics_start_failed",
-            "diagnostics storage was ready but the transfer server did not start");
+        const device_transfer::HttpTransferStatus startFailure =
+            deviceTransferHttp.status();
+        if (startFailure.lastErrorCode.empty()) {
+          deviceTransferHttp.setLastError(
+              "diagnostics_start_failed",
+              "diagnostics storage was ready but the transfer server did not start");
+        }
       } else {
         keepSnapshotLease = true;
+      }
+      const device_transfer::HttpTransferStatus startStatus =
+          deviceTransferHttp.status();
+      const char *startFailureCode =
+          startStatus.lastErrorCode.empty()
+              ? "diagnostics_start_failed"
+              : startStatus.lastErrorCode.c_str();
+      char fields[192] = {};
+      if (enabled) {
+        snprintf(fields, sizeof(fields), "%s",
+                 ride_diagnostics::transfer_policy::usingInternalFallback(
+                     storageResult)
+                     ? "{\"active\":true,\"mode\":\"diagnostics\",\"storage\":\"internal_ffat\"}"
+                     : "{\"active\":true,\"mode\":\"diagnostics\",\"storage\":\"removable_sd\"}");
+      } else {
+        snprintf(fields, sizeof(fields),
+                 "{\"active\":false,\"mode\":\"diagnostics\",\"code\":\"%s\"}",
+                 startFailureCode);
       }
       (void)ride_diagnostics::record(
           enabled ? ride_diagnostics::Level::Info
                   : ride_diagnostics::Level::Warning,
-          "transfer", "diagnostics_transfer_entered",
-          enabled
-              ? (ride_diagnostics::transfer_policy::usingInternalFallback(
-                     storageResult)
-                     ? "{\"active\":true,\"mode\":\"diagnostics\",\"storage\":\"internal_ffat\"}"
-                     : "{\"active\":true,\"mode\":\"diagnostics\",\"storage\":\"removable_sd\"}")
-              : "{\"active\":false,\"mode\":\"diagnostics\",\"code\":\"diagnostics_start_failed\"}");
+          "transfer", "diagnostics_transfer_entered", fields);
       Serial.printf(
           "BLE Device Transfer: diagnostics async enter applied, enabled=%d\n",
           enabled);
