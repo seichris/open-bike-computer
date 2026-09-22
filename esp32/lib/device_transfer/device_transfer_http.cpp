@@ -279,17 +279,43 @@ bool HttpTransferServer::bindAuthenticatedBleSession(uint64_t sessionId) {
   if (sessionId == 0)
     return false;
   lockState();
-  if (enabled_ && authenticatedBleSessionId_ != sessionId) {
+  if (enabled_ && authenticatedBleSessionId_ != 0 &&
+      authenticatedBleSessionId_ != sessionId) {
     rememberError("ble_session_changed",
                   "transfer is bound to another BLE session");
     unlockState();
     return false;
   }
+  bool resumedTransfer = false;
   if (authenticatedBleSessionId_ != sessionId) {
     authenticatedBleSessionId_ = sessionId;
+    if (enabled_ && sessionToken_.empty()) {
+      sessionToken_ = generateSessionToken();
+      resumedTransfer = true;
+    }
     transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+    if (enabled_)
+      lastUsefulTrafficMs_ = millis();
   }
   unlockState();
+  if (resumedTransfer)
+    signalStatusChanged();
+  return true;
+}
+
+bool HttpTransferServer::suspendAuthenticatedBleSession() {
+  lockState();
+  if (!enabled_ || mode_ != "firmware" || commitInProgress_) {
+    unlockState();
+    return false;
+  }
+  authenticatedBleSessionId_ = 0;
+  sessionToken_.clear();
+  currentRequestAuthorized_ = false;
+  transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
+  interruptActiveClientLocked();
+  unlockState();
+  signalStatusChanged();
   return true;
 }
 

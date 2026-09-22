@@ -5473,6 +5473,15 @@ static bool handleFirmwareMaintenancePayload(
   if (hasPrefix(value, "DSTS")) {
     power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
     if (requireAuthenticated("maintenance device transfer status")) {
+      const device_transfer::HttpTransferStatus status =
+          deviceTransferHttp.status();
+      if (status.enabled && status.mode == "firmware" &&
+          !deviceTransferHttp.bindAuthenticatedBleSession(
+              currentAuthenticatedTransferSessionId())) {
+        deviceTransferHttp.setLastError(
+            "ble_rebind_failed",
+            "firmware transfer could not bind the reauthenticated owner");
+      }
       queueTransferControl(ble_transfer::Action::None,
                            ble_transfer::NotifyGeneric);
     }
@@ -5656,13 +5665,22 @@ public:
     if (activeConnHandle == BLE_HS_CONN_HANDLE_NONE && !server->connected) {
       return;
     }
-    // Revoke the session token, hotspot secret, and request generation on
-    // NimBLE's serialized host callback before a reconnect can authenticate.
-    deviceTransferHttp.clearAuthenticatedBleSession();
+    // A firmware maintenance hotspot can briefly interrupt BLE while the Wi-Fi
+    // radio starts. Revoke its HTTP token and active client immediately, but
+    // keep the listener alive so the same owner can reauthenticate and receive
+    // a fresh token without restarting the hotspot. Every other mode retains
+    // the full fail-closed teardown.
+    const bool suspendedFirmwareTransfer =
+        firmware_maintenance::active() &&
+        deviceTransferHttp.suspendAuthenticatedBleSession();
+    if (!suspendedFirmwareTransfer)
+      deviceTransferHttp.clearAuthenticatedBleSession();
     resetScreenConfigurationTransport();
-    queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
-                         ble_transfer::NotifyNone);
-    if (firmware_maintenance::active()) {
+    if (!suspendedFirmwareTransfer) {
+      queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
+                           ble_transfer::NotifyNone);
+    }
+    if (firmware_maintenance::active() && !suspendedFirmwareTransfer) {
       const firmware_maintenance::Stage stage = firmware_maintenance::stage();
       if (stage != firmware_maintenance::Stage::Committing &&
           stage != firmware_maintenance::Stage::Rebooting) {

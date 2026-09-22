@@ -69,6 +69,27 @@ class FirmwareMaintenanceBleContractTests(unittest.TestCase):
         self.assertIn("MyMaintenanceRejectedCharacteristicCallbacks", stable_prefix)
         self.assertIn("new MySettingsCharacteristicCallbacks()", stable_prefix)
 
+    def test_firmware_transfer_survives_wifi_startup_ble_reconnect(self):
+        disconnect_start = self.ble_cpp.index("void disconnectActive()")
+        disconnect_end = self.ble_cpp.index(
+            "class MyNavCharacteristicCallbacks", disconnect_start
+        )
+        disconnect = self.ble_cpp[disconnect_start:disconnect_end]
+        self.assertIn("suspendAuthenticatedBleSession()", disconnect)
+        self.assertIn("!suspendedFirmwareTransfer", disconnect)
+
+        maintenance_start = self.ble_cpp.index(
+            "static bool handleFirmwareMaintenancePayload("
+        )
+        maintenance_end = self.ble_cpp.index(
+            "class MyMaintenanceRejectedCharacteristicCallbacks",
+            maintenance_start,
+        )
+        maintenance = self.ble_cpp[maintenance_start:maintenance_end]
+        self.assertIn("bindAuthenticatedBleSession(", maintenance)
+        self.assertIn("currentAuthenticatedTransferSessionId()", maintenance)
+        self.assertIn("ble_rebind_failed", maintenance)
+
 
 if __name__ == "__main__":
     unittest.main()
