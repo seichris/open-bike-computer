@@ -19322,7 +19322,7 @@ struct NavigationProtocolTests {
     }
 
     static func testDeviceSoundProtocol() {
-        assertEqual(DeviceSound.allCases.map(\.rawValue), [1, 2, 3, 5], "sound IDs match firmware assets")
+        assertEqual(DeviceSound.allCases.map(\.rawValue), [1, 2, 5], "the picker omits the retired rotating-bell sound ID")
         assertEqual(DeviceSound.defaultSelection, .plasticBicycleHorn, "bicycle horn is the default sound")
         assertEqual(DeviceSound.defaultVolumePercent, 70, "device sound volume defaults to 70 percent")
 
@@ -25379,16 +25379,21 @@ struct NavigationProtocolTests {
         assert(!freshManager.isPowerButtonHonkEnabled, "fresh installs leave PWR honk disabled")
 
         freshManager.deviceSoundsEnabled = true
-        freshManager.selectedDeviceSound = .rotatingBicycleBell
+        freshManager.selectedDeviceSound = .squeezeHorn
         freshManager.deviceSoundVolumePercent = 65
         freshManager.isPowerButtonHonkEnabled = true
         freshManager.saveSettings()
 
         let reloaded = BLEManager()
         assert(reloaded.deviceSoundsEnabled, "device sounds enabled state persists")
-        assertEqual(reloaded.selectedDeviceSound, .rotatingBicycleBell, "selected sound persists")
+        assertEqual(reloaded.selectedDeviceSound, .squeezeHorn, "selected sound persists")
         assertEqual(reloaded.deviceSoundVolumePercent, 65, "sound volume persists")
         assert(reloaded.isPowerButtonHonkEnabled, "PWR honk enabled state persists")
+
+        defaults.set(3, forKey: soundKey)
+        let retiredValue = BLEManager()
+        assertEqual(retiredValue.selectedDeviceSound, .plasticBicycleHorn,
+                    "the retired rotating-bell ID migrates to the default horn")
 
         defaults.set(4, forKey: soundKey)
         defaults.set(Double.nan, forKey: volumeKey)

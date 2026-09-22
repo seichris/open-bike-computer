@@ -625,10 +625,18 @@ enum DeviceTransferPacketRoutingPolicy {
 enum DeviceSound: UInt8, CaseIterable, Identifiable {
     case bellDing = 1
     case plasticBicycleHorn = 2
+    // Decode legacy device state without offering the removed recording in
+    // the current picker. Firmware keeps raw value 3 reserved.
     case rotatingBicycleBell = 3
     case squeezeHorn = 5
 
     var id: UInt8 { rawValue }
+
+    static let allCases: [DeviceSound] = [
+        .bellDing,
+        .plasticBicycleHorn,
+        .squeezeHorn,
+    ]
 
     static let defaultSelection: DeviceSound = .plasticBicycleHorn
     static let defaultVolumePercent: Double = 70
@@ -672,7 +680,7 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
         case .plasticBicycleHorn:
             return "Bicycle Horn"
         case .rotatingBicycleBell:
-            return "Rotating Bicycle Bell"
+            return "Rotating Bicycle Bell (Legacy)"
         case .squeezeHorn:
             return "Squeeze Horn"
         }
@@ -1817,9 +1825,12 @@ class BLEManager: NSObject, ObservableObject {
         ) as? Bool ?? false
         let storedSoundID = defaults.object(forKey: SettingsKeys.selectedDeviceSound) as? Int
             ?? Int(DeviceSound.defaultSelection.rawValue)
-        selectedDeviceSound = UInt8(exactly: storedSoundID)
+        let restoredSound = UInt8(exactly: storedSoundID)
             .flatMap(DeviceSound.init(rawValue:))
             ?? .defaultSelection
+        selectedDeviceSound = restoredSound == .rotatingBicycleBell
+            ? .defaultSelection
+            : restoredSound
         let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double
             ?? DeviceSound.defaultVolumePercent
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(storedSoundVolume)
