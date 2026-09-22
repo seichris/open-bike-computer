@@ -1775,7 +1775,13 @@ unresolved. The app runs this reconciliation after every fresh authenticated
 device-transfer status, including the first status after an app relaunch.
 Optional navigation and telemetry writes are suppressed while
 maintenance is active, but authentication and transfer status/control remain
-available.
+available. The maintenance GATT database preserves the normal characteristic
+order and properties from Navigation through Settings (`2A6E`, Auth, `2A6F`,
+`2A72`, `2A73`). This keeps cached CoreBluetooth handles valid across the
+intentional reboot. Route and GPS are inert placeholders in maintenance;
+Settings accepts only owner-authenticated `DTRN`, `DSTS`, and capabilities
+traffic, with responses emitted on Navigation. All other Settings payloads are
+rejected before normal riding or renderer state can be touched.
 
 The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic
