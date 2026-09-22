@@ -3,11 +3,12 @@ import SwiftUI
 struct ConfigurableDeviceScreensSettingsSection: View {
     @ObservedObject var controller: DeviceScreenConfigurationController
     let onAddScreen: () -> Void
+    @State private var saveWasInProgress = false
+    @State private var showSavedConfirmation = false
+    @State private var savedConfirmationTask: Task<Void, Never>?
 
     var body: some View {
         Section {
-            statusContent
-
             if let document = controller.draft {
                 ForEach(document.instances) { instance in
                     HStack {
@@ -66,11 +67,20 @@ struct ConfigurableDeviceScreensSettingsSection: View {
                 .disabled(!canAdd(to: document))
                 .accessibilityIdentifier("device-screen-add")
 
+                statusContent
+            } else {
+                statusContent
             }
         } header: {
-            Text("Device Screens")
+            Text("Bicino Screens")
         } footer: {
-            Text("Drag screens to reorder, add new screens or hide screens. Changes save automatically.")
+            Text("Drag screens to reorder, add new screens or hide screens.")
+        }
+        .onChange(of: controller.state) { state in
+            updateSaveConfirmation(for: state)
+        }
+        .onDisappear {
+            savedConfirmationTask?.cancel()
         }
     }
 
@@ -85,7 +95,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
         case .saving:
             HStack {
                 ProgressView()
-                Text("Saving changes to Bicino…")
+                Text("Saving changes")
             }
         case .conflict:
             VStack(alignment: .leading, spacing: 8) {
@@ -109,19 +119,46 @@ struct ConfigurableDeviceScreensSettingsSection: View {
         case .ready:
             if controller.hasUnsavedChanges {
                 if controller.canSave {
-                    Label("Changes will save automatically.", systemImage: "clock")
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        ProgressView()
+                        Text("Saving changes")
+                    }
                 } else {
                     Label("Finish editing to save changes.", systemImage: "exclamationmark.circle")
                         .foregroundStyle(.secondary)
                 }
-            } else {
+            } else if showSavedConfirmation {
                 Label("Saved to Bicino", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.secondary)
             }
         case .legacyUnsupported:
             Text("This firmware uses the original fixed screen settings.")
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func updateSaveConfirmation(
+        for state: DeviceScreenConfigurationSyncState
+    ) {
+        switch state {
+        case .saving:
+            savedConfirmationTask?.cancel()
+            savedConfirmationTask = nil
+            showSavedConfirmation = false
+            saveWasInProgress = true
+        case .ready:
+            guard saveWasInProgress else { return }
+            saveWasInProgress = false
+            guard !controller.hasUnsavedChanges else { return }
+            showSavedConfirmation = true
+            savedConfirmationTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                showSavedConfirmation = false
+                savedConfirmationTask = nil
+            }
+        case .loading, .conflict, .failed, .legacyUnsupported:
+            saveWasInProgress = false
         }
     }
 
