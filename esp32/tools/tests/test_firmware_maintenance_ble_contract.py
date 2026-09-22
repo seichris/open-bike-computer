@@ -88,7 +88,10 @@ class FirmwareMaintenanceBleContractTests(unittest.TestCase):
         maintenance = self.ble_cpp[maintenance_start:maintenance_end]
         self.assertIn("bindAuthenticatedBleSession(", maintenance)
         self.assertIn("currentAuthenticatedTransferSessionId()", maintenance)
-        self.assertIn("ble_rebind_failed", maintenance)
+        self.assertLess(
+            maintenance.index("bindAuthenticatedBleSession("),
+            maintenance.index("queueTransferControl(ble_transfer::Action::None"),
+        )
 
 
 if __name__ == "__main__":

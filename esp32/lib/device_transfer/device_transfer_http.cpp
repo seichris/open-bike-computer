@@ -286,20 +286,15 @@ bool HttpTransferServer::bindAuthenticatedBleSession(uint64_t sessionId) {
     unlockState();
     return false;
   }
-  bool resumedTransfer = false;
   if (authenticatedBleSessionId_ != sessionId) {
     authenticatedBleSessionId_ = sessionId;
-    if (enabled_ && sessionToken_.empty()) {
+    if (enabled_ && sessionToken_.empty())
       sessionToken_ = generateSessionToken();
-      resumedTransfer = true;
-    }
     transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
     if (enabled_)
       lastUsefulTrafficMs_ = millis();
   }
   unlockState();
-  if (resumedTransfer)
-    signalStatusChanged();
   return true;
 }
 
@@ -315,7 +310,6 @@ bool HttpTransferServer::suspendAuthenticatedBleSession() {
   transferGeneration_ = nextHttpTransferGeneration(transferGeneration_);
   interruptActiveClientLocked();
   unlockState();
-  signalStatusChanged();
   return true;
 }
 

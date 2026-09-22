@@ -5473,15 +5473,11 @@ static bool handleFirmwareMaintenancePayload(
   if (hasPrefix(value, "DSTS")) {
     power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
     if (requireAuthenticated("maintenance device transfer status")) {
-      const device_transfer::HttpTransferStatus status =
-          deviceTransferHttp.status();
-      if (status.enabled && status.mode == "firmware" &&
-          !deviceTransferHttp.bindAuthenticatedBleSession(
-              currentAuthenticatedTransferSessionId())) {
-        deviceTransferHttp.setLastError(
-            "ble_rebind_failed",
-            "firmware transfer could not bind the reauthenticated owner");
-      }
+      // A hotspot start may have suspended this owner's HTTP token when BLE
+      // briefly disconnected. Rebinding issues a fresh token before DSTS is
+      // reported; bindAuthenticatedBleSession records any ownership conflict.
+      deviceTransferHttp.bindAuthenticatedBleSession(
+          currentAuthenticatedTransferSessionId());
       queueTransferControl(ble_transfer::Action::None,
                            ble_transfer::NotifyGeneric);
     }
