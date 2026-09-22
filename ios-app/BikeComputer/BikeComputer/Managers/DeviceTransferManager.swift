@@ -228,6 +228,7 @@ enum RemoteDeviceDebugError: LocalizedError, Equatable {
     case unsupportedFirmware
     case transferCommandNotSent
     case rejected(code: String, message: String)
+    case missingDiagnosticsSession
     case missingSession
 
     var errorDescription: String? {
@@ -240,6 +241,8 @@ enum RemoteDeviceDebugError: LocalizedError, Equatable {
             return "The remote-debug request could not be sent."
         case .rejected(_, let message):
             return message
+        case .missingDiagnosticsSession:
+            return "The device did not return a fresh diagnostics session."
         case .missingSession:
             return "The device did not return a fresh remote-debug session."
         }
@@ -251,7 +254,30 @@ enum RemoteDeviceDebugError: LocalizedError, Equatable {
         case .unsupportedFirmware: return "unsupported_firmware"
         case .transferCommandNotSent: return "transfer_command_not_sent"
         case .rejected(let code, _): return code
+        case .missingDiagnosticsSession: return "missing_session"
         case .missingSession: return "missing_session"
+        }
+    }
+}
+
+enum DeviceDiagnosticsHotspotFallbackPolicy {
+    static let maximumAttemptCount = 2
+
+    static func shouldRetry(error: Error) -> Bool {
+        guard let remoteError = error as? RemoteDeviceDebugError else {
+            return false
+        }
+        switch remoteError {
+        case .missingDiagnosticsSession:
+            return true
+        case .rejected(let code, _):
+            return [
+                "diagnostics_worker_stopping",
+                "http_worker_stopping",
+                "transfer_stopping",
+            ].contains(code)
+        default:
+            return false
         }
     }
 }
@@ -1276,19 +1302,9 @@ final class DeviceTransferManager {
                 if !probeResult.isReady {
                     status("switching to device hotspot")
                     try await stopDiagnostics(bleManager: bleManager)
-                    enterWasQueued = false
-                    let fallbackRevision = bleManager.deviceTransferStatusRevision
-                    guard bleManager.requestDeviceTransferMode(
-                        .diagnostics,
-                        remoteDebugHotspotFallbackReason: .endpointUnreachable
-                    ) else {
-                        throw RemoteDeviceDebugError.transferCommandNotSent
-                    }
-                    enterWasQueued = true
-                    session = try await waitForDiagnosticsSession(
+                    session = try await enterDiagnosticsHotspotFallback(
                         bleManager: bleManager,
-                        afterRevision: fallbackRevision,
-                        attemptCount: DeviceTransferHandshakePolicy.attemptCount
+                        status: status
                     )
                 }
             }
@@ -1332,6 +1348,50 @@ final class DeviceTransferManager {
             }
             throw error
         }
+    }
+
+    private func enterDiagnosticsHotspotFallback(
+        bleManager: BLEManager,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws -> DeviceTransferSession {
+        for attempt in 0..<DeviceDiagnosticsHotspotFallbackPolicy
+            .maximumAttemptCount {
+            let fallbackRevision = bleManager.deviceTransferStatusRevision
+            guard bleManager.requestDeviceTransferMode(
+                .diagnostics,
+                remoteDebugHotspotFallbackReason: .endpointUnreachable
+            ) else {
+                throw RemoteDeviceDebugError.transferCommandNotSent
+            }
+            do {
+                return try await waitForDiagnosticsSession(
+                    bleManager: bleManager,
+                    afterRevision: fallbackRevision,
+                    attemptCount: DeviceTransferHandshakePolicy.attemptCount
+                )
+            } catch {
+                let hasRetry = attempt + 1 <
+                    DeviceDiagnosticsHotspotFallbackPolicy.maximumAttemptCount
+                guard hasRetry,
+                      DeviceDiagnosticsHotspotFallbackPolicy.shouldRetry(
+                        error: error
+                      ) else {
+                    throw error
+                }
+                status("retrying device hotspot")
+                record(
+                    mode: .diagnostics,
+                    event: "hotspot_fallback_retry"
+                )
+                // Build 98 and earlier can publish the empty exit status
+                // before their LAN worker has actually stopped. By the time
+                // the first bounded hotspot handshake expires, a compensating
+                // exit gives that worker a deterministic cleanup boundary and
+                // makes one fresh retry safe.
+                try? await stopDiagnostics(bleManager: bleManager)
+            }
+        }
+        throw RemoteDeviceDebugError.missingDiagnosticsSession
     }
 
     private func waitForDiagnosticsSession(
@@ -1383,7 +1443,7 @@ final class DeviceTransferManager {
                 )
             )
         }
-        throw RemoteDeviceDebugError.missingSession
+        throw RemoteDeviceDebugError.missingDiagnosticsSession
     }
 
 #if HOST_TESTING

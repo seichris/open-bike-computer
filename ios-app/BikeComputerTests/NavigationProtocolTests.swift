@@ -19443,6 +19443,35 @@ struct NavigationProtocolTests {
         )
         assertEqual(DeviceTransferHandshakePolicy.remoteDebugExitAttemptCount, 32,
                     "debug teardown allows the worker's bounded stop path to finish")
+        assertEqual(
+            DeviceDiagnosticsHotspotFallbackPolicy.maximumAttemptCount,
+            2,
+            "diagnostics retries one hotspot transition for affected firmware"
+        )
+        assert(
+            DeviceDiagnosticsHotspotFallbackPolicy.shouldRetry(
+                error: RemoteDeviceDebugError.missingDiagnosticsSession
+            ),
+            "a missing fallback DSTS receives one compatibility retry"
+        )
+        assert(
+            DeviceDiagnosticsHotspotFallbackPolicy.shouldRetry(
+                error: RemoteDeviceDebugError.rejected(
+                    code: "http_worker_stopping",
+                    message: "worker is stopping"
+                )
+            ),
+            "a retained LAN worker receives one compatibility retry"
+        )
+        assert(
+            !DeviceDiagnosticsHotspotFallbackPolicy.shouldRetry(
+                error: RemoteDeviceDebugError.rejected(
+                    code: "transfer_busy",
+                    message: "another mode is active"
+                )
+            ),
+            "an unrelated active transfer is not retried"
+        )
         assert(DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 4),
                "transfer handshake refreshes status after one second")
         assert(!DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 3),
