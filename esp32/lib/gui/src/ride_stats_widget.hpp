@@ -24,7 +24,10 @@ struct Presentation {
   const char *unit = "";
   PresentationKind kind = PresentationKind::Empty;
   bool available = false;
+  bool isAltitude = false;
   int8_t zoneIndex = -1;
+  uint8_t zoneCount = 5;
+  bool zoneShowsHeart = true;
   std::array<char, 24> value{};
 };
 
@@ -33,6 +36,7 @@ inline Presentation bottomMetric(
     const ride_telemetry_presenter::ViewModel &model) {
   Presentation presentation{};
   presentation.kind = PresentationKind::Scalar;
+  presentation.isAltitude = metric == ride_telemetry_presenter::BottomMetric::Altitude;
   presentation.title = ride_telemetry_presenter::bottomMetricTitle(metric);
   ride_telemetry_presenter::formatBottomMetric(
       metric, model, presentation.value.data(), presentation.value.size());
@@ -76,13 +80,52 @@ inline Presentation make(Widget widget,
     return presentation;
   }
   case Widget::HeartRateZone:
-    presentation.title = "HR zone";
+  case Widget::PowerZone: {
+    const bool power = widget == Widget::PowerZone;
+    presentation.title = ride_telemetry_presenter::zoneTitle(model, power);
     presentation.kind = PresentationKind::ZoneStrip;
-    presentation.zoneIndex = ride_telemetry_presenter::fiveZoneIndex(model);
+    presentation.zoneShowsHeart = !power;
+    presentation.zoneCount = ride_telemetry_presenter::zoneCount(model, power);
+    presentation.zoneIndex = ride_telemetry_presenter::zoneIndex(model, power);
     presentation.available = presentation.zoneIndex >= 0;
     std::snprintf(presentation.value.data(), presentation.value.size(), "%s",
                   presentation.available ? "ZONE" : "--");
     return presentation;
+  }
+  case Widget::HeartRateZoneTime:
+  case Widget::PowerZoneTime:
+  case Widget::HeartRateZoneRange:
+  case Widget::PowerZoneRange: {
+    const bool power = widget == Widget::PowerZoneTime || widget == Widget::PowerZoneRange;
+    const bool time = widget == Widget::HeartRateZoneTime || widget == Widget::PowerZoneTime;
+    const auto &zone = power ? model.zones.power : model.zones.heartRate;
+    const int8_t index = ride_telemetry_presenter::zoneIndex(model, power);
+    presentation.title = time ? (power ? "Power zone time" : "HR zone time")
+                              : (power ? "Power zone W" : "HR zone bpm");
+    presentation.kind = PresentationKind::Scalar;
+    presentation.available = zone.received && index >= 0 && (!time || zone.durations());
+    if (!presentation.available) {
+      std::snprintf(presentation.value.data(), presentation.value.size(), "--");
+    } else if (time) {
+      ride_telemetry_presenter::formatElapsed(
+          {true, zone.milliseconds[static_cast<std::size_t>(index)] / 1000},
+          presentation.value.data(), presentation.value.size());
+    } else {
+      // Ranges are display-only. The Watch owns exact boundary membership.
+      // Compact formatting never feeds back into zone classification.
+      if (index == 0)
+        std::snprintf(presentation.value.data(), presentation.value.size(),
+                      "to %.5g", zone.boundaries[0]);
+      else if (index + 1 == zone.count)
+        std::snprintf(presentation.value.data(), presentation.value.size(),
+                      "from %.5g", zone.boundaries[static_cast<std::size_t>(index) - 1]);
+      else
+        std::snprintf(presentation.value.data(), presentation.value.size(),
+                      "%.5g-%.5g", zone.boundaries[static_cast<std::size_t>(index) - 1],
+                      zone.boundaries[static_cast<std::size_t>(index)]);
+    }
+    return presentation;
+  }
   case Widget::Distance:
     presentation.title = "Distance";
     presentation.kind = PresentationKind::Scalar;
@@ -105,6 +148,7 @@ inline Presentation make(Widget widget,
     presentation.available = model.wallElapsedSeconds.available;
     return presentation;
   case Widget::Altitude:
+    presentation.isAltitude = true;
     presentation.title = "Altitude m";
     presentation.kind = PresentationKind::Scalar;
     ride_telemetry_presenter::formatInteger(
@@ -185,6 +229,9 @@ inline std::size_t maximumFormattedValueBytes(Widget widget) {
     return 13;
   case Widget::Cadence:
     return 7;
+  case Widget::HeartRateZoneRange:
+  case Widget::PowerZoneRange:
+    return 23;
   case Widget::Empty:
     return 0;
   default:

@@ -60,6 +60,8 @@ struct RouteSearchPanel: View {
     let currentLocation: CLLocation?
     let maxExpandedHeight: CGFloat
     var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType) -> Void
+    var onSaveToFavorites:
+        ((SavedDestination, RouteEndpoint, MKDirectionsTransportType) -> Void)? = nil
 
     @StateObject private var destinationCompleter = AddressSearchCompleter()
     @StateObject private var sourceCompleter = AddressSearchCompleter()
@@ -294,7 +296,7 @@ struct RouteSearchPanel: View {
             }
         } else if shouldShowSavedDestinations {
             savedDestinationsScroll
-        } else {
+        } else if !hasSelectedDestination {
             Spacer(minLength: 0)
         }
     }
@@ -493,7 +495,25 @@ struct RouteSearchPanel: View {
 
     private func toggleSelectedDestinationFavorite() {
         guard let destination = activeDestination else { return }
-        destinationStore.toggleFavorite(destination)
+        if destinationStore.isFavorite(destination) {
+            destinationStore.removeFavorite(destination)
+            return
+        }
+
+        let sourceEndpoint = RouteEndpointSelection.sourceEndpoint(
+            hasSelectedSource: hasSelectedSource,
+            sourceAddress: sourceAddress
+        )
+        destinationStore.addRecent(destination)
+        if let onSaveToFavorites {
+            onSaveToFavorites(
+                destination,
+                sourceEndpoint,
+                selectedTransportType
+            )
+        } else {
+            destinationStore.addFavorite(destination)
+        }
     }
 }
 

@@ -42,7 +42,7 @@ struct NavigationLocationSampleV1 {
     let altitudeMeters: Double
     let timestamp: Date
 }
-struct NavigationSnapshotV1 {
+struct NavigationSnapshotV1: Equatable {
     var routeWindow = Data()
     var navigationGeneration = 1
     var routeID = "test-route"
@@ -73,7 +73,7 @@ struct WorkoutDeviceMotionUpdate {
     let automaticallyPaused: Bool
 }
 enum WorkoutDeviceFrameBuilder {
-    static func transportFrames(for frames: WorkoutDeviceFrames, generation: UInt8, includeOrigin: Bool) -> [Data] {
+    static func transportFrames(for frames: WorkoutDeviceFrames, generation: UInt8, includeOrigin: Bool, zoneSequence: UInt32 = 0) -> [Data] {
         [Data("workout-\(frames.identity.state)-identity".utf8), Data("workout-\(frames.identity.state)-metrics".utf8)]
     }
     static func watchMotionFrame(for update: WorkoutDeviceMotionUpdate, sentAt: Date) -> Data? {

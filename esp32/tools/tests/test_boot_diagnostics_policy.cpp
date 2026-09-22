@@ -134,5 +134,23 @@ int main() {
     assert(probe.lastFailureResetReason == 0);
   }
 
+  // A maintenance updater is likewise an intentional partial boot, but remains
+  // distinguishable from a display probe and from full application readiness.
+  PersistentState maintenance{};
+  BeginResult maintenanceBoot = beginBoot(maintenance, kFirmwareA, 3, false);
+  assert(!maintenanceBoot.safeMode);
+  assert(completeStage(maintenance, Stage::Startup));
+  assert(enterStage(maintenance, Stage::CoreServices));
+  assert(completeStage(maintenance, Stage::CoreServices));
+  assert(markFirmwareMaintenance(maintenance));
+  assert(isFirmwareMaintenance(maintenance));
+  assert(!isDiagnosticHold(maintenance));
+  assert(!isReady(maintenance));
+  BeginResult afterMaintenance = beginBoot(
+      maintenance, kFirmwareA, 3, false);
+  assert(!afterMaintenance.failureRecorded);
+  assert(!afterMaintenance.safeMode);
+  assert(maintenance.consecutiveEarlyFailures == 0);
+
   return 0;
 }

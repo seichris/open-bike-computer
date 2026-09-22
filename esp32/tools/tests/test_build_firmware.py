@@ -44,6 +44,7 @@ from generated_sdkconfig import (
     FLASH_PLAN_PORT_PLACEHOLDER,
     FLASH_PLAN_SCHEMA,
     GeneratedSdkconfigError,
+    PRODUCTION_APPLICATION_RESERVE_BYTES,
     _execution_tree_sha256,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_PACKAGES,
@@ -1426,6 +1427,54 @@ build_src_filter =
             record_generated_sdkconfig_defaults(
                 self.project_dir, self.environment
             )
+
+    def test_attestation_rejects_production_firmware_without_size_reserve(self):
+        production = f"{self.environment}_PRODUCTION"
+        with (self.project_dir / "platformio.ini").open(
+            "a", encoding="utf-8"
+        ) as config:
+            config.write(f"[env:{production}]\nplatform = test\n")
+        self.initialize_git_repo()
+        core = self.write_core_attestation(production)
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware(production)
+        firmware = (
+            self.project_dir / ".pio" / "build" / production / "firmware.bin"
+        )
+        firmware.write_bytes(
+            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
+        )
+
+        with patch.dict(
+            os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+        ), self.assertRaisesRegex(
+            GeneratedSdkconfigError,
+            f"required {PRODUCTION_APPLICATION_RESERVE_BYTES}-byte "
+            "application reserve",
+        ):
+            record_generated_sdkconfig_defaults(self.project_dir, production)
+
+    def test_attestation_accepts_exact_production_firmware_size_reserve(self):
+        production = f"{self.environment}_PRODUCTION"
+        with (self.project_dir / "platformio.ini").open(
+            "a", encoding="utf-8"
+        ) as config:
+            config.write(f"[env:{production}]\nplatform = test\n")
+        self.initialize_git_repo()
+        core = self.write_core_attestation(production)
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware(production)
+        firmware = (
+            self.project_dir / ".pio" / "build" / production / "firmware.bin"
+        )
+        firmware.write_bytes(
+            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES)
+        )
+
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+            record_generated_sdkconfig_defaults(self.project_dir, production)
 
     def test_upload_replays_and_attests_additional_platformio_images(self):
         core = self.write_core_attestation().resolve()

@@ -1,21 +1,21 @@
 {
   "generator": "tools/generate_preconnection_assets.py",
   "logo": {
-    "color_rgb888": "#FF372E",
-    "data_sha256": "fe377369c67d201ba4602aacc61092ff9ff8615a81df91a6805ed9119ef9382d",
+    "color_rgb888": "#F5F5F5",
+    "data_sha256": "bd581a6344454f3aeed34aa68ffc9aa84232a2261d6e2f57e1623d55438672d1",
     "output_dimensions": [
-      36,
-      36
+      128,
+      37
     ],
-    "source_commit": "a7b0bc0cdbf4e01b8afee9d614c8c8ffab884a9e",
-    "source_path": "public/images/bicino-logo.png",
-    "source_repository": "https://github.com/seichris/bicino",
-    "source_sha256": "c37377cca05d4a9120a23c92ee5f19750b64ff206a8beb1f7863fc2ca1016612"
+    "source_png_path": "tools/preconnection-bicino-wordmark.png",
+    "source_png_sha256": "158cefe0f67f2060af8c4b6d9ee2378ad52b3b063241dcfdbaefe21f8f8647c3",
+    "source_svg_path": "tools/preconnection-bicino-wordmark.svg",
+    "source_svg_sha256": "7af224b30f3499510b898f11866f0972457498e5a6cfc1b709875548a297a4b9"
   },
   "outputs": {
     "lib/images/src/bicino_app_qr.c": "9177108076805eb052d03aa2796677689dfeee0aaf709279e917c6e0ded7091a",
     "lib/images/src/bicino_app_qr.h": "37f3c82ef8ad73e8cfacf642f267b19ce6ad17771bf392acd22bf1a3c33b01b2",
-    "lib/images/src/bicino_logo.c": "495e27460a17ff0f8adc9115a94205c0292024969f75e7fd127813463f2e6a4f",
+    "lib/images/src/bicino_logo.c": "812009f7a05c53b3b81381972e87587ca6210993dcabeeb57abac7b3dd958c1e",
     "lib/images/src/bicino_logo.h": "1e3729b93417ceac31dee5023697624a3f1d57c795b2d7216740b9e48337ec30"
   },
   "qr": {

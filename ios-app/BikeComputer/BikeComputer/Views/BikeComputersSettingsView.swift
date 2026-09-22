@@ -38,7 +38,9 @@ struct BikeComputersSettingsView: View {
     var body: some View {
         Form {
             bikeComputerSection
-            sensorProfilesSection
+            if shouldShowSensorManagement {
+                sensorProfilesSection
+            }
 
             if shouldShowExplicitDiscoveryState {
                 Section {
@@ -78,9 +80,9 @@ struct BikeComputersSettingsView: View {
                     } label: {
                         Label(
                             bleManager.isConnecting
-                                ? "Cancel connection"
+                                ? "Cancel and Search Nearby"
                                 : bleManager.knownDevices.isEmpty
-                                ? "Search Nearby"
+                                ? "Find your Bicino"
                                 : "Connect a new Bike Computer",
                             systemImage: bleManager.isConnecting
                                 ? "xmark.circle"
@@ -93,7 +95,9 @@ struct BikeComputersSettingsView: View {
                 }
             }
 
-            sensorConnectionSection
+            if shouldShowSensorManagement {
+                sensorConnectionSection
+            }
 
             if let error = bleManager.pairingError {
                 Section {
@@ -195,18 +199,8 @@ struct BikeComputersSettingsView: View {
 
     @ViewBuilder
     private var bikeComputerSection: some View {
-        Section {
-            if bleManager.knownDevices.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("Add your Bicino One", systemImage: "bicycle")
-                    Text(
-                        "Your Bicino One will appear automatically when it’s "
-                            + "nearby, or you can search for it here."
-                    )
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
+        if !bleManager.knownDevices.isEmpty {
+            Section {
                 ForEach(bleManager.knownDevices) { device in
                     NavigationLink {
                         BikeComputerDetailView(deviceID: device.deviceID)
@@ -214,9 +208,7 @@ struct BikeComputersSettingsView: View {
                         KnownBikeComputerRow(device: device)
                     }
                 }
-            }
-        } header: {
-            if !bleManager.knownDevices.isEmpty {
+            } header: {
                 Text(
                     bleManager.knownDevices.count == 1
                         ? "My Bike Computer"
@@ -237,7 +229,8 @@ struct BikeComputersSettingsView: View {
     private var sensorConnectionSection: some View {
         CyclingSensorConnectionSection(
             sensorStore: sensorStore,
-            detectionCoordinator: sensorDetectionCoordinator
+            detectionCoordinator: sensorDetectionCoordinator,
+            focusOnAppear: focusSensorsOnAppear
         )
     }
 
@@ -249,7 +242,18 @@ struct BikeComputersSettingsView: View {
                     isExplicitBikeComputerSetup:
                         startsBikeComputerDiscoveryOnAppear
                 ),
-            scanPurpose: bleManager.currentScanPurpose
+            scanPurpose: bleManager.currentScanPurpose,
+            isExplicitDiscoveryPending:
+                bleManager.isExplicitDiscoveryPending
+        )
+    }
+
+    private var shouldShowSensorManagement: Bool {
+        BikeComputerSettingsPresentationPolicy.shouldShowSensorManagement(
+            hasEverConnectedBikeComputer:
+                bleManager.hasEverConnectedBikeComputer,
+            sensorProfileCount: sensorStore.profiles.count,
+            isExplicitSensorSetup: focusSensorsOnAppear
         )
     }
 
@@ -402,20 +406,11 @@ struct BikeComputerPairingFlow: View {
 
     @State private var deviceName = DeviceOwnershipProtocol.defaultDeviceName
     @State private var didStart = false
+    @FocusState private var isDeviceNameFocused: Bool
 
     var body: some View {
         NavigationView {
             Form {
-                Section {
-                    DeviceValueRow(title: "Device", value: candidate.shortIdentifier)
-                    DeviceValueRow(
-                        title: "Signal",
-                        value: BLEDiscoverySignalPolicy.description(
-                            for: candidate.rssi
-                        )
-                    )
-                }
-
                 if let prompt = matchingPrompt {
                     if bleManager.isPairingConfirmationSubmitting {
                         Section {
@@ -426,18 +421,22 @@ struct BikeComputerPairingFlow: View {
                         }
                     } else {
                         Section {
-                            Text(prompt.formattedCode)
-                                .font(.system(size: 44, weight: .semibold, design: .rounded))
-                                .monospacedDigit()
-                                .frame(maxWidth: .infinity)
-                                .accessibilityLabel("Pairing code \(prompt.formattedCode)")
+                            VStack(spacing: 16) {
+                                Text(prompt.formattedCode)
+                                    .font(.system(size: 44, weight: .semibold, design: .rounded))
+                                    .monospacedDigit()
+                                    .accessibilityLabel("Pairing code \(prompt.formattedCode)")
+
+                                BikeComputerPairingConfirmationIllustration(
+                                    code: prompt.formattedCode
+                                )
+                            }
+                            .frame(maxWidth: .infinity)
                         } header: {
-                            Text("Confirm the Code")
+                            Text("Confirm the Code on your Bicino")
                         } footer: {
                             if prompt.isReplacingExistingRegistration {
                                 Text("This Bike Computer was reset. Match this code, then press either button on the device to replace its old registration on this iPhone.")
-                            } else {
-                                Text("If this exact code is also displayed on your Bike Computer, press either button on the device to confirm physical access.")
                             }
                         }
                     }
@@ -453,11 +452,10 @@ struct BikeComputerPairingFlow: View {
                         TextField("Bike name", text: $deviceName)
                             .textInputAutocapitalization(.words)
                             .submitLabel(.continue)
+                            .focused($isDeviceNameFocused)
                             .onSubmit(startPairing)
                     } header: {
                         Text("Name Your Bike")
-                    } footer: {
-                        Text("You can change this later. iOS does not expose the owner’s Apple ID name, so the app starts with “My bike.”")
                     }
 
                     Section {
@@ -487,6 +485,11 @@ struct BikeComputerPairingFlow: View {
             }
             .navigationTitle("Add Bike Computer")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                DispatchQueue.main.async {
+                    isDeviceNameFocused = true
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -525,8 +528,44 @@ struct BikeComputerPairingFlow: View {
     }
 
     private func startPairing() {
+        isDeviceNameFocused = false
         didStart = true
         bleManager.pair(with: candidate, name: deviceName)
+    }
+}
+
+private struct BikeComputerPairingConfirmationIllustration: View {
+    let code: String
+
+    var body: some View {
+        Image("PairingConfirmationBicino")
+            .resizable()
+            .scaledToFit()
+            .overlay {
+                GeometryReader { geometry in
+                    Text(code)
+                        .font(
+                            .system(
+                                size: geometry.size.width * 0.10,
+                                weight: .black,
+                                design: .rounded
+                            )
+                        )
+                        .monospacedDigit()
+                        .foregroundStyle(
+                            Color(red: 1.0, green: 0.72, blue: 0.04)
+                        )
+                        .position(
+                            x: geometry.size.width * 0.5,
+                            y: geometry.size.height * 0.64
+                        )
+                }
+            }
+            .frame(maxWidth: 360)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                "On your Bicino, confirm code \(code) by pressing either button"
+            )
     }
 }
 
@@ -545,19 +584,15 @@ private struct BikeComputerDetailView: View {
     var body: some View {
         Form {
             if let device {
-                Section("Bike Computer") {
-                    TextField("Name", text: $editedName)
-                        .disabled(!bleManager.isConnected(to: device) || device.isLegacy)
-                    DeviceValueRow(title: "Device ID", value: device.shortIdentifier)
-                    DeviceValueRow(
-                        title: "Status",
-                        value: bleManager.isConnected(to: device) ? "Connected" : "Disconnected"
-                    )
-                }
+                Section("My Bicino") {
+                    HStack(spacing: 12) {
+                        TextField("Name", text: $editedName)
+                            .disabled(
+                                !bleManager.isConnected(to: device) ||
+                                device.isLegacy
+                            )
 
-                if !bleManager.isConnected(to: device) || !device.isLegacy {
-                    Section {
-                        if bleManager.isConnected(to: device) {
+                        if bleManager.isConnected(to: device) && !device.isLegacy {
                             Button("Save Name") {
                                 bleManager.rename(device: device, to: editedName)
                             }
@@ -565,14 +600,14 @@ private struct BikeComputerDetailView: View {
                                 bleManager.deviceOperationDeviceID != nil ||
                                 DeviceOwnershipProtocol.normalizedName(editedName) == device.name
                             )
-                        } else {
-                            Button("Set as Current and Connect") {
-                                bleManager.connect(to: device)
-                            }
                         }
                     }
+                    DeviceValueRow(title: "Device ID", value: device.shortIdentifier)
+                    DeviceValueRow(
+                        title: "Status",
+                        value: bleManager.isConnected(to: device) ? "Connected" : "Disconnected"
+                    )
                 }
-
 
                 if !device.isLegacy {
                     watchControllerSection(device: device)
@@ -595,6 +630,12 @@ private struct BikeComputerDetailView: View {
                 }
 
                 Section {
+                    if !bleManager.isConnected(to: device) {
+                        Button("Set as current device and connect") {
+                            bleManager.connect(to: device)
+                        }
+                    }
+
                     if BikeComputerRemovalPolicy.action(
                         isConnected: bleManager.isConnected(to: device),
                         isLegacy: device.isLegacy
@@ -607,7 +648,7 @@ private struct BikeComputerDetailView: View {
                             bleManager.deviceOperationDeviceID != nil
                         )
                     } else {
-                        Button("Forget on This iPhone", role: .destructive) {
+                        Button("Forget device on this iPhone", role: .destructive) {
                             showingForgetConfirmation = true
                         }
                         .disabled(bleManager.deviceOperationDeviceID != nil)

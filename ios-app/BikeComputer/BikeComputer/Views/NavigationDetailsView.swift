@@ -194,7 +194,6 @@ struct RideMetricsPanel: View {
     let onPauseWorkout: () -> Void
     let onResumeWorkout: () -> Void
     let onEndAndSaveWorkout: () -> Void
-    let onDiscardWorkout: () -> Void
     let enabledSensorCapabilities: CyclingSensorCapabilities
     let sensorPrompt: CyclingSensorPrompt?
     let onOpenSensorSettings: () -> Void
@@ -403,9 +402,26 @@ struct RideMetricsPanel: View {
         .padding(.horizontal, 8)
     }
 
+    @ViewBuilder
+    private var workoutZoneViews: some View {
+        let native = workoutStore.presentation.snapshot.nativeZones
+        if let heartRate = native?.heartRate {
+            WorkoutNativeZoneCard(
+                group: heartRate, showCurrent: !suppressInstantaneousMetrics
+            )
+        } else {
+            HeartRateZoneStrip(currentZone: displayedHeartRateZone)
+        }
+        if let power = native?.cyclingPower {
+            WorkoutNativeZoneCard(
+                group: power, showCurrent: !suppressInstantaneousMetrics
+            )
+        }
+    }
+
     private var workoutMetrics: some View {
         VStack(spacing: 12) {
-            HeartRateZoneStrip(currentZone: displayedHeartRateZone)
+            workoutZoneViews
                 .padding(.horizontal, 8)
 
             workoutMetricGrid(
@@ -433,7 +449,7 @@ struct RideMetricsPanel: View {
                 .frame(maxWidth: .infinity)
             }
 
-            HeartRateZoneStrip(currentZone: displayedHeartRateZone)
+            workoutZoneViews
 
             workoutMetricGrid(
                 metrics: expandedWorkoutMetricValues(from: metrics),
@@ -742,11 +758,7 @@ struct RideMetricsPanel: View {
                 )
             }
 
-            WorkoutFinishButton(
-                store: workoutStore,
-                onEndAndSave: onEndAndSaveWorkout,
-                onDiscard: onDiscardWorkout
-            ) {
+            Button(action: onEndAndSaveWorkout) {
                 RideControlLabel(
                     "End workout",
                     systemImage: "stop.fill"
@@ -857,9 +869,11 @@ struct RideMetricsPanel: View {
     }
 
     private var displayedHeartRateZoneElapsedTime: TimeInterval? {
-        suppressInstantaneousMetrics
-            ? nil
-            : workoutStore.currentHeartRateZoneElapsedTime
+        guard !suppressInstantaneousMetrics else { return nil }
+        if let native = workoutStore.presentation.snapshot.nativeZones?.heartRate {
+            return native.currentZoneDuration
+        }
+        return workoutStore.currentHeartRateZoneElapsedTime
     }
 
     private func altitudeValue(_ altitude: Double?) -> String {

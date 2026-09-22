@@ -69,6 +69,17 @@ installation credential and do not consume a second assertion. There is no
 runtime test-verifier or disable switch; backend tests inject their verifier
 directly through `create_app`.
 
+Normal App Store updates keep the same App Attest key. If iOS reports that the
+bound key is no longer available, the app authenticates an `attestation`
+challenge with the existing installation token and submits a fresh Apple
+attestation plus `previousKeyId`. The backend atomically replaces only that
+exact binding, retains the installation ID and owned maps, resets the assertion
+counter, and records the retired key so it cannot be reused. A plain server
+mismatch or transient DeviceCheck failure never authorizes rotation.
+If a database restore removes the server binding entirely, the same owner token
+can request a scoped challenge with no previous key and re-establish the binding
+without changing the installation ID or abandoning owned maps.
+
 ### Strava route import
 
 Strava route import is disabled unless `MAP_PLATFORM_STRAVA_ENABLED=1` and all
@@ -217,7 +228,8 @@ The local compose shape defaults `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE` to
 `shadow` and passes the estimator settings to API, worker, and maintenance so
 local development records calibration revisions without exposing them to
 clients. The digest-pinned development lock also defaults to `shadow`; the
-production lock defaults to `off`.
+production lock now defaults to `shadow` so it records bounded estimate
+revisions and accuracy evidence without exposing unvalidated ranges to clients.
 
 Configure each Coolify resource with repository base directory `/` and only its
 own Compose location/watch path: `/map-platform/deploy/compose.yaml` for
@@ -255,6 +267,8 @@ conservative and can be tuned with:
 
 - `MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE` (default `240` per IP)
 - `MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY` (default `3` per IP)
+- `MAP_PLATFORM_APP_ATTEST_ROTATION_IP_LIMIT_PER_DAY` (default `12` per IP)
+- `MAP_PLATFORM_APP_ATTEST_ROTATION_LIMIT_PER_DAY` (default `3` per installation)
 - `MAP_PLATFORM_APP_ATTEST_CHALLENGE_TTL_SECONDS` (default `300`; allowed
   range `30` through `900`)
 - `MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR` (default `4` per installation)
@@ -418,8 +432,8 @@ Useful production environment variables:
   in-window timing samples loaded for an aggregate summary, default `50000`,
   maximum `1000000`. Responses report the matching count, sampled count, limit,
   and whether the summary was truncated.
-- `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE`: `off` (default for the pinned
-  Coolify compose; local development defaults to `shadow`), `shadow`, or
+- `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE`: `off`, `shadow` (default for the
+  pinned Coolify compose and local development), or
   `public`. `off` omits generation and the public field; `shadow` stores
   revisions for accuracy review but omits the public field; `public` returns
   the latest validated revision on the existing installation-scoped job API.

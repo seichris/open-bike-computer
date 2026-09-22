@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+"$(dirname "${BASH_SOURCE[0]}")/run-native-workout-zone-tests.sh"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_DIR="$(cd "${IOS_DIR}/.." && pwd)"
@@ -12,6 +14,7 @@ python3 "${SCRIPT_DIR}/run-durable-map-attempt-tests.py"
 
 "${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
 bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
+bash "${SCRIPT_DIR}/run-offline-route-tests.sh"
 
 RENDERER_SCHEDULER_OUT="${TMPDIR:-/tmp}/open-bike-renderer-scheduler-tests"
 xcrun swiftc -D HOST_TESTING -parse-as-library \
@@ -38,8 +41,11 @@ xcrun swiftc -D HOST_TESTING -parse-as-library \
 xcrun swiftc \
   -D HOST_TESTING \
   -o "${OUT}" \
+  ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift \
+  ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift \
+  ios-app/BikeComputer/BikeComputer/Models/BicinoDeviceIntroductionPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift \
@@ -54,15 +60,22 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift \
   ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift \
   ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
+  ios-app/BikeComputer/BikeComputer/Models/BicinoURLSchemeConfig.swift \
   ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift \
   ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \
   ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift \
+  ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift \
+  ios-app/BikeComputer/RideShared/GPXRouteImporter.swift \
+  ios-app/BikeComputer/RideShared/StravaRouteURL.swift \
+  ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
@@ -81,9 +94,13 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -97,6 +114,8 @@ xcrun swiftc \
 
 "${OUT}"
 
+bash "${SCRIPT_DIR}/run-world-radio-tests.sh"
+
 CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
 
 for CYCLING_SENSOR_TEST in CyclingSensorTests CyclingSensorObservationIntegrationTests; do
@@ -105,8 +124,13 @@ xcrun swiftc \
   -default-isolation MainActor \
   -o "${CYCLING_SENSOR_OUT}" \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -115,6 +139,8 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservation.swift \
   ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservation+Workout.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift \
   ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift \
   ios-app/BikeComputer/BikeComputer/Models/CyclingSensorProfile.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CyclingSensorStore.swift \
@@ -183,6 +209,8 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift \
   ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift \
+  ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift \
+  ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
@@ -206,6 +234,10 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift \
+  ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift \
@@ -220,6 +252,7 @@ xcrun swiftc \
   ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
   ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
+  ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputerTests/SavedMapPreviewCatalystTests.swift

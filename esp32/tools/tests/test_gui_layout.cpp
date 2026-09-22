@@ -55,6 +55,10 @@ int main() {
   assert(!mapTransition.canReveal(false, false));
 
 #if defined(WAVESHARE_AMOLED_206)
+  // Drag preview moves the map canvas by the inverse of mapDragDelta().
+  // A finger moving right/down must move the visible map right/down too.
+  assert(-gui_layout::mapDragDelta(36) == 36);
+  assert(-gui_layout::mapDragDelta(-24) == -24);
   // 2.06-inch viewport: 502px screen with 72px reserved UI space.
   assert(gui_layout::mapViewportHeight(502) == 430);
   assert(gui_layout::mapScreenAnchorX(410, 410) == 205);
@@ -66,7 +70,10 @@ int main() {
   static_assert(!ride_telemetry_layout::useLargeMetricValueFont(
       rideLayout.screenWidth));
   static_assert(!waitingLayout.round);
-#else
+#elif defined(WAVESHARE_AMOLED_175)
+  // The calibrated CST9217 coordinates now follow the physical finger.
+  assert(-gui_layout::mapDragDelta(36) == 36);
+  assert(-gui_layout::mapDragDelta(-24) == -24);
   // 1.75-inch viewport: 466px screen with 100px reserved UI space.
   assert(gui_layout::mapViewportHeight(466) == 366);
   assert(gui_layout::mapScreenAnchorX(466, 466) == 233);
@@ -184,15 +191,19 @@ int main() {
   static_assert(navigationMetrics.startWorkoutButton.y -
                     navigationMetrics.bottomLeft.bottom() >=
                 ride_telemetry_layout::kStartWorkoutButtonGap);
-  static_assert(navigationMetrics.rideDetectionMessage.x ==
+  static_assert(navigationMetrics.startWorkoutButton.height == 68);
+  static_assert(navigationMetrics.startWorkoutHitTarget.width ==
+                rideLayout.screenWidth);
+  static_assert(navigationMetrics.startWorkoutHitTarget.height ==
+                navigationMetrics.startWorkoutButton.height * 2);
+  static_assert(navigationMetrics.startWorkoutHitTarget.x <=
                 navigationMetrics.startWorkoutButton.x);
-  static_assert(navigationMetrics.rideDetectionMessage.y ==
-                navigationMetrics.startWorkoutButton.bottom() +
-                    ride_telemetry_layout::kRideDetectionMessageGap);
-  static_assert(navigationMetrics.rideDetectionMessage.width ==
-                navigationMetrics.startWorkoutButton.width);
-  static_assert(navigationMetrics.rideDetectionMessage.height ==
-                navigationMetrics.startWorkoutButton.height);
+  static_assert(navigationMetrics.startWorkoutHitTarget.y <=
+                navigationMetrics.startWorkoutButton.y);
+  static_assert(navigationMetrics.startWorkoutHitTarget.right() >=
+                navigationMetrics.startWorkoutButton.right());
+  static_assert(navigationMetrics.startWorkoutHitTarget.bottom() >=
+                navigationMetrics.startWorkoutButton.bottom());
   constexpr auto idleMetrics =
       ride_telemetry_layout::makeMetricPlacement(
           rideLayout, ride_telemetry_layout::MetricLayoutMode::Idle);
@@ -218,7 +229,19 @@ int main() {
                 ride_telemetry_layout::
                     kRoundStartWorkoutButtonHorizontalInset);
   static_assert(idleMetrics.startWorkoutButton.width == 314);
-  static_assert(idleMetrics.startWorkoutButton.y == 310);
+  static_assert(idleMetrics.startWorkoutButton.y == 294);
+  static_assert(idleMetrics.startWorkoutHitTarget.x == 0);
+  static_assert(idleMetrics.startWorkoutHitTarget.y == 260);
+  static_assert(idleMetrics.startWorkoutHitTarget.width == 466);
+  static_assert(idleMetrics.startWorkoutHitTarget.height == 136);
+  static_assert(idleMetrics.startWorkoutHitTarget.x <=
+                idleMetrics.startWorkoutButton.x);
+  static_assert(idleMetrics.startWorkoutHitTarget.y <=
+                idleMetrics.startWorkoutButton.y);
+  static_assert(idleMetrics.startWorkoutHitTarget.right() >=
+                idleMetrics.startWorkoutButton.right());
+  static_assert(idleMetrics.startWorkoutHitTarget.bottom() >=
+                idleMetrics.startWorkoutButton.bottom());
   static_assert(ride_telemetry_layout::kRoundStartWorkoutIconSize == 34);
 #endif
   static_assert(ride_telemetry_layout::fits(
@@ -228,10 +251,10 @@ int main() {
       idleMetrics.startWorkoutButton, rideLayout.screenWidth,
       rideLayout.screenHeight));
   static_assert(ride_telemetry_layout::fits(
-      navigationMetrics.rideDetectionMessage, rideLayout.screenWidth,
+      navigationMetrics.startWorkoutHitTarget, rideLayout.screenWidth,
       rideLayout.screenHeight));
   static_assert(ride_telemetry_layout::fits(
-      idleMetrics.rideDetectionMessage, rideLayout.screenWidth,
+      idleMetrics.startWorkoutHitTarget, rideLayout.screenWidth,
       rideLayout.screenHeight));
   constexpr int32_t representativeHeartRateTextWidth = 100;
   const auto unavailableHeartRate =
@@ -378,8 +401,8 @@ int main() {
                                      ride_telemetry_layout::kMetricValueOffsetY);
     assert(zoneStrip.bounds.bottom() <= rideLayout.metrics[1].bottom());
     assert(zoneStrip.segments.front().x == zoneStrip.bounds.x);
-    assert(zoneStrip.segments.back().right() == zoneStrip.bounds.right());
-    for (std::size_t index = 0; index < zoneStrip.segments.size(); ++index) {
+    assert(zoneStrip.segments[ride_telemetry_layout::kHeartRateZoneCount - 1].right() == zoneStrip.bounds.right());
+    for (std::size_t index = 0; index < ride_telemetry_layout::kHeartRateZoneCount; ++index) {
       const auto &segment = zoneStrip.segments[index];
       assert(segment.y == zoneStrip.bounds.y);
       assert(segment.height == zoneStrip.bounds.height);
@@ -387,13 +410,13 @@ int main() {
       if (index == activeIndex) {
         assert(segment.width >
                zoneStrip.segments[(index + 1) %
-                                  zoneStrip.segments.size()]
+                                  ride_telemetry_layout::kHeartRateZoneCount]
                    .width);
         assert(zoneStrip.heart.x >= segment.x);
         assert(zoneStrip.label.right() <= segment.right());
         assert(zoneStrip.label.width >= 58);
       }
-      if (index + 1 < zoneStrip.segments.size()) {
+      if (index + 1 < ride_telemetry_layout::kHeartRateZoneCount) {
         assert(segment.right() + ride_telemetry_layout::kZoneStripGap ==
                zoneStrip.segments[index + 1].x);
       }

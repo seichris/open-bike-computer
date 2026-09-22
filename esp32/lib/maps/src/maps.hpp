@@ -486,8 +486,6 @@ private:
   RenderResult visibleRenderResult{};
   map_camera::Lag cameraLag;
   uint32_t lastCameraRequestMs = 0;
-  bool stableCameraHidden = false;
-  lv_obj_t *cameraStatusLabel = nullptr;
   renderer_diagnostics::CameraSample cameraEvidence{};
   std::atomic<bool> renderWorkerShutdown{false};
   std::atomic<bool> renderWorkerExited{true};

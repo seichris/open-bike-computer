@@ -23,6 +23,62 @@ Record before each test:
 - Whether Developer Downgrade is enabled.
 - Result and any device/app error message.
 
+For maintenance-boot qualification also record the stable USB serial, exact Git
+SHA, production profile, build provenance, upload provenance and flash-plan
+identity, partition table, running partition, iPhone build identity, maintenance
+correlation, boot sequence/fingerprint, and every resource sample. Keep build,
+upload, running-image, and physical observations as separate evidence.
+
+## Maintenance resource qualification
+
+Run this matrix independently on `WAVESHARE_AMOLED_175_PRODUCTION` and
+`WAVESHARE_AMOLED_206_PRODUCTION`, using the exact production bytes under test.
+Do not use a diagnostic build as production acceptance evidence.
+
+1. Capture internal 8-bit and DMA free/minimum-free/largest-block values, PSRAM
+   use, firmware-worker stack high-water bytes, allocation failures, and crypto
+   headroom rejections at boot baseline, worker creation, AP startup, phone
+   association, TLS handshake, manifest verification, erase, sustained upload,
+   finalize, cancellation, and teardown.
+2. Repeat the successful path without an SD card. SD absence must not prevent
+   maintenance entry, transfer, or the authenticated boot checkpoint.
+3. Verify the pre-worker and pre-listener resource floors admit every successful
+   run with a documented margin. Raise candidate floors when the evidence
+   supports it; never lower them below the emergency authenticated-control
+   reserve merely to make a run pass.
+4. Confirm two-minute unauthenticated exit, 90-second inactive-transfer exit,
+   and ten-minute overall exit reclaim the listener, clients, Wi-Fi, worker, OTA
+   handle, and transfer power lock, then return to a normal usable boot.
+5. Run success, cancellation, timeout, malformed request, failed authentication,
+   Wi-Fi interruption, and repeated-session paths. Compare teardown values with
+   the baseline and investigate any accumulating loss or largest-block decline.
+
+Record the chosen worker stack, each enforced floor, worst observed value, and
+margin for both targets. A compile, simulator, or host-policy test does not close
+this gate.
+
+## Maintenance lifecycle matrix
+
+- Complete at least ten consecutive signed OTA cycles per target, alternating
+  slots. Then update once more from the newly installed candidate.
+- Interrupt power during erase/write/verification and around boot selection.
+  The old or new complete image may boot according to ESP-IDF state; a partial
+  image must never be accepted.
+- Disconnect BLE during erase/write and race cancellation against commit. A
+  pre-commit cancellation must preserve the running slot. A post-boundary cancel
+  must reconcile through the resulting boot and must not concurrently abort the
+  OTA handle.
+- Lose the maintenance acknowledgement, terminate/relaunch the app, lose the
+  finalize response, and interrupt Wi-Fi. The app must query authoritative state,
+  avoid blind replay, and distinguish cancelled, rolled back, failed, installed,
+  and unresolved outcomes.
+- Exercise invalid signature, wrong target, oversized image, bad hash, invalid
+  image, missing/identical inactive slot, active ride, and active map activation.
+  Each case must fail before unsafe mutation and preserve the usable image.
+- After successful normal-ready confirmation, verify display, maps, audio,
+  navigation, riding behavior, BLE pairing, normal reboot, rollback behavior,
+  USB rescue, and a subsequent OTA from the accepted image.
+
 ## Test 1: Foreground Update
 
 1. Open the iPhone app.

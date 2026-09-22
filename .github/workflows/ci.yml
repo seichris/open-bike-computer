@@ -218,6 +218,24 @@ jobs:
             echo "Non-debug firmware contains the development map signer"
             exit 1
           fi
+      - name: Verify World Radio preview artifact gate
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          # Use the stable diagnostics-only marker emitted by the preview
+          # screen instead of a renderer-specific log message.
+          has_radio=false
+          if grep -aFq "World Radio preview artifact v1" ".pio/build/${BUILD_ENVIRONMENT}/firmware.bin"; then
+            has_radio=true
+          fi
+          case "$BUILD_ENVIRONMENT" in
+            *_PRODUCTION)
+              test "$has_radio" = false
+              ;;
+            *)
+              test "$has_radio" = true
+              ;;
+          esac
       - name: Verify ordinary artifacts include persistent diagnostics capability
         if: ${{ !contains(matrix.target, '_REMOTE_DEBUG') }}
         run: |
@@ -384,6 +402,7 @@ jobs:
           /tmp/test_runtime_ownership
           python3 tools/tests/test_runtime_ownership_contract.py
           python3 tools/tests/test_runtime_rollback_failure.py
+          python3 tools/tests/test_firmware_runtime_boundaries.py
       - name: Ride diagnostics and watchdog host tests
         run: |
           for test in \
@@ -404,6 +423,7 @@ jobs:
           python -m pip install -r tools/preconnection-assets-requirements.txt
           python tools/generate_preconnection_assets.py --check
           python -m unittest tools.tests.test_preconnection_assets
+          python -m unittest tools.tests.test_world_radio_assets
       - name: GUI layout host tests
         run: |
           PYTHONPATH=tools python -m unittest \
@@ -418,7 +438,7 @@ jobs:
             tools.tests.test_device_registry \
             tools.tests.test_map_guidance_integration \
             tools.tests.test_map_memory_diagnostics
-          g++ -std=c++17 \
+          g++ -std=c++17 -DWAVESHARE_AMOLED_175 \
             tools/tests/test_gui_layout.cpp \
             -o /tmp/test_gui_layout_175
           /tmp/test_gui_layout_175
@@ -474,9 +494,23 @@ jobs:
             -o /tmp/test_boot_diagnostics_policy
           /tmp/test_boot_diagnostics_policy
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_firmware_maintenance_policy.cpp \
+            -o /tmp/test_firmware_maintenance_policy
+          /tmp/test_firmware_maintenance_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_firmware_update_policy.cpp \
+            -o /tmp/test_firmware_update_policy
+          /tmp/test_firmware_update_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_status_json.cpp \
+            lib/status_json/status_json.cpp \
+            -o /tmp/test_status_json
+          /tmp/test_status_json
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_speaker_playback_policy.cpp \
             -o /tmp/test_speaker_playback_policy
           /tmp/test_speaker_playback_policy
+          python3 -m unittest tools.tests.test_speaker_pcm_assets
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_speaker_resource_state.cpp \
             -o /tmp/test_speaker_resource_state
@@ -587,6 +621,10 @@ jobs:
             tools/tests/test_screen_configuration_protocol.cpp \
             -o /tmp/test_screen_configuration_protocol
           /tmp/test_screen_configuration_protocol
+          g++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 \
+            tools/tests/test_screen_configuration_protocol.cpp \
+            -o /tmp/test_screen_configuration_protocol_development
+          /tmp/test_screen_configuration_protocol_development
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_screen_configuration_policy.cpp \
             -o /tmp/test_screen_configuration_policy
@@ -649,6 +687,18 @@ jobs:
             tools/tests/test_device_screen_protocol.cpp \
             -o /tmp/test_device_screen_protocol
           /tmp/test_device_screen_protocol
+      - name: World Radio protocol and screen registry host tests
+        run: |
+          for test in test_world_radio_protocol test_world_radio_presentation test_world_radio_globe test_main_screen_registry; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              "tools/tests/${test}.cpp" \
+              -o "/tmp/${test}"
+            "/tmp/${test}"
+          done
+          g++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 \
+            tools/tests/test_main_screen_registry.cpp \
+            -o /tmp/test_main_screen_registry_development
+          /tmp/test_main_screen_registry_development
       - name: Device ownership crypto host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
@@ -691,8 +741,13 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_ride_automation_policy.cpp \
-            -o /tmp/test_ride_automation_policy
-          /tmp/test_ride_automation_policy
+            -o /tmp/test_ride_automation_policy_production
+          /tmp/test_ride_automation_policy_production
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -DRIDE_AUTOMATION_AUTOMATIC_START=1 \
+            tools/tests/test_ride_automation_policy.cpp \
+            -o /tmp/test_ride_automation_policy_automatic_start
+          /tmp/test_ride_automation_policy_automatic_start
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_ride_automation_protocol.cpp \
             -o /tmp/test_ride_automation_protocol

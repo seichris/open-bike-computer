@@ -135,13 +135,10 @@ final class RideDetectionSettingsStore: ObservableObject {
         static let generation = "rideDetection.settingsGeneration.v1"
         static let watermarks = "rideDetection.decisionWatermarks.v1"
         static let pendingDecision = "rideDetection.pendingDecision.v1"
-        static let locationUseAcknowledged =
-            "rideDetection.locationUseAcknowledged.v1"
     }
 
     @Published private(set) var settings: RideDetectionSettings
     @Published private(set) var generation: UInt32
-    @Published private(set) var hasAcknowledgedLocationUse: Bool
 
     private let defaults: UserDefaults
 
@@ -174,9 +171,6 @@ final class RideDetectionSettingsStore: ObservableObject {
         } catch {
             decisionLoadFailed = true
         }
-        hasAcknowledgedLocationUse = defaults.bool(
-            forKey: Key.locationUseAcknowledged
-        )
         if let data = defaults.data(forKey: Key.payload),
            var decoded = try? PropertyListDecoder().decode(
              RideDetectionSettings.self,
@@ -238,12 +232,6 @@ final class RideDetectionSettingsStore: ObservableObject {
 
     func setAlertMode(_ value: UInt8) {
         update { $0.alertMode = value }
-    }
-
-    func acknowledgeLocationUse() {
-        guard !hasAcknowledgedLocationUse else { return }
-        hasAcknowledgedLocationUse = true
-        defaults.set(true, forKey: Key.locationUseAcknowledged)
     }
 
     /// An authenticated device-side edit wins when its serial generation is

@@ -150,7 +150,6 @@ nonisolated enum RideDetectionLocationStatusResolver {
 
     static func resolve(
         startMode: RideStartMode,
-        locationUseAcknowledged: Bool,
         isNavigationReady: Bool,
         supportsRideAutomation: Bool,
         supportsGPSPositionQualityV1: Bool,
@@ -159,7 +158,7 @@ nonisolated enum RideDetectionLocationStatusResolver {
         location: CLLocation?,
         now: Date = Date()
     ) -> RideDetectionLocationStatus {
-        guard startMode != .off, locationUseAcknowledged else {
+        guard startMode != .off else {
             return .disabled
         }
         guard isNavigationReady, supportsRideAutomation,
@@ -352,12 +351,14 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private var isNavigating = false
     private var isViewingMap = false
     private var isWorkoutActive = false
+    private var isPhoneWorkoutActive = false
     private var isRideDetectionArmed = false
     private var isLocationUpdating = false
     private var isDeviceDestinationRequestsEnabled = false
     private var isRefreshingDeviceDestinationLocation = false
     private var hasRequestedAlwaysAuthorizationForDeviceDestinations = false
     private var hasRequestedAlwaysAuthorizationForRideActivity = false
+    private var hasRequestedWhenInUseAuthorizationForRideDetection = false
     private var lastDiagnosticsLocationRecordAt = Date.distantPast
 #if DEBUG
     private let developerLocationOverride = DeveloperLocationOverride.coordinate(
@@ -393,8 +394,9 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             )
         }
 #endif
-        // User-initiated feature flows own the permission request so the native
-        // prompt appears in context and the user's response remains authoritative.
+        // The Ride Start setting is the app-level switch. If it becomes armed
+        // before location permission exists, request the native permission from
+        // the location lifecycle rather than adding a second app-level consent.
     }
     
     func requestLocation() {
@@ -457,9 +459,11 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         updateLocationTracking()
     }
 
-    func setWorkoutActive(_ active: Bool) {
-        guard isWorkoutActive != active else { return }
+    func setWorkoutActive(_ active: Bool, phoneOwned: Bool = false) {
+        let phoneActive = active && phoneOwned
+        guard isWorkoutActive != active || isPhoneWorkoutActive != phoneActive else { return }
         isWorkoutActive = active
+        isPhoneWorkoutActive = phoneActive
         updateLocationTracking()
     }
 
@@ -472,10 +476,12 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 
     @MainActor
     func bindWorkoutMetricsStore(_ store: WorkoutMetricsStore) {
-        workoutActivityCancellable = store.$shouldMaintainWorkoutServices
-            .removeDuplicates()
-            .sink { [weak self] isWorkoutActive in
-                self?.setWorkoutActive(isWorkoutActive)
+        workoutActivityCancellable = Publishers.CombineLatest(
+            store.$shouldMaintainWorkoutServices, store.$recordingOwner
+        )
+            .removeDuplicates { $0.0 == $1.0 && $0.1 == $1.1 }
+            .sink { [weak self] active, owner in
+                self?.setWorkoutActive(active, phoneOwned: owner == .iphone)
             }
     }
 
@@ -506,21 +512,37 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
                 isRideDetectionArmed: isRideDetectionArmed
             )
 
+        if isApplicationActive && isRideDetectionArmed &&
+            locationManager.authorizationLevel == .denied &&
+            locationManager.authorizationStatus == .notDetermined &&
+            !hasRequestedWhenInUseAuthorizationForRideDetection {
+            hasRequestedWhenInUseAuthorizationForRideDetection = true
+            locationManager.requestWhenInUseAuthorization()
+        }
+
         if shouldTrackInBackground &&
             locationManager.authorizationLevel == .whenInUse &&
             isApplicationActive &&
+            (!isPhoneWorkoutActive || isNavigating || isRideDetectionArmed) &&
             !hasRequestedAlwaysAuthorizationForRideActivity {
             hasRequestedAlwaysAuthorizationForRideActivity = true
             locationManager.requestAlwaysAuthorization()
         }
 
+        // A phone workout explicitly started in foreground may continue the
+        // same When-In-Use location stream with the system background indicator.
+        // Do not grant this exception to navigation, Watch mirroring or passive
+        // ride detection, and never cold-start When-In-Use GPS in background.
+        let phoneWhenInUse = isPhoneWorkoutActive
+            && locationManager.authorizationLevel == .whenInUse
         let canTrackInBackground = shouldTrackInBackground &&
-            locationManager.authorizationLevel == .always
+            (locationManager.authorizationLevel == .always || phoneWhenInUse)
         locationManager.setBackgroundTrackingEnabled(canTrackInBackground)
 
         let canStartUpdates =
             locationManager.authorizationLevel == .always
                 || isApplicationActive
+                || (phoneWhenInUse && isLocationUpdating)
         
         if shouldTrack &&
             isLocationAuthorized &&

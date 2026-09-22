@@ -120,6 +120,7 @@ final class WorkoutMirrorManager: NSObject {
     nonisolated static let sessionStartDateMatchTolerance: TimeInterval = 2
 
     let store: WorkoutMetricsStore
+    weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
 
     private let healthStore: HKHealthStore
     private let now: () -> Date
@@ -308,14 +309,39 @@ final class WorkoutMirrorManager: NSObject {
         configuration.locationType = .outdoor
 
         scheduleLaunchTimeout(id: launchID)
+        diagnosticsRecorder?.record(
+            category: .workout,
+            event: "watch_launch_requested",
+            fields: ["state": "launchingWatch"]
+        )
         let callbackReference = WorkoutWeakReference(self)
         launchWatchApp(configuration) { success, error in
             Task { @MainActor in
                 guard let manager = callbackReference.value else { return }
+                let safeError = success
+                    ? nil : Self.safeLaunchErrorCode(for: error)
                 let completedCurrentLaunch = manager.store.completeWatchLaunch(
                     id: launchID,
                     succeeded: success,
-                    error: success ? nil : Self.safeLaunchErrorCode(for: error)
+                    error: safeError
+                )
+                var diagnosticFields: [String: String] = [
+                    "outcome": success ? "success" : "failure",
+                    "result": completedCurrentLaunch ? "applied" : "ignored",
+                    "durationMs": String(max(
+                        0,
+                        Int(manager.now().timeIntervalSince(requestDate) * 1_000)
+                    )),
+                ]
+                if let safeError {
+                    diagnosticFields["errorCode"] = safeError.rawValue
+                }
+                manager.diagnosticsRecorder?.record(
+                    level: success ? .info : .warning,
+                    category: .workout,
+                    event: "watch_launch_completed",
+                    fields: diagnosticFields,
+                    captureId: nil
                 )
                 if !success, completedCurrentLaunch {
                     manager.launchTimeoutTask?.cancel()
@@ -514,7 +540,24 @@ final class WorkoutMirrorManager: NSObject {
                 return
             }
             guard let self else { return }
-            _ = store.timeOutWatchLaunch(id: id, at: now())
+            let completedCurrentLaunch = store.timeOutWatchLaunch(
+                id: id,
+                at: now()
+            )
+            diagnosticsRecorder?.record(
+                level: .warning,
+                category: .workout,
+                event: "watch_launch_completed",
+                fields: [
+                    "outcome": "timeout",
+                    "result": completedCurrentLaunch
+                        ? "applied" : "ignored",
+                    "durationMs": String(Int(timeout * 1_000)),
+                    "errorCode": WorkoutSafeErrorCodeV1.setupRequired
+                        .rawValue,
+                ],
+                captureId: nil
+            )
             launchTimeoutTask = nil
         }
     }
@@ -794,7 +837,7 @@ final class WorkoutMirrorManager: NSObject {
     }
 
     @available(iOS 17.0, *)
-    private func acceptMirroredSession(_ session: HKWorkoutSession) {
+    func acceptMirroredSession(_ session: HKWorkoutSession) {
         acceptMirroredTransport(
             HealthKitMirroredSessionTransport(session: session)
         )

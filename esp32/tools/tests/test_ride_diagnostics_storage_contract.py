@@ -11,6 +11,9 @@ BLE_NAVIGATION = (ROOT / "lib/ble_navigation/ble_navigation.cpp").read_text(
 RECORDER = (ROOT / "lib/ride_diagnostics/ride_diagnostics.cpp").read_text(
     encoding="utf-8"
 )
+POLICY = (
+    ROOT / "lib/ride_diagnostics/ride_diagnostics_storage_policy.hpp"
+).read_text(encoding="utf-8")
 
 
 class RideDiagnosticsStorageContractTests(unittest.TestCase):
@@ -26,6 +29,20 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
         self.assertIn("internalFallbackMounted.load()", STORAGE)
         self.assertIn("const uint64_t total = FFat.totalBytes();", STORAGE)
         self.assertIn("diagnosticsSdHealthy = true", STORAGE)
+
+    def test_ffat_uses_a_bounded_backend_specific_retention_policy(self):
+        self.assertIn("kInternalFfatBudget", POLICY)
+        self.assertIn("1ULL * 1024ULL * 1024ULL", POLICY)
+        self.assertIn("2ULL * 1024ULL * 1024ULL", POLICY)
+        self.assertIn("kRemovableBudget", POLICY)
+        self.assertIn("32ULL * 1024ULL * 1024ULL", POLICY)
+        self.assertIn("8ULL * 1024ULL * 1024ULL", POLICY)
+        self.assertIn(
+            "storage->storageBackend() == StorageBackend::InternalFFat",
+            RECORDER,
+        )
+        self.assertIn("storage_policy::constraintsExceeded", RECORDER)
+        self.assertIn("freeBytes = storage->diagnosticsSdFreeBytes();", RECORDER)
 
     def test_writer_retries_only_after_recovery_gate_and_quiesces_for_transition(self):
         self.assertIn("storageRecoveryAllowedProbe", RECORDER)

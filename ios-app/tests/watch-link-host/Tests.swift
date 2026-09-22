@@ -53,6 +53,95 @@ enum Tests {
     }
     static var location: NavigationLocationSampleV1 { .init(coordinate: .init(latitude: 1, longitude: 2), horizontalAccuracyMeters: 3, courseDegrees: 4, speedMetersPerSecond: 5, altitudeMeters: 6, timestamp: Date(timeIntervalSince1970: 0)) }
     static func main() async {
+        await run("maneuver distance advances across small GPS increments") {
+            let f = Fixture(); defer { f.close() }
+            var current = snapshot(77)
+            for distance in stride(from: 100.0, through: 0.0, by: -5.0) {
+                current.distanceToManeuverMeters = distance
+                f.link.updateNavigation(location: location, snapshot: current)
+                f.link.testDrainATT(on: f.peer)
+            }
+            let maneuvers = f.peer.writes.filter {
+                $0.characteristic.uuid.uuidString == WatchDirectBLEProtocolV1.navigationUUID
+            }
+            expect(maneuvers.count == 11,
+                   "100 metres of 5-metre updates must send each accumulated 10-metre change")
+        }
+        await run("maneuver threshold follows the snapshot actually dispatched") {
+            let f = Fixture(); defer { f.close() }
+            var current = snapshot(77)
+            current.distanceToManeuverMeters = 100
+            f.link.updateNavigation(location: location, snapshot: current)
+            f.link.testDrainATT(on: f.peer)
+            f.link.setWorkoutDemand(true)
+            f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil, motion: nil)
+            // Several samples arrive while another characteristic owns ATT.
+            // The queued 90-metre maneuver must be replaced by 85, then become
+            // the baseline only when it reaches the transport.
+            for distance in [95.0, 90.0, 85.0] {
+                current.distanceToManeuverMeters = distance
+                f.link.updateNavigation(location: location, snapshot: current)
+            }
+            f.link.testDrainATT(on: f.peer)
+            current.distanceToManeuverMeters = 80
+            f.link.updateNavigation(location: location, snapshot: current)
+            f.link.testDrainATT(on: f.peer)
+            expect(f.peer.writes.filter {
+                $0.characteristic.uuid.uuidString == WatchDirectBLEProtocolV1.navigationUUID
+            }.count == 2, "an unsent intermediate sample must not become the distance baseline")
+            current.distanceToManeuverMeters = 75
+            f.link.updateNavigation(location: location, snapshot: current)
+            f.link.testDrainATT(on: f.peer)
+            expect(f.peer.writes.filter {
+                $0.characteristic.uuid.uuidString == WatchDirectBLEProtocolV1.navigationUUID
+            }.count == 3, "the next accumulated 10 metres must update the maneuver")
+        }
+        for appACK in [false, true] {
+            await run("navigation clear retires queued snapshots, app ACK \(appACK)") {
+                let f = Fixture(appACK: appACK); defer { f.close() }
+                f.link.setWorkoutDemand(true)
+                // Hold the writer on a workout while older navigation waits.
+                f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil, motion: nil)
+                f.link.updateNavigation(location: location, snapshot: snapshot(77))
+                f.link.endNavigationDemandAfterClearing()
+                f.link.testDrainATT(on: f.peer)
+                if appACK, let clear = f.link.testPendingACK {
+                    expect(clear.applicationCommandType == .navigationClear, "clear must be the pending command")
+                    f.link.testAcknowledge(clear, on: f.peer)
+                    f.link.testDrainATT(on: f.peer)
+                }
+                expect(!f.peer.writes.contains { $0.data == Data([77]) },
+                       "an obsolete queued route cannot be sent after its clear")
+                expect(!f.peer.writes.contains { $0.data == Data("new-77".utf8) },
+                       "an obsolete queued maneuver cannot resurrect navigation")
+                expect(f.link.state.isReady && f.link.testDemand.workoutActive,
+                       "the independent workout keeps its connection")
+            }
+        }
+        await run("clear preserves a successor route and queued workout") {
+            let f = Fixture(); defer { f.close() }
+            f.link.setWorkoutDemand(true)
+            f.link.updateNavigation(location: location, snapshot: snapshot(77))
+            f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil, motion: nil)
+            f.link.endNavigationDemandAfterClearing()
+            f.link.setNavigationDemand(true)
+            f.link.updateNavigation(location: location, snapshot: snapshot(88))
+            f.link.testDrainATT(on: f.peer)
+            guard let clear = f.link.testPendingACK else {
+                expect(false, "old navigation clear must precede successor state")
+                return
+            }
+            let clearEnd = f.peer.writes.count
+            f.link.testAcknowledge(clear, on: f.peer)
+            f.link.testDrainATT(on: f.peer)
+            let successorWrites = f.peer.writes.dropFirst(clearEnd)
+            expect(successorWrites.contains { $0.data == Data([88]) }, "successor route survives the clear")
+            expect(successorWrites.contains { $0.data == Data("new-88".utf8) }, "successor maneuver follows the clear")
+            expect(!successorWrites.contains { $0.data == Data([77]) || $0.data == Data("new-77".utf8) },
+                   "retired navigation cannot return after the clear")
+            expect(successorWrites.contains { $0.data == Data("workout-running-identity".utf8) },
+                   "clearing navigation retains queued workout traffic")
+        }
         await run("R1 disconnect releases exact preparation") {
             let f = Fixture(); defer { f.close() }
             f.stop(); f.link.testDrop(f.peer)
@@ -317,6 +406,70 @@ enum Tests {
             expect(f.link.testCentral.connections.count == 1, "availability restarts pending successor")
             f.link.directRidePreparationDidRespond(request: try! .init(preparationID: f.id, operation: .prepare, deviceID: "00112233445566778899aabbccddeeff"), response: .init(requestID: UUID(), accepted: true))
             expect(f.link.testPreparationID == successor && !f.link.testPreparationAccepted, "delayed prepare reply ignored")
+        }
+        await run("phone reconciliation waits for restored demand") {
+            let suite = "WatchLinkReconciliation-\(UUID())"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let preparationID = UUID()
+            WatchDeviceLink.testInstallRestoredPreparation(
+                defaults: defaults,
+                preparationID: preparationID
+            )
+            let link = WatchDeviceLink(
+                credentialStore: WatchControllerCredentialStore(),
+                defaults: defaults,
+                sleep: { _ in }
+            )
+            defer { link.testDispose() }
+            var releases: [UUID] = []
+            link.onDirectRidePreparationChange = { operation, _, identity in
+                if operation == .release { releases.append(identity) }
+                return .submitted
+            }
+            let request = try! WatchDirectRideReconciliationRequestV1(
+                preparationID: preparationID,
+                deviceID: "00112233445566778899aabbccddeeff"
+            )
+            link.requestPhonePreparationReconciliation(request)
+            expect(releases.isEmpty,
+                   "reconciliation cannot release before ride restoration completes")
+            expect(link.testPendingReconciliation == request,
+                   "a pre-restoration reconciliation is persisted")
+            link.completeInitialDemandRestoration()
+            expect(releases == [preparationID],
+                   "idle restoration durably releases the exact phone handoff")
+            expect(link.testPendingReconciliation == nil && link.testIntent == nil,
+                   "successful reconciliation clears both persisted intents")
+        }
+        await run("phone reconciliation cannot steal an active Watch ride") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            let request = try! WatchDirectRideReconciliationRequestV1(
+                preparationID: f.id,
+                deviceID: "00112233445566778899aabbccddeeff"
+            )
+            f.link.requestPhonePreparationReconciliation(request)
+            expect(f.releases.isEmpty && f.link.testPreparationID == f.id,
+                   "active demand retains the current handoff")
+            f.stop()
+            f.link.testDrop(f.peer)
+            expect(f.releases == [f.id],
+                   "the pending request completes after the active ride ends")
+        }
+        await run("old reconciliation cannot release a successor ride") {
+            let f = Fixture(); defer { f.close() }
+            f.link.completeInitialDemandRestoration()
+            let oldID = UUID()
+            let request = try! WatchDirectRideReconciliationRequestV1(
+                preparationID: oldID,
+                deviceID: "00112233445566778899aabbccddeeff"
+            )
+            f.link.requestPhonePreparationReconciliation(request)
+            expect(f.releases == [oldID],
+                   "the Watch releases only the stale requested identity")
+            expect(f.link.testPreparationID == f.id && f.link.testIntent?.operation == .prepare,
+                   "the active successor preparation remains intact")
         }
         #endif
         #if FIXED_LIFECYCLE

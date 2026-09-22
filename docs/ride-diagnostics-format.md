@@ -100,6 +100,24 @@ The firmware also emits `logger.health` at lifecycle readiness and controlled
 shutdown. Its enqueue/write/drop/storage-error counters and current/maximum
 queue depth make missing diagnostics distinguishable from a healthy empty log.
 
+## Device storage retention
+
+The recorder applies separate budgets to removable SD and the internal FFat
+fallback. Removable storage retains at most 32 MiB of closed chunks and protects
+8 MiB of free space. FFat retains at most 1 MiB of chunks and protects 2 MiB of
+free space for maps and other storage owners. A new 256 KiB chunk starts only
+when that backend's protected free-space floor will remain after the complete
+chunk is written.
+
+Retention removes only closed diagnostic chunks, oldest first. It prunes when
+chunks exceed the backend's byte ceiling or when reclaiming diagnostic files
+can restore the free-space floor; it never removes maps, firmware-transfer
+files, or the active diagnostic chunk. If non-diagnostic data already consumes
+the protected reserve, recording pauses and the RTC fault capsule preserves the
+storage-gap evidence. These FFat limits allow the same policy to operate on a
+future 7 MiB FFat partition without turning the fallback into an unbounded log
+volume.
+
 ## Bundle
 
 An exported stored-ZIP contains `manifest.json`, `checksums.sha256`, `app/`,

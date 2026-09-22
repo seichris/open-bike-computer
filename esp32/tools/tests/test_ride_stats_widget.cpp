@@ -52,6 +52,14 @@ int main() {
   assert(!unavailablePower.available);
   assert(std::strcmp(unavailablePower.value.data(), "--") == 0);
 
+  assert(ride_stats_widget::make(RideStatsWidget::Altitude, model).isAltitude);
+  assert(!ride_stats_widget::make(RideStatsWidget::MovingTime, model).isAltitude);
+  model.cyclingPowerWatts.available = false;
+  model.cyclingCadenceTenthsRpm.available = false;
+  assert(ride_stats_widget::make(RideStatsWidget::SmartMetric2, model).isAltitude);
+  model.cyclingPowerWatts = {true, 245};
+  assert(!ride_stats_widget::make(RideStatsWidget::SmartMetric2, model).isAltitude);
+
   model.sessionState = workout_telemetry_protocol::SessionState::Ended;
   const auto endedSpeed =
       ride_stats_widget::make(RideStatsWidget::Speed, model);
@@ -65,6 +73,8 @@ int main() {
            std::pair<int32_t, int32_t>{410, 502}}) {
     const auto layout = ride_telemetry_layout::makeLayout(
         dimensions.first, dimensions.second);
+    const bool round = ride_telemetry_layout::usesRoundScreenSafeArea(
+        dimensions.first, dimensions.second);
     assert(ride_telemetry_layout::isValid(layout));
     assert(ride_telemetry_layout::fits(
         layout.hero, dimensions.first, dimensions.second));
@@ -72,10 +82,46 @@ int main() {
          index < ride_telemetry_layout::kConfigurableSlotCount; ++index) {
       const auto slot =
           ride_telemetry_layout::configurableSlotRect(layout, index);
+      const auto value =
+          ride_telemetry_layout::configurableValueRect(layout, index);
+      // Slot zero has a logical origin above the hero for heart/zone
+      // adapters; its visible caption is below the value, not at slot.y.
+      const ride_telemetry_layout::Rect title = index == 0
+          ? layout.heroUnit
+          : ride_telemetry_layout::Rect{
+                slot.x, slot.y, slot.width,
+                ride_telemetry_layout::kMetricTitleLineHeight};
       assert(ride_telemetry_layout::fits(
           slot, dimensions.first, dimensions.second));
-      assert(slot.width >=
-             (index == 0 ? dimensions.first : (dimensions.first - 48) / 2));
+      assert(ride_telemetry_layout::fits(
+          value, dimensions.first, dimensions.second));
+      assert(ride_telemetry_layout::fits(
+          title, dimensions.first, dimensions.second));
+      assert(value.width == slot.width);
+      assert(value.height >= ride_telemetry_layout::metricValueLineHeight(
+                                 dimensions.first));
+      if (round) {
+        // Full-square columns are deliberately not the round-board contract.
+        assert(ride_telemetry_layout::cornersFitCircle(value, dimensions.first));
+        assert(ride_telemetry_layout::cornersFitCircle(title, dimensions.first));
+        assert(slot.width >= (index == 0 ? 230 : 150));
+        if (index != 0)
+          assert(ride_telemetry_layout::cornersFitCircle(slot, dimensions.first));
+      } else {
+        // Preserve the rectangular board's full-width hero and columns.
+        assert(slot.width ==
+               (index == 0 ? dimensions.first : (dimensions.first - 48) / 2));
+      }
+      const auto heart = ride_telemetry_layout::makeHeartRatePresentation(
+          slot, dimensions.first, true);
+      const auto heartLayout = ride_telemetry_layout::makeHeartRateValueLayout(
+          slot, dimensions.first, heart.fontSelectionWidth);
+      for (const auto &rect : {heartLayout.value, heartLayout.heart}) {
+        assert(ride_telemetry_layout::fits(
+            rect, dimensions.first, dimensions.second));
+        if (round)
+          assert(ride_telemetry_layout::cornersFitCircle(rect, dimensions.first));
+      }
       for (RideStatsWidget widget : {
                RideStatsWidget::Speed, RideStatsWidget::HeartRate,
                RideStatsWidget::HeartRateZone, RideStatsWidget::Distance,
@@ -88,6 +134,16 @@ int main() {
         assert(ride_stats_widget::maximumFormattedValueBytes(widget) <= 15);
       }
     }
+    if (round) {
+      assert(layout.metrics[4].width < layout.metrics[2].width);
+      assert(layout.metrics[4].x > layout.metrics[2].x);
+      // This old lower-left cell fits the framebuffer but not the circle.
+      const ride_telemetry_layout::Rect oldBottomLeft{12, 316, 209, 82};
+      assert(ride_telemetry_layout::fits(
+          oldBottomLeft, dimensions.first, dimensions.second));
+      assert(!ride_telemetry_layout::cornersFitCircle(
+          oldBottomLeft, dimensions.first));
+    }
     for (std::size_t active = 0;
          active < ride_telemetry_layout::kHeartRateZoneCount; ++active) {
       for (std::size_t index = 0;
@@ -96,8 +152,23 @@ int main() {
             ride_telemetry_layout::configurableSlotRect(layout, index);
         const auto strip = ride_telemetry_layout::makeZoneStripLayout(
             slot, dimensions.first, active);
-        assert(ride_telemetry_layout::fits(
-            strip.bounds, dimensions.first, dimensions.second));
+        for (const auto &rect : {strip.bounds, strip.heart, strip.label}) {
+          assert(ride_telemetry_layout::fits(
+              rect, dimensions.first, dimensions.second));
+          if (round)
+            assert(ride_telemetry_layout::cornersFitCircle(rect, dimensions.first));
+        }
+        for (std::size_t zone = 0; zone < strip.segments.size(); ++zone) {
+          const auto &segment = strip.segments[zone];
+          if (zone >= ride_telemetry_layout::kHeartRateZoneCount) {
+            assert(segment.width == 0 && segment.height == 0);
+            continue;
+          }
+          assert(segment.x >= strip.bounds.x &&
+                 segment.right() <= strip.bounds.right());
+          assert(segment.y == strip.bounds.y &&
+                 segment.bottom() == strip.bounds.bottom());
+        }
       }
     }
   }

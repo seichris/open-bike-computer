@@ -1,13 +1,9 @@
 import Foundation
 import Security
 
-enum ConfiguredDeviceScreenType: UInt8, CaseIterable, Codable, Identifiable, Sendable {
-    case map = 0
-    case navigation = 1
-    case rideStats = 2
-    case mapPlusNavigation = 3
-    case batteryStatus = 4
+typealias ConfiguredDeviceScreenType = RideBLEScreenTypeV1
 
+extension RideBLEScreenTypeV1: Identifiable {
     var id: UInt8 { rawValue }
     var bit: UInt32 { 1 << UInt32(rawValue) }
 
@@ -18,29 +14,14 @@ enum ConfiguredDeviceScreenType: UInt8, CaseIterable, Codable, Identifiable, Sen
         case .rideStats: return "Ride Stats"
         case .mapPlusNavigation: return "Map + Navigation"
         case .batteryStatus: return "Battery Status"
+        case .worldRadio: return "World Radio"
         }
     }
 }
 
-enum RideStatsWidget: UInt8, CaseIterable, Codable, Identifiable, Sendable {
-    case empty = 0
-    case speed = 1
-    case heartRate = 2
-    case heartRateZone = 3
-    case distance = 4
-    case movingTime = 5
-    case elapsedTime = 6
-    case altitude = 7
-    case routeRemaining = 8
-    case power = 9
-    case cadence = 10
-    case averageSpeed = 11
-    case maximumSpeed = 12
-    case calories = 13
-    case averageHeartRate = 14
-    case smartMetric1 = 15
-    case smartMetric2 = 16
+typealias RideStatsWidget = RideBLERideStatsWidgetV1
 
+extension RideBLERideStatsWidgetV1: Identifiable {
     var id: UInt8 { rawValue }
     var bit: UInt32 { 1 << UInt32(rawValue) }
 
@@ -63,6 +44,11 @@ enum RideStatsWidget: UInt8, CaseIterable, Codable, Identifiable, Sendable {
         case .averageHeartRate: return "Average Heart Rate"
         case .smartMetric1: return "Smart Metric 1"
         case .smartMetric2: return "Smart Metric 2"
+        case .powerZone: return "Power Zone"
+        case .heartRateZoneTime: return "Time in Current HR Zone"
+        case .powerZoneTime: return "Time in Current Power Zone"
+        case .heartRateZoneRange: return "Current HR Zone Range"
+        case .powerZoneRange: return "Current Power Zone Range"
         }
     }
 }
@@ -102,9 +88,9 @@ struct DeviceScreenConfigurationCapabilities: Equatable, Sendable {
         maximumInstances = tlvValue[1]
         maximumNameBytes = tlvValue[2]
         rideStatsSlotCount = tlvValue[3]
-        supportedScreenTypes = tlvValue.readUInt32LE(at: 4)
-        supportedRideStatsWidgets = tlvValue.readUInt32LE(at: 8)
-        maximumDocumentBytes = tlvValue.readUInt16LE(at: 12)
+        supportedScreenTypes = tlvValue.wireUInt32LE(at: 4)
+        supportedRideStatsWidgets = tlvValue.wireUInt32LE(at: 8)
+        maximumDocumentBytes = tlvValue.wireUInt16LE(at: 12)
         guard schemaVersion == RideBLEGeneratedProtocolV1.screenConfigurationSchemaVersion,
               maximumInstances > 0,
               maximumInstances <= RideBLEGeneratedProtocolV1.maximumScreenConfigurationInstances,
@@ -320,7 +306,7 @@ struct DeviceScreenConfigurationDocument: Equatable, Codable, Sendable {
                 guard layout.slots.contains(where: { $0 != .empty }) else {
                     throw DeviceScreenConfigurationValidationError.emptyRideStatsLayout
                 }
-            case .navigation, .batteryStatus:
+            case .navigation, .batteryStatus, .worldRadio:
                 guard instance.mapProfile == nil,
                       instance.rideStatsLayout == nil else {
                     throw DeviceScreenConfigurationValidationError.invalidPayload
@@ -431,22 +417,22 @@ enum DeviceScreenConfigurationCodec {
         var data = magic
         data.append(DeviceScreenConfigurationDocument.schemaVersion)
         data.append(UInt8(document.instances.count))
-        data.appendUInt32LE(document.defaultInstanceID)
+        data.appendWireUInt32LE(document.defaultInstanceID)
         for instance in document.instances {
             let name = Data(instance.name.utf8)
             let payload = try encodePayload(instance)
-            data.appendUInt32LE(instance.id)
+            data.appendWireUInt32LE(instance.id)
             data.append(instance.type.rawValue)
             data.append(instance.enabled ? 1 : 0)
             data.append(UInt8(name.count))
-            data.appendUInt16LE(UInt16(payload.count))
+            data.appendWireUInt16LE(UInt16(payload.count))
             data.append(name)
             data.append(payload)
         }
         guard data.count + 4 <= Int(capabilities.maximumDocumentBytes) else {
             throw DeviceScreenConfigurationValidationError.documentTooLarge
         }
-        data.appendUInt32LE(crc32(data))
+        data.appendWireUInt32LE(crc32(data))
         try document.validate(capabilities: capabilities, encodedByteCount: data.count)
         return data
     }
@@ -458,7 +444,7 @@ enum DeviceScreenConfigurationCodec {
         guard data.count >= 14,
               data.count <= Int(capabilities.maximumDocumentBytes),
               data.prefix(4) == magic,
-              crc32(data.dropLast(4)) == data.readUInt32LE(at: data.count - 4) else {
+              crc32(data.dropLast(4)) == data.wireUInt32LE(at: data.count - 4) else {
             throw DeviceScreenConfigurationValidationError.invalidPayload
         }
         var reader = ScreenConfigurationDataReader(data: Data(data.dropLast(4)), offset: 4)
@@ -517,7 +503,7 @@ enum DeviceScreenConfigurationCodec {
 
     static func documentCRC(_ data: Data) -> UInt32? {
         guard data.count >= 4 else { return nil }
-        return data.readUInt32LE(at: data.count - 4)
+        return data.wireUInt32LE(at: data.count - 4)
     }
 
     private static func encodePayload(_ instance: DeviceScreenInstance) throws -> Data {
@@ -532,7 +518,7 @@ enum DeviceScreenConfigurationCodec {
                 profile.routeLineWidth, profile.streetLineWidth,
                 profile.positionMarkerScale, profile.zoomLevel,
             ])
-            payload.appendUInt32LE(profile.visibilityMask)
+            payload.appendWireUInt32LE(profile.visibilityMask)
             payload.append(contentsOf: [
                 profile.labelDensity, profile.labelLanguageMode,
                 profile.labelTextSize, profile.labelOrientation,
@@ -552,7 +538,7 @@ enum DeviceScreenConfigurationCodec {
             payload.append(1)
             payload.append(UInt8(layout.slots.count))
             payload.append(contentsOf: layout.slots.map(\.rawValue))
-        case .navigation, .batteryStatus:
+        case .navigation, .batteryStatus, .worldRadio:
             break
         }
         return payload
@@ -622,7 +608,7 @@ enum DeviceScreenConfigurationCodec {
                 slots.append(widget)
             }
             rideStatsLayout = RideStatsLayout(slots: slots)
-        case .navigation, .batteryStatus:
+        case .navigation, .batteryStatus, .worldRadio:
             guard payload.count == 1 else {
                 throw DeviceScreenConfigurationValidationError.invalidPayload
             }
@@ -656,12 +642,12 @@ private struct ScreenConfigurationDataReader {
 
     mutating func uint16() throws -> UInt16 {
         let value = try data(count: 2)
-        return value.readUInt16LE(at: 0)
+        return value.wireUInt16LE(at: 0)
     }
 
     mutating func uint32() throws -> UInt32 {
         let value = try data(count: 4)
-        return value.readUInt32LE(at: 0)
+        return value.wireUInt32LE(at: 0)
     }
 
     mutating func data(count: Int) throws -> Data {
@@ -670,30 +656,5 @@ private struct ScreenConfigurationDataReader {
         }
         defer { offset += count }
         return data.subdata(in: offset..<(offset + count))
-    }
-}
-
-extension Data {
-    fileprivate mutating func appendUInt16LE(_ value: UInt16) {
-        append(UInt8(truncatingIfNeeded: value))
-        append(UInt8(truncatingIfNeeded: value >> 8))
-    }
-
-    fileprivate mutating func appendUInt32LE(_ value: UInt32) {
-        append(UInt8(truncatingIfNeeded: value))
-        append(UInt8(truncatingIfNeeded: value >> 8))
-        append(UInt8(truncatingIfNeeded: value >> 16))
-        append(UInt8(truncatingIfNeeded: value >> 24))
-    }
-
-    fileprivate func readUInt16LE(at offset: Int) -> UInt16 {
-        UInt16(self[offset]) | (UInt16(self[offset + 1]) << 8)
-    }
-
-    fileprivate func readUInt32LE(at offset: Int) -> UInt32 {
-        UInt32(self[offset]) |
-            (UInt32(self[offset + 1]) << 8) |
-            (UInt32(self[offset + 2]) << 16) |
-            (UInt32(self[offset + 3]) << 24)
     }
 }

@@ -542,20 +542,26 @@ bool writeSilence(uint32_t milliseconds) {
   return true;
 }
 
-bool playPcm(const uint8_t *start, const uint8_t *end) {
-  if (start == nullptr || end <= start) {
+bool playMonoPcm(const uint8_t *start, const uint8_t *end) {
+  if (start == nullptr || end <= start ||
+      static_cast<size_t>(end - start) % sizeof(int16_t) != 0) {
     return false;
   }
 
   const uint8_t *cursor = start;
   size_t remaining = static_cast<size_t>(end - start);
+  alignas(int16_t) uint8_t stereoFrames[256 * CHANNELS * sizeof(int16_t)];
   while (remaining > 0) {
-    size_t chunk = remaining > 2048 ? 2048 : remaining;
-    if (!writeAudio(cursor, chunk)) {
+    const size_t frames = expandMonoPcm16ToStereo(
+        cursor, remaining, stereoFrames, 256);
+    if (frames == 0 ||
+        !writeAudio(stereoFrames,
+                    frames * CHANNELS * sizeof(int16_t))) {
       return false;
     }
-    cursor += chunk;
-    remaining -= chunk;
+    const size_t consumed = frames * sizeof(int16_t);
+    cursor += consumed;
+    remaining -= consumed;
   }
   return writeSilence(180);
 }
@@ -600,11 +606,11 @@ bool playNow(Sound sound) {
   case Sound::BellDing:
     return playBellDing();
   case Sound::PlasticBicycleHorn:
-    return playPcm(realBikeHornStart, realBikeHornEnd);
+    return playMonoPcm(realBikeHornStart, realBikeHornEnd);
   case Sound::RotatingBicycleBell:
-    return playPcm(rotatingBikeBellStart, rotatingBikeBellEnd);
+    return playMonoPcm(rotatingBikeBellStart, rotatingBikeBellEnd);
   case Sound::SqueezeHorn:
-    return playPcm(squeezeHornStart, squeezeHornEnd);
+    return playMonoPcm(squeezeHornStart, squeezeHornEnd);
   }
   return false;
 }
@@ -704,21 +710,11 @@ bool begin() {
   Serial.println("Speaker: playback task ready");
 
   loadPowerButtonHonkConfig();
-  powerButtonHonkAvailable =
-      axp2101::isAvailable() && powerButtonConfigMutex != nullptr;
-  if (powerButtonHonkAvailable) {
-    PowerButtonConfigLock lock(
-        pdMS_TO_TICKS(POWER_BUTTON_CONFIG_LOCK_TIMEOUT_MS));
-    if (!lock.ok() || !configurePowerButtonMonitoringLocked()) {
-      Serial.println("Speaker: PWR honk monitoring setup will retry");
-    }
-    Serial.printf("Speaker: PWR honk %s sound %u at %u%%\n",
-                  powerButtonHonkConfig.enabled ? "enabled" : "disabled",
-                  static_cast<unsigned>(powerButtonHonkConfig.sound),
-                  powerButtonHonkConfig.volumePercent);
-  } else {
-    Serial.println("Speaker: PWR honk unavailable because AXP2101 is missing");
-  }
+  // PWR short presses belong to reverse screen navigation. Keep the legacy
+  // configuration decoder for protocol compatibility, but do not advertise or
+  // activate the old honk action.
+  powerButtonHonkAvailable = false;
+  Serial.println("Speaker: PWR button reserved for screen navigation");
   return true;
 }
 

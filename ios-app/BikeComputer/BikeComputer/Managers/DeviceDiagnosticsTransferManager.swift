@@ -37,6 +37,7 @@ enum DeviceDiagnosticsTransferError: LocalizedError {
     case invalidIndex
     case requestFailed(Int)
     case deviceRejected(code: String, message: String)
+    case transportInterrupted(receivedBytes: Int, expectedBytes: Int64, code: Int)
     case oversizedChunk
     case hashMismatch
     case malformedChunk
@@ -54,6 +55,8 @@ enum DeviceDiagnosticsTransferError: LocalizedError {
                 code: code,
                 fallback: message
             )
+        case .transportInterrupted(let receivedBytes, let expectedBytes, let code):
+            return "The device diagnostics connection ended after \(receivedBytes) of \(expectedBytes) bytes (network error \(code))."
         case .oversizedChunk:
             return "The device diagnostics chunk exceeded the safety limit."
         case .hashMismatch:
@@ -103,11 +106,21 @@ nonisolated private enum DeviceDiagnosticsHTTPClient {
         if expectedLength > 0 {
             data.reserveCapacity(Int(expectedLength))
         }
-        for try await byte in bytes {
-            guard data.count < maximumBytes else {
-                throw DeviceDiagnosticsTransferError.oversizedChunk
+        do {
+            for try await byte in bytes {
+                guard data.count < maximumBytes else {
+                    throw DeviceDiagnosticsTransferError.oversizedChunk
+                }
+                data.append(byte)
             }
-            data.append(byte)
+        } catch let error as DeviceDiagnosticsTransferError {
+            throw error
+        } catch {
+            throw DeviceDiagnosticsTransferError.transportInterrupted(
+                receivedBytes: data.count,
+                expectedBytes: expectedLength,
+                code: (error as NSError).code
+            )
         }
         guard 200..<300 ~= status else {
             if let envelope = try? JSONDecoder().decode(
@@ -346,6 +359,8 @@ final class DeviceDiagnosticsTransferManager {
             case .invalidIndex: code = "invalid_index"
             case .requestFailed(let status): code = "http_\(status)"
             case .deviceRejected(let rejectedCode, _): code = rejectedCode
+            case .transportInterrupted(_, _, let networkCode):
+                code = "network_\(networkCode)"
             case .oversizedChunk: code = "oversized_chunk"
             case .hashMismatch: code = "hash_mismatch"
             case .malformedChunk: code = "malformed_chunk"

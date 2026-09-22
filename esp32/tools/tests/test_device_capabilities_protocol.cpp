@@ -63,6 +63,17 @@ int main() {
       (1UL << 21));
   static_assert(
       device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION == 20);
+  static_assert(device_capabilities_protocol::WORLD_RADIO_CLIENT_VERSION == 25);
+  static_assert(device_capabilities_protocol::WORLD_RADIO_FEATURE ==
+                (1UL << 27));
+  static_assert(device_capabilities_protocol::
+                    DISPLAY_INACTIVITY_TIMEOUTS_CLIENT_VERSION == 26);
+  static_assert(device_capabilities_protocol::
+                    DISPLAY_INACTIVITY_TIMEOUTS_FEATURE == (1UL << 28));
+  static_assert((device_capabilities_protocol::WORLD_RADIO_FEATURE &
+                 (device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE |
+                  device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
+                  device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE)) == 0);
   static_assert(device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE ==
                 (1UL << 22));
   static_assert(
@@ -154,6 +165,16 @@ int main() {
   assert(automaticDisplayOffSize == sizeof(expectedAutomaticDisplayOff));
   for (size_t index = 0; index < automaticDisplayOffSize; ++index)
     assert(output[index] == expectedAutomaticDisplayOff[index]);
+  const size_t displayInactivityTimeoutsSize =
+      device_capabilities_protocol::encodeCap2(
+          device_capabilities_protocol::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE,
+          nullptr, false, output, sizeof(output));
+  const uint8_t expectedDisplayInactivityTimeouts[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x10};
+  assert(displayInactivityTimeoutsSize ==
+         sizeof(expectedDisplayInactivityTimeouts));
+  for (size_t index = 0; index < displayInactivityTimeoutsSize; ++index)
+    assert(output[index] == expectedDisplayInactivityTimeouts[index]);
   const size_t rideDiagnosticsSize = device_capabilities_protocol::encodeCap2(
       device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE, nullptr, false,
       output, sizeof(output));

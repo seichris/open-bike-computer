@@ -1,27 +1,16 @@
 # Watch workout companion release notes
 
-Release candidate: **1.6 (16)**. App Store version 1.5 is already distributed,
-and App Store Connect already contains builds through 15, so both the marketing
-version and build number advance for this release.
+Release candidate: **1.9 (23)**. App Store version 1.8 is already distributed,
+and App Store Connect already contains builds through 22, so the build number
+advances for this release candidate.
 
 ## App Store What's New
 
-Record rides from Apple Watch and keep the important numbers visible across
-Watch, iPhone, and compatible Bike Computer hardware.
+Download offline maps more reliably on your Bicino.
 
-- Start an outdoor cycling workout from Watch or iPhone.
-- See live heart rate, time, distance, speed, energy, and available cycling
-  sensor data.
-- Pause, resume, save, or discard from either Apple device.
-- Recover an active Watch workout after an interruption.
-- Follow an active workout from the iPhone Lock Screen and Dynamic Island,
-  including Segment and Pause/Resume controls.
-- Keep navigation and workout controls independent.
-- Show current Watch metrics on the ESP32 Ride Stats pages with compatible
-  firmware.
-
-The workout companion requires iOS 17 and watchOS 10 or later. iPhone
-navigation requires iOS 16.4 or later.
+- Recover automatically if the app's map-security credential becomes
+  unavailable.
+- Retry map creation after securely restoring that credential.
 
 ## App Review notes
 

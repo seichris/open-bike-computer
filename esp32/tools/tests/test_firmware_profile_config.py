@@ -135,6 +135,8 @@ for environment, (base, board_define) in diagnostic_profiles.items():
     assert "-DRIDE_AUTOMATION_SHADOW=1" in flags
     assert "-DMAP_STABLE_CAMERA=1" in flags
     assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" in flags
+    assert "-DDETAILED_RIDE_DIAGNOSTICS=1" in flags
+    assert "-DRIDE_AUTOMATION_TRACE=1" in flags
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
     assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in flags
     assert (
@@ -167,9 +169,11 @@ for environment, target in expected_targets.items():
     assert "-DCORE_DEBUG_LEVEL=2" not in flags
     assert "-DFIRMWARE_DIAGNOSTICS=1" not in flags
     assert "-DARDUINO_USB_CDC_ON_BOOT=1" not in flags
-    assert "-DRIDE_AUTOMATION_SHADOW=1" not in flags
-    assert "-DMAP_STABLE_CAMERA=1" not in flags
-    assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" not in flags
+    assert "-DRIDE_AUTOMATION_SHADOW=1" in flags
+    assert "-DMAP_STABLE_CAMERA=1" in flags
+    assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" in flags
+    assert "-DDETAILED_RIDE_DIAGNOSTICS=0" in flags
+    assert "-DRIDE_AUTOMATION_TRACE=1" not in flags
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
     unflags = config.get(environment, "build_unflags")
     assert "${waveshare_amoled_common.build_unflags}" in unflags
