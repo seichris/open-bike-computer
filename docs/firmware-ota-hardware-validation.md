@@ -96,6 +96,22 @@ are software evidence only. Repeat the exact physical path on the fixed
 production artifact before closing any 1.75-inch gate; the 2.06-inch gate is
 separate and remains open.
 
+A later build-99 attempt used an iPhone build that paused ordinary navigation,
+settings, GPS, diagnostics, and map-status traffic across the maintenance
+reconnect. The authenticated reconnect sent only fresh device-transfer status
+and firmware-entry control, but firmware never published a maintenance transfer
+session, uploaded zero image bytes, and returned to the original build 98. This
+isolated the remaining failure to device-side transfer startup rather than the
+iPhone's background BLE traffic or Wi-Fi state.
+
+The build-100 candidate moves the firmware-maintenance TLS worker stack to PSRAM
+and delegates every cache-disabling OTA begin/write/end/abort/description/boot
+selection call to one serialized internal-stack flash owner with a bounded
+2 KiB staging buffer. Both worker stack margins are observable, but a successful
+compile is not hardware evidence. The 1.75-inch gate remains open until the
+production bytes start a fresh session, complete signed OTA, and pass the boot
+acceptance validator; the independent 2.06-inch gate also remains open.
+
 ## Test 1: Foreground Update
 
 1. Open the iPhone app.

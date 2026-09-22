@@ -21,6 +21,30 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         cleanup = worker.index("handlers_[index].handler->workerWillStop();")
         self.assertLess(cleanup, worker.index("workerTask_ = nullptr;", cleanup))
 
+    def test_firmware_tls_and_flash_have_separate_stack_owners(self):
+        ota = source("lib/firmware_update/firmware_update_http.cpp")
+        flash = source("lib/firmware_update/firmware_flash_owner.cpp")
+        http = source("lib/device_transfer/device_transfer_http.cpp")
+
+        maintenance_psram = (
+            'requestedMode == "firmware" && firmware_maintenance::active()'
+        )
+        self.assertIn(maintenance_psram, http)
+        for operation in (
+            "esp_ota_begin(",
+            "esp_ota_write(",
+            "esp_ota_end(",
+            "esp_ota_abort(",
+            "esp_ota_get_partition_description(",
+            "esp_ota_set_boot_partition(",
+        ):
+            self.assertIn(operation, flash)
+            self.assertNotIn(operation, ota)
+        self.assertIn("MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT", flash)
+        self.assertIn("writeBuffer_", flash)
+        self.assertIn("uxTaskGetStackHighWaterMark", flash)
+        self.assertIn("flashOwnerStackHighWaterBytes", ota)
+
     def test_all_socket_close_paths_withdraw_interrupt_capability(self):
         tls = source("lib/device_transfer/device_transfer_tls.cpp")
         close = tls[tls.index("void TransferClient::stop()") :]

@@ -367,6 +367,8 @@ final class FirmwareUpdateManager: ObservableObject {
                     .requireFirmwareMaintenanceEligibility(
                         bleManager: bleManager
                     )
+                bleManager.beginFirmwareMaintenanceReconnect()
+                defer { bleManager.endFirmwareMaintenanceReconnect() }
                 self.latestManifest = manifest
                 self.statusMessage = "downloading firmware"
                 self.persistPendingUpdate(manifest: manifest, status: self.statusMessage)

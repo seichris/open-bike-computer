@@ -2905,6 +2905,9 @@ static std::string genericTransferStatusJson() {
   status_json::appendUnsignedField(body, "receivedBytes",
                           firmwareStatus.receivedBytes);
   status_json::appendUnsignedField(body, "totalBytes", firmwareStatus.totalBytes);
+  status_json::appendUnsignedField(
+      body, "flashOwnerStackHighWaterBytes",
+      firmwareStatus.flashOwnerStackHighWaterBytes);
   if (!firmwareStatus.errorCode.empty()) {
     status_json::appendFieldPrefix(body, "lastError");
     body += "{\"code\":\"";

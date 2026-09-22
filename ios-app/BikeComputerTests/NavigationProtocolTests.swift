@@ -829,6 +829,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsMapTransferControlFrames()
         testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerSuppressesOptionalWritesDuringFirmwareMaintenance()
+        testBLEManagerSuppressesOrdinaryWritesWhileMaintenanceReconnectIsExpected()
         testBLEManagerParsesMapTransferStatus()
         testBLEManagerReassemblesChunkedMapTransferStatus()
         testBLEManagerCompletesRetransmittedChunkedMapTransferStatus()
@@ -23028,6 +23029,36 @@ struct NavigationProtocolTests {
                "maintenance status traffic remains available")
         assertEqual(sentPackets, [Data("DSTS".utf8)],
                     "only the required transfer-control write reaches BLE")
+    }
+
+    static func testBLEManagerSuppressesOrdinaryWritesWhileMaintenanceReconnectIsExpected() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 96,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.beginFirmwareMaintenanceReconnect()
+        assert(manager.firmwareMaintenanceReconnectExpected,
+               "maintenance reconnect expectation survives the reboot boundary")
+        assert(!manager.sendNavigationData("2|120|Turn left"),
+               "ordinary navigation is rejected before maintenance status arrives")
+        assert(!manager.requestMapTransferStatus(),
+               "unrelated map transfer polling is rejected during firmware maintenance")
+        assert(manager.requestDeviceTransferStatus(
+            forMaintenanceReconnect: true
+        ), "maintenance status traffic remains available during reconnect")
+        assertEqual(sentPackets, [Data("DSTS".utf8)],
+                    "only transfer control reaches BLE while reconnect is pending")
+
+        manager.endFirmwareMaintenanceReconnect()
+        assert(!manager.firmwareMaintenanceReconnectExpected,
+               "ending maintenance restores the normal connection policy")
     }
 
     @MainActor

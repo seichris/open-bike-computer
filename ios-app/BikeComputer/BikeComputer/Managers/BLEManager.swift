@@ -1126,6 +1126,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var firmwareMaintenanceActive = false
     @Published private(set) var firmwareMaintenanceStage = "normal"
     @Published private(set) var firmwareMaintenanceCorrelation: UInt32 = 0
+    @Published private(set) var firmwareMaintenanceReconnectExpected = false
     @Published private(set) var deviceStorageBackend: String?
     @Published private(set) var deviceStoragePowerCycleRequired: Bool?
     @Published var firmwareTarget: String = ""
@@ -5822,6 +5823,10 @@ class BLEManager: NSObject, ObservableObject {
 
     @discardableResult
     func requestMapTransferMode(enabled: Bool) -> Bool {
+        guard !firmwareMaintenanceReconnectExpected else {
+            log("Suppressed map transfer control during firmware maintenance")
+            return false
+        }
         var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
         packet.append(Data((enabled ? "enter" : "exit").utf8))
         let label = enabled ? "map transfer enter" : "map transfer exit"
@@ -5834,6 +5839,10 @@ class BLEManager: NSObject, ObservableObject {
 
     @discardableResult
     func requestMapTransferStatus() -> Bool {
+        guard !firmwareMaintenanceReconnectExpected else {
+            log("Suppressed map transfer status during firmware maintenance")
+            return false
+        }
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8)
         return sendTransferControlPacket(
             packet,
@@ -5894,6 +5903,29 @@ class BLEManager: NSObject, ObservableObject {
             label: "firmware maintenance prepare",
             coalescingKey: "transfer.device.control"
         )
+    }
+
+    func beginFirmwareMaintenanceReconnect() {
+        guard !firmwareMaintenanceReconnectExpected else { return }
+        firmwareMaintenanceReconnectExpected = true
+        for writeClass in NavigationWriteClass.allCases
+            where writeClass != .transfer {
+            navigationWriteQueue.removePendingWrites(ofClass: writeClass)
+        }
+        log("Firmware maintenance reconnect armed; ordinary sync paused")
+    }
+
+    func endFirmwareMaintenanceReconnect() {
+        guard firmwareMaintenanceReconnectExpected else { return }
+        firmwareMaintenanceReconnectExpected = false
+        log("Firmware maintenance reconnect ended; ordinary sync resumed")
+
+        guard isNavigationReady, !firmwareMaintenanceActive else { return }
+        enqueueAuthMessage("GET_NAME")
+        requestDeviceCapabilities()
+        sendInitialDeviceSettingsAfterAuthentication()
+        requestDeviceTransferStatus()
+        requestMapTransferStatus()
     }
 
     @discardableResult
@@ -7880,7 +7912,9 @@ class BLEManager: NSObject, ObservableObject {
         isPairingMode = false
         isConnected = true
         isNavigationReady = true
-        sendDiagnosticsCaptureBindingIfNeeded()
+        if !firmwareMaintenanceReconnectExpected {
+            sendDiagnosticsCaptureBindingIfNeeded()
+        }
         supportsDeviceSettings = true
         authRetryTimer?.invalidate()
         authRetryTimer = nil
@@ -7955,11 +7989,16 @@ class BLEManager: NSObject, ObservableObject {
             event: "authenticated",
             fields: ["authorized": "true"]
         )
-        enqueueAuthMessage("GET_NAME")
-        requestDeviceCapabilities()
-        sendInitialDeviceSettingsAfterAuthentication()
-        requestDeviceTransferStatus()
-        requestMapTransferStatus()
+        if firmwareMaintenanceReconnectExpected {
+            log("Maintenance reconnect authenticated; requesting transfer status only")
+            _ = requestDeviceTransferStatus(forMaintenanceReconnect: true)
+        } else {
+            enqueueAuthMessage("GET_NAME")
+            requestDeviceCapabilities()
+            sendInitialDeviceSettingsAfterAuthentication()
+            requestDeviceTransferStatus()
+            requestMapTransferStatus()
+        }
     }
 
     private func sendInitialDeviceSettingsAfterAuthentication() {
@@ -7994,7 +8033,9 @@ class BLEManager: NSObject, ObservableObject {
         onDrop: (() -> Void)? = nil,
         onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
-        if firmwareMaintenanceActive && writeClass != .transfer {
+        if (firmwareMaintenanceActive ||
+            firmwareMaintenanceReconnectExpected) &&
+            writeClass != .transfer {
             log("Suppressed \(writeClass.rawValue) write during firmware maintenance")
             return false
         }

@@ -19,10 +19,11 @@ namespace {
 // Map activation is handed off to this worker after the HTTP response completes
 // so the transfer and activation phases do not allocate two large stacks at
 // once. Activation reaches substantially deeper than the idle accept loop;
-// retain the 16 KiB budget required by that handoff path. Remote debugging and
-// diagnostics perform only RAM/network/file work on this worker, so keep their
-// equally deep TLS stacks in PSRAM instead of consuming scarce contiguous
-// internal/DMA-capable memory on the fully initialized device.
+// retain the 16 KiB budget required by that handoff path. Remote debugging,
+// diagnostics, and firmware maintenance keep their equally deep TLS stacks in
+// PSRAM instead of consuming scarce contiguous internal/DMA-capable memory.
+// Firmware's cache-disabling operations are synchronously delegated to a
+// dedicated internal-stack flash owner; the PSRAM worker never calls them.
 constexpr uint32_t kTransferHttpWorkerStackBytes = 16384;
 constexpr uint32_t kPsramHttpWorkerStackBytes = 16384;
 constexpr uint32_t kLanConnectTimeoutMs = 6000;
@@ -532,17 +533,16 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   if (enabled && !wasEnabled) {
     TaskHandle_t worker = nullptr;
     const bool workerStackInPsram =
-        requestedMode == "debug" || requestedMode == "diagnostics";
+        requestedMode == "debug" || requestedMode == "diagnostics" ||
+        (requestedMode == "firmware" && firmware_maintenance::active());
     const uint32_t workerStackBytes =
         workerStackInPsram ? kPsramHttpWorkerStackBytes
                            : kTransferHttpWorkerStackBytes;
-    // Debug and diagnostics are RAM-only and never perform firmware flash
-    // writes or map activation. Keep their long-lived 16 KiB stacks in PSRAM
-    // so the pinned-TLS session cannot consume the internal/DMA headroom that
-    // BLE authentication and diagnostics setup need. Map/firmware modes retain
-    // an internal stack because their activation and flash paths may execute
-    // while external RAM is unavailable. Both variants use the capability-
-    // aware task API so the worker has one matching destruction path.
+    // Map activation remains on this worker and therefore retains an internal
+    // stack. Firmware maintenance delegates OTA begin/write/end/abort/commit
+    // to its internal-stack owner before any flash cache disabling operation.
+    // Both variants use the capability-aware task API so the worker has one
+    // matching destruction path.
     const UBaseType_t workerStackCaps =
         workerStackInPsram
             ? static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
