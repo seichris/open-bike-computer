@@ -159,6 +159,9 @@ final class DeviceScreenConfigurationController: ObservableObject {
             if snapshotRequestID != nil, draft != oldValue {
                 preserveDraftOnSnapshot = hasUnsavedChanges
             }
+            if draft != oldValue {
+                scheduleAutosaveIfNeeded()
+            }
         }
     }
 
@@ -173,11 +176,13 @@ final class DeviceScreenConfigurationController: ObservableObject {
     private var saveDocument: DeviceScreenConfigurationDocument?
     private var saveCRC: UInt32?
     private var saveBaseRevision: UInt32?
+    private var autosaveTask: Task<Void, Never>?
     private var requestTimeoutTask: Task<Void, Never>?
     private var download = DeviceScreenConfigurationDownloadReassembler()
     private var requestIDGenerator = DeviceScreenInstanceIDGenerator.secure
     private let defaults: UserDefaults
     private let now: () -> TimeInterval
+    private let autosaveDelayNanoseconds: UInt64
     private let requestTimeoutNanoseconds: UInt64
 
     init(
@@ -185,10 +190,12 @@ final class DeviceScreenConfigurationController: ObservableObject {
         now: @escaping () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
         },
+        autosaveDelayNanoseconds: UInt64 = 650_000_000,
         requestTimeoutNanoseconds: UInt64 = 5_000_000_000
     ) {
         self.defaults = defaults
         self.now = now
+        self.autosaveDelayNanoseconds = autosaveDelayNanoseconds
         self.requestTimeoutNanoseconds = requestTimeoutNanoseconds
     }
 
@@ -306,6 +313,7 @@ final class DeviceScreenConfigurationController: ObservableObject {
                 }
                 preserveDraftOnSnapshot = false
                 state = .ready
+                scheduleAutosaveIfNeeded()
             } catch {
                 failSnapshot("The device returned invalid screen settings.")
             }
@@ -356,6 +364,7 @@ final class DeviceScreenConfigurationController: ObservableObject {
               let draft,
               let capabilities,
               let sendFrames else { return }
+        cancelAutosave()
         do {
             let encoded = try DeviceScreenConfigurationCodec.encode(
                 draft, capabilities: capabilities
@@ -402,6 +411,7 @@ final class DeviceScreenConfigurationController: ObservableObject {
 
     func reloadDeviceSettings() {
         guard canDiscardChanges, let acknowledgedDocument else { return }
+        cancelAutosave()
         preserveDraftOnSnapshot = false
         draft = acknowledgedDocument
         draftDeviceID = connectedDeviceID
@@ -412,9 +422,11 @@ final class DeviceScreenConfigurationController: ObservableObject {
         guard canResolveConflict, draft != nil else { return }
         preserveDraftOnSnapshot = true
         state = .ready
+        scheduleAutosaveIfNeeded()
     }
 
     func retry() {
+        cancelAutosave()
         state = .loading
         requestSnapshot()
     }
@@ -503,6 +515,14 @@ final class DeviceScreenConfigurationController: ObservableObject {
             handleRequestTimeout(requestID: snapshotRequestID, saving: false)
         }
     }
+
+    var hasPendingAutosaveForTesting: Bool { autosaveTask != nil }
+
+    func performPendingAutosaveForTesting() {
+        guard autosaveTask != nil else { return }
+        cancelAutosave()
+        save()
+    }
 #endif
 
     private func handle(_ acknowledgement: DeviceScreenConfigurationAcknowledgement) {
@@ -548,6 +568,9 @@ final class DeviceScreenConfigurationController: ObservableObject {
         saveDocument = nil
         saveCRC = nil
         saveBaseRevision = nil
+        if state == .ready {
+            scheduleAutosaveIfNeeded()
+        }
     }
 
     private func failSave(_ message: String) {
@@ -592,7 +615,25 @@ final class DeviceScreenConfigurationController: ObservableObject {
         requestTimeoutTask = nil
     }
 
+    private func scheduleAutosaveIfNeeded() {
+        cancelAutosave()
+        guard canSave else { return }
+        let delay = autosaveDelayNanoseconds
+        autosaveTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled, let self else { return }
+            self.autosaveTask = nil
+            self.save()
+        }
+    }
+
+    private func cancelAutosave() {
+        autosaveTask?.cancel()
+        autosaveTask = nil
+    }
+
     private func clearSession(preserveDraft: Bool) {
+        cancelAutosave()
         cancelRequestTimeout()
         connectedDeviceID = nil
         connectionGeneration = 0

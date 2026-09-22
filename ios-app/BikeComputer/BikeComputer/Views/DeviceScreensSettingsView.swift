@@ -66,23 +66,11 @@ struct ConfigurableDeviceScreensSettingsSection: View {
                 .disabled(!canAdd(to: document))
                 .accessibilityIdentifier("device-screen-add")
 
-                if controller.canSave {
-                    Button("Save to Bicino") {
-                        controller.save()
-                    }
-                    .accessibilityIdentifier("device-screen-save")
-                }
-
-                if controller.canDiscardChanges {
-                    Button("Cancel Changes", role: .destructive) {
-                        controller.reloadDeviceSettings()
-                    }
-                }
             }
         } header: {
             Text("Device Screens")
         } footer: {
-            Text("Drag screens to reorder, add new screens or hide screens")
+            Text("Drag screens to reorder, add new screens or hide screens. Changes save automatically.")
         }
     }
 
@@ -97,7 +85,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
         case .saving:
             HStack {
                 ProgressView()
-                Text("Saving all screen settings…")
+                Text("Saving changes to Bicino…")
             }
         case .conflict:
             VStack(alignment: .leading, spacing: 8) {
@@ -119,7 +107,18 @@ struct ConfigurableDeviceScreensSettingsSection: View {
                 Button("Retry") { controller.retry() }
             }
         case .ready:
-            EmptyView()
+            if controller.hasUnsavedChanges {
+                if controller.canSave {
+                    Label("Changes will save automatically.", systemImage: "clock")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label("Finish editing to save changes.", systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Label("Saved to Bicino", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
         case .legacyUnsupported:
             Text("This firmware uses the original fixed screen settings.")
                 .foregroundStyle(.secondary)
