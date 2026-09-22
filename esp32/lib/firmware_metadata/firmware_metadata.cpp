@@ -1,4 +1,5 @@
 #include "firmware_metadata.hpp"
+#include "../status_json/status_json.hpp"
 
 #ifndef VERSION
 #define VERSION "0.0.0"
@@ -25,28 +26,6 @@
 #endif
 
 namespace firmware_metadata {
-namespace {
-
-static std::string jsonEscape(const std::string &value) {
-  std::string out;
-  out.reserve(value.size() + 8);
-  for (char c : value) {
-    if (c == '"' || c == '\\') {
-      out.push_back('\\');
-      out.push_back(c);
-    } else if (c == '\n') {
-      out += "\\n";
-    } else if (c == '\r') {
-      out += "\\r";
-    } else {
-      out.push_back(c);
-    }
-  }
-  return out;
-}
-
-} // namespace
-
 const char *target() { return FLAVOR; }
 
 const char *buildProfile() { return BUILD_PROFILE; }
@@ -73,21 +52,31 @@ bool hasImmutableGitIdentity() {
 const char *buildTimestamp() { return BUILD_TIMESTAMP; }
 
 std::string json() {
-  return std::string("{\"target\":\"") + jsonEscape(target()) +
-         "\",\"version\":\"" + jsonEscape(version()) + "\",\"build\":" +
-         std::to_string(build()) + ",\"gitSha\":\"" + jsonEscape(gitSha()) +
-         "\",\"buildTimestamp\":\"" + jsonEscape(buildTimestamp()) +
-         "\",\"updaterProtocol\":" +
-         std::to_string(kUpdaterProtocolVersion) + "}";
+  std::string body = "{\"target\":\"";
+  body += status_json::escape(target());
+  body += "\"";
+  status_json::appendStringField(body, "version", version());
+  status_json::appendUnsignedField(body, "build", build());
+  status_json::appendStringField(body, "gitSha", gitSha());
+  status_json::appendStringField(body, "buildTimestamp", buildTimestamp());
+  status_json::appendUnsignedField(body, "updaterProtocol",
+                                   kUpdaterProtocolVersion);
+  body += "}";
+  return body;
 }
 
 std::string bootAcceptanceJson(bool ready, const char *otaState) {
-  return std::string("{\"schemaVersion\":1,\"firmwareTarget\":\"") + jsonEscape(target()) +
-         "\",\"firmwareProfile\":\"" + jsonEscape(buildProfile()) +
-         "\",\"firmwareVersion\":\"" + jsonEscape(version()) + "\",\"firmwareBuild\":" +
-         std::to_string(build()) + ",\"firmwareGitSha\":\"" + jsonEscape(gitSha()) +
-         "\",\"ready\":" + (ready ? "true" : "false") +
-         ",\"otaState\":\"" + jsonEscape(otaState == nullptr ? "unknown" : otaState) + "\"}";
+  std::string body = "{\"schemaVersion\":1";
+  status_json::appendStringField(body, "firmwareTarget", target());
+  status_json::appendStringField(body, "firmwareProfile", buildProfile());
+  status_json::appendStringField(body, "firmwareVersion", version());
+  status_json::appendUnsignedField(body, "firmwareBuild", build());
+  status_json::appendStringField(body, "firmwareGitSha", gitSha());
+  status_json::appendBoolField(body, "ready", ready);
+  status_json::appendStringField(
+      body, "otaState", otaState == nullptr ? "unknown" : otaState);
+  body += "}";
+  return body;
 }
 
 } // namespace firmware_metadata

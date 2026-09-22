@@ -89,7 +89,9 @@ int main() {
                 subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT),
                                 f'-DFLAVOR="{target}"', f'-DBUILD_PROFILE="{target}_PRODUCTION"',
                                 '-DVERSION="0.3.4"', '-DREVISION=94', '-DGIT_SHA="' + 'a'*40 + '"',
-                                str(path / "test.cpp"), str(ROOT / "esp32/lib/firmware_metadata/firmware_metadata.cpp"),
+                                str(path / "test.cpp"),
+                                str(ROOT / "esp32/lib/firmware_metadata/firmware_metadata.cpp"),
+                                str(ROOT / "esp32/lib/status_json/status_json.cpp"),
                                 "-o", str(executable)], check=True)
                 fields = json.loads(subprocess.check_output([str(executable)]))
                 self.assertEqual(fields["firmwareProfile"], target + "_PRODUCTION")

@@ -474,6 +474,9 @@ class BikeComputerCoordinator: ObservableObject {
                         .reconcileStorageMigrationStatus(
                             bleManager: self.bleManager
                         )
+                    self.firmwareUpdateManager.reconcilePendingUpdate(
+                        bleManager: self.bleManager
+                    )
                 }
             }
             .store(in: &cancellables)

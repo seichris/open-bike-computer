@@ -64,21 +64,25 @@ class MapActivationHandoffTests(unittest.TestCase):
             DEVICE_TRANSFER_SOURCE,
         )
 
-    def test_remote_debug_worker_retains_network_setup_stack_budget(self):
+    def test_psram_workers_retain_network_setup_stack_budget(self):
         self.assertIn(
-            "constexpr uint32_t kDebugHttpWorkerStackBytes = 16384;",
+            "constexpr uint32_t kPsramHttpWorkerStackBytes = 16384;",
             DEVICE_TRANSFER_SOURCE,
         )
         self.assertIn(
-            'requestedMode == "debug" ? kDebugHttpWorkerStackBytes',
+            "workerStackInPsram ? kPsramHttpWorkerStackBytes",
             DEVICE_TRANSFER_SOURCE,
         )
 
-    def test_remote_debug_worker_stack_preserves_internal_crypto_headroom(self):
+    def test_ram_only_worker_stacks_preserve_internal_crypto_headroom(self):
         self.assertIn("xTaskCreateWithCaps(", DEVICE_TRANSFER_SOURCE)
         self.assertIn(
-            'requestedMode == "debug"\n'
-            "            ? static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)",
+            'requestedMode == "debug" || requestedMode == "diagnostics"',
+            DEVICE_TRANSFER_SOURCE,
+        )
+        self.assertIn("workerStackInPsram", DEVICE_TRANSFER_SOURCE)
+        self.assertIn(
+            "static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)",
             DEVICE_TRANSFER_SOURCE,
         )
         self.assertIn(

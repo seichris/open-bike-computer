@@ -271,6 +271,9 @@ public:
    * current location is covered by the active map. */
   void noteMapAvailabilityChanged();
 
+  /** Queue a fresh owner-authenticated device-transfer status snapshot. */
+  void requestDeviceTransferStatusNotification();
+
   /** Record physical input that should reopen the fast-advertising window. */
   void noteUserWake();
 
