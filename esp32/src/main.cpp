@@ -696,8 +696,8 @@ bool stopActiveDeviceTransfer() {
     const bool stopped = deviceTransferHttp.waitUntilStopped(5500);
     if (!stopped) {
       deviceTransferHttp.setLastError(
-          "diagnostics_worker_stopping",
-          "diagnostics HTTP worker did not stop before fallback deadline");
+          "http_worker_stopping",
+          "previous transfer HTTP worker is still stopping");
     }
     return revoked && stopped;
   }
