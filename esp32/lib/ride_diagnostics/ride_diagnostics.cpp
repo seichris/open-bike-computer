@@ -1771,14 +1771,28 @@ bool prepareForShutdown(uint32_t timeoutMs) {
 #endif
 }
 
-void beginTransferSnapshotLease(uint32_t durationMs) {
-  SemaphoreGuard retentionGuard(retentionMutex);
+void armTransferSnapshotLease(uint32_t durationMs) {
   const uint32_t bounded = std::min<uint32_t>(
       std::max<uint32_t>(durationMs, 30U * 1000U), 15U * 60U * 1000U);
   uint32_t deadline = millis() + bounded;
   if (deadline == 0)
     deadline = 1;
+  // Publish the lease without waiting behind a retention scan. The writer is
+  // the sole pruning owner, and a transfer seal cannot complete until any
+  // scan that started before this store has returned to the writer loop.
+  // Every later prune observes the lease before touching closed chunks. This
+  // lets diagnostics acquire the snapshot boundary before requesting its
+  // seal, rather than putting a full retained-directory scan inside the
+  // bounded seal deadline.
   retentionLeaseDeadlineMs.store(deadline, std::memory_order_release);
+}
+
+void beginTransferSnapshotLease(uint32_t durationMs) {
+  // Index creation has no writer-owned seal to serve as its synchronization
+  // point, so wait for any pre-existing prune before refreshing the lease and
+  // enumerating closed chunks.
+  SemaphoreGuard retentionGuard(retentionMutex);
+  armTransferSnapshotLease(durationMs);
 }
 
 void refreshTransferSnapshotLease(uint32_t durationMs) {
@@ -1786,7 +1800,6 @@ void refreshTransferSnapshotLease(uint32_t durationMs) {
 }
 
 void endTransferSnapshotLease() {
-  SemaphoreGuard retentionGuard(retentionMutex);
   retentionLeaseDeadlineMs.store(0, std::memory_order_release);
 }
 

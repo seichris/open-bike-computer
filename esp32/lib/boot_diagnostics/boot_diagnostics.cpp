@@ -223,7 +223,7 @@ Snapshot snapshot() {
   if (!initialized) {
     return {0,          0,           0,          Stage::None,
             Stage::None, Stage::None, Stage::None, 0,
-            0,          false,       false,      false};
+            0,          false,       false,      false, false};
   }
   return {
       persistentState.bootSequence,
@@ -238,6 +238,7 @@ Snapshot snapshot() {
       policy::isReady(persistentState),
       policy::isSafeMode(persistentState),
       policy::isDiagnosticHold(persistentState),
+      policy::isFirmwareMaintenance(persistentState),
   };
 }
 
@@ -288,6 +289,18 @@ void markDiagnosticHold() {
   } else if (kLogEnabled) {
     Serial.println(
         "BOOT_DIAGNOSTICS_ERROR schema=1 operation=diagnostic_hold");
+  }
+}
+
+void markFirmwareMaintenance() {
+  if (!initialized || runtimeSafeMode) {
+    return;
+  }
+  if (policy::markFirmwareMaintenance(persistentState)) {
+    logStage("hold", Stage::FirmwareMaintenance);
+  } else if (kLogEnabled) {
+    Serial.println(
+        "BOOT_DIAGNOSTICS_ERROR schema=1 operation=firmware_maintenance");
   }
 }
 

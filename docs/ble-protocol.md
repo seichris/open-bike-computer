@@ -1677,7 +1677,8 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
 | `MSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Current map-transfer status notification. |
 | `DTRN` | iOS -> ESP32 | `enter\|map` | Preferred atomic map-mode entry; publishes both map status and generic device-transfer status. |
-| `DTRN` | iOS -> ESP32 | `enter\|firmware` | Enter firmware-update transfer mode. |
+| `DTRN` | iOS -> ESP32 | `prepare\|firmware` | Validate OTA eligibility, write a one-shot maintenance request, acknowledge `reboot_pending`, then reboot. |
+| `DTRN` | iOS -> ESP32 | `enter\|firmware` | Enter firmware-update transfer mode after reconnecting and authenticating in maintenance boot. Normal boot rejects this command. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug` | Enter opt-in real-device browser-debug mode when CAP2 bit `16` is present. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|lan1\|` plus bounded binary credentials | Enter browser-debug mode by trying a normal LAN first, with device-hotspot fallback. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|h1\|e` | Force the hotspot after authenticated LAN endpoint verification fails; `e` records `endpoint_unreachable`. |
@@ -1731,9 +1732,50 @@ transfer id and accepts both forms.
 Generic device-transfer status uses the equivalent `DSTS{...}` direct response
 or `DSTC` chunk header. Firmware keeps an incomplete `DSTC` snapshot on the
 owner task and resumes it only as the bounded authenticated-notification queue
-drains. A request received while that snapshot is pending continues the same
-transfer instead of assigning a new transfer id and stranding the iOS
-reassembler with another partial response.
+drains. A fresh status event supersedes an incomplete older snapshot and uses a
+new transfer id, so chunks from different `statusRevision` values cannot be
+combined.
+
+Firmware-update clients require `capabilities.firmwareMaintenanceV1`. Before
+downloading or rebooting, iOS checks `firmware.otaEligible`,
+`firmware.eligibilityCode`, `firmware.inactivePartition`, and
+`firmware.maxImageBytes`. Preparation publishes a `maintenance` object with
+`active: false`, stage `reboot_pending`, and a non-zero correlation. After the
+expected disconnect, iOS reconnects to the same device identity, authenticates
+again, and requires `maintenance.active: true` with the same correlation before
+sending `enter|firmware`.
+
+Maintenance stages are `awaiting_authentication`, `network_starting`, `ready`,
+`receiving`, `verifying`, `committing`, `rebooting`, `cancelling`, and `failed`.
+The status also carries non-secret `resources` counters for current and minimum
+internal/DMA free space, largest blocks, worker stack high-water bytes, and the
+measurement phase. Transfer tokens, hotspot passwords, and TLS private keys are
+never retained in resource evidence.
+
+Before creating the firmware worker and again before accepting HTTPS clients,
+maintenance firmware applies named internal-heap and DMA-heap admission floors.
+It fails closed with a `maintenance_*_low` error when any free-space or
+largest-block floor is missed. The initial floors are conservative candidates;
+the per-target production qualification report records observed minima and may
+raise them. It must not lower them below the authenticated-control reserve.
+Waiting for owner authentication is bounded to two minutes, inactivity after
+transfer entry is bounded to 90 seconds, and the existing ten-minute overall
+maintenance deadline remains authoritative. Commit and reboot own their terminal
+path once the serialized commit boundary has been crossed.
+
+`DSTS.bootCheckpoint` is the SD-independent boot acceptance record. Schema 1
+contains `target`, `profile`, full `gitSha`, `version`, `build`, `bootSequence`,
+`bootFingerprint`, `normalReady`, `maintenance`, and `otaState`. The nested
+`firmware` object also reports `runningPartition`, `profile`, and `otaState`.
+iOS completes a pending update only when the exact requested image identity is
+reported with `normalReady: true` and `maintenance: false`. A matching active
+maintenance correlation resumes reconciliation; an old normal-ready image after
+commit is reported as rollback, while missing or contradictory evidence remains
+unresolved. The app runs this reconciliation after every fresh authenticated
+device-transfer status, including the first status after an app relaunch.
+Optional navigation and telemetry writes are suppressed while
+maintenance is active, but authentication and transfer status/control remain
+available.
 
 The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic
@@ -1842,9 +1884,13 @@ the existing bearer token. The read-only API is:
 Every route requires the authenticated transfer token and an active
 `diagnostics` mode. The device never accepts an arbitrary filesystem path or a
 remote-delete request. Before enabling the HTTP session, the firmware writer
-performs a fresh directory and write/flush/close/remove probe, drains all
-earlier queue entries, and seals its current chunk; short, normal rides are
-therefore included without exposing a mutable tail. The recorder root is stable
+acquires the bounded transfer snapshot lease, performs a fresh directory and
+write/flush/close/remove probe, drains all earlier queue entries, and seals its
+current chunk; short, normal rides are therefore included without exposing a
+mutable tail. Acquiring the lease before the seal keeps retention enumeration
+out of the seal deadline. Because the writer serializes pruning and sealing,
+seal completion also proves that any prune which began before the lease has
+finished. The recorder root is stable
 for the complete boot. When removable SD was mounted at boot, diagnostics uses
 that mount without unmounting it beneath map/font readers. When the boot is
 already using the bounded internal FFat fallback, diagnostics exports FFat and
@@ -1881,9 +1927,11 @@ streaming, verifies length, SHA-256, JSONL schema/source, per-field types, and
 sequence ordering within and across chunks, then atomically
 retains it under its local diagnostics root. Repeating a download skips an
 already-imported chunk with the same hash.
-Creating the index starts a bounded transfer snapshot lease. Retention pruning
-cannot delete indexed closed chunks while that authenticated session is active;
-each non-exit request refreshes the lease and session exit releases it.
+Diagnostics entry starts a bounded transfer snapshot lease before the recorder
+seal. Retention pruning cannot delete the sealed or indexed closed chunks while
+that authenticated session is active; index creation and each non-exit request
+refresh the lease, while setup failure, disconnect, timeout, or session exit
+releases it.
 
 The browser API and binary RGB565 frame contract are documented in
 [Remote device debugging](remote-device-debugging.md). BLE exit, browser exit,

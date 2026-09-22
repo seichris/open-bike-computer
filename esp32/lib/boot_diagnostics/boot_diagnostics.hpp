@@ -31,6 +31,7 @@ struct Snapshot {
   bool ready;
   bool safeMode;
   bool diagnosticHold;
+  bool firmwareMaintenance;
 };
 
 // Read-only runtime state for structured post-storage diagnostics. This does
@@ -42,5 +43,6 @@ void enterStage(Stage stage);
 void completeStage(Stage stage);
 void markReady();
 void markDiagnosticHold();
+void markFirmwareMaintenance();
 
 } // namespace boot_diagnostics

@@ -144,6 +144,9 @@ bool sealActiveChunk(uint32_t timeoutMs = 2000);
 bool beginStorageTransition(uint32_t timeoutMs = 2000);
 void endStorageTransition();
 bool prepareForShutdown(uint32_t timeoutMs = 2000);
+// Publish a lease before requesting a writer-owned seal. The subsequent seal
+// is the synchronization point with any retention pass already in progress.
+void armTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);
 void beginTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);
 void refreshTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);
 void endTransferSnapshotLease();

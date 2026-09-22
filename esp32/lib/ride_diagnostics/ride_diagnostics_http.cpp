@@ -26,13 +26,13 @@ namespace {
 constexpr const char *kPrefix = "/device-diagnostics/v1/";
 constexpr std::size_t kMaximumChunks = 256;
 constexpr std::size_t kMaximumIndexBytes = 64 * 1024;
+constexpr uint32_t kIndexHashProgressBytes = 32U * 1024U;
 
 struct Chunk {
   uint32_t boot = 0;
   uint32_t number = 0;
   uint32_t bytes = 0;
   std::string path;
-  std::string sha256;
 };
 
 struct ChunkIndex {
@@ -86,6 +86,8 @@ bool requestStillAuthorized(
 }
 
 bool sha256File(const char *path, std::string &out, uint32_t &bytes,
+                uint32_t expectedBytes,
+                device_transfer::TransferClient &client,
                 device_transfer::HttpTransferServer *server,
                 const device_transfer::HttpRequest &request) {
   FILE *file = storage.open(path, "rb");
@@ -100,16 +102,24 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
   }
   uint8_t buffer[4096];
   bytes = 0;
+  uint32_t lastResponseProgressBytes = 0;
   bool ok = true;
-  while (true) {
+  // The index already snapshots the closed file's exact stat size. Read only
+  // those bytes instead of issuing one extra fread past EOF. Some embedded
+  // FAT/VFS paths report that probe as an I/O error even after all requested
+  // bytes were returned, which used to abort the response immediately after
+  // its final progress byte and before the chunk digest was emitted.
+  while (bytes < expectedBytes) {
     if (!requestStillAuthorized(server, request)) {
       ok = false;
       break;
     }
-    const size_t count = storage.read(file, buffer, sizeof(buffer));
+    const size_t remaining = expectedBytes - bytes;
+    const size_t count =
+        storage.read(file, buffer, std::min<std::size_t>(remaining,
+                                                        sizeof(buffer)));
     if (count == 0) {
-      if (storage.hasError(file))
-        ok = false;
+      ok = false;
       break;
     }
     if (mbedtls_sha256_update(&context, buffer, count) != 0) {
@@ -117,6 +127,15 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
       break;
     }
     bytes += static_cast<uint32_t>(count);
+    if (bytes - lastResponseProgressBytes >= kIndexHashProgressBytes ||
+        bytes == expectedBytes) {
+      static constexpr uint8_t progress = ' ';
+      if (!device_transfer::writeHttpBytes(client, &progress, 1)) {
+        ok = false;
+        break;
+      }
+      lastResponseProgressBytes = bytes;
+    }
   }
   uint8_t digest[32] = {};
   if (ok)
@@ -134,6 +153,11 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
     out.push_back(hex[byte & 0x0f]);
   }
   return true;
+}
+
+std::size_t indexHashProgressCharacters(uint32_t bytes) {
+  return (static_cast<std::size_t>(bytes) + kIndexHashProgressBytes - 1U) /
+         kIndexHashProgressBytes;
 }
 
 ChunkIndex listChunks(
@@ -204,7 +228,7 @@ ChunkIndex listChunks(
         continue;
       }
       Chunk candidate = {boot, chunkNumber,
-                         static_cast<uint32_t>(metadata.st_size), path, {}};
+                         static_cast<uint32_t>(metadata.st_size), path};
       if (chunks.size() < kMaximumChunks) {
         chunks.push_back(std::move(candidate));
       } else {
@@ -217,21 +241,24 @@ ChunkIndex listChunks(
   }
   closedir(boots);
   std::sort(chunks.begin(), chunks.end(), chunkOlder);
-  for (auto chunk = chunks.begin(); chunk != chunks.end();) {
-    uint32_t bytes = 0;
-    std::string digest;
-    if (!sha256File(chunk->path.c_str(), digest, bytes, server, request) ||
-        bytes == 0 ||
-        bytes != chunk->bytes || bytes > kChunkBytes) {
-      index.readable = false;
-      chunk = chunks.erase(chunk);
-      continue;
-    }
-    chunk->bytes = bytes;
-    chunk->sha256 = std::move(digest);
-    ++chunk;
-  }
   return index;
+}
+
+bool writeBodySegment(device_transfer::TransferClient &client,
+                      const std::string &body) {
+  std::size_t offset = 0;
+  while (offset < body.size()) {
+    const std::size_t count =
+        std::min<std::size_t>(4096, body.size() - offset);
+    if (!device_transfer::writeHttpBytes(
+            client,
+            reinterpret_cast<const uint8_t *>(body.data() + offset),
+            count)) {
+      return false;
+    }
+    offset += count;
+  }
+  return true;
 }
 
 bool sendBody(device_transfer::TransferClient &client, const std::string &body,
@@ -257,6 +284,97 @@ bool sendBody(device_transfer::TransferClient &client, const std::string &body,
       return false;
     }
     offset += count;
+  }
+  return true;
+}
+
+std::string indexEntryPrefix(const Chunk &chunk) {
+  return std::string("{\"bootSequence\":") + std::to_string(chunk.boot) +
+         ",\"chunk\":" + std::to_string(chunk.number) +
+         ",\"bytes\":" + std::to_string(chunk.bytes) +
+         ",\"sha256\":\"";
+}
+
+bool sendIndex(device_transfer::TransferClient &client,
+               const ChunkIndex &index, const Stats &snapshot,
+               device_transfer::HttpTransferServer *server,
+               const device_transfer::HttpRequest &request) {
+  const std::vector<Chunk> &chunks = index.chunks;
+  const std::string prefix =
+      std::string("{\"schema\":1,\"source\":\"firmware\",\"bootSequence\":") +
+      std::to_string(currentBootSequence()) +
+      ",\"activeChunk\":" + std::to_string(currentActiveChunk()) +
+      ",\"stats\":{\"enqueued\":" + std::to_string(snapshot.enqueued) +
+      ",\"written\":" + std::to_string(snapshot.written) +
+      ",\"dropped\":" + std::to_string(snapshot.dropped) +
+      ",\"storageErrors\":" + std::to_string(snapshot.storageErrors) +
+      "},\"chunks\":[";
+  const std::string suffix = "]}";
+  constexpr std::size_t kDigestCharacters = 64;
+  constexpr std::size_t kEntrySuffixCharacters = 2; // \"}
+  std::size_t contentLength = prefix.size() + suffix.size();
+  for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
+    contentLength += (chunkIndex == 0 ? 0 : 1) +
+                     indexHashProgressCharacters(chunks[chunkIndex].bytes) +
+                     indexEntryPrefix(chunks[chunkIndex]).size() +
+                     kDigestCharacters + kEntrySuffixCharacters;
+    if (contentLength > kMaximumIndexBytes) {
+      endTransferSnapshotLease();
+      return device_transfer::sendHttpError(
+          client, 413, "index_too_large",
+          "diagnostic index exceeds the response limit");
+    }
+  }
+
+  // Send the fixed-length prefix before hashing retained chunks. A full
+  // retention window can take longer to hash than iOS permits a connected
+  // response to remain silent. sha256File emits pre-counted JSON whitespace
+  // while reading each bounded chunk, so even a slow SD file keeps the stream
+  // active without exposing an unverified digest or weakening the exact-byte
+  // contract.
+  if (!requestStillAuthorized(server, request) ||
+      !device_transfer::sendHttpHead(client, 200, contentLength,
+                                     "application/json") ||
+      !writeBodySegment(client, prefix)) {
+    endTransferSnapshotLease();
+    return false;
+  }
+
+  for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
+    if (!requestStillAuthorized(server, request)) {
+      endTransferSnapshotLease();
+      client.stop();
+      return false;
+    }
+    const Chunk &chunk = chunks[chunkIndex];
+    uint32_t bytes = 0;
+    std::string digest;
+    if (!sha256File(chunk.path.c_str(), digest, bytes, chunk.bytes, client,
+                    server, request) ||
+        bytes == 0 || bytes != chunk.bytes || bytes > kChunkBytes ||
+        digest.size() != kDigestCharacters) {
+      endTransferSnapshotLease();
+      client.stop();
+      return false;
+    }
+    if (!requestStillAuthorized(server, request)) {
+      endTransferSnapshotLease();
+      client.stop();
+      return false;
+    }
+    const std::string entry =
+        (chunkIndex == 0 ? "" : ",") + indexEntryPrefix(chunk) + digest +
+        "\"}";
+    if (!writeBodySegment(client, entry)) {
+      endTransferSnapshotLease();
+      return false;
+    }
+  }
+  if (!requestStillAuthorized(server, request) ||
+      !writeBodySegment(client, suffix)) {
+    endTransferSnapshotLease();
+    client.stop();
+    return false;
   }
   return true;
 }
@@ -379,37 +497,8 @@ bool RideDiagnosticsHttp::handleRequest(
           client, 500, "diagnostics_index_unreadable",
           "one or more non-empty diagnostic chunks could not be read safely");
     }
-    const std::vector<Chunk> &chunks = index.chunks;
     const Stats snapshot = stats();
-    std::string body = "{\"schema\":1,\"source\":\"firmware\",\"bootSequence\":" +
-                       std::to_string(currentBootSequence()) +
-                       ",\"activeChunk\":" + std::to_string(currentActiveChunk()) +
-                       ",\"stats\":{\"enqueued\":" + std::to_string(snapshot.enqueued) +
-                       ",\"written\":" + std::to_string(snapshot.written) +
-                       ",\"dropped\":" + std::to_string(snapshot.dropped) +
-                       ",\"storageErrors\":" + std::to_string(snapshot.storageErrors) +
-                       "},\"chunks\":[";
-    for (std::size_t index = 0; index < chunks.size(); ++index) {
-      if (!requestStillAuthorized(server_, request)) {
-        endTransferSnapshotLease();
-        client.stop();
-        return false;
-      }
-      if (index != 0)
-        body += ',';
-      const Chunk &chunk = chunks[index];
-      body += "{\"bootSequence\":" + std::to_string(chunk.boot) +
-              ",\"chunk\":" + std::to_string(chunk.number) +
-              ",\"bytes\":" + std::to_string(chunk.bytes) +
-              ",\"sha256\":\"" + chunk.sha256 + "\"}";
-      if (body.size() > kMaximumIndexBytes) {
-        endTransferSnapshotLease();
-        return device_transfer::sendHttpError(client, 413, "index_too_large",
-                                              "diagnostic index exceeds the response limit");
-      }
-    }
-    body += "]}";
-    return sendBody(client, body, "application/json", server_, request);
+    return sendIndex(client, index, snapshot, server_, request);
   }
 
   if (route.kind == http_policy::RouteKind::Chunk) {
