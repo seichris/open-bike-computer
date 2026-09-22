@@ -209,6 +209,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         locationManager.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.diagnosticsRecorder = rideDiagnosticsRecorder
         workoutSessionCoordinator.store.diagnosticsRecorder = rideDiagnosticsRecorder
+        workoutMirrorManager.diagnosticsRecorder = rideDiagnosticsRecorder
         rideAutomationCoordinator.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.firmwareUpdateManager.diagnosticsRecorder = rideDiagnosticsRecorder
         rideDiagnosticsRecorder.$captureBinding

@@ -102,6 +102,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
         }
         watchAvailability.recordingAvailabilityPublisher.removeDuplicates().sink { [weak self] availability in
             guard let self else { return }
+            recordWatchAvailability(availability)
             objectWillChange.send()
             guard pendingAutomaticChoice, availability != .activating else { return }
             // @Published emits before storage changes; use this emitted value.
@@ -181,7 +182,18 @@ final class WorkoutSessionCoordinator: ObservableObject {
     @discardableResult
     private func requestStart(using availability: WorkoutWatchAvailabilityV1,
                               explicitOwner: WorkoutRecordingOwner? = nil) -> Bool {
-        guard !storageFailed, startTask == nil else { return false }
+        recordStartRequest(
+            availability: availability,
+            explicitOwner: explicitOwner
+        )
+        guard !storageFailed, startTask == nil else {
+            recordStartDecision(
+                availability: availability,
+                outcome: storageFailed ? "storageBlocked" : "startInFlight",
+                owner: explicitOwner
+            )
+            return false
+        }
         // An explicit new start also acknowledges the previous ride's
         // completed summary. Clear only an authoritative terminal tombstone;
         // unresolved, active, and recovering rides must continue to block.
@@ -197,6 +209,10 @@ final class WorkoutSessionCoordinator: ObservableObject {
             recoveryComplete: recoveryComplete, existingRecording: record,
             watchAvailability: availability, phoneSupported: phoneSupported,
             explicitOwner: explicitOwner
+        )
+        recordStartDecision(
+            availability: availability,
+            decision: decision
         )
         switch decision {
         case .waitForRecovery:
@@ -225,6 +241,109 @@ final class WorkoutSessionCoordinator: ObservableObject {
             return start(owner)
         }
         return false
+    }
+
+    private func recordWatchAvailability(
+        _ availability: WorkoutWatchAvailabilityV1
+    ) {
+        store.diagnosticsRecorder?.record(
+            category: .workout,
+            event: "watch_availability_changed",
+            fields: Self.diagnosticFields(for: availability)
+        )
+    }
+
+    private func recordStartRequest(
+        availability: WorkoutWatchAvailabilityV1,
+        explicitOwner: WorkoutRecordingOwner?
+    ) {
+        var fields = Self.diagnosticFields(for: availability)
+        fields["role"] = explicitOwner?.rawValue ?? "automatic"
+        fields["ready"] = String(recoveryComplete && !storageFailed)
+        fields["sessionPresent"] = String(record != nil)
+        store.diagnosticsRecorder?.record(
+            category: .workout,
+            event: "start_requested",
+            fields: fields
+        )
+    }
+
+    private func recordStartDecision(
+        availability: WorkoutWatchAvailabilityV1,
+        decision: WorkoutRecordingStartDecision
+    ) {
+        switch decision {
+        case .waitForRecovery:
+            recordStartDecision(
+                availability: availability,
+                outcome: "waitForRecovery"
+            )
+        case .waitForWatchActivation:
+            recordStartDecision(
+                availability: availability,
+                outcome: "waitForWatchActivation"
+            )
+        case .start(let owner):
+            recordStartDecision(
+                availability: availability,
+                outcome: "start",
+                owner: owner
+            )
+        case .chooseRecorder:
+            recordStartDecision(
+                availability: availability,
+                outcome: "chooseRecorder"
+            )
+        case .blockedByExistingRecording:
+            recordStartDecision(
+                availability: availability,
+                outcome: "blockedByExistingRecording",
+                owner: record?.owner
+            )
+        case .phoneUnsupported:
+            recordStartDecision(
+                availability: availability,
+                outcome: "phoneUnsupported"
+            )
+        }
+    }
+
+    private func recordStartDecision(
+        availability: WorkoutWatchAvailabilityV1,
+        outcome: String,
+        owner: WorkoutRecordingOwner? = nil
+    ) {
+        var fields = Self.diagnosticFields(for: availability)
+        fields["outcome"] = outcome
+        fields["role"] = owner?.rawValue ?? "none"
+        store.diagnosticsRecorder?.record(
+            category: .workout,
+            event: "start_decision",
+            fields: fields
+        )
+    }
+
+    private static func diagnosticFields(
+        for availability: WorkoutWatchAvailabilityV1
+    ) -> [String: String] {
+        switch availability {
+        case .activating:
+            return ["state": "activating"]
+        case .unsupported:
+            return ["state": "unsupported"]
+        case .activationFailed:
+            return ["state": "activationFailed"]
+        case .noPairedWatch:
+            return ["state": "noPairedWatch"]
+        case .companionAppNotInstalled:
+            return ["state": "companionAppNotInstalled"]
+        case .ready(let isReachable):
+            return [
+                "state": "ready",
+                "connectionState": isReachable
+                    ? "reachable" : "unreachable",
+            ]
+        }
     }
 
     private func start(_ owner: WorkoutRecordingOwner) -> Bool {

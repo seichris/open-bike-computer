@@ -27,8 +27,14 @@ struct WorkoutRecordingOwnershipTests {
         check(decision(.ready(isReachable: true)) == .start(.watch), "Ready Watch remains default")
         check(decision(.ready(isReachable: false)) == .start(.watch),
               "Interactive reachability does not block HealthKit Watch launch")
-        check(decision(.companionAppNotInstalled) == .chooseRecorder, "Missing companion needs explicit choice")
-        check(decision(.activationFailed) == .chooseRecorder, "Activation failure is not unpaired")
+        check(decision(.companionAppNotInstalled) == .start(.watch),
+              "Stale companion catalogue defers to HealthKit Watch launch")
+        check(decision(.activationFailed) == .start(.watch),
+              "Transient WatchConnectivity activation failure defers to HealthKit")
+        check(decision(.unsupported) == .start(.iphone),
+              "Unsupported WatchConnectivity uses the available phone recorder")
+        check(decision(.unsupported, phone: false) == .phoneUnsupported,
+              "Unsupported WatchConnectivity cannot invent a recorder")
         for watch in availability {
             check(decision(watch, recovery: false) == .waitForRecovery, "Cold-start recovery always first")
             check(decision(watch, recovery: false, explicit: .iphone) == .waitForRecovery, "Explicit start cannot bypass recovery")

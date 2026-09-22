@@ -1901,10 +1901,12 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
     func testPhoneStartUsesOutdoorCyclingAndPublishesLaunchFailure() async {
         let now = Date(timeIntervalSinceReferenceDate: 800_400_000)
         let probe = WatchLaunchProbe()
+        let diagnostics = WorkoutLaunchDiagnosticsProbe()
         let manager = WorkoutMirrorManager(
             now: { now },
             launchWatchApp: probe.launch
         )
+        manager.diagnosticsRecorder = diagnostics
 
         manager.installMirroringHandler()
         manager.installMirroringHandler()
@@ -1933,19 +1935,41 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
         XCTAssertTrue(detail.contains("workout did not start"))
         XCTAssertFalse(detail.contains("workout continues on Watch"))
+        XCTAssertEqual(
+            diagnostics.events.first(where: {
+                $0.name == "watch_launch_requested"
+            })?.fields["state"],
+            "launchingWatch"
+        )
+        let completion = diagnostics.events.first(where: {
+            $0.name == "watch_launch_completed"
+        })
+        XCTAssertEqual(completion?.level, .warning)
+        XCTAssertEqual(completion?.fields["outcome"], "failure")
+        XCTAssertEqual(completion?.fields["result"], "applied")
+        XCTAssertEqual(completion?.fields["errorCode"], "watchUnavailable")
     }
 
     func testStaleLaunchFailureCannotCancelRetryTimeout() async throws {
         let probe = WatchLaunchProbe()
+        let diagnostics = WorkoutLaunchDiagnosticsProbe()
         let manager = WorkoutMirrorManager(
             watchLaunchTimeout: 0.02,
             launchWatchApp: probe.launch
         )
+        manager.diagnosticsRecorder = diagnostics
 
         manager.startOutdoorCyclingOnWatch()
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(manager.store.presentation.connectionState, .failed)
         XCTAssertEqual(manager.store.presentation.errorCode, .setupRequired)
+        let timeout = diagnostics.events.first(where: {
+            $0.name == "watch_launch_completed"
+                && $0.fields["outcome"] == "timeout"
+        })
+        XCTAssertEqual(timeout?.level, .warning)
+        XCTAssertEqual(timeout?.fields["result"], "applied")
+        XCTAssertEqual(timeout?.fields["errorCode"], "setupRequired")
 
         manager.startOutdoorCyclingOnWatch()
         XCTAssertEqual(manager.store.presentation.connectionState, .launchingWatch)
@@ -4296,6 +4320,32 @@ private final class FakeWorkoutBackgroundExecutionLease:
 }
 
 @available(iOS 17.0, *)
+@MainActor
+private final class WorkoutLaunchDiagnosticsProbe:
+    RideDiagnosticsEventSink {
+    struct Event {
+        let level: RideDiagnosticLevel
+        let name: String
+        let fields: [String: String]
+    }
+
+    var events: [Event] = []
+
+    func record(
+        level: RideDiagnosticLevel,
+        category: RideDiagnosticCategory,
+        event: String,
+        fields: [String: String],
+        captureId: UUID?
+    ) {
+        events.append(Event(
+            level: level,
+            name: event,
+            fields: fields
+        ))
+    }
+}
+
 private final class WatchLaunchProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var storedConfiguration: HKWorkoutConfiguration?
