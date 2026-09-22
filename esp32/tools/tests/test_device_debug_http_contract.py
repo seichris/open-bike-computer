@@ -455,6 +455,23 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertLess(worker_stopped, final_cancel)
         self.assertLess(final_cancel, finish)
 
+    def test_diagnostics_exit_waits_for_worker_before_hotspot_reentry(self):
+        stop = MAIN[
+            MAIN.index("bool stopActiveDeviceTransfer()") :
+            MAIN.index("void appRemoteDebugPointerActivity()")
+        ]
+        diagnostics = stop[
+            stop.index('if (status.mode == "diagnostics")') :
+            stop.index('if (status.mode == "map")')
+        ]
+        self.assertIn("deviceTransferHttp.setEnabled(false)", diagnostics)
+        self.assertIn("deviceTransferHttp.waitUntilStopped(5500)", diagnostics)
+        self.assertIn('"diagnostics_worker_stopping"', diagnostics)
+        self.assertLess(
+            diagnostics.index("deviceTransferHttp.setEnabled(false)"),
+            diagnostics.index("deviceTransferHttp.waitUntilStopped(5500)"),
+        )
+
     def test_remote_boot_uses_existing_waveshare_button_path(self):
         button = MAIN[
             MAIN.index("static bool processWaveshareBootButton") :

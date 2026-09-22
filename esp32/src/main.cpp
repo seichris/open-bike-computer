@@ -687,7 +687,19 @@ bool stopActiveDeviceTransfer() {
   const device_transfer::HttpTransferStatus status = deviceTransferHttp.status();
   if (status.mode == "diagnostics") {
     ride_diagnostics::endTransferSnapshotLease();
-    return deviceTransferHttp.setEnabled(false);
+    const bool revoked = deviceTransferHttp.setEnabled(false);
+    // DTRN exit is also the sequencing boundary before iOS requests the
+    // endpoint-unreachable hotspot fallback. Do not acknowledge an empty
+    // diagnostics status while the old LAN worker is still unwinding: a
+    // replacement session can otherwise observe the stale worker handle and
+    // fail without ever publishing a fresh DSTS response.
+    const bool stopped = deviceTransferHttp.waitUntilStopped(5500);
+    if (!stopped) {
+      deviceTransferHttp.setLastError(
+          "diagnostics_worker_stopping",
+          "diagnostics HTTP worker did not stop before fallback deadline");
+    }
+    return revoked && stopped;
   }
   if (status.mode == "map")
     return mapTransferHttp.setEnabled(false);
