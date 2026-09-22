@@ -175,7 +175,10 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
             ble_source.index("static std::string genericTransferStatusJson()") :
             ble_source.index("static void notifyMapTransferStatus")
         ]
-        self.assertIn('\\"sequence\\":', transfer_status)
+        self.assertIn(
+            'appendUnsignedField(body, "sequence", transferStatus.errorSequence)',
+            transfer_status,
+        )
         self.assertIn("transferStatus.errorSequence", transfer_status)
 
     def test_tls_does_not_claim_a_psram_hole_that_cannot_fix_internal_crypto(self):
@@ -322,11 +325,20 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
             HTTP_SOURCE.index("void HttpTransferServer::clearAuthenticatedBleSession") :
             HTTP_SOURCE.index("bool HttpTransferServer::prepareTlsIdentityRotation")
         ]
+        suspend_ble = HTTP_SOURCE[
+            HTTP_SOURCE.index(
+                "bool HttpTransferServer::suspendFirmwareAuthenticatedBleSession"
+            ) :
+            HTTP_SOURCE.index("void HttpTransferServer::clearAuthenticatedBleSession")
+        ]
         disable = HTTP_SOURCE[
             HTTP_SOURCE.index("bool HttpTransferServer::setEnabled(bool enabled, std::string mode)") :
             HTTP_SOURCE.index("void HttpTransferServer::setLastError")
         ]
         self.assertIn("interruptActiveClientLocked();", clear_ble)
+        self.assertIn("sessionToken_.clear();", suspend_ble)
+        self.assertIn("interruptActiveClientLocked();", suspend_ble)
+        self.assertNotIn("server_.stop();", suspend_ble)
         self.assertIn("interruptActiveClientLocked();", disable)
         self.assertIn("interruptLease_.interrupt(", TLS_SOURCE)
         self.assertIn("::shutdown(fd, SHUT_RDWR);", TLS_SOURCE)

@@ -361,6 +361,11 @@ enum RemoteDeviceDebugSessionPolicy {
 
 enum DeviceTransferHandshakePolicy {
     static let attemptCount = 32
+    // Starting Wi-Fi in firmware maintenance can temporarily drop BLE. Keep
+    // the transfer-entry handshake alive long enough for the accessory to
+    // finish network startup and for CoreBluetooth to reconnect.
+    static let firmwareAttemptCount = 120
+    static let firmwareRetryIntervalNanoseconds: UInt64 = 500_000_000
     static let remoteDebugAttemptCount = 64
     static let retryIntervalNanoseconds: UInt64 = 250_000_000
     static let remoteDebugExitAttemptCount = 32
@@ -1028,6 +1033,7 @@ final class DeviceTransferManager {
             bleManager.deviceTransferStatusRevision
         let initialDeviceTransferErrorSequence =
             bleManager.deviceTransferLastErrorSequence
+        let expectedDeviceID = bleManager.connectedDeviceID
         var enterWasQueued = false
 
         do {
@@ -1036,7 +1042,8 @@ final class DeviceTransferManager {
             }
             enterWasQueued = true
 
-            for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
+            var sawDisconnect = false
+            for attempt in 0..<DeviceTransferHandshakePolicy.firmwareAttemptCount {
                 let hasFreshDeviceStatus =
                     bleManager.deviceTransferStatusRevision !=
                     initialDeviceTransferStatusRevision
@@ -1074,14 +1081,28 @@ final class DeviceTransferManager {
                         message: failure.message
                     )
                 }
-                if DeviceTransferHandshakePolicy.shouldRequestStatus(
-                    attempt: attempt
-                ) {
-                    _ = bleManager.requestDeviceTransferStatus()
+
+                if !bleManager.isNavigationReady {
+                    sawDisconnect = true
+                    if attempt % 8 == 0 {
+                        bleManager.reconnectToLastDevice()
+                    }
+                } else if expectedDeviceID == nil ||
+                            bleManager.connectedDeviceID == expectedDeviceID {
+                    if sawDisconnect {
+                        _ = bleManager.requestDeviceTransferStatus(
+                            forMaintenanceReconnect: true
+                        )
+                    } else if DeviceTransferHandshakePolicy.shouldRequestStatus(
+                        attempt: attempt
+                    ) {
+                        _ = bleManager.requestDeviceTransferStatus()
+                    }
                 }
                 try await Task.sleep(
                     nanoseconds:
-                        DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+                        DeviceTransferHandshakePolicy
+                            .firmwareRetryIntervalNanoseconds
                 )
             }
             throw FirmwareUpdateError.missingTransferSession
