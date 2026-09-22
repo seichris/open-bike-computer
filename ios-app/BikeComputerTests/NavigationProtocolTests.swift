@@ -12899,18 +12899,34 @@ struct NavigationProtocolTests {
                 screensSource.contains("Button(\"Cancel\") { dismiss() }"),
             "Add Screen is routed from the stable Settings presenter and dismisses only its own sheet"
         )
+        let statusFollowsAddScreen: Bool
+        if let addScreenMarker = screensSource.range(of: "device-screen-add"),
+           let statusMarker = screensSource.range(
+               of: "statusContent",
+               range: addScreenMarker.upperBound..<screensSource.endIndex
+           ) {
+            statusFollowsAddScreen = addScreenMarker.lowerBound < statusMarker.lowerBound
+        } else {
+            statusFollowsAddScreen = false
+        }
         assert(
             !screensSource.contains("Reorder Screens") &&
                 !screensSource.contains("Done Reordering") &&
                 screensSource.contains(".onMove(perform: controller.move)") &&
                 !screensSource.contains("Button(\"Save to Bicino\")") &&
                 !screensSource.contains("Button(\"Cancel Changes\"") &&
-                screensSource.contains("Changes save automatically.") &&
-                screensSource.contains("Saving changes to Bicino…") &&
+                screensSource.contains("Text(\"Bicino Screens\")") &&
+                settingsSource.contains("header: Text(\"Bicino Screens\")") &&
+                !screensSource.contains("Changes save automatically.") &&
+                !screensSource.contains("Changes will save automatically.") &&
+                !screensSource.contains("Saving changes to Bicino…") &&
+                screensSource.contains("Text(\"Saving changes\")") &&
                 screensSource.contains("Saved to Bicino") &&
+                screensSource.contains("2_000_000_000") &&
+                statusFollowsAddScreen &&
                 !screensSource.contains("Button(\"Save to Bike Computer\")") &&
                 !screensSource.contains(".disabled(!controller.canSave)"),
-            "device screen actions use long-press reordering and automatic Bicino saves"
+            "Bicino screen actions autosave with transient feedback below Add Screen"
         )
         assert(
             screensSource.contains("Text(\"Preferred\").tag(UInt8(1))") &&
