@@ -1743,7 +1743,10 @@ downloading or rebooting, iOS checks `firmware.otaEligible`,
 `active: false`, stage `reboot_pending`, and a non-zero correlation. After the
 expected disconnect, iOS reconnects to the same device identity, authenticates
 again, and requires `maintenance.active: true` with the same correlation before
-sending `enter|firmware`.
+sending `enter|firmware`. The first status request after that reconnect, and all
+transfer control while maintenance is active, use the authenticated Navigation
+fallback. This also lets the app upgrade older maintenance firmware whose
+cached Settings handle can acknowledge a write without delivering it.
 
 Maintenance stages are `awaiting_authentication`, `network_starting`, `ready`,
 `receiving`, `verifying`, `committing`, `rebooting`, `cancelling`, and `failed`.

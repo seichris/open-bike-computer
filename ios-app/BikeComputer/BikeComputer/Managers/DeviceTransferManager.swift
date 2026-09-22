@@ -1193,7 +1193,9 @@ final class DeviceTransferManager {
             } else if sawDisconnect,
                       expectedDeviceID == nil ||
                         bleManager.connectedDeviceID == expectedDeviceID {
-                _ = bleManager.requestDeviceTransferStatus()
+                _ = bleManager.requestDeviceTransferStatus(
+                    forMaintenanceReconnect: true
+                )
                 try await Task.sleep(nanoseconds: 250_000_000)
                 if bleManager.firmwareMaintenanceActive,
                    bleManager.firmwareMaintenanceCorrelation ==
