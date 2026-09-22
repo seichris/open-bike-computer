@@ -177,7 +177,7 @@ static void processFirmwareMaintenanceMode() {
       now - firmware_maintenance::activeSinceMs();
   if (stage == firmware_maintenance::Stage::AwaitingAuthentication &&
       firmware_maintenance::policy::authenticationTimedOut(
-          maintenanceElapsed, false)) {
+          maintenanceElapsed, bleNavServer.isAuthenticated())) {
     deviceTransferHttp.setLastError(
         "maintenance_authentication_timeout",
         "owner authentication did not complete before the deadline");
