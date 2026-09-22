@@ -262,6 +262,9 @@ public:
    */
   bool isConnected() const { return connected; }
 
+  /** True when the current BLE connection completed owner authentication. */
+  bool isAuthenticated() const;
+
   /**
    * @brief Process any pending BLE events (call from main loop)
    */

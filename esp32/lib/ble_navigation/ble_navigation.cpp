@@ -5448,6 +5448,56 @@ public:
   }
 };
 
+static bool handleFirmwareMaintenancePayload(
+    const std::string &value, NimBLECharacteristic *statusCharacteristic,
+    bool scopedWatchSession, const char *source) {
+  if (!firmware_maintenance::active()) {
+    return false;
+  }
+
+  if (scopedWatchSession) {
+    Serial.printf(
+        "BLE maintenance: rejected transfer command from scoped Watch on %s\n",
+        source);
+    return true;
+  }
+  if (hasPrefix(value, "DTRN")) {
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
+    if (requireAuthenticated("maintenance device transfer control")) {
+      handleGenericTransferControlPayload(
+          reinterpret_cast<const uint8_t *>(value.data()) + 4,
+          value.length() - 4, statusCharacteristic);
+    }
+    return true;
+  }
+  if (hasPrefix(value, "DSTS")) {
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
+    if (requireAuthenticated("maintenance device transfer status")) {
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    }
+    return true;
+  }
+  if (handleDeviceCapabilitiesCommand(value, statusCharacteristic,
+                                      "maintenance device capabilities")) {
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+    return true;
+  }
+  Serial.printf("BLE maintenance: rejected non-transfer payload on %s\n",
+                source);
+  return true;
+}
+
+class MyMaintenanceRejectedCharacteristicCallbacks
+    : public NimBLECharacteristicCallbacks {
+public:
+  void onWrite(NimBLECharacteristic *) override {
+    ScopedNimbleCallback callbackScope;
+    Serial.println(
+        "BLE maintenance: rejected write to inactive riding characteristic");
+  }
+};
+
 static bool resetOwnershipConnectionState() {
   if (!deviceOwnershipReady) {
     return true;
@@ -5717,35 +5767,8 @@ public:
       return;
     }
 
-    if (firmware_maintenance::active()) {
-      if (scopedWatchSession) {
-        Serial.println(
-            "BLE maintenance: rejected transfer command from scoped Watch");
-        return;
-      }
-      if (hasPrefix(value, "DTRN")) {
-        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
-        if (requireAuthenticated("device transfer control")) {
-          handleGenericTransferControlPayload(
-              reinterpret_cast<const uint8_t *>(value.data()) + 4,
-              value.length() - 4, pChar);
-        }
-        return;
-      }
-      if (hasPrefix(value, "DSTS")) {
-        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
-        if (requireAuthenticated("device transfer status")) {
-          queueTransferControl(ble_transfer::Action::None,
-                               ble_transfer::NotifyGeneric);
-        }
-        return;
-      }
-      if (handleDeviceCapabilitiesCommand(value, pChar,
-                                          "device capabilities")) {
-        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
-        return;
-      }
-      Serial.println("BLE maintenance: rejected non-transfer payload");
+    if (handleFirmwareMaintenancePayload(value, pChar, scopedWatchSession,
+                                         "navigation characteristic")) {
       return;
     }
 
@@ -6319,8 +6342,15 @@ public:
     ScopedNimbleCallback callbackScope;
     const std::string frame = pChar->getValue();
     std::string value;
+    bool scopedWatchSession = false;
     if (!unwrapOwnerAuthenticatedPayload(
             device_ownership::AuthenticatedChannel::Settings, frame, value,
+            "settings characteristic", &scopedWatchSession)) {
+      return;
+    }
+
+    if (handleFirmwareMaintenancePayload(
+            value, mapTransferStatusCharacteristic, scopedWatchSession,
             "settings characteristic")) {
       return;
     }
@@ -6632,27 +6662,41 @@ void BLENavigationServer::init(const char *deviceName) {
   pAuthCharacteristic->setValue("LOCKED");
   authCharacteristic = pAuthCharacteristic;
 
-  if (!maintenanceBoot) {
-    pRouteCharacteristic = pService->createCharacteristic(
-        ROUTE_CHAR_UUID,
-        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
-            NIMBLE_PROPERTY::NOTIFY);
+  // Preserve the normal GATT handle prefix through Settings during maintenance.
+  // CoreBluetooth can retain the previously discovered handles across the
+  // intentional reboot; changing their order would silently route native
+  // transfer commands to the wrong characteristic.
+  pRouteCharacteristic = pService->createCharacteristic(
+      ROUTE_CHAR_UUID,
+      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
+          NIMBLE_PROPERTY::NOTIFY);
+  if (maintenanceBoot) {
+    pRouteCharacteristic->setCallbacks(
+        new MyMaintenanceRejectedCharacteristicCallbacks());
+  } else {
     pRouteCharacteristic->setCallbacks(new MyRouteCharacteristicCallbacks());
+  }
 
-    // Create GPS Position Characteristic (UUID 2A72)
-    NimBLECharacteristic *pGPSCharacteristic =
-        pService->createCharacteristic(
-            GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  // Create GPS Position Characteristic (UUID 2A72)
+  NimBLECharacteristic *pGPSCharacteristic = pService->createCharacteristic(
+      GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  if (maintenanceBoot) {
+    pGPSCharacteristic->setCallbacks(
+        new MyMaintenanceRejectedCharacteristicCallbacks());
+  } else {
     pGPSCharacteristic->setCallbacks(new MyGPSCharacteristicCallbacks());
+  }
 
-    // Create Settings Characteristic (UUID 2A73) for runtime configuration
-    NimBLECharacteristic *pSettingsCharacteristic =
-        pService->createCharacteristic(
-            SETTINGS_CHAR_UUID,
-            NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-    pSettingsCharacteristic->setCallbacks(
-        new MySettingsCharacteristicCallbacks());
+  // Keep Settings active in maintenance for owner-authenticated transfer
+  // control. Its callback rejects all normal riding/settings payloads while
+  // maintenance is active.
+  NimBLECharacteristic *pSettingsCharacteristic =
+      pService->createCharacteristic(
+          SETTINGS_CHAR_UUID,
+          NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  pSettingsCharacteristic->setCallbacks(new MySettingsCharacteristicCallbacks());
 
+  if (!maintenanceBoot) {
     // Workout frames are accepted only after the same local authentication
     // handshake as navigation traffic and remain in RAM-only telemetry state.
     pWorkoutTelemetryCharacteristic = pService->createCharacteristic(
@@ -6973,6 +7017,10 @@ BLEDebugStats BLENavigationServer::getDebugStats() const {
       radioDebugSnapshot.requestedConnectionProfile;
   portEXIT_CRITICAL(&radioDebugMux);
   return stats;
+}
+
+bool BLENavigationServer::isAuthenticated() const {
+  return bleSessionAuthenticated.load(std::memory_order_acquire);
 }
 
 bool BLENavigationServer::supportsExplicitInvalidGpsHeading() const {

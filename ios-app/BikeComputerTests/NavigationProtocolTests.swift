@@ -19401,6 +19401,28 @@ struct NavigationProtocolTests {
         assert(!failed, "two failed routes report failure")
         assertEqual(attempts, ["preferred", "fallback"],
                     "route failure still attempts each route exactly once")
+
+        assert(
+            !DeviceTransferPacketRoutingPolicy.usesNavigationFallback(
+                firmwareMaintenanceActive: false,
+                maintenanceReconnect: false
+            ),
+            "normal transfers prefer the native Settings characteristic"
+        )
+        assert(
+            DeviceTransferPacketRoutingPolicy.usesNavigationFallback(
+                firmwareMaintenanceActive: false,
+                maintenanceReconnect: true
+            ),
+            "the first maintenance reconnect status bypasses a stale Settings handle"
+        )
+        assert(
+            DeviceTransferPacketRoutingPolicy.usesNavigationFallback(
+                firmwareMaintenanceActive: true,
+                maintenanceReconnect: false
+            ),
+            "an active maintenance session keeps transfer control on Navigation"
+        )
     }
 
     static func testDeviceTransferHandshakePolicy() {
