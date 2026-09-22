@@ -5472,7 +5472,7 @@ static bool handleFirmwareMaintenancePayload(
   }
   if (hasPrefix(value, "DSTS")) {
     power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
-    if (requireAuthenticated("maintenance device transfer status")) {
+    if (requireAuthenticated("firmware status")) {
       // A hotspot start may have suspended this owner's HTTP token when BLE
       // briefly disconnected. Rebinding issues a fresh token before DSTS is
       // reported; bindAuthenticatedBleSession records any ownership conflict.
