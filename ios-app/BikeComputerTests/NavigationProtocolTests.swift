@@ -810,6 +810,7 @@ struct NavigationProtocolTests {
         testScreenCleanReconnect()
         testScreenEditsDuringReload()
         testScreenEditsDuringSave()
+        testScreenAutosaveCoalescesAndCoversMapProfiles()
         testScreenPendingConflictResolution()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
@@ -12902,14 +12903,14 @@ struct NavigationProtocolTests {
             !screensSource.contains("Reorder Screens") &&
                 !screensSource.contains("Done Reordering") &&
                 screensSource.contains(".onMove(perform: controller.move)") &&
-                screensSource.contains("if controller.canSave") &&
-                screensSource.contains("Button(\"Save to Bicino\")") &&
-                screensSource.contains("if controller.canDiscardChanges") &&
-                screensSource.contains("Text(\"Drag screens to reorder, add new screens or hide screens\")") &&
+                !screensSource.contains("Button(\"Save to Bicino\")") &&
+                !screensSource.contains("Button(\"Cancel Changes\"") &&
+                screensSource.contains("Changes save automatically.") &&
+                screensSource.contains("Saving changes to Bicino…") &&
+                screensSource.contains("Saved to Bicino") &&
                 !screensSource.contains("Button(\"Save to Bike Computer\")") &&
-                !screensSource.contains(".disabled(!controller.canSave)") &&
-                !screensSource.contains(".disabled(!controller.canDiscardChanges)"),
-            "device screen actions use long-press reordering, conditional save/cancel visibility, and Bicino copy"
+                !screensSource.contains(".disabled(!controller.canSave)"),
+            "device screen actions use long-press reordering and automatic Bicino saves"
         )
         assert(
             screensSource.contains("Text(\"Preferred\").tag(UInt8(1))") &&
