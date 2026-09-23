@@ -26,6 +26,8 @@ private enum OfflineMapDefaults {
     nonisolated static let sideLengthKey = "offlineMap.sideLengthKm"
     nonisolated static let topographicMapsEnabledKey =
         "offlineMap.topographicMapsEnabled.v1"
+    nonisolated static let includeTopographyInNewMapsKey =
+        "offlineMap.includeTopographyInNewMaps.v1"
     nonisolated static let activeTopographyAssociationKey =
         "offlineMap.activeTopographyAssociation.v1"
     nonisolated static let packDisplayNamesKey = "offlineMap.packDisplayNames"
@@ -2025,7 +2027,12 @@ final class OfflineMapManager: ObservableObject {
     ) async throws -> URL
 
     @Published var serverURLString: String {
-        didSet { defaults.set(serverURLString, forKey: OfflineMapDefaults.serverURLKey) }
+        didSet {
+            defaults.set(serverURLString, forKey: OfflineMapDefaults.serverURLKey)
+            if !canRequestTopographicMap {
+                includeTopographyInNewMaps = false
+            }
+        }
     }
     @Published var centerLatitude: String {
         didSet { defaults.set(centerLatitude, forKey: OfflineMapDefaults.centerLatitudeKey) }
@@ -2046,6 +2053,23 @@ final class OfflineMapManager: ObservableObject {
             reloadTopographyOverlay()
 #endif
         }
+    }
+    @Published var includeTopographyInNewMaps: Bool {
+        didSet {
+            defaults.set(
+                includeTopographyInNewMaps,
+                forKey: OfflineMapDefaults.includeTopographyInNewMapsKey
+            )
+        }
+    }
+    var canRequestTopographicMap: Bool {
+        serverURLString == OfflineMapServiceConfig.developmentServerURLString
+    }
+    var registeredDevelopmentInstallationID: String? {
+        guard canRequestTopographicMap else { return nil }
+        return bicinoServiceSession.loadedCredential(
+            serverURLString: serverURLString
+        )?.clientInstallationId
     }
     @Published private(set) var currentJob: OfflineMapJob?
     @Published private(set) var downloadURL: URL?
@@ -2259,6 +2283,10 @@ final class OfflineMapManager: ObservableObject {
         self.topographicMapsEnabled = defaults.object(
             forKey: OfflineMapDefaults.topographicMapsEnabledKey
         ) as? Bool ?? false
+        self.includeTopographyInNewMaps = (defaults.object(
+            forKey: OfflineMapDefaults.includeTopographyInNewMapsKey
+        ) as? Bool ?? false) &&
+            resolvedServerURL == OfflineMapServiceConfig.developmentServerURLString
         self.lastTransferMapId = defaults.string(forKey: OfflineMapDefaults.lastTransferMapIdKey) ?? ""
         let restoredTransferOutcome = defaults.string(
             forKey: OfflineMapDefaults.lastTransferOutcomeKey
@@ -2313,8 +2341,18 @@ final class OfflineMapManager: ObservableObject {
         selectedMapBounds = bounds
     }
 
-    func createJobFromSelectedMapArea() {
+    func createJobFromSelectedMapArea(bleManager: BLEManager) {
         guard canStartNewMapJob() else { return }
+        guard !includeTopographyInNewMaps || canRequestTopographicMap else {
+            errorMessage = "Topographic map creation is available on the development server only."
+            return
+        }
+        guard !includeTopographyInNewMaps ||
+                !bleManager.hasReceivedDeviceCapabilities ||
+                bleManager.supportsTopographicContours else {
+            errorMessage = "Update the Bike Computer firmware before creating a topographic map."
+            return
+        }
         guard let selectedMapBounds else {
             errorMessage = OfflineMapPlatformError.invalidResponse.localizedDescription
             return
@@ -2323,7 +2361,7 @@ final class OfflineMapManager: ObservableObject {
         createJobAndDownload(
             request: OfflineMapJobRequest
                 .customBBox(selectedMapBounds)
-                .withTopography(topographicMapsEnabled)
+                .withTopography(includeTopographyInNewMaps)
         )
     }
 
@@ -2370,7 +2408,11 @@ final class OfflineMapManager: ObservableObject {
         bleManager: BLEManager
     ) {
         guard canStartNewMapJob() else { return }
-        guard !topographicMapsEnabled ||
+        guard !includeTopographyInNewMaps || canRequestTopographicMap else {
+            errorMessage = "Topographic map creation is available on the development server only."
+            return
+        }
+        guard !includeTopographyInNewMaps ||
                 bleManager.supportsTopographicContours else {
             errorMessage = bleManager.hasReceivedDeviceCapabilities
                 ? "Update the Bike Computer firmware to install topographic maps."
@@ -2389,7 +2431,7 @@ final class OfflineMapManager: ObservableObject {
             }
             let request = OfflineMapJobRequest
                 .customBBox(bounds)
-                .withTopography(manager.topographicMapsEnabled)
+                .withTopography(manager.includeTopographyInNewMaps)
                 .forDevice(
                     firmwareVersion: bleManager.firmwareVersion
                 )
@@ -3999,7 +4041,7 @@ final class OfflineMapManager: ObservableObject {
         )
         return OfflineMapJobRequest
             .customBBox(bounds)
-            .withTopography(topographicMapsEnabled)
+            .withTopography(includeTopographyInNewMaps)
     }
 
     private func createJobAndDownload(request: OfflineMapJobRequest) {

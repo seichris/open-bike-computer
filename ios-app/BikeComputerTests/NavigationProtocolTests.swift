@@ -998,6 +998,7 @@ struct NavigationProtocolTests {
         testLandingMapConnectionStatusPositioning()
         testDeviceScreenUISettingsWiring()
         testSavedRouteNamingAndViewWiring()
+        testTopographicMapChoicesAreIndependent()
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
@@ -10518,7 +10519,7 @@ struct NavigationProtocolTests {
 
         manager.beginMapAreaSelection()
         manager.createCustomCutoutJob()
-        manager.createJobFromSelectedMapArea()
+        manager.createJobFromSelectedMapArea(bleManager: BLEManager())
         manager.installCurrentLocationMap(
             location: CLLocation(latitude: 31.2304, longitude: 121.4737),
             bleManager: BLEManager()
@@ -13478,6 +13479,58 @@ struct NavigationProtocolTests {
                 source.contains("Link(\"View on Strava\", destination: url)"),
             "saved Strava routes keep their source link without the Powered by Strava label"
         )
+    }
+
+    @MainActor
+    static func testTopographicMapChoicesAreIndependent() {
+        let suite = "topographic-map-choices-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let manager = OfflineMapManager(defaults: defaults)
+        manager.topographicMapsEnabled = true
+        assertEqual(
+            try? manager.makeCustomBBoxRequest().target?.rendererFormatVersion,
+            3,
+            "showing saved iPhone contours does not turn a new map into a topo job"
+        )
+        manager.serverURLString =
+            OfflineMapServiceConfig.developmentServerURLString
+        manager.includeTopographyInNewMaps = true
+        manager.topographicMapsEnabled = false
+        assertEqual(
+            try? manager.makeCustomBBoxRequest().target?.rendererFormatVersion,
+            4,
+            "topographic map detail requests format 4 independently of iPhone visibility"
+        )
+        let restored = OfflineMapManager(defaults: defaults)
+        assert(!restored.includeTopographyInNewMaps,
+               "development map detail cannot leak into the default production server after relaunch")
+        assert(!restored.topographicMapsEnabled,
+               "iPhone contour visibility survives independently")
+
+        manager.serverURLString =
+            OfflineMapServiceConfig.productionServerURLString
+        assert(!manager.includeTopographyInNewMaps,
+               "switching to production clears the development-only topo choice")
+        assertEqual(
+            try? manager.makeCustomBBoxRequest().target?.rendererFormatVersion,
+            3,
+            "production map creation remains standard")
+
+        let contentView = URL(fileURLWithPath:
+            "ios-app/BikeComputer/BikeComputer/ContentView.swift"
+        )
+        guard let source = try? String(contentsOf: contentView, encoding: .utf8) else {
+            assert(false, "content view source should be available")
+            return
+        }
+        assert(source.contains("$offlineMapManager.includeTopographyInNewMaps") &&
+               source.contains("$offlineMapManager.topographicMapsEnabled"),
+               "active map selection and Layers menu expose separate topo controls")
     }
 
     @MainActor

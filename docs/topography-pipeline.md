@@ -6,8 +6,10 @@ and the [end-to-end plan](plans/issue-190-topographic-map-support-implementation
 The maintainer-supplied 2026-09-13 research is now incorporated in source
 hardening, regional metadata discovery and an executable qualification inventory.
 See [report-to-implementation evidence](research/topography-report-implementation-2026-09-13.md)
-for exact changes, limitations and outstanding providers. Firmware/app builds
-and build-triggering pushes are paused pending maintainer confirmation.
+for exact changes, limitations and outstanding providers. The 1.75-inch firmware
+and Bicino Dev app were built and installed from PR head `80b82d2e` for a
+standard-map smoke test; that is not topographic map qualification. Later source
+changes require new builds and separate install/flash approval.
 
 The follow-on [regional ingestion and transformation flow](topography-regional-ingestion.md)
 now stages and inspects native TIFFs, applies exact offline operation/grid
@@ -28,7 +30,9 @@ companion pairs. No provider has thereby gained production approval.
   `MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST`. Production and global policy
   activation are rejected in code. The deployed/default v1 policy remains
   formats 1–3 until operators deliberately select v2.
-- `/healthz.topography` reports `access: free` and `generationEnabled: false`.
+- `/healthz` includes a `topography` summary with `access: free` and
+  `generationEnabled: false`; this describes the source-policy production gate,
+  not an authenticated installation's development-canary eligibility.
 
 - A bounded compiler clips one map-wide contour intermediate to polygon holes
   or a metric route corridor, projects to Web Mercator, quantizes once, and
@@ -62,7 +66,7 @@ companion pairs. No provider has thereby gained production approval.
   health gate the device toggle. Contours default off.
 
 The source implementation is end-to-end for explicitly allowlisted development
-jobs. It is **not yet a production or physical-device release**. Production
+jobs. It is **not yet a production or topographic physical-device release**. Production
 source approval, promotion eligibility, deployment configuration, representative
 iPhone performance, both-board hardware qualification, app/firmware builds, and
 any install or flash remain separate gates. The catalog intentionally omits

@@ -59,6 +59,29 @@ class DeploymentChannelComposeTests(unittest.TestCase):
         self.assertNotIn("${MAP_PLATFORM_DEPLOYMENT_CHANNEL:-production}", compose)
         self.assertNotIn("${MAP_PLATFORM_CATALOG_CHANNEL:-production}", compose)
 
+    def test_development_topography_is_exact_installation_canary_only(self):
+        development = (DEPLOY_DIR / "compose.development.yaml").read_text(
+            encoding="utf-8"
+        )
+        production = (DEPLOY_DIR / "compose.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "MAP_PLATFORM_GENERATION_PROFILE_POLICY: "
+            "/app/config/generation-profile-policy-v1.json",
+            development,
+        )
+        self.assertNotIn("generation-profile-policy-v2.json", development)
+        self.assertEqual(
+            2,
+            development.count(
+                "MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST: "
+                "${MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST:-}"
+            ),
+        )
+        self.assertNotIn("generation-profile-policy-v2.json", production)
+        self.assertNotIn("MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST", production)
+
     def test_catalog_maintenance_has_bounded_network_batches(self):
         for filename in (
             "compose.yaml",

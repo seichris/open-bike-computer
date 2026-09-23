@@ -149,9 +149,9 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         )
     }
 
-    // Renderer target 3 is the only format generated for new maps. Older
-    // renderer targets remain supported only when transferring already-saved
-    // artifacts to compatible legacy firmware.
+    // Renderer target 3 remains the standard new-map format. The development
+    // topography canary explicitly requests target 4; older targets remain
+    // supported only for transferring already-saved legacy artifacts.
     private static var targetThree: RendererTarget {
         RendererTarget(
             renderer: "esp32-fmb",
