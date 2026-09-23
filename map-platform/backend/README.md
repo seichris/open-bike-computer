@@ -277,7 +277,7 @@ conservative and can be tuned with:
 - `MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR` (default `60` per IP)
 - `MAP_PLATFORM_MAX_REQUEST_BODY_BYTES` (default `2097152` for every non-GET request; large enough for the maximum supported route corridor)
 
-Every accepted map also receives a durable `map-cost-v1` reservation derived
+Every accepted map also receives a durable `map-cost-v2` reservation derived
 from its area, geometry complexity, source count, and renderer version. The API
 atomically enforces the per-installation rolling budget and global queued-cost
 ceiling with idempotent creation; workers independently enforce the running-cost
@@ -285,6 +285,8 @@ ceiling before claiming work. Terminal and cancelled jobs release global
 capacity, while their recent cost remains in the installation window. Public
 work cannot consume the operator reserve. Admission-state corruption fails
 closed instead of silently undercounting work.
+Renderer format 4 reserves eight area units, versus four for format 3; stored
+`map-cost-v1` reservations remain valid for jobs accepted before the change.
 
 Production Compose requires `MAP_PLATFORM_TRUSTED_PROXY_CIDRS` to contain the
 comma-separated CIDRs of the

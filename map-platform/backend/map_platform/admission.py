@@ -10,7 +10,12 @@ from .map_labels import renderer_format_version
 from .models import JobStatus, MapJob, NormalizedGeometry, SourceRegion
 
 
-ADMISSION_POLICY_VERSION = "map-cost-v1"
+ADMISSION_POLICY_VERSION = "map-cost-v2"
+
+# Each renderer layer adds work per unit of requested area. Target 4 retains
+# target 3's buildings and adds elevation acquisition, contours, and a paired
+# iPhone companion, so reserve twice target 3's area cost for its canary jobs.
+RENDERER_AREA_WEIGHTS = {1: 1, 2: 2, 3: 4, 4: 8}
 
 
 class AdmissionCapacityError(RuntimeError):
@@ -137,7 +142,7 @@ class AdmissionPolicy:
         source: SourceRegion,
     ) -> AdmissionCost:
         format_version = renderer_format_version(request)
-        renderer_weight = {1: 1, 2: 2, 3: 4}.get(format_version)
+        renderer_weight = RENDERER_AREA_WEIGHTS.get(format_version)
         if renderer_weight is None:
             raise ValueError("renderer format has no admission cost policy")
 
