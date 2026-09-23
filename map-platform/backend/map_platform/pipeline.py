@@ -5731,6 +5731,7 @@ class MapBuildPipeline:
                 unit="artifact_pairs",
                 completed=0,
                 total=1,
+                total_blocks=None,
                 indeterminate=True,
             )
             topography_started = time.perf_counter()
@@ -5754,6 +5755,7 @@ class MapBuildPipeline:
                 unit="artifact_pairs",
                 completed=1,
                 total=1,
+                total_blocks=None,
                 indeterminate=False,
             )
         building_preprocessing_summary = self._building_preprocessing_summary(

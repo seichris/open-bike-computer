@@ -119,6 +119,69 @@ class BuildingPhaseStreamingRunner:
 
 
 class PipelineProgressTests(unittest.TestCase):
+    def test_topography_packaging_emits_progress_without_block_counts(self):
+        source = SourceRegion(
+            id="sg",
+            provider="test",
+            name="Singapore",
+            url="https://example.invalid/sg.osm.pbf",
+            bounds=Bounds(103.0, 1.0, 104.5, 1.8),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = MapJobService(
+                SourceIndex([source]), JobStore(root / "jobs")
+            ).create_job(
+                {"mode": "custom_bbox", "bbox": [103.80, 1.30, 103.81, 1.31]}
+            )
+            # Isolate target-4 packaging from the separate admission policy.
+            job.request["target"] = {
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": 4,
+            }
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                )
+            )
+            pack_root = root / "pack"
+            pack_root.mkdir()
+            progress = []
+            with (
+                patch.object(pipeline, "_resolve_source_preview_geometry"),
+                patch.object(
+                    pipeline,
+                    "_prepare_topography",
+                    return_value=({"recordCount": 0}, root / "companion.sqlite3"),
+                ),
+                patch.object(pipeline, "_pipeline_metadata", return_value={}),
+                patch(
+                    "map_platform.pipeline.build_manifest",
+                    side_effect=RuntimeError("stop after topography progress"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "stop after topography progress"),
+            ):
+                pipeline._package_map(
+                    job,
+                    pack_root,
+                    root / "pack.zip",
+                    on_phase_progress=progress.append,
+                )
+
+            self.assertEqual(
+                [
+                    (item["phase"], item["completed"], item["total"],
+                     item["totalBlocks"], item["indeterminate"])
+                    for item in progress
+                ],
+                [
+                    ("topography_generation", 0, 1, None, True),
+                    ("topography_generation", 1, 1, None, False),
+                ],
+            )
+
     def test_source_wide_calibration_and_scoped_preprocessing_have_distinct_deadlines(
         self,
     ):
