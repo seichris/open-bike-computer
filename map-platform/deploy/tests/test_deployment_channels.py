@@ -68,10 +68,10 @@ class DeploymentChannelComposeTests(unittest.TestCase):
         )
         self.assertIn(
             "MAP_PLATFORM_GENERATION_PROFILE_POLICY: "
-            "/app/config/generation-profile-policy-v1.json",
+            "/app/config/generation-profile-policy-v2.json",
             development,
         )
-        self.assertNotIn("generation-profile-policy-v2.json", development)
+        self.assertNotIn("generation-profile-policy-v1.json", development)
         self.assertEqual(
             2,
             development.count(

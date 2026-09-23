@@ -12,11 +12,10 @@ promotion advances API, maintenance, and worker together for development
 testing without modifying the production lock. It defaults to the development
 deployment/catalog channels, shadow preparation estimates, and disabled Strava.
 It forwards `MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST` to the development API
-and worker, defaulting to empty. The lock deliberately stays on generation
-policy v1 while its pinned image predates the topography pipeline. Renderer
-format 4 remains unavailable until a later reviewed development-only lock
-change selects policy v2 **after** an exact image containing that policy is
-promoted. Production stays on policy v1 and has no topography allowlist.
+and worker, defaulting to empty. Its API selects generation policy v2 only
+after the image containing that policy has been promoted. Renderer format 4
+remains unavailable until an exact registered development installation ID is
+allowlisted. Production stays on policy v1 and has no topography allowlist.
 
 ## One-time GitHub configuration
 
@@ -122,16 +121,15 @@ publishing unvalidated estimates to clients. Hardware validation remains `off`.
 Shadow mode records bounded estimate revisions without returning them in public
 job responses; promote to `public` only after the documented sample and accuracy
 gates pass.
-For a topography canary, first merge and promote an exact image containing
-generation policy v2 and the topography pipeline through the normal development
-image-lock PR. Then submit a separate development-lock PR changing only the
-development API's `MAP_PLATFORM_GENERATION_PROFILE_POLICY` path to
-`/app/config/generation-profile-policy-v2.json`; verify the pinned image
-contains that file before merging the lock change. In Bicino Dev, select the
-development map server. After the app
-has registered there, Developer Settings displays its **Topo Canary Installation
-ID**; this ID is not the installation token. Configure only that exact ID in
-the development Coolify `MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST`, restart
+For a topography canary, merge and promote an exact image containing generation
+policy v2 and the topography pipeline through the normal development image-lock
+PR. Verify the pinned image contains that policy before merging the separate
+development-lock change selecting
+`/app/config/generation-profile-policy-v2.json`. In Bicino Dev, select the
+development map server. After the app has registered there, Developer Settings
+displays its **Topo Canary Installation ID**; this ID is not the installation
+token. Configure only that exact ID in the development Coolify
+`MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST`, restart
 only the development stack, and verify that the authenticated `/v1/capabilities`
 response for the same installation includes renderer format 4. `/healthz`
 reports the loaded source-policy summary, but is not an allowlist check.
