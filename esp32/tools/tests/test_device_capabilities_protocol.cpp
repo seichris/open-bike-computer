@@ -70,6 +70,10 @@ int main() {
                     DISPLAY_INACTIVITY_TIMEOUTS_CLIENT_VERSION == 26);
   static_assert(device_capabilities_protocol::
                     DISPLAY_INACTIVITY_TIMEOUTS_FEATURE == (1UL << 28));
+  static_assert(device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_CLIENT_VERSION ==
+                28);
+  static_assert(device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE ==
+                (1UL << 30));
   static_assert((device_capabilities_protocol::WORLD_RADIO_FEATURE &
                  (device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE |
                   device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
@@ -175,6 +179,15 @@ int main() {
          sizeof(expectedDisplayInactivityTimeouts));
   for (size_t index = 0; index < displayInactivityTimeoutsSize; ++index)
     assert(output[index] == expectedDisplayInactivityTimeouts[index]);
+  const size_t topographicContoursSize =
+      device_capabilities_protocol::encodeCap2(
+          device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE, nullptr,
+          false, output, sizeof(output));
+  const uint8_t expectedTopographicContours[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x40};
+  assert(topographicContoursSize == sizeof(expectedTopographicContours));
+  for (size_t index = 0; index < topographicContoursSize; ++index)
+    assert(output[index] == expectedTopographicContours[index]);
   const size_t rideDiagnosticsSize = device_capabilities_protocol::encodeCap2(
       device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE, nullptr, false,
       output, sizeof(output));

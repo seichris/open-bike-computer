@@ -32,6 +32,10 @@ constexpr uint8_t INSTANCE_ENABLED_FLAG = 1U << 0;
 constexpr uint32_t APP_INSTANCE_ID_MASK = 1UL << 31;
 constexpr uint32_t ALLOWED_VISIBILITY_MASK =
     map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
+    map_profile_protocol::VISIBILITY_OVERLAY_MASK |
+    map_profile_protocol::VISIBILITY_CONTOURS;
+constexpr uint32_t DEFAULT_VISIBILITY_MASK =
+    map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
     map_profile_protocol::VISIBILITY_OVERLAY_MASK;
 
 using ScreenType = ride_ble_protocol_generated::ScreenType;
@@ -65,7 +69,7 @@ struct MapProfile {
   uint8_t streetLineWidth = map_profile_protocol::DEFAULT_STREET_WIDTH;
   uint8_t positionMarkerScale = 2;
   uint8_t zoomLevel = map_profile_protocol::MAP_DEFAULT_ZOOM_LEVEL;
-  uint32_t visibilityMask = ALLOWED_VISIBILITY_MASK;
+  uint32_t visibilityMask = DEFAULT_VISIBILITY_MASK;
   uint8_t labelDensity = map_profile_protocol::DEFAULT_LABEL_DENSITY;
   uint8_t labelLanguageMode =
       map_profile_protocol::DEFAULT_LABEL_LANGUAGE_MODE;

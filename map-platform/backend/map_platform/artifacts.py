@@ -15,6 +15,8 @@ BIKE_MAP_STREAM_FORMAT = "bike-map-stream-v1"
 BIKE_MAP_STREAM_MEDIA_TYPE = "application/vnd.openbikecomputer.map-stream"
 ZIP_STORED_FORMAT = "zip-stored-v1"
 ZIP_MEDIA_TYPE = "application/zip"
+TOPOGRAPHY_COMPANION_FORMAT = "topography-ios-v1"
+TOPOGRAPHY_COMPANION_MEDIA_TYPE = "application/vnd.bicino.topography+sqlite3"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 OCI_DIGEST_PATTERN = re.compile(r"sha256:([0-9a-f]{64})")
 MAXIMUM_ARTIFACT_BYTES = (1 << 63) - 1
@@ -24,6 +26,7 @@ MAXIMUM_STREAM_ARTIFACT_BYTES = (
     + 4 + 64 + 64  # signature prefix, maximum key ID, and raw signature
     + 512 * 1024 * 1024  # payload
 )
+MAXIMUM_TOPOGRAPHY_COMPANION_BYTES = 256 * 1024 * 1024
 
 
 class ArtifactStoreError(RuntimeError):
@@ -44,6 +47,10 @@ class ArtifactRecord:
     signature_key_sha256: str | None = None
     producer_build_sha256: str | None = None
     producer_image_digest: str | None = None
+    map_content_receipt: str | None = None
+    intermediate_sha256: str | None = None
+    source_policy_sha256: str | None = None
+    attribution_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _validate_object_key(self.object_key)
@@ -121,6 +128,29 @@ class ArtifactRecord:
             )
             if self.object_key != expected_key:
                 raise ValueError("map stream artifact object key does not match its identity")
+        companion_fields = (
+            self.map_content_receipt,
+            self.intermediate_sha256,
+            self.source_policy_sha256,
+            self.attribution_sha256,
+        )
+        if self.format == TOPOGRAPHY_COMPANION_FORMAT:
+            if self.media_type != TOPOGRAPHY_COMPANION_MEDIA_TYPE:
+                raise ValueError("topography companion media type is invalid")
+            if not self.filename.endswith(".btopo") or self.bytes > MAXIMUM_TOPOGRAPHY_COMPANION_BYTES:
+                raise ValueError("topography companion file identity is invalid")
+            map_id = self.filename.removesuffix(".btopo")
+            _validate_map_id(map_id)
+            if not all(field is not None and SHA256_PATTERN.fullmatch(field) for field in companion_fields):
+                raise ValueError("topography companion association identity is incomplete")
+            expected_key = (
+                f"maps/{map_id}/{TOPOGRAPHY_COMPANION_FORMAT}/"
+                f"{self.map_content_receipt}/{self.sha256}.btopo"
+            )
+            if self.object_key != expected_key:
+                raise ValueError("topography companion object key does not match its identity")
+        elif any(companion_fields):
+            raise ValueError("topography association identity requires a companion artifact")
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -143,6 +173,14 @@ class ArtifactRecord:
             result["producerBuildSha256"] = self.producer_build_sha256
         if self.producer_image_digest is not None:
             result["producerImageDigest"] = self.producer_image_digest
+        for key, value in (
+            ("mapContentReceipt", self.map_content_receipt),
+            ("intermediateSha256", self.intermediate_sha256),
+            ("sourcePolicySha256", self.source_policy_sha256),
+            ("attributionSha256", self.attribution_sha256),
+        ):
+            if value is not None:
+                result[key] = value
         return result
 
     @classmethod
@@ -168,6 +206,10 @@ class ArtifactRecord:
             "signatureKeySha256",
             "producerBuildSha256",
             "producerImageDigest",
+            "mapContentReceipt",
+            "intermediateSha256",
+            "sourcePolicySha256",
+            "attributionSha256",
         }
         if set(value) - required_fields - optional_fields or not required_fields.issubset(value):
             raise ValueError("artifact metadata has invalid fields")
@@ -191,6 +233,10 @@ class ArtifactRecord:
                 "producerBuildSha256"
             ),
             producer_image_digest=optional_string("producerImageDigest"),
+            map_content_receipt=optional_string("mapContentReceipt"),
+            intermediate_sha256=optional_string("intermediateSha256"),
+            source_policy_sha256=optional_string("sourcePolicySha256"),
+            attribution_sha256=optional_string("attributionSha256"),
         )
 
 
@@ -693,6 +739,20 @@ def zip_object_key(map_id: str, sha256: str) -> str:
     if not SHA256_PATTERN.fullmatch(sha256):
         raise ValueError("artifact SHA-256 is invalid")
     return f"maps/{map_id}/{ZIP_STORED_FORMAT}/{sha256}.zip"
+
+
+def topography_companion_object_key(
+    map_id: str,
+    map_content_receipt: str,
+    sha256: str,
+) -> str:
+    _validate_map_id(map_id)
+    if not SHA256_PATTERN.fullmatch(map_content_receipt) or not SHA256_PATTERN.fullmatch(sha256):
+        raise ValueError("topography companion identity is invalid")
+    return (
+        f"maps/{map_id}/{TOPOGRAPHY_COMPANION_FORMAT}/"
+        f"{map_content_receipt}/{sha256}.btopo"
+    )
 
 
 def map_stream_object_key(

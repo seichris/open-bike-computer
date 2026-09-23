@@ -15,7 +15,7 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let capabilityRequestMagic = "CAPS"
     static let capabilityResponseMagic = "CAP2"
     static let capabilitySchemaVersion: UInt8 = 1
-    static let currentClientVersion: UInt8 = 27
+    static let currentClientVersion: UInt8 = 28
     static let deviceSoundsFeature: UInt32 = 1 << 0
     static let deviceSoundsMinimumClientVersion: UInt8 = 1
     static let powerButtonHonkFeature: UInt32 = 1 << 1
@@ -76,6 +76,8 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let displayInactivityTimeoutsMinimumClientVersion: UInt8 = 26
     static let workoutZonesV1Feature: UInt32 = 1 << 29
     static let workoutZonesV1MinimumClientVersion: UInt8 = 27
+    static let topographicContoursFeature: UInt32 = 1 << 30
+    static let topographicContoursMinimumClientVersion: UInt8 = 28
     static let screenConfigurationSchemaVersion: UInt8 = 1
     static let screenConfigurationCapabilityTLVType: UInt8 = 2
     static let maximumScreenConfigurationInstances = 16

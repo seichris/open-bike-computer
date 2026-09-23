@@ -151,6 +151,25 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         return
     }
     assertEqual(decoded, document, "screen configuration binary round trip")
+    var contourMap = DeviceScreenInstance.defaults(id: 9, type: .map)
+    contourMap.mapProfile?.visibilityMask |=
+        DeviceScreenMapProfile.contoursVisibilityMask
+    let contourDocument = DeviceScreenConfigurationDocument(
+        defaultInstanceID: 9,
+        instances: [contourMap]
+    )
+    assertEqual(
+        try? DeviceScreenConfigurationCodec.decode(
+            DeviceScreenConfigurationCodec.encode(contourDocument)
+        ),
+        contourDocument,
+        "topographic contour visibility survives the screen document round trip"
+    )
+    assert(
+        DeviceScreenMapProfile.mapDefault.visibilityMask &
+            DeviceScreenMapProfile.contoursVisibilityMask == 0,
+        "topographic contours default off until an active map proves support"
+    )
     let radioDocument = DeviceScreenConfigurationDocument(
         defaultInstanceID: 6,
         instances: [.defaults(id: 6, type: .worldRadio)]

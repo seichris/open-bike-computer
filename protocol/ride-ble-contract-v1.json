@@ -31,7 +31,7 @@
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 27,
+    "current_client_version": 28,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -62,7 +62,8 @@
       "screen_configuration_v1": {"bit": 26, "minimum_client_version": 24},
       "world_radio": {"bit": 27, "minimum_client_version": 25},
       "display_inactivity_timeouts": {"bit": 28, "minimum_client_version": 26},
-      "workout_zones_v1": {"bit": 29, "minimum_client_version": 27}
+      "workout_zones_v1": {"bit": 29, "minimum_client_version": 27},
+      "topographic_contours": {"bit": 30, "minimum_client_version": 28}
     }
   },
   "screen_types": {

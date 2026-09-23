@@ -84,7 +84,7 @@ bool decode(const uint8_t *data, size_t size, Block &output,
     return map_block_format::validate(data, size)
                ? true
                : fail(error, "invalid legacy FMB block");
-  if (data[3] != 4 || !map_block_format::validate(data, size))
+  if ((data[3] != 4 && data[3] != 5) || !map_block_format::validate(data, size))
     return fail(error, "invalid FMB v4 block");
 
   size_t directoryOffset = 0;

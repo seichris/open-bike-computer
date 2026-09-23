@@ -52,6 +52,27 @@ struct OfflineMapsView: View {
                         )
                     )
                 }
+
+                Toggle(
+                    "Include Topographic Contours · Free",
+                    isOn: $manager.includeTopographyInNewMaps
+                )
+                .disabled(!manager.canRequestTopographicMap)
+                if !manager.canRequestTopographicMap {
+                    Text("Topographic downloads are available on the development server only.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Section(header: Text("iPhone Map Layers")) {
+                Toggle(
+                    "Show Topographic Contours",
+                    isOn: $manager.topographicMapsEnabled
+                )
+                Text(manager.topographyOverlayStatus)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
             }
 
             if !manager.statusMessage.isEmpty {

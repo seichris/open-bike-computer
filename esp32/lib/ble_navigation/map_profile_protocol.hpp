@@ -67,6 +67,7 @@ constexpr uint32_t VISIBILITY_POSITION_MARKER = 1u << 9;
 constexpr uint32_t VISIBILITY_SERVICE_ROADS = 1u << 10;
 constexpr uint32_t VISIBILITY_TRACKS = 1u << 11;
 constexpr uint32_t VISIBILITY_EXTENDED_MARKER = 1u << 12;
+constexpr uint32_t VISIBILITY_CONTOURS = 1u << 13;
 constexpr uint32_t VISIBILITY_LEGACY_FEATURE_MASK = 0xFF;
 constexpr uint32_t VISIBILITY_EXTENDED_FEATURE_MASK =
     VISIBILITY_LEGACY_FEATURE_MASK | VISIBILITY_SERVICE_ROADS |
@@ -110,7 +111,7 @@ inline uint8_t extendedCapabilityFlagsForClient(uint8_t clientVersion) {
 }
 
 inline uint32_t normalizedFeatureVisibilityMask(uint32_t mask) {
-  uint32_t normalized = mask & VISIBILITY_LEGACY_FEATURE_MASK;
+  uint32_t normalized = mask & (VISIBILITY_LEGACY_FEATURE_MASK | VISIBILITY_CONTOURS);
   if ((mask & VISIBILITY_EXTENDED_MARKER) != 0) {
     normalized |= mask & (VISIBILITY_SERVICE_ROADS | VISIBILITY_TRACKS);
   } else {
@@ -124,6 +125,8 @@ inline uint32_t normalizedFeatureVisibilityMask(uint32_t mask) {
 
 inline uint32_t visibilityMaskForMapVersion(uint32_t mask,
                                             uint8_t mapVersion) {
+  if (mapVersion < 5)
+    mask &= ~VISIBILITY_CONTOURS;
   if (mapVersion >= 2)
     return mask;
 

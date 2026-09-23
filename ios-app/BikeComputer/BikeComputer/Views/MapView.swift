@@ -259,6 +259,7 @@ struct MapViewContainer: UIViewRepresentable {
     var savedRoutePreview: MapSavedRouteOverlay? = nil
     var savedRoutePreviewBottomPadding: CGFloat? = 220
     var isRouteCalculationActive = false
+    var topographyOverlay: MKTileOverlay? = nil
     var offlineNavigationPolyline: MKPolyline? = nil
 
     private var visibleSavedRoutePreview: MapSavedRouteOverlay? {
@@ -284,6 +285,7 @@ struct MapViewContainer: UIViewRepresentable {
             to: mapView
         )
         mapView.delegate = context.coordinator
+        context.coordinator.updateTopographyOverlay(topographyOverlay, on: mapView)
         mapView.showsUserLocation = isUserLocationAuthorized
         mapView.userTrackingMode = isUserLocationAuthorized &&
             visibleSavedRoutePreview == nil ? .follow : .none
@@ -329,6 +331,7 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
+        context.coordinator.updateTopographyOverlay(topographyOverlay, on: uiView)
         context.coordinator.applyAppearanceIfNeeded(
             appearance,
             to: uiView
@@ -454,10 +457,25 @@ struct MapViewContainer: UIViewRepresentable {
         coordinator: Coordinator
     ) {
         coordinator.removeSavedRouteOverlay(from: uiView)
+        coordinator.updateTopographyOverlay(nil, on: uiView)
         coordinator.controlState?.disconnect(from: uiView)
     }
     
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
+        private var displayedTopographyOverlay: MKTileOverlay?
+
+        func updateTopographyOverlay(_ overlay: MKTileOverlay?, on mapView: MKMapView) {
+            guard displayedTopographyOverlay !== overlay else { return }
+            if let displayedTopographyOverlay {
+                (displayedTopographyOverlay as? BicinoTopographyTileOverlay)?
+                    .cancelPendingLoads()
+                mapView.removeOverlay(displayedTopographyOverlay)
+            }
+            displayedTopographyOverlay = overlay
+            if let overlay { mapView.insertOverlay(overlay, at: 0, level: .aboveRoads) }
+            // Navigation and saved-route overlays retain their own ownership.
+            // No camera, tracking, selection or route state changes here.
+        }
         typealias AddressResolver = @MainActor (CLLocation) async -> String?
 
         var lastRoute: MKRoute?
@@ -1282,6 +1300,9 @@ struct MapViewContainer: UIViewRepresentable {
         }
         
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let topography = overlay as? MKTileOverlay {
+                return MKTileOverlayRenderer(tileOverlay: topography)
+            }
             if let polyline = overlay as? MKPolyline {
                 let renderer = MKPolylineRenderer(polyline: polyline)
                 applyRouteStyle(renderer, for: overlay)

@@ -499,6 +499,8 @@ static bool safeLanguageTag(const std::string &value) {
   return false;
 }
 
+static bool isHexSha256(const std::string &value);
+
 static MapTargetMetadata targetMetadata(const MapManifest &manifest) {
   MapTargetMetadata target;
   target.renderer = manifest.renderer;
@@ -507,6 +509,14 @@ static MapTargetMetadata targetMetadata(const MapManifest &manifest) {
   target.labelLanguages = manifest.labelLanguages;
   target.internationalFallback = manifest.internationalFallback;
   target.buildingProfileVersion = manifest.buildingProfileVersion;
+  target.topographyProfileVersion = manifest.topographyProfileVersion;
+  target.topographyQualityMode = manifest.contourQualityMode;
+  target.contourMinorIntervalM = manifest.contourMinorIntervalM;
+  target.contourIndexIntervalM = manifest.contourIndexIntervalM;
+  target.contourRecordCount = manifest.contourRecordCount;
+  target.contourNoDataMillionths = manifest.contourNoDataMillionths;
+  target.topographySourcePolicySha256 =
+      manifest.topographySourcePolicySha256;
   return target;
 }
 
@@ -514,7 +524,14 @@ static bool targetMetadataEmpty(const MapTargetMetadata &target) {
   return target.renderer.empty() && target.formatVersion == 0 &&
          target.labelProfileVersion == 0 && target.labelLanguages.empty() &&
          target.internationalFallback.empty() &&
-         target.buildingProfileVersion == 0;
+         target.buildingProfileVersion == 0 &&
+         target.topographyProfileVersion == 0 &&
+         target.topographyQualityMode.empty() &&
+         target.contourMinorIntervalM == 0 &&
+         target.contourIndexIntervalM == 0 &&
+         target.contourRecordCount == 0 &&
+         target.contourNoDataMillionths == 0 &&
+         target.topographySourcePolicySha256.empty();
 }
 
 static bool targetMetadataValid(const MapTargetMetadata &target) {
@@ -522,14 +539,21 @@ static bool targetMetadataValid(const MapTargetMetadata &target) {
     return true;
   if (target.renderer != "esp32-fmb" ||
       (target.formatVersion != 1 && target.formatVersion != 2 &&
-       target.formatVersion != 3)) {
+       target.formatVersion != 3 && target.formatVersion != 4)) {
     return false;
   }
   if (target.formatVersion == 1) {
     return target.labelProfileVersion == 0 &&
            target.labelLanguages.empty() &&
            target.internationalFallback.empty() &&
-           target.buildingProfileVersion == 0;
+           target.buildingProfileVersion == 0 &&
+           target.topographyProfileVersion == 0 &&
+           target.topographyQualityMode.empty() &&
+           target.contourMinorIntervalM == 0 &&
+           target.contourIndexIntervalM == 0 &&
+           target.contourRecordCount == 0 &&
+           target.contourNoDataMillionths == 0 &&
+           target.topographySourcePolicySha256.empty();
   }
   if (target.labelProfileVersion != 1 ||
       target.labelLanguages.size() > 3 ||
@@ -545,8 +569,29 @@ static bool targetMetadataValid(const MapTargetMetadata &target) {
         return false;
     }
   }
-  return target.formatVersion == 3 ? target.buildingProfileVersion == 1
-                                   : target.buildingProfileVersion == 0;
+  const bool buildingsValid =
+      (target.formatVersion == 3 || target.formatVersion == 4)
+          ? target.buildingProfileVersion == 1
+          : target.buildingProfileVersion == 0;
+  const bool contourIntervalsValid =
+      (target.contourMinorIntervalM == 20 &&
+       target.contourIndexIntervalM == 100) ||
+      (target.contourMinorIntervalM == 50 &&
+       target.contourIndexIntervalM == 250);
+  const bool topographyValid = target.formatVersion == 4
+      ? target.topographyProfileVersion == 1 && contourIntervalsValid &&
+            (target.topographyQualityMode == "standard-20m-v1" ||
+             target.topographyQualityMode == "coarse-50m-v1") &&
+            target.contourNoDataMillionths <= 1000000 &&
+            isHexSha256(target.topographySourcePolicySha256)
+      : target.topographyProfileVersion == 0 &&
+            target.topographyQualityMode.empty() &&
+            target.contourMinorIntervalM == 0 &&
+            target.contourIndexIntervalM == 0 &&
+            target.contourRecordCount == 0 &&
+            target.contourNoDataMillionths == 0 &&
+            target.topographySourcePolicySha256.empty();
+  return buildingsValid && topographyValid;
 }
 
 static bool targetMetadataMatches(const MapTargetMetadata &left,
@@ -556,7 +601,15 @@ static bool targetMetadataMatches(const MapTargetMetadata &left,
          left.labelProfileVersion == right.labelProfileVersion &&
          left.labelLanguages == right.labelLanguages &&
          left.internationalFallback == right.internationalFallback &&
-         left.buildingProfileVersion == right.buildingProfileVersion;
+         left.buildingProfileVersion == right.buildingProfileVersion &&
+         left.topographyProfileVersion == right.topographyProfileVersion &&
+         left.topographyQualityMode == right.topographyQualityMode &&
+         left.contourMinorIntervalM == right.contourMinorIntervalM &&
+         left.contourIndexIntervalM == right.contourIndexIntervalM &&
+         left.contourRecordCount == right.contourRecordCount &&
+         left.contourNoDataMillionths == right.contourNoDataMillionths &&
+         left.topographySourcePolicySha256 ==
+             right.topographySourcePolicySha256;
 }
 
 static MapTargetMetadata targetMetadataFromJson(const std::string &json,
@@ -576,6 +629,13 @@ static MapTargetMetadata targetMetadataFromJson(const std::string &json,
   const std::string languagesKey = key("LabelLanguages");
   const std::string fallbackKey = key("InternationalFallback");
   const std::string buildingProfileKey = key("BuildingProfileVersion");
+  const std::string topographyProfileKey = key("TopographyProfileVersion");
+  const std::string topographyQualityKey = key("TopographyQualityMode");
+  const std::string contourMinorIntervalKey = key("ContourMinorIntervalM");
+  const std::string contourIndexIntervalKey = key("ContourIndexIntervalM");
+  const std::string contourRecordCountKey = key("ContourRecordCount");
+  const std::string contourNoDataKey = key("ContourNoDataMillionths");
+  const std::string sourcePolicyKey = key("TopographySourcePolicySha256");
   const auto hasKey = [&](const std::string &name) {
     return json.find("\"" + name + "\"") != std::string::npos;
   };
@@ -593,15 +653,46 @@ static MapTargetMetadata targetMetadataFromJson(const std::string &json,
       jsonUintValue(json, buildingProfileKey);
   target.buildingProfileVersion =
       static_cast<uint32_t>(buildingProfileVersion);
+  const uint64_t topographyProfileVersion =
+      jsonUintValue(json, topographyProfileKey);
+  target.topographyProfileVersion =
+      static_cast<uint32_t>(topographyProfileVersion);
+  target.topographyQualityMode =
+      jsonStringValue(json, topographyQualityKey);
+  const uint64_t contourMinorIntervalM =
+      jsonUintValue(json, contourMinorIntervalKey);
+  target.contourMinorIntervalM =
+      static_cast<uint32_t>(contourMinorIntervalM);
+  const uint64_t contourIndexIntervalM =
+      jsonUintValue(json, contourIndexIntervalKey);
+  target.contourIndexIntervalM =
+      static_cast<uint32_t>(contourIndexIntervalM);
+  const uint64_t contourRecordCount =
+      jsonUintValue(json, contourRecordCountKey);
+  target.contourRecordCount = static_cast<uint32_t>(contourRecordCount);
+  const uint64_t contourNoDataMillionths =
+      jsonUintValue(json, contourNoDataKey);
+  target.contourNoDataMillionths =
+      static_cast<uint32_t>(contourNoDataMillionths);
+  target.topographySourcePolicySha256 =
+      jsonStringValue(json, sourcePolicyKey);
   const bool metadataPresent =
       hasKey(rendererKey) || hasKey(formatKey) || hasKey(profileKey) ||
       hasKey(languagesKey) || hasKey(fallbackKey) ||
-      hasKey(buildingProfileKey);
+      hasKey(buildingProfileKey) || hasKey(topographyProfileKey) ||
+      hasKey(topographyQualityKey) || hasKey(contourMinorIntervalKey) ||
+      hasKey(contourIndexIntervalKey) || hasKey(contourRecordCountKey) ||
+      hasKey(contourNoDataKey) || hasKey(sourcePolicyKey);
   if (valid != nullptr) {
     *valid = (!metadataPresent || languagesValid) &&
              formatVersion <= UINT32_MAX &&
              labelProfileVersion <= UINT32_MAX &&
-             buildingProfileVersion <= UINT32_MAX;
+             buildingProfileVersion <= UINT32_MAX &&
+             topographyProfileVersion <= UINT32_MAX &&
+             contourMinorIntervalM <= UINT32_MAX &&
+             contourIndexIntervalM <= UINT32_MAX &&
+             contourRecordCount <= UINT32_MAX &&
+             contourNoDataMillionths <= UINT32_MAX;
   }
   return target;
 }
@@ -633,6 +724,22 @@ static std::string targetMetadataJson(const MapTargetMetadata &target,
           jsonEscape(target.internationalFallback) + "\",\"" +
           key("BuildingProfileVersion") + "\":" +
           std::to_string(target.buildingProfileVersion);
+  if (target.formatVersion == 4) {
+    json += ",\"" + key("TopographyProfileVersion") + "\":" +
+            std::to_string(target.topographyProfileVersion) + ",\"" +
+            key("TopographyQualityMode") + "\":\"" +
+            jsonEscape(target.topographyQualityMode) + "\",\"" +
+            key("ContourMinorIntervalM") + "\":" +
+            std::to_string(target.contourMinorIntervalM) + ",\"" +
+            key("ContourIndexIntervalM") + "\":" +
+            std::to_string(target.contourIndexIntervalM) + ",\"" +
+            key("ContourRecordCount") + "\":" +
+            std::to_string(target.contourRecordCount) + ",\"" +
+            key("ContourNoDataMillionths") + "\":" +
+            std::to_string(target.contourNoDataMillionths) + ",\"" +
+            key("TopographySourcePolicySha256") + "\":\"" +
+            jsonEscape(target.topographySourcePolicySha256) + "\"";
+  }
   return json;
 }
 
@@ -937,6 +1044,8 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       jsonStringValue(manifestText, "internationalFallback");
   manifest.buildingProfileVersion = static_cast<uint32_t>(
       jsonUintValue(manifestText, "buildingProfileVersion"));
+  manifest.topographyProfileVersion = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "topographyProfileVersion"));
   manifest.buildingRecordCount = static_cast<uint32_t>(
       jsonUintValue(manifestText, "recordCount"));
   manifest.buildingProvenanceCounts[0] = static_cast<uint32_t>(
@@ -949,6 +1058,29 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       jsonUintValue(manifestText, "localMedianHeightCount"));
   manifest.buildingProvenanceCounts[4] = static_cast<uint32_t>(
       jsonUintValue(manifestText, "classDefaultHeightCount"));
+  const size_t topographyPosition = manifestText.find("\"topography\"");
+  const std::string topographyText =
+      topographyPosition == std::string::npos
+          ? std::string()
+          : manifestText.substr(topographyPosition);
+  manifest.contourRecordCount = static_cast<uint32_t>(
+      jsonUintValue(topographyText, "recordCount"));
+  manifest.contourPointCount = static_cast<uint32_t>(
+      jsonUintValue(topographyText, "pointCount"));
+  manifest.contourMinorIntervalM = static_cast<uint32_t>(
+      jsonUintValue(topographyText, "minorIntervalM"));
+  manifest.contourIndexIntervalM = static_cast<uint32_t>(
+      jsonUintValue(topographyText, "indexIntervalM"));
+  manifest.contourNoDataMillionths = static_cast<uint32_t>(
+      jsonUintValue(topographyText, "noDataMillionths"));
+  manifest.contourQualityMode =
+      jsonStringValue(topographyText, "qualityMode");
+  manifest.topographySourcePolicySha256 =
+      jsonStringValue(topographyText, "sourcePolicySha256");
+  manifest.topographyIntermediateSha256 =
+      jsonStringValue(topographyText, "intermediateSha256");
+  manifest.topographyAttributionSha256 =
+      jsonStringValue(topographyText, "attributionSha256");
   manifest.minimumFirmwareVersion =
       jsonStringValue(manifestText, "minFirmwareVersion");
   if (manifest.renderer.empty() && manifest.formatVersion == 0) {
@@ -1002,13 +1134,15 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
     return fail("manifest_files", "manifest contains no map files");
   if (manifest.renderer != "esp32-fmb" ||
       (manifest.formatVersion != 1 && manifest.formatVersion != 2 &&
-       manifest.formatVersion != 3))
+       manifest.formatVersion != 3 && manifest.formatVersion != 4))
     return fail("manifest_target", "manifest renderer target is unsupported");
-  if (((manifest.formatVersion == 2 || manifest.formatVersion == 3) &&
+  if (((manifest.formatVersion == 2 || manifest.formatVersion == 3 ||
+        manifest.formatVersion == 4) &&
        (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
       (manifest.formatVersion == 1 && fontAssetCount != 0))
     return fail("manifest_target", "manifest files do not match renderer target");
-  if (manifest.formatVersion == 2 || manifest.formatVersion == 3) {
+  if (manifest.formatVersion == 2 || manifest.formatVersion == 3 ||
+      manifest.formatVersion == 4) {
     bool uniqueLanguages = true;
     for (size_t index = 0; index < manifest.labelLanguages.size(); ++index)
       for (size_t other = index + 1; other < manifest.labelLanguages.size(); ++other)
@@ -1030,13 +1164,33 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   uint64_t provenanceTotal = 0;
   for (uint32_t count : manifest.buildingProvenanceCounts)
     provenanceTotal += count;
-  if (manifest.formatVersion == 3) {
+  if (manifest.formatVersion == 3 || manifest.formatVersion == 4) {
     if (manifest.buildingProfileVersion != 1 ||
         provenanceTotal != manifest.buildingRecordCount)
       return fail("manifest_buildings", "manifest building profile is invalid");
   } else if (manifest.buildingProfileVersion != 0 ||
              manifest.buildingRecordCount != 0 || provenanceTotal != 0) {
     return fail("manifest_buildings", "non-v3 manifest contains building metadata");
+  }
+  const bool contourIntervalsValid =
+      (manifest.contourMinorIntervalM == 20 &&
+       manifest.contourIndexIntervalM == 100) ||
+      (manifest.contourMinorIntervalM == 50 &&
+       manifest.contourIndexIntervalM == 250);
+  if (manifest.formatVersion == 4) {
+    if (manifest.topographyProfileVersion != 1 ||
+        !contourIntervalsValid ||
+        (manifest.contourQualityMode != "standard-20m-v1" &&
+         manifest.contourQualityMode != "coarse-50m-v1") ||
+        manifest.contourNoDataMillionths > 1000000 ||
+        !isHexSha256(manifest.topographySourcePolicySha256) ||
+        !isHexSha256(manifest.topographyIntermediateSha256) ||
+        !isHexSha256(manifest.topographyAttributionSha256))
+      return fail("manifest_topography", "manifest topography profile is invalid");
+  } else if (manifest.topographyProfileVersion != 0 ||
+             !manifest.contourQualityMode.empty() ||
+             !topographyText.empty()) {
+    return fail("manifest_topography", "non-v4 manifest contains topography metadata");
   }
   return {true, "ok", ""};
 }
@@ -3064,8 +3218,19 @@ MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
            std::to_string(manifest.buildingRecordCount) + "\n";
   for (uint32_t count : manifest.buildingProvenanceCounts)
     value += std::to_string(count) + "\n";
-  value +=
-           manifest.minimumFirmwareVersion + "\n";
+  if (manifest.formatVersion == 4) {
+    value += std::to_string(manifest.topographyProfileVersion) + "\n" +
+             manifest.contourQualityMode + "\n" +
+             std::to_string(manifest.contourRecordCount) + "\n" +
+             std::to_string(manifest.contourPointCount) + "\n" +
+             std::to_string(manifest.contourMinorIntervalM) + "\n" +
+             std::to_string(manifest.contourIndexIntervalM) + "\n" +
+             std::to_string(manifest.contourNoDataMillionths) + "\n" +
+             manifest.topographySourcePolicySha256 + "\n" +
+             manifest.topographyIntermediateSha256 + "\n" +
+             manifest.topographyAttributionSha256 + "\n";
+  }
+  value += manifest.minimumFirmwareVersion + "\n";
   for (const ManifestFile &file : manifest.files) {
     value += file.path + "\n" + file.publishPath + "\n" +
              std::to_string(file.bytes) + "\n" + file.sha256 + "\n";
@@ -3091,7 +3256,8 @@ MapTransferInstaller::readInstalledManifest(const std::string &root,
 InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string &root, const MapManifest &manifest,
     bool useManifestPaths) const try {
-  if (manifest.formatVersion != 2 && manifest.formatVersion != 3)
+  if (manifest.formatVersion != 2 && manifest.formatVersion != 3 &&
+      manifest.formatVersion != 4)
     return {true, "ok", ""};
   const auto resolvedPath = [&](const ManifestFile &file) {
     if (useManifestPaths)
@@ -3138,7 +3304,9 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     input.read(reinterpret_cast<char *>(bytes.data()),
                static_cast<std::streamsize>(bytes.size()));
     const uint8_t expectedBlockVersion =
-        manifest.formatVersion == 3 ? 4 : 3;
+        manifest.formatVersion == 4
+            ? 5
+            : (manifest.formatVersion == 3 ? 4 : 3);
     if (!input || bytes.size() < 4 || bytes[3] != expectedBlockVersion)
       return fail("label_block_version",
                   "map block version does not match renderer target");

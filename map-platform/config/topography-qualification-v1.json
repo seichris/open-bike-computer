@@ -1,0 +1,385 @@
+{
+  "schemaVersion": 1,
+  "researchDate": "2026-09-13",
+  "reportSha256": "9142faa7f5d5acf00327f733d07752cc2eae34869247e999cc336ce3b0f9dcf8",
+  "sources": [
+    {
+      "id": "copernicus-glo30-public-2021",
+      "stage": "pinned-acquisition",
+      "release": "2021",
+      "surfaceModel": "dsm",
+      "nativeVerticalDatum": "EPSG:3855",
+      "accessRequirement": "anonymous",
+      "termsUrl": "https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM",
+      "fallbackIds": [
+        "copernicus-glo90-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "copernicus-glo90-2021",
+      "stage": "pinned-acquisition",
+      "release": "2021",
+      "surfaceModel": "dsm",
+      "nativeVerticalDatum": "EPSG:3855",
+      "accessRequirement": "anonymous",
+      "termsUrl": "https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM",
+      "fallbackIds": [],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "copernicus-glo30-cdse-2024_1-dged",
+      "stage": "planned",
+      "release": "2024_1",
+      "surfaceModel": "dsm",
+      "nativeVerticalDatum": "EPSG:3855",
+      "accessRequirement": "registered",
+      "termsUrl": "https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "usgs-3dep-per-project",
+      "stage": "planned",
+      "release": "per-project",
+      "surfaceModel": "dtm",
+      "nativeVerticalDatum": null,
+      "accessRequirement": "anonymous",
+      "termsUrl": "https://www.usgs.gov/faqs/there-api-accessing-national-map-data",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "linz-national-dem-1m",
+      "stage": "metadata-discovery",
+      "release": "per-collection-and-item",
+      "surfaceModel": "dtm",
+      "nativeVerticalDatum": "NZVD2016; native asset verification required",
+      "accessRequirement": "anonymous",
+      "termsUrl": "https://github.com/linz/elevation",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "swissalti3d-2m",
+      "stage": "metadata-discovery",
+      "release": "per-item",
+      "surfaceModel": "dtm",
+      "nativeVerticalDatum": "EPSG:5728",
+      "accessRequirement": "anonymous",
+      "termsUrl": "https://www.swisstopo.admin.ch/en/terms-of-use-free-geodata-and-geoservices",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "canada-hrdem-lidar",
+      "stage": "metadata-discovery",
+      "release": "per-project",
+      "surfaceModel": "dtm",
+      "nativeVerticalDatum": null,
+      "accessRequirement": "anonymous",
+      "termsUrl": "https://nrcan.github.io/CanElevation/stac-dem-mosaics/",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "ea-england-2022",
+      "stage": "planned",
+      "release": "2022-composite",
+      "surfaceModel": "dtm",
+      "nativeVerticalDatum": "ODN",
+      "accessRequirement": "batch-contract-review",
+      "termsUrl": "https://environment.data.gov.uk/dataset/13787b9a-26a4-4775-8523-806d13af58fc",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "nasadem-hgt-001",
+      "stage": "planned",
+      "release": "001-merged-integer-hgt",
+      "surfaceModel": "surface-hybrid",
+      "nativeVerticalDatum": "EGM96",
+      "accessRequirement": "registered",
+      "termsUrl": "https://www.earthdata.nasa.gov/data/catalog/lpcloud-nasadem-hgt-001",
+      "fallbackIds": [],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "aw3d30-per-tile",
+      "stage": "planned",
+      "release": "per-tile-mixed-revisions",
+      "surfaceModel": "dsm",
+      "nativeVerticalDatum": "EGM96",
+      "accessRequirement": "registered-and-commercial-notification",
+      "termsUrl": "https://earth.jaxa.jp/en/data/policy/",
+      "fallbackIds": [],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "ign-rge-alti-per-territory",
+      "stage": "planned",
+      "release": "per-territory-and-edition",
+      "surfaceModel": "dtm",
+      "nativeVerticalDatum": null,
+      "accessRequirement": "batch-contract-review",
+      "termsUrl": "https://geoservices.ign.fr/rgealti",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "ahn1-4",
+      "stage": "planned",
+      "release": "separate-generation-cc0",
+      "surfaceModel": "dtm",
+      "nativeVerticalDatum": "NAP",
+      "accessRequirement": "batch-contract-review",
+      "termsUrl": "https://www.ahn.nl/",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "ahn5-6",
+      "stage": "planned",
+      "release": "separate-generation-cc-by-4",
+      "surfaceModel": "dtm",
+      "nativeVerticalDatum": "NAP",
+      "accessRequirement": "batch-contract-review",
+      "termsUrl": "https://www.ahn.nl/",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "cnig-mdt05",
+      "stage": "planned",
+      "release": "per-sheet-and-cycle",
+      "surfaceModel": "dtm",
+      "nativeVerticalDatum": null,
+      "accessRequirement": "batch-contract-review",
+      "termsUrl": "https://centrodedescargas.cnig.es/CentroDescargas/modelo-digital-terreno-mdt05-primera-cobertura",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "arcticdem-mosaics-4_1",
+      "stage": "planned",
+      "release": "4.1-public-mosaics",
+      "surfaceModel": "dsm",
+      "nativeVerticalDatum": "WGS84-ellipsoidal",
+      "accessRequirement": "anonymous",
+      "termsUrl": "https://www.pgc.umn.edu/data/arcticdem/",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    },
+    {
+      "id": "rema-mosaics-2_0",
+      "stage": "planned",
+      "release": "2.0-public-mosaics",
+      "surfaceModel": "dsm",
+      "nativeVerticalDatum": "WGS84-ellipsoidal",
+      "accessRequirement": "anonymous",
+      "termsUrl": "https://www.pgc.umn.edu/data/rema/",
+      "fallbackIds": [
+        "copernicus-glo30-public-2021"
+      ],
+      "evidenceSha256": {
+        "license": null,
+        "notices": null,
+        "access": null,
+        "coverage": null,
+        "rasterMasks": null,
+        "verticalTransform": null,
+        "sourceBoundaryQuality": null,
+        "jurisdiction": null,
+        "clientQualification": null
+      },
+      "productionApproved": false
+    }
+  ]
+}

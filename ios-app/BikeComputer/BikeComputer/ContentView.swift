@@ -1672,6 +1672,11 @@ struct ContentView: View {
                 .accessibilityHint(
                     "Adds realistic elevation; tilt the map to see the terrain."
                 )
+
+                Toggle(isOn: $offlineMapManager.topographicMapsEnabled) {
+                    Label("Topographic Contours", systemImage: "mountain.2")
+                }
+                .accessibilityHint(offlineMapManager.topographyOverlayStatus)
             }
         } label: {
             mapControlIcon("map.fill")
@@ -1680,7 +1685,10 @@ struct ContentView: View {
         .accessibilityLabel("Layers")
         .accessibilityValue(
             "\(mapAppearance.baseStyle.title), " +
-            (usesRealisticMapElevation ? "3D Terrain on" : "3D Terrain off")
+            (usesRealisticMapElevation ? "3D Terrain on, " : "3D Terrain off, ") +
+            (offlineMapManager.topographicMapsEnabled
+                ? "Topographic Contours on"
+                : "Topographic Contours off")
         )
     }
 
@@ -2111,6 +2119,7 @@ struct ContentView: View {
             savedRoutePreview: visibleSavedRouteMapPreview?.overlay,
             savedRoutePreviewBottomPadding: savedRoutePreviewBottomPadding,
             isRouteCalculationActive: coordinator.routeCalculation.isCalculating,
+            topographyOverlay: offlineMapManager.topographyOverlay,
             offlineNavigationPolyline: coordinator.offlineRoutePolyline
         )
     }
@@ -2167,25 +2176,56 @@ struct ContentView: View {
             offlineMapSelectionResizeHandle(edge: .bottom, selectionFrame: selectionFrame)
                 .position(x: selectionFrame.midX, y: selectionFrame.maxY)
 
-            HStack(spacing: 12) {
-                Button {
-                    offlineMapManager.cancelMapAreaSelection()
-                } label: {
-                    Label("Cancel", systemImage: "xmark")
+            VStack(spacing: 10) {
+#if DEBUG
+                if offlineMapManager.canRequestTopographicMap {
+                    Picker(
+                        "Map detail",
+                        selection: $offlineMapManager.includeTopographyInNewMaps
+                    ) {
+                        Text("Standard").tag(false)
+                        Text("Topographic · Free").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityHint(
+                        "Topographic maps add offline contours to the iPhone and both Bike Computer map screens."
+                    )
+                    if offlineMapManager.includeTopographyInNewMaps &&
+                        coordinator.bleManager.hasReceivedDeviceCapabilities &&
+                        !coordinator.bleManager.supportsTopographicContours {
+                        Text("Update the Bike Computer firmware to install topographic maps.")
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                    }
                 }
-                .buttonStyle(.bordered)
+#endif
+                HStack(spacing: 12) {
+                    Button {
+                        offlineMapManager.cancelMapAreaSelection()
+                    } label: {
+                        Label("Cancel", systemImage: "xmark")
+                    }
+                    .buttonStyle(.bordered)
 
-                Button {
-                    offlineMapManager.createJobFromSelectedMapArea()
-                } label: {
-                    Label("Download Area", systemImage: "arrow.down.circle")
+                    Button {
+                        offlineMapManager.createJobFromSelectedMapArea(
+                            bleManager: coordinator.bleManager
+                        )
+                    } label: {
+                        Label("Download Area", systemImage: "arrow.down.circle")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        offlineMapManager.selectedMapBounds == nil ||
+                        (offlineMapManager.includeTopographyInNewMaps &&
+                         coordinator.bleManager.hasReceivedDeviceCapabilities &&
+                         !coordinator.bleManager.supportsTopographicContours)
+                    )
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(offlineMapManager.selectedMapBounds == nil)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .background(.regularMaterial, in: Capsule())
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
             .padding(.top, 70)
         }
         .ignoresSafeArea()

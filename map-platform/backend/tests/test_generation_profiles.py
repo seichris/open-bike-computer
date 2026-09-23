@@ -9,6 +9,7 @@ from map_platform.generation_profiles import (
     GenerationProfilePolicy,
     configured_deployment_channel,
 )
+from map_platform.topography_rollout import topography_target4_generation_allowlist
 
 
 class GenerationProfilePolicyTests(unittest.TestCase):
@@ -64,6 +65,81 @@ class GenerationProfilePolicyTests(unittest.TestCase):
         with patch.dict(os.environ, {"MAP_PLATFORM_DEPLOYMENT_CHANNEL": "DEV"}):
             with self.assertRaisesRegex(ValueError, "development or production"):
                 configured_deployment_channel()
+
+    def test_topography_allowlist_is_exact_and_fail_closed(self):
+        with patch.dict(
+            os.environ,
+            {"MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST": "install-a,install:b"},
+        ):
+            self.assertEqual(
+                topography_target4_generation_allowlist(),
+                frozenset({"install-a", "install:b"}),
+            )
+        for value in ("install-a,install-a", "install-a,../escape"):
+            with patch.dict(
+                os.environ,
+                {"MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST": value},
+            ):
+                with self.assertRaises(ValueError):
+                    topography_target4_generation_allowlist()
+
+    def test_v2_allows_topography_only_for_development_canary_claims(self):
+        policy = GenerationProfilePolicy.load(self.policy_path.with_name("generation-profile-policy-v2.json"))
+        development = policy.available_profiles(
+            "development",
+            canary_profile_ids=frozenset({"topographic-contours-v1"}),
+        )
+        production = policy.available_profiles(
+            "production",
+            canary_profile_ids=frozenset({"topographic-contours-v1"}),
+        )
+        self.assertEqual([p.renderer_format_version for p in development], [4, 3, 2, 1])
+        self.assertEqual([p.renderer_format_version for p in production], [3, 2, 1])
+        self.assertEqual(policy.channels["development"].disabled_profile_ids, ())
+        self.assertEqual(
+            policy.channels["production"].disabled_profile_ids,
+            ("topographic-contours-v1",),
+        )
+
+    def test_v2_cannot_enable_topography_globally_or_in_production(self):
+        payload = json.loads(self.policy_path.with_name("generation-profile-policy-v2.json").read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "policy.json"
+            for channel_name, target in (
+                ("development", "globalProfiles"),
+                ("production", "canaryProfiles"),
+            ):
+                value = json.loads(json.dumps(payload))
+                channel = value["channels"][channel_name]
+                for assignment in (
+                    "globalProfiles",
+                    "canaryProfiles",
+                    "disabledProfiles",
+                ):
+                    channel[assignment] = [
+                        profile
+                        for profile in channel[assignment]
+                        if profile != "topographic-contours-v1"
+                    ]
+                channel[target].append("topographic-contours-v1")
+                path.write_text(json.dumps(value))
+                with self.assertRaisesRegex(ValueError, "development-canary only"):
+                    GenerationProfilePolicy.load(path)
+
+    def test_v2_rejects_missing_overlapping_and_wrong_feature_contracts(self):
+        payload = json.loads(self.policy_path.with_name("generation-profile-policy-v2.json").read_text())
+        mutations = [lambda p: p.update(schemaVersion=True),
+                     lambda p: p["channels"]["development"].update(canaryProfiles=[]),
+                     lambda p: p["channels"]["development"]["disabledProfiles"].append("legacy-vector-v1"),
+                     lambda p: p["profiles"][-1].update(features=["contours"])]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "policy.json"
+            for mutate in mutations:
+                value = json.loads(json.dumps(payload))
+                mutate(value)
+                path.write_text(json.dumps(value))
+                with self.assertRaises(ValueError):
+                    GenerationProfilePolicy.load(path)
 
     def test_duplicate_json_keys_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
