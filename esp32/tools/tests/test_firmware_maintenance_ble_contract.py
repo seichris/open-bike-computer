@@ -27,6 +27,11 @@ class FirmwareMaintenanceBleContractTests(unittest.TestCase):
             self.main_cpp,
             r"authenticationTimedOut\(\s*maintenanceElapsed,\s*false\)",
         )
+        self.assertRegex(
+            self.main_cpp,
+            r"!commitOwnsReboot\s*&&\s*!transferStatus\.enabled\s*&&\s*"
+            r"firmware_maintenance::policy::authenticationTimedOut",
+        )
 
     def test_native_and_fallback_channels_share_maintenance_dispatch(self):
         self.assertEqual(
@@ -77,6 +82,10 @@ class FirmwareMaintenanceBleContractTests(unittest.TestCase):
         disconnect = self.ble_cpp[disconnect_start:disconnect_end]
         self.assertIn("suspendFirmwareAuthenticatedBleSession()", disconnect)
         self.assertIn("!suspendedFirmwareTransfer", disconnect)
+        self.assertIn("maintenance_ble_detached", disconnect)
+        self.assertIn("clearAuthenticatedBleSession()", disconnect)
+        self.assertIn("DisableOnBleDisconnect", disconnect)
+        self.assertNotIn("firmware_maintenance::requestExit();", disconnect)
 
         maintenance_start = self.ble_cpp.index(
             "static bool handleFirmwareMaintenancePayload("

@@ -5731,11 +5731,13 @@ public:
                            ble_transfer::NotifyNone);
     }
     if (firmware_maintenance::active() && !suspendedFirmwareTransfer) {
-      const firmware_maintenance::Stage stage = firmware_maintenance::stage();
-      if (stage != firmware_maintenance::Stage::Committing &&
-          stage != firmware_maintenance::Stage::Rebooting) {
-        firmware_maintenance::requestExit();
-      }
+      // A disconnect while the listener is still starting has no session to
+      // suspend. Credentials and any partial transfer were revoked above; keep
+      // maintenance alive so the owner can reconnect and read the startup
+      // failure from DSTS instead of losing it in an immediate normal reboot.
+      (void)ride_diagnostics::record(
+          ride_diagnostics::Level::Warning, "transfer",
+          "maintenance_ble_detached", "{}");
     }
     server->connected = false;
     bleSessionAuthenticated = false;

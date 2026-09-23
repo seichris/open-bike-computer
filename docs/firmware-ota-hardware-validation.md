@@ -125,6 +125,46 @@ compile is not hardware evidence. The 1.75-inch gate remains open until the
 production bytes start a fresh session, complete signed OTA, and pass the boot
 acceptance validator; the independent 2.06-inch gate also remains open.
 
+### 2026-09-23 build-100 signed OTA trial
+
+The connected 1.75-inch board (USB serial `28:84:85:3B:75:20`) ran production
+build 100 at Git `2676867dd192c689d987ad219c1b8823078d1aa2`. Bicino Dev
+1.9 (23) verified the signed build-99 image
+(`11bf6ebf0d4e130fe9a4698dd5888179fca7bb03447b47584fe1bc4ed5430922`)
+and requested a developer downgrade. The app recorder shows an authenticated
+maintenance reconnect followed by the firmware-transfer request at
+04:07:32 UTC. BLE disconnected at 04:07:34 UTC. The next retained device boot
+(sequence 348) started at 04:07:35 UTC with software-reset reason 3 and reached
+normal-ready build 100 at 04:07:45 UTC; its OTA state was `undefined`. The app
+waited until 04:08:35 UTC, reported “Device did not report a firmware transfer
+session,” and had uploaded no image bytes. The device-log import and support
+bundle passed `tools/ride_diagnostics.py validate` after a fresh app reconnect.
+
+The maintenance boot deliberately skips SD recording, so its transfer-start
+error is absent from that bundle. The two-minute authentication, 90-second
+transfer-inactivity, and ten-minute overall deadlines cannot explain a return
+to normal within seconds. A transient BLE disconnect or explicit exit is a
+possible source-derived path; the exact trigger still needs a live serial and
+iPhone log capture. This trial does not satisfy the 1.75-inch OTA gate. No USB
+restore was needed because build 99 was never installed.
+
+A second, separately approved attempt with the same signed image reproduced the
+failure. The live iPhone log received maintenance correlation `3828212039`
+with 129,027 bytes of free internal memory and 121,395 bytes of free DMA memory
+immediately before the firmware-entry command. It received no `worker_created`
+status afterward. The USB trace recorded the maintenance reset and the rapid
+software reset back to normal, while the retained device log identified that
+normal boot as sequence 350, build 100, reset reason 3, ready, and OTA state
+`undefined`. The app again uploaded zero bytes and reported no transfer session.
+Production disables USB CDC application logging, so this trace has boot ROM
+reset headers but no application `Serial` messages.
+
+The next candidate keeps maintenance running after a pre-session BLE disconnect
+while revoking its credentials and partial transfer. The unauthenticated
+two-minute deadline now also covers failed and cancelling pre-transfer stages.
+This is a source-level repair and still needs a fresh physical test before any
+OTA success claim.
+
 ## Test 1: Foreground Update
 
 1. Open the iPhone app.

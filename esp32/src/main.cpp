@@ -175,7 +175,7 @@ static void processFirmwareMaintenanceMode() {
       stage == firmware_maintenance::Stage::Rebooting;
   const uint32_t maintenanceElapsed =
       now - firmware_maintenance::activeSinceMs();
-  if (stage == firmware_maintenance::Stage::AwaitingAuthentication &&
+  if (!commitOwnsReboot && !transferStatus.enabled &&
       firmware_maintenance::policy::authenticationTimedOut(
           maintenanceElapsed, bleNavServer.isAuthenticated())) {
     deviceTransferHttp.setLastError(
