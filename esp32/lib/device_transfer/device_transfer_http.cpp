@@ -6,6 +6,7 @@
 #include "../ui_scheduler/ui_scheduler.hpp"
 #include "device_transfer_http_limits.hpp"
 #include "device_transfer_failure_policy.hpp"
+#include "response_write_policy.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -1493,7 +1494,16 @@ bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
       client.noteHttpResponseWriteFailed();
       return false;
     }
-    const size_t chunk = std::min(maximumChunkBytes, length - offset);
+    const auto budget = response_write_policy::budget(
+        length - offset, maximumChunkBytes, interChunkDelayMs,
+        static_cast<uint32_t>(heap_caps_get_largest_free_block(
+            MALLOC_CAP_DMA | MALLOC_CAP_8BIT)));
+    if (budget.chunkBytes == 0) {
+      client.noteHttpResponseNoProgressWait(budget.delayMs);
+      vTaskDelay(pdMS_TO_TICKS(budget.delayMs));
+      continue;
+    }
+    const size_t chunk = budget.chunkBytes;
     client.noteWriteAttempt(length, offset, chunk, millis() - lastProgressMs);
     const size_t written = client.write(data + offset, chunk);
     if (written == 0) {
@@ -1504,9 +1514,9 @@ bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
     offset += written;
     client.noteHttpResponseWriteProgress(written);
     lastProgressMs = millis();
-    if (offset < length && interChunkDelayMs != 0) {
-      client.noteHttpResponseIntentionalDelay(interChunkDelayMs);
-      vTaskDelay(pdMS_TO_TICKS(interChunkDelayMs));
+    if (budget.delayMs != 0) {
+      client.noteHttpResponseIntentionalDelay(budget.delayMs);
+      vTaskDelay(pdMS_TO_TICKS(budget.delayMs));
     }
   }
   const bool complete = offset == length;

@@ -1,4 +1,5 @@
 #include "../../lib/device_transfer/device_transfer_failure_policy.hpp"
+#include "../../lib/device_transfer/response_write_policy.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -38,4 +39,14 @@ int main() {
   assert(authorizationBits(true, true, true, true, true, true) == 63);
   assert(authorizationBits(true, true, false, true, true, false) == 27);
   assert(authorizationBits(false, true, false, false, false, false) == 2);
+
+  using device_transfer::response_write_policy::budget;
+  const auto healthy = budget(4096, 1024, 2, 8192);
+  assert(healthy.chunkBytes == 1024 && healthy.delayMs == 2);
+  const auto pressure = budget(4096, 1024, 2, 3000);
+  assert(pressure.chunkBytes == 512 && pressure.delayMs == 5);
+  const auto tail = budget(200, 1024, 2, 3000);
+  assert(tail.chunkBytes == 200 && tail.delayMs == 5);
+  const auto depleted = budget(4096, 1024, 2, 756);
+  assert(depleted.chunkBytes == 0 && depleted.delayMs == 4);
 }

@@ -263,8 +263,8 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("kFrameResponseInterChunkDelayMs = 1", HTTP)
         self.assertIn("kFrameResponseChunkBytes,", frame)
         self.assertIn("kFrameResponseInterChunkDelayMs", frame)
-        self.assertIn("std::min(maximumChunkBytes, length - offset)", writer)
-        self.assertIn("vTaskDelay(pdMS_TO_TICKS(interChunkDelayMs))", writer)
+        self.assertIn("response_write_policy::budget(", writer)
+        self.assertIn("vTaskDelay(pdMS_TO_TICKS(budget.delayMs))", writer)
 
     def test_non_secret_benchmark_state_uses_forced_psram(self):
         self.assertIn("State *diagnosticsState = nullptr;", RENDERER_DIAGNOSTICS)
