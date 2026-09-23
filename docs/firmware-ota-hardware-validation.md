@@ -29,6 +29,30 @@ identity, partition table, running partition, iPhone build identity, maintenance
 correlation, boot sequence/fingerprint, and every resource sample. Keep build,
 upload, running-image, and physical observations as separate evidence.
 
+## Findings from the first successful 1.75-inch trial
+
+- A signed build-99 image transferred from Bicino Dev and booted on the
+  `WAVESHARE_AMOLED_175_PRODUCTION` board with `otaState=valid`. This proves one
+  downgrade cycle, not an OTA upgrade or repeatability across boards.
+- Maintenance startup needed distinct internal-stack ownership for Wi-Fi and
+  flash operations, while the TLS worker used PSRAM and bounded response writes
+  against DMA headroom. Earlier trials failed before any firmware bytes were
+  uploaded, so those failures alone do not establish which single source change
+  resolved transfer startup.
+- The device's inactivity clock must be sampled after processing BLE transfer
+  commands; an earlier sample could underflow against freshly updated traffic
+  time and cause an immediate exit. A pre-session BLE drop must not silently
+  end maintenance. Both behaviors were repaired before the successful trial.
+- The iPhone's `BikeComputer-Transfer` system Join prompt was the final observed
+  blocker. The app now allows 60 seconds for the first hotspot configuration
+  and avoids an overlapping retry while that prompt is unresolved. The user
+  accepted Join during the successful trial, after which pinned HTTPS and the
+  firmware upload proceeded.
+- Boot acceptance, app status, and verified USB recovery are separate checks.
+  The board was restored to build 100 over USB and passed its ready checkpoint;
+  the ten-cycle, fault-injection, SD-absence, resource-margin, 2.06-inch, and
+  build-99-to-100 OTA tests remain open.
+
 ## Maintenance resource qualification
 
 Run this matrix independently on `WAVESHARE_AMOLED_175_PRODUCTION` and
