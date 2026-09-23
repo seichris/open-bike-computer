@@ -37,6 +37,7 @@ xcrun swiftc -D HOST_TESTING -parse-as-library -o "${OUT_DIR}/tests" \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift \
+  ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift \
   ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \

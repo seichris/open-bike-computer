@@ -8376,7 +8376,8 @@ struct NavigationProtocolTests {
         let grant = OfflineMapCatalogDownloadGrant(
             downloadURL: URL(string: "https://maps-share.8o.vc/v1/downloads/retry")!,
             expiresAt: "2099-01-01T00:00:00.000Z",
-            artifact: artifact
+            artifact: artifact,
+            companion: nil
         )
         var grantRequestCount = 0
         OfflineMapTestURLProtocol.configure { request in
@@ -8415,7 +8416,7 @@ struct NavigationProtocolTests {
                 )
                 assertEqual(
                     renderers.first?["formatVersions"] as? [Int],
-                    [1, 2, 3],
+                    [1, 2, 3, 4],
                     "download grants advertise discrete renderer versions"
                 )
                 return (200, try! JSONEncoder().encode(grant))
@@ -17717,7 +17718,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.serviceRoadsVisibilityMask, 0x400, "service roads use visibility bit 10")
         assertEqual(DeviceBLEProtocol.tracksVisibilityMask, 0x800, "tracks use visibility bit 11")
         assertEqual(DeviceBLEProtocol.extendedVisibilityMarker, 0x1000, "extended visibility uses marker bit 12")
-        assertEqual(DeviceBLEProtocol.topographicContoursVisibilityMask, 0x2000, "topographic contours use visibility bit 13")
+        assertEqual(DeviceBLEProtocol.contoursVisibilityMask, 0x2000, "topographic contours use visibility bit 13")
         assertEqual(DeviceBLEProtocol.defaultStreetWidth, 4, "street width defaults to 4 px")
         assertEqual(DeviceBLEProtocol.absoluteStreetWidth(fromLegacyBoost: 0), 4, "legacy zero boost migrates to the default absolute width")
         assertEqual(DeviceBLEProtocol.absoluteStreetWidth(fromLegacyBoost: 4), 8, "legacy boosts migrate relative to the default width")

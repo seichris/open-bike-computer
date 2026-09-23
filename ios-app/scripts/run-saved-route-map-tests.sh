@@ -54,11 +54,13 @@ xcrun swiftc -D HOST_TESTING -parse-as-library \
   ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift \
   ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift \
   ios-app/BikeComputer/BikeComputer/Models/SavedRouteMapSelection.swift \
+  ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift \
   ios-app/BikeComputer/BikeComputer/Managers/PhoneRouteLibrary.swift \
+  ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift \
   ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
   ios-app/BikeComputer/BikeComputer/Views/SavedRouteMapPreview.swift \
   ios-app/BikeComputerTests/SavedRouteMapPreviewTests.swift

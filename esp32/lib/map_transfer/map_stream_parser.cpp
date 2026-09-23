@@ -21,14 +21,6 @@ bool endsWith(std::string_view value, std::string_view suffix) {
          value.substr(value.size() - suffix.size()) == suffix;
 }
 
-bool lowercaseSha256(const std::string &value) {
-  return value.size() == 64 &&
-         std::all_of(value.begin(), value.end(), [](char character) {
-           return (character >= '0' && character <= '9') ||
-                  (character >= 'a' && character <= 'f');
-         });
-}
-
 void *allocateStreamMemory(size_t bytes) {
   if (bytes == 0)
     return nullptr;
