@@ -16769,9 +16769,9 @@ struct NavigationProtocolTests {
             "hotspot remote debugging joins and probes the pinned device endpoint"
         )
         assert(
-            DeviceNetworkJoinPolicy.configurationApplyTimeout >= 10 &&
-                DeviceNetworkJoinPolicy.configurationApplyTimeout <= 30,
-            "the system hotspot prompt has a sufficient but bounded callback window"
+            DeviceNetworkJoinPolicy.configurationApplyTimeout >= 45 &&
+                DeviceNetworkJoinPolicy.configurationApplyTimeout <= 60,
+            "the system hotspot prompt allows foreground confirmation before firmware inactivity"
         )
         assert(
             DeviceNetworkJoinPolicy.currentNetworkFetchTimeout > 0 &&

@@ -232,6 +232,47 @@ written hashes. Bicino Dev reconnected and reported production build 100 with
 the full Git SHA. The signed OTA gate remains open until this image completes
 an approved update trial.
 
+A separately approved build-99 OTA from Bicino Dev 1.9 (23) reached a new
+boundary. The app requested transfer at 05:51:16 UTC, authenticated after the
+maintenance reboot, and received correlation `55426110`. The device reported
+`maintenance_boot_baseline`, then `network_ready` with an active `firmware`
+transfer session and worker stack margin of 12,324 bytes. This physically
+confirms that the earlier immediate `exit_inactivity` no longer prevented
+maintenance transfer startup on the 1.75-inch board.
+
+The iPhone did not associate with `BikeComputer-Transfer`. Its first hotspot
+configuration waited the full 20-second app deadline; the recorder logged
+`Bicino.DeviceNetworkJoin 1` at 05:51:38 UTC. A second application returned
+`NEHotspotConfigurationErrorDomain 8`, with both network observations reporting
+another network. The system's Join prompt was still visible after the app had
+already reported failure. The app sent the transfer exit, uploaded zero image
+bytes, and the device returned to normal production build 100. Retained boot
+356 recorded `maintenance/exit_ble_command`, reset reason 3, a ready acceptance
+checkpoint for Git `77d68e1e6b6a6a581d097712d7bdf1927d643d0d`, and OTA state
+`undefined`. The support bundle passed `tools/ride_diagnostics.py validate`
+(ZIP SHA-256
+`c2a1e2b658e97e04fa438fc93b0cabc779e123678b83ccb45b696e5feb4055ff`).
+This trial verifies maintenance startup but not image upload or OTA acceptance.
+The 1.75-inch and 2.06-inch signed OTA gates both remain open.
+
+An independently approved retry with the same signed build 99 reached
+`network_ready` again, this time with correlation `1980752790` and a 12,324-byte
+worker stack margin. The system Join prompt was visible, but the iPhone UI
+automation runner remained busy while probing the modal. The app's first Wi-Fi
+application timed out after 20 seconds and the second returned iOS internal
+error 8. The user accepted the visible prompt after the app had already exited
+firmware transfer. The subsequent BLE status identified normal build 100 at Git
+`77d68e1e6b6a6a581d097712d7bdf1927d643d0d`. No firmware upload was reported.
+Both attempts isolate the current physical blocker to confirming the iPhone's
+accessory Wi-Fi join within the app's bounded deadline; they do not show an OTA
+image or boot acceptance failure. Source review found that an observation of
+another network cleared the typed timeout and allowed a second configuration
+request while the first system prompt was unresolved. An iOS follow-up extends
+the foreground callback window to 60 seconds, within the firmware's 90-second
+pre-upload inactivity deadline, and prevents that overlapping retry. These
+source changes still need a separately approved physical retry with the updated
+app.
+
 ## Test 1: Foreground Update
 
 1. Open the iPhone app.

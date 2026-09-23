@@ -573,7 +573,10 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
 enum DeviceNetworkJoinPolicy {
     static let applyAttemptCount = 2
     static let configurationSettleDelayNanoseconds: UInt64 = 500_000_000
-    static let configurationApplyTimeout: TimeInterval = 20
+    // iOS can leave its accessory Wi-Fi confirmation visible while an XCTest
+    // screen capture is stalled. Give the foreground user time to answer while
+    // retaining a bounded window below firmware's 90-second inactivity limit.
+    static let configurationApplyTimeout: TimeInterval = 60
     static let currentNetworkFetchTimeout: TimeInterval = 2
     static let associationObservationTimeout: TimeInterval = 12
     static let associationObservationRetryNanoseconds: UInt64 = 250_000_000
@@ -1751,6 +1754,16 @@ final class DeviceTransferManager {
             )
 
             if networkObservation == .other {
+                if let applyError,
+                   !DeviceNetworkJoinPolicy.shouldRetry(
+                    domain: applyError.domain,
+                    code: applyError.code
+                   ) {
+                    // A timed-out apply can still be showing its system
+                    // prompt. Keep the typed failure and never overlap it
+                    // with another configuration request.
+                    break
+                }
                 lastDiagnostic =
                     "accessory Wi-Fi association was not confirmed"
                 lastApplyError = nil
