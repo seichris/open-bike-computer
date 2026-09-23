@@ -24255,10 +24255,15 @@ struct NavigationProtocolTests {
         }
 
         sentPackets.removeAll()
+        var waitingForMaintenanceReconnect = false
         let preparation = Task {
             try await manager.prepareFirmwareMaintenance(
                 bleManager: bleManager,
-                status: { _ in }
+                status: { message in
+                    if message == "waiting for firmware maintenance" {
+                        waitingForMaintenanceReconnect = true
+                    }
+                }
             )
         }
         for _ in 0..<100 where sentPackets.isEmpty {
@@ -24275,7 +24280,14 @@ struct NavigationProtocolTests {
                 Data(acceptedStatus.utf8)
         )
         bleManager.isNavigationReady = false
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // Keep the reboot-pending status available until the preparation task
+        // captures its correlation. A fixed sleep can race the task on CI and
+        // replace that status with the maintenance boot before it is consumed.
+        for _ in 0..<500 where !waitingForMaintenanceReconnect {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(waitingForMaintenanceReconnect,
+               "firmware preparation accepts the reboot correlation")
         bleManager.isNavigationReady = true
         let maintenanceStatus = """
         {"enabled":false,"mode":"","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":true,"stage":"awaiting_authentication","correlation":42},"firmware":{"otaEligible":true,"eligibilityCode":"eligible"}}
