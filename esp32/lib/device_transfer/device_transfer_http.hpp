@@ -205,11 +205,13 @@ bool sendHttpHead(TransferClient &client, int status,
                   const char *contentType = nullptr,
                   const HttpResponseHeader *additionalHeaders = nullptr,
                   size_t additionalHeaderCount = 0);
+// Bound sustained TLS records and yield between them so Wi-Fi/AES DMA buffers
+// can drain before the next allocation on the AMOLED board's internal heap.
 bool writeHttpBytes(TransferClient &client, const uint8_t *data,
                     size_t length,
                     uint32_t timeoutMs = 5000,
-                    size_t maximumChunkBytes = 4096,
-                    uint32_t interChunkDelayMs = 0);
+                    size_t maximumChunkBytes = 1024,
+                    uint32_t interChunkDelayMs = 2);
 bool sendHttpJson(TransferClient &client, int status,
                   const std::string &body);
 bool sendHttpError(TransferClient &client, int status,
