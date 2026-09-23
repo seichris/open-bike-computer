@@ -52,6 +52,9 @@ upload, running-image, and physical observations as separate evidence.
   The board was restored to build 100 over USB and passed its ready checkpoint;
   the ten-cycle, fault-injection, SD-absence, resource-margin, 2.06-inch, and
   build-99-to-100 OTA tests remain open.
+- A later signed build-97-to-99 upgrade trial failed before a firmware session
+  appeared. The successful build-100-to-99 downgrade therefore does not prove
+  that older installed firmware can upgrade over OTA.
 
 ## Maintenance resource qualification
 
@@ -343,6 +346,42 @@ with the full Git SHA above, production profile, `ready=true`, and
 `otaState=undefined`. `tools/verify_firmware_boot_acceptance.py` passed for
 that exact USB boot without `--ota`. The board is back on build 100. This USB
 restore does not establish a build-99-to-100 OTA upgrade.
+
+### 2026-09-23 signed build-97-to-99 upgrade trial
+
+With separate user approval, the same 1.75-inch board (USB serial
+`28:84:85:3B:75:20`) received production build 97 from release.6 Git
+`6c30a4e89f0ebf5d6c9802eb8f9b04aa9fd8f249`. The local Mac build image
+SHA-256 was `f9df5b872afe9fa528ed6902a076b6463bf53eaf52ef92b034edb79515355e93`;
+the attested flash-plan SHA-256 was
+`0ecfac838cc2d5d84e79c9a1dbe72de0be39dde33f3c308f7d71464a1b4bc013`.
+Esptool verified the written regions. Bicino Dev 1.9 (23), from Git
+`31be90cd114dbef0c117daa45213659d03504d64`, showed current build 97,
+Git prefix `6c30a4e89f0`, target `WAVESHARE_AMOLED_175`, and
+available signed build 99. Retained board boot sequence 360 independently
+recorded the full build-97 Git SHA, production profile, and `ready=true`.
+
+The exact signed target was release.7 build 99, Git
+`ef18f363b281528192e7fe5215434eb374e59f5c`, image SHA-256
+`11bf6ebf0d4e130fe9a4698dd5888179fca7bb03447b47584fe1bc4ed5430922`,
+and manifest SHA-256
+`9b4f6f68fe00e0817085c76ece03c2f7e0c2f84e53b48a6b7ca6a58e510a4842`.
+At 08:57:21 UTC the iPhone requested firmware transfer. BLE disconnected,
+reconnected, and authenticated by 08:57:37 UTC. Transfer-control ATT writes
+continued for about a minute, but the app never observed a secure firmware
+transfer session. It reported "Device did not report a firmware transfer
+session" and `transfer_entry_failed` at 08:58:24 UTC. No image upload began;
+the app still reported current build 97 afterward. This is a failed OTA
+upgrade test, not an installed update.
+
+The pre-upload signature resembles the previously documented build-98
+transfer-startup failure. Build 97 predates the later device-side worker and
+maintenance fixes, but this trial did not capture the maintenance boot's
+serial output, so it does not isolate one failed allocation or command. The
+board's retained log found the Shanghai map and loaded its renderer; its GPS
+quality checkpoint had `fixValid=false`. A user also observed the physical
+`iPhone connected` waiting screen, so map display acceptance remains unproven
+for this build-97 baseline.
 
 ## Test 1: Foreground Update
 
