@@ -222,6 +222,16 @@ samples time after processing and rejects a future timestamp in the inactivity
 policy. This fix needs its own exact production build and physical OTA test;
 the 1.75-inch gate remains open.
 
+The 1.75-inch production image from Git
+`77d68e1e6b6a6a581d097712d7bdf1927d643d0d` (firmware image SHA-256
+`3c3b39a9a004764ca45114de462800cc52dab75385e838c7152e9f4082b4be2d`,
+attested flash-plan SHA-256
+`6ab4d5bc99f67b66704b5540cc6f7be431be4fd0a93e8c9e1bdb66f9d23cb0ad`)
+was flashed to USB serial `28:84:85:3B:75:20`. Esptool verified all four
+written hashes. Bicino Dev reconnected and reported production build 100 with
+the full Git SHA. The signed OTA gate remains open until this image completes
+an approved update trial.
+
 ## Test 1: Foreground Update
 
 1. Open the iPhone app.
