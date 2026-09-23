@@ -1071,8 +1071,12 @@ Supported sound IDs on `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206`:
 | ---: | --- |
 | `1` | Bell ding |
 | `2` | Plastic bicycle horn |
-| `3` | Rotating bicycle bell |
 | `5` | Squeeze horn |
+
+Sound ID `3` was the retired rotating-bell recording and remains reserved. New
+firmware rejects it rather than reassigning it to a different sound. Bicino
+continues to decode legacy device state containing ID `3`, but does not offer
+it in the current sound picker.
 
 `VolumePercent` must be in the inclusive range `0...100`. For compatibility,
 the firmware also accepts the older frame containing only `SoundID` and uses
@@ -1766,8 +1770,10 @@ Maintenance stages are `awaiting_authentication`, `network_starting`, `ready`,
 `receiving`, `verifying`, `committing`, `rebooting`, `cancelling`, and `failed`.
 The status also carries non-secret `resources` counters for current and minimum
 internal/DMA free space, largest blocks, worker stack high-water bytes, and the
-measurement phase. Transfer tokens, hotspot passwords, and TLS private keys are
-never retained in resource evidence.
+measurement phase. The nested `firmware.flashOwnerStackHighWaterBytes` field
+separately reports the internal flash owner's worst remaining stack margin when
+that owner has started. Transfer tokens, hotspot passwords, and TLS private keys
+are never retained in resource evidence.
 
 Before creating the firmware worker and again before accepting HTTPS clients,
 maintenance firmware applies named internal-heap and DMA-heap admission floors.

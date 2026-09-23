@@ -5,6 +5,8 @@
 #include "../power_management/power_management.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 #include "device_transfer_http_limits.hpp"
+#include "device_transfer_failure_policy.hpp"
+#include "response_write_policy.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -19,10 +21,11 @@ namespace {
 // Map activation is handed off to this worker after the HTTP response completes
 // so the transfer and activation phases do not allocate two large stacks at
 // once. Activation reaches substantially deeper than the idle accept loop;
-// retain the 16 KiB budget required by that handoff path. Remote debugging and
-// diagnostics perform only RAM/network/file work on this worker, so keep their
-// equally deep TLS stacks in PSRAM instead of consuming scarce contiguous
-// internal/DMA-capable memory on the fully initialized device.
+// retain the 16 KiB budget required by that handoff path. Remote debugging,
+// diagnostics, and firmware maintenance keep their equally deep TLS stacks in
+// PSRAM instead of consuming scarce contiguous internal/DMA-capable memory.
+// Firmware's cache-disabling operations are synchronously delegated to a
+// dedicated internal-stack flash owner; the PSRAM worker never calls them.
 constexpr uint32_t kTransferHttpWorkerStackBytes = 16384;
 constexpr uint32_t kPsramHttpWorkerStackBytes = 16384;
 constexpr uint32_t kLanConnectTimeoutMs = 6000;
@@ -216,6 +219,13 @@ void HttpTransferServer::setStatusChangedCallback(
     StatusChangedCallback callback) {
   lockState();
   statusChangedCallback_ = callback;
+  unlockState();
+}
+
+void HttpTransferServer::setNetworkOperationOwner(
+    NetworkOperationOwner *owner) {
+  lockState();
+  networkOperationOwner_ = owner;
   unlockState();
 }
 
@@ -502,6 +512,7 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
         apPassphrase_ = generateSessionToken().substr(0, 24);
       }
       if (!wasEnabled) {
+        lastTransferFailure_ = {};
         if (requestedMode != "debug" && requestedMode != "diagnostics")
           preferredNetwork_ = {};
         startedAp_ = false;
@@ -532,17 +543,16 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   if (enabled && !wasEnabled) {
     TaskHandle_t worker = nullptr;
     const bool workerStackInPsram =
-        requestedMode == "debug" || requestedMode == "diagnostics";
+        requestedMode == "debug" || requestedMode == "diagnostics" ||
+        (requestedMode == "firmware" && firmware_maintenance::active());
     const uint32_t workerStackBytes =
         workerStackInPsram ? kPsramHttpWorkerStackBytes
                            : kTransferHttpWorkerStackBytes;
-    // Debug and diagnostics are RAM-only and never perform firmware flash
-    // writes or map activation. Keep their long-lived 16 KiB stacks in PSRAM
-    // so the pinned-TLS session cannot consume the internal/DMA headroom that
-    // BLE authentication and diagnostics setup need. Map/firmware modes retain
-    // an internal stack because their activation and flash paths may execute
-    // while external RAM is unavailable. Both variants use the capability-
-    // aware task API so the worker has one matching destruction path.
+    // Map activation remains on this worker and therefore retains an internal
+    // stack. Firmware maintenance delegates OTA begin/write/end/abort/commit
+    // to its internal-stack owner before any flash cache disabling operation.
+    // Both variants use the capability-aware task API so the worker has one
+    // matching destruction path.
     const UBaseType_t workerStackCaps =
         workerStackInPsram
             ? static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
@@ -619,6 +629,7 @@ void HttpTransferServer::process() {}
 bool HttpTransferServer::startNetwork() {
   lockState();
   const bool enabled = enabled_;
+  NetworkOperationOwner *networkOwner = networkOperationOwner_;
   const LanCredentials preferredNetwork = preferredNetwork_;
   preferredNetwork_ = {};
   const std::string requestedHotspotFallbackReason =
@@ -630,6 +641,11 @@ bool HttpTransferServer::startNetwork() {
   unlockState();
   if (!enabled)
     return false;
+  if (networkOwner == nullptr) {
+    setLastError("network_owner_unavailable",
+                 "internal network operation owner is unavailable");
+    return false;
+  }
 
   const bool preferLan = validLanCredentials(preferredNetwork);
   if (preferLan) {
@@ -638,18 +654,19 @@ bool HttpTransferServer::startNetwork() {
     networkSsid_ = preferredNetwork.ssid;
     unlockState();
 
-    WiFi.persistent(false);
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(false);
-    WiFi.begin(preferredNetwork.ssid.c_str(),
-               preferredNetwork.password.c_str());
+    if (!networkOwner->startStation(preferredNetwork.ssid,
+                                    preferredNetwork.password)) {
+      setLastError("wifi_station_start",
+                   "could not start transfer Wi-Fi station safely");
+      return false;
+    }
     const uint32_t started = millis();
     while (millis() - started < kLanConnectTimeoutMs) {
       lockState();
       const bool stillEnabled = enabled_;
       unlockState();
       if (!stillEnabled) {
-        WiFi.disconnect(true, false);
+        (void)networkOwner->disconnectStation(true);
         return false;
       }
       if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress()) {
@@ -673,7 +690,7 @@ bool HttpTransferServer::startNetwork() {
   const bool stillEnabled = enabled_;
   unlockState();
   if (!stillEnabled) {
-    WiFi.disconnect(true, false);
+    (void)networkOwner->disconnectStation(true);
     return false;
   }
 
@@ -684,17 +701,20 @@ bool HttpTransferServer::startNetwork() {
       fallbackReason = lanFallbackReasonForStatus(
           static_cast<int>(stationStatus), static_cast<int>(WL_NO_SSID_AVAIL),
           static_cast<int>(WL_CONNECT_FAILED));
-      WiFi.disconnect(true, false);
+      if (!networkOwner->disconnectStation(true)) {
+        setLastError("wifi_station_stop",
+                     "could not stop transfer Wi-Fi station safely");
+        return false;
+      }
       vTaskDelay(pdMS_TO_TICKS(50));
     }
-    WiFi.mode(WIFI_AP);
     const bool apStarted =
-        WiFi.softAP(apSsid.c_str(), apPassphrase.c_str());
+        networkOwner->startAccessPoint(apSsid, apPassphrase);
     if (!apStarted) {
       lockState();
       rememberError("wifi_ap", "could not start transfer Wi-Fi fallback");
       unlockState();
-      WiFi.mode(WIFI_OFF);
+      (void)networkOwner->stopWiFi();
       return false;
     }
     lockState();
@@ -746,6 +766,7 @@ void HttpTransferServer::stopNetwork() {
   const bool startedAp = startedAp_;
   const bool startedStation = startedStation_;
   const bool hadNetworkActivity = !networkTransport_.empty();
+  NetworkOperationOwner *networkOwner = networkOperationOwner_;
   startedAp_ = false;
   startedStation_ = false;
   hotspotFallback_ = false;
@@ -758,12 +779,14 @@ void HttpTransferServer::stopNetwork() {
   unlockState();
 
   server_.stop();
+  if (networkOwner == nullptr)
+    return;
   if (startedAp)
-    WiFi.softAPdisconnect(true);
+    (void)networkOwner->stopAccessPoint(true);
   if (startedStation)
-    WiFi.disconnect(true, false);
+    (void)networkOwner->disconnectStation(true);
   if (hadNetworkActivity)
-    WiFi.mode(WIFI_OFF);
+    (void)networkOwner->stopWiFi();
 }
 
 void HttpTransferServer::runWorker() {
@@ -892,6 +915,7 @@ void HttpTransferServer::runWorker() {
         const bool stillEnabled = enabled_;
         requestInProgress_ = stillEnabled;
         currentRequestAuthorized_ = false;
+        currentAuthorizationBits_ = 0;
         unlockState();
         if (!stillEnabled || !handleClient(client, requestIndex))
           break;
@@ -960,6 +984,7 @@ HttpTransferStatus HttpTransferServer::status() const {
   const std::string lastErrorCode = lastErrorCode_;
   const std::string lastErrorMessage = lastErrorMessage_;
   const uint32_t errorSequence = errorSequence_;
+  const TransferFailureRecord lastTransferFailure = lastTransferFailure_;
   const uint32_t lastUsefulTrafficMs = lastUsefulTrafficMs_;
   const uint32_t statusRevision = statusRevision_;
   const uint32_t minimumInternalFree = minimumInternalFree_;
@@ -969,6 +994,7 @@ HttpTransferStatus HttpTransferServer::status() const {
   const uint32_t minimumPsramFree = minimumPsramFree_;
   const uint32_t minimumPsramLargest = minimumPsramLargest_;
   const uint32_t workerStackHighWaterBytes = workerStackHighWaterBytes_;
+  NetworkOperationOwner *networkOwner = networkOperationOwner_;
   const std::string resourcePhase = resourcePhase_;
   // Only authenticated work may extend the transfer lifetime. A client that
   // stalls before authorization must not keep the AP awake indefinitely.
@@ -1024,6 +1050,7 @@ HttpTransferStatus HttpTransferServer::status() const {
   result.lastErrorCode = lastErrorCode;
   result.lastErrorMessage = lastErrorMessage;
   result.errorSequence = errorSequence;
+  result.lastTransferFailure = lastTransferFailure;
   result.lastUsefulTrafficMs = lastUsefulTrafficMs;
   result.authorizedRequestInProgress = authorizedRequestInProgress;
   result.internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -1053,6 +1080,8 @@ HttpTransferStatus HttpTransferServer::status() const {
                                    ? result.psramLargest
                                    : minimumPsramLargest;
   result.workerStackHighWaterBytes = workerStackHighWaterBytes;
+  result.internalOwnerStackHighWaterBytes =
+      networkOwner == nullptr ? 0 : networkOwner->stackHighWaterBytes();
   result.resourcePhase = resourcePhase;
   return result;
 }
@@ -1064,17 +1093,29 @@ bool HttpTransferServer::isRequestAuthorized(
   const std::string sessionToken = sessionToken_;
   const uint32_t transferGeneration = transferGeneration_;
   const uint64_t authenticatedBleSessionId = authenticatedBleSessionId_;
-  const bool authorized =
-      isHttpTransferGenerationCurrent(enabled, transferGeneration,
-                                      request.transferGeneration) &&
-      authenticatedBleSessionId != 0 && !sessionToken.empty() &&
+  const bool generationMatches = isHttpTransferGenerationCurrent(
+      enabled, transferGeneration, request.transferGeneration);
+  const bool tokenPresent = !sessionToken.empty();
+  const bool bleBound = authenticatedBleSessionId != 0;
+  const bool tokenMatches = generationMatches && bleBound && tokenPresent &&
       constantTimeEqual(request.transferToken, sessionToken);
+  const bool authorized =
+      generationMatches && bleBound && tokenPresent && tokenMatches;
+  currentAuthorizationBits_ = failure_policy::authorizationBits(
+      enabled, tokenPresent, tokenMatches, generationMatches, bleBound, false);
   currentRequestAuthorized_ = authorized;
   if (authorized) {
     lastUsefulTrafficMs_ = millis();
   }
   unlockState();
   return authorized;
+}
+
+void HttpTransferServer::noteDiagnosticsModeDecision(bool matches) {
+  lockState();
+  currentAuthorizationBits_ =
+      (currentAuthorizationBits_ & ~uint8_t{32}) | (matches ? 32U : 0U);
+  unlockState();
 }
 
 bool HttpTransferServer::beginAuthorizedCommit(const HttpRequest &request) {
@@ -1230,6 +1271,14 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   if (client.httpResponseWriteFailed() ||
       (client.httpResponseWriteStarted() && !handled) ||
       (handler != nullptr && !client.connected())) {
+    client.noteFailure(TransferFailureReason::HandlerAbort);
+    TransferFailureRecord failure = client.failureRecord();
+    lockState();
+    failure.generation = request.transferGeneration;
+    failure.authorizationBits = currentAuthorizationBits_;
+    if (lastTransferFailure_.reason == TransferFailureReason::None)
+      lastTransferFailure_ = failure;
+    unlockState();
     client.requestHttpResponseClose();
     client.stop();
     if (handler != nullptr)
@@ -1418,7 +1467,11 @@ bool sendHttpHead(TransferClient &client, int status, uint64_t contentLength,
               "\r\nContent-Length: " +
               std::to_string(contentLength) +
               "\r\nCache-Control: no-store\r\nPragma: no-cache\r\n\r\n";
-  return writeHttpResponse(client, response);
+  client.noteResponseHeaderStarted();
+  const bool sent = writeHttpResponse(client, response);
+  if (sent)
+    client.noteResponseHeaderComplete();
+  return sent;
 }
 
 bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
@@ -1426,17 +1479,32 @@ bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
                     uint32_t interChunkDelayMs) {
   client.noteHttpResponseWriteStarted();
   if ((data == nullptr && length != 0) || maximumChunkBytes == 0) {
+    client.noteFailure(TransferFailureReason::InvalidWrite, length);
     client.noteHttpResponseWriteFailed();
     return false;
   }
   size_t offset = 0;
   uint32_t lastProgressMs = millis();
-  while (offset < length && millis() - lastProgressMs < timeoutMs) {
+  while (offset < length &&
+         !failure_policy::noProgressExpired(millis(), lastProgressMs,
+                                            timeoutMs)) {
     if (!client.connected()) {
+      client.noteFailure(TransferFailureReason::Disconnected, length, offset,
+                         0, millis() - lastProgressMs);
       client.noteHttpResponseWriteFailed();
       return false;
     }
-    const size_t chunk = std::min(maximumChunkBytes, length - offset);
+    const auto budget = response_write_policy::budget(
+        length - offset, maximumChunkBytes, interChunkDelayMs,
+        static_cast<uint32_t>(heap_caps_get_largest_free_block(
+            MALLOC_CAP_DMA | MALLOC_CAP_8BIT)));
+    if (budget.chunkBytes == 0) {
+      client.noteHttpResponseNoProgressWait(budget.delayMs);
+      vTaskDelay(pdMS_TO_TICKS(budget.delayMs));
+      continue;
+    }
+    const size_t chunk = budget.chunkBytes;
+    client.noteWriteAttempt(length, offset, chunk, millis() - lastProgressMs);
     const size_t written = client.write(data + offset, chunk);
     if (written == 0) {
       client.noteHttpResponseNoProgressWait(1);
@@ -1446,14 +1514,17 @@ bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
     offset += written;
     client.noteHttpResponseWriteProgress(written);
     lastProgressMs = millis();
-    if (offset < length && interChunkDelayMs != 0) {
-      client.noteHttpResponseIntentionalDelay(interChunkDelayMs);
-      vTaskDelay(pdMS_TO_TICKS(interChunkDelayMs));
+    if (budget.delayMs != 0) {
+      client.noteHttpResponseIntentionalDelay(budget.delayMs);
+      vTaskDelay(pdMS_TO_TICKS(budget.delayMs));
     }
   }
   const bool complete = offset == length;
-  if (!complete)
+  if (!complete) {
+    client.noteFailure(TransferFailureReason::NoProgressTimeout, length,
+                       offset, 0, millis() - lastProgressMs);
     client.noteHttpResponseWriteFailed();
+  }
   return complete;
 }
 

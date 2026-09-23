@@ -52,9 +52,10 @@ layouts keep FFat at `0x610000`, so USB-flashing a diagnostic image does not
 relocate or format fallback map and diagnostics data. OTA release artifacts
 continue to use only the production layout. Production builds must retain at
 least 64 KiB in each application slot; the locked build helper rejects an image
-that merely fits but leaves less reserve. The three embedded alert recordings
-are stored as mono PCM and expanded to their original identical-channel stereo
-streams during playback, reclaiming about 83 KiB without changing the audio.
+that merely fits but leaves less reserve. The two embedded horn recordings are
+stored as mono PCM and expanded to their original identical-channel stereo
+streams during playback. The unused rotating-bell recording was removed; sound
+ID `3` remains reserved so older clients and persisted settings fail closed.
 
 Each production profile keeps the canonical hardware target in firmware
 metadata (`WAVESHARE_AMOLED_175` or `WAVESHARE_AMOLED_206`). The profile suffix

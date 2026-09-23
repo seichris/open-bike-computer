@@ -77,8 +77,9 @@ class RideDiagnosticsHttpContractTests(unittest.TestCase):
         ]
         self.assertIn("resolveClosedChunk", chunk)
         self.assertIn("sendFile(client, chunk, server_, request)", chunk)
-        self.assertIn("sent == chunk.bytes", HTTP)
-        self.assertIn("storage.hasError(file)", HTTP)
+        self.assertIn("sent != chunk.bytes || closeResult != 0", HTTP)
+        self.assertIn("readWithEvidence", HTTP)
+        self.assertIn("read.error", HTTP)
 
     def test_zero_byte_crash_artifacts_are_ignored_but_read_errors_fail_closed(self):
         self.assertIn("CandidateDisposition::IgnoreEmpty", HTTP)

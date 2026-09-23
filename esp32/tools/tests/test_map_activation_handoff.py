@@ -76,8 +76,10 @@ class MapActivationHandoffTests(unittest.TestCase):
 
     def test_ram_only_worker_stacks_preserve_internal_crypto_headroom(self):
         self.assertIn("xTaskCreateWithCaps(", DEVICE_TRANSFER_SOURCE)
+        self.assertIn('requestedMode == "debug"', DEVICE_TRANSFER_SOURCE)
+        self.assertIn('requestedMode == "diagnostics"', DEVICE_TRANSFER_SOURCE)
         self.assertIn(
-            'requestedMode == "debug" || requestedMode == "diagnostics"',
+            'requestedMode == "firmware" && firmware_maintenance::active()',
             DEVICE_TRANSFER_SOURCE,
         )
         self.assertIn("workerStackInPsram", DEVICE_TRANSFER_SOURCE)

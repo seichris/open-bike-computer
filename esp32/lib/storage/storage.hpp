@@ -38,6 +38,14 @@ struct SDCardInfo {
   std::string used_space;
 };
 
+struct StorageReadEvidence {
+  size_t requested = 0;
+  size_t returned = 0;
+  int errorNumber = 0;
+  bool error = false;
+  bool eof = false;
+};
+
 enum class StorageBackend : uint8_t {
   Unavailable,
   NativeSdmmc,
@@ -173,6 +181,7 @@ public:
   bool rmdir(const char *path);
   size_t size(const char *path);
   size_t read(FILE *file, uint8_t *buffer, size_t size);
+  StorageReadEvidence readWithEvidence(FILE *file, uint8_t *buffer, size_t size);
   size_t read(FILE *file, char *buffer, size_t size);
   bool hasError(FILE *file);
   size_t write(FILE *file, const uint8_t *buffer, size_t size);

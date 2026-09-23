@@ -42,12 +42,23 @@ navigation/BLE suite pass, as does the unsigned generic iOS Release build. No
 locked firmware build, device flash, physical memory measurement, repeated OTA
 cycle, CI result, or release claim is recorded here yet.
 
+Implementation update, 2026-09-22: repeated 1.75-inch attempts reached the
+authenticated maintenance reconnect but published no fresh transfer session and
+uploaded zero bytes. Quieting the app's ordinary BLE traffic did not change the
+result, localizing the remaining failure before image transfer without proving a
+specific reset cause. The measured-history-driven split now keeps TLS/HTTP on a
+PSRAM-backed worker and routes direct OTA calls plus indirect flash-capable Wi-Fi
+initialization/configuration/teardown through one serialized internal-stack
+owner. The owner disables Wi-Fi persistence before initialization and becomes
+terminal for the current boot after a command timeout or mismatched result.
+
 ## Decision
 
 Make a dedicated **maintenance boot mode in the existing application image** the
 normal firmware update path. Reboot before starting the OTA network service,
-initialize only the services needed by the updater, and use one internal-RAM
-worker to own HTTPS handling and the complete OTA lifecycle.
+initialize only the services needed by the updater, keep TLS/HTTP on a
+PSRAM-backed worker, and use one internal-RAM owner for Wi-Fi state changes and
+the complete OTA flash lifecycle.
 
 Keep the existing owner-authenticated BLE control plane, BLE-pinned HTTPS,
 session-token authorization, signed firmware manifest, image hash validation,
@@ -230,13 +241,23 @@ Swift tests together. Negotiate the maintenance capability explicitly; an older
 client's firmware-enter command must not silently trigger a reboot it cannot
 handle. Unsupported clients receive an actionable app-update requirement.
 
-### Single OTA owner and commit boundary
+### Single internal operation owner and commit boundary
 
-Use one firmware-specific internal-stack worker for TLS/HTTP and
-`esp_ota_begin`, writes, end/validation, boot selection, and abort. A BLE callback
-or UI task may revoke admission and interrupt network waiting, but may not close
-the OTA handle concurrently. Shutdown joins/acknowledges owner completion before
-reusing any state or buffer.
+Use the PSRAM-backed worker for TLS/HTTP protocol work and one internal-stack
+owner for every operation that can disable the flash cache directly or
+indirectly: Wi-Fi initialization/configuration/teardown and `esp_ota_begin`,
+writes, end/validation, boot selection, and abort. Disable Arduino Wi-Fi
+persistence before the first station or hotspot mode transition so credentials
+and AP configuration use RAM-backed driver storage. A BLE callback or UI task
+may revoke admission and interrupt network waiting, but may not close the OTA
+handle concurrently. Shutdown joins/acknowledges owner completion before reusing
+any state or buffer.
+
+An issued owner command either returns its matching result or makes the owner
+terminal for the remainder of that boot. A timeout must not release a shared
+staging buffer for reuse while the worker may still consume it, and a delayed
+result must never satisfy a later caller. Command correlation is defense in
+depth, not permission to continue after an indeterminate flash operation.
 
 Define one serialized commit boundary. Cancellation accepted before that boundary
 prevents boot selection. After commit starts, cancellation is too late; report
@@ -262,6 +283,11 @@ DMA capabilities, PSRAM usage, per-task stack high-water marks, allocation
 failures, and crypto-headroom rejections. Report units explicitly; do not inherit
 misleading stack metric labels. Never record owner secrets, TLS private keys,
 session tokens, or hotspot passwords.
+
+The iPhone must retain the non-secret DSTS resource snapshot, maintenance
+correlation, boot/source identity, transfer-worker stack margin, and internal-
+owner stack margin in its debug log. Publishing a field that the client discards
+does not create usable hardware evidence.
 
 Measure at boot baseline, worker creation, AP startup, phone association, TLS
 setup/handshake, manifest verification, erase, sustained upload, finalize,

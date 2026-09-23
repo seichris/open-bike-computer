@@ -347,9 +347,12 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
     def test_all_hotspots_are_protected_and_status_advertises_https(self):
         self.assertIn("apPassphrase_ = generateSessionToken().substr(0, 24);", HTTP_SOURCE)
         self.assertIn(
-            "WiFi.softAP(apSsid.c_str(), apPassphrase.c_str())", HTTP_SOURCE
+            "networkOwner->startAccessPoint(apSsid, apPassphrase)", HTTP_SOURCE
         )
-        self.assertNotIn("WiFi.softAP(apSsid.c_str());", HTTP_SOURCE)
+        flash_owner = (
+            ROOT / "lib/firmware_update/firmware_flash_owner.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn("WiFi.softAP(networkSsid_, networkPassword_)", flash_owner)
         self.assertIn('std::string("https://")', HTTP_SOURCE)
 
 

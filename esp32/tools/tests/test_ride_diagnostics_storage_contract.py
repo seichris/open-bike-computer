@@ -139,7 +139,7 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
         status = BLE_NAVIGATION.split(
             "static std::string genericTransferStatusJson()", 1
         )[1].split("static void notifyMapTransferStatus", 1)[0]
-        self.assertIn('\\"storage\\":{\\"backend\\":\\"', status)
+        self.assertIn('appendFieldPrefix(body, "storage")', status)
         self.assertIn("storage.storageBackendName()", status)
         self.assertIn("storage.storagePowerCycleRequired()", status)
 

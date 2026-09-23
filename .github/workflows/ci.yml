@@ -498,6 +498,10 @@ jobs:
             -o /tmp/test_firmware_maintenance_policy
           /tmp/test_firmware_maintenance_policy
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_firmware_internal_owner_policy.cpp \
+            -o /tmp/test_firmware_internal_owner_policy
+          /tmp/test_firmware_internal_owner_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_firmware_update_policy.cpp \
             -o /tmp/test_firmware_update_policy
           /tmp/test_firmware_update_policy
@@ -888,6 +892,11 @@ jobs:
           /tmp/test_map_transfer_status_chunk_session
       - name: Device transfer HTTP limit host tests
         run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_device_transfer_failure_policy.cpp \
+            -o /tmp/test_device_transfer_failure_policy
+          /tmp/test_device_transfer_failure_policy
+          python -m unittest tools.tests.test_device_transfer_failure_contract
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_device_transfer_http_limits.cpp \
             -o /tmp/test_device_transfer_http_limits
