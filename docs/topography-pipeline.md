@@ -28,8 +28,8 @@ companion pairs. No provider has thereby gained production approval.
 - Generation-policy v2 exposes renderer format 4 only as a development canary.
   An exact installation ID must also appear in
   `MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST`. Production and global policy
-  activation are rejected in code. The deployed/default v1 policy remains
-  formats 1–3 until operators deliberately select v2.
+  activation are rejected in code. Production remains on v1, while the
+  development lock selects v2 with an empty-by-default exact-ID allowlist.
 - `/healthz` includes a `topography` summary with `access: free` and
   `generationEnabled: false`; this describes the source-policy production gate,
   not an authenticated installation's development-canary eligibility.
