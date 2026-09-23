@@ -3834,8 +3834,12 @@ static void processPendingTransferControl() {
   case ble_transfer::Action::DisableAll: {
     cancelDiagnosticsSessionStart();
     const bool disabled = stopActiveDeviceTransfer();
-    if (firmware_maintenance::active() && disabled)
+    if (firmware_maintenance::active() && disabled &&
+        !firmware_maintenance::exitRequested()) {
+      (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                     "maintenance", "exit_ble_command", "{}");
       firmware_maintenance::requestExit();
+    }
     Serial.printf("BLE Device Transfer: exit applied, disabled=%d\n",
                   disabled);
     if (!firmware_maintenance::active()) {

@@ -159,30 +159,32 @@ static void processFirmwareMaintenanceMode() {
   const device_transfer::HttpTransferStatus transferStatus =
       deviceTransferHttp.status();
 
-  static uint32_t bootPressStartedMs = 0;
-  if (digitalRead(BOARD_BOOT_PIN) == LOW) {
-    if (bootPressStartedMs == 0)
-      bootPressStartedMs = now;
-    if (now - bootPressStartedMs >= 2000)
-      firmware_maintenance::requestExit();
-  } else {
-    bootPressStartedMs = 0;
-  }
-
   const firmware_maintenance::Stage stage = firmware_maintenance::stage();
   const bool commitOwnsReboot =
       stage == firmware_maintenance::Stage::Committing ||
       stage == firmware_maintenance::Stage::Rebooting;
+  static firmware_maintenance::policy::BootButtonExitState bootButtonExit;
+  if (!commitOwnsReboot && !firmware_maintenance::exitRequested() &&
+      firmware_maintenance::policy::bootButtonExitRequested(
+          bootButtonExit, digitalRead(BOARD_BOOT_PIN) == LOW, now)) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_boot_button", "{}");
+    firmware_maintenance::requestExit();
+  }
+
   const uint32_t maintenanceElapsed =
       now - firmware_maintenance::activeSinceMs();
-  if (!commitOwnsReboot && !transferStatus.enabled &&
+  if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
+      !transferStatus.enabled &&
       firmware_maintenance::policy::authenticationTimedOut(
           maintenanceElapsed, bleNavServer.isAuthenticated())) {
     deviceTransferHttp.setLastError(
         "maintenance_authentication_timeout",
         "owner authentication did not complete before the deadline");
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_auth_timeout", "{}");
     firmware_maintenance::requestExit();
-  } else if (!commitOwnsReboot &&
+  } else if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
              firmware_maintenance::policy::transferTimedOut(
                  now, transferStatus.lastUsefulTrafficMs,
                  transferStatus.enabled,
@@ -190,14 +192,18 @@ static void processFirmwareMaintenanceMode() {
     deviceTransferHttp.setLastError(
         "maintenance_inactivity_timeout",
         "firmware transfer made no useful progress before the deadline");
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_inactivity", "{}");
     firmware_maintenance::requestExit();
   }
-  if (!commitOwnsReboot &&
+  if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
       maintenanceElapsed >=
           firmware_maintenance::kOverallDeadlineMs) {
     deviceTransferHttp.setLastError(
         "maintenance_deadline",
         "firmware maintenance exceeded its overall deadline");
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_deadline", "{}");
     firmware_maintenance::requestExit();
   }
 

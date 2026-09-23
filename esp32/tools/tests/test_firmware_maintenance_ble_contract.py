@@ -33,6 +33,11 @@ class FirmwareMaintenanceBleContractTests(unittest.TestCase):
             r"firmware_maintenance::policy::authenticationTimedOut",
         )
 
+    def test_maintenance_button_requires_a_fresh_release_and_records_exit(self):
+        self.assertIn("bootButtonExitRequested(", self.main_cpp)
+        self.assertIn("exit_boot_button", self.main_cpp)
+        self.assertIn("exit_ble_command", self.ble_cpp)
+
     def test_native_and_fallback_channels_share_maintenance_dispatch(self):
         self.assertEqual(
             self.ble_cpp.count("handleFirmwareMaintenancePayload("),

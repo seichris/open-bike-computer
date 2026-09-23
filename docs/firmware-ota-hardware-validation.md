@@ -165,6 +165,33 @@ two-minute deadline now also covers failed and cancelling pre-transfer stages.
 This is a source-level repair and still needs a fresh physical test before any
 OTA success claim.
 
+The 1.75-inch production image from Git
+`d566c5ce9bedd9cd692123addfe2fe41eff70c8b` (image SHA-256
+`949e67d351dc83fa59b2aa5992ee4468cf76c3feef71878e78426c1e4256c442`,
+attested flash-plan SHA-256
+`9516cffd6b74ad474e1eee8505ba894c28a97cd65826da91aeb2e3faf218d161`)
+was flashed with verified esptool hashes. The iPhone reconnected and reported
+production build 100 with that full Git SHA. Retained boot 351 recorded the
+same production identity and a ready acceptance checkpoint.
+
+A separately approved signed build-99 OTA still failed before uploading image
+bytes. The app sent `enter|firmware` at 04:54:34.841 UTC and lost BLE at
+04:54:36.219 UTC. Retained boot 352 started at 04:54:37 UTC with software-reset
+reason 3, then reached normal-ready build 100 with OTA state `undefined`. Its
+`storage_gap` from the maintenance interval retained two missing events and
+named `ble/authenticated` as the last critical event; it did not retain the new
+`maintenance_ble_detached` warning. The validated support bundle was exported
+at 05:02:10 UTC (SHA-256
+`b56e854fde109a34a2df547ea345c7df20dde18b662783733be00cdc0e2aa961`).
+The BLE disconnect may therefore follow the software reset rather than cause
+it. The exact maintenance exit trigger is still unknown.
+
+The next source candidate requires GPIO0 to be observed released before a
+two-second BOOT hold can exit maintenance. It also records each explicit exit
+path in the retained fault capsule, so a further software reset can be
+distinguished from a transport drop. Neither this source change nor the
+previous candidate qualifies OTA until tested on the device.
+
 ## Test 1: Foreground Update
 
 1. Open the iPhone app.

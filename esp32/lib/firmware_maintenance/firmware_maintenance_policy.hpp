@@ -9,6 +9,32 @@ constexpr uint16_t kRequestSchema = 1;
 constexpr uint32_t kSoftwareResetReason = 3;
 constexpr uint32_t kAwaitingAuthenticationTimeoutMs = 2U * 60U * 1000U;
 constexpr uint32_t kTransferInactivityTimeoutMs = 90U * 1000U;
+constexpr uint32_t kBootButtonExitHoldMs = 2U * 1000U;
+
+struct BootButtonExitState {
+  bool releasedSinceBoot = false;
+  bool pressStarted = false;
+  uint32_t pressedAtMs = 0;
+};
+
+// GPIO0 can be low during the reset that enters maintenance. Only a fresh
+// release and hold in this boot is an intentional request to leave it.
+constexpr bool bootButtonExitRequested(BootButtonExitState &state,
+                                       bool pressed, uint32_t nowMs) {
+  if (!pressed) {
+    state.releasedSinceBoot = true;
+    state.pressStarted = false;
+    return false;
+  }
+  if (!state.releasedSinceBoot)
+    return false;
+  if (!state.pressStarted) {
+    state.pressStarted = true;
+    state.pressedAtMs = nowMs;
+    return false;
+  }
+  return nowMs - state.pressedAtMs >= kBootButtonExitHoldMs;
+}
 
 enum class ResourcePhase : uint8_t {
   BeforeWorker = 0,

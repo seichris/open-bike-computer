@@ -60,5 +60,17 @@ int main() {
   assert(!transferTimedOut(kTransferInactivityTimeoutMs, 0, true, true));
   assert(!transferTimedOut(kTransferInactivityTimeoutMs, 0, false, false));
 
+  BootButtonExitState bootButton;
+  assert(!bootButtonExitRequested(bootButton, true, 100));
+  assert(!bootButtonExitRequested(bootButton, true, 3000));
+  assert(!bootButtonExitRequested(bootButton, false, 3010));
+  assert(!bootButtonExitRequested(bootButton, true, 3020));
+  assert(!bootButtonExitRequested(bootButton, true,
+                                  3020 + kBootButtonExitHoldMs - 1));
+  assert(bootButtonExitRequested(bootButton, true,
+                                 3020 + kBootButtonExitHoldMs));
+  assert(!bootButtonExitRequested(bootButton, false, 6000));
+  assert(!bootButtonExitRequested(bootButton, true, 6010));
+
   return 0;
 }

@@ -3,6 +3,7 @@
 
 #include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_metadata/firmware_metadata.hpp"
+#include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../status_json/status_json.hpp"
 
 #include <algorithm>
@@ -809,7 +810,12 @@ void FirmwareUpdateHttpServer::handleCancel(device_transfer::TransferClient &cli
   lockState();
   status_ = "cancelled";
   unlockState();
-  firmware_maintenance::requestExit();
+  if (firmware_maintenance::active() &&
+      !firmware_maintenance::exitRequested()) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_http_cancel", "{}");
+    firmware_maintenance::requestExit();
+  }
   transferServer_->noteStatusChanged("cancelled");
   device_transfer::sendHttpJson(client, 200, statusJson());
 }
