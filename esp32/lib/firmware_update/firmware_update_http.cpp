@@ -3,6 +3,7 @@
 
 #include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_metadata/firmware_metadata.hpp"
+#include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../status_json/status_json.hpp"
 
 #include <algorithm>
@@ -150,14 +151,14 @@ static bool otaPartitionEligible(const esp_partition_t *running,
   return eligibility == policy::Eligibility::Eligible;
 }
 
-static std::string otaStateName(const esp_partition_t *partition) {
+static std::string otaStateName(const esp_partition_t *partition,
+                                esp_err_t stateResult,
+                                esp_ota_img_states_t state) {
   if (partition == nullptr)
     return "unknown";
-  esp_ota_img_states_t state;
-  esp_err_t result = esp_ota_get_state_partition(partition, &state);
-  if (result == ESP_ERR_NOT_FOUND)
+  if (stateResult == ESP_ERR_NOT_FOUND)
     return "untracked"; // USB/factory image with no OTA state entry
-  if (result != ESP_OK)
+  if (stateResult != ESP_OK)
     return "unknown";
   switch (state) {
   case ESP_OTA_IMG_NEW:
@@ -263,6 +264,8 @@ void FirmwareUpdateHttpServer::configure(
     stateMutex_ = xSemaphoreCreateMutexStatic(&stateMutexStorage_);
   configASSERT(stateMutex_ != nullptr);
   transferServer_ = sharedServer == nullptr ? &ownedTransferServer_ : sharedServer;
+  flashOwner_.configure();
+  transferServer_->setNetworkOperationOwner(&flashOwner_);
   if (sharedServer == nullptr)
     transferServer_->configure(port, "BikeComputer-Transfer");
   transferServer_->registerHandler("/firmware-update", this);
@@ -278,6 +281,11 @@ bool FirmwareUpdateHttpServer::setEnabled(bool enabled) {
     return false;
   }
 #endif
+  if (enabled && !flashOwner_.start()) {
+    setLastError("ota_flash_worker",
+                 "could not start the internal firmware flash owner");
+    return false;
+  }
   return transferServer_->setEnabled(enabled, enabled ? "firmware" : "");
 }
 
@@ -294,8 +302,19 @@ void FirmwareUpdateHttpServer::setLastError(const std::string &code,
 void FirmwareUpdateHttpServer::process() { transferServer_->process(); }
 
 FirmwareUpdateStatus FirmwareUpdateHttpServer::status() const {
-  const esp_partition_t *running = esp_ota_get_running_partition();
-  const esp_partition_t *inactive = esp_ota_get_next_update_partition(nullptr);
+  FirmwarePartitionSnapshot partitions;
+  if (firmware_maintenance::active() && flashOwner_.started()) {
+    partitions = flashOwner_.partitionSnapshot();
+  } else {
+    partitions.running = esp_ota_get_running_partition();
+    partitions.inactive = esp_ota_get_next_update_partition(nullptr);
+    if (partitions.running != nullptr) {
+      partitions.runningStateResult = esp_ota_get_state_partition(
+          partitions.running, &partitions.runningState);
+    }
+  }
+  const esp_partition_t *running = partitions.running;
+  const esp_partition_t *inactive = partitions.inactive;
 
   lockState();
   FirmwareUpdateStatus snapshot;
@@ -307,12 +326,15 @@ FirmwareUpdateStatus FirmwareUpdateHttpServer::status() const {
   snapshot.runningProfile = firmware_metadata::buildProfile();
   snapshot.runningPartition = partitionLabel(running);
   snapshot.inactivePartition = partitionLabel(inactive);
-  snapshot.otaState = otaStateName(running);
+  snapshot.otaState = otaStateName(
+      running, partitions.runningStateResult, partitions.runningState);
   snapshot.otaEligible =
       otaPartitionEligible(running, inactive, snapshot.eligibilityCode);
   snapshot.maxImageBytes = inactive == nullptr ? 0 : inactive->size;
   snapshot.receivedBytes = receivedBytes_;
   snapshot.totalBytes = totalBytes_;
+  snapshot.flashOwnerStackHighWaterBytes =
+      flashOwner_.stackHighWaterBytes();
   snapshot.sha256 = actualSha256_.empty() ? expectedSha256_ : actualSha256_;
   snapshot.errorCode = errorCode_;
   snapshot.errorMessage = errorMessage_;
@@ -349,6 +371,8 @@ std::string FirmwareUpdateHttpServer::statusJson() const {
   status_json::appendUnsignedField(body, "receivedBytes",
                                    snapshot.receivedBytes);
   status_json::appendUnsignedField(body, "totalBytes", snapshot.totalBytes);
+  status_json::appendUnsignedField(body, "flashOwnerStackHighWaterBytes",
+                                   snapshot.flashOwnerStackHighWaterBytes);
   if (!snapshot.sha256.empty()) {
     status_json::appendStringField(body, "sha256", snapshot.sha256);
   } else {
@@ -369,8 +393,14 @@ std::string FirmwareUpdateHttpServer::statusJson() const {
 }
 
 std::string FirmwareUpdateHttpServer::bootAcceptanceJson(bool ready) const {
+  esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_err_t stateResult = running == nullptr
+                                    ? ESP_FAIL
+                                    : esp_ota_get_state_partition(running,
+                                                                  &state);
   return firmware_metadata::bootAcceptanceJson(
-      ready, otaStateName(esp_ota_get_running_partition()).c_str());
+      ready, otaStateName(running, stateResult, state).c_str());
 }
 
 bool FirmwareUpdateHttpServer::markRunningAppValid() {
@@ -520,9 +550,10 @@ void FirmwareUpdateHttpServer::handleBegin(
     return;
   }
 
-  const esp_partition_t *updatePartition =
-      esp_ota_get_next_update_partition(nullptr);
-  const esp_partition_t *runningPartition = esp_ota_get_running_partition();
+  const FirmwarePartitionSnapshot partitions =
+      flashOwner_.partitionSnapshot();
+  const esp_partition_t *updatePartition = partitions.inactive;
+  const esp_partition_t *runningPartition = partitions.running;
   std::string eligibilityCode;
   if (!otaPartitionEligible(runningPartition, updatePartition,
                             eligibilityCode)) {
@@ -537,13 +568,13 @@ void FirmwareUpdateHttpServer::handleBegin(
 
   resetUploadState();
   esp_ota_handle_t handle = 0;
-  esp_err_t result = esp_ota_begin(updatePartition, size, &handle);
+  esp_err_t result = flashOwner_.begin(updatePartition, size, handle);
   if (result != ESP_OK) {
     fail(client, 500, "ota_begin_failed", esp_err_to_name(result));
     return;
   }
   if (!transaction_.begin()) {
-    esp_ota_abort(handle);
+    (void)flashOwner_.abort(handle);
     fail(client, 409, "ota_owner_busy",
          "another firmware transaction owns the OTA lifecycle");
     return;
@@ -613,7 +644,7 @@ void FirmwareUpdateHttpServer::handleImage(
       delay(1);
       continue;
     }
-    esp_err_t result = esp_ota_write(handle, buffer, bytesRead);
+    esp_err_t result = flashOwner_.write(handle, buffer, bytesRead);
     if (result != ESP_OK) {
       mbedtls_sha256_free(&sha);
       resetUploadState();
@@ -707,7 +738,7 @@ void FirmwareUpdateHttpServer::handleFinalize(
     return;
   }
 
-  esp_err_t result = esp_ota_end(handle);
+  esp_err_t result = flashOwner_.end(handle);
   lockState();
   otaOpen_ = false;
   otaHandle_ = 0;
@@ -725,7 +756,7 @@ void FirmwareUpdateHttpServer::handleFinalize(
   }
 
   esp_app_desc_t appDescription;
-  result = esp_ota_get_partition_description(updatePartition, &appDescription);
+  result = flashOwner_.description(updatePartition, appDescription);
   if (result != ESP_OK) {
     resetUploadState();
     fail(client, 400, "image_description_failed", esp_err_to_name(result));
@@ -748,7 +779,7 @@ void FirmwareUpdateHttpServer::handleFinalize(
 
   firmware_maintenance::setStage(firmware_maintenance::Stage::Committing);
   transferServer_->noteStatusChanged("commit_boundary");
-  result = esp_ota_set_boot_partition(updatePartition);
+  result = flashOwner_.selectBootPartition(updatePartition);
   if (result != ESP_OK) {
     transferServer_->endAuthorizedCommit();
     resetUploadState();
@@ -779,7 +810,12 @@ void FirmwareUpdateHttpServer::handleCancel(device_transfer::TransferClient &cli
   lockState();
   status_ = "cancelled";
   unlockState();
-  firmware_maintenance::requestExit();
+  if (firmware_maintenance::active() &&
+      !firmware_maintenance::exitRequested()) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_http_cancel", "{}");
+    firmware_maintenance::requestExit();
+  }
   transferServer_->noteStatusChanged("cancelled");
   device_transfer::sendHttpJson(client, 200, statusJson());
 }
@@ -802,7 +838,7 @@ void FirmwareUpdateHttpServer::resetUploadState() {
   transaction_.reset();
   unlockState();
   if (otaOpen) {
-    esp_ota_abort(handle);
+    (void)flashOwner_.abort(handle);
   }
 }
 

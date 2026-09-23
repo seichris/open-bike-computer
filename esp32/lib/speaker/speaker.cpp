@@ -63,10 +63,6 @@ extern const uint8_t realBikeHornStart[]
     asm("_binary_lib_speaker_assets_real_bike_horn_pcm_start");
 extern const uint8_t realBikeHornEnd[]
     asm("_binary_lib_speaker_assets_real_bike_horn_pcm_end");
-extern const uint8_t rotatingBikeBellStart[]
-    asm("_binary_lib_speaker_assets_rotating_bike_bell_pcm_start");
-extern const uint8_t rotatingBikeBellEnd[]
-    asm("_binary_lib_speaker_assets_rotating_bike_bell_pcm_end");
 extern const uint8_t squeezeHornStart[]
     asm("_binary_lib_speaker_assets_squeeze_horn_a_pcm_start");
 extern const uint8_t squeezeHornEnd[]
@@ -607,8 +603,6 @@ bool playNow(Sound sound) {
     return playBellDing();
   case Sound::PlasticBicycleHorn:
     return playMonoPcm(realBikeHornStart, realBikeHornEnd);
-  case Sound::RotatingBicycleBell:
-    return playMonoPcm(rotatingBikeBellStart, rotatingBikeBellEnd);
   case Sound::SqueezeHorn:
     return playMonoPcm(squeezeHornStart, squeezeHornEnd);
   }

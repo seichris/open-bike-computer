@@ -177,13 +177,20 @@ actor CatalogCredentialBootstrapRecorder {
 
 final class OfflineMapTestURLProtocol: URLProtocol {
     typealias Handler = (URLRequest) throws -> (Int, Data)
+    private struct InterruptedResponse {
+        let path: String
+        let prefix: Data
+        let expectedBytes: Int
+    }
     nonisolated(unsafe) private static var handler: Handler?
+    nonisolated(unsafe) private static var interruptedResponse: InterruptedResponse?
     nonisolated(unsafe) private static var recordedRequests: [URLRequest] = []
     private static let lock = NSLock()
 
     static func configure(handler: @escaping Handler) {
         lock.lock()
         self.handler = handler
+        interruptedResponse = nil
         recordedRequests = []
         lock.unlock()
     }
@@ -194,9 +201,18 @@ final class OfflineMapTestURLProtocol: URLProtocol {
         return recordedRequests
     }
 
+    static func interruptResponse(path: String, prefix: Data, expectedBytes: Int) {
+        lock.lock()
+        interruptedResponse = InterruptedResponse(
+            path: path, prefix: prefix, expectedBytes: expectedBytes
+        )
+        lock.unlock()
+    }
+
     static func reset() {
         lock.lock()
         handler = nil
+        interruptedResponse = nil
         recordedRequests = []
         lock.unlock()
     }
@@ -231,7 +247,25 @@ final class OfflineMapTestURLProtocol: URLProtocol {
         Self.lock.lock()
         Self.recordedRequests.append(request)
         let handler = Self.handler
+        let interruption = Self.interruptedResponse
         Self.lock.unlock()
+        if let interruption, request.url?.path == interruption.path {
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "application/x-ndjson",
+                    "Content-Length": String(interruption.expectedBytes),
+                ]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: interruption.prefix)
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(50)) { [self] in
+                client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+            }
+            return
+        }
         guard let handler else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
@@ -829,6 +863,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsMapTransferControlFrames()
         testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerSuppressesOptionalWritesDuringFirmwareMaintenance()
+        testBLEManagerSuppressesOrdinaryWritesWhileMaintenanceReconnectIsExpected()
         testBLEManagerParsesMapTransferStatus()
         testBLEManagerReassemblesChunkedMapTransferStatus()
         testBLEManagerCompletesRetransmittedChunkedMapTransferStatus()
@@ -911,6 +946,7 @@ struct NavigationProtocolTests {
         await testFirmwareTransferCancellationExits()
         await testFirmwareMaintenancePreparationFlow()
         await testDeviceDiagnosticsTransferPolicy()
+        await testDeviceDiagnosticsInterruptedChunk()
         await testDeviceDiagnosticsFailsFastOnFirmwareRejection()
         await testDeviceDiagnosticsRecordsEntryFailure()
         await testDeviceDiagnosticsDownloadEndToEnd()
@@ -16733,9 +16769,9 @@ struct NavigationProtocolTests {
             "hotspot remote debugging joins and probes the pinned device endpoint"
         )
         assert(
-            DeviceNetworkJoinPolicy.configurationApplyTimeout >= 10 &&
-                DeviceNetworkJoinPolicy.configurationApplyTimeout <= 30,
-            "the system hotspot prompt has a sufficient but bounded callback window"
+            DeviceNetworkJoinPolicy.configurationApplyTimeout >= 45 &&
+                DeviceNetworkJoinPolicy.configurationApplyTimeout <= 60,
+            "the system hotspot prompt allows foreground confirmation before firmware inactivity"
         )
         assert(
             DeviceNetworkJoinPolicy.currentNetworkFetchTimeout > 0 &&
@@ -19321,7 +19357,7 @@ struct NavigationProtocolTests {
     }
 
     static func testDeviceSoundProtocol() {
-        assertEqual(DeviceSound.allCases.map(\.rawValue), [1, 2, 3, 5], "sound IDs match firmware assets")
+        assertEqual(DeviceSound.allCases.map(\.rawValue), [1, 2, 5], "the picker omits the retired rotating-bell sound ID")
         assertEqual(DeviceSound.defaultSelection, .plasticBicycleHorn, "bicycle horn is the default sound")
         assertEqual(DeviceSound.defaultVolumePercent, 70, "device sound volume defaults to 70 percent")
 
@@ -23030,6 +23066,36 @@ struct NavigationProtocolTests {
                     "only the required transfer-control write reaches BLE")
     }
 
+    static func testBLEManagerSuppressesOrdinaryWritesWhileMaintenanceReconnectIsExpected() {
+        let manager = BLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 96,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        manager.beginFirmwareMaintenanceReconnect()
+        assert(manager.firmwareMaintenanceReconnectExpected,
+               "maintenance reconnect expectation survives the reboot boundary")
+        assert(!manager.sendNavigationData("2|120|Turn left"),
+               "ordinary navigation is rejected before maintenance status arrives")
+        assert(!manager.requestMapTransferStatus(),
+               "unrelated map transfer polling is rejected during firmware maintenance")
+        assert(manager.requestDeviceTransferStatus(
+            forMaintenanceReconnect: true
+        ), "maintenance status traffic remains available during reconnect")
+        assertEqual(sentPackets, [Data("DSTS".utf8)],
+                    "only transfer control reaches BLE while reconnect is pending")
+
+        manager.endFirmwareMaintenanceReconnect()
+        assert(!manager.firmwareMaintenanceReconnectExpected,
+               "ending maintenance restores the normal connection policy")
+    }
+
     @MainActor
     static func testDeviceDiagnosticsTransferPolicy() async {
         let configuration = URLSessionConfiguration.ephemeral
@@ -23222,6 +23288,87 @@ struct NavigationProtocolTests {
                 numericBooleanStream
             ) == nil,
             "JSON numbers cannot impersonate firmware boolean fields"
+        )
+    }
+
+    static func testDeviceDiagnosticsInterruptedChunk() async {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("device-diagnostics-interrupted-\(UUID().uuidString)")
+        let defaultsSuite = "DeviceDiagnosticsInterrupted.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsSuite)!
+        defer {
+            OfflineMapTestURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+            defaults.removePersistentDomain(forName: defaultsSuite)
+        }
+        let recorder = RideDiagnosticsRecorder(rootURL: root, userDefaults: defaults)
+        let bleManager = BLEManager()
+        let deviceID = "01234567-89ab-cdef-0123-456789abcdef"
+        bleManager.setConnectedDeviceIDForTesting(deviceID)
+        let fullChunk = Data(repeating: 0x41, count: 7130)
+        let digest = SHA256.hash(data: fullChunk).map {
+            String(format: "%02x", $0)
+        }.joined()
+        let index = Data("""
+        {"schema":1,"source":"firmware","bootSequence":1,"activeChunk":2,"stats":{"enqueued":1,"written":1,"dropped":0,"storageErrors":0},"chunks":[{"bootSequence":1,"chunk":1,"bytes":7130,"sha256":"\(digest)"}]}
+        """.utf8)
+        let session = DeviceTransferSession(
+            mode: .diagnostics,
+            baseURL: URL(string: "https://diagnostics.test")!,
+            accessPointSSID: nil,
+            sessionToken: "test-token",
+            tlsCertificateSHA256: String(repeating: "a", count: 64),
+            tlsIdentityVersion: 1,
+            transferGeneration: 1,
+            secureTransferV1: true
+        )
+        let controller = TestDeviceDiagnosticsSessionController(session: session)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        OfflineMapTestURLProtocol.configure { request in
+            switch request.url?.path {
+            case "/device-diagnostics/v1/index": return (200, index)
+            case "/device-diagnostics/v1/session/exit":
+                return (200, Data("{\"ok\":true}".utf8))
+            default: return (404, Data())
+            }
+        }
+        OfflineMapTestURLProtocol.interruptResponse(
+            path: "/device-diagnostics/v1/chunks/1/1",
+            prefix: Data(fullChunk.prefix(4096)),
+            expectedBytes: fullChunk.count
+        )
+        let manager = DeviceDiagnosticsTransferManager(
+            transferManager: controller,
+            sessionConfiguration: { configuration }
+        )
+        do {
+            _ = try await manager.downloadDeviceLogs(
+                bleManager: bleManager,
+                recorder: recorder,
+                status: { _ in }
+            )
+            assert(false, "interrupted diagnostics chunk must fail")
+        } catch DeviceDiagnosticsTransferError.transportInterrupted(
+            let received, let expected, let code
+        ) {
+            assertEqual(received, 4096, "transport error retains the exact prefix")
+            assertEqual(expected, 7130, "transport error retains declared length")
+            assertEqual(code, URLError.networkConnectionLost.rawValue,
+                        "transport error retains the URL error")
+        } catch {
+            assert(false, "interrupted diagnostics has a typed error: \(error)")
+        }
+        let deviceDigest = recorder.deviceDigest(for: deviceID)
+        assertEqual(
+            recorder.importedDeviceChunkData(
+                deviceDigest: deviceDigest,
+                bootSequence: 1,
+                chunk: 1,
+                sha256: digest
+            ),
+            nil,
+            "an interrupted prefix is never imported as a chunk"
         )
     }
 
@@ -24108,10 +24255,15 @@ struct NavigationProtocolTests {
         }
 
         sentPackets.removeAll()
+        var waitingForMaintenanceReconnect = false
         let preparation = Task {
             try await manager.prepareFirmwareMaintenance(
                 bleManager: bleManager,
-                status: { _ in }
+                status: { message in
+                    if message == "waiting for firmware maintenance" {
+                        waitingForMaintenanceReconnect = true
+                    }
+                }
             )
         }
         for _ in 0..<100 where sentPackets.isEmpty {
@@ -24128,7 +24280,14 @@ struct NavigationProtocolTests {
                 Data(acceptedStatus.utf8)
         )
         bleManager.isNavigationReady = false
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // Keep the reboot-pending status available until the preparation task
+        // captures its correlation. A fixed sleep can race the task on CI and
+        // replace that status with the maintenance boot before it is consumed.
+        for _ in 0..<500 where !waitingForMaintenanceReconnect {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(waitingForMaintenanceReconnect,
+               "firmware preparation accepts the reboot correlation")
         bleManager.isNavigationReady = true
         let maintenanceStatus = """
         {"enabled":false,"mode":"","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":true,"stage":"awaiting_authentication","correlation":42},"firmware":{"otaEligible":true,"eligibilityCode":"eligible"}}
@@ -24498,7 +24657,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesDeviceTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"debug","statusRevision":23,"baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":true,"stage":"ready","correlation":42},"bootCheckpoint":{"schemaVersion":1,"target":"WAVESHARE_AMOLED_206","profile":"WAVESHARE_AMOLED_206_PRODUCTION","gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"0.2.2","build":86,"bootSequence":9,"bootFingerprint":1234,"normalReady":false,"maintenance":true,"otaState":"valid"},"lastError":{"sequence":17,"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updaterProtocol":1,"otaEligible":true,"eligibilityCode":"eligible","inactivePartition":"ota_1","runningPartition":"ota_0","profile":"WAVESHARE_AMOLED_206_PRODUCTION","otaState":"valid","maxImageBytes":3145728,"receivedBytes":1024,"totalBytes":2048,"lastError":{"code":"previous","message":"previous update failed"}}}
+        {"configured":true,"enabled":true,"port":8080,"mode":"debug","statusRevision":23,"baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"session-wpa-key","networkTransport":"hotspot","networkSsid":"BikeComputer-Transfer","hotspotFallback":true,"hotspotFallbackReason":"endpoint_unreachable","sessionToken":"abc123","capabilities":{"firmwareMaintenanceV1":true},"maintenance":{"supported":true,"active":true,"stage":"ready","correlation":42},"resources":{"internalFree":65536,"internalLargest":32768,"dmaFree":49152,"dmaLargest":24576,"psramFree":4194304,"psramLargest":3145728,"minimumInternalFree":61440,"minimumInternalLargest":28672,"minimumDmaFree":45056,"minimumDmaLargest":20480,"minimumPsramFree":4000000,"minimumPsramLargest":3000000,"workerStackHighWaterBytes":7168,"internalOwnerStackHighWaterBytes":4096,"phase":"network_ready"},"bootCheckpoint":{"schemaVersion":1,"target":"WAVESHARE_AMOLED_206","profile":"WAVESHARE_AMOLED_206_PRODUCTION","gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"0.2.2","build":86,"bootSequence":9,"bootFingerprint":1234,"normalReady":false,"maintenance":true,"otaState":"valid"},"lastError":{"sequence":17,"code":"transfer_busy","message":"another transfer mode is active"},"storage":{"backend":"legacy_spi_migration","powerCycleRequired":true},"firmware":{"status":"receiving","target":"WAVESHARE_AMOLED_206","version":"0.2.2","build":86,"gitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","updaterProtocol":1,"otaEligible":true,"eligibilityCode":"eligible","inactivePartition":"ota_1","runningPartition":"ota_0","profile":"WAVESHARE_AMOLED_206_PRODUCTION","otaState":"valid","maxImageBytes":3145728,"receivedBytes":1024,"totalBytes":2048,"flashOwnerStackHighWaterBytes":4096,"lastError":{"code":"previous","message":"previous update failed"}}}
         """
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -24524,6 +24683,18 @@ struct NavigationProtocolTests {
                     "status parser exposes maintenance readiness")
         assertEqual(manager.firmwareMaintenanceCorrelation, 42,
                     "status parser preserves reboot correlation")
+        assertEqual(manager.deviceTransferResourceSnapshot?.phase,
+                    "network_ready",
+                    "status parser retains the resource sampling phase")
+        assertEqual(manager.deviceTransferResourceSnapshot?.minimumDmaFree,
+                    45056,
+                    "status parser retains the minimum DMA evidence")
+        assertEqual(
+            manager.deviceTransferResourceSnapshot?
+                .internalOwnerStackHighWaterBytes,
+            4096,
+            "status parser retains the internal-owner stack margin"
+        )
         assertEqual(manager.firmwareBootSequence, 9,
                     "status parser exposes the authenticated boot sequence")
         assertEqual(manager.firmwareBootFingerprint, 1234,
@@ -24563,6 +24734,8 @@ struct NavigationProtocolTests {
                     "status parser exposes the slot capacity")
         assertEqual(manager.firmwareUpdateReceivedBytes, 1024, "status parser exposes received bytes")
         assertEqual(manager.firmwareUpdateTotalBytes, 2048, "status parser exposes total bytes")
+        assertEqual(manager.firmwareFlashOwnerStackHighWaterBytes, 4096,
+                    "status parser retains the flash-owner stack margin")
         assertEqual(manager.firmwareUpdateLastError, "previous: previous update failed", "status parser exposes firmware error")
 
         let clearedPacket = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
@@ -25334,16 +25507,21 @@ struct NavigationProtocolTests {
         assert(!freshManager.isPowerButtonHonkEnabled, "fresh installs leave PWR honk disabled")
 
         freshManager.deviceSoundsEnabled = true
-        freshManager.selectedDeviceSound = .rotatingBicycleBell
+        freshManager.selectedDeviceSound = .squeezeHorn
         freshManager.deviceSoundVolumePercent = 65
         freshManager.isPowerButtonHonkEnabled = true
         freshManager.saveSettings()
 
         let reloaded = BLEManager()
         assert(reloaded.deviceSoundsEnabled, "device sounds enabled state persists")
-        assertEqual(reloaded.selectedDeviceSound, .rotatingBicycleBell, "selected sound persists")
+        assertEqual(reloaded.selectedDeviceSound, .squeezeHorn, "selected sound persists")
         assertEqual(reloaded.deviceSoundVolumePercent, 65, "sound volume persists")
         assert(reloaded.isPowerButtonHonkEnabled, "PWR honk enabled state persists")
+
+        defaults.set(3, forKey: soundKey)
+        let retiredValue = BLEManager()
+        assertEqual(retiredValue.selectedDeviceSound, .plasticBicycleHorn,
+                    "the retired rotating-bell ID migrates to the default horn")
 
         defaults.set(4, forKey: soundKey)
         defaults.set(Double.nan, forKey: volumeKey)

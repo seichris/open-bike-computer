@@ -625,10 +625,18 @@ enum DeviceTransferPacketRoutingPolicy {
 enum DeviceSound: UInt8, CaseIterable, Identifiable {
     case bellDing = 1
     case plasticBicycleHorn = 2
+    // Decode legacy device state without offering the removed recording in
+    // the current picker. Firmware keeps raw value 3 reserved.
     case rotatingBicycleBell = 3
     case squeezeHorn = 5
 
     var id: UInt8 { rawValue }
+
+    static let allCases: [DeviceSound] = [
+        .bellDing,
+        .plasticBicycleHorn,
+        .squeezeHorn,
+    ]
 
     static let defaultSelection: DeviceSound = .plasticBicycleHorn
     static let defaultVolumePercent: Double = 70
@@ -672,7 +680,7 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
         case .plasticBicycleHorn:
             return "Bicycle Horn"
         case .rotatingBicycleBell:
-            return "Rotating Bicycle Bell"
+            return "Rotating Bicycle Bell (Legacy)"
         case .squeezeHorn:
             return "Squeeze Horn"
         }
@@ -964,6 +972,24 @@ private final class WeakBLEManagerSendableBox: @unchecked Sendable {
     }
 }
 
+struct DeviceTransferResourceSnapshot: Equatable {
+    let internalFree: UInt32
+    let internalLargest: UInt32
+    let dmaFree: UInt32
+    let dmaLargest: UInt32
+    let psramFree: UInt32
+    let psramLargest: UInt32
+    let minimumInternalFree: UInt32
+    let minimumInternalLargest: UInt32
+    let minimumDmaFree: UInt32
+    let minimumDmaLargest: UInt32
+    let minimumPsramFree: UInt32
+    let minimumPsramLargest: UInt32
+    let workerStackHighWaterBytes: UInt32
+    let internalOwnerStackHighWaterBytes: UInt32
+    let phase: String
+}
+
 #if HOST_TESTING
 final class BLEScanDriverForTesting {
     struct Start: Equatable {
@@ -1123,9 +1149,12 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferLastErrorSequence: UInt64?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
+    @Published private(set) var deviceTransferResourceSnapshot:
+        DeviceTransferResourceSnapshot?
     @Published private(set) var firmwareMaintenanceActive = false
     @Published private(set) var firmwareMaintenanceStage = "normal"
     @Published private(set) var firmwareMaintenanceCorrelation: UInt32 = 0
+    @Published private(set) var firmwareMaintenanceReconnectExpected = false
     @Published private(set) var deviceStorageBackend: String?
     @Published private(set) var deviceStoragePowerCycleRequired: Bool?
     @Published var firmwareTarget: String = ""
@@ -1146,6 +1175,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var firmwareBootMaintenance = false
     @Published var firmwareUpdateReceivedBytes: Int = 0
     @Published var firmwareUpdateTotalBytes: Int = 0
+    @Published private(set) var firmwareFlashOwnerStackHighWaterBytes: UInt32?
     @Published var firmwareUpdateLastError: String?
     @Published var deviceHasSDCard: Bool?
     @Published var deviceMapStateKnown = false
@@ -1374,6 +1404,7 @@ class BLEManager: NSObject, ObservableObject {
     private var deviceTransferStatusChunkTransferID: UInt8?
     private var deviceTransferStatusChunkCount: UInt8 = 0
     private var deviceTransferStatusChunks: [UInt8: Data] = [:]
+    private var lastLoggedTransferFailureKey: String?
     private var rendererDiagnosticsChunks =
         RendererDiagnosticsChunkReassembler()
     private var deviceGPSOverrideToken: UUID?
@@ -1795,9 +1826,12 @@ class BLEManager: NSObject, ObservableObject {
         ) as? Bool ?? false
         let storedSoundID = defaults.object(forKey: SettingsKeys.selectedDeviceSound) as? Int
             ?? Int(DeviceSound.defaultSelection.rawValue)
-        selectedDeviceSound = UInt8(exactly: storedSoundID)
+        let restoredSound = UInt8(exactly: storedSoundID)
             .flatMap(DeviceSound.init(rawValue:))
             ?? .defaultSelection
+        selectedDeviceSound = restoredSound == .rotatingBicycleBell
+            ? .defaultSelection
+            : restoredSound
         let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double
             ?? DeviceSound.defaultVolumePercent
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(storedSoundVolume)
@@ -5822,6 +5856,10 @@ class BLEManager: NSObject, ObservableObject {
 
     @discardableResult
     func requestMapTransferMode(enabled: Bool) -> Bool {
+        guard !firmwareMaintenanceReconnectExpected else {
+            log("Suppressed map transfer control during firmware maintenance")
+            return false
+        }
         var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
         packet.append(Data((enabled ? "enter" : "exit").utf8))
         let label = enabled ? "map transfer enter" : "map transfer exit"
@@ -5834,6 +5872,10 @@ class BLEManager: NSObject, ObservableObject {
 
     @discardableResult
     func requestMapTransferStatus() -> Bool {
+        guard !firmwareMaintenanceReconnectExpected else {
+            log("Suppressed map transfer status during firmware maintenance")
+            return false
+        }
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8)
         return sendTransferControlPacket(
             packet,
@@ -5894,6 +5936,29 @@ class BLEManager: NSObject, ObservableObject {
             label: "firmware maintenance prepare",
             coalescingKey: "transfer.device.control"
         )
+    }
+
+    func beginFirmwareMaintenanceReconnect() {
+        guard !firmwareMaintenanceReconnectExpected else { return }
+        firmwareMaintenanceReconnectExpected = true
+        for writeClass in NavigationWriteClass.allCases
+            where writeClass != .transfer {
+            navigationWriteQueue.removePendingWrites(ofClass: writeClass)
+        }
+        log("Firmware maintenance reconnect armed; ordinary sync paused")
+    }
+
+    func endFirmwareMaintenanceReconnect() {
+        guard firmwareMaintenanceReconnectExpected else { return }
+        firmwareMaintenanceReconnectExpected = false
+        log("Firmware maintenance reconnect ended; ordinary sync resumed")
+
+        guard isNavigationReady, !firmwareMaintenanceActive else { return }
+        enqueueAuthMessage("GET_NAME")
+        requestDeviceCapabilities()
+        sendInitialDeviceSettingsAfterAuthentication()
+        requestDeviceTransferStatus()
+        requestMapTransferStatus()
     }
 
     @discardableResult
@@ -6640,6 +6705,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferLastErrorMessage = nil
         deviceTransferLastErrorSequence = nil
         deviceTransferStatusRevision = 0
+        deviceTransferResourceSnapshot = nil
         firmwareMaintenanceActive = false
         firmwareMaintenanceStage = "normal"
         firmwareMaintenanceCorrelation = 0
@@ -6663,6 +6729,7 @@ class BLEManager: NSObject, ObservableObject {
         firmwareGitSha = ""
         firmwareUpdateReceivedBytes = 0
         firmwareUpdateTotalBytes = 0
+        firmwareFlashOwnerStackHighWaterBytes = nil
         firmwareUpdateLastError = nil
         supportsDeviceSounds = false
         supportsAutomaticDisplayOff = false
@@ -7880,7 +7947,9 @@ class BLEManager: NSObject, ObservableObject {
         isPairingMode = false
         isConnected = true
         isNavigationReady = true
-        sendDiagnosticsCaptureBindingIfNeeded()
+        if !firmwareMaintenanceReconnectExpected {
+            sendDiagnosticsCaptureBindingIfNeeded()
+        }
         supportsDeviceSettings = true
         authRetryTimer?.invalidate()
         authRetryTimer = nil
@@ -7955,11 +8024,16 @@ class BLEManager: NSObject, ObservableObject {
             event: "authenticated",
             fields: ["authorized": "true"]
         )
-        enqueueAuthMessage("GET_NAME")
-        requestDeviceCapabilities()
-        sendInitialDeviceSettingsAfterAuthentication()
-        requestDeviceTransferStatus()
-        requestMapTransferStatus()
+        if firmwareMaintenanceReconnectExpected {
+            log("Maintenance reconnect authenticated; requesting transfer status only")
+            _ = requestDeviceTransferStatus(forMaintenanceReconnect: true)
+        } else {
+            enqueueAuthMessage("GET_NAME")
+            requestDeviceCapabilities()
+            sendInitialDeviceSettingsAfterAuthentication()
+            requestDeviceTransferStatus()
+            requestMapTransferStatus()
+        }
     }
 
     private func sendInitialDeviceSettingsAfterAuthentication() {
@@ -7994,7 +8068,9 @@ class BLEManager: NSObject, ObservableObject {
         onDrop: (() -> Void)? = nil,
         onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
-        if firmwareMaintenanceActive && writeClass != .transfer {
+        if (firmwareMaintenanceActive ||
+            firmwareMaintenanceReconnectExpected) &&
+            writeClass != .transfer {
             log("Suppressed \(writeClass.rawValue) write during firmware maintenance")
             return false
         }
@@ -10785,6 +10861,43 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 .flatMap { $0.isEmpty ? nil : $0 }
             log("Device transfer error: \(message.map { "\(code): \($0)" } ?? code)")
         }
+        if let failure = object["firstTransferFailure"] as? [String: Any] {
+            let generation = (failure["generation"] as? NSNumber)?.uint32Value ?? 0
+            let atMs = (failure["atMs"] as? NSNumber)?.uint32Value ?? 0
+            let key = "\(generation):\(atMs)"
+            if key != lastLoggedTransferFailureKey {
+                lastLoggedTransferFailureKey = key
+                let reason = failure["reason"] as? String ?? "unknown"
+                let branch = failure["fileAbortBranch"] as? String ?? "none"
+                let numericKeys = [
+                    "headerBytes", "bodyBytes", "inputBytes", "offsetBytes",
+                    "attemptedBytes", "elapsedSinceProgressMs", "rawTlsResult",
+                    "immediateErrno", "firstFatalTlsResult", "firstFatalErrno",
+                    "pollResult", "pollFlags", "tlsWriteCalls", "wantReadCalls",
+                    "wantWriteCalls", "rawZeroCalls", "fatalWriteCalls",
+                    "positivePartialCalls", "lastWriteDurationUs", "fileRequested",
+                    "fileReturned", "fileErrno", "authorizationBits",
+                ]
+                let values = numericKeys.compactMap { field -> String? in
+                    guard let value = failure[field] as? NSNumber else { return nil }
+                    return "\(field)=\(value)"
+                }
+                let booleanKeys = ["firstFatalSeen", "fileError", "fileEof"]
+                let booleanValues = booleanKeys.compactMap { field -> String? in
+                    guard let value = failure[field] as? Bool else { return nil }
+                    return "\(field)=\(value)"
+                }
+                let memory = failure["memory"] as? [String: Any] ?? [:]
+                let memoryKeys = ["internalFree", "internalLargest", "dmaFree",
+                                  "dmaLargest", "psramFree", "psramLargest"]
+                let memoryValues = memoryKeys.compactMap { field -> String? in
+                    guard let value = memory[field] as? NSNumber else { return nil }
+                    return "\(field)=\(value)"
+                }
+                log("Device transfer first failure: reason=\(reason) branch=\(branch) "
+                    + (values + booleanValues + memoryValues).joined(separator: " "))
+            }
+        }
 #endif
         if let storage = object["storage"] as? [String: Any] {
             deviceStorageBackend = storage["backend"] as? String
@@ -10795,6 +10908,27 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // native-SDMMC migration protocol extension.
             deviceStorageBackend = nil
             deviceStoragePowerCycleRequired = nil
+        }
+        if let resources = object["resources"] as? [String: Any] {
+            deviceTransferResourceSnapshot = DeviceTransferResourceSnapshot(
+                internalFree: (resources["internalFree"] as? NSNumber)?.uint32Value ?? 0,
+                internalLargest: (resources["internalLargest"] as? NSNumber)?.uint32Value ?? 0,
+                dmaFree: (resources["dmaFree"] as? NSNumber)?.uint32Value ?? 0,
+                dmaLargest: (resources["dmaLargest"] as? NSNumber)?.uint32Value ?? 0,
+                psramFree: (resources["psramFree"] as? NSNumber)?.uint32Value ?? 0,
+                psramLargest: (resources["psramLargest"] as? NSNumber)?.uint32Value ?? 0,
+                minimumInternalFree: (resources["minimumInternalFree"] as? NSNumber)?.uint32Value ?? 0,
+                minimumInternalLargest: (resources["minimumInternalLargest"] as? NSNumber)?.uint32Value ?? 0,
+                minimumDmaFree: (resources["minimumDmaFree"] as? NSNumber)?.uint32Value ?? 0,
+                minimumDmaLargest: (resources["minimumDmaLargest"] as? NSNumber)?.uint32Value ?? 0,
+                minimumPsramFree: (resources["minimumPsramFree"] as? NSNumber)?.uint32Value ?? 0,
+                minimumPsramLargest: (resources["minimumPsramLargest"] as? NSNumber)?.uint32Value ?? 0,
+                workerStackHighWaterBytes: (resources["workerStackHighWaterBytes"] as? NSNumber)?.uint32Value ?? 0,
+                internalOwnerStackHighWaterBytes: (resources["internalOwnerStackHighWaterBytes"] as? NSNumber)?.uint32Value ?? 0,
+                phase: resources["phase"] as? String ?? "unknown"
+            )
+        } else {
+            deviceTransferResourceSnapshot = nil
         }
         if let maintenance = object["maintenance"] as? [String: Any] {
             firmwareMaintenanceActive =
@@ -10854,6 +10988,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             firmwareGitSha = firmware["gitSha"] as? String ?? firmwareGitSha
             firmwareUpdateReceivedBytes = firmware["receivedBytes"] as? Int ?? 0
             firmwareUpdateTotalBytes = firmware["totalBytes"] as? Int ?? 0
+            firmwareFlashOwnerStackHighWaterBytes =
+                (firmware["flashOwnerStackHighWaterBytes"] as? NSNumber)?.uint32Value
             if let lastError = firmware["lastError"] as? [String: Any] {
                 let code = lastError["code"] as? String ?? "error"
                 let message = lastError["message"] as? String ?? ""
@@ -10864,6 +11000,21 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         }
 
         let modeDescription = deviceTransferMode.isEmpty ? "none" : deviceTransferMode
+        if let resources = deviceTransferResourceSnapshot {
+            let flashStack = firmwareFlashOwnerStackHighWaterBytes
+                .map(String.init) ?? "unknown"
+            log(
+                "Device transfer resources: phase=\(resources.phase) " +
+                "correlation=\(firmwareMaintenanceCorrelation) " +
+                "build=\(firmwareBuild) git=\(firmwareGitSha) " +
+                "internal=\(resources.internalFree)/\(resources.minimumInternalFree) " +
+                "dma=\(resources.dmaFree)/\(resources.minimumDmaFree) " +
+                "psram=\(resources.psramFree)/\(resources.minimumPsramFree) " +
+                "workerStack=\(resources.workerStackHighWaterBytes) " +
+                "internalOwnerStack=\(resources.internalOwnerStackHighWaterBytes) " +
+                "flashOwnerStack=\(flashStack)"
+            )
+        }
         if let code = deviceTransferLastErrorCode {
             let sequence = deviceTransferLastErrorSequence.map(String.init) ?? "unknown"
             let message = deviceTransferLastErrorMessage ?? "none"

@@ -11,6 +11,7 @@
 #include <string>
 
 #include "device_transfer_network_protocol.hpp"
+#include "device_transfer_network_owner.hpp"
 #include "device_transfer_tls.hpp"
 
 namespace device_transfer {
@@ -55,7 +56,9 @@ struct HttpTransferStatus {
   uint32_t minimumPsramFree = 0;
   uint32_t minimumPsramLargest = 0;
   uint32_t workerStackHighWaterBytes = 0;
+  uint32_t internalOwnerStackHighWaterBytes = 0;
   std::string resourcePhase;
+  TransferFailureRecord lastTransferFailure;
 };
 
 struct HttpRequest {
@@ -97,6 +100,7 @@ public:
                  std::string apSsid = "BikeComputer-Transfer");
   bool registerHandler(std::string pathPrefix, HttpRequestHandler *handler);
   void setStatusChangedCallback(StatusChangedCallback callback);
+  void setNetworkOperationOwner(NetworkOperationOwner *owner);
   bool setEnabled(bool enabled);
   bool setEnabled(bool enabled, std::string mode);
   bool setPreferredNetwork(const LanCredentials &credentials);
@@ -115,6 +119,7 @@ public:
   void process();
   HttpTransferStatus status() const;
   bool isRequestAuthorized(const HttpRequest &request);
+  void noteDiagnosticsModeDecision(bool matches);
   bool beginAuthorizedCommit(const HttpRequest &request);
   void endAuthorizedCommit();
   bool waitUntilStopped(uint32_t timeoutMs);
@@ -146,6 +151,8 @@ private:
   uint32_t lastUsefulTrafficMs_ = 0;
   bool requestInProgress_ = false;
   bool currentRequestAuthorized_ = false;
+  uint8_t currentAuthorizationBits_ = 0;
+  TransferFailureRecord lastTransferFailure_;
   bool commitInProgress_ = false;
   uint32_t transferGeneration_ = 0;
   uint32_t statusRevision_ = 1;
@@ -167,6 +174,7 @@ private:
   size_t handlerCount_ = 0;
   TaskHandle_t workerTask_ = nullptr;
   TransferClient *activeClient_ = nullptr;
+  NetworkOperationOwner *networkOperationOwner_ = nullptr;
 
   bool handleClient(TransferClient &client, size_t requestIndex);
   void runWorker();
@@ -197,11 +205,13 @@ bool sendHttpHead(TransferClient &client, int status,
                   const char *contentType = nullptr,
                   const HttpResponseHeader *additionalHeaders = nullptr,
                   size_t additionalHeaderCount = 0);
+// Bound sustained TLS records and yield between them so Wi-Fi/AES DMA buffers
+// can drain before the next allocation on the AMOLED board's internal heap.
 bool writeHttpBytes(TransferClient &client, const uint8_t *data,
                     size_t length,
                     uint32_t timeoutMs = 5000,
-                    size_t maximumChunkBytes = 4096,
-                    uint32_t interChunkDelayMs = 0);
+                    size_t maximumChunkBytes = 1024,
+                    uint32_t interChunkDelayMs = 2);
 bool sendHttpJson(TransferClient &client, int status,
                   const std::string &body);
 bool sendHttpError(TransferClient &client, int status,
