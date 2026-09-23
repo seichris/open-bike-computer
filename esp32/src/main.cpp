@@ -153,11 +153,11 @@ static void setupFirmwareMaintenanceMode() {
 }
 
 static void processFirmwareMaintenanceMode() {
-  const uint32_t now = millis();
   bleNavServer.process();
   deviceTransferHttp.process();
   const device_transfer::HttpTransferStatus transferStatus =
       deviceTransferHttp.status();
+  const uint32_t now = millis();
 
   const firmware_maintenance::Stage stage = firmware_maintenance::stage();
   const bool commitOwnsReboot =

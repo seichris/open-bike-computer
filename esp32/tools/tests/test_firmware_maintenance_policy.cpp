@@ -59,6 +59,12 @@ int main() {
   assert(transferTimedOut(kTransferInactivityTimeoutMs, 0, true, false));
   assert(!transferTimedOut(kTransferInactivityTimeoutMs, 0, true, true));
   assert(!transferTimedOut(kTransferInactivityTimeoutMs, 0, false, false));
+  assert(!transferTimedOut(1000, 1001, true, false));
+  const uint32_t beforeMillisWrap = 0xffffff00U;
+  assert(!transferTimedOut(beforeMillisWrap + kTransferInactivityTimeoutMs - 1,
+                           beforeMillisWrap, true, false));
+  assert(transferTimedOut(beforeMillisWrap + kTransferInactivityTimeoutMs,
+                          beforeMillisWrap, true, false));
 
   BootButtonExitState bootButton;
   assert(!bootButtonExitRequested(bootButton, true, 100));

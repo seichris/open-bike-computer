@@ -106,8 +106,13 @@ constexpr bool authenticationTimedOut(uint32_t elapsedMs, bool authenticated) {
 constexpr bool transferTimedOut(uint32_t nowMs, uint32_t lastUsefulTrafficMs,
                                 bool transferEnabled,
                                 bool authorizedRequestInProgress) {
+  const uint32_t elapsedMs = nowMs - lastUsefulTrafficMs;
+  // The HTTP worker can record traffic after the loop sampled nowMs. That
+  // small future timestamp wraps on subtraction and must not look idle.
+  // Maintenance lasts at most ten minutes, well within this half-range.
   return transferEnabled && !authorizedRequestInProgress &&
-         nowMs - lastUsefulTrafficMs >= kTransferInactivityTimeoutMs;
+         elapsedMs < (uint32_t{1} << 31) &&
+         elapsedMs >= kTransferInactivityTimeoutMs;
 }
 
 struct Request {

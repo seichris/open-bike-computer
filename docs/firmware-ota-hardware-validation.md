@@ -200,7 +200,27 @@ attested flash-plan SHA-256
 was flashed over USB to serial `28:84:85:3B:75:20`. Esptool verified all four
 written image hashes and reset the board. Bicino Dev reconnected and reported
 build 100 and the same full Git SHA. This confirms the candidate's USB upload
-and running identity; its signed OTA behavior remains untested.
+and running identity.
+
+A separately approved signed build-99 OTA from Bicino Dev 1.9 (23) still failed
+before uploading image bytes. The app requested maintenance at 05:23:31 UTC,
+reconnected to the maintenance boot with correlation `2192991118`, and sent
+`enter|firmware`. It then lost BLE and reconnected to normal build 100. The
+retained boot 354 began at 05:23:33 UTC with software-reset reason 3 and later
+published a ready acceptance checkpoint for Git `3f96c89a8aaf39e6165182d9422fccfe40532d27`;
+OTA state was `undefined`. Its retained `storage_gap` named
+`maintenance/exit_inactivity` as the last critical event. Bicino Dev ended with
+“Device did not report a firmware transfer session.” The support bundle passed
+`tools/ride_diagnostics.py validate` (ZIP SHA-256
+`9f0b4c2bdb1865afb70ee33120105b71f3f9164f3ea3d16ddf9e911cc3074dc7`).
+
+Source inspection identified a clock-sampling race: the maintenance loop read
+`millis()` before processing the BLE transfer command, which could update
+`lastUsefulTrafficMs` to a later value. Unsigned subtraction then treated that
+future timestamp as nearly 49 days of inactivity. The follow-up source fix
+samples time after processing and rejects a future timestamp in the inactivity
+policy. This fix needs its own exact production build and physical OTA test;
+the 1.75-inch gate remains open.
 
 ## Test 1: Foreground Update
 
