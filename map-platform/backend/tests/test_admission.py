@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from map_platform.admission import AdmissionCapacityError, AdmissionPolicy
+from map_platform.generation_profiles import GenerationProfilePolicy
 from map_platform.jobs import JobClaimError, JobStore, MapJobService
 from map_platform.models import (
     Bounds,
@@ -79,7 +80,65 @@ class AdmissionPolicyTests(unittest.TestCase):
 
         self.assertEqual(legacy, policy.estimate({}, geometry, source()))
         self.assertGreater(buildings.units, legacy.units)
+        self.assertEqual(legacy.inputs["rendererWeight"], 1)
+        self.assertEqual(
+            policy.estimate(
+                {"target": {"rendererFormatVersion": 2}},
+                geometry,
+                source(),
+            ).inputs["rendererWeight"],
+            2,
+        )
         self.assertEqual(buildings.inputs["rendererWeight"], 4)
+        with self.assertRaisesRegex(ValueError, "no admission cost policy"):
+            policy.estimate(
+                {"target": {"rendererFormatVersion": 5}},
+                geometry,
+                source(),
+            )
+
+    def test_development_topography_canary_creates_durable_cost_reservation(self):
+        profile_path = (
+            Path(__file__).resolve().parents[3]
+            / "map-platform"
+            / "config"
+            / "generation-profile-policy-v2.json"
+        )
+        profile_policy = GenerationProfilePolicy.load(profile_path)
+        request = {
+            "mode": "custom_bbox",
+            "bbox": [103.80, 1.20, 103.81, 1.21],
+            "target": {
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": 4,
+            },
+            "labels": {
+                "profileVersion": 1,
+                "preferredLanguages": ["en"],
+                "internationalFallback": "en",
+            },
+            "clientInstallationId": "installation_topography_canary",
+            "clientRequestId": "request_topography_canary",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            store = JobStore(tmp, admission_policy=AdmissionPolicy())
+            service = MapJobService(
+                SourceIndex([source()]),
+                store,
+                topography_target4_allowlist=frozenset({
+                    "installation_topography_canary"
+                }),
+                generation_profile_policy=profile_policy,
+                deployment_channel="development",
+            )
+            created = service.create_job(request)
+            persisted = store.get(created.job_id)
+
+        self.assertEqual(created.status, JobStatus.QUEUED)
+        self.assertEqual(persisted.admission_cost_inputs["rendererFormatVersion"], 4)
+        self.assertEqual(persisted.admission_cost_inputs["rendererWeight"], 8)
+        self.assertEqual(persisted.admission_policy_version, "map-cost-v2")
+        self.assertGreater(persisted.admission_cost, 0)
 
     def test_public_capacity_cannot_consume_operator_reserve(self):
         policy = AdmissionPolicy(
