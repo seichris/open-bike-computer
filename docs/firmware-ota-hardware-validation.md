@@ -273,6 +273,31 @@ pre-upload inactivity deadline, and prevents that overlapping retry. These
 source changes still need a separately approved physical retry with the updated
 app.
 
+The next separately approved downgrade succeeded with the signed build-99 image
+(`11bf6ebf0d4e130fe9a4698dd5888179fca7bb03447b47584fe1bc4ed5430922`)
+and Bicino Dev 1.9 (23) from Git
+`31be90cd114dbef0c117daa45213659d03504d64`. On the same 1.75-inch board,
+the app requested firmware transfer at 06:19:30 UTC. The user accepted the
+iPhone's `BikeComputer-Transfer` system prompt; the first Wi-Fi observation at
+06:19:39 UTC was `target` with an accepted configuration. Two early pinned HTTPS
+probes saw the route before it was ready. The third probe at 06:19:43 UTC
+reached the accessory subnet, accepted the pinned TLS challenge, and received
+the authenticated server response. The app displayed `uploading firmware`,
+then `device rebooting`, and after BLE reconnect showed current build 99 with
+Git prefix `ef18f363b281` and status `firmware is current`.
+
+The new retained boot sequence 358 recorded production target
+`WAVESHARE_AMOLED_175`, version 0.3.4, build 99, full Git
+`ef18f363b281528192e7fe5215434eb374e59f5c`, `ready=true`, and
+`otaState=valid`. The exported support bundle passed
+`tools/ride_diagnostics.py validate` (ZIP SHA-256
+`ea034ced73fab897f010aaf3240116e2ac1dc9b54b6d0fb9bd3bf1f8d25451e4`),
+and `tools/verify_firmware_boot_acceptance.py --ota` passed for that exact boot.
+This closes the single signed downgrade trial on the 1.75-inch board. It does
+not close the ten-cycle, fault-injection, SD-absence, resource-margin, or
+2.06-inch production gates above. A return to build 100 over USB is a separate
+physical firmware write requiring its own exact approval.
+
 ## Test 1: Foreground Update
 
 1. Open the iPhone app.
