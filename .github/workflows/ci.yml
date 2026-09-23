@@ -893,6 +893,11 @@ jobs:
       - name: Device transfer HTTP limit host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_device_transfer_failure_policy.cpp \
+            -o /tmp/test_device_transfer_failure_policy
+          /tmp/test_device_transfer_failure_policy
+          python -m unittest tools.tests.test_device_transfer_failure_contract
+          g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_device_transfer_http_limits.cpp \
             -o /tmp/test_device_transfer_http_limits
           /tmp/test_device_transfer_http_limits

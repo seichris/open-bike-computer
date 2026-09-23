@@ -1,6 +1,7 @@
 #include "ride_diagnostics_http.hpp"
 
 #include "../storage/storage.hpp"
+#include "../device_transfer/device_transfer_failure_policy.hpp"
 #include "ride_diagnostics.hpp"
 #include "ride_diagnostics_http_policy.hpp"
 #include "ride_diagnostics_index_policy.hpp"
@@ -81,8 +82,14 @@ std::string jsonEscape(const std::string &value) {
 bool requestStillAuthorized(
     device_transfer::HttpTransferServer *server,
     const device_transfer::HttpRequest &request) {
-  return server != nullptr && server->isRequestAuthorized(request) &&
-         server->status().mode == "diagnostics";
+  if (server == nullptr)
+    return false;
+  const bool authorized = server->isRequestAuthorized(request);
+  if (!authorized)
+    return false;
+  const bool modeMatches = server->status().mode == "diagnostics";
+  server->noteDiagnosticsModeDecision(modeMatches);
+  return modeMatches;
 }
 
 bool sha256File(const char *path, std::string &out, uint32_t &bytes,
@@ -383,6 +390,8 @@ bool sendFile(device_transfer::TransferClient &client, const Chunk &chunk,
               device_transfer::HttpTransferServer *server,
               const device_transfer::HttpRequest &request) {
   if (!requestStillAuthorized(server, request)) {
+    client.noteFailure(device_transfer::TransferFailureReason::Authorization);
+    client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::AuthorizationBeforeOpen);
     client.stop();
     return false;
   }
@@ -391,6 +400,7 @@ bool sendFile(device_transfer::TransferClient &client, const Chunk &chunk,
     return device_transfer::sendHttpError(client, 404, "chunk_missing",
                                           "diagnostic chunk is unavailable");
   if (!device_transfer::sendHttpHead(client, 200, chunk.bytes, "application/x-ndjson")) {
+    client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::Header);
     storage.close(file);
     return false;
   }
@@ -398,24 +408,37 @@ bool sendFile(device_transfer::TransferClient &client, const Chunk &chunk,
   uint32_t sent = 0;
   while (sent < chunk.bytes) {
     if (!requestStillAuthorized(server, request)) {
+      client.noteFailure(device_transfer::TransferFailureReason::Authorization);
+      client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::AuthorizationDuringBody);
       storage.close(file);
       client.stop();
       return false;
     }
     const size_t remaining = chunk.bytes - sent;
-    const size_t count =
-        storage.read(file, buffer, std::min(remaining, sizeof(buffer)));
-    if (count == 0 || storage.hasError(file)) {
+    const StorageReadEvidence read = storage.readWithEvidence(
+        file, buffer, std::min(remaining, sizeof(buffer)));
+    const size_t count = read.returned;
+    if (device_transfer::failure_policy::fileReadFailed(count, read.error)) {
+      client.noteFileRead(read.requested, count, read.errorNumber,
+                          read.error, read.eof);
+      client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::Read);
       storage.close(file);
       return false;
     }
     if (!device_transfer::writeHttpBytes(client, buffer, count)) {
+      client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::Write);
       storage.close(file);
       return false;
     }
     sent += static_cast<uint32_t>(count);
   }
-  return sent == chunk.bytes && storage.close(file) == 0;
+  const int closeResult = storage.close(file);
+  if (sent != chunk.bytes || closeResult != 0) {
+    client.noteFailure(device_transfer::TransferFailureReason::FileRead);
+    client.noteFileAbortBranch(device_transfer::TransferFileAbortBranch::Close);
+    return false;
+  }
+  return true;
 }
 
 bool resolveClosedChunk(uint32_t boot, uint32_t number, Chunk &chunk) {
@@ -459,6 +482,7 @@ bool RideDiagnosticsHttp::handleRequest(
                                    "diagnostics session is not authorized");
     return true;
   }
+  server_->noteDiagnosticsModeDecision(true);
   const http_policy::Route route =
       http_policy::parseRoute(request.method, request.path, kPrefix);
   if (route.kind != http_policy::RouteKind::Exit) {

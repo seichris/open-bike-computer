@@ -58,6 +58,7 @@ struct HttpTransferStatus {
   uint32_t workerStackHighWaterBytes = 0;
   uint32_t internalOwnerStackHighWaterBytes = 0;
   std::string resourcePhase;
+  TransferFailureRecord lastTransferFailure;
 };
 
 struct HttpRequest {
@@ -118,6 +119,7 @@ public:
   void process();
   HttpTransferStatus status() const;
   bool isRequestAuthorized(const HttpRequest &request);
+  void noteDiagnosticsModeDecision(bool matches);
   bool beginAuthorizedCommit(const HttpRequest &request);
   void endAuthorizedCommit();
   bool waitUntilStopped(uint32_t timeoutMs);
@@ -149,6 +151,8 @@ private:
   uint32_t lastUsefulTrafficMs_ = 0;
   bool requestInProgress_ = false;
   bool currentRequestAuthorized_ = false;
+  uint8_t currentAuthorizationBits_ = 0;
+  TransferFailureRecord lastTransferFailure_;
   bool commitInProgress_ = false;
   uint32_t transferGeneration_ = 0;
   uint32_t statusRevision_ = 1;

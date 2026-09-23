@@ -2816,6 +2816,55 @@ static std::string genericTransferStatusJson() {
     status_json::appendUnsignedField(body, "sequence", transferStatus.errorSequence);
     body += "}";
   }
+  const auto &failure = transferStatus.lastTransferFailure;
+  if (failure.reason != device_transfer::TransferFailureReason::None) {
+    status_json::appendFieldPrefix(body, "firstTransferFailure");
+    body += "{\"reason\":\"";
+    body += device_transfer::transferFailureReasonName(failure.reason);
+    body += "\"";
+    const auto appendSigned = [&body](const char *key, int32_t value) {
+      status_json::appendFieldPrefix(body, key);
+      body += std::to_string(value);
+    };
+    status_json::appendUnsignedField(body, "atMs", failure.atMs);
+    status_json::appendUnsignedField(body, "generation", failure.generation);
+    status_json::appendUnsignedField(body, "headerBytes", failure.responseHeaderBytes);
+    status_json::appendUnsignedField(body, "bodyBytes", failure.responseBodyBytes);
+    status_json::appendUnsignedField(body, "inputBytes", failure.inputBytes);
+    status_json::appendUnsignedField(body, "offsetBytes", failure.offsetBytes);
+    status_json::appendUnsignedField(body, "attemptedBytes", failure.attemptedBytes);
+    status_json::appendUnsignedField(body, "elapsedSinceProgressMs", failure.elapsedSinceProgressMs);
+    appendSigned("rawTlsResult", failure.rawTlsResult);
+    appendSigned("immediateErrno", failure.immediateErrno);
+    status_json::appendBoolField(body, "firstFatalSeen", failure.firstFatalSeen);
+    appendSigned("firstFatalTlsResult", failure.firstFatalTlsResult);
+    appendSigned("firstFatalErrno", failure.firstFatalErrno);
+    appendSigned("pollResult", failure.pollResult);
+    appendSigned("pollFlags", failure.pollFlags);
+    status_json::appendUnsignedField(body, "tlsWriteCalls", failure.tlsWriteCalls);
+    status_json::appendUnsignedField(body, "wantReadCalls", failure.wantReadCalls);
+    status_json::appendUnsignedField(body, "wantWriteCalls", failure.wantWriteCalls);
+    status_json::appendUnsignedField(body, "rawZeroCalls", failure.rawZeroCalls);
+    status_json::appendUnsignedField(body, "fatalWriteCalls", failure.fatalWriteCalls);
+    status_json::appendUnsignedField(body, "positivePartialCalls", failure.positivePartialCalls);
+    status_json::appendUnsignedField(body, "lastWriteDurationUs", failure.lastWriteDurationUs);
+    status_json::appendUnsignedField(body, "fileRequested", failure.fileRequested);
+    status_json::appendUnsignedField(body, "fileReturned", failure.fileReturned);
+    appendSigned("fileErrno", failure.fileErrno);
+    status_json::appendBoolField(body, "fileError", failure.fileError);
+    status_json::appendBoolField(body, "fileEof", failure.fileEof);
+    status_json::appendStringField(body, "fileAbortBranch",
+        device_transfer::transferFileAbortBranchName(failure.fileAbortBranch));
+    status_json::appendUnsignedField(body, "authorizationBits", failure.authorizationBits);
+    status_json::appendFieldPrefix(body, "memory");
+    body += "{\"internalFree\":" + std::to_string(failure.memory.internalFree);
+    status_json::appendUnsignedField(body, "internalLargest", failure.memory.internalLargest);
+    status_json::appendUnsignedField(body, "dmaFree", failure.memory.dmaFree);
+    status_json::appendUnsignedField(body, "dmaLargest", failure.memory.dmaLargest);
+    status_json::appendUnsignedField(body, "psramFree", failure.memory.psramFree);
+    status_json::appendUnsignedField(body, "psramLargest", failure.memory.psramLargest);
+    body += "}}";
+  }
   if (!firmware_maintenance::active()) {
     status_json::appendFieldPrefix(body, "storage");
     body += "{\"backend\":\"";

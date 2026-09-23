@@ -5,6 +5,7 @@
 #include "../power_management/power_management.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 #include "device_transfer_http_limits.hpp"
+#include "device_transfer_failure_policy.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -510,6 +511,7 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
         apPassphrase_ = generateSessionToken().substr(0, 24);
       }
       if (!wasEnabled) {
+        lastTransferFailure_ = {};
         if (requestedMode != "debug" && requestedMode != "diagnostics")
           preferredNetwork_ = {};
         startedAp_ = false;
@@ -912,6 +914,7 @@ void HttpTransferServer::runWorker() {
         const bool stillEnabled = enabled_;
         requestInProgress_ = stillEnabled;
         currentRequestAuthorized_ = false;
+        currentAuthorizationBits_ = 0;
         unlockState();
         if (!stillEnabled || !handleClient(client, requestIndex))
           break;
@@ -980,6 +983,7 @@ HttpTransferStatus HttpTransferServer::status() const {
   const std::string lastErrorCode = lastErrorCode_;
   const std::string lastErrorMessage = lastErrorMessage_;
   const uint32_t errorSequence = errorSequence_;
+  const TransferFailureRecord lastTransferFailure = lastTransferFailure_;
   const uint32_t lastUsefulTrafficMs = lastUsefulTrafficMs_;
   const uint32_t statusRevision = statusRevision_;
   const uint32_t minimumInternalFree = minimumInternalFree_;
@@ -1045,6 +1049,7 @@ HttpTransferStatus HttpTransferServer::status() const {
   result.lastErrorCode = lastErrorCode;
   result.lastErrorMessage = lastErrorMessage;
   result.errorSequence = errorSequence;
+  result.lastTransferFailure = lastTransferFailure;
   result.lastUsefulTrafficMs = lastUsefulTrafficMs;
   result.authorizedRequestInProgress = authorizedRequestInProgress;
   result.internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -1087,17 +1092,29 @@ bool HttpTransferServer::isRequestAuthorized(
   const std::string sessionToken = sessionToken_;
   const uint32_t transferGeneration = transferGeneration_;
   const uint64_t authenticatedBleSessionId = authenticatedBleSessionId_;
-  const bool authorized =
-      isHttpTransferGenerationCurrent(enabled, transferGeneration,
-                                      request.transferGeneration) &&
-      authenticatedBleSessionId != 0 && !sessionToken.empty() &&
+  const bool generationMatches = isHttpTransferGenerationCurrent(
+      enabled, transferGeneration, request.transferGeneration);
+  const bool tokenPresent = !sessionToken.empty();
+  const bool bleBound = authenticatedBleSessionId != 0;
+  const bool tokenMatches = generationMatches && bleBound && tokenPresent &&
       constantTimeEqual(request.transferToken, sessionToken);
+  const bool authorized =
+      generationMatches && bleBound && tokenPresent && tokenMatches;
+  currentAuthorizationBits_ = failure_policy::authorizationBits(
+      enabled, tokenPresent, tokenMatches, generationMatches, bleBound, false);
   currentRequestAuthorized_ = authorized;
   if (authorized) {
     lastUsefulTrafficMs_ = millis();
   }
   unlockState();
   return authorized;
+}
+
+void HttpTransferServer::noteDiagnosticsModeDecision(bool matches) {
+  lockState();
+  currentAuthorizationBits_ =
+      (currentAuthorizationBits_ & ~uint8_t{32}) | (matches ? 32U : 0U);
+  unlockState();
 }
 
 bool HttpTransferServer::beginAuthorizedCommit(const HttpRequest &request) {
@@ -1253,6 +1270,14 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   if (client.httpResponseWriteFailed() ||
       (client.httpResponseWriteStarted() && !handled) ||
       (handler != nullptr && !client.connected())) {
+    client.noteFailure(TransferFailureReason::HandlerAbort);
+    TransferFailureRecord failure = client.failureRecord();
+    lockState();
+    failure.generation = request.transferGeneration;
+    failure.authorizationBits = currentAuthorizationBits_;
+    if (lastTransferFailure_.reason == TransferFailureReason::None)
+      lastTransferFailure_ = failure;
+    unlockState();
     client.requestHttpResponseClose();
     client.stop();
     if (handler != nullptr)
@@ -1441,7 +1466,11 @@ bool sendHttpHead(TransferClient &client, int status, uint64_t contentLength,
               "\r\nContent-Length: " +
               std::to_string(contentLength) +
               "\r\nCache-Control: no-store\r\nPragma: no-cache\r\n\r\n";
-  return writeHttpResponse(client, response);
+  client.noteResponseHeaderStarted();
+  const bool sent = writeHttpResponse(client, response);
+  if (sent)
+    client.noteResponseHeaderComplete();
+  return sent;
 }
 
 bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
@@ -1449,17 +1478,23 @@ bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
                     uint32_t interChunkDelayMs) {
   client.noteHttpResponseWriteStarted();
   if ((data == nullptr && length != 0) || maximumChunkBytes == 0) {
+    client.noteFailure(TransferFailureReason::InvalidWrite, length);
     client.noteHttpResponseWriteFailed();
     return false;
   }
   size_t offset = 0;
   uint32_t lastProgressMs = millis();
-  while (offset < length && millis() - lastProgressMs < timeoutMs) {
+  while (offset < length &&
+         !failure_policy::noProgressExpired(millis(), lastProgressMs,
+                                            timeoutMs)) {
     if (!client.connected()) {
+      client.noteFailure(TransferFailureReason::Disconnected, length, offset,
+                         0, millis() - lastProgressMs);
       client.noteHttpResponseWriteFailed();
       return false;
     }
     const size_t chunk = std::min(maximumChunkBytes, length - offset);
+    client.noteWriteAttempt(length, offset, chunk, millis() - lastProgressMs);
     const size_t written = client.write(data + offset, chunk);
     if (written == 0) {
       client.noteHttpResponseNoProgressWait(1);
@@ -1475,8 +1510,11 @@ bool writeHttpBytes(TransferClient &client, const uint8_t *data, size_t length,
     }
   }
   const bool complete = offset == length;
-  if (!complete)
+  if (!complete) {
+    client.noteFailure(TransferFailureReason::NoProgressTimeout, length,
+                       offset, 0, millis() - lastProgressMs);
     client.noteHttpResponseWriteFailed();
+  }
   return complete;
 }
 

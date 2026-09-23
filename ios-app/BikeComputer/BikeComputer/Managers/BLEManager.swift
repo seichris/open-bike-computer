@@ -1404,6 +1404,7 @@ class BLEManager: NSObject, ObservableObject {
     private var deviceTransferStatusChunkTransferID: UInt8?
     private var deviceTransferStatusChunkCount: UInt8 = 0
     private var deviceTransferStatusChunks: [UInt8: Data] = [:]
+    private var lastLoggedTransferFailureKey: String?
     private var rendererDiagnosticsChunks =
         RendererDiagnosticsChunkReassembler()
     private var deviceGPSOverrideToken: UUID?
@@ -10859,6 +10860,43 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             let message = deviceTransferLastErrorMessage
                 .flatMap { $0.isEmpty ? nil : $0 }
             log("Device transfer error: \(message.map { "\(code): \($0)" } ?? code)")
+        }
+        if let failure = object["firstTransferFailure"] as? [String: Any] {
+            let generation = (failure["generation"] as? NSNumber)?.uint32Value ?? 0
+            let atMs = (failure["atMs"] as? NSNumber)?.uint32Value ?? 0
+            let key = "\(generation):\(atMs)"
+            if key != lastLoggedTransferFailureKey {
+                lastLoggedTransferFailureKey = key
+                let reason = failure["reason"] as? String ?? "unknown"
+                let branch = failure["fileAbortBranch"] as? String ?? "none"
+                let numericKeys = [
+                    "headerBytes", "bodyBytes", "inputBytes", "offsetBytes",
+                    "attemptedBytes", "elapsedSinceProgressMs", "rawTlsResult",
+                    "immediateErrno", "firstFatalTlsResult", "firstFatalErrno",
+                    "pollResult", "pollFlags", "tlsWriteCalls", "wantReadCalls",
+                    "wantWriteCalls", "rawZeroCalls", "fatalWriteCalls",
+                    "positivePartialCalls", "lastWriteDurationUs", "fileRequested",
+                    "fileReturned", "fileErrno", "authorizationBits",
+                ]
+                let values = numericKeys.compactMap { field -> String? in
+                    guard let value = failure[field] as? NSNumber else { return nil }
+                    return "\(field)=\(value)"
+                }
+                let booleanKeys = ["firstFatalSeen", "fileError", "fileEof"]
+                let booleanValues = booleanKeys.compactMap { field -> String? in
+                    guard let value = failure[field] as? Bool else { return nil }
+                    return "\(field)=\(value)"
+                }
+                let memory = failure["memory"] as? [String: Any] ?? [:]
+                let memoryKeys = ["internalFree", "internalLargest", "dmaFree",
+                                  "dmaLargest", "psramFree", "psramLargest"]
+                let memoryValues = memoryKeys.compactMap { field -> String? in
+                    guard let value = memory[field] as? NSNumber else { return nil }
+                    return "\(field)=\(value)"
+                }
+                log("Device transfer first failure: reason=\(reason) branch=\(branch) "
+                    + (values + booleanValues + memoryValues).joined(separator: " "))
+            }
         }
 #endif
         if let storage = object["storage"] as? [String: Any] {

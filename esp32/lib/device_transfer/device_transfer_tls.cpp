@@ -1,4 +1,5 @@
 #include "device_transfer_tls.hpp"
+#include "device_transfer_failure_policy.hpp"
 
 #include <Preferences.h>
 #include <esp_heap_caps.h>
@@ -17,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <climits>
 #include <cstring>
 #include <limits>
@@ -517,6 +519,81 @@ bool TransferTlsIdentityStore::cancelRotation() {
 
 TransferClient::~TransferClient() { stop(); }
 
+const char *transferFailureReasonName(TransferFailureReason reason) {
+  switch (reason) {
+  case TransferFailureReason::None: return "none";
+  case TransferFailureReason::InvalidWrite: return "invalid_write";
+  case TransferFailureReason::TlsWrite: return "tls_write";
+  case TransferFailureReason::SocketPoll: return "socket_poll";
+  case TransferFailureReason::TlsRead: return "tls_read";
+  case TransferFailureReason::SocketInterrupted: return "socket_interrupted";
+  case TransferFailureReason::Disconnected: return "disconnected";
+  case TransferFailureReason::NoProgressTimeout: return "no_progress_timeout";
+  case TransferFailureReason::FileRead: return "file_read";
+  case TransferFailureReason::Authorization: return "authorization";
+  case TransferFailureReason::HandlerAbort: return "handler_abort";
+  }
+  return "unknown";
+}
+
+const char *transferFileAbortBranchName(TransferFileAbortBranch branch) {
+  switch (branch) {
+  case TransferFileAbortBranch::None: return "none";
+  case TransferFileAbortBranch::AuthorizationBeforeOpen: return "authorization_before_open";
+  case TransferFileAbortBranch::Header: return "header";
+  case TransferFileAbortBranch::AuthorizationDuringBody: return "authorization_during_body";
+  case TransferFileAbortBranch::Read: return "read";
+  case TransferFileAbortBranch::Write: return "write";
+  case TransferFileAbortBranch::Close: return "close";
+  }
+  return "unknown";
+}
+
+void TransferClient::noteFailure(TransferFailureReason reason, size_t input,
+                                 size_t offset, size_t attempted,
+                                 uint32_t elapsed) {
+  if (failureRecord_.reason != TransferFailureReason::None)
+    return;
+  failureRecord_.reason = reason;
+  failureRecord_.atMs = millis();
+  failureRecord_.responseHeaderBytes = responseHeaderInProgress_
+      ? responseBytesWritten_ : responseHeaderBytes_;
+  failureRecord_.responseBodyBytes = responseHeaderInProgress_ ? 0
+      : (responseBytesWritten_ >= responseHeaderBytes_
+             ? responseBytesWritten_ - responseHeaderBytes_ : 0);
+  failureRecord_.inputBytes = input;
+  failureRecord_.offsetBytes = offset;
+  failureRecord_.attemptedBytes = attempted;
+  failureRecord_.elapsedSinceProgressMs = elapsed;
+  failureRecord_.rawTlsResult = lastRawTlsResult_;
+  failureRecord_.immediateErrno = lastWriteErrno_;
+  failureRecord_.firstFatalTlsResult = firstFatalTlsResult_;
+  failureRecord_.firstFatalErrno = firstFatalErrno_;
+  failureRecord_.firstFatalSeen = firstFatalSeen_;
+  failureRecord_.pollResult = lastPollResult_;
+  failureRecord_.pollFlags = lastPollFlags_;
+  failureRecord_.tlsWriteCalls = responseWriteCalls_;
+  failureRecord_.wantReadCalls = wantReadCalls_;
+  failureRecord_.wantWriteCalls = wantWriteCalls_;
+  failureRecord_.rawZeroCalls = rawZeroCalls_;
+  failureRecord_.fatalWriteCalls = fatalWriteCalls_;
+  failureRecord_.positivePartialCalls = positivePartialCalls_;
+  failureRecord_.lastWriteDurationUs = lastWriteDurationUs_;
+  failureRecord_.memory = captureTlsMemory();
+}
+
+void TransferClient::noteFileRead(size_t requested, size_t returned,
+                                  int errorNumber, bool error, bool eof) {
+  if (failureRecord_.reason != TransferFailureReason::None)
+    return;
+  noteFailure(TransferFailureReason::FileRead);
+  failureRecord_.fileRequested = requested;
+  failureRecord_.fileReturned = returned;
+  failureRecord_.fileErrno = errorNumber;
+  failureRecord_.fileError = error;
+  failureRecord_.fileEof = eof;
+}
+
 bool TransferClient::begin(WiFiClient &accepted,
                            const TransferTlsIdentity &identity,
                            uint32_t handshakeTimeoutMs) {
@@ -607,7 +684,13 @@ int TransferClient::available() {
     return buffered > INT_MAX ? INT_MAX : static_cast<int>(buffered);
   pollfd descriptor{socket_, POLLIN, 0};
   const int ready = ::poll(&descriptor, 1, 0);
+  const int pollErrno = ready < 0 ? errno : 0;
   if (ready > 0 && (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+    lastPollResult_ = ready;
+    lastPollFlags_ = descriptor.revents;
+    lastRawTlsResult_ = 0;
+    lastWriteErrno_ = pollErrno;
+    noteFailure(TransferFailureReason::SocketPoll);
     connected_ = false;
     return 0;
   }
@@ -623,9 +706,13 @@ int TransferClient::read(uint8_t *buffer, size_t length) {
   if (!connected_ || tls_ == nullptr || buffer == nullptr || length == 0)
     return 0;
   const ssize_t result = esp_tls_conn_read(tls_, buffer, length);
+  const int readErrno = errno;
   if (result > 0)
     return result > INT_MAX ? INT_MAX : static_cast<int>(result);
   if (result == 0) {
+    lastRawTlsResult_ = 0;
+    lastWriteErrno_ = readErrno;
+    noteFailure(TransferFailureReason::TlsRead);
     connected_ = false;
     return 0;
   }
@@ -634,6 +721,9 @@ int TransferClient::read(uint8_t *buffer, size_t length) {
     return 0;
   }
   connected_ = false;
+  lastRawTlsResult_ = result;
+  lastWriteErrno_ = readErrno;
+  noteFailure(TransferFailureReason::TlsRead);
   return -1;
 }
 
@@ -642,6 +732,18 @@ size_t TransferClient::write(const uint8_t *buffer, size_t length) {
     return 0;
   const uint32_t startedUs = micros();
   const ssize_t result = esp_tls_conn_write(tls_, buffer, length);
+  const int writeErrno = errno;
+  lastWriteDurationUs_ = micros() - startedUs;
+  lastRawTlsResult_ = result;
+  lastWriteErrno_ = writeErrno;
+  const auto outcome = failure_policy::classifyTlsWrite(
+      result, length, ESP_TLS_ERR_SSL_WANT_READ, ESP_TLS_ERR_SSL_WANT_WRITE);
+  if (outcome == failure_policy::TlsWriteOutcome::Fatal &&
+      !firstFatalSeen_) {
+    firstFatalSeen_ = true;
+    firstFatalTlsResult_ = result;
+    firstFatalErrno_ = writeErrno;
+  }
   if (responseWriteStarted_) {
     ++responseWriteCalls_;
     responseActiveTlsWriteUs_ += micros() - startedUs;
@@ -649,11 +751,23 @@ size_t TransferClient::write(const uint8_t *buffer, size_t length) {
       ++responseZeroWriteCalls_;
     else if (static_cast<size_t>(result) < length)
       ++responseShortWriteCalls_;
+    if (outcome == failure_policy::TlsWriteOutcome::WantRead)
+      ++wantReadCalls_;
+    else if (outcome == failure_policy::TlsWriteOutcome::WantWrite)
+      ++wantWriteCalls_;
+    else if (outcome == failure_policy::TlsWriteOutcome::RawZero)
+      ++rawZeroCalls_;
+    else if (outcome == failure_policy::TlsWriteOutcome::Fatal)
+      ++fatalWriteCalls_;
+    else if (outcome == failure_policy::TlsWriteOutcome::PositivePartial)
+      ++positivePartialCalls_;
   }
   if (result > 0)
     return static_cast<size_t>(result);
   if (result != ESP_TLS_ERR_SSL_WANT_READ &&
       result != ESP_TLS_ERR_SSL_WANT_WRITE) {
+    noteFailure(TransferFailureReason::TlsWrite, writeInputBytes_,
+                writeOffsetBytes_, writeAttemptedBytes_, writeElapsedMs_);
     connected_ = false;
   }
   return 0;
@@ -663,8 +777,15 @@ uint8_t TransferClient::connected() {
   if (!connected_ || tls_ == nullptr || socket_ < 0)
     return 0;
   pollfd descriptor{socket_, POLLIN, 0};
-  if (::poll(&descriptor, 1, 0) > 0 &&
+  const int ready = ::poll(&descriptor, 1, 0);
+  const int pollErrno = ready < 0 ? errno : 0;
+  if (ready > 0 &&
       (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+    lastPollResult_ = ready;
+    lastPollFlags_ = descriptor.revents;
+    lastRawTlsResult_ = 0;
+    lastWriteErrno_ = pollErrno;
+    noteFailure(TransferFailureReason::SocketPoll);
     connected_ = false;
   }
   return connected_ ? 1 : 0;
@@ -683,13 +804,24 @@ void TransferClient::resetHttpResponsePolicy(bool persistenceAllowed) {
   responseActiveTlsWriteUs_ = 0;
   responseNoProgressWaitMs_ = 0;
   responseIntentionalDelayMs_ = 0;
+  responseHeaderBytes_ = 0;
+  responseHeaderInProgress_ = false;
+  failureRecord_ = {};
+  wantReadCalls_ = wantWriteCalls_ = rawZeroCalls_ = fatalWriteCalls_ = 0;
+  positivePartialCalls_ = lastWriteDurationUs_ = 0;
+  lastRawTlsResult_ = lastWriteErrno_ = lastPollResult_ = lastPollFlags_ = 0;
+  firstFatalTlsResult_ = firstFatalErrno_ = 0;
+  firstFatalSeen_ = false;
+  writeInputBytes_ = writeOffsetBytes_ = writeAttemptedBytes_ = 0;
+  writeElapsedMs_ = 0;
 }
 
 void TransferClient::requestHttpResponseKeepAlive() {
   responseKeepAlive_ = responsePersistenceAllowed_;
 }
 
-void TransferClient::interruptSocket() const {
+void TransferClient::interruptSocket() {
+  noteFailure(TransferFailureReason::SocketInterrupted);
   interruptLease_.interrupt([](int fd) { ::shutdown(fd, SHUT_RDWR); });
 }
 

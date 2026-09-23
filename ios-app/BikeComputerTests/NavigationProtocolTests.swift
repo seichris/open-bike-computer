@@ -177,13 +177,20 @@ actor CatalogCredentialBootstrapRecorder {
 
 final class OfflineMapTestURLProtocol: URLProtocol {
     typealias Handler = (URLRequest) throws -> (Int, Data)
+    private struct InterruptedResponse {
+        let path: String
+        let prefix: Data
+        let expectedBytes: Int
+    }
     nonisolated(unsafe) private static var handler: Handler?
+    nonisolated(unsafe) private static var interruptedResponse: InterruptedResponse?
     nonisolated(unsafe) private static var recordedRequests: [URLRequest] = []
     private static let lock = NSLock()
 
     static func configure(handler: @escaping Handler) {
         lock.lock()
         self.handler = handler
+        interruptedResponse = nil
         recordedRequests = []
         lock.unlock()
     }
@@ -194,9 +201,18 @@ final class OfflineMapTestURLProtocol: URLProtocol {
         return recordedRequests
     }
 
+    static func interruptResponse(path: String, prefix: Data, expectedBytes: Int) {
+        lock.lock()
+        interruptedResponse = InterruptedResponse(
+            path: path, prefix: prefix, expectedBytes: expectedBytes
+        )
+        lock.unlock()
+    }
+
     static func reset() {
         lock.lock()
         handler = nil
+        interruptedResponse = nil
         recordedRequests = []
         lock.unlock()
     }
@@ -231,7 +247,25 @@ final class OfflineMapTestURLProtocol: URLProtocol {
         Self.lock.lock()
         Self.recordedRequests.append(request)
         let handler = Self.handler
+        let interruption = Self.interruptedResponse
         Self.lock.unlock()
+        if let interruption, request.url?.path == interruption.path {
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "application/x-ndjson",
+                    "Content-Length": String(interruption.expectedBytes),
+                ]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: interruption.prefix)
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(50)) { [self] in
+                client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+            }
+            return
+        }
         guard let handler else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
@@ -912,6 +946,7 @@ struct NavigationProtocolTests {
         await testFirmwareTransferCancellationExits()
         await testFirmwareMaintenancePreparationFlow()
         await testDeviceDiagnosticsTransferPolicy()
+        await testDeviceDiagnosticsInterruptedChunk()
         await testDeviceDiagnosticsFailsFastOnFirmwareRejection()
         await testDeviceDiagnosticsRecordsEntryFailure()
         await testDeviceDiagnosticsDownloadEndToEnd()
@@ -23253,6 +23288,87 @@ struct NavigationProtocolTests {
                 numericBooleanStream
             ) == nil,
             "JSON numbers cannot impersonate firmware boolean fields"
+        )
+    }
+
+    static func testDeviceDiagnosticsInterruptedChunk() async {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("device-diagnostics-interrupted-\(UUID().uuidString)")
+        let defaultsSuite = "DeviceDiagnosticsInterrupted.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: defaultsSuite)!
+        defer {
+            OfflineMapTestURLProtocol.reset()
+            try? FileManager.default.removeItem(at: root)
+            defaults.removePersistentDomain(forName: defaultsSuite)
+        }
+        let recorder = RideDiagnosticsRecorder(rootURL: root, userDefaults: defaults)
+        let bleManager = BLEManager()
+        let deviceID = "01234567-89ab-cdef-0123-456789abcdef"
+        bleManager.setConnectedDeviceIDForTesting(deviceID)
+        let fullChunk = Data(repeating: 0x41, count: 7130)
+        let digest = SHA256.hash(data: fullChunk).map {
+            String(format: "%02x", $0)
+        }.joined()
+        let index = Data("""
+        {"schema":1,"source":"firmware","bootSequence":1,"activeChunk":2,"stats":{"enqueued":1,"written":1,"dropped":0,"storageErrors":0},"chunks":[{"bootSequence":1,"chunk":1,"bytes":7130,"sha256":"\(digest)"}]}
+        """.utf8)
+        let session = DeviceTransferSession(
+            mode: .diagnostics,
+            baseURL: URL(string: "https://diagnostics.test")!,
+            accessPointSSID: nil,
+            sessionToken: "test-token",
+            tlsCertificateSHA256: String(repeating: "a", count: 64),
+            tlsIdentityVersion: 1,
+            transferGeneration: 1,
+            secureTransferV1: true
+        )
+        let controller = TestDeviceDiagnosticsSessionController(session: session)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OfflineMapTestURLProtocol.self]
+        OfflineMapTestURLProtocol.configure { request in
+            switch request.url?.path {
+            case "/device-diagnostics/v1/index": return (200, index)
+            case "/device-diagnostics/v1/session/exit":
+                return (200, Data("{\"ok\":true}".utf8))
+            default: return (404, Data())
+            }
+        }
+        OfflineMapTestURLProtocol.interruptResponse(
+            path: "/device-diagnostics/v1/chunks/1/1",
+            prefix: Data(fullChunk.prefix(4096)),
+            expectedBytes: fullChunk.count
+        )
+        let manager = DeviceDiagnosticsTransferManager(
+            transferManager: controller,
+            sessionConfiguration: { configuration }
+        )
+        do {
+            _ = try await manager.downloadDeviceLogs(
+                bleManager: bleManager,
+                recorder: recorder,
+                status: { _ in }
+            )
+            assert(false, "interrupted diagnostics chunk must fail")
+        } catch DeviceDiagnosticsTransferError.transportInterrupted(
+            let received, let expected, let code
+        ) {
+            assertEqual(received, 4096, "transport error retains the exact prefix")
+            assertEqual(expected, 7130, "transport error retains declared length")
+            assertEqual(code, URLError.networkConnectionLost.rawValue,
+                        "transport error retains the URL error")
+        } catch {
+            assert(false, "interrupted diagnostics has a typed error: \(error)")
+        }
+        let deviceDigest = recorder.deviceDigest(for: deviceID)
+        assertEqual(
+            recorder.importedDeviceChunkData(
+                deviceDigest: deviceDigest,
+                bootSequence: 1,
+                chunk: 1,
+                sha256: digest
+            ),
+            nil,
+            "an interrupted prefix is never imported as a chunk"
         )
     }
 
