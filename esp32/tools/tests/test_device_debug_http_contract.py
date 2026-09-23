@@ -328,14 +328,29 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         transfer = (ROOT / "lib/device_transfer/device_transfer_http.cpp").read_text(
             encoding="utf-8"
         )
+        flash_owner = (
+            ROOT / "lib/firmware_update/firmware_flash_owner.cpp"
+        ).read_text(encoding="utf-8")
         self.assertIn(
             "apPassphrase_ = generateSessionToken().substr(0, 24);",
             transfer,
         )
         self.assertIn(
-            "WiFi.softAP(apSsid.c_str(), apPassphrase.c_str())", transfer
+            "networkOwner->startAccessPoint(apSsid, apPassphrase)", transfer
         )
-        self.assertNotIn("WiFi.softAP(apSsid.c_str());", transfer)
+        owner_call = flash_owner[
+            flash_owner.index("bool FirmwareFlashOwner::startAccessPoint") :
+            flash_owner.index("bool FirmwareFlashOwner::stopAccessPoint")
+        ]
+        self.assertIn("&passphrase) == ESP_OK", owner_call)
+        ap_operation = flash_owner[
+            flash_owner.index("case Operation::StartAccessPoint:") :
+            flash_owner.index("case Operation::StopAccessPoint:")
+        ]
+        self.assertIn("WiFi.persistent(false);", ap_operation)
+        self.assertIn("esp_wifi_set_storage(WIFI_STORAGE_RAM)", ap_operation)
+        self.assertIn("WiFi.softAP(networkSsid_, networkPassword_)", ap_operation)
+        self.assertNotIn("WiFi.softAP(networkSsid_)", ap_operation)
         info = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleInfo") :
             HTTP.index("bool DeviceDebugHttp::handleFrame")
