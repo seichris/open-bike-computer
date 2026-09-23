@@ -1757,7 +1757,10 @@ downloading or rebooting, iOS checks `firmware.otaEligible`,
 `active: false`, stage `reboot_pending`, and a non-zero correlation. After the
 expected disconnect, iOS reconnects to the same device identity, authenticates
 again, and requires `maintenance.active: true` with the same correlation before
-sending `enter|firmware`.
+sending `enter|firmware`. The first status request after that reconnect, and all
+transfer control while maintenance is active, use the authenticated Navigation
+fallback. This also lets the app upgrade older maintenance firmware whose
+cached Settings handle can acknowledge a write without delivering it.
 
 Maintenance stages are `awaiting_authentication`, `network_starting`, `ready`,
 `receiving`, `verifying`, `committing`, `rebooting`, `cancelling`, and `failed`.
@@ -1789,7 +1792,13 @@ unresolved. The app runs this reconciliation after every fresh authenticated
 device-transfer status, including the first status after an app relaunch.
 Optional navigation and telemetry writes are suppressed while
 maintenance is active, but authentication and transfer status/control remain
-available.
+available. The maintenance GATT database preserves the normal characteristic
+order and properties from Navigation through Settings (`2A6E`, Auth, `2A6F`,
+`2A72`, `2A73`). This keeps cached CoreBluetooth handles valid across the
+intentional reboot. Route and GPS are inert placeholders in maintenance;
+Settings accepts only owner-authenticated `DTRN`, `DSTS`, and capabilities
+traffic, with responses emitted on Navigation. All other Settings payloads are
+rejected before normal riding or renderer state can be touched.
 
 The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic

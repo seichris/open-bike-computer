@@ -810,6 +810,7 @@ struct NavigationProtocolTests {
         testScreenCleanReconnect()
         testScreenEditsDuringReload()
         testScreenEditsDuringSave()
+        testScreenAutosaveCoalescesAndCoversMapProfiles()
         testScreenPendingConflictResolution()
         testHardwareLabelPreference()
         testBLEPairingAuthenticator()
@@ -906,6 +907,7 @@ struct NavigationProtocolTests {
         await testDeviceTransferManagerCompensatesCancelledDebugEntry()
         await testDeviceTransferManagerConfirmsDebugExit()
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
+        await testFirmwareTransferSurvivesNetworkStartupReconnect()
         await testFirmwareTransferSurfacesFreshRejectionAndExits()
         await testFirmwareTransferCancellationExits()
         await testFirmwareMaintenancePreparationFlow()
@@ -12914,18 +12916,34 @@ struct NavigationProtocolTests {
                 screensSource.contains("Button(\"Cancel\") { dismiss() }"),
             "Add Screen is routed from the stable Settings presenter and dismisses only its own sheet"
         )
+        let statusFollowsAddScreen: Bool
+        if let addScreenMarker = screensSource.range(of: "device-screen-add"),
+           let statusMarker = screensSource.range(
+               of: "statusContent",
+               range: addScreenMarker.upperBound..<screensSource.endIndex
+           ) {
+            statusFollowsAddScreen = addScreenMarker.lowerBound < statusMarker.lowerBound
+        } else {
+            statusFollowsAddScreen = false
+        }
         assert(
             !screensSource.contains("Reorder Screens") &&
                 !screensSource.contains("Done Reordering") &&
                 screensSource.contains(".onMove(perform: controller.move)") &&
-                screensSource.contains("if controller.canSave") &&
-                screensSource.contains("Button(\"Save to Bicino\")") &&
-                screensSource.contains("if controller.canDiscardChanges") &&
-                screensSource.contains("Text(\"Drag screens to reorder, add new screens or hide screens\")") &&
+                !screensSource.contains("Button(\"Save to Bicino\")") &&
+                !screensSource.contains("Button(\"Cancel Changes\"") &&
+                screensSource.contains("Text(\"Bicino Screens\")") &&
+                settingsSource.contains("header: Text(\"Bicino Screens\")") &&
+                !screensSource.contains("Changes save automatically.") &&
+                !screensSource.contains("Changes will save automatically.") &&
+                !screensSource.contains("Saving changes to Bicino…") &&
+                screensSource.contains("Text(\"Saving changes\")") &&
+                screensSource.contains("Saved to Bicino") &&
+                screensSource.contains("2_000_000_000") &&
+                statusFollowsAddScreen &&
                 !screensSource.contains("Button(\"Save to Bike Computer\")") &&
-                !screensSource.contains(".disabled(!controller.canSave)") &&
-                !screensSource.contains(".disabled(!controller.canDiscardChanges)"),
-            "device screen actions use long-press reordering, conditional save/cancel visibility, and Bicino copy"
+                !screensSource.contains(".disabled(!controller.canSave)"),
+            "Bicino screen actions autosave with transient feedback below Add Screen"
         )
         assert(
             screensSource.contains("Text(\"Preferred\").tag(UInt8(1))") &&
@@ -19403,6 +19421,28 @@ struct NavigationProtocolTests {
         assert(!failed, "two failed routes report failure")
         assertEqual(attempts, ["preferred", "fallback"],
                     "route failure still attempts each route exactly once")
+
+        assert(
+            !DeviceTransferPacketRoutingPolicy.usesNavigationFallback(
+                firmwareMaintenanceActive: false,
+                maintenanceReconnect: false
+            ),
+            "normal transfers prefer the native Settings characteristic"
+        )
+        assert(
+            DeviceTransferPacketRoutingPolicy.usesNavigationFallback(
+                firmwareMaintenanceActive: false,
+                maintenanceReconnect: true
+            ),
+            "the first maintenance reconnect status bypasses a stale Settings handle"
+        )
+        assert(
+            DeviceTransferPacketRoutingPolicy.usesNavigationFallback(
+                firmwareMaintenanceActive: true,
+                maintenanceReconnect: false
+            ),
+            "an active maintenance session keeps transfer control on Navigation"
+        )
     }
 
     static func testDeviceTransferHandshakePolicy() {
@@ -19422,6 +19462,35 @@ struct NavigationProtocolTests {
         )
         assertEqual(DeviceTransferHandshakePolicy.remoteDebugExitAttemptCount, 32,
                     "debug teardown allows the worker's bounded stop path to finish")
+        assertEqual(
+            DeviceDiagnosticsHotspotFallbackPolicy.maximumAttemptCount,
+            2,
+            "diagnostics retries one hotspot transition for affected firmware"
+        )
+        assert(
+            DeviceDiagnosticsHotspotFallbackPolicy.shouldRetry(
+                error: RemoteDeviceDebugError.missingDiagnosticsSession
+            ),
+            "a missing fallback DSTS receives one compatibility retry"
+        )
+        assert(
+            DeviceDiagnosticsHotspotFallbackPolicy.shouldRetry(
+                error: RemoteDeviceDebugError.rejected(
+                    code: "http_worker_stopping",
+                    message: "worker is stopping"
+                )
+            ),
+            "a retained LAN worker receives one compatibility retry"
+        )
+        assert(
+            !DeviceDiagnosticsHotspotFallbackPolicy.shouldRetry(
+                error: RemoteDeviceDebugError.rejected(
+                    code: "transfer_busy",
+                    message: "another mode is active"
+                )
+            ),
+            "an unrelated active transfer is not retried"
+        )
         assert(DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 4),
                "transfer handshake refreshes status after one second")
         assert(!DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: 3),
@@ -23913,6 +23982,77 @@ struct NavigationProtocolTests {
                     "cancelled debug entry was queued before cancellation")
         assert(sentPackets.contains(Data("DTRNexit".utf8)),
                "post-enqueue cancellation queues a compensating debug exit")
+    }
+
+    @MainActor
+    static func testFirmwareTransferSurvivesNetworkStartupReconnect() async {
+        let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        bleManager.setConnectedDeviceIDForTesting("device-a")
+
+        let maintenanceStatus = """
+        {"configured":true,"enabled":false,"mode":"","maintenance":{"supported":true,"active":true,"stage":"awaiting_authentication","correlation":42}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(maintenanceStatus.utf8)
+        )
+
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 96,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+
+        let task = Task {
+            try await DeviceTransferManager().enterFirmwareTransfer(
+                bleManager: bleManager,
+                status: { _ in }
+            )
+        }
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assertEqual(
+            String(data: sentPackets.first ?? Data(), encoding: .utf8),
+            "DTRNenter|firmware",
+            "maintenance firmware entry uses the authenticated fallback"
+        )
+
+        bleManager.isConnected = false
+        bleManager.isNavigationReady = false
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        for _ in 0..<100 where
+            !sentPackets.dropFirst().contains(Data("DSTS".utf8)) {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(
+            sentPackets.dropFirst().contains(Data("DSTS".utf8)),
+            "the first post-reconnect status request uses Navigation"
+        )
+
+        let tlsFingerprint = String(repeating: "c", count: 64)
+        let readyStatus = """
+        {"configured":true,"enabled":true,"mode":"firmware","baseUrl":"https://192.168.31.195:8080","networkTransport":"lan","networkSsid":"Home Wi-Fi","sessionToken":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":3,"capabilities":{"secureTransferV1":true},"maintenance":{"supported":true,"active":true,"stage":"ready","correlation":42}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(readyStatus.utf8)
+        )
+
+        do {
+            let session = try await task.value
+            assertEqual(session.mode, .firmware,
+                        "firmware transfer survives the Wi-Fi startup reconnect")
+            assertEqual(session.networkTransport, "lan",
+                        "reconnected firmware transfer retains its network")
+        } catch {
+            assert(false, "firmware reconnect should complete: \(error)")
+        }
     }
 
     @MainActor

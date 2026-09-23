@@ -79,6 +79,23 @@ this gate.
   navigation, riding behavior, BLE pairing, normal reboot, rollback behavior,
   USB rescue, and a subsequent OTA from the accepted image.
 
+### 2026-09-22 1.75-inch failed handshake evidence
+
+The first `WAVESHARE_AMOLED_175_PRODUCTION` downgrade attempt reached the
+maintenance reboot but failed before firmware upload. The iPhone reconnected,
+completed owner authentication, and reported successful ATT writes for transfer
+control, but received no correlated `DSTS` maintenance response. The device
+exited maintenance after the two-minute authentication deadline and returned to
+the original normal-ready image; no candidate image was finalized or selected.
+
+Source analysis found two independent faults: maintenance omitted Route, GPS,
+and Settings, so CoreBluetooth's cached native Settings handle no longer mapped
+to the intended characteristic; and the maintenance loop passed a constant
+unauthenticated state to its deadline policy. Regression tests and a clean build
+are software evidence only. Repeat the exact physical path on the fixed
+production artifact before closing any 1.75-inch gate; the 2.06-inch gate is
+separate and remains open.
+
 ## Test 1: Foreground Update
 
 1. Open the iPhone app.

@@ -2076,7 +2076,7 @@ private struct DeviceScreensSettingsSection: View {
 
     var body: some View {
         Section(
-            header: Text("Device Screens"),
+            header: Text("Bicino Screens"),
             footer: Text(mapStyleFooter)
         ) {
             ForEach(bleManager.availableDeviceScreens) { screen in

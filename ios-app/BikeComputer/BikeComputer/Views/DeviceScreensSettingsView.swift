@@ -3,11 +3,12 @@ import SwiftUI
 struct ConfigurableDeviceScreensSettingsSection: View {
     @ObservedObject var controller: DeviceScreenConfigurationController
     let onAddScreen: () -> Void
+    @State private var saveWasInProgress = false
+    @State private var showSavedConfirmation = false
+    @State private var savedConfirmationTask: Task<Void, Never>?
 
     var body: some View {
         Section {
-            statusContent
-
             if let document = controller.draft {
                 ForEach(document.instances) { instance in
                     HStack {
@@ -66,23 +67,20 @@ struct ConfigurableDeviceScreensSettingsSection: View {
                 .disabled(!canAdd(to: document))
                 .accessibilityIdentifier("device-screen-add")
 
-                if controller.canSave {
-                    Button("Save to Bicino") {
-                        controller.save()
-                    }
-                    .accessibilityIdentifier("device-screen-save")
-                }
-
-                if controller.canDiscardChanges {
-                    Button("Cancel Changes", role: .destructive) {
-                        controller.reloadDeviceSettings()
-                    }
-                }
+                statusContent
+            } else {
+                statusContent
             }
         } header: {
-            Text("Device Screens")
+            Text("Bicino Screens")
         } footer: {
-            Text("Drag screens to reorder, add new screens or hide screens")
+            Text("Drag screens to reorder, add new screens or hide screens.")
+        }
+        .onChange(of: controller.state) { state in
+            updateSaveConfirmation(for: state)
+        }
+        .onDisappear {
+            savedConfirmationTask?.cancel()
         }
     }
 
@@ -97,7 +95,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
         case .saving:
             HStack {
                 ProgressView()
-                Text("Saving all screen settings…")
+                Text("Saving changes")
             }
         case .conflict:
             VStack(alignment: .leading, spacing: 8) {
@@ -119,10 +117,48 @@ struct ConfigurableDeviceScreensSettingsSection: View {
                 Button("Retry") { controller.retry() }
             }
         case .ready:
-            EmptyView()
+            if controller.hasUnsavedChanges {
+                if controller.canSave {
+                    HStack {
+                        ProgressView()
+                        Text("Saving changes")
+                    }
+                } else {
+                    Label("Finish editing to save changes.", systemImage: "exclamationmark.circle")
+                        .foregroundStyle(.secondary)
+                }
+            } else if showSavedConfirmation {
+                Label("Saved to Bicino", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.secondary)
+            }
         case .legacyUnsupported:
             Text("This firmware uses the original fixed screen settings.")
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    private func updateSaveConfirmation(
+        for state: DeviceScreenConfigurationSyncState
+    ) {
+        switch state {
+        case .saving:
+            savedConfirmationTask?.cancel()
+            savedConfirmationTask = nil
+            showSavedConfirmation = false
+            saveWasInProgress = true
+        case .ready:
+            guard saveWasInProgress else { return }
+            saveWasInProgress = false
+            guard !controller.hasUnsavedChanges else { return }
+            showSavedConfirmation = true
+            savedConfirmationTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                showSavedConfirmation = false
+                savedConfirmationTask = nil
+            }
+        case .loading, .conflict, .failed, .legacyUnsupported:
+            saveWasInProgress = false
         }
     }
 

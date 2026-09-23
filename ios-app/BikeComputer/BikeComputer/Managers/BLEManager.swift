@@ -616,6 +616,15 @@ enum DevicePacketRouting {
     }
 }
 
+enum DeviceTransferPacketRoutingPolicy {
+    static func usesNavigationFallback(
+        firmwareMaintenanceActive: Bool,
+        maintenanceReconnect: Bool
+    ) -> Bool {
+        firmwareMaintenanceActive || maintenanceReconnect
+    }
+}
+
 enum DeviceSound: UInt8, CaseIterable, Identifiable {
     case bellDing = 1
     case plasticBicycleHorn = 2
@@ -5937,12 +5946,15 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func requestDeviceTransferStatus() -> Bool {
+    func requestDeviceTransferStatus(
+        forMaintenanceReconnect: Bool = false
+    ) -> Bool {
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8)
         return sendTransferControlPacket(
             packet,
             label: "device transfer status",
-            coalescingKey: "transfer.device.status"
+            coalescingKey: "transfer.device.status",
+            forMaintenanceReconnect: forMaintenanceReconnect
         )
     }
 
@@ -8259,9 +8271,23 @@ class BLEManager: NSObject, ObservableObject {
         _ data: Data,
         label: String,
         coalescingKey: String?,
+        forMaintenanceReconnect: Bool = false,
         onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
-        DevicePacketRouting.sendPreferredThenFallback(
+        if DeviceTransferPacketRoutingPolicy.usesNavigationFallback(
+            firmwareMaintenanceActive: firmwareMaintenanceActive,
+            maintenanceReconnect: forMaintenanceReconnect
+        ) {
+            return sendFallbackMapPacket(
+                data,
+                label: label,
+                writeClass: .transfer,
+                coalescingKey: coalescingKey,
+                prioritized: true,
+                onWriteFailure: onWriteFailure
+            )
+        }
+        return DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
                 sendNativeMapTransferPacket(
                     data,

@@ -177,7 +177,7 @@ static void processFirmwareMaintenanceMode() {
       now - firmware_maintenance::activeSinceMs();
   if (stage == firmware_maintenance::Stage::AwaitingAuthentication &&
       firmware_maintenance::policy::authenticationTimedOut(
-          maintenanceElapsed, false)) {
+          maintenanceElapsed, bleNavServer.isAuthenticated())) {
     deviceTransferHttp.setLastError(
         "maintenance_authentication_timeout",
         "owner authentication did not complete before the deadline");
@@ -687,7 +687,13 @@ bool stopActiveDeviceTransfer() {
   const device_transfer::HttpTransferStatus status = deviceTransferHttp.status();
   if (status.mode == "diagnostics") {
     ride_diagnostics::endTransferSnapshotLease();
-    return deviceTransferHttp.setEnabled(false);
+    deviceTransferHttp.setEnabled(false);
+    // DTRN exit is also the sequencing boundary before iOS requests the
+    // endpoint-unreachable hotspot fallback. Do not acknowledge an empty
+    // diagnostics status while the old LAN worker is still unwinding: a
+    // replacement session can otherwise observe the stale worker handle and
+    // fail without ever publishing a fresh DSTS response.
+    return deviceTransferHttp.waitUntilStopped(5500);
   }
   if (status.mode == "map")
     return mapTransferHttp.setEnabled(false);
@@ -883,10 +889,10 @@ static bool processTransferInactivityTimeout(uint32_t nowMs) {
   }
 
   const bool disabled = stopActiveDeviceTransfer();
-  Serial.printf(
-      "DEVICE_TRANSFER_HTTP: inactivity timeout mode=%s disabled=%d\n",
-      transferStatus.mode.empty() ? "unknown" : transferStatus.mode.c_str(),
-      disabled);
+  Serial.printf("DTRN timeout %s %d\n",
+                transferStatus.mode.empty() ? "unknown"
+                                            : transferStatus.mode.c_str(),
+                disabled);
   return disabled;
 }
 
