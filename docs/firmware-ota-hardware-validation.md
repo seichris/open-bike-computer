@@ -192,6 +192,16 @@ path in the retained fault capsule, so a further software reset can be
 distinguished from a transport drop. Neither this source change nor the
 previous candidate qualifies OTA until tested on the device.
 
+The 1.75-inch production candidate from Git
+`3f96c89a8aaf39e6165182d9422fccfe40532d27` (firmware image SHA-256
+`cbf2d927d6a7b8f45925c1e40df042aacdd65c71a58bae104b138adc14a4b942`,
+attested flash-plan SHA-256
+`e1fa91a988c0ec15d921e297bdb684bddce2ca4f7eb662b144258ec5db9f88c5`)
+was flashed over USB to serial `28:84:85:3B:75:20`. Esptool verified all four
+written image hashes and reset the board. Bicino Dev reconnected and reported
+build 100 and the same full Git SHA. This confirms the candidate's USB upload
+and running identity; its signed OTA behavior remains untested.
+
 ## Test 1: Foreground Update
 
 1. Open the iPhone app.
