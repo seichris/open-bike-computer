@@ -298,6 +298,28 @@ not close the ten-cycle, fault-injection, SD-absence, resource-margin, or
 2.06-inch production gates above. A return to build 100 over USB is a separate
 physical firmware write requiring its own exact approval.
 
+### 2026-09-23 build-100 USB restore after the signed OTA trial
+
+With separate user approval, the attested upload-only helper restored production
+build 100 from Git `77d68e1e6b6a6a581d097712d7bdf1927d643d0d` to the
+same Waveshare AMOLED 1.75, USB serial `28:84:85:3B:75:20` on
+`/dev/cu.usbmodem2101`. The `WAVESHARE_AMOLED_175_PRODUCTION` firmware image
+SHA-256 was `3c3b39a9a004764ca45114de462800cc52dab75385e838c7152e9f4082b4be2d`;
+the attested flash-plan SHA-256 was
+`6ab4d5bc99f67b66704b5540cc6f7be431be4fd0a93e8c9e1bdb66f9d23cb0ad`.
+Esptool verified the written bootloader, partition table, boot app, and firmware
+regions. Bicino Dev reconnected over BLE and reported current version 0.3.4,
+build 100, Git prefix `77d68e1e6b6a`, and target `WAVESHARE_AMOLED_175`.
+
+The post-restore support bundle passed `tools/ride_diagnostics.py validate`
+(ZIP SHA-256
+`e0153ad198b4c54e4d888546b8997d990c6e7791b313ca3acc844c482517619d`).
+Retained boot sequence 359 reached its acceptance checkpoint at 06:32:12 UTC
+with the full Git SHA above, production profile, `ready=true`, and
+`otaState=undefined`. `tools/verify_firmware_boot_acceptance.py` passed for
+that exact USB boot without `--ota`. The board is back on build 100. This USB
+restore does not establish a build-99-to-100 OTA upgrade.
+
 ## Test 1: Foreground Update
 
 1. Open the iPhone app.
