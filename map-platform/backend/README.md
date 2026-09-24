@@ -194,6 +194,15 @@ will download it into the configured data root through the source cache.
 Static sources are stored in the source index; other areas are resolved from
 the cached Geofabrik catalog at job creation time and persisted with the job
 before the worker downloads the matching PBF.
+`config/geofabrik-source-fallbacks.json` selects a larger, containing source
+for known incomplete regional extracts. Sichuan currently uses China's PBF:
+the regional extract has missing relation references, while the China source
+index has passed validation. This fallback is enabled only when
+`MAP_PLATFORM_DEPLOYMENT_CHANNEL=development` while the larger map is being
+qualified on a physical device. The fallback is applied when the job is created;
+it never changes the source of an existing job. Resolution fails if the named
+parent source does not cover the requested bounds. Remove the entry only after
+a refreshed regional extract passes source-index validation.
 
 Checksum-pinned sources are immutable. Mutable sources without a checksum are
 revalidated at most once per `MAP_PLATFORM_SOURCE_CACHE_REVALIDATE_SECONDS`
@@ -515,6 +524,8 @@ Useful production environment variables:
   `https://download.geofabrik.de/index-v1.json`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_CACHE`: catalog cache path, default
   `$MAP_PLATFORM_DATA_ROOT/source-catalogs/geofabrik-index-v1.json`.
+- `MAP_PLATFORM_GEOFABRIK_SOURCE_FALLBACKS`: tracked source-fallback policy
+  path, default `config/geofabrik-source-fallbacks.json`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_TTL_SECONDS`: catalog cache TTL, default
   `86400`.
 - `MAP_PLATFORM_GEOFABRIK_FAILURE_COOLDOWN_SECONDS`: fail-fast interval shared
