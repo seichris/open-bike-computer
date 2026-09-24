@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .strict_json import loads_strict_json
 from .topography_cache import ElevationCache
-from .topography_grid import contour_grid
+from .topography_grid import contour_grid, enclosing_bounds_e7
 from .topography_pipeline import MAX_GRID_PIXELS, extract_contours
 from .topography_discovery import REGIONAL_SOURCES, _allowed_url
 from .topography_transform import _sha
@@ -184,7 +184,7 @@ def regional_contour_sample(cache: ElevationCache, receipt_path: Path | list[Pat
     return {"schemaVersion": 1, "kind": "bicino-contour-evidence-v1", "access": "free",
             "productionEligible": False, "sourcePolicySha256": contract["contractSha256"],
             "sourceContractKind": "regional-transform-set-v1" if multiple else "regional-transform-v1", "sourceContract": contract,
-            "boundsE7": [round(value * 10_000_000) for value in bounds], "workingCrs": grid.crs,
+            "boundsE7": enclosing_bounds_e7(bounds), "workingCrs": grid.crs,
             "verticalDatum": "EPSG:3855", "surfaceModel": "dtm", "qualityMode": "regional-dtm-20m-v1",
             "processingGrid": grid.evidence(), "gridResolutionM": 30, "gridSize": [grid.width, grid.height],
             "noDataMillionths": round(missing * 1_000_000 / mosaic.size),

@@ -349,6 +349,21 @@ class TopographyPipelineTests(unittest.TestCase):
         self.assertEqual(audit["dimensions"], [100, 100])
         self.assertEqual(audit["waterMask"], "unavailable-in-height-only-input")
 
+    def test_fractional_e7_selection_remains_inside_contour_mosaic(self):
+        from shapely.geometry import box, mapping
+        from map_platform.topography_geometry import compile_contours
+
+        # Real map requests retain sub-E7 coordinates. Rounding the sample
+        # envelope inward makes a valid selection fail at contour compilation.
+        bounds = [6.20000004184229, .20000003870287, 6.25000003839369, .250000007377274]
+        sample = contour_sample(self.policy, self.cache, bounds)
+        west, south, east, north = [value / 10_000_000 for value in sample["boundsE7"]]
+        self.assertLessEqual(west, bounds[0])
+        self.assertLessEqual(south, bounds[1])
+        self.assertGreaterEqual(east, bounds[2])
+        self.assertGreaterEqual(north, bounds[3])
+        self.assertGreater(compile_contours(sample, mapping(box(*bounds))).record_count, 0)
+
     def test_overlapping_grids_have_the_same_pixel_lattice(self):
         a = contour_grid([6.2, .2, 6.25, .25], 30, 4_000_000)
         b = contour_grid([6.22, .22, 6.27, .27], 30, 4_000_000)
