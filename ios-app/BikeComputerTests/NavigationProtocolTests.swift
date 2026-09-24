@@ -11797,6 +11797,72 @@ struct NavigationProtocolTests {
         assert(persisted404Completed, "persisted 404 should stop")
         assert(!persisted404Manager.hasPendingMapJob, "persisted 404 clears stale durable state")
         assert(persisted404Manager.errorMessage?.contains("404") == true, "persisted 404 is visible")
+
+        let failedSuite = "offline-map-persisted-failure-\(UUID().uuidString)"
+        let failedDefaults = UserDefaults(suiteName: failedSuite)!
+        defer { failedDefaults.removePersistentDomain(forName: failedSuite) }
+        let failedServer = "https://persisted-failure.example"
+        let failedInstallationID = "inst_v2_1234567890abcdef1234567890abcdef"
+        failedDefaults.set(failedServer, forKey: "offlineMap.serverURL")
+        failedDefaults.set(failedInstallationID, forKey: "offlineMap.clientInstallationId")
+        try! OfflineMapInstallationCredentialStore(defaults: failedDefaults).save(
+            OfflineMapInstallationCredential(
+                clientInstallationId: failedInstallationID,
+                clientInstallationToken: "v1." + String(repeating: "C", count: 43)
+            ),
+            serverURLString: failedServer
+        )
+        OfflineMapJobPersistence.save(
+            jobId: "job-persisted-failure",
+            serverURLString: failedServer,
+            defaults: failedDefaults
+        )
+        let failedResponse = try! JSONSerialization.data(withJSONObject: [
+            "jobId": "job-persisted-failure",
+            "status": "failed",
+            "errorCode": "building_relation_incomplete",
+            "error": "selected building relation closure is incomplete",
+            "sourceRegion": [
+                "id": "geofabrik-asia-china",
+                "name": "Sichuan",
+                "provider": "geofabrik",
+            ],
+        ])
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-persisted-failure" {
+                return (200, failedResponse)
+            }
+            return (404, Data())
+        }
+        let failedManager = OfflineMapManager(
+            defaults: failedDefaults,
+            mapPlatformSession: session
+        )
+        failedManager.resumePendingMapJobIfNeeded()
+        let failedJobStopped = await waitForMapTaskCompletion(failedManager)
+        assert(failedJobStopped, "failed job recovery should stop")
+        assert(failedManager.hasPendingMapJob, "terminal failure stays visible in Saved Maps")
+        assert(failedManager.hasTerminalMapJobFailure, "terminal failure is not retryable")
+        assertEqual(failedManager.currentJob?.sourceRegion?.name, "Sichuan", "failed map keeps its name")
+        assert(
+            failedManager.errorMessage?.contains("Some buildings") == true,
+            "failed map keeps the actionable server error"
+        )
+
+        let relaunchedFailedManager = OfflineMapManager(
+            defaults: failedDefaults,
+            mapPlatformSession: session
+        )
+        relaunchedFailedManager.resumePendingMapJobIfNeeded()
+        let relaunchedFailedJobStopped = await waitForMapTaskCompletion(relaunchedFailedManager)
+        assert(
+            relaunchedFailedJobStopped,
+            "failed job recovery should also stop after relaunch"
+        )
+        assert(relaunchedFailedManager.hasPendingMapJob, "failed map survives app relaunch")
+        assert(relaunchedFailedManager.hasTerminalMapJobFailure, "relaunch restores terminal state")
+        relaunchedFailedManager.forgetPendingMapJob()
+        assert(!relaunchedFailedManager.hasPendingMapJob, "failed map can be explicitly discarded")
     }
 
     @MainActor

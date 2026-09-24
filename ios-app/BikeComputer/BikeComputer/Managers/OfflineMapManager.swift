@@ -2121,6 +2121,10 @@ final class OfflineMapManager: ObservableObject {
             isServerRecoveryCheckPending
     }
 
+    var hasTerminalMapJobFailure: Bool {
+        ["failed", "expired", "cancelled"].contains(currentJob?.status ?? "")
+    }
+
     var hasPendingDeviceActivation: Bool {
         lastTransferOutcome == "unconfirmed"
     }
@@ -2476,7 +2480,7 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func retryPendingMapJob(bleManager: BLEManager? = nil) {
-        guard hasPendingMapJob else { return }
+        guard hasPendingMapJob, !hasTerminalMapJobFailure else { return }
         guard mapJobTask != nil || !isBusy else { return }
         syncDownloadedMapInventoryIfNeeded()
         syncCatalogLibraryIfNeeded()
@@ -4794,7 +4798,10 @@ final class OfflineMapManager: ObservableObject {
                 }
             )
         } catch {
-            if currentJob?.isTerminal == true || shouldForgetPersistedJob(after: error) {
+            // Keep terminal jobs until the user discards them. Recovery can then
+            // show the server's failure after an app relaunch instead of making
+            // the pending map silently disappear from Saved Maps.
+            if shouldForgetPersistedJob(after: error) {
                 clearPersistedJob()
             }
             throw error

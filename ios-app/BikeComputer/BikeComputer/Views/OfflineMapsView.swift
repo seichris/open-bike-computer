@@ -127,7 +127,8 @@ struct OfflineMapsView: View {
                         )
                     }
 
-                    if manager.downloadedPackURL == nil && manager.hasPendingMapJob {
+                    if manager.downloadedPackURL == nil && manager.hasPendingMapJob &&
+                        !manager.hasTerminalMapJobFailure {
                         Button {
                             manager.retryPendingMapJob()
                         } label: {

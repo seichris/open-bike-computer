@@ -882,23 +882,25 @@ private struct DownloadingMapsSettingsSection: View {
             }
 
             if manager.hasPendingMapJob {
-                if manager.currentJob?.mapId != nil {
-                    Button {
-                        manager.retryPendingMapJob(bleManager: bleManager)
-                    } label: {
-                        Label("Retry Map Download", systemImage: "arrow.clockwise")
-                    }
-                } else if manager.isMapJobProcessing {
-                    Button {
-                        manager.pausePendingMapJob()
-                    } label: {
-                        Label("Pause Map Preparation", systemImage: "pause.circle")
-                    }
-                } else {
-                    Button {
-                        manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
-                    } label: {
-                        Label("Resume Map Preparation", systemImage: "play.circle")
+                if !manager.hasTerminalMapJobFailure {
+                    if manager.currentJob?.mapId != nil {
+                        Button {
+                            manager.retryPendingMapJob(bleManager: bleManager)
+                        } label: {
+                            Label("Retry Map Download", systemImage: "arrow.clockwise")
+                        }
+                    } else if manager.isMapJobProcessing {
+                        Button {
+                            manager.pausePendingMapJob()
+                        } label: {
+                            Label("Pause Map Preparation", systemImage: "pause.circle")
+                        }
+                    } else {
+                        Button {
+                            manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
+                        } label: {
+                            Label("Resume Map Preparation", systemImage: "play.circle")
+                        }
                     }
                 }
                 Button(role: .destructive) {
@@ -1255,7 +1257,9 @@ private struct PendingSavedMapRow: View {
                     Text(sourceSummary ?? "Pending Offline Map")
                         .font(.body.weight(.semibold))
                         .lineLimit(2)
-                    Text("Downloading to this iPhone")
+                    Text(manager.hasTerminalMapJobFailure
+                         ? "Map preparation ended"
+                         : "Downloading to this iPhone")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1290,10 +1294,12 @@ private struct PendingSavedMapRow: View {
 
             if manager.errorMessage != nil {
                 HStack(spacing: 16) {
-                    Button {
-                        manager.retryPendingMapJob(bleManager: bleManager)
-                    } label: {
-                        Label("Retry Download", systemImage: "arrow.clockwise")
+                    if !manager.hasTerminalMapJobFailure {
+                        Button {
+                            manager.retryPendingMapJob(bleManager: bleManager)
+                        } label: {
+                            Label("Retry Download", systemImage: "arrow.clockwise")
+                        }
                     }
                     Button("Choose Another Map", role: .destructive) {
                         onChooseAnotherMap()
