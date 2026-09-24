@@ -18,14 +18,8 @@
 namespace device_transfer {
 namespace {
 
-// Map activation is handed off to this worker after the HTTP response completes
-// so the transfer and activation phases do not allocate two large stacks at
-// once. Activation reaches substantially deeper than the idle accept loop;
-// retain the 16 KiB budget required by that handoff path. Remote debugging,
-// diagnostics, and firmware maintenance keep their equally deep TLS stacks in
-// PSRAM instead of consuming scarce contiguous internal/DMA-capable memory.
-// Firmware's cache-disabling operations are synchronously delegated to a
-// dedicated internal-stack flash owner; the PSRAM worker never calls them.
+// Transfer protocol/TLS uses PSRAM. Wi-Fi driver mutations, OTA flash and
+// durable map activation are delegated to one serialized internal owner.
 constexpr uint32_t kTransferHttpWorkerStackBytes = 16384;
 constexpr uint32_t kPsramHttpWorkerStackBytes = 16384;
 constexpr uint32_t kLanConnectTimeoutMs = 6000;
@@ -513,6 +507,7 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
       }
       if (!wasEnabled) {
         lastTransferFailure_ = {};
+        networkStart_ = {};
         if (requestedMode != "debug" && requestedMode != "diagnostics")
           preferredNetwork_ = {};
         startedAp_ = false;
@@ -541,18 +536,16 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   }
 
   if (enabled && !wasEnabled) {
+    observeResources("transfer_entry");
     TaskHandle_t worker = nullptr;
     const bool workerStackInPsram =
         requestedMode == "debug" || requestedMode == "diagnostics" ||
-        (requestedMode == "firmware" && firmware_maintenance::active());
+        requestedMode == "map" || requestedMode == "firmware";
     const uint32_t workerStackBytes =
         workerStackInPsram ? kPsramHttpWorkerStackBytes
                            : kTransferHttpWorkerStackBytes;
-    // Map activation remains on this worker and therefore retains an internal
-    // stack. Firmware maintenance delegates OTA begin/write/end/abort/commit
-    // to its internal-stack owner before any flash cache disabling operation.
-    // Both variants use the capability-aware task API so the worker has one
-    // matching destruction path.
+    // Map activation and OTA flash are dispatched to the internal owner.
+    // Keep only TLS and protocol parsing on this PSRAM-backed worker.
     const UBaseType_t workerStackCaps =
         workerStackInPsram
             ? static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
@@ -708,11 +701,29 @@ bool HttpTransferServer::startNetwork() {
       }
       vTaskDelay(pdMS_TO_TICKS(50));
     }
-    const bool apStarted =
-        networkOwner->startAccessPoint(apSsid, apPassphrase);
-    if (!apStarted) {
+    observeResources("before_wifi_ap");
+    const NetworkStartResult apStart =
+        networkOwner->startAccessPointDetailed(apSsid, apPassphrase);
+    lockState();
+    networkStart_ = apStart;
+    unlockState();
+    observeResources("after_wifi_ap");
+    if (!apStart.ok()) {
+      char message[300] = {};
+      std::snprintf(message, sizeof(message),
+                    "Wi-Fi startup failed at %s (esp=%ld, internal=%lu/%lu to %lu/%lu, DMA=%lu/%lu to %lu/%lu). Retry transfer; if it repeats, share device status.",
+                    networkStartCode(apStart.failedStep),
+                    static_cast<long>(apStart.espError),
+                    static_cast<unsigned long>(apStart.before.internalFree),
+                    static_cast<unsigned long>(apStart.before.internalLargest),
+                    static_cast<unsigned long>(apStart.after.internalFree),
+                    static_cast<unsigned long>(apStart.after.internalLargest),
+                    static_cast<unsigned long>(apStart.before.dmaFree),
+                    static_cast<unsigned long>(apStart.before.dmaLargest),
+                    static_cast<unsigned long>(apStart.after.dmaFree),
+                    static_cast<unsigned long>(apStart.after.dmaLargest));
       lockState();
-      rememberError("wifi_ap", "could not start transfer Wi-Fi fallback");
+      rememberError(networkStartCode(apStart.failedStep), message);
       unlockState();
       (void)networkOwner->stopWiFi();
       return false;
@@ -747,6 +758,7 @@ bool HttpTransferServer::startNetwork() {
     }
   }
 
+  observeResources("before_listener");
   server_.begin();
   server_.setNoDelay(true);
   Serial.printf(
@@ -808,6 +820,15 @@ void HttpTransferServer::runWorker() {
     }
     unlockState();
     stopNetwork();
+    observeResources("network_stopped");
+    if (networkOperationOwner_ != nullptr && !networkOperationOwner_->release()) {
+      lockState();
+      if (lastErrorCode_.empty())
+        rememberError("operation_owner_poisoned",
+                      "internal transfer owner could not be safely released");
+      unlockState();
+    }
+    observeResources("owner_released");
     lockState();
     workerTask_ = nullptr;
     const bool releasePowerLock = powerLockHeld_;
@@ -835,6 +856,15 @@ void HttpTransferServer::runWorker() {
       for (size_t index = 0; index < handlerCount_; ++index)
         handlers_[index].handler->workerWillStop();
       stopNetwork();
+      observeResources("network_stopped");
+      if (networkOperationOwner_ != nullptr && !networkOperationOwner_->release()) {
+        lockState();
+        if (lastErrorCode_.empty())
+          rememberError("operation_owner_poisoned",
+                        "internal transfer owner could not be safely released");
+        unlockState();
+      }
+      observeResources("owner_released");
       lockState();
       workerTask_ = nullptr;
       const bool releasePowerLock = powerLockHeld_;
@@ -996,6 +1026,7 @@ HttpTransferStatus HttpTransferServer::status() const {
   const uint32_t workerStackHighWaterBytes = workerStackHighWaterBytes_;
   NetworkOperationOwner *networkOwner = networkOperationOwner_;
   const std::string resourcePhase = resourcePhase_;
+  const NetworkStartResult networkStart = networkStart_;
   // Only authenticated work may extend the transfer lifetime. A client that
   // stalls before authorization must not keep the AP awake indefinitely.
   const bool authorizedRequestInProgress =
@@ -1083,6 +1114,7 @@ HttpTransferStatus HttpTransferServer::status() const {
   result.internalOwnerStackHighWaterBytes =
       networkOwner == nullptr ? 0 : networkOwner->stackHighWaterBytes();
   result.resourcePhase = resourcePhase;
+  result.networkStart = networkStart;
   return result;
 }
 

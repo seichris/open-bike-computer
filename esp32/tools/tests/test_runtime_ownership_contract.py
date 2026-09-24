@@ -23,12 +23,10 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
 
     def test_firmware_tls_and_flash_have_separate_stack_owners(self):
         ota = source("lib/firmware_update/firmware_update_http.cpp")
-        flash = source("lib/firmware_update/firmware_flash_owner.cpp")
+        flash = source("lib/firmware_update/device_operation_owner.cpp")
         http = source("lib/device_transfer/device_transfer_http.cpp")
 
-        maintenance_psram = (
-            'requestedMode == "firmware" && firmware_maintenance::active()'
-        )
+        maintenance_psram = 'requestedMode == "firmware"'
         self.assertIn(maintenance_psram, http)
         for operation in (
             "esp_ota_begin(",
@@ -46,7 +44,7 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         self.assertIn("flashOwnerStackHighWaterBytes", ota)
 
     def test_wifi_mutation_and_ota_share_internal_stack_owner(self):
-        flash = source("lib/firmware_update/firmware_flash_owner.cpp")
+        flash = source("lib/firmware_update/device_operation_owner.cpp")
         http = source("lib/device_transfer/device_transfer_http.cpp")
         for operation in (
             "WiFi.persistent(false)",
@@ -60,7 +58,7 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         ):
             self.assertIn(operation, flash)
             self.assertNotIn(operation, http)
-        self.assertIn("setNetworkOperationOwner(&flashOwner_)",
+        self.assertIn("setNetworkOperationOwner(&operationOwner_)",
                       source("lib/firmware_update/firmware_update_http.cpp"))
         self.assertGreaterEqual(
             flash.count("esp_wifi_set_storage(WIFI_STORAGE_RAM)"), 2
@@ -68,7 +66,7 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         self.assertIn("internalOwnerStackHighWaterBytes", http)
 
     def test_internal_owner_timeout_is_terminal_for_this_boot(self):
-        flash = source("lib/firmware_update/firmware_flash_owner.cpp")
+        flash = source("lib/firmware_update/device_operation_owner.cpp")
         policy = source(
             "lib/firmware_update/firmware_internal_owner_policy.hpp"
         )
@@ -77,6 +75,33 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         self.assertIn("DispatchState::Poisoned", policy)
         self.assertIn("state == DispatchState::InFlight && matchingResult",
                       policy)
+
+    def test_ap_failure_reports_distinct_driver_steps_and_memory(self):
+        flash = source("lib/firmware_update/device_operation_owner.cpp")
+        http = source("lib/device_transfer/device_transfer_http.cpp")
+        ble = source("lib/ble_navigation/ble_navigation.cpp")
+        ap = flash[flash.index("case Operation::StartAccessPoint:"):
+                   flash.index("case Operation::StopAccessPoint:")]
+        for step in ("Mode", "RamStorage", "AccessPoint"):
+            self.assertIn(f"NetworkStartStep::{step}", ap)
+        for phase in ("mode", "ramStorage", "accessPoint"):
+            self.assertIn(f"networkStart.{phase}.before = networkMemory()", ap)
+            self.assertIn(f"networkStart.{phase}.after = networkMemory()", ap)
+        self.assertIn("networkStartCode(apStart.failedStep)", http)
+        self.assertIn('"wifiStartFailure"', ble)
+        self.assertNotIn("apPassphrase.c_str()", http)
+
+    def test_owner_is_reclaimed_after_network_teardown(self):
+        flash = source("lib/firmware_update/device_operation_owner.cpp")
+        http = source("lib/device_transfer/device_transfer_http.cpp")
+        worker = http[http.index("void HttpTransferServer::runWorker"):
+                      http.index("void HttpTransferServer::workerTaskThunk")]
+        self.assertIn("Operation::Shutdown", flash)
+        self.assertIn("vTaskDeleteWithCaps(workerTask_)", flash)
+        self.assertIn("DispatchState::Poisoned", flash)
+        self.assertGreaterEqual(worker.count("networkOperationOwner_->release()"), 2)
+        self.assertLess(worker.index("stopNetwork();"),
+                        worker.index("networkOperationOwner_->release()"))
 
     def test_all_socket_close_paths_withdraw_interrupt_capability(self):
         tls = source("lib/device_transfer/device_transfer_tls.cpp")

@@ -7,7 +7,7 @@
 #include <freertos/semphr.h>
 
 #include "../device_transfer/device_transfer_http.hpp"
-#include "firmware_flash_owner.hpp"
+#include "device_operation_owner.hpp"
 #include "firmware_update_policy.hpp"
 
 #include <string>
@@ -47,6 +47,7 @@ public:
   bool markRunningAppValid();
   void rejectRunningApp();
   std::string bootAcceptanceJson(bool ready) const;
+  DeviceOperationOwner *operationOwner() { return &operationOwner_; }
 
 private:
   device_transfer::HttpTransferServer ownedTransferServer_;
@@ -67,7 +68,7 @@ private:
   esp_ota_handle_t otaHandle_ = 0;
   bool otaOpen_ = false;
   policy::Transaction transaction_;
-  mutable FirmwareFlashOwner flashOwner_;
+  mutable DeviceOperationOwner operationOwner_;
 
   bool handleRequest(const device_transfer::HttpRequest &request,
                      device_transfer::TransferClient &client) override;

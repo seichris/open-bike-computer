@@ -24827,6 +24827,28 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferResourceSnapshot?.minimumDmaFree,
                     45056,
                     "status parser retains the minimum DMA evidence")
+        assert(manager.deviceTransferWiFiStartFailure == nil,
+               "older firmware omits optional Wi-Fi startup diagnostics")
+        let wifiFailure = """
+        {"configured":true,"enabled":false,"mode":"","lastError":{"code":"wifi_ram_storage","message":"Wi-Fi startup failed","sequence":18},"wifiStartFailure":{"step":"wifi_ram_storage","espError":258,"before":{"internalFree":44000,"internalLargest":29000,"dmaFree":36000,"dmaLargest":21000},"after":{"internalFree":42000,"internalLargest":27000,"dmaFree":34000,"dmaLargest":19000}}}
+        """
+        assert(manager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(wifiFailure.utf8)
+        ), "classified Wi-Fi failure is consumed")
+        assertEqual(manager.deviceTransferWiFiStartFailure?.step,
+                    "wifi_ram_storage",
+                    "status parser keeps the failed Wi-Fi substep")
+        assertEqual(manager.deviceTransferWiFiStartFailure?.espError,
+                    258,
+                    "status parser keeps the underlying ESP result")
+        assertEqual(manager.deviceTransferWiFiStartFailure?.after.dmaLargest,
+                    19000,
+                    "status parser keeps failure-time DMA headroom")
+        assert(manager.handleDeviceTransferStatusNotification(packet),
+               "older firmware status remains decodable after a failure")
+        assert(manager.deviceTransferWiFiStartFailure == nil,
+               "older firmware clears stale optional Wi-Fi diagnostics")
         assertEqual(
             manager.deviceTransferResourceSnapshot?
                 .internalOwnerStackHighWaterBytes,

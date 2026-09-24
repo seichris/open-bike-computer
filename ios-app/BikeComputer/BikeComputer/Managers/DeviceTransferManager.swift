@@ -1038,6 +1038,20 @@ final class DeviceTransferManager {
         if failure.code == "sd_unavailable" {
             return .deviceSDCardUnavailable
         }
+        if failure.code.hasPrefix("wifi_") {
+            let step: String
+            switch failure.code {
+            case "wifi_owner_create": step = "device memory"
+            case "wifi_owner_dispatch": step = "device transfer service"
+            case "wifi_mode": step = "Wi-Fi mode"
+            case "wifi_ram_storage": step = "Wi-Fi configuration"
+            case "wifi_softap": step = "device hotspot"
+            default: step = "Wi-Fi"
+            }
+            return .deviceMapTransferRejected(
+                "\(step) could not start. The map is still on your iPhone; retry the transfer."
+            )
+        }
         return .deviceMapTransferRejected(failure.message)
     }
 

@@ -1,5 +1,6 @@
 #include "map_transfer_http.hpp"
 #include "../power_management/power_management.hpp"
+#include "../firmware_update/device_operation_owner.hpp"
 
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "map_stream_compiled_trust.hpp"
@@ -964,26 +965,62 @@ void MapTransferHttpServer::beginDeferredActivation(
   unlockState();
 
   if (beginResult == ActivationBeginResult::Started) {
-    // responseDidComplete runs on the existing 16 KiB transfer worker after
-    // the upload handler and stream parser have unwound. Activation needs the
-    // same stack budget, so execute it here instead of allocating a second
-    // 16 KiB task at the firmware's peak map-transfer memory watermark.
-    executeActivation(activation.sessionId, peerClosedCleanly);
+    // The HTTP response and stream parser have unwound. Only the internal
+    // operation owner may now run the durable activation/rollback transaction;
+    // the TLS worker's stack is in PSRAM and must never be the flash caller.
+    transferServer_->sampleResources("before_map_activation");
+    const esp_err_t dispatch = operationOwner_ == nullptr
+        ? ESP_ERR_INVALID_STATE
+        : operationOwner_->runMapActivation(ownedActivation, this,
+                                            activation.sessionId,
+                                            peerClosedCleanly);
+    if (dispatch == ESP_ERR_TIMEOUT) {
+      // The internal task may still be committing the journal. Keep its
+      // activation state live and poison the owner; a late completion must
+      // never be reported as a cancelled or safely retryable map switch.
+      setLastError("activation_owner_timeout",
+                   "map activation is still resolving on the device");
+    } else if (dispatch != ESP_OK) {
+      finishActivation("failed", "", "activation_owner",
+                       "internal map activation owner is unavailable");
+    }
+    transferServer_->sampleResources("after_map_activation");
     return;
   }
   if (beginResult == ActivationBeginResult::AlreadyInstalled) {
-    const InstallStatus cleaned =
-        installer_.activateReadyStreamMap(activation.sessionId);
-    if (!cleaned.ok)
-      setLastError(cleaned.code, cleaned.message);
-    if (peerClosedCleanly)
-      requestAutomaticExit();
+    const esp_err_t dispatch = operationOwner_ == nullptr
+        ? ESP_ERR_INVALID_STATE
+        : operationOwner_->runMapActivation(ownedInstalledCleanup, this,
+                                            activation.sessionId,
+                                            peerClosedCleanly);
+    if (dispatch != ESP_OK)
+      setLastError(dispatch == ESP_ERR_TIMEOUT ? "activation_cleanup_timeout"
+                                               : "activation_cleanup_owner",
+                   "installed map cleanup could not complete safely");
     return;
   }
   if (beginResult == ActivationBeginResult::Busy) {
     setLastError("activation_busy",
                  "another map activation started after upload completion");
   }
+}
+
+void MapTransferHttpServer::ownedActivation(void *context,
+                                            const char *sessionId,
+                                            bool automaticExit) {
+  static_cast<MapTransferHttpServer *>(context)->executeActivation(
+      sessionId, automaticExit);
+}
+
+void MapTransferHttpServer::ownedInstalledCleanup(void *context,
+                                                  const char *sessionId,
+                                                  bool automaticExit) {
+  auto *server = static_cast<MapTransferHttpServer *>(context);
+  const InstallStatus cleaned = server->installer_.activateReadyStreamMap(sessionId);
+  if (!cleaned.ok)
+    server->setLastError(cleaned.code, cleaned.message);
+  if (automaticExit)
+    server->requestAutomaticExit();
 }
 
 void MapTransferHttpServer::executeActivation(const std::string &sessionId,

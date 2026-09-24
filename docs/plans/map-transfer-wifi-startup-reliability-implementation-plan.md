@@ -160,3 +160,27 @@ suboperation and retains a safe retry; activation and rollback remain durable;
 OTA and diagnostics still pass their own transfer paths; and the transfer
 owner/worker lifecycle returns to the pre-session memory baseline. Source,
 build, CI, and physical observations must be reported separately.
+
+## Implementation record (2026-09-24)
+
+The follow-up implementation uses a mode-neutral `DeviceOperationOwner` for
+Wi-Fi mutations, OTA flash calls, and post-response map activation. The map
+HTTPS/TLS worker uses a PSRAM stack; the internal owner has a 16 KiB stack and
+is reclaimed after the network worker finishes. Dispatch command IDs still
+poison the owner on timeout or a mismatched result, so late work cannot be
+paired with a new caller. The map activation wait has a separate ten-minute
+limit; a timeout leaves activation status unresolved rather than reporting a
+safe retry while its journal might still commit. Boot recovery continues on
+its dedicated internal task before transfer startup. Renderer rollback remains
+on the existing serialized storage-control task, which uses the SD card rather
+than flash/NVS operations and cannot run concurrently with transfer activation.
+
+Authenticated `DSTS` now reports the AP startup substep and before/after
+internal/DMA blocks, with numeric `esp_err_t` when one is returned. The iPhone
+shows a retry message and keeps its local map artifact after startup failure.
+The owner and worker release paths are explicit for map, diagnostics, debug,
+and firmware modes. Physical evidence is still needed to determine whether
+the reported 1.75-inch failure was memory pressure, driver state, or another
+substep, to set justified per-target admission reserves, and to qualify map,
+diagnostics, remote-debug, and OTA behavior on both boards. This PR must remain
+hardware-gated until that evidence exists.

@@ -1,13 +1,24 @@
-#include "firmware_flash_owner.hpp"
+#include "device_operation_owner.hpp"
 
 #include <cstring>
+#include <new>
 #include <esp_heap_caps.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
 
 namespace firmware_update {
+namespace {
+device_transfer::NetworkMemorySnapshot networkMemory() {
+  return {
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT)),
+      static_cast<uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_8BIT)),
+  };
+}
+} // namespace
 
-void FirmwareFlashOwner::configure() {
+void DeviceOperationOwner::configure() {
   if (callMutex_ == nullptr) {
     callMutex_ = xSemaphoreCreateMutexStatic(&callMutexStorage_);
   }
@@ -24,14 +35,25 @@ void FirmwareFlashOwner::configure() {
   configASSERT(resultQueue_ != nullptr);
 }
 
-bool FirmwareFlashOwner::start() {
+bool DeviceOperationOwner::start() {
   configure();
+  if (xSemaphoreTake(callMutex_, kCommandTimeoutTicks) != pdTRUE)
+    return false;
+  const bool created = startLocked();
+  xSemaphoreGive(callMutex_);
+  return created;
+}
+
+bool DeviceOperationOwner::startLocked() {
+  if (!internal_owner_policy::canIssue(
+          dispatchState_.load(std::memory_order_acquire)))
+    return false;
   if (workerTask_ != nullptr)
     return true;
 
   TaskHandle_t worker = nullptr;
   const BaseType_t created = xTaskCreateWithCaps(
-      taskThunk, "firmware_flash", kWorkerStackBytes, this, 2, &worker,
+      taskThunk, "device_operation", kWorkerStackBytes, this, 2, &worker,
       static_cast<UBaseType_t>(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   if (created != pdPASS)
     return false;
@@ -39,29 +61,67 @@ bool FirmwareFlashOwner::start() {
   return true;
 }
 
-bool FirmwareFlashOwner::started() const { return workerTask_ != nullptr; }
+bool DeviceOperationOwner::release() {
+  configure();
+  if (xSemaphoreTake(callMutex_, kCommandTimeoutTicks) != pdTRUE)
+    return false;
+  if (workerTask_ == nullptr) {
+    xSemaphoreGive(callMutex_);
+    return true;
+  }
+  if (!internal_owner_policy::canIssue(
+          dispatchState_.load(std::memory_order_acquire))) {
+    xSemaphoreGive(callMutex_);
+    return false;
+  }
+  Command command{Operation::Shutdown};
+  command.id = nextCommandId_++;
+  if (command.id == 0)
+    command.id = nextCommandId_++;
+  Result result;
+  const bool sent = xQueueSend(commandQueue_, &command, kCommandTimeoutTicks) == pdTRUE;
+  const bool received = sent &&
+      xQueueReceive(resultQueue_, &result, kCommandTimeoutTicks) == pdTRUE;
+  const bool matched = received && result.commandId == command.id &&
+                       result.error == ESP_OK;
+  if (!matched) {
+    dispatchState_.store(internal_owner_policy::DispatchState::Poisoned,
+                         std::memory_order_release);
+    xSemaphoreGive(callMutex_);
+    return false;
+  }
+  // The owner sent its terminal result and then parks forever. It cannot
+  // touch a staging buffer after this point; reclaim its capability stack.
+  vTaskDeleteWithCaps(workerTask_);
+  workerTask_ = nullptr;
+  xQueueReset(commandQueue_);
+  xQueueReset(resultQueue_);
+  std::memset(networkSsid_, 0, sizeof(networkSsid_));
+  std::memset(networkPassword_, 0, sizeof(networkPassword_));
+  std::memset(mapSessionId_, 0, sizeof(mapSessionId_));
+  xSemaphoreGive(callMutex_);
+  return true;
+}
 
-bool FirmwareFlashOwner::healthy() const {
+bool DeviceOperationOwner::started() const { return workerTask_ != nullptr; }
+
+bool DeviceOperationOwner::healthy() const {
   return started() && internal_owner_policy::canIssue(
                           dispatchState_.load(std::memory_order_acquire));
 }
 
-uint32_t FirmwareFlashOwner::stackHighWaterBytes() const {
-  const TaskHandle_t worker = workerTask_;
-  if (worker == nullptr)
-    return 0;
-  return static_cast<uint32_t>(uxTaskGetStackHighWaterMark(worker)) *
-         sizeof(StackType_t);
+uint32_t DeviceOperationOwner::stackHighWaterBytes() const {
+  return lastStackHighWaterBytes_.load(std::memory_order_acquire);
 }
 
-FirmwarePartitionSnapshot FirmwareFlashOwner::partitionSnapshot() {
+FirmwarePartitionSnapshot DeviceOperationOwner::partitionSnapshot() {
   Result result;
   if (execute(Command{Operation::Snapshot}, result) != ESP_OK)
     return {};
   return result.snapshot;
 }
 
-bool FirmwareFlashOwner::startStation(const std::string &ssid,
+bool DeviceOperationOwner::startStation(const std::string &ssid,
                                       const std::string &password) {
   Result result;
   return execute(Command{Operation::StartStation}, result, nullptr, &ssid,
@@ -69,35 +129,66 @@ bool FirmwareFlashOwner::startStation(const std::string &ssid,
          result.error == ESP_OK;
 }
 
-bool FirmwareFlashOwner::disconnectStation(bool wifiOff) {
+bool DeviceOperationOwner::disconnectStation(bool wifiOff) {
   Result result;
   Command command{Operation::DisconnectStation};
   command.wifiOff = wifiOff;
   return execute(command, result) == ESP_OK && result.error == ESP_OK;
 }
 
-bool FirmwareFlashOwner::startAccessPoint(
+bool DeviceOperationOwner::startAccessPoint(
     const std::string &ssid, const std::string &passphrase) {
-  Result result;
-  return execute(Command{Operation::StartAccessPoint}, result, nullptr, &ssid,
-                 &passphrase) == ESP_OK &&
-         result.error == ESP_OK;
+  return startAccessPointDetailed(ssid, passphrase).ok();
 }
 
-bool FirmwareFlashOwner::stopAccessPoint(bool wifiOff) {
+device_transfer::NetworkStartResult DeviceOperationOwner::startAccessPointDetailed(
+    const std::string &ssid, const std::string &passphrase) {
+  Result result;
+  const auto before = networkMemory();
+  const esp_err_t dispatch = execute(Command{Operation::StartAccessPoint}, result,
+                                     nullptr, &ssid, &passphrase);
+  if (dispatch != ESP_OK) {
+    device_transfer::NetworkStartResult failed;
+    failed.failedStep = dispatch == ESP_ERR_NO_MEM
+        ? device_transfer::NetworkStartStep::OwnerCreate
+        : device_transfer::NetworkStartStep::OwnerDispatch;
+    failed.espError = dispatch;
+    failed.before = before;
+    failed.after = networkMemory();
+    return failed;
+  }
+  return result.networkStart;
+}
+
+esp_err_t DeviceOperationOwner::runMapActivation(
+    MapOperation operation, void *context, const std::string &sessionId,
+    bool automaticExit) {
+  if (operation == nullptr || sessionId.empty() || sessionId.size() >= sizeof(mapSessionId_))
+    return ESP_ERR_INVALID_ARG;
+  Result result;
+  Command command{Operation::MapActivation};
+  command.mapOperation = operation;
+  command.mapContext = context;
+  command.automaticExit = automaticExit;
+  const esp_err_t dispatch = execute(command, result, nullptr, &sessionId,
+                                     nullptr, kMapActivationTimeoutTicks);
+  return dispatch == ESP_OK ? result.error : dispatch;
+}
+
+bool DeviceOperationOwner::stopAccessPoint(bool wifiOff) {
   Result result;
   Command command{Operation::StopAccessPoint};
   command.wifiOff = wifiOff;
   return execute(command, result) == ESP_OK && result.error == ESP_OK;
 }
 
-bool FirmwareFlashOwner::stopWiFi() {
+bool DeviceOperationOwner::stopWiFi() {
   Result result;
   return execute(Command{Operation::StopWiFi}, result) == ESP_OK &&
          result.error == ESP_OK;
 }
 
-esp_err_t FirmwareFlashOwner::begin(const esp_partition_t *partition,
+esp_err_t DeviceOperationOwner::begin(const esp_partition_t *partition,
                                     std::size_t imageSize,
                                     esp_ota_handle_t &handle) {
   Result result;
@@ -107,7 +198,7 @@ esp_err_t FirmwareFlashOwner::begin(const esp_partition_t *partition,
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
-esp_err_t FirmwareFlashOwner::write(esp_ota_handle_t handle,
+esp_err_t DeviceOperationOwner::write(esp_ota_handle_t handle,
                                     const uint8_t *data,
                                     std::size_t size) {
   if (data == nullptr || size == 0 || size > kMaximumWriteBytes)
@@ -118,21 +209,21 @@ esp_err_t FirmwareFlashOwner::write(esp_ota_handle_t handle,
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
-esp_err_t FirmwareFlashOwner::end(esp_ota_handle_t handle) {
+esp_err_t DeviceOperationOwner::end(esp_ota_handle_t handle) {
   Result result;
   const esp_err_t dispatch =
       execute(Command{Operation::End, nullptr, handle}, result);
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
-esp_err_t FirmwareFlashOwner::abort(esp_ota_handle_t handle) {
+esp_err_t DeviceOperationOwner::abort(esp_ota_handle_t handle) {
   Result result;
   const esp_err_t dispatch =
       execute(Command{Operation::Abort, nullptr, handle}, result);
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
-esp_err_t FirmwareFlashOwner::description(
+esp_err_t DeviceOperationOwner::description(
     const esp_partition_t *partition, esp_app_desc_t &description) {
   Result result;
   const esp_err_t dispatch = execute(
@@ -142,7 +233,7 @@ esp_err_t FirmwareFlashOwner::description(
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
-esp_err_t FirmwareFlashOwner::selectBootPartition(
+esp_err_t DeviceOperationOwner::selectBootPartition(
     const esp_partition_t *partition) {
   Result result;
   const esp_err_t dispatch =
@@ -150,14 +241,19 @@ esp_err_t FirmwareFlashOwner::selectBootPartition(
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
-esp_err_t FirmwareFlashOwner::execute(
+esp_err_t DeviceOperationOwner::execute(
     const Command &command, Result &result, const uint8_t *writeData,
     const std::string *networkSsid,
-    const std::string *networkPassword) {
-  if (!start())
-    return ESP_ERR_NO_MEM;
-  if (xSemaphoreTake(callMutex_, kCommandTimeoutTicks) != pdTRUE) {
+    const std::string *networkPassword, TickType_t timeoutTicks) {
+  configure();
+  if (xSemaphoreTake(callMutex_, timeoutTicks) != pdTRUE) {
     return ESP_ERR_TIMEOUT;
+  }
+
+  if (!startLocked()) {
+    xSemaphoreGive(callMutex_);
+    return internal_owner_policy::canIssue(dispatchState_.load())
+               ? ESP_ERR_NO_MEM : ESP_ERR_INVALID_STATE;
   }
 
   esp_err_t dispatch = ESP_FAIL;
@@ -175,7 +271,14 @@ esp_err_t FirmwareFlashOwner::execute(
       }
       std::memcpy(writeBuffer_, writeData, command.size);
     }
-    if (networkSsid != nullptr) {
+    if (command.operation == Operation::MapActivation) {
+      if (networkSsid == nullptr || networkSsid->empty() ||
+          networkSsid->size() >= sizeof(mapSessionId_)) {
+        dispatch = ESP_ERR_INVALID_ARG;
+        break;
+      }
+      std::memcpy(mapSessionId_, networkSsid->c_str(), networkSsid->size() + 1);
+    } else if (networkSsid != nullptr) {
       if (networkSsid->empty() || networkSsid->size() >= sizeof(networkSsid_) ||
           networkPassword == nullptr ||
           networkPassword->size() >= sizeof(networkPassword_)) {
@@ -191,7 +294,7 @@ esp_err_t FirmwareFlashOwner::execute(
     if (queuedCommand.id == 0)
       queuedCommand.id = nextCommandId_++;
     if (xQueueSend(commandQueue_, &queuedCommand,
-                   kCommandTimeoutTicks) != pdTRUE) {
+                   timeoutTicks) != pdTRUE) {
       dispatchState_.store(internal_owner_policy::commandTimedOut(
                                dispatchState_.load(std::memory_order_relaxed)),
                            std::memory_order_release);
@@ -202,7 +305,7 @@ esp_err_t FirmwareFlashOwner::execute(
                              dispatchState_.load(std::memory_order_relaxed)),
                          std::memory_order_release);
     if (xQueueReceive(resultQueue_, &result,
-                      kCommandTimeoutTicks) != pdTRUE) {
+                      timeoutTicks) != pdTRUE) {
       // The issued operation may still be using the staging buffers or may
       // complete later. Permanently reject subsequent commands in this boot
       // so a late result cannot be paired with a new caller and the shared
@@ -229,7 +332,7 @@ esp_err_t FirmwareFlashOwner::execute(
   return dispatch;
 }
 
-void FirmwareFlashOwner::run() {
+void DeviceOperationOwner::run() {
   for (;;) {
     Command command;
     if (xQueueReceive(commandQueue_, &command, portMAX_DELAY) != pdTRUE)
@@ -285,16 +388,35 @@ void FirmwareFlashOwner::run() {
       result.error = WiFi.disconnect(command.wifiOff, false) ? ESP_OK
                                                               : ESP_FAIL;
       break;
-    case Operation::StartAccessPoint:
+    case Operation::StartAccessPoint: {
+      result.networkStart.mode.attempted = true;
+      result.networkStart.mode.before = networkMemory();
       WiFi.persistent(false);
-      if (!WiFi.mode(WIFI_AP) ||
-          esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK) {
+      const bool modeStarted = WiFi.mode(WIFI_AP);
+      result.networkStart.mode.after = networkMemory();
+      if (!modeStarted) {
+        result.networkStart.failedStep = device_transfer::NetworkStartStep::Mode;
         result.error = ESP_FAIL;
         break;
       }
+      result.networkStart.ramStorage.attempted = true;
+      result.networkStart.ramStorage.before = networkMemory();
+      result.error = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+      result.networkStart.ramStorage.after = networkMemory();
+      if (result.error != ESP_OK) {
+        result.networkStart.failedStep = device_transfer::NetworkStartStep::RamStorage;
+        result.networkStart.espError = result.error;
+        break;
+      }
+      result.networkStart.accessPoint.attempted = true;
+      result.networkStart.accessPoint.before = networkMemory();
       result.error = WiFi.softAP(networkSsid_, networkPassword_) ? ESP_OK
                                                                   : ESP_FAIL;
+      result.networkStart.accessPoint.after = networkMemory();
+      if (result.error != ESP_OK)
+        result.networkStart.failedStep = device_transfer::NetworkStartStep::AccessPoint;
       break;
+    }
     case Operation::StopAccessPoint:
       result.error = WiFi.softAPdisconnect(command.wifiOff) ? ESP_OK
                                                              : ESP_FAIL;
@@ -302,13 +424,48 @@ void FirmwareFlashOwner::run() {
     case Operation::StopWiFi:
       result.error = WiFi.mode(WIFI_OFF) ? ESP_OK : ESP_FAIL;
       break;
+    case Operation::MapActivation:
+      // Map finalization performs long SD transactions. Match the former
+      // HTTP worker's priority so the UI/idle tasks keep making progress.
+      vTaskPrioritySet(nullptr, 1);
+      try {
+        command.mapOperation(command.mapContext, mapSessionId_,
+                             command.automaticExit);
+        result.error = ESP_OK;
+      } catch (const std::bad_alloc &) {
+        result.error = ESP_ERR_NO_MEM;
+      } catch (...) {
+        result.error = ESP_FAIL;
+      }
+      vTaskPrioritySet(nullptr, 2);
+      break;
+    case Operation::Shutdown:
+      result.error = ESP_OK;
+      break;
     }
+    if (command.operation == Operation::StartAccessPoint) {
+      const auto *step = result.networkStart.failedStep ==
+                                 device_transfer::NetworkStartStep::Mode
+                             ? &result.networkStart.mode
+                         : result.networkStart.failedStep ==
+                                 device_transfer::NetworkStartStep::RamStorage
+                             ? &result.networkStart.ramStorage
+                             : &result.networkStart.accessPoint;
+      result.networkStart.before = step->before;
+      result.networkStart.after = step->after;
+    }
+    lastStackHighWaterBytes_.store(
+        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)) *
+            sizeof(StackType_t),
+        std::memory_order_release);
     (void)xQueueSend(resultQueue_, &result, portMAX_DELAY);
+    if (command.operation == Operation::Shutdown)
+      (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   }
 }
 
-void FirmwareFlashOwner::taskThunk(void *context) {
-  static_cast<FirmwareFlashOwner *>(context)->run();
+void DeviceOperationOwner::taskThunk(void *context) {
+  static_cast<DeviceOperationOwner *>(context)->run();
 }
 
 } // namespace firmware_update

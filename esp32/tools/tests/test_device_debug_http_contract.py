@@ -329,20 +329,20 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         flash_owner = (
-            ROOT / "lib/firmware_update/firmware_flash_owner.cpp"
+            ROOT / "lib/firmware_update/device_operation_owner.cpp"
         ).read_text(encoding="utf-8")
         self.assertIn(
             "apPassphrase_ = generateSessionToken().substr(0, 24);",
             transfer,
         )
         self.assertIn(
-            "networkOwner->startAccessPoint(apSsid, apPassphrase)", transfer
+            "networkOwner->startAccessPointDetailed(apSsid, apPassphrase)", transfer
         )
         owner_call = flash_owner[
-            flash_owner.index("bool FirmwareFlashOwner::startAccessPoint") :
-            flash_owner.index("bool FirmwareFlashOwner::stopAccessPoint")
+            flash_owner.index("bool DeviceOperationOwner::startAccessPoint") :
+            flash_owner.index("bool DeviceOperationOwner::stopAccessPoint")
         ]
-        self.assertIn("&passphrase) == ESP_OK", owner_call)
+        self.assertIn("startAccessPointDetailed(ssid, passphrase).ok()", owner_call)
         ap_operation = flash_owner[
             flash_owner.index("case Operation::StartAccessPoint:") :
             flash_owner.index("case Operation::StopAccessPoint:")
