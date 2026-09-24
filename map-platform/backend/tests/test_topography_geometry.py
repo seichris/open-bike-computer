@@ -7,15 +7,26 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric import ec
 from shapely.geometry import box, mapping
 
+from map_platform.artifacts import (
+    ArtifactRecord, FileSystemArtifactStore, ZIP_MEDIA_TYPE, ZIP_STORED_FORMAT, zip_object_key,
+)
+from map_platform.building_scope import BuildingScopeError
 from map_platform.topography_artifacts import encode_contour_section
 from map_platform.topography_companion import validate_companion, write_companion
 from map_platform.topography_geometry import compile_contours
 from map_platform.topography_pack import assemble_topographic_pack
 from map_platform.map_artifact_validation import validate_fmb5
+from map_platform.map_signing import P256MapArtifactSigner
+from map_platform.map_stream import write_map_stream_artifact
+from map_platform.manifest import PipelineMetadata, build_manifest, write_pack_archive
+from map_platform.models import Bounds, GeometryMode, JobStatus, MapJob, NormalizedGeometry, SourceRegion
+from map_platform.pipeline import MapBuildPipeline, PipelinePaths, validate_final_assembly_artifact
 from tests.map_label_fixtures import one_building_fmb4, one_label_fma1
 
 
@@ -101,6 +112,89 @@ class TopographyGeometryTests(unittest.TestCase):
         self.assertFalse(list((output / "device").rglob("*.btopo")))
         with self.assertRaises(FileExistsError):
             assemble_topographic_pack(source, output, "test-map", compiled, self.sample, b"Test notices\n")
+
+    def test_generated_topography_receipt_survives_full_packaging(self):
+        self.sample["sources"] = [{
+            "sourceId": "fixture", "datasetRelease": "test-release",
+            "termsUrl": "https://example.invalid/terms",
+            "attributionUrl": "https://example.invalid/attribution",
+            "accessReviewedAt": "2026-09-24",
+        }]
+        self.sample["inputs"] = [{"sourceId": "fixture", "cell": [0, 0], "sha256": "b" * 64}]
+        source = self.root / "source"
+        block = source / "VECTMAP/test-map/+000+000/0_0.fmb"
+        block.parent.mkdir(parents=True)
+        block.write_bytes(one_building_fmb4())
+        font = source / "VECTMAP/test-map/assets/street-labels.fma"
+        font.parent.mkdir()
+        font.write_bytes(one_label_fma1())
+        output = self.root / "pair"
+        notice = b"Test fixture notices only\n"
+        receipt = assemble_topographic_pack(
+            source, output, "test-map", compile_contours(self.sample, self.selection), self.sample, notice,
+        )
+        device = output / "device"
+        license_dir = device / "LICENSES"
+        license_dir.mkdir()
+        (license_dir / "Elevation-Sources.txt").write_bytes(notice)
+        job = MapJob(
+            job_id="topography-test", status=JobStatus.QUEUED,
+            request={"target": {"renderer": "esp32-fmb", "rendererFormatVersion": 4},
+                     "labels": {"profileVersion": 1, "preferredLanguages": ["en"],
+                                "internationalFallback": "en"}},
+            geometry=NormalizedGeometry(mode=GeometryMode.CUSTOM_BBOX,
+                                        bounds=Bounds(-.09, -.09, .09, .09),
+                                        area_km2=400, vertex_count=4),
+            source_region=SourceRegion(id="fixture", provider="test", name="Fixture",
+                                       url="https://example.invalid/map.osm.pbf",
+                                       bounds=Bounds(-1, -1, 1, 1)),
+        )
+        job.map_id = "test-map"
+        manifest = build_manifest(job, device, PipelineMetadata(), topography=receipt)
+        archive = write_pack_archive(device, manifest, self.root / "topography.zip")
+        stream = write_map_stream_artifact(
+            device, {**manifest, "producer": {"buildSha256": "a" * 64,
+                                              "imageDigest": "sha256:" + "b" * 64}},
+            P256MapArtifactSigner("topography-test", ec.derive_private_key(4, ec.SECP256R1())),
+            self.root / "topography.bmap",
+        )
+        archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+        validation = validate_final_assembly_artifact(archive, [ArtifactRecord(
+            format=ZIP_STORED_FORMAT, media_type=ZIP_MEDIA_TYPE, filename=archive.name,
+            object_key=zip_object_key("test-map", archive_sha256),
+            bytes=archive.stat().st_size, sha256=archive_sha256,
+        )])
+        self.assertEqual(manifest["target"]["topographyProfileVersion"], 1)
+        self.assertEqual(manifest["topography"]["recordCount"], receipt["recordCount"])
+        self.assertTrue(archive.is_file())
+        self.assertGreater(stream.bytes, 0)
+        self.assertTrue(validation["zipReceiptValidated"])
+        with zipfile.ZipFile(archive) as original:
+            entries = {name: original.read(name) for name in original.namelist()}
+        entries["LICENSES/Elevation-Sources.txt"] = b"Different source notice\n"
+        tampered = self.root / "tampered.zip"
+        with zipfile.ZipFile(tampered, "w", compression=zipfile.ZIP_STORED) as changed:
+            for name, body in entries.items():
+                changed.writestr(name, body)
+        tampered_sha256 = hashlib.sha256(tampered.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(BuildingScopeError, "elevation source notice differs"):
+            validate_final_assembly_artifact(tampered, [ArtifactRecord(
+                format=ZIP_STORED_FORMAT, media_type=ZIP_MEDIA_TYPE, filename=tampered.name,
+                object_key=zip_object_key("test-map", tampered_sha256),
+                bytes=tampered.stat().st_size, sha256=tampered_sha256,
+            )])
+
+        pipeline = MapBuildPipeline(
+            PipelinePaths(Path(__file__).resolve().parents[3], self.root / "work", self.root / "packs"),
+            artifact_store=FileSystemArtifactStore(self.root / "artifacts"),
+            map_signer=P256MapArtifactSigner("topography-test", ec.derive_private_key(4, ec.SECP256R1())),
+            producer_build_sha256="a" * 64, producer_image_digest="sha256:" + "b" * 64,
+            topography_builder=lambda *_args, **_kwargs: (receipt, output / receipt["companion"]["filename"]),
+        )
+        packaged = pipeline._package_map(job, device, self.root / "pipeline.zip", validate_final_artifact=True)
+        self.assertEqual({artifact.format for artifact in packaged.artifacts},
+                         {"zip-stored-v1", "bike-map-stream-v1", "topography-ios-v1"})
+        self.assertTrue(packaged.artifact_metrics["finalArtifactValidation"]["zipReceiptValidated"])
 
     def companion(self, path):
         compiled = compile_contours(self.sample, self.selection)

@@ -1115,6 +1115,7 @@ _FINAL_ASSEMBLY_METADATA_PATHS = frozenset(
         "LICENSES/OpenStreetMap-ODbL.txt",
     }
 )
+_FINAL_ASSEMBLY_ELEVATION_NOTICE_PATH = "LICENSES/Elevation-Sources.txt"
 CHUNK_TASK_LEASE_SECONDS = 120.0
 PARENT_PHASE_LEASE_SECONDS = 120.0
 SOURCE_PREPARATION_MEMORY_RESERVATION_BYTES = 5 * 1024 * 1024 * 1024
@@ -1330,6 +1331,7 @@ def validate_final_assembly_artifact(
                 if (
                     not _safe_final_archive_path(preview_path)
                     or preview_path in _FINAL_ASSEMBLY_METADATA_PATHS
+                    or preview_path == _FINAL_ASSEMBLY_ELEVATION_NOTICE_PATH
                     or preview_path in declared_files
                     or type(preview_bytes) is not int
                     or preview_bytes <= 0
@@ -1341,12 +1343,30 @@ def validate_final_assembly_artifact(
 
             expected_paths = set(_FINAL_ASSEMBLY_METADATA_PATHS)
             expected_paths.update(declared_files)
+            topography = manifest.get("topography")
+            if "topography" in manifest:
+                if (
+                    not isinstance(topography, dict)
+                    or not isinstance(topography.get("attributionSha256"), str)
+                    or re.fullmatch(r"[0-9a-f]{64}", topography["attributionSha256"]) is None
+                ):
+                    invalid("final map archive topography attribution identity is invalid")
+                expected_paths.add(_FINAL_ASSEMBLY_ELEVATION_NOTICE_PATH)
             if preview_path is not None:
                 expected_paths.add(preview_path)
             if set(entries_by_path) != expected_paths:
                 invalid(
                     "final map archive entries do not match the manifest identities"
                 )
+
+            if topography is not None:
+                notice_info = entries_by_path[_FINAL_ASSEMBLY_ELEVATION_NOTICE_PATH]
+                if (
+                    notice_info.file_size <= 0
+                    or _zip_entry_sha256(archive, notice_info)
+                    != topography["attributionSha256"]
+                ):
+                    invalid("final map archive elevation source notice differs from manifest")
 
             for path, (byte_count, expected_sha256) in declared_files.items():
                 info = entries_by_path[path]

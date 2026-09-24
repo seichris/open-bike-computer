@@ -14,7 +14,7 @@ from typing import Callable
 
 from .map_artifact_validation import validate_fma1, validate_fmb5
 from .reuse import MapBlock, block_from_pack_path
-from .topography_artifacts import ContourSection, empty_fmb5, upgrade_fmb4
+from .topography_artifacts import TOPOGRAPHY_PROFILE_VERSION, ContourSection, empty_fmb5, upgrade_fmb4
 from .topography_cache import _sync_directory
 from .topography_companion import write_companion
 from .topography_geometry import CompiledTopography, MAX_BLOCKS
@@ -94,7 +94,7 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
         (staged / "ATTRIBUTION.txt").write_bytes(attribution)
         receipt = {"schemaVersion": 1, "kind": "bicino-topography-development-pair-v1", "productionEligible": False,
                    "mapId": map_id, "rendererFormatVersion": 4, "blockFormatVersion": 5,
-                   "topographyProfileVersion": 1, "sourcePolicySha256": sample["sourcePolicySha256"],
+                   "profileVersion": TOPOGRAPHY_PROFILE_VERSION, "sourcePolicySha256": sample["sourcePolicySha256"],
                    "sampleSha256": sample_sha, "selectionSha256": compiled.selection_sha256,
                    "intermediateSha256": compiled.intermediate_sha256, "attributionSha256": notice_sha,
                    "qualityMode": sample["qualityMode"], "minorIntervalM": empty.minor_interval_m,
