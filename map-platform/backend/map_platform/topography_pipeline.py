@@ -16,7 +16,10 @@ from .topography_raster import audited_copernicus_pixels, sample_fixed_grid
 from .topography_sources import TopographySourcePolicy, plan_elevation
 
 MAX_GRID_PIXELS = 4_000_000
-MAX_CONTOUR_POINTS = 200_000
+# A 312 km2 Sichuan mountain selection measured 422,855 canonical input
+# points. Keep the map-wide intermediate bounded while allowing that case and
+# headroom for similarly dense selections; larger regions need partitioning.
+MAX_CONTOUR_POINTS = 1_000_000
 MAX_CONTOUR_RECORDS = 10_000
 
 
