@@ -197,7 +197,9 @@ before the worker downloads the matching PBF.
 `config/geofabrik-source-fallbacks.json` selects a larger, containing source
 for known incomplete regional extracts. Sichuan currently uses China's PBF:
 the regional extract has missing relation references, while the China source
-index has passed validation. The fallback is applied when the job is created;
+index has passed validation. This fallback is enabled only when
+`MAP_PLATFORM_DEPLOYMENT_CHANNEL=development` while the larger map is being
+qualified on a physical device. The fallback is applied when the job is created;
 it never changes the source of an existing job. Resolution fails if the named
 parent source does not cover the requested bounds. Remove the entry only after
 a refreshed regional extract passes source-index validation.

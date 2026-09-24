@@ -76,6 +76,10 @@ class GeofabrikSourceProvider:
             if not isinstance(child_id, str) or not isinstance(parent_id, str) or child_id == parent_id:
                 raise ValueError("Geofabrik source fallback entry is invalid")
             source_fallbacks[child_id] = parent_id
+        # Qualify the larger source on the development stack before changing
+        # production source selection for maps installed on physical devices.
+        if os.environ.get("MAP_PLATFORM_DEPLOYMENT_CHANNEL") != "development":
+            source_fallbacks = {}
         return cls(
             os.environ.get("MAP_PLATFORM_GEOFABRIK_INDEX_URL", DEFAULT_GEOFABRIK_INDEX_URL),
             cache_path=cache_path,

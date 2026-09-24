@@ -149,10 +149,19 @@ class SourceAndJobTests(unittest.TestCase):
             with patch.dict("os.environ", {
                 "MAP_PLATFORM_DYNAMIC_SOURCE_DISCOVERY": "1",
                 "MAP_PLATFORM_GEOFABRIK_INDEX_CACHE": str(catalog_path),
+                "MAP_PLATFORM_DEPLOYMENT_CHANNEL": "development",
             }):
                 configured = GeofabrikSourceProvider.from_environment(tmp)
             self.assertIsNotNone(configured)
             self.assertEqual(configured.resolve_for_bounds(bounds).id, "geofabrik-china")
+            with patch.dict("os.environ", {
+                "MAP_PLATFORM_DYNAMIC_SOURCE_DISCOVERY": "1",
+                "MAP_PLATFORM_GEOFABRIK_INDEX_CACHE": str(catalog_path),
+                "MAP_PLATFORM_DEPLOYMENT_CHANNEL": "production",
+            }):
+                production = GeofabrikSourceProvider.from_environment(tmp)
+            self.assertIsNotNone(production)
+            self.assertEqual(production.resolve_for_bounds(bounds).id, "geofabrik-sichuan")
             missing_parent = GeofabrikSourceProvider(
                 cache_path=catalog_path,
                 source_fallbacks={"geofabrik-sichuan": "geofabrik-asia"},
