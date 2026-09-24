@@ -11,7 +11,7 @@ import platform
 from typing import Any
 
 from .topography_cache import ElevationCache
-from .topography_grid import contour_grid, processing_region, region_resolution
+from .topography_grid import contour_grid, enclosing_bounds_e7, processing_region, region_resolution
 from .topography_raster import audited_copernicus_pixels, sample_fixed_grid
 from .topography_sources import TopographySourcePolicy, plan_elevation
 
@@ -145,7 +145,7 @@ def contour_sample(policy: TopographySourcePolicy, cache: ElevationCache,
     return {
         "schemaVersion": 1, "kind": "bicino-contour-evidence-v1", "access": "free",
         "productionEligible": False, "sourcePolicySha256": policy.sha256,
-        "boundsE7": [round(value * 10_000_000) for value in bounds], "workingCrs": crs,
+        "boundsE7": enclosing_bounds_e7(bounds), "workingCrs": crs,
         "verticalDatum": "EPSG:3855", "surfaceModel": "dsm",
         "qualityMode": "coarse-50m-v1" if resolution == 90 else "standard-20m-v1",
         "processingGrid": grid.evidence(), "nativeRasterAudits": raster_audits,

@@ -8,9 +8,22 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 GRID_POLICY = "utm-polar-zero-origin-halo-v1"
 HALO_PIXELS = 4
+
+
+def enclosing_bounds_e7(bounds: list[float]) -> list[int]:
+    """Quantize an already validated WGS84 envelope without shrinking it.
+
+    Contour compilation checks the original selection against this recorded
+    envelope, so nearest-E7 rounding can incorrectly reject ordinary maps.
+    Decimal preserves the input float's JSON representation at E7 boundaries.
+    """
+    scaled = [Decimal(str(value)) * 10_000_000 for value in bounds]
+    return [int(value.to_integral_value(rounding=direction))
+            for value, direction in zip(scaled, (ROUND_FLOOR, ROUND_FLOOR, ROUND_CEILING, ROUND_CEILING))]
 
 
 def region_resolution(policy, indexes, crs: str) -> int:
