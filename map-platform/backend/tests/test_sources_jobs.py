@@ -110,6 +110,65 @@ class SourceAndJobTests(unittest.TestCase):
         self.assertEqual(source.local_path, "backend/data/source-pbf/geofabrik/japan-latest.osm.pbf")
         self.assertEqual(source.preview_geometry["type"], "Polygon")
 
+    def test_dynamic_geofabrik_source_uses_configured_complete_parent(self):
+        from map_platform.geofabrik_sources import GeofabrikSourceProvider
+
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog_path = Path(tmp) / "geofabrik-index-v1.json"
+            catalog_path.write_text(json.dumps({
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {
+                            "id": source_id,
+                            "name": source_id,
+                            "urls": {"pbf": f"https://download.geofabrik.de/{source_id}-latest.osm.pbf"},
+                        },
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [[[min_lon, min_lat], [max_lon, min_lat],
+                                             [max_lon, max_lat], [min_lon, max_lat],
+                                             [min_lon, min_lat]]],
+                        },
+                    }
+                    for source_id, min_lon, min_lat, max_lon, max_lat in (
+                        ("china", 73, 18, 135, 54),
+                        ("sichuan", 97, 26, 109, 35),
+                    )
+                ],
+            }))
+            bounds = Bounds(103.399, 30.933, 103.585, 31.092)
+            ordinary = GeofabrikSourceProvider(cache_path=catalog_path)
+            self.assertEqual(ordinary.resolve_for_bounds(bounds).id, "geofabrik-sichuan")
+            fallback = GeofabrikSourceProvider(
+                cache_path=catalog_path,
+                source_fallbacks={"geofabrik-sichuan": "geofabrik-china"},
+            )
+            self.assertEqual(fallback.resolve_for_bounds(bounds).id, "geofabrik-china")
+            with patch.dict("os.environ", {
+                "MAP_PLATFORM_DYNAMIC_SOURCE_DISCOVERY": "1",
+                "MAP_PLATFORM_GEOFABRIK_INDEX_CACHE": str(catalog_path),
+                "MAP_PLATFORM_DEPLOYMENT_CHANNEL": "development",
+            }):
+                configured = GeofabrikSourceProvider.from_environment(tmp)
+            self.assertIsNotNone(configured)
+            self.assertEqual(configured.resolve_for_bounds(bounds).id, "geofabrik-china")
+            with patch.dict("os.environ", {
+                "MAP_PLATFORM_DYNAMIC_SOURCE_DISCOVERY": "1",
+                "MAP_PLATFORM_GEOFABRIK_INDEX_CACHE": str(catalog_path),
+                "MAP_PLATFORM_DEPLOYMENT_CHANNEL": "production",
+            }):
+                production = GeofabrikSourceProvider.from_environment(tmp)
+            self.assertIsNotNone(production)
+            self.assertEqual(production.resolve_for_bounds(bounds).id, "geofabrik-sichuan")
+            missing_parent = GeofabrikSourceProvider(
+                cache_path=catalog_path,
+                source_fallbacks={"geofabrik-sichuan": "geofabrik-asia"},
+            )
+            with self.assertRaises(SourceResolutionError):
+                missing_parent.resolve_for_bounds(bounds)
+
     def test_static_geofabrik_preview_geometry_is_deferred_to_catalog_provider(self):
         from map_platform.geofabrik_sources import GeofabrikSourceProvider
 
