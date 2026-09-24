@@ -515,6 +515,10 @@ bool MapTransferHttpServer::handleInstallStream(
   const MapStreamInstallSnapshot completed = receiver->snapshot();
   const uint32_t minimumActivationSequence =
       completed.sequence == UINT32_MAX ? UINT32_MAX : completed.sequence + 1;
+  // Activation starts in responseDidComplete after the verified response has
+  // unwound. A reusable HTTPS connection skips that callback while the client
+  // polls status, leaving this ready map unselected until the session expires.
+  client.requestHttpResponseClose();
   const bool responseQueued =
       sendJson(client, 200,
                std::string("{\"ok\":true,\"status\":\"ready\",\"sessionId\":\"") +

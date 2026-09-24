@@ -39,6 +39,18 @@ class MapActivationHandoffTests(unittest.TestCase):
         self.assertNotIn("startActivationTask(", body)
         self.assertNotIn("xTaskCreate(", body)
 
+    def test_verified_stream_response_closes_before_activation_handoff(self):
+        body = method_body("handleInstallStream")
+        close = body.index("client.requestHttpResponseClose();")
+        success = body.index("sendJson(client, 200,", close)
+        defer = body.index("deferActivationUntilResponse(", success)
+        self.assertLess(close, success)
+        self.assertLess(success, defer)
+        completion = DEVICE_TRANSFER_SOURCE.index(
+            "handler->responseDidComplete(request, peerClosedCleanly);"
+        )
+        self.assertIn("if (keepAlive)", DEVICE_TRANSFER_SOURCE[:completion])
+
     def test_unsigned_archive_routes_are_rejected(self):
         body = method_body("handleRequest")
         self.assertIn('startsWith(request.path, kSessionPrefix)', body)

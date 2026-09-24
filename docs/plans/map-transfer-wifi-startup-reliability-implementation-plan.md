@@ -247,3 +247,24 @@ finish on status polls; mode changes and BLE authorization boundaries still
 discard stale streams. This is a source-supported failure mechanism that needs
 physical confirmation with a newly approved image. Map upload, TLS, activation,
 renderer reload, and teardown remain unqualified.
+
+The `f554151c9cf6b559db07e95ac9d1b43a4922bc8a` image completed an
+attested upload and controlled warm-boot identity/ready/PMIC read-only check on
+the 1.75-inch board. The next iPhone attempt received the hotspot join prompt,
+established pinned HTTPS, and its 760,796-byte signed-map upload returned HTTP
+200. Bicino Dev reached `activating Shanghai`, then timed out after its ten-minute
+confirmation window. Its persisted upload record reports all 760,796 bytes and
+HTTP 200, but the saved map remained `unconfirmed` and the device displayed
+`No map for this area` even after Bicino Dev was launched with a test coordinate
+inside the saved map's Expo Culture Park bounds. This confirms the secure
+status and Wi-Fi startup fix, but not map activation.
+
+Source review identified the next handoff defect: the map upload defers
+activation until `responseDidComplete`, while the shared HTTPS server skips
+that callback when it reuses the authenticated connection. The app uses that
+connection for status polling. The next candidate marks only the verified map
+upload response `Connection: close` before writing it, so the server unwinds
+the response and dispatches durable activation to the internal operation owner.
+Status GETs and the other transfer modes retain their ordinary connection
+policy. This needs a new attested image and physical retry; the source change
+alone does not prove activation or rendering.
