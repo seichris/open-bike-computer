@@ -107,6 +107,40 @@ static void refreshSectionCrc(std::vector<uint8_t> &data,
   write32(data, entryOffset + 12U, crc32(section));
 }
 
+static std::vector<uint8_t> withEmptyContours(
+    const std::vector<uint8_t> &validV4) {
+  const size_t directory = extensionOffset(validV4, 4);
+  std::vector<uint8_t> result(validV4.begin(), validV4.begin() + directory);
+  result[3] = 5;
+  result.insert(result.end(), {'E', 'X', 'T', '5', 5, 0, 0, 0});
+  size_t payloadOffset = result.size() + 5U * 16U;
+  std::vector<uint8_t> payload;
+  for (uint8_t sectionType = 1; sectionType <= 5; ++sectionType) {
+    std::vector<uint8_t> section;
+    if (sectionType == 5) {
+      // FMB v5 requires a contour header even when this block has no contours.
+      section = {1, 0, 20, 0, 100, 0, 0, 0, 0, 0, 0, 0};
+    } else {
+      const size_t entry = sectionEntryOffset(validV4, 4, sectionType);
+      const size_t offset = read32(validV4, entry + 4U);
+      const size_t length = read32(validV4, entry + 8U);
+      section.assign(validV4.begin() + offset,
+                     validV4.begin() + offset + length);
+    }
+    const size_t entry = result.size();
+    result.resize(entry + 16U, 0);
+    result[entry] = sectionType;
+    result[entry + 1U] = 1; // critical section
+    write32(result, entry + 4U, static_cast<uint32_t>(payloadOffset));
+    write32(result, entry + 8U, static_cast<uint32_t>(section.size()));
+    write32(result, entry + 12U, crc32(section));
+    payload.insert(payload.end(), section.begin(), section.end());
+    payloadOffset += section.size();
+  }
+  result.insert(result.end(), payload.begin(), payload.end());
+  return result;
+}
+
 int main() {
   static_assert(map_block_format::kMaximumBuildings == 12288);
   for (size_t offset = 0; offset < 8; ++offset) {
@@ -170,6 +204,13 @@ int main() {
   assert(buildingBlock.stats.provenance[1] == 0);
   for (const uint8_t wall : buildingBlock.buildings[0].rings[0].walls)
     assert(wall == 1);
+  const std::vector<uint8_t> validV5 = withEmptyContours(validV4);
+  assert(map_block_format::validate(validV5.data(), validV5.size()));
+  buildingError.clear();
+  assert(map_building_block::decode(validV5.data(), validV5.size(),
+                                    buildingBlock, &buildingError));
+  assert(buildingBlock.buildings.size() == 1);
+  assert(buildingBlock.stats.records == 1);
   for (size_t size = 0; size < validV4.size(); ++size)
     assert(!map_block_format::validate(validV4.data(), size));
 
