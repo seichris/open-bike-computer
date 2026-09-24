@@ -199,10 +199,28 @@ outcome qualifies a map transfer. The exact successful serial boot identity
 and the panic belong to this same image; no cold-start or readback claim was
 made.
 
-The next image raises the ESP-IDF internal/DMA reserve from 64 to 96 KiB and
-rejects AP/STA initialization below a conservative floor derived from the
-observed unsafe region. The floor is a crash-avoidance preflight, not a proven
-success threshold. Physical measurements must show Wi-Fi startup, signed
-upload, activation, renderer reload, and safe teardown before choosing final
-per-target admission thresholds. The revised image has not been flashed or
-physically accepted.
+The follow-up 1.75-inch remote-debug image at Git
+`99f49894e95fd9a3bcce291f589a47577c88c61a` raised the ESP-IDF
+internal/DMA reserve from 64 to 96 KiB and added a conservative AP/STA
+rejection floor. Its attested upload completed and a controlled **warm** boot
+matched the Git/profile identity, reached ready, and passed the PMIC read-only
+gate. With the iPhone authenticated over BLE and normal map rendering active,
+the warm-boot log showed only 60,503 bytes internal free, 31,732 bytes in the
+largest internal/DMA block, and 52,871 bytes DMA free. These figures were
+measured before allocating the 16 KiB internal operation-owner task. The
+rejection floor requires 61,440 bytes internal free and a 32,768-byte largest
+internal/DMA block, so this image cannot admit AP startup in that state. The
+larger reserve did not create additional internal RAM. The iPhone's manual
+transfer attempt reported `Device map transfer mode is not ready`; that app
+message is also used when BLE navigation is not ready or no fresh transfer
+status arrives, so it does not independently prove that the Wi-Fi guard fired.
+
+The next source candidate places the diagnostics event **payload storage**
+(32 events, approximately 25 KiB) in PSRAM while retaining FreeRTOS queue
+control in internal RAM. Queue producers and consumers run as tasks, outside
+the cache-disabled flash operations; no ISR queue API is used. This targets a
+specific large boot allocation rather than relaxing the rejection floor or
+shrinking the stack needed for map activation. The source change requires a
+new attested build, explicit per-image flash approval, and measured physical
+Wi-Fi/TLS/map/diagnostics/OTA gates. The rejection floor remains a
+crash-avoidance preflight, not a proven success threshold.

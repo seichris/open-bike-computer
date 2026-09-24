@@ -27,6 +27,7 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <esp_heap_caps.h>
 
 #ifndef PERSISTENT_RIDE_DIAGNOSTICS
 #define PERSISTENT_RIDE_DIAGNOSTICS 0
@@ -95,6 +96,29 @@ constexpr std::size_t kFilePruneBatch = 16;
 Storage *storage = nullptr;
 QueueHandle_t normalQueue = nullptr;
 QueueHandle_t criticalQueue = nullptr;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+// Queue control remains in internal RAM. Only task-owned event payloads live
+// in PSRAM; no ISR or flash-cache-disabled path accesses these queues.
+StaticQueue_t normalQueueControl{};
+StaticQueue_t criticalQueueControl{};
+uint8_t *normalQueueEvents = nullptr;
+uint8_t *criticalQueueEvents = nullptr;
+
+QueueHandle_t createEventQueue(UBaseType_t capacity, uint8_t *&events,
+                               StaticQueue_t &control) {
+  events = static_cast<uint8_t *>(heap_caps_malloc(
+      capacity * sizeof(QueuedEvent), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (events == nullptr)
+    return nullptr;
+  QueueHandle_t queue =
+      xQueueCreateStatic(capacity, sizeof(QueuedEvent), events, &control);
+  if (queue == nullptr) {
+    heap_caps_free(events);
+    events = nullptr;
+  }
+  return queue;
+}
+#endif
 TaskHandle_t writerTaskHandle = nullptr;
 std::atomic<bool> recorderResourcesReady{false};
 std::atomic<bool> recorderWriterReady{false};
@@ -1232,10 +1256,22 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   initializeFaultCapsules();
   lastStorageAvailable.store(storage->getDiagnosticsSdLoaded(),
                              std::memory_order_release);
-  if (normalQueue == nullptr)
+  if (normalQueue == nullptr) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+    normalQueue = createEventQueue(kNormalQueueCapacity, normalQueueEvents,
+                                   normalQueueControl);
+#else
     normalQueue = xQueueCreate(kNormalQueueCapacity, sizeof(QueuedEvent));
-  if (criticalQueue == nullptr)
+#endif
+  }
+  if (criticalQueue == nullptr) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+    criticalQueue = createEventQueue(kCriticalQueueCapacity,
+                                     criticalQueueEvents, criticalQueueControl);
+#else
     criticalQueue = xQueueCreate(kCriticalQueueCapacity, sizeof(QueuedEvent));
+#endif
+  }
   if (producerMutex == nullptr)
     producerMutex = xSemaphoreCreateMutex();
   if (queueMutationMutex == nullptr)
