@@ -3945,7 +3945,11 @@ static void processPendingTransferControl() {
     notifyMapTransferStatus(mapTransferStatusCharacteristic);
   }
   if (request.notifications & ble_transfer::NotifyGeneric) {
-    resetPendingDeviceTransferStatusChunks();
+    // A status poll must finish any in-flight DSTC stream. The iPhone polls
+    // once per second while entering transfer mode; restarting a multi-chunk
+    // response on each poll can prevent it from ever receiving a complete
+    // token-bearing DSTS snapshot under BLE notification backpressure. Mode
+    // changes and disconnects reset the stream above at their auth boundary.
     notifyGenericTransferStatus(mapTransferStatusCharacteristic);
   }
   if (request.notifications & ble_transfer::NotifyRendererDiagnostics) {

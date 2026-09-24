@@ -224,3 +224,26 @@ shrinking the stack needed for map activation. The source change requires a
 new attested build, explicit per-image flash approval, and measured physical
 Wi-Fi/TLS/map/diagnostics/OTA gates. The rejection floor remains a
 crash-avoidance preflight, not a proven success threshold.
+
+The queue-storage image at Git `7b68c70316d49b7868f165278df6c9b9504c75ca`
+received that exact approval, uploaded successfully to the 1.75-inch board,
+and passed a controlled warm-boot ready/PMIC read-only capture. At authenticated
+idle, internal free rose to 86,375 bytes and the largest internal/DMA block to
+57,332 bytes. The iPhone's map transfer status subsequently showed the device
+hotspot URL `https://192.168.4.1:8080`, establishing that Wi-Fi AP startup and
+the map status notification succeeded. The app still reported `Device map
+transfer mode is not ready` on two manual attempts; it never asked to join the
+hotspot or began uploading. This isolates a remaining secure-session readiness
+handshake problem, not a completed map transfer. The app's recent debug log
+contained repeated map-status replies but no completed generic device-transfer
+status (`DSTS`) reply.
+
+The generic `DSTS` response spans multiple BLE notifications. During transfer
+entry the iPhone polls status each second, but the firmware currently resets
+an in-flight generic chunk stream on each poll. Under notification backlog,
+that can starve assembly of the token-bearing status needed before the Wi-Fi
+join prompt. The next source candidate allows an in-flight `DSTC` stream to
+finish on status polls; mode changes and BLE authorization boundaries still
+discard stale streams. This is a source-supported failure mechanism that needs
+physical confirmation with a newly approved image. Map upload, TLS, activation,
+renderer reload, and teardown remain unqualified.
