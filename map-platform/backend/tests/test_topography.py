@@ -17,7 +17,7 @@ from map_platform.topography_sources import (
     TopographySourcePolicy, geocells, load_topography_source_policy,
     parse_tile_index, plan_elevation,
 )
-from map_platform.topography_pipeline import canonical_bytes, canonical_line, contour_sample
+from map_platform.topography_pipeline import canonical_bytes, canonical_line, contour_sample, extract_contours
 from map_platform.topography_grid import contour_grid, processing_region, region_resolution
 from map_platform.topography_cli import main as cli_main
 
@@ -443,6 +443,20 @@ class TopographyPipelineTests(unittest.TestCase):
     def test_contour_complexity_limit(self):
         with patch("map_platform.topography_pipeline.MAX_CONTOUR_POINTS", 1), self.assertRaisesRegex(ValueError, "complexity"):
             contour_sample(self.policy, self.cache, [6.2, 0.2, 6.25, 0.25])
+
+    def test_dense_contour_above_previous_point_limit_is_accepted(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        line = np.column_stack((np.arange(200_001) / 1000, np.zeros(200_001)))
+        grid = SimpleNamespace(width=2, height=2, left=0, top=0, resolution=30)
+        generator = Mock()
+        generator.lines.return_value = [line]
+        with patch("contourpy.contour_generator", return_value=generator):
+            records, missing = extract_contours(np.zeros((2, 2), dtype="float32"), grid, 20, 100)
+        self.assertEqual(missing, 0)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(len(records[0][2]), 200_001)
 
     def test_partial_no_data_is_reported_without_zero_filling(self):
         receipt = self.cache.stage(self.policy.sources[0], (6, 0))

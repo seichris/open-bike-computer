@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from shapely.geometry import box, mapping
@@ -88,6 +89,20 @@ class TopographyGeometryTests(unittest.TestCase):
             raise InterruptedError("cancelled")
         with self.assertRaises(InterruptedError):
             compile_contours(self.sample, self.selection, cancel=cancelled)
+
+    def test_dense_intermediate_above_previous_point_limit_is_accepted(self):
+        # The line is inside the sampled bounds but outside this selection.
+        # It exercises the input budget without creating a huge device block.
+        self.sample["contours"][0]["pointsMm"] = [
+            [5_000_000 if index % 2 else 6_000_000, 10_500_000]
+            for index in range(200_001)
+        ]
+        self.assertEqual(compile_contours(self.sample, self.selection).point_count, 0)
+
+    def test_compiled_point_budget_still_rejects_oversized_output(self):
+        with patch("map_platform.topography_geometry.MAX_COMPILED_POINTS", 1):
+            with self.assertRaisesRegex(ValueError, "compiled contours exceed"):
+                compile_contours(self.sample, self.selection)
 
     def test_pack_preserves_vector_input_and_adds_terrain_only_blocks(self):
         source = self.root / "source"

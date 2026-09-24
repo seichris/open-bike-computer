@@ -190,10 +190,27 @@ The output contains `device/VECTMAP/`, a separate `.btopo`, `ATTRIBUTION.txt`,
 and `topography-receipt.json`. That receipt is development evidence, **not** an
 authenticated catalog grant, signed map manifest, or source-license approval.
 
-Current bounds are 256 blocks/400,000 compiled points per pair, 4,096 contour
+Current bounds are one million sampled and compiler-input contour points,
+one million compiled points and 256 blocks per pair, 4,096 contour
 records/65,536 points per block, 256 points per record, 512 m maximum encoded
 segment, 16,384 companion tiles (both scales), and 256 MiB per companion.
 Exceeding a bound rejects the result rather than silently truncating terrain.
+These map-wide limits are an interim bound for the development canary. Tiled,
+reusable processing for routine 2,500 km² selections is tracked in
+[issue #509](https://github.com/seichris/open-bike-computer/issues/509).
+
+### Sichuan complexity check on 2026-09-24
+
+The failed 311.96 km² development job `14133e0c016f4178bbf1` was sampled
+again from its cached elevation inputs in a separate diagnostic process, with
+network acquisition disabled and the proposed point limits applied in memory.
+It produced 1,295 intermediate contour records and 422,855 canonical input
+points. Compilation produced 4,981 device records and 405,818 points across
+36 blocks; the busiest block held 226 records and 20,570 points. A temporary
+iPhone companion built and validated with 3,264 tiles and 34,562,048 bytes.
+This checks the contour and companion budgets for that exact selection; the
+original job remains failed, and no completed map pack or physical rendering
+has been validated from these diagnostics.
 
 Repeatability is qualified within the same native runtime. Cross-platform
 SQLite/Pillow/PROJ byte identity has not been qualified; producer environment
