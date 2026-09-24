@@ -1159,6 +1159,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferActivationError: String?
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
+    @Published private(set) var hasFreshMapTransferStatus = false
     @Published var deviceTransferMode: String = ""
     @Published var deviceTransferBaseURL: URL?
     @Published var deviceTransferAccessPointSSID: String?
@@ -6738,6 +6739,7 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferActivationError = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
+        hasFreshMapTransferStatus = false
         mapTransferStatusChunkTransferID = nil
         mapTransferStatusChunkCount = 0
         mapTransferStatusChunks.removeAll()
@@ -11213,6 +11215,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferActivationProgress = nil
             mapTransferActivationError = nil
         }
+        hasFreshMapTransferStatus = true
     }
 
     private func applyMapTransferStatusBody(_ body: Data) -> Bool {
@@ -11304,6 +11307,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferStatusDescription = "transfer mode disabled"
         }
 
+        hasFreshMapTransferStatus = true
         log("Map transfer status: \(mapTransferStatusDescription)")
         return true
     }

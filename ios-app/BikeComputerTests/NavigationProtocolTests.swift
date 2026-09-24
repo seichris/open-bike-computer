@@ -2666,6 +2666,18 @@ struct NavigationProtocolTests {
                 lastTransferOutcome: "unconfirmed",
                 lastTransferMapID: "map-a",
                 candidateMapID: "map-a",
+                lastDeviceState: "idle",
+                backgroundUploadSucceeded: true,
+                observedIdleOnAnotherMap: true,
+                statusMessage: "Activation paused. Tap Upload to resume."
+            ),
+            "a fresh idle status on another map permits retry after a completed upload"
+        )
+        assert(
+            PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "map-a",
+                candidateMapID: "map-a",
                 lastDeviceState: "paused",
                 backgroundUploadSucceeded: true
             ),
@@ -13561,6 +13573,26 @@ struct NavigationProtocolTests {
         bleManager.mapTransferActiveMapId = "old-map"
         bleManager.mapTransferActiveSessionId = "old-session"
         bleManager.mapTransferActivationStatus = "idle"
+        manager.reconcileLastTransfer(bleManager: bleManager)
+        assertEqual(
+            manager.statusMessage,
+            "Waiting for device map status",
+            "a restored transfer waits for fresh authenticated device status"
+        )
+        bleManager.applyAuthenticatedMapTransferStatus(
+            MapTransferDeviceStatus(
+                enabled: false,
+                activeMapId: "old-map",
+                activeSessionId: "old-session",
+                activation: nil,
+                protocols: [1, 2],
+                streamFormatVersions: [1],
+                streamTrust: nil,
+                firmwareVersion: nil,
+                firmwareBuild: nil,
+                firmwareGitSha: nil
+            )
+        )
         manager.reconcileLastTransfer(bleManager: bleManager)
         assertEqual(
             manager.statusMessage,

@@ -1165,6 +1165,7 @@ private struct SavedMapsSettingsSection: View {
             }
         }
         .onChange(of: bleManager.isNavigationReady) { isReady in
+            manager.reconcileLastTransfer(bleManager: bleManager)
             if isReady {
                 bleManager.requestMapTransferStatus()
             }
@@ -1188,6 +1189,9 @@ private struct SavedMapsSettingsSection: View {
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
         .onChange(of: bleManager.mapTransferActivationProgress) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
+        .onChange(of: bleManager.hasFreshMapTransferStatus) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
     }

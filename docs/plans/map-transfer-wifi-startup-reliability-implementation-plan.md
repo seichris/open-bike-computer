@@ -221,7 +221,7 @@ control in internal RAM. Queue producers and consumers run as tasks, outside
 the cache-disabled flash operations; no ISR queue API is used. This targets a
 specific large boot allocation rather than relaxing the rejection floor or
 shrinking the stack needed for map activation. The source change requires a
-new attested build, explicit per-image flash approval, and measured physical
+new attested build and measured physical
 Wi-Fi/TLS/map/diagnostics/OTA gates. The rejection floor remains a
 crash-avoidance preflight, not a proven success threshold.
 
@@ -245,7 +245,7 @@ that can starve assembly of the token-bearing status needed before the Wi-Fi
 join prompt. The next source candidate allows an in-flight `DSTC` stream to
 finish on status polls; mode changes and BLE authorization boundaries still
 discard stale streams. This is a source-supported failure mechanism that needs
-physical confirmation with a newly approved image. Map upload, TLS, activation,
+physical confirmation with a newly attested image. Map upload, TLS, activation,
 renderer reload, and teardown remain unqualified.
 
 The `f554151c9cf6b559db07e95ac9d1b43a4922bc8a` image completed an
@@ -268,3 +268,28 @@ the response and dispatches durable activation to the internal operation owner.
 Status GETs and the other transfer modes retain their ordinary connection
 policy. This needs a new attested image and physical retry; the source change
 alone does not prove activation or rendering.
+
+The response-close image at Git `c93e774e550b3ae3f249014bbc98fd89aea4af84`
+passed a clean attested 1.75-inch REMOTE_DEBUG build and `--upload-only` write;
+esptool verified each segment. A controlled warm-boot capture matched the Git
+and profile, reached ready, and passed the PMIC read-only gate. Exact-head CI
+Gate passed. The iPhone's next visible Shanghai row briefly reported installed,
+but after a DEBUG launch at Expo Culture Park the device still showed `No map
+for this area`. The live app console proved the Expo override was active, BLE
+authenticated, and native GPS positions were sent. The iPhone's persisted
+small-map record remained `unconfirmed`, and the Saved Maps row showed a clock
+waiting for device confirmation. No new background upload record was found for
+this image. Therefore the response-close change is source-validated and flashed,
+but a fresh successful activation and renderer result remain unproven.
+
+The app then showed `Activation paused. Tap Upload to resume.` when it treated
+the device as idle on another map, yet its resume policy suppressed Upload
+because the previous HTTP request had succeeded. The iOS follow-up makes this
+explicit authenticated idle observation a resumable state and adds persistent
+map job, transfer outcome, and retry-availability journal events so the next
+failure can be diagnosed without depending on the short Copy Debug Log view.
+The user's separate Sichuan generation reached 10% in the iPhone UI, then its
+Saved Maps pending row disappeared. Its current app preferences contain no
+active job ID and the local pack directory has no Sichuan artifact; the remote
+job state has not been established. Do not infer that the server job completed
+or was cancelled from the local row disappearing.

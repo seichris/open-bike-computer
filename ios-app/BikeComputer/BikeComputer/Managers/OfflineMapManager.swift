@@ -2091,6 +2091,7 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var activationProgress: MapActivationProgressPresentation?
     @Published private(set) var lastTransferMapId: String
     @Published private(set) var lastTransferOutcome: String
+    @Published private(set) var lastTransferObservedIdleOnAnotherMap = false
     @Published private(set) var catalogMaps: [OfflineMapCatalogMap] = []
     @Published private(set) var catalogShares: [OfflineMapCatalogShare] = []
     @Published private(set) var libraryLinkCode: OfflineMapLibraryLinkCode?
@@ -2646,11 +2647,13 @@ final class OfflineMapManager: ObservableObject {
             candidateArtifactFilename: packURL.lastPathComponent,
             lastDeviceState: metadata?.lastDeviceState,
             backgroundUploadSucceeded: backgroundUploadSucceeded,
+            observedIdleOnAnotherMap: lastTransferObservedIdleOnAnotherMap,
             statusMessage: statusMessage
         )
     }
 
     func isAwaitingMapActivationConfirmation(_ packURL: URL) -> Bool {
+        guard !isPausedMapUpload(packURL) else { return false }
         let candidateMapID = savedMapID(for: packURL)
         guard lastTransferOutcome == "unconfirmed",
               lastTransferMapId == candidateMapID,
@@ -3955,6 +3958,7 @@ final class OfflineMapManager: ObservableObject {
                 forKey: OfflineMapDefaults.lastTransferSessionIdKey
               ),
               !sessionId.isEmpty else {
+            lastTransferObservedIdleOnAnotherMap = false
             return
         }
 
@@ -3999,10 +4003,12 @@ final class OfflineMapManager: ObservableObject {
         )
         switch evaluation.decision {
         case .installed:
+            lastTransferObservedIdleOnAnotherMap = false
             updateLastTransferOutcome("installed")
             statusMessage = "map installed: \(displayName(forMapId: lastTransferMapId))"
             errorMessage = nil
         case .failed(let message):
+            lastTransferObservedIdleOnAnotherMap = false
             updateLastTransferOutcome("failed")
             statusMessage = ""
             errorMessage = OfflineMapPlatformError
@@ -4010,8 +4016,18 @@ final class OfflineMapManager: ObservableObject {
                 .localizedDescription
         case .pending:
             let deviceIsIdleOnAnotherMap =
+                bleManager.hasFreshMapTransferStatus &&
                 bleManager.mapTransferActivationStatus == "idle" &&
                 bleManager.mapTransferActiveSessionId != sessionId
+            if deviceIsIdleOnAnotherMap &&
+                !lastTransferObservedIdleOnAnotherMap {
+                diagnosticsRecorder?.record(
+                    category: .map,
+                    event: "activation_retry_available",
+                    fields: ["mapId": lastTransferMapId, "state": "idle"]
+                )
+            }
+            lastTransferObservedIdleOnAnotherMap = deviceIsIdleOnAnotherMap
             switch bleManager.mapTransferActivationStatus {
             case "receiving":
                 statusMessage = "Map upload continues on device"
@@ -4733,6 +4749,11 @@ final class OfflineMapManager: ObservableObject {
         }
         currentJob = job
         downloadURL = nil
+        diagnosticsRecorder?.record(
+            category: .map,
+            event: "job_recovered",
+            fields: ["mapId": job.mapId ?? ""]
+        )
     }
 
     nonisolated static func resolvedServerURL(defaults: UserDefaults) -> String {
@@ -5360,9 +5381,25 @@ final class OfflineMapManager: ObservableObject {
             serverURLString: serverURLString,
             defaults: defaults
         )
+        diagnosticsRecorder?.record(
+            category: .map,
+            event: "job_persisted",
+            fields: [
+                "mapId": currentJob?.mapId ?? "",
+                "outcome": installOnDevice ? "device" : "iphone",
+            ]
+        )
     }
 
     private func clearPersistedJob(markHandled: Bool = false) {
+        diagnosticsRecorder?.record(
+            category: .map,
+            event: "job_cleared",
+            fields: [
+                "mapId": currentJob?.mapId ?? "",
+                "outcome": markHandled ? "handled" : "cleared",
+            ]
+        )
         if markHandled,
            let jobId = OfflineMapJobPersistence.activeJobId(defaults: defaults) {
             OfflineMapRecoveryHistory.markHandled(jobId: jobId, defaults: defaults)
@@ -6180,6 +6217,7 @@ final class OfflineMapManager: ObservableObject {
                                 protocolVersion: Int = 1,
                                 streamFormatVersion: Int? = nil,
                                 artifactURL: URL? = nil) {
+        lastTransferObservedIdleOnAnotherMap = false
         lastTransferMapId = mapId
         defaults.set(mapId, forKey: OfflineMapDefaults.lastTransferMapIdKey)
         defaults.set(sessionId, forKey: OfflineMapDefaults.lastTransferSessionIdKey)
@@ -6220,8 +6258,16 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func updateLastTransferOutcome(_ outcome: String) {
+        let changed = lastTransferOutcome != outcome
         lastTransferOutcome = outcome
         defaults.set(outcome, forKey: OfflineMapDefaults.lastTransferOutcomeKey)
+        if changed {
+            diagnosticsRecorder?.record(
+                category: .map,
+                event: "transfer_outcome",
+                fields: ["mapId": lastTransferMapId, "outcome": outcome]
+            )
+        }
         if MapActivationProgressPresentation.shouldClear(
             forTransferOutcome: outcome
         ) {
@@ -6246,6 +6292,7 @@ final class OfflineMapManager: ObservableObject {
             )
         }
         if outcome != "unconfirmed" {
+            lastTransferObservedIdleOnAnotherMap = false
             activationReconciliationTask?.cancel()
             activationReconciliationTask = nil
         }
@@ -6271,6 +6318,7 @@ final class OfflineMapManager: ObservableObject {
         }
         lastTransferMapId = ""
         lastTransferOutcome = ""
+        lastTransferObservedIdleOnAnotherMap = false
         transferProgress = 0
         activationProgress = nil
         statusMessage = ""
