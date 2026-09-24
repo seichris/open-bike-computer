@@ -22,6 +22,7 @@ MAX_CATALOG_BYTES = 32 * 1024 * 1024
 MAX_CATALOG_FEATURES = 10000
 MAX_CATALOG_NODES = 2000000
 MAX_CATALOG_DEPTH = 16
+DEFAULT_SOURCE_FALLBACKS_PATH = Path(__file__).resolve().parents[1] / "config" / "geofabrik-source-fallbacks.json"
 
 
 @dataclass(frozen=True)
@@ -39,12 +40,14 @@ class GeofabrikSourceProvider:
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         request_timeout_seconds: int = 60,
         failure_cooldown_seconds: int = DEFAULT_FAILURE_COOLDOWN_SECONDS,
+        source_fallbacks: dict[str, str] | None = None,
     ):
         self.index_url = index_url
         self.cache_path = Path(cache_path)
         self.cache_ttl_seconds = cache_ttl_seconds
         self.request_timeout_seconds = request_timeout_seconds
         self.failure_cooldown_seconds = max(1, failure_cooldown_seconds)
+        self.source_fallbacks = dict(source_fallbacks or {})
         self._regions: list[GeofabrikCatalogRegion] | None = None
         self._regions_lock = threading.Lock()
         self._regions_error: SourceResolutionError | None = None
@@ -62,6 +65,17 @@ class GeofabrikSourceProvider:
                 data_root_path / "source-catalogs" / "geofabrik-index-v1.json",
             )
         )
+        fallback_path = Path(
+            os.environ.get("MAP_PLATFORM_GEOFABRIK_SOURCE_FALLBACKS", DEFAULT_SOURCE_FALLBACKS_PATH)
+        )
+        fallback_config = json.loads(fallback_path.read_text())
+        if fallback_config.get("schemaVersion") != 1 or not isinstance(fallback_config.get("fallbacks"), dict):
+            raise ValueError("Geofabrik source fallback configuration is invalid")
+        source_fallbacks = {}
+        for child_id, parent_id in fallback_config["fallbacks"].items():
+            if not isinstance(child_id, str) or not isinstance(parent_id, str) or child_id == parent_id:
+                raise ValueError("Geofabrik source fallback entry is invalid")
+            source_fallbacks[child_id] = parent_id
         return cls(
             os.environ.get("MAP_PLATFORM_GEOFABRIK_INDEX_URL", DEFAULT_GEOFABRIK_INDEX_URL),
             cache_path=cache_path,
@@ -73,6 +87,7 @@ class GeofabrikSourceProvider:
                     DEFAULT_FAILURE_COOLDOWN_SECONDS,
                 )
             ),
+            source_fallbacks=source_fallbacks,
         )
 
     def source_regions(self) -> list[SourceRegion]:
@@ -85,7 +100,19 @@ class GeofabrikSourceProvider:
             if contains_bounds(region.source_region.bounds, bounds) and _geometry_contains_bounds(region.geometry, bounds)
         ]
         if containing:
-            return sorted(containing, key=lambda region: bbox_area_km2(region.source_region.bounds))[0].source_region
+            containing.sort(key=lambda region: bbox_area_km2(region.source_region.bounds))
+            selected = containing[0]
+            fallback_id = self.source_fallbacks.get(selected.source_region.id)
+            if fallback_id is not None:
+                selected = next(
+                    (region for region in containing if region.source_region.id == fallback_id),
+                    None,
+                )
+                if selected is None:
+                    raise SourceResolutionError(
+                        f"configured fallback for {containing[0].source_region.id} does not cover the requested area"
+                    )
+            return selected.source_region
         raise SourceResolutionError("no Geofabrik source region covers the requested area")
 
     def preview_geometry_for_source(self, source: SourceRegion) -> dict[str, Any] | None:
