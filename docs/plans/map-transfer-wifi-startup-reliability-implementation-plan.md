@@ -184,3 +184,25 @@ the reported 1.75-inch failure was memory pressure, driver state, or another
 substep, to set justified per-target admission reserves, and to qualify map,
 diagnostics, remote-debug, and OTA behavior on both boards. This PR must remain
 hardware-gated until that evidence exists.
+
+## Physical 1.75-inch finding and follow-up candidate (2026-09-24)
+
+On an ordinary 1.75-inch image at Git `aaf0cdb55385cd2b4062eadc53d9dbe7c125c06b`,
+the authenticated iPhone retained the downloaded signed Shanghai topo stream,
+but AP startup returned `wifi_mode` before upload. After a controlled warm
+reboot, the first attempt entered Wi-Fi initialization with internal free /
+largest blocks of 42,811 / 14,836 bytes and DMA free / largest blocks of
+35,179 / 14,836 bytes. Initialization returned failure after consuming about
+21 KiB of internal memory. A separate controlled attempt panicked on core 0
+in `ieee80211_hostap_attach` / `wifi_softap_start`, then rebooted. Neither
+outcome qualifies a map transfer. The exact successful serial boot identity
+and the panic belong to this same image; no cold-start or readback claim was
+made.
+
+The next image raises the ESP-IDF internal/DMA reserve from 64 to 96 KiB and
+rejects AP/STA initialization below a conservative floor derived from the
+observed unsafe region. The floor is a crash-avoidance preflight, not a proven
+success threshold. Physical measurements must show Wi-Fi startup, signed
+upload, activation, renderer reload, and safe teardown before choosing final
+per-target admission thresholds. The revised image has not been flashed or
+physically accepted.

@@ -1043,13 +1043,14 @@ final class DeviceTransferManager {
             switch failure.code {
             case "wifi_owner_create": step = "device memory"
             case "wifi_owner_dispatch": step = "device transfer service"
+            case "wifi_memory": step = "device memory"
             case "wifi_mode": step = "Wi-Fi mode"
             case "wifi_ram_storage": step = "Wi-Fi configuration"
             case "wifi_softap": step = "device hotspot"
             default: step = "Wi-Fi"
             }
             return .deviceMapTransferRejected(
-                "\(step) could not start. The map is still on your iPhone; retry the transfer."
+                "\(step) could not start. The map is still on your iPhone. Restart your Bike Computer before retrying."
             )
         }
         return .deviceMapTransferRejected(failure.message)

@@ -711,7 +711,7 @@ bool HttpTransferServer::startNetwork() {
     if (!apStart.ok()) {
       char message[300] = {};
       std::snprintf(message, sizeof(message),
-                    "Wi-Fi startup failed at %s (esp=%ld, internal=%lu/%lu to %lu/%lu, DMA=%lu/%lu to %lu/%lu). Retry transfer; if it repeats, share device status.",
+                    "Wi-Fi startup failed at %s (esp=%ld, internal=%lu/%lu to %lu/%lu, DMA=%lu/%lu to %lu/%lu).",
                     networkStartCode(apStart.failedStep),
                     static_cast<long>(apStart.espError),
                     static_cast<unsigned long>(apStart.before.internalFree),
@@ -722,8 +722,14 @@ bool HttpTransferServer::startNetwork() {
                     static_cast<unsigned long>(apStart.before.dmaLargest),
                     static_cast<unsigned long>(apStart.after.dmaFree),
                     static_cast<unsigned long>(apStart.after.dmaLargest));
+      // A failed Wi-Fi initialization can retain driver allocations for the
+      // rest of this boot. An immediate retry can have less headroom and may
+      // reach the driver's unsafe AP-start path.
+      const std::string failureMessage =
+          std::string(message) +
+          " Restart the device before retrying; if it repeats, share device status.";
       lockState();
-      rememberError(networkStartCode(apStart.failedStep), message);
+      rememberError(networkStartCode(apStart.failedStep), failureMessage);
       unlockState();
       (void)networkOwner->stopWiFi();
       return false;

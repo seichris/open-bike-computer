@@ -1841,7 +1841,7 @@ for an active hotspot) `apPassphrase`; `baseUrl` remains empty until the
 selected listener is ready. Stable fallback reasons are `ssid_unavailable`,
 `authentication_failed`, `association_timeout`, and `endpoint_unreachable`.
 On failed hotspot startup, authenticated `DSTS.lastError.code` identifies
-`wifi_owner_create`, `wifi_owner_dispatch`, `wifi_mode`,
+`wifi_owner_create`, `wifi_owner_dispatch`, `wifi_memory`, `wifi_mode`,
 `wifi_ram_storage`, or `wifi_softap`. Optional `wifiStartFailure` contains
 `step`, numeric `espError` when available, and `before`/`after` internal and
 DMA free and largest blocks at the failing substep. The status persists after

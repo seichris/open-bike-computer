@@ -371,6 +371,12 @@ void DeviceOperationOwner::run() {
       result.error = esp_ota_set_boot_partition(command.partition);
       break;
     case Operation::StartStation:
+      if (WiFi.getMode() == WIFI_OFF &&
+          !device_transfer::wifiStartupMemoryAboveObservedFailure(
+              networkMemory())) {
+        result.error = ESP_ERR_NO_MEM;
+        break;
+      }
       WiFi.persistent(false);
       if (!WiFi.mode(WIFI_STA)) {
         result.error = ESP_FAIL;
@@ -389,8 +395,18 @@ void DeviceOperationOwner::run() {
                                                               : ESP_FAIL;
       break;
     case Operation::StartAccessPoint: {
-      result.networkStart.mode.attempted = true;
       result.networkStart.mode.before = networkMemory();
+      if (WiFi.getMode() == WIFI_OFF &&
+          !device_transfer::wifiStartupMemoryAboveObservedFailure(
+              result.networkStart.mode.before)) {
+        result.networkStart.failedStep =
+            device_transfer::NetworkStartStep::Memory;
+        result.networkStart.mode.after = result.networkStart.mode.before;
+        result.networkStart.espError = ESP_ERR_NO_MEM;
+        result.error = ESP_ERR_NO_MEM;
+        break;
+      }
+      result.networkStart.mode.attempted = true;
       WiFi.persistent(false);
       const bool modeStarted = WiFi.mode(WIFI_AP);
       result.networkStart.mode.after = networkMemory();
@@ -444,8 +460,10 @@ void DeviceOperationOwner::run() {
       break;
     }
     if (command.operation == Operation::StartAccessPoint) {
-      const auto *step = result.networkStart.failedStep ==
-                                 device_transfer::NetworkStartStep::Mode
+      const auto *step = (result.networkStart.failedStep ==
+                                 device_transfer::NetworkStartStep::Mode ||
+                             result.networkStart.failedStep ==
+                                 device_transfer::NetworkStartStep::Memory)
                              ? &result.networkStart.mode
                          : result.networkStart.failedStep ==
                                  device_transfer::NetworkStartStep::RamStorage

@@ -19,8 +19,20 @@ struct NetworkTransitionMemory {
 };
 
 enum class NetworkStartStep : uint8_t {
-  None, OwnerCreate, OwnerDispatch, Mode, RamStorage, AccessPoint,
+  None, OwnerCreate, OwnerDispatch, Memory, Mode, RamStorage, AccessPoint,
 };
+
+// The 1.75-inch board failed Wi-Fi initialization at 42,811 bytes free and a
+// 14,836-byte largest internal/DMA block, and another attempt panicked in the
+// Wi-Fi AP task. This is a conservative rejection floor for known unsafe
+// headroom, not a qualification threshold for a successful transfer.
+inline bool wifiStartupMemoryAboveObservedFailure(
+    const NetworkMemorySnapshot &memory) {
+  return memory.internalFree >= 60U * 1024U &&
+         memory.internalLargest >= 32U * 1024U &&
+         memory.dmaFree >= 48U * 1024U &&
+         memory.dmaLargest >= 32U * 1024U;
+}
 
 struct NetworkStartResult {
   NetworkStartStep failedStep = NetworkStartStep::None;
@@ -37,6 +49,7 @@ inline const char *networkStartCode(NetworkStartStep step) {
   switch (step) {
   case NetworkStartStep::OwnerCreate: return "wifi_owner_create";
   case NetworkStartStep::OwnerDispatch: return "wifi_owner_dispatch";
+  case NetworkStartStep::Memory: return "wifi_memory";
   case NetworkStartStep::Mode: return "wifi_mode";
   case NetworkStartStep::RamStorage: return "wifi_ram_storage";
   case NetworkStartStep::AccessPoint: return "wifi_softap";
