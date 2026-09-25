@@ -218,6 +218,24 @@ function appStoreID(appStoreURL: string): string | null {
   }
 }
 
+function topographyShareNotices(): string {
+  const copyright =
+    "© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 " +
+    "provided under COPERNICUS by the European Union and ESA; all rights reserved.";
+  const products = ["Copernicus WorldDEM-30", "Copernicus WorldDEM™-90"];
+  const notices = products
+    .map(
+      (product) =>
+        `<p><small>${escapeHTML(copyright)}<br>` +
+        `${escapeHTML(`produced using ${product} ${copyright}`)}<br>` +
+        `${escapeHTML(`The organisations in charge of the Copernicus programme by law or by delegation do not incur any liability for any use of the ${product}.`)}</small></p>`,
+    )
+    .join("");
+  return `<section aria-label="Elevation source notices"><h2>Elevation sources</h2>
+<p><small>This contour map uses one or both of these 2021 Copernicus DEM sources. The exact contributing source is identified in the downloaded map.</small></p>
+${notices}</section>`;
+}
+
 async function shareLanding(env: Env, token: string): Promise<Response> {
   const preview = await sharePreview(env, token);
   const features = preview.features.map(escapeHTML).join(", ") || "offline map";
@@ -231,6 +249,10 @@ async function shareLanding(env: Env, token: string): Promise<Response> {
   const smartAppBannerMeta = smartAppBanner
     ? `<meta name="apple-itunes-app" content="app-id=${smartAppBanner}, app-argument=${escapeHTML(shareURL)}">`
     : "";
+  const elevationNotices =
+    preview.rendererFormatVersion === 4 && preview.features.includes("contours")
+      ? topographyShareNotices()
+      : "";
   const html = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 ${smartAppBannerMeta}
@@ -241,7 +263,8 @@ ${smartAppBannerMeta}
 <p>Open this link in Bicino to preview the map. Adding it is always an explicit step; opening this page does not download or install anything.</p>
 <a href="${appStoreURL}">Get Bicino</a><a class="secondary" href="${escapeHTML(devURL)}">Open in Bicino Dev</a>
 <p><small>If Bicino is already installed, tap Open in the app banner above.</small></p>
-<p><small>Map data attribution is included with the downloaded map.</small></p></main></body></html>`;
+<p><small>Map data attribution is included with the downloaded map.</small></p>
+${elevationNotices}</main></body></html>`;
   return new Response(html, {
     headers: {
       "content-type": "text/html; charset=utf-8",

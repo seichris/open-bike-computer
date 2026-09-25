@@ -15,8 +15,9 @@ from unittest.mock import patch
 from map_platform.topography_cache import ElevationCache, _SourceRedirects
 from map_platform.topography_sources import (
     TopographySourcePolicy, geocells, load_topography_source_policy,
-    parse_tile_index, plan_elevation,
+    parse_tile_index, plan_elevation, require_production_topography_approval,
 )
+from map_platform.generation_profiles import GenerationProfilePolicy
 from map_platform.topography_pipeline import canonical_bytes, canonical_line, contour_sample, extract_contours
 from map_platform.topography_grid import contour_grid, processing_region, region_resolution
 from map_platform.topography_cli import main as cli_main
@@ -55,7 +56,7 @@ class TopographyPolicyTests(unittest.TestCase):
             lambda p: p.update(schemaVersion=True),
             lambda p: p.update(access="premium"),
             lambda p: p.update(extra=1),
-            lambda p: p["sources"][0].update(productionApproved=True),
+            lambda p: p["sources"][0].update(productionApproved="yes"),
             lambda p: p["sources"][0].update(priority=True),
             lambda p: p["sources"][1].update(priority=100),
             lambda p: p["sources"][0].update(origin="http://localhost"),
@@ -76,6 +77,22 @@ class TopographyPolicyTests(unittest.TestCase):
             target.write_text('{"schemaVersion":1,"schemaVersion":1}')
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 TopographySourcePolicy.load(target)
+
+    def test_production_generation_requires_approved_pinned_sources(self):
+        profile = GenerationProfilePolicy.load(
+            ROOT / "map-platform/config/generation-profile-policy-v3.json"
+        )
+        with self.assertRaisesRegex(ValueError, "have not been approved"):
+            require_production_topography_approval(profile, self.policy, "production")
+        require_production_topography_approval(profile, self.policy, "development")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sources.json"
+            value = json.loads(POLICY.read_bytes())
+            for source in value["sources"]:
+                source["productionApproved"] = True
+            path.write_text(json.dumps(value))
+            approved = TopographySourcePolicy.load(path)
+            require_production_topography_approval(profile, approved, "production")
 
     def test_half_open_cells_negative_coordinates_dateline_and_poles(self):
         self.assertEqual(geocells([-1, -1, 0, 0]), ((-1, -1),))

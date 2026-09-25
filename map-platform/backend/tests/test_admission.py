@@ -97,7 +97,7 @@ class AdmissionPolicyTests(unittest.TestCase):
                 source(),
             )
 
-    def test_development_topography_canary_creates_durable_cost_reservation(self):
+    def test_development_topography_creates_durable_cost_reservation(self):
         profile_path = (
             Path(__file__).resolve().parents[3]
             / "map-platform"
@@ -125,9 +125,6 @@ class AdmissionPolicyTests(unittest.TestCase):
             service = MapJobService(
                 SourceIndex([source()]),
                 store,
-                topography_target4_allowlist=frozenset({
-                    "installation_topography_canary"
-                }),
                 generation_profile_policy=profile_policy,
                 deployment_channel="development",
             )

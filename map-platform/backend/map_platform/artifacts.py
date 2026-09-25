@@ -147,7 +147,11 @@ class ArtifactRecord:
                 f"maps/{map_id}/{TOPOGRAPHY_COMPANION_FORMAT}/"
                 f"{self.map_content_receipt}/{self.sha256}.btopo"
             )
-            if self.object_key != expected_key:
+            production_key = (
+                f"maps/{map_id}/{TOPOGRAPHY_COMPANION_FORMAT}/production/"
+                f"{self.map_content_receipt}/{self.sha256}.btopo"
+            )
+            if self.object_key not in (expected_key, production_key):
                 raise ValueError("topography companion object key does not match its identity")
         elif any(companion_fields):
             raise ValueError("topography association identity requires a companion artifact")
@@ -745,13 +749,16 @@ def topography_companion_object_key(
     map_id: str,
     map_content_receipt: str,
     sha256: str,
+    *,
+    production: bool = False,
 ) -> str:
     _validate_map_id(map_id)
     if not SHA256_PATTERN.fullmatch(map_content_receipt) or not SHA256_PATTERN.fullmatch(sha256):
         raise ValueError("topography companion identity is invalid")
     return (
         f"maps/{map_id}/{TOPOGRAPHY_COMPANION_FORMAT}/"
-        f"{map_content_receipt}/{sha256}.btopo"
+        + ("production/" if production else "")
+        + f"{map_content_receipt}/{sha256}.btopo"
     )
 
 

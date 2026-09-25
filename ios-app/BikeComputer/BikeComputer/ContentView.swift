@@ -2177,7 +2177,6 @@ struct ContentView: View {
                 .position(x: selectionFrame.midX, y: selectionFrame.maxY)
 
             VStack(spacing: 10) {
-#if DEBUG
                 if offlineMapManager.canRequestTopographicMap {
                     Picker(
                         "Map detail",
@@ -2198,7 +2197,6 @@ struct ContentView: View {
                             .foregroundStyle(.orange)
                     }
                 }
-#endif
                 HStack(spacing: 12) {
                     Button {
                         offlineMapManager.cancelMapAreaSelection()

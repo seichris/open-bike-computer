@@ -31,6 +31,28 @@ private enum SettingsSheetDestination: Identifiable, Equatable {
     }
 }
 
+private func copernicusTopographyNotice(
+    for source: VerifiedBikeMapTopographySource
+) -> String? {
+    guard source.release == "2021" else { return nil }
+    let product: String
+    switch source.id {
+    case "copernicus-glo30-public-2021":
+        product = "Copernicus WorldDEM-30"
+    case "copernicus-glo90-2021":
+        product = "Copernicus WorldDEM™-90"
+    default:
+        return nil
+    }
+    let copyright = "© DLR e.V. 2010-2014 and © Airbus Defence and " +
+        "Space GmbH 2014-2018 provided under COPERNICUS by the European " +
+        "Union and ESA; all rights reserved."
+    return "\(copyright)\n" +
+        "produced using \(product) \(copyright)\n" +
+        "The organisations in charge of the Copernicus programme by law " +
+        "or by delegation do not incur any liability for any use of the \(product)."
+}
+
 struct SettingsView: View {
     @EnvironmentObject var bleManager: BLEManager
     @Environment(\.dismiss) private var dismiss
@@ -1251,7 +1273,9 @@ private struct PendingSavedMapRow: View {
                     Text(sourceSummary ?? "Pending Offline Map")
                         .font(.body.weight(.semibold))
                         .lineLimit(2)
-                    Text("Downloading to this iPhone")
+                    Text(manager.downloadProgress >= 1
+                        ? "Finishing map on this iPhone"
+                        : "Downloading to this iPhone")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1863,6 +1887,14 @@ private struct SavedMapPreviewSheet: View {
                                         destination: attributionURL
                                     )
                                     .font(.caption)
+                                }
+                                if let notice = copernicusTopographyNotice(
+                                    for: source
+                                ) {
+                                    Text(notice)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                        .textSelection(.enabled)
                                 }
                             }
                         }
@@ -3816,13 +3848,6 @@ private struct DeveloperSettingsView: View {
 #if DEBUG
                 Button(action: useDevelopmentMapServer) {
                     Label("Use Development Server", systemImage: "hammer")
-                }
-                if let installationID =
-                    offlineMapManager.registeredDevelopmentInstallationID {
-                    SettingsValueRow(
-                        title: "Topo Canary Installation ID",
-                        value: installationID
-                    )
                 }
 #endif
             }

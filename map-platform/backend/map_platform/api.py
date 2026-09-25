@@ -81,7 +81,6 @@ from .monitoring import (
     MapMonitoringStore,
 )
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
-from .topography_rollout import topography_target4_generation_allowlist
 from .preparation_estimates import (
     PreparationEstimateMode,
     load_estimate_coordinator,
@@ -99,7 +98,7 @@ from .source_cache import (
     default_backend_data_root,
 )
 from .sources import SourceIndex
-from .topography_sources import load_topography_source_policy
+from .topography_sources import load_topography_source_policy, require_production_topography_approval
 from .strava_client import StravaTransport
 from .strava_integrations import (
     StravaIntegrationError,
@@ -375,12 +374,14 @@ def create_app(
     )
     generation_profile_policy = load_generation_profile_policy(repo_root)
     topography_source_policy = load_topography_source_policy(repo_root)
+    require_production_topography_approval(
+        generation_profile_policy, topography_source_policy, deployment_channel,
+    )
     service = MapJobService(
         SourceIndex.from_json(source_index_path, fallback_provider=source_provider),
         job_store,
         limits=limits,
         building_target3_allowlist=building_target3_generation_allowlist(),
-        topography_target4_allowlist=topography_target4_generation_allowlist(),
         generation_profile_policy=generation_profile_policy,
         deployment_channel=deployment_channel,
         estimate_coordinator=estimate_coordinator,
@@ -398,6 +399,7 @@ def create_app(
             else None
         ),
         building_task_store=building_task_store,
+        deployment_channel=deployment_channel,
     )
 
     app = FastAPI(title="Open Bike Computer Offline Map Platform", version="0.1.0")

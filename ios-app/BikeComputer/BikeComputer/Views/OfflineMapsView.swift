@@ -59,7 +59,7 @@ struct OfflineMapsView: View {
                 )
                 .disabled(!manager.canRequestTopographicMap)
                 if !manager.canRequestTopographicMap {
-                    Text("Topographic downloads are available on the development server only.")
+                    Text("This map server does not support topographic downloads.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }
