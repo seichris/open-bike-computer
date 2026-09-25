@@ -340,9 +340,10 @@ image, GitHub CI, and hardware gates remain separate.
 
 On 2026-09-25 the maintainer confirmed that use of the pinned 2021 public
 Copernicus DEM sources is acceptable. This resolves the source-use decision for
-those exact releases. The source review record still needs the actual notices,
-disclaimers, retention and redistribution evidence required by the checklist
-below; it does not approve other data releases or qualify a device build.
+those exact releases. The [2021 source review](topography-source-review-2021.md)
+records the licence and exact notices now emitted into archives and shown in
+the iPhone map details. Durable terms retention, source-boundary evidence and
+physical qualification remain open; this does not approve other data releases.
 This change makes the development generation policy offer format 4 to every
 installation after its image and lock are promoted.
 The production policy v3 and paired catalog promotion code are prepared but
@@ -356,9 +357,9 @@ the current development qualification job, remain development artifacts;
 they must be regenerated under the approved policy before production
 promotion.
 
-1. Complete [source review](templates/topography-source-review.md), including
-   exact attribution/disclaimers, retention rights, masks, and source-boundary
-   quality samples. Do not treat a terms URL as a complete attribution notice.
+1. Complete the [2021 source review](topography-source-review-2021.md), including
+   durable terms retention, masks, source-boundary quality samples and notice
+   placement on every public surface.
 2. Run app and firmware builds, unit/integration suites, image-size checks, and
    simulator smoke tests for the exact branch head.
 3. Qualify one exact signed renderer-format-4 artifact on both Waveshare boards

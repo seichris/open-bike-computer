@@ -5633,29 +5633,10 @@ class MapBuildPipeline:
         }
 
     @staticmethod
-    def _development_topography_attribution(sample: Mapping[str, Any]) -> bytes:
-        lines = [
-            "Bicino development topography source record.",
-            "These sources are not yet approved for production redistribution.",
-            "Contours describe a surface model and are not surveyed bare-earth elevations.",
-            "",
-        ]
-        sources = sample.get("sources")
-        if not isinstance(sources, list) or not sources:
-            raise ValueError("topography sample has no contributing sources")
-        for source in sources:
-            if not isinstance(source, Mapping):
-                raise ValueError("topography source attribution is invalid")
-            lines.extend(
-                [
-                    f"Source: {source.get('sourceId')}",
-                    f"Dataset release: {source.get('datasetRelease')}",
-                    f"Terms: {source.get('termsUrl')}",
-                    f"Attribution information: {source.get('attributionUrl')}",
-                    "",
-                ]
-            )
-        return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
+    def _topography_attribution(sample: Mapping[str, Any]) -> bytes:
+        from .topography_notices import topography_attribution
+
+        return topography_attribution(sample)
 
     def _build_topography_pair(
         self,
@@ -5698,7 +5679,7 @@ class MapBuildPipeline:
             job.map_id or stable_map_id(job),
             compiled,
             sample,
-            self._development_topography_attribution(sample),
+            self._topography_attribution(sample),
             cancel=cancel,
         )
         generated_vectmap = pair_root / "device" / "VECTMAP"
