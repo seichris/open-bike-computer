@@ -120,17 +120,6 @@ class GenerationProfilePolicy:
                 or set(global_ids + canary_ids + disabled_ids) != set(profiles)
             ):
                 raise ValueError(f"generation profile channel {channel_name} is invalid")
-            target4_ids = {
-                profile_id for profile_id in profiles
-                if profiles[profile_id].renderer_format_version == 4
-            }
-            # Target 4 is development-canary only until source, client and
-            # hardware qualification is complete. A policy cannot make it
-            # global or expose it in production, even if an allowlist is set.
-            if target4_ids & set(global_ids) or (
-                channel_name == "production" and target4_ids & set(canary_ids)
-            ):
-                raise ValueError("topographic generation must remain development-canary only")
             legacy_profiles = [
                 profile
                 for profile in profiles.values()

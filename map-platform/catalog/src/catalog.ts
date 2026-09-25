@@ -58,16 +58,26 @@ export async function listPromotionCandidates(
   const rows = await env.DB.prepare(
     `SELECT m.id FROM map_entries m
       WHERE m.id > ? AND m.origin_channel = 'development'
-        AND m.renderer_format_version IN (1, 2, 3)
+        AND m.renderer_format_version IN (1, 2, 3, 4)
+        AND (m.renderer_format_version <> 4 OR ? = '1')
         AND m.delivery_state IN ('development', 'promotion_pending')
         AND EXISTS (SELECT 1 FROM artifacts a WHERE a.map_entry_id = m.id
           AND a.bucket_slot = 'development' AND a.delivery_tier = 'development'
           AND a.format = 'zip-stored-v1' AND a.generation_head = 1 AND a.state = 'live')
+        AND (m.renderer_format_version <> 4 OR EXISTS (
+          SELECT 1 FROM artifacts companion WHERE companion.map_entry_id = m.id
+            AND companion.bucket_slot = 'development'
+            AND companion.delivery_tier = 'development'
+            AND companion.format = 'topography-ios-v1'
+            AND companion.generation_head = 1 AND companion.state = 'live'
+            AND json_extract(companion.reader_requirements_json, '$.mapContentReceipt') = m.content_receipt
+            AND json_extract(companion.reader_requirements_json, '$.mapId') = m.legacy_map_id
+        ))
         AND NOT EXISTS (SELECT 1 FROM artifacts a WHERE a.map_entry_id = m.id
           AND a.delivery_tier = 'production' AND a.generation_head = 1 AND a.state = 'live')
       ORDER BY m.id LIMIT ?`,
   )
-    .bind(cursor ?? "", limit + 1)
+    .bind(cursor ?? "", env.TOPOGRAPHY_PROMOTION_ENABLED ?? "0", limit + 1)
     .all<{ id: string }>();
   const ids = rows.results.slice(0, limit).map((row) => row.id);
   return {
@@ -600,10 +610,20 @@ export async function finalizePublication(
       !PROMOTION_LEASE_ID.test(promotionLeaseID) ||
       publication.originChannel !== "development" ||
       publication.deliveryState !== "production" ||
-      publication.artifacts.length !== 1 ||
-      publication.artifacts[0].bucketSlot !== "production" ||
-      publication.artifacts[0].deliveryTier !== "production" ||
-      publication.artifacts[0].format !== "bike-map-stream-v1"
+      publication.artifacts.length !==
+        (publication.rendererFormatVersion === 4 ? 2 : 1) ||
+      publication.artifacts.some(
+        (artifact) =>
+          artifact.bucketSlot !== "production" ||
+          artifact.deliveryTier !== "production",
+      ) ||
+      publication.artifacts.filter(
+        (artifact) => artifact.format === "bike-map-stream-v1",
+      ).length !== 1 ||
+      (publication.rendererFormatVersion === 4 &&
+        publication.artifacts.filter(
+          (artifact) => artifact.format === "topography-ios-v1",
+        ).length !== 1)
     ) {
       throw new HttpError(400, "promotion publication is invalid");
     }
@@ -624,6 +644,35 @@ export async function finalizePublication(
       .first<{ present: number }>();
     if (!activeLease) {
       throw new HttpError(409, "promotion lease is not active");
+    }
+    if (publication.rendererFormatVersion === 4) {
+      const sourceCompanion = await env.DB.prepare(
+        `SELECT sha256, reader_requirements_json FROM artifacts
+          WHERE map_entry_id = ? AND bucket_slot = 'development'
+            AND delivery_tier = 'development' AND format = 'topography-ios-v1'
+            AND generation_head = 1 AND state = 'live'
+          ORDER BY created_at DESC LIMIT 1`,
+      )
+        .bind(publication.mapEntryId)
+        .first<{
+          sha256: string;
+          reader_requirements_json: string | null;
+        }>();
+      const promoted = publication.artifacts.find(
+        (artifact) => artifact.format === "topography-ios-v1",
+      );
+      if (
+        !sourceCompanion ||
+        !promoted ||
+        sourceCompanion.sha256 !== promoted.sha256 ||
+        sourceCompanion.reader_requirements_json !==
+          JSON.stringify(promoted.companionRequirements)
+      ) {
+        throw new HttpError(
+          409,
+          "promotion topography companion differs from source",
+        );
+      }
     }
   }
 
@@ -1853,10 +1902,22 @@ export async function resolveDownloadGrant(
               SELECT 1 FROM promotion_leases lease
                WHERE lease.lease_id = dg.promotion_lease_id
                  AND lease.map_entry_id = a.map_entry_id
-                 AND lease.source_artifact_id = a.id
-                 AND lease.source_object_key = a.object_key
-                 AND lease.source_byte_count = a.byte_count
-                 AND lease.source_sha256 = a.sha256
+                 AND (
+                   (lease.source_artifact_id = a.id
+                    AND lease.source_object_key = a.object_key
+                    AND lease.source_byte_count = a.byte_count
+                    AND lease.source_sha256 = a.sha256)
+                   OR (a.format = 'topography-ios-v1'
+                    AND a.bucket_slot = 'development'
+                    AND a.delivery_tier = 'development'
+                    AND a.generation_head = 1
+                    AND EXISTS (
+                      SELECT 1 FROM map_entries m WHERE m.id = a.map_entry_id
+                        AND m.renderer_format_version = 4
+                        AND json_extract(a.reader_requirements_json, '$.mapContentReceipt') = m.content_receipt
+                        AND json_extract(a.reader_requirements_json, '$.mapId') = m.legacy_map_id
+                    ))
+                 )
                  AND lease.state = 'active' AND lease.expires_at > ?
             )
           )
@@ -1914,6 +1975,7 @@ export async function createPromotionGrant(
       expiresAt: string;
       leaseExpiresAt: string;
       artifact: PublicArtifact;
+      companion: { artifact: PublicArtifact; downloadURL: string } | null;
       map: Record<string, unknown>;
     }
   | {
@@ -1936,7 +1998,10 @@ export async function createPromotionGrant(
   ) {
     throw new HttpError(409, "map is not eligible for promotion");
   }
-  if (map.renderer_format_version === 4) {
+  if (
+    map.renderer_format_version === 4 &&
+    env.TOPOGRAPHY_PROMOTION_ENABLED !== "1"
+  ) {
     throw new HttpError(409, "topographic promotion is not qualified");
   }
   const artifact = await env.DB.prepare(
@@ -1949,7 +2014,31 @@ export async function createPromotionGrant(
     .bind(mapEntryID)
     .first<ArtifactRow>();
   if (!artifact) throw new HttpError(404, "promotable artifact not found");
+  const companion =
+    map.renderer_format_version === 4
+      ? await env.DB.prepare(
+          `SELECT * FROM artifacts WHERE map_entry_id = ?
+          AND bucket_slot = 'development' AND delivery_tier = 'development'
+          AND format = 'topography-ios-v1' AND generation_head = 1 AND state = 'live'
+          ORDER BY created_at DESC LIMIT 1`,
+        )
+          .bind(mapEntryID)
+          .first<ArtifactRow>()
+      : null;
+  if (
+    map.renderer_format_version === 4 &&
+    (!companion ||
+      companionRequirementsForArtifact(companion)?.mapContentReceipt !==
+        map.content_receipt ||
+      companionRequirementsForArtifact(companion)?.mapId !== map.legacy_map_id)
+  ) {
+    throw new HttpError(
+      409,
+      "topography companion is unavailable for promotion",
+    );
+  }
   const grant = randomToken(32);
+  const companionGrant = companion ? randomToken(32) : null;
   const leaseID = `promotion_lease_v1_${randomToken(24)}`;
   const now = clock;
   const nowValue = now.toISOString();
@@ -2020,6 +2109,29 @@ export async function createPromotionGrant(
       artifact.sha256,
       nowValue,
     ),
+    ...(companion && companionGrant
+      ? [
+          env.DB.prepare(
+            `INSERT INTO download_grants(
+         token_hash, artifact_id, purpose, created_at, expires_at,
+         promotion_lease_id
+       ) SELECT ?, ?, 'promotion', ?, ?, ? WHERE EXISTS (
+         SELECT 1 FROM promotion_leases
+          WHERE map_entry_id = ? AND lease_id = ? AND state = 'active'
+            AND expires_at > ?
+       )`,
+          ).bind(
+            await sha256Hex(companionGrant),
+            companion.id,
+            nowValue,
+            expires.toISOString(),
+            leaseID,
+            mapEntryID,
+            leaseID,
+            nowValue,
+          ),
+        ]
+      : []),
     env.DB.prepare(
       `UPDATE map_entries SET delivery_state = 'promotion_pending', updated_at = ?
         WHERE id = ? AND delivery_state IN ('development', 'promotion_pending')
@@ -2029,7 +2141,12 @@ export async function createPromotionGrant(
           )`,
     ).bind(nowValue, mapEntryID, mapEntryID, leaseID),
   ]);
-  if (results[1]?.meta.changes !== 1 || results[2]?.meta.changes !== 1) {
+  if (
+    results[1]?.meta.changes !== 1 ||
+    results[2]?.meta.changes !== 1 ||
+    (companion && results[3]?.meta.changes !== 1) ||
+    results[results.length - 1]?.meta.changes !== 1
+  ) {
     const currentProduction = await existingProductionPromotion(
       env,
       mapEntryID,
@@ -2044,6 +2161,13 @@ export async function createPromotionGrant(
     expiresAt: expires.toISOString(),
     leaseExpiresAt: leaseExpires.toISOString(),
     artifact: publicArtifact(artifact),
+    companion:
+      companion && companionGrant
+        ? {
+            artifact: publicArtifact(companion),
+            downloadURL: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/v1/internal/promotions/downloads/${companionGrant}`,
+          }
+        : null,
     map: {
       mapEntryId: map.id,
       mapId: map.legacy_map_id,

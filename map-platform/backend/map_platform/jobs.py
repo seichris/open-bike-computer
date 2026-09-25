@@ -1722,7 +1722,6 @@ class MapJobService:
         label_target2_enabled: bool = False,
         building_target3_enabled: bool = False,
         building_target3_allowlist: frozenset[str] = frozenset(),
-        topography_target4_allowlist: frozenset[str] = frozenset(),
         generation_profile_policy: GenerationProfilePolicy | None = None,
         deployment_channel: str = "production",
         estimate_coordinator=None,
@@ -1734,7 +1733,6 @@ class MapJobService:
         self.label_target2_enabled = label_target2_enabled
         self.building_target3_enabled = building_target3_enabled
         self.building_target3_allowlist = building_target3_allowlist
-        self.topography_target4_allowlist = topography_target4_allowlist
         self.generation_profile_policy = generation_profile_policy
         self.deployment_channel = deployment_channel
         self.estimate_coordinator = estimate_coordinator
@@ -1749,11 +1747,6 @@ class MapJobService:
             if client_installation_id in self.building_target3_allowlist:
                 canary_profiles = canary_profiles | frozenset({
                     self.generation_profile_policy.profile_id_for_renderer_format(3)
-                })
-            if (self.deployment_channel == "development"
-                    and client_installation_id in self.topography_target4_allowlist):
-                canary_profiles = canary_profiles | frozenset({
-                    self.generation_profile_policy.profile_id_for_renderer_format(4)
                 })
             return [
                 profile.renderer_format_version
@@ -1781,11 +1774,6 @@ class MapJobService:
         if client_installation_id in self.building_target3_allowlist:
             canary_profiles = canary_profiles | frozenset({
                 self.generation_profile_policy.profile_id_for_renderer_format(3)
-            })
-        if (self.deployment_channel == "development"
-                and client_installation_id in self.topography_target4_allowlist):
-            canary_profiles = canary_profiles | frozenset({
-                self.generation_profile_policy.profile_id_for_renderer_format(4)
             })
         profiles = self.generation_profile_policy.available_profiles(
             self.deployment_channel,

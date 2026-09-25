@@ -2063,13 +2063,8 @@ final class OfflineMapManager: ObservableObject {
         }
     }
     var canRequestTopographicMap: Bool {
-        serverURLString == OfflineMapServiceConfig.developmentServerURLString
-    }
-    var registeredDevelopmentInstallationID: String? {
-        guard canRequestTopographicMap else { return nil }
-        return bicinoServiceSession.loadedCredential(
-            serverURLString: serverURLString
-        )?.clientInstallationId
+        serverURLString == OfflineMapServiceConfig.developmentServerURLString ||
+            serverURLString == OfflineMapServiceConfig.productionServerURLString
     }
     @Published private(set) var currentJob: OfflineMapJob?
     @Published private(set) var downloadURL: URL?
@@ -2290,7 +2285,8 @@ final class OfflineMapManager: ObservableObject {
         self.includeTopographyInNewMaps = (defaults.object(
             forKey: OfflineMapDefaults.includeTopographyInNewMapsKey
         ) as? Bool ?? false) &&
-            resolvedServerURL == OfflineMapServiceConfig.developmentServerURLString
+            (resolvedServerURL == OfflineMapServiceConfig.developmentServerURLString ||
+             resolvedServerURL == OfflineMapServiceConfig.productionServerURLString)
         self.lastTransferMapId = defaults.string(forKey: OfflineMapDefaults.lastTransferMapIdKey) ?? ""
         let restoredTransferOutcome = defaults.string(
             forKey: OfflineMapDefaults.lastTransferOutcomeKey
@@ -2348,7 +2344,7 @@ final class OfflineMapManager: ObservableObject {
     func createJobFromSelectedMapArea(bleManager: BLEManager) {
         guard canStartNewMapJob() else { return }
         guard !includeTopographyInNewMaps || canRequestTopographicMap else {
-            errorMessage = "Topographic map creation is available on the development server only."
+            errorMessage = "This map server does not support topographic map creation."
             return
         }
         guard !includeTopographyInNewMaps ||
@@ -2413,7 +2409,7 @@ final class OfflineMapManager: ObservableObject {
     ) {
         guard canStartNewMapJob() else { return }
         guard !includeTopographyInNewMaps || canRequestTopographicMap else {
-            errorMessage = "Topographic map creation is available on the development server only."
+            errorMessage = "This map server does not support topographic map creation."
             return
         }
         guard !includeTopographyInNewMaps ||

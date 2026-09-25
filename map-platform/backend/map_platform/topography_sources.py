@@ -62,6 +62,7 @@ class ElevationSource:
     terms_url: str
     attribution_url: str
     access_reviewed_at: str
+    production_approved: bool = False
 
     @property
     def index_url(self) -> str:
@@ -133,9 +134,8 @@ class TopographySourcePolicy:
                     or value["surfaceModel"] != "dsm" or value["horizontalCrs"] != "EPSG:4326"
                     or value["verticalDatum"] != "EPSG:3855" or value["verticalUnits"] != "m"):
                 raise ValueError("unsupported topography source contract")
-            # This acquisition slice must not masquerade as production approval.
-            if value["productionApproved"] is not False:
-                raise ValueError("topography production approval is not implemented")
+            if type(value["productionApproved"]) is not bool:
+                raise ValueError("topography production approval must be explicit")
             resolution = _integer(value["resolutionM"], 30, 90, "resolution")
             if resolution not in (30, 90) or value["origin"] != f"https://copernicus-dem-{resolution}m.s3.amazonaws.com":
                 raise ValueError("unsupported topography origin or resolution")
@@ -152,6 +152,7 @@ class TopographySourcePolicy:
                 _integer(value["tileCount"], 1, 64800, "tile count"),
                 _https(value["termsUrl"], "terms URL"),
                 _https(value["attributionUrl"], "attribution URL"), reviewed,
+                value["productionApproved"],
             ))
         if len({s.id for s in sources}) != len(sources) or len({s.priority for s in sources}) != len(sources):
             raise ValueError("duplicate topography source id or priority")
@@ -166,6 +167,18 @@ class TopographySourcePolicy:
 
 def load_topography_source_policy(repo_root: Path) -> TopographySourcePolicy:
     return TopographySourcePolicy.load(repo_root / "map-platform/config/topography-source-policy-v1.json")
+
+
+def require_production_topography_approval(
+    generation_policy: Any,
+    source_policy: TopographySourcePolicy,
+    deployment_channel: str,
+) -> None:
+    if deployment_channel == "production" and any(
+        profile.renderer_format_version == 4
+        for profile in generation_policy.available_profiles("production")
+    ) and not all(source.production_approved for source in source_policy.sources):
+        raise ValueError("production topography sources have not been approved")
 
 
 def parse_tile_index(source: ElevationSource, raw: bytes) -> frozenset[tuple[int, int]]:

@@ -3817,13 +3817,6 @@ private struct DeveloperSettingsView: View {
                 Button(action: useDevelopmentMapServer) {
                     Label("Use Development Server", systemImage: "hammer")
                 }
-                if let installationID =
-                    offlineMapManager.registeredDevelopmentInstallationID {
-                    SettingsValueRow(
-                        title: "Topo Canary Installation ID",
-                        value: installationID
-                    )
-                }
 #endif
             }
 

@@ -13542,19 +13542,19 @@ struct NavigationProtocolTests {
             "topographic map detail requests format 4 independently of iPhone visibility"
         )
         let restored = OfflineMapManager(defaults: defaults)
-        assert(!restored.includeTopographyInNewMaps,
-               "development map detail cannot leak into the default production server after relaunch")
+        assert(restored.includeTopographyInNewMaps,
+               "topographic map detail remains selected on the supported production server")
         assert(!restored.topographicMapsEnabled,
                "iPhone contour visibility survives independently")
 
         manager.serverURLString =
             OfflineMapServiceConfig.productionServerURLString
-        assert(!manager.includeTopographyInNewMaps,
-               "switching to production clears the development-only topo choice")
+        assert(manager.includeTopographyInNewMaps,
+               "switching to production preserves the supported topo choice")
         assertEqual(
             try? manager.makeCustomBBoxRequest().target?.rendererFormatVersion,
-            3,
-            "production map creation remains standard")
+            4,
+            "production map creation requests topography when selected")
 
         let contentView = URL(fileURLWithPath:
             "ios-app/BikeComputer/BikeComputer/ContentView.swift"

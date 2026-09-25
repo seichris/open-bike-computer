@@ -455,5 +455,79 @@ class CatalogPromotionIdentityTests(unittest.TestCase):
         artifact_store.verify.assert_called_once()
         catalog.finalize_promotion.assert_not_called()
 
+    def test_topographic_promotion_publishes_signed_stream_and_bound_companion(self):
+        manifest = self.manifest()
+        manifest["target"]["formatVersion"] = 4
+        manifest["topography"] = {
+            "intermediateSha256": "5" * 64,
+            "sourcePolicySha256": "6" * 64,
+            "attributionSha256": "7" * 64,
+        }
+        receipt = manifest_receipt(canonical_stream_manifest_bytes(manifest))
+        entry_id = map_entry_id_for_descriptor(
+            content_receipt=receipt, renderer="esp32-fmb",
+            renderer_format_version=4,
+            features=["3d-buildings", "contours", "street-labels"],
+        )
+        grant = self.grant(content_receipt=receipt, entry_id=entry_id)
+        grant["map"]["rendererFormatVersion"] = 4
+        grant["map"]["features"] = ["3d-buildings", "contours", "street-labels"]
+        grant["companion"] = {
+            "downloadURL": "https://maps-share.8o.vc/v1/internal/promotions/downloads/companion",
+            "artifact": {
+                "format": "topography-ios-v1",
+                "mediaType": "application/vnd.bicino.topography+sqlite3",
+                "deliveryTier": "development",
+                "filename": "promotion-map.btopo",
+                "bytes": 4096,
+                "sha256": "8" * 64,
+                "companionRequirements": {
+                    "schemaVersion": 1, "role": "topography-ios-v1",
+                    "mapContentReceipt": receipt, "mapId": "promotion-map",
+                    "profileVersion": 1, "intermediateSha256": "5" * 64,
+                    "sourcePolicySha256": "6" * 64,
+                    "attributionSha256": "7" * 64,
+                },
+            },
+        }
+        catalog = FakePromotionCatalog(grant)
+        catalog.finalize_promotion = Mock(return_value={
+            "mapEntryId": entry_id, "state": "finalized",
+        })
+        store = SimpleNamespace(catalog_delivery_backed=True, put=Mock(),
+                                verify=Mock(return_value=True))
+        stream = SimpleNamespace(
+            signed_manifest_receipt="a" * 64,
+            signature_key_id="production", sha256="b" * 64,
+            bytes=123, manifest_receipt=receipt,
+        )
+        signer = SimpleNamespace(public_key_sha256="c" * 64)
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            "os.environ", {"MAP_PLATFORM_S3_ENDPOINT_URL":
+                           "https://a" + "1" * 31 + ".r2.cloudflarestorage.com"}, clear=True,
+        ), patch("map_platform.catalog_promotion._download_exact_zip"), patch(
+            "map_platform.catalog_promotion.validate_final_assembly_artifact"
+        ), patch("map_platform.catalog_promotion._extract_validated_archive",
+                 return_value=manifest), patch(
+            "map_platform.catalog_promotion.validate_renderer_artifacts"
+        ), patch("map_platform.catalog_promotion.validate_companion", return_value={
+            "sourcePolicySha256": "6" * 64,
+            "attributionSha256": "7" * 64,
+        }), patch("map_platform.catalog_promotion.write_map_stream_artifact",
+                  return_value=stream):
+            result = promote_catalog_map(
+                entry_id, catalog_client=catalog, artifact_store=store,
+                signer=signer, producer_build_sha256="2" * 64,
+                producer_image_digest="sha256:" + "3" * 64,
+                work_root=Path(temporary),
+            )
+        self.assertEqual(result["state"], "finalized")
+        published = catalog.finalize_promotion.call_args.args[1]
+        self.assertEqual([a["format"] for a in published["artifacts"]],
+                         ["bike-map-stream-v1", "topography-ios-v1"])
+        self.assertIn("/production/", published["artifacts"][1]["objectKey"])
+        self.assertEqual(published["artifacts"][1]["companionRequirements"]["mapContentReceipt"], receipt)
+        self.assertEqual(store.verify.call_count, 2)
+
 if __name__ == "__main__":
     unittest.main()

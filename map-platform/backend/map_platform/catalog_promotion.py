@@ -17,10 +17,13 @@ from urllib.request import Request, urlopen
 from .artifacts import (
     BIKE_MAP_STREAM_FORMAT,
     BIKE_MAP_STREAM_MEDIA_TYPE,
+    TOPOGRAPHY_COMPANION_FORMAT,
+    TOPOGRAPHY_COMPANION_MEDIA_TYPE,
     ZIP_MEDIA_TYPE,
     ZIP_STORED_FORMAT,
     ArtifactRecord,
     map_stream_object_key,
+    topography_companion_object_key,
 )
 from .catalog import (
     CatalogClient,
@@ -35,10 +38,16 @@ from .map_stream import (
     write_map_stream_artifact,
 )
 from .pipeline import validate_final_assembly_artifact
+from .topography_companion import validate_companion
 
 
 class CatalogPromotionError(RuntimeError):
     code = "catalog_promotion_failed"
+
+
+def _production_companion_artifact_id(sha256: str) -> str:
+    digest = hashlib.sha256(b"production-topography-v1\n" + bytes.fromhex(sha256)).digest()
+    return "artifact_v1_" + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
 class _PromotionLeaseHeartbeat:
@@ -155,6 +164,7 @@ def _download_exact_zip(
     catalog_origin: str,
     r2_endpoint: str,
     timeout_seconds: float,
+    media_type: str = ZIP_MEDIA_TYPE,
 ) -> None:
     initial = urlparse(url)
     catalog = urlparse(catalog_origin)
@@ -173,7 +183,7 @@ def _download_exact_zip(
     request = Request(
         url,
         headers={
-            "Accept": ZIP_MEDIA_TYPE,
+            "Accept": media_type,
             "User-Agent": "BicinoMapPlatform/1.0",
         },
     )
@@ -345,13 +355,15 @@ def promote_catalog_map(
             or not isinstance(target, dict)
             or target.get("renderer") != map_value.get("renderer")
             or target.get("formatVersion") != format_version
-            or features not in ([], ["street-labels"], ["3d-buildings", "street-labels"])
+            or features not in ([], ["street-labels"], ["3d-buildings", "street-labels"],
+                                ["3d-buildings", "contours", "street-labels"])
         ):
             raise CatalogPromotionError("promotion map metadata does not match its ZIP")
         expected_features = {
             1: [],
             2: ["street-labels"],
             3: ["3d-buildings", "street-labels"],
+            4: ["3d-buildings", "contours", "street-labels"],
         }.get(format_version)
         if expected_features is None or features != expected_features:
             raise CatalogPromotionError("promotion renderer features are unsupported")
@@ -391,6 +403,90 @@ def promote_catalog_map(
             manifest["files"],
             format_version,
         )
+        production_companion: ArtifactRecord | None = None
+        if format_version == 4:
+            companion_grant = grant.get("companion")
+            topo = manifest.get("topography")
+            if not isinstance(companion_grant, dict) or not isinstance(topo, dict):
+                raise CatalogPromotionError("promotion topography companion is missing")
+            source_companion = companion_grant.get("artifact")
+            if not isinstance(source_companion, dict):
+                raise CatalogPromotionError("promotion topography companion is invalid")
+            requirements = source_companion.get("companionRequirements")
+            expected_requirements = {
+                "schemaVersion": 1,
+                "role": TOPOGRAPHY_COMPANION_FORMAT,
+                "mapContentReceipt": canonical_content_receipt,
+                "mapId": map_id,
+                "profileVersion": 1,
+                "intermediateSha256": topo.get("intermediateSha256"),
+                "sourcePolicySha256": topo.get("sourcePolicySha256"),
+                "attributionSha256": topo.get("attributionSha256"),
+            }
+            companion_bytes = source_companion.get("bytes")
+            companion_sha256 = source_companion.get("sha256")
+            if (
+                requirements != expected_requirements
+                or source_companion.get("format") != TOPOGRAPHY_COMPANION_FORMAT
+                or source_companion.get("mediaType") != TOPOGRAPHY_COMPANION_MEDIA_TYPE
+                or source_companion.get("deliveryTier") != "development"
+                or source_companion.get("filename") != f"{map_id}.btopo"
+                or type(companion_bytes) is not int
+                or not 512 <= companion_bytes <= 256 * 1024 * 1024
+                or not isinstance(companion_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", companion_sha256) is None
+            ):
+                raise CatalogPromotionError("promotion topography companion identity differs")
+            companion_path = temporary_root / f"{map_id}.btopo"
+            _download_exact_zip(
+                _require_string(companion_grant.get("downloadURL"), "companion download URL"),
+                companion_path,
+                expected_bytes=companion_bytes,
+                expected_sha256=companion_sha256,
+                catalog_origin=catalog_client.base_url,
+                r2_endpoint=r2_endpoint,
+                timeout_seconds=catalog_client.timeout_seconds,
+                media_type=TOPOGRAPHY_COMPANION_MEDIA_TYPE,
+            )
+            try:
+                metadata = validate_companion(
+                    companion_path,
+                    expected_map_id=map_id,
+                    expected_intermediate=topo["intermediateSha256"],
+                )
+            except (OSError, ValueError) as exc:
+                raise CatalogPromotionError("promotion topography companion validation failed") from exc
+            if any(metadata[key] != topo[manifest_key] for key, manifest_key in (
+                ("sourcePolicySha256", "sourcePolicySha256"),
+                ("attributionSha256", "attributionSha256"),
+            )):
+                raise CatalogPromotionError("promotion topography source identity differs")
+            companion_key = topography_companion_object_key(
+                map_id, canonical_content_receipt, companion_sha256, production=True,
+            )
+            artifact_store.put(
+                companion_path,
+                companion_key,
+                sha256=companion_sha256,
+                media_type=TOPOGRAPHY_COMPANION_MEDIA_TYPE,
+            )
+            production_companion = ArtifactRecord(
+                format=TOPOGRAPHY_COMPANION_FORMAT,
+                media_type=TOPOGRAPHY_COMPANION_MEDIA_TYPE,
+                filename=f"{map_id}.btopo",
+                object_key=companion_key,
+                bytes=companion_bytes,
+                sha256=companion_sha256,
+                manifest_receipt=canonical_content_receipt,
+                map_content_receipt=canonical_content_receipt,
+                intermediate_sha256=topo["intermediateSha256"],
+                source_policy_sha256=topo["sourcePolicySha256"],
+                attribution_sha256=topo["attributionSha256"],
+            )
+            if not artifact_store.verify(
+                companion_key, sha256=companion_sha256, expected_bytes=companion_bytes,
+            ):
+                raise CatalogPromotionError("promotion companion is missing from shared storage")
         heartbeat.check()
         stream_manifest = dict(manifest)
         stream_manifest["producer"] = {
@@ -443,6 +539,30 @@ def promote_catalog_map(
             )
         heartbeat.check()
         delivery = catalog_delivery_requirements("production")
+        companion_publication = []
+        if production_companion is not None:
+            companion_publication.append({
+                "artifactId": _production_companion_artifact_id(production_companion.sha256),
+                "bucketSlot": "production",
+                "objectKey": production_companion.object_key,
+                "format": production_companion.format,
+                "mediaType": production_companion.media_type,
+                "filename": production_companion.filename,
+                "bytes": production_companion.bytes,
+                "sha256": production_companion.sha256,
+                "manifestReceipt": canonical_content_receipt,
+                "companionRequirements": {
+                    "schemaVersion": 1,
+                    "role": TOPOGRAPHY_COMPANION_FORMAT,
+                    "mapContentReceipt": canonical_content_receipt,
+                    "mapId": map_id,
+                    "profileVersion": 1,
+                    "intermediateSha256": production_companion.intermediate_sha256,
+                    "sourcePolicySha256": production_companion.source_policy_sha256,
+                    "attributionSha256": production_companion.attribution_sha256,
+                },
+                "deliveryTier": "production",
+            })
         publication_id = f"promotion:production:{stream.sha256}"
         publication = {
             "publicationId": publication_id,
@@ -490,7 +610,7 @@ def promote_catalog_map(
                     **delivery,
                     "deliveryTier": "production",
                 }
-            ],
+            ] + companion_publication,
         }
         heartbeat.stop()
         heartbeat.check()

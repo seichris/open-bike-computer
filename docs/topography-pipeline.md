@@ -338,6 +338,19 @@ image, GitHub CI, and hardware gates remain separate.
 
 ## Remaining release gates
 
+On 2026-09-25 the maintainer confirmed that use of the pinned 2021 public
+Copernicus DEM sources is acceptable. This resolves the source-use decision for
+those exact releases. The source review record still needs the actual notices,
+disclaimers, retention and redistribution evidence required by the checklist
+below; it does not approve other data releases or qualify a device build.
+This change makes the development generation policy offer format 4 to every
+installation after its image and lock are promoted.
+The production policy v3 and paired catalog promotion code are prepared but
+not selected by the production Compose lock. The catalog promotion switch
+defaults to off, and the worker checks source approval before generating
+production contours. This keeps production closed until the remaining physical
+and source-notice gates are recorded.
+
 1. Complete [source review](templates/topography-source-review.md), including
    exact attribution/disclaimers, retention rights, masks, and source-boundary
    quality samples. Do not treat a terms URL as a complete attribution notice.
@@ -347,9 +360,9 @@ image, GitHub CI, and hardware gates remain separate.
    (including the 1.75-inch target) and representative iPhones, with contour-on/
    contour-off memory, frame-time, SD-I/O, power, cancellation, and route-contrast
    evidence.
-4. Record regional alignment/source-boundary evidence and production legal
-   approval, then implement/enable companion-preserving production promotion and
-   switch the production policy only after the recorded gates pass.
+4. Record regional alignment/source-boundary evidence and the exact source
+   notices, then enable companion-preserving production promotion and select
+   production policy v3 only after the recorded gates pass.
 5. Deploy canary configuration deliberately and verify exact-head catalog,
    download, transfer, restart, offline, sharing, deletion, and rollback flows.
    No purchase checks belong in any gate.
