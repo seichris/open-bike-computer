@@ -10,9 +10,11 @@ record does not approve the newer registered Copernicus releases.
 - GLO-30 Public: [WorldDEM-30 free and open licence](https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/DEM/resources/license/License-COPDEM-30.pdf),
   retrieved 2026-09-25, SHA-256
   `9cd37d37ea654bbcaf0a2e059e6a3a5b5f76072824d8dd860ccf274ada8951bd`.
+  The reviewed copy is [retained here](licenses/License-COPDEM-30.pdf).
 - GLO-90: [Copernicus DEM licence collection](https://dataspace.copernicus.eu/sites/default/files/media/files/2025-06/copernicus_contributing_mission_data_access_v2_cop_dem_licenses.pdf),
   pages 19–20 for the GLO-90 free and open licence, retrieved 2026-09-25,
   SHA-256 `bb4a01dcd7f61acefa81c9ccd76af975e12096158169acf0d7b5c44c26c8701f`.
+  The reviewed copy is [retained here](licenses/copernicus_contributing_mission_data_access_v2_cop_dem_licenses.pdf).
 - Both free and open licences grant reproduction, distribution, public
   communication and adaptation without a fee or geographic/time limit.
   Article 6 requires the original source notice, an adapted-data notice, and
@@ -25,6 +27,12 @@ record does not approve the newer registered Copernicus releases.
 - [Copernicus DEM collection](https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM)
   identifies GLO-30/GLO-90 as digital surface models and gives their datum,
   resolution, coverage and public-source attribution guidance.
+
+Before approving a source-policy change or production release, run
+`python3 tools/check_topography_terms.py --upstream` from the repository root.
+It verifies the retained files and current official downloads against the
+reviewed hashes. A mismatch requires reviewing the new terms and source access;
+it must not silently replace these pinned copies.
 
 ## Exact public input boundary
 
@@ -61,8 +69,6 @@ artifact. The public height-only inputs did not include those quality masks.
 
 ## Still required before production approval
 
-- Preserve a durable copy of the reviewed terms and define a change check for
-  upstream notices and source access.
 - Verify regional source boundaries, water/no-data behavior, high latitudes,
   representative raw/derived checksums and exact-input retention under the
   production cache policy.

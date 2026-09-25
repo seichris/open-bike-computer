@@ -302,8 +302,9 @@ Known limitations, intentionally **not** production claims:
 - exact projection/sampling is chunked with cancellation checks; each native
   contour call is bounded but not interruptible mid-call, so production workers
   still need execution deadlines;
-- no elevation labels, hillshade, qualified route contrast, MapKit coordinate
-  correction, or physical firmware render qualification yet.
+- no elevation labels, hillshade, qualified route contrast, or physical firmware
+  render qualification yet. The iPhone MapKit overlay applies the mainland-China
+  WGS-84/GCJ-02 warp, but its regional visual alignment remains to be qualified.
 
 ## Local evidence
 
@@ -342,8 +343,9 @@ On 2026-09-25 the maintainer confirmed that use of the pinned 2021 public
 Copernicus DEM sources is acceptable. This resolves the source-use decision for
 those exact releases. The [2021 source review](topography-source-review-2021.md)
 records the licence and exact notices now emitted into archives and shown in
-the iPhone map details. Durable terms retention, source-boundary evidence and
-physical qualification remain open; this does not approve other data releases.
+the iPhone map details. Reviewed terms are retained and their upstream hashes
+were rechecked on 2026-09-25. Further source-boundary quality and physical
+qualification remain open; this does not approve other data releases.
 This change makes the development generation policy offer format 4 to every
 installation after its image and lock are promoted.
 The production policy v3 and paired catalog promotion code are prepared but
@@ -358,8 +360,8 @@ they must be regenerated under the approved policy before production
 promotion.
 
 1. Complete the [2021 source review](topography-source-review-2021.md), including
-   durable terms retention, masks, source-boundary quality samples and notice
-   placement on every public surface.
+   masks, source-boundary quality samples and notice placement on every public
+   surface. Recheck retained terms against upstream before production release.
 2. Run app and firmware builds, unit/integration suites, image-size checks, and
    simulator smoke tests for the exact branch head.
 3. Qualify one exact signed renderer-format-4 artifact on both Waveshare boards
