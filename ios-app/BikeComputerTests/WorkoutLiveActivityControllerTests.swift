@@ -27,6 +27,7 @@ private final class FakeWorkoutLiveActivityClient:
             WorkoutLiveActivityDismissal
         )] = []
     private(set) var endAttempts: [String] = []
+    var onEnd: (() -> Void)?
     private var continuations:
         [String: AsyncStream<WorkoutLiveActivitySystemState>.Continuation] = [:]
 
@@ -94,6 +95,7 @@ private final class FakeWorkoutLiveActivityClient:
             }
         }
         endings.append((id, contentState, dismissal))
+        onEnd?()
         if let index = recordsValue.firstIndex(where: { $0.id == id }) {
             let record = recordsValue[index]
             recordsValue[index] = WorkoutLiveActivityRecord(
@@ -901,6 +903,8 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
             TestWorkoutLiveActivityPresentationSource(.idle)
         let client = FakeWorkoutLiveActivityClient()
         client.recordsValue = [record("orphan", mapped: mapped)]
+        let orphanEnded = expectation(description: "orphan ended after grace")
+        client.onEnd = { orphanEnded.fulfill() }
         let scheduler = WorkoutLiveActivityWaitScheduler()
         let controller = makeController(
             source: source,
@@ -913,7 +917,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         await settle()
 
         await scheduler.resumeNext()
-        await settle()
+        await fulfillment(of: [orphanEnded], timeout: 3)
 
         XCTAssertEqual(client.endings.count, 1)
         XCTAssertEqual(client.endings.first?.0, "orphan")
