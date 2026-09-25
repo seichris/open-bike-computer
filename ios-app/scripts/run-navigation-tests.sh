@@ -12,6 +12,14 @@ cd "${REPO_DIR}"
 
 python3 "${SCRIPT_DIR}/run-durable-map-attempt-tests.py"
 
+TOPOGRAPHY_ALIGNMENT_OUT="${TMPDIR:-/tmp}/open-bike-topography-alignment-tests"
+xcrun swiftc -parse-as-library \
+  -o "${TOPOGRAPHY_ALIGNMENT_OUT}" \
+  ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift \
+  ios-app/BikeComputerTests/TopographyMapKitTileWarpTests.swift
+"${TOPOGRAPHY_ALIGNMENT_OUT}"
+
 "${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
 bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
 bash "${SCRIPT_DIR}/run-offline-route-tests.sh"
@@ -167,6 +175,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
   ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift \
@@ -190,6 +199,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
   ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift \
@@ -233,6 +243,7 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift \
   ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \

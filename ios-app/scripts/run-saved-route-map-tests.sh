@@ -56,6 +56,7 @@ xcrun swiftc -D HOST_TESTING -parse-as-library \
   ios-app/BikeComputer/BikeComputer/Models/SavedRouteMapSelection.swift \
   ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift \

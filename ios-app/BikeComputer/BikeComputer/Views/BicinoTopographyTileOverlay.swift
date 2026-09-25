@@ -2,22 +2,34 @@ import Foundation
 import MapKit
 import UIKit
 
-/// Local transparent contours only. A caller must separately enforce saved-map
-/// scope and regional MapKit alignment eligibility before attaching the layer.
+/// Local transparent contours only. The signed companion stays in WGS-84; only
+/// the MapKit presentation is remapped for wholly mainland-China selections.
 nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked Sendable {
     let receipt: TopographyCompanionReceipt
     private let store: TopographyCompanionStore
     private let mapBounds: MKMapRect
+    private let alignsChina: Bool
     private let taskLock = NSLock()
     private var tileTasks: [UUID: Task<Void, Never>] = [:]
     private var memoryWarningObserver: NSObjectProtocol?
 
-    private init(store: TopographyCompanionStore, metadata: TopographyCompanionMetadata) {
+    private init(
+        store: TopographyCompanionStore,
+        metadata: TopographyCompanionMetadata,
+        alignsChina: Bool
+    ) {
         self.store = store
         self.receipt = store.receipt
+        self.alignsChina = alignsChina
         let bounds = metadata.boundsE7.map { Double($0) / 10_000_000 }
-        let northwest = MKMapPoint(CLLocationCoordinate2D(latitude: bounds[3], longitude: bounds[0]))
-        let southeast = MKMapPoint(CLLocationCoordinate2D(latitude: bounds[1], longitude: bounds[2]))
+        let northwestCoordinate = CLLocationCoordinate2D(latitude: bounds[3], longitude: bounds[0])
+        let southeastCoordinate = CLLocationCoordinate2D(latitude: bounds[1], longitude: bounds[2])
+        let northwest = MKMapPoint(alignsChina
+            ? CoordinateConverter.wgs84ToGCJ02(coordinate: northwestCoordinate)
+            : northwestCoordinate)
+        let southeast = MKMapPoint(alignsChina
+            ? CoordinateConverter.wgs84ToGCJ02(coordinate: southeastCoordinate)
+            : southeastCoordinate)
         mapBounds = MKMapRect(x: northwest.x, y: northwest.y, width: southeast.x - northwest.x, height: southeast.y - northwest.y)
         super.init(urlTemplate: nil)
         canReplaceMapContent = false
@@ -45,7 +57,20 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
         let store = TopographyCompanionStore(url: url, receipt: receipt)
         let metadata = try await store.validate()
         try Task.checkCancellation()
-        return BicinoTopographyTileOverlay(store: store, metadata: metadata)
+        let bounds = metadata.boundsE7.map { Double($0) / 10_000_000 }
+        let corners = [
+            (bounds[1], bounds[0]), (bounds[1], bounds[2]),
+            (bounds[3], bounds[0]), (bounds[3], bounds[2])
+        ]
+        let chinaCorners = corners.filter {
+            CoordinateConverter.isInChina(lat: $0.0, lon: $0.1)
+        }.count
+        guard chinaCorners == 0 || chinaCorners == corners.count else {
+            throw TopographyMapKitTileWarp.WarpError.extent
+        }
+        return BicinoTopographyTileOverlay(
+            store: store, metadata: metadata, alignsChina: chinaCorners == corners.count
+        )
     }
 
     override var boundingMapRect: MKMapRect { mapBounds }
@@ -58,12 +83,22 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
         let store = store
         let x = path.x, y = path.y, z = path.z
         let scale = path.contentScaleFactor > 1 ? 2 : 1
+        let alignsChina = alignsChina
         let taskID = UUID()
         taskLock.lock()
         tileTasks[taskID] = Task { [weak self] in
             defer { self?.finishTask(taskID) }
             do {
-                let data = try await store.tile(z: z, x: x, y: y, scale: scale)
+                let data: Data?
+                if alignsChina {
+                    data = try await TopographyMapKitTileWarp.tile(
+                        z: z, x: x, y: y, scale: scale
+                    ) { z, x, y, scale in
+                        try await store.tile(z: z, x: x, y: y, scale: scale)
+                    }
+                } else {
+                    data = try await store.tile(z: z, x: x, y: y, scale: scale)
+                }
                 try Task.checkCancellation()
                 reply.complete(data ?? Self.transparentPNG, nil)
             } catch {
