@@ -1273,7 +1273,9 @@ private struct PendingSavedMapRow: View {
                     Text(sourceSummary ?? "Pending Offline Map")
                         .font(.body.weight(.semibold))
                         .lineLimit(2)
-                    Text("Downloading to this iPhone")
+                    Text(manager.downloadProgress >= 1
+                        ? "Finishing map on this iPhone"
+                        : "Downloading to this iPhone")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

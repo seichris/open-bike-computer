@@ -707,7 +707,9 @@ enum OfflineMapProgressPresentation {
     static func value(job: OfflineMapJob?, downloadProgress: Double) -> Double? {
         if downloadProgress > 0,
            job == nil || job?.status == "ready" {
-            return 0.95 + (clamped(downloadProgress) * 0.05)
+            // This row still represents a pending job. File transfer reaching
+            // 100% precedes artifact verification and saving the map locally.
+            return min(0.99, 0.95 + (clamped(downloadProgress) * 0.05))
         }
 
         guard let job else { return 0.01 }

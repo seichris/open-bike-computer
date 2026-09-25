@@ -10217,6 +10217,14 @@ struct NavigationProtocolTests {
             ) < 0.000_001,
             "file download completes the final five percent"
         )
+        assertEqual(
+            OfflineMapProgressPresentation.value(
+                job: offlineMapJob(status: "ready"),
+                downloadProgress: 1
+            ),
+            0.99,
+            "a pending map does not claim completion before verification and saving"
+        )
     }
 
     static func testOfflineMapByteProgressPresentation() {
