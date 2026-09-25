@@ -667,12 +667,31 @@ export async function finalizePublication(
       const promoted = publication.artifacts.find(
         (artifact) => artifact.format === "topography-ios-v1",
       );
+      const sourceRequirements =
+        parseJSON<TopographyCompanionRequirements | null>(
+          sourceCompanion?.reader_requirements_json ?? null,
+          null,
+        );
+      const promotedRequirements = promoted?.companionRequirements;
+      const requirementFields: (keyof TopographyCompanionRequirements)[] = [
+        "schemaVersion",
+        "role",
+        "mapContentReceipt",
+        "mapId",
+        "profileVersion",
+        "intermediateSha256",
+        "sourcePolicySha256",
+        "attributionSha256",
+      ];
       if (
         !sourceCompanion ||
         !promoted ||
         sourceCompanion.sha256 !== promoted.sha256 ||
-        sourceCompanion.reader_requirements_json !==
-          JSON.stringify(promoted.companionRequirements)
+        !sourceRequirements ||
+        !promotedRequirements ||
+        !requirementFields.every(
+          (field) => sourceRequirements[field] === promotedRequirements[field],
+        )
       ) {
         throw new HttpError(
           409,
