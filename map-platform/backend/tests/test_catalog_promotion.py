@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -455,6 +456,10 @@ class CatalogPromotionIdentityTests(unittest.TestCase):
         artifact_store.verify.assert_called_once()
         catalog.finalize_promotion.assert_not_called()
 
+    @unittest.skipIf(
+        os.environ.get("MAP_PLATFORM_PINNED_PROMOTION_COMPAT") == "1",
+        "the pinned production converter predates topographic companions",
+    )
     def test_topographic_promotion_publishes_signed_stream_and_bound_companion(self):
         manifest = self.manifest()
         manifest["target"]["formatVersion"] = 4
