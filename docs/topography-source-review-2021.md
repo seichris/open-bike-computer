@@ -19,7 +19,9 @@ record does not approve the newer registered Copernicus releases.
   a programme liability notice. The exact product-specific text is emitted
   into each map archive's `LICENSES/Elevation-Sources.txt` and
   `ATTRIBUTION.txt` by `topography_notices.py`; the iPhone map details show it
-  for these two source IDs. Unknown sources fail notice generation.
+  for these two source IDs. Topographic share pages display both possible
+  pinned-source notices and direct readers to the archive for the exact
+  contributing source. Unknown sources fail notice generation.
 - [Copernicus DEM collection](https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM)
   identifies GLO-30/GLO-90 as digital surface models and gives their datum,
   resolution, coverage and public-source attribution guidance.
@@ -44,7 +46,7 @@ are not surveyed bare-earth terrain.
 - Verify regional source boundaries, water/no-data behavior, high latitudes,
   representative raw/derived checksums and exact-input retention under the
   production cache policy.
-- Confirm notice visibility in the catalog/shared page and on the physical
+- Confirm notice visibility on deployed catalog/share pages and the physical
   1.75-inch device. The 2.06-inch device is unavailable for its separate gate.
 - Record app/device resource and rendering measurements, signed production
   artifact transfer, rollback and the final reviewer decision.

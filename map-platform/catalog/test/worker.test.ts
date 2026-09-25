@@ -41,7 +41,10 @@ function hex(bytes: ArrayBuffer): string {
   ).join("");
 }
 
-async function seedShareLanding(token: string): Promise<void> {
+async function seedShareLanding(
+  token: string,
+  topographic = false,
+): Promise<void> {
   const suffix = crypto.randomUUID().replaceAll("-", "");
   const libraryID = `lib_v1_${suffix}`;
   const mapEntryID = `map_v1_${suffix}`;
@@ -59,7 +62,7 @@ async function seedShareLanding(token: string): Promise<void> {
          source_region_name, bounds_json, renderer, renderer_format_version,
          features_json, attribution_json, generated_at, delivery_state,
          created_at, updated_at)
-       VALUES (?, ?, ?, 'production', ?, ?, NULL, 'fmb', 1, ?, '{}', ?,
+       VALUES (?, ?, ?, 'production', ?, ?, NULL, 'fmb', ?, ?, '{}', ?,
                'production', ?, ?)`,
     ).bind(
       mapEntryID,
@@ -67,7 +70,10 @@ async function seedShareLanding(token: string): Promise<void> {
       `receipt-${suffix}`,
       "Shared Shanghai map",
       "Shanghai",
-      JSON.stringify(["roads", "places"]),
+      topographic ? 4 : 1,
+      JSON.stringify(
+        topographic ? ["roads", "places", "contours"] : ["roads", "places"],
+      ),
       now,
       now,
       now,
@@ -161,6 +167,22 @@ describe("worker public surfaces", () => {
     expect(html).toContain(
       "If Bicino is already installed, tap Open in the app banner above.",
     );
+    expect(html).not.toContain("Elevation source notices");
+  });
+
+  it("shows Copernicus source and liability notices on topographic shares", async () => {
+    const token = "C".repeat(43);
+    await seedShareLanding(token, true);
+    const response = await worker.fetch(
+      new Request(`https://maps-share-staging.8o.vc/s/${token}`),
+      workerEnv(),
+    );
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Elevation source notices");
+    expect(html).toContain("produced using Copernicus WorldDEM-30");
+    expect(html).toContain("produced using Copernicus WorldDEM™-90");
+    expect(html).toContain("do not incur any liability");
   });
 
   it("bootstraps a bearer credential but never caches it", async () => {
