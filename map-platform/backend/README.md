@@ -471,6 +471,14 @@ Useful production environment variables:
   profile. The default is the checked-in
   `config/preparation-estimate-profile-v1.json`; model/profile changes do not
   enter map IDs, cache keys, manifests, signatures, or artifact bytes.
+  Renderer format 4 has a low-confidence shadow baseline that includes the
+  paired topography-generation stage. Its initial range was checked against
+  the only two successful development format-4 builds recorded by 2026-09-25:
+  3.79 km2 in 25 seconds and 420.12 km2 in 1,287 seconds. These observations
+  set the baseline; they are not independent validation. Keep format-4 ranges
+  private until additional small, medium, dense, and sparse builds establish
+  coverage and range width under the shadow-validation gates in
+  `docs/plans/offline-map-preparation-time-estimates-implementation-plan.md`.
 - `MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS`: maintenance-service cleanup interval,
   default `3600`.
 - `MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS`: maximum content objects attempted

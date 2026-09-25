@@ -74,6 +74,19 @@
           "packaging": [2, 90]
         }
       }
+    },
+    "4": {
+      "legacy": {
+        "referenceAreaM2": 420000000,
+        "referenceBlocks": 42,
+        "components": {
+          "source": [10, 180],
+          "conversion": [30, 900],
+          "encoding": [10, 350],
+          "topography": [10, 600],
+          "packaging": [3, 120]
+        }
+      }
     }
   },
   "reuseBaselines": {
