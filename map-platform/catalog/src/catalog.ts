@@ -651,9 +651,15 @@ export async function finalizePublication(
           WHERE map_entry_id = ? AND bucket_slot = 'development'
             AND delivery_tier = 'development' AND format = 'topography-ios-v1'
             AND generation_head = 1 AND state = 'live'
+            AND json_extract(reader_requirements_json, '$.mapContentReceipt') = ?
+            AND json_extract(reader_requirements_json, '$.mapId') = ?
           ORDER BY created_at DESC LIMIT 1`,
       )
-        .bind(publication.mapEntryId)
+        .bind(
+          publication.mapEntryId,
+          publication.contentReceipt,
+          publication.legacyMapId,
+        )
         .first<{
           sha256: string;
           reader_requirements_json: string | null;
@@ -2020,9 +2026,11 @@ export async function createPromotionGrant(
           `SELECT * FROM artifacts WHERE map_entry_id = ?
           AND bucket_slot = 'development' AND delivery_tier = 'development'
           AND format = 'topography-ios-v1' AND generation_head = 1 AND state = 'live'
+          AND json_extract(reader_requirements_json, '$.mapContentReceipt') = ?
+          AND json_extract(reader_requirements_json, '$.mapId') = ?
           ORDER BY created_at DESC LIMIT 1`,
         )
-          .bind(mapEntryID)
+          .bind(mapEntryID, map.content_receipt, map.legacy_map_id)
           .first<ArtifactRow>()
       : null;
   if (
