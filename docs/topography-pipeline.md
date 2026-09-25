@@ -131,8 +131,22 @@ cmp "$terrain_cache/alps-a.json" "$terrain_cache/alps-b.json"
 `stage` accepts the same bounds and stages receipts without contour processing.
 `plan` exits 2 for missing cells. `sample` refuses any catalog gap, an oversized
 request, or an existing output path. It accepts `--max-tiles` (default 8, maximum
-256), but the independent four-million-pixel limit normally binds first. A
+256), but the independent 16-million-pixel limit normally binds first. A
 one-degree 30 m sample exceeds that pixel bound; use a small inspection area.
+
+The development map-wide contour budgets are 16 million raster pixels, 4 million
+sampled points, 40,000 sampled records, and 4 million compiled device points.
+These are four times the previous budgets to admit a roughly fourfold area.
+The operator encoder also accepts up to 128 MiB of serialized sample evidence,
+four times its former input cap, so it can consume a sample at the new budget.
+The FMB5 section bounds remain 65,536 points and 4,096 records **per block**;
+the 256-block cap remains a geometry/format safety bound. The 256 MiB `.btopo`
+limit remains aligned across the producer, artifact receipt, and iPhone reader:
+the previous Sichuan companion was 46,845,952 bytes, so a linear fourfold
+estimate is below that limit, and generation still fails if actual tiles exceed
+it. Regional native-read windows remain capped at 4 million pixels per chunk
+to bound transient `float64` allocations; they are distinct from the full
+contour grid. These retained bounds require no firmware or iPhone format change.
 
 `sample` additionally checks the four-pixel processing halo and uses a fixed
 region-wide quality profile. Thus `plan` (catalog coverage for the requested
@@ -190,8 +204,8 @@ The output contains `device/VECTMAP/`, a separate `.btopo`, `ATTRIBUTION.txt`,
 and `topography-receipt.json`. That receipt is development evidence, **not** an
 authenticated catalog grant, signed map manifest, or source-license approval.
 
-Current bounds are one million sampled and compiler-input contour points,
-one million compiled points and 256 blocks per pair, 4,096 contour
+Current bounds are four million sampled and compiler-input contour points,
+four million compiled points and 256 blocks per pair, 4,096 contour
 records/65,536 points per block, 256 points per record, 512 m maximum encoded
 segment, 16,384 companion tiles (both scales), and 256 MiB per companion.
 Exceeding a bound rejects the result rather than silently truncating terrain.

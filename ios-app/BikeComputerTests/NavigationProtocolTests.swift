@@ -11273,6 +11273,41 @@ struct NavigationProtocolTests {
             discoveryManager.deleteCachedPack(at: url)
         }
 
+        let completedSuite = "offline-map-completed-download-\(UUID().uuidString)"
+        let completedDefaults = UserDefaults(suiteName: completedSuite)!
+        defer { completedDefaults.removePersistentDomain(forName: completedSuite) }
+        let completedCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("offline-map-completed-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: completedCache) }
+        try! FileManager.default.createDirectory(at: completedCache, withIntermediateDirectories: true)
+        let completedPack = completedCache.appendingPathComponent("map-completed.zip")
+        try! packData(mapId: "map-completed").write(to: completedPack)
+        OfflineMapJobPersistence.save(jobId: "job-completed", defaults: completedDefaults)
+        OfflineMapJobPersistence.markPackDownloaded(
+            jobId: "job-completed", mapId: "map-completed", defaults: completedDefaults
+        )
+        let completedManager = OfflineMapManager(
+            defaults: completedDefaults,
+            mapPlatformSession: session,
+            cacheDirectory: completedCache,
+            packDownload: { _, _, _, _ in
+                assertionFailure("a saved completed map must not download again")
+                throw OfflineMapPlatformError.invalidResponse
+            }
+        )
+        assert(completedManager.hasLocallySavedPendingMap, "saved completed map is recognized at launch")
+        completedManager.resumePendingMapJobIfNeeded()
+        let localCompletionDeadline = Date().addingTimeInterval(3)
+        while completedManager.hasPendingMapJob && Date() < localCompletionDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        assert(!completedManager.hasPendingMapJob, "local completed map clears the stale pending row")
+        assert(
+            OfflineMapRecoveryHistory.handledJobIds(defaults: completedDefaults).contains("job-completed"),
+            "local completion marks only the exact job handled"
+        )
+        assert(FileManager.default.fileExists(atPath: completedPack.path), "local completion preserves the saved map")
+
         let downloadRetrySuite = "offline-map-download-retry-\(UUID().uuidString)"
         let downloadRetryDefaults = UserDefaults(suiteName: downloadRetrySuite)!
         defer { downloadRetryDefaults.removePersistentDomain(forName: downloadRetrySuite) }
@@ -12661,7 +12696,7 @@ struct NavigationProtocolTests {
                     "OfflineMapDownloadingSectionPresentation.isRecoveryOnly("
                 ) &&
                 savedMapsSectionSource.contains(
-                    "!manager.hasDownloadedPendingDeviceInstall"
+                    "!manager.hasLocallySavedPendingMap"
                 ) &&
                 savedMapsSectionSource.contains("PendingSavedMapRow(") &&
                 source.contains("private struct PendingSavedMapRow") &&
