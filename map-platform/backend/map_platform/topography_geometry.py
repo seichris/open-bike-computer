@@ -15,13 +15,13 @@ from shapely.geometry import LineString, box, shape
 from shapely.ops import transform
 
 from .topography_artifacts import Contour, ContourSection, encode_contour_section
-from .topography_pipeline import MAX_CONTOUR_POINTS, canonical_bytes, canonical_line
+from .topography_pipeline import MAX_CONTOUR_POINTS, MAX_CONTOUR_RECORDS, canonical_bytes, canonical_line
 
 BLOCK_METRES = 4096
 MAX_BLOCKS = 256
 # Block clipping and seam splitting can add points to the sampled intermediate.
-# The Sichuan selection measured 405,818 device points across 36 blocks.
-MAX_COMPILED_POINTS = 1_000_000
+# Keep the map-wide compiled budget aligned with the larger sample budget.
+MAX_COMPILED_POINTS = 4_000_000
 MAX_WORLD_METRES = math.pi * 6378137
 
 
@@ -57,7 +57,7 @@ def compile_contours(sample: dict, selection: dict, *, corridor_width_m: float =
 
     if (sample.get("kind") != "bicino-contour-evidence-v1"
             or sample.get("verticalDatum") != "EPSG:3855"
-            or len(sample.get("contours", [])) > 10_000):
+            or len(sample.get("contours", [])) > MAX_CONTOUR_RECORDS):
         raise ValueError("unsupported or oversized contour intermediate")
     minor, index = sample["minorIntervalM"], sample["indexIntervalM"]
     encode_contour_section(ContourSection(minor, index, ()))

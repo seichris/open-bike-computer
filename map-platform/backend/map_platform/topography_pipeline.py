@@ -15,12 +15,12 @@ from .topography_grid import contour_grid, enclosing_bounds_e7, processing_regio
 from .topography_raster import audited_copernicus_pixels, sample_fixed_grid
 from .topography_sources import TopographySourcePolicy, plan_elevation
 
-MAX_GRID_PIXELS = 4_000_000
-# A 312 km2 Sichuan mountain selection measured 422,855 canonical input
-# points. Keep the map-wide intermediate bounded while allowing that case and
-# headroom for similarly dense selections; larger regions need partitioning.
-MAX_CONTOUR_POINTS = 1_000_000
-MAX_CONTOUR_RECORDS = 10_000
+# Map-wide budgets scale with the selected area. The 420 km2 Sichuan canary
+# used 554,024 final points; these limits permit a roughly fourfold region
+# while retaining finite worker allocations and explicit complexity failures.
+MAX_GRID_PIXELS = 16_000_000
+MAX_CONTOUR_POINTS = 4_000_000
+MAX_CONTOUR_RECORDS = 40_000
 
 
 def canonical_bytes(value: Any) -> bytes:

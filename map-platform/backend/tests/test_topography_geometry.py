@@ -104,6 +104,12 @@ class TopographyGeometryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "compiled contours exceed"):
                 compile_contours(self.sample, self.selection)
 
+    def test_intermediate_record_budget_matches_extraction(self):
+        self.sample["contours"].append(dict(self.sample["contours"][0]))
+        with patch("map_platform.topography_geometry.MAX_CONTOUR_RECORDS", 1):
+            with self.assertRaisesRegex(ValueError, "oversized contour intermediate"):
+                compile_contours(self.sample, self.selection)
+
     def test_pack_preserves_vector_input_and_adds_terrain_only_blocks(self):
         source = self.root / "source"
         block = source / "VECTMAP/test-map/+000+000/0_0.fmb"

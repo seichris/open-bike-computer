@@ -97,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "encode":
         from .topography_geometry import compile_contours
         from .topography_pack import assemble_topographic_pack
-        for path, maximum in ((args.sample, 32 * 1024 * 1024), (args.selection, 2 * 1024 * 1024), (args.attribution, 256 * 1024)):
+        for path, maximum in ((args.sample, 128 * 1024 * 1024), (args.selection, 2 * 1024 * 1024), (args.attribution, 256 * 1024)):
             if not path.is_file() or path.stat().st_size > maximum:
                 parser.error("encoding input is missing or exceeds its byte limit")
         sample = json.loads(args.sample.read_bytes())
