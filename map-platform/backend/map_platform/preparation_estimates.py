@@ -402,6 +402,22 @@ class PreparationEstimator:
         completed = set(COMPLETED_BY_PHASE.get(phase, ()))
         completed.update(_string_list(context.get("completedComponents"), 16))
         progress = evidence.get("progress") if isinstance(evidence, dict) else None
+        if renderer == 4 and phase == "topography_generation":
+            # The vector pack is complete before the paired contour artifacts start.
+            completed.update(
+                {"source", "dependencies", "normalization", "conversion", "encoding"}
+            )
+        if (
+            renderer == 4
+            and isinstance(progress, dict)
+            and progress.get("phase") == "topography_generation"
+        ):
+            if (
+                progress.get("completed") == progress.get("total")
+                and _finite_nonnegative(progress.get("total"))
+                and float(progress["total"]) > 0
+            ):
+                completed.add("topography")
         building_block_cache = (
             evidence.get("buildingBlockCache")
             if isinstance(evidence, dict)
@@ -449,7 +465,7 @@ class PreparationEstimator:
         complexity = evidence.get("complexity") if isinstance(evidence, dict) else None
         scale_area = self._area_scale(job, baseline, scope)
         scale_blocks = self._block_scale(baseline, scope)
-        for name in ("source", "dependencies", "conversion"):
+        for name in ("source", "dependencies", "conversion", "topography"):
             if name in all_components:
                 all_components[name] = _scale_range(
                     all_components[name], scale_area
@@ -822,14 +838,14 @@ class PreparationEstimateCoordinator:
                     ),
                     rules_sha256=self.rules_sha256,
                 )
-                for renderer in (1, 2, 3)
+                for renderer in (1, 2, 3, 4)
             }
             self.capability_store.publish(
                 worker_id=worker_id,
                 performance_compatibility_keys=keys,
                 worker_class=self.config.worker_class,
                 preprocessing_modes={self.preprocessing_mode},
-                renderer_formats={1, 2, 3},
+                renderer_formats={1, 2, 3, 4},
                 model_version=self.estimator.profile.model_version,
                 profile_sha256=self.estimator.profile.sha256,
             )
@@ -1412,11 +1428,12 @@ def _validate_profile(value: Any) -> None:
             r"[A-Za-z0-9._-]{1,64}", value[key]
         ):
             raise ValueError(f"preparation estimate {key} is invalid")
-    if not isinstance(value["baselines"], dict) or set(value["baselines"]) != {
-        "1",
-        "2",
-        "3",
-    }:
+    baseline_renderers = value["baselines"]
+    if (
+        not isinstance(baseline_renderers, dict)
+        or not {"1", "2", "3"}.issubset(baseline_renderers)
+        or not set(baseline_renderers).issubset({"1", "2", "3", "4"})
+    ):
         raise ValueError("preparation estimate baselines are invalid")
     if value["scopePolicyVersion"] != BUILDING_SCOPE_POLICY_VERSION:
         raise ValueError("preparation estimate scope policy is stale")
@@ -1435,6 +1452,7 @@ def _validate_profile(value: Any) -> None:
         "normalization",
         "conversion",
         "encoding",
+        "topography",
         "packaging",
     }
     reference_fields = {
@@ -1446,7 +1464,7 @@ def _validate_profile(value: Any) -> None:
         "referenceVertices",
     }
     for renderer, modes in value["baselines"].items():
-        if renderer not in {"1", "2", "3"} or not isinstance(modes, dict):
+        if renderer not in {"1", "2", "3", "4"} or not isinstance(modes, dict):
             raise ValueError("preparation estimate renderer baseline is invalid")
         for baseline in modes.values():
             if (
