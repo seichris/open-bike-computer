@@ -11297,8 +11297,10 @@ struct NavigationProtocolTests {
         )
         assert(completedManager.hasLocallySavedPendingMap, "saved completed map is recognized at launch")
         completedManager.resumePendingMapJobIfNeeded()
-        let completedLocally = await waitForMapTaskCompletion(completedManager)
-        assert(completedLocally, "local completed map recovery should finish")
+        let localCompletionDeadline = Date().addingTimeInterval(3)
+        while completedManager.hasPendingMapJob && Date() < localCompletionDeadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         assert(!completedManager.hasPendingMapJob, "local completed map clears the stale pending row")
         assert(
             OfflineMapRecoveryHistory.handledJobIds(defaults: completedDefaults).contains("job-completed"),
