@@ -858,6 +858,7 @@ def main() -> int:
             producer_build_sha256=producer_build_sha256,
             producer_image_digest=producer_image_digest,
             work_root=data_root / "promotions",
+            source_policy=load_topography_source_policy(repo_root),
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

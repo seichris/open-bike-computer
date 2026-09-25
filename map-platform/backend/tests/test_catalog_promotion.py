@@ -520,6 +520,10 @@ class CatalogPromotionIdentityTests(unittest.TestCase):
                 signer=signer, producer_build_sha256="2" * 64,
                 producer_image_digest="sha256:" + "3" * 64,
                 work_root=Path(temporary),
+                source_policy=SimpleNamespace(
+                    sha256="6" * 64,
+                    sources=(SimpleNamespace(production_approved=True),),
+                ),
             )
         self.assertEqual(result["state"], "finalized")
         published = catalog.finalize_promotion.call_args.args[1]

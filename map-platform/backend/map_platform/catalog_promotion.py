@@ -39,6 +39,7 @@ from .map_stream import (
 )
 from .pipeline import validate_final_assembly_artifact
 from .topography_companion import validate_companion
+from .topography_sources import TopographySourcePolicy
 
 
 class CatalogPromotionError(RuntimeError):
@@ -272,6 +273,7 @@ def promote_catalog_map(
     producer_image_digest: str,
     work_root: Path,
     grant: dict[str, Any] | None = None,
+    source_policy: TopographySourcePolicy | None = None,
 ) -> dict[str, Any]:
     """Repackage one validated development ZIP as a production-signed stream."""
 
@@ -409,6 +411,12 @@ def promote_catalog_map(
             topo = manifest.get("topography")
             if not isinstance(companion_grant, dict) or not isinstance(topo, dict):
                 raise CatalogPromotionError("promotion topography companion is missing")
+            if (
+                source_policy is None
+                or topo.get("sourcePolicySha256") != source_policy.sha256
+                or not all(source.production_approved for source in source_policy.sources)
+            ):
+                raise CatalogPromotionError("promotion topography sources have not been approved")
             source_companion = companion_grant.get("artifact")
             if not isinstance(source_companion, dict):
                 raise CatalogPromotionError("promotion topography companion is invalid")

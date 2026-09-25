@@ -350,6 +350,11 @@ not selected by the production Compose lock. The catalog promotion switch
 defaults to off, and the worker checks source approval before generating
 production contours. This keeps production closed until the remaining physical
 and source-notice gates are recorded.
+Promotion also requires the companion's source-policy digest to match the
+approved production policy. Maps generated before that approval, including
+the current development qualification job, remain development artifacts;
+they must be regenerated under the approved policy before production
+promotion.
 
 1. Complete [source review](templates/topography-source-review.md), including
    exact attribution/disclaimers, retention rights, masks, and source-boundary
