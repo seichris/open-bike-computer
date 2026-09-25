@@ -204,8 +204,8 @@ The output contains `device/VECTMAP/`, a separate `.btopo`, `ATTRIBUTION.txt`,
 and `topography-receipt.json`. That receipt is development evidence, **not** an
 authenticated catalog grant, signed map manifest, or source-license approval.
 
-Current bounds are one million sampled and compiler-input contour points,
-one million compiled points and 256 blocks per pair, 4,096 contour
+Current bounds are four million sampled and compiler-input contour points,
+four million compiled points and 256 blocks per pair, 4,096 contour
 records/65,536 points per block, 256 points per record, 512 m maximum encoded
 segment, 16,384 companion tiles (both scales), and 256 MiB per companion.
 Exceeding a bound rejects the result rather than silently truncating terrain.
