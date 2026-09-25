@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import re
 import unittest
@@ -66,13 +67,23 @@ class DeploymentChannelComposeTests(unittest.TestCase):
         production = (DEPLOY_DIR / "compose.yaml").read_text(
             encoding="utf-8"
         )
+        development_policy = json.loads(
+            (DEPLOY_DIR.parent / "config" / "generation-profile-policy-v2.json")
+            .read_text(encoding="utf-8")
+        )
         self.assertIn(
             "MAP_PLATFORM_GENERATION_PROFILE_POLICY: "
             "/app/config/generation-profile-policy-v2.json",
             development,
         )
         self.assertNotIn("generation-profile-policy-v1.json", development)
-        self.assertNotIn("MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST", development)
+        self.assertIn(
+            "topographic-contours-v1",
+            development_policy["channels"]["development"]["globalProfiles"],
+        )
+        self.assertEqual(
+            [], development_policy["channels"]["development"]["canaryProfiles"]
+        )
         self.assertNotIn("generation-profile-policy-v2.json", production)
         self.assertNotIn("MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST", production)
 

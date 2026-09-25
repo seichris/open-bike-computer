@@ -15,6 +15,10 @@ Its API selects generation policy v2 only after the image containing that
 policy has been promoted. Renderer format 4 is available to every development
 installation under the policy's normal admission limits. Production stays on
 policy v1 until its independent release gates and image promotion complete.
+The current development lock still forwards the legacy canary allowlist to
+its pinned image; the new backend ignores that variable. Remove the inert
+setting in the separate development lock promotion after the active map job
+finishes so this source PR does not restart the running stack.
 The checked-in v3 generation policy makes format 4 global in both channels,
 but the production Compose lock deliberately does not select it yet. The
 catalog's `TOPOGRAPHY_PROMOTION_ENABLED` remains `0` in staging and production
