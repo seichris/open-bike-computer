@@ -1089,7 +1089,7 @@ private struct SavedMapsSettingsSection: View {
                 hasDownloadedPack: manager.downloadedPackURL != nil,
                 errorMessage: manager.errorMessage
             ) &&
-            !manager.hasDownloadedPendingDeviceInstall
+            !manager.hasLocallySavedPendingMap
         Section(header: Text(scope == .developerMaps ? "Development Maps" : "Saved Maps")) {
             if savedMaps.isEmpty && !hasPendingMapRow {
                 Group {

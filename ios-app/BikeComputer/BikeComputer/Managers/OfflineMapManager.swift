@@ -2132,9 +2132,13 @@ final class OfflineMapManager: ObservableObject {
     }
 
     var hasDownloadedPendingDeviceInstall: Bool {
-        guard OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
-              let activeJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults),
-              OfflineMapJobPersistence.downloadedJobId(defaults: defaults) == activeJobId,
+        OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults) &&
+            hasLocallySavedPendingMap
+    }
+
+    var hasLocallySavedPendingMap: Bool {
+        guard let jobId = OfflineMapJobPersistence.activeJobId(defaults: defaults),
+              OfflineMapJobPersistence.downloadedJobId(defaults: defaults) == jobId,
               let mapId = OfflineMapJobPersistence.downloadedMapId(defaults: defaults),
               let cachedURL = try? cachedPackURL(mapId: mapId) else {
             return false
@@ -5257,6 +5261,11 @@ final class OfflineMapManager: ObservableObject {
         installOnDevice: Bool,
         bleManager: BLEManager?
     ) async throws -> Bool {
+        if !installOnDevice, restoreDownloadedPackIfAvailable(jobId: jobId) {
+            clearPersistedJob(markHandled: true)
+            statusMessage = "map downloaded"
+            return true
+        }
         if installOnDevice, restoreDownloadedPackIfAvailable(jobId: jobId) {
             guard let bleManager,
                   bleManager.isConnected,
