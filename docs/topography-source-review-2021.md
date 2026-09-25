@@ -39,6 +39,26 @@ for GLO-90. GLO-90 fills unavailable GLO-30 cells. These are DSM heights in
 metres, horizontal EPSG:4326 and vertical EPSG:3855. The resulting contours
 are not surveyed bare-earth terrain.
 
+## Live public-source boundary sample
+
+On 2026-09-25, the operator sampler selected W/S/E/N
+`42.975 / 40.50 / 43.025 / 40.55`, crossing the 43°E boundary from a public
+GLO-30 cell `(42, 40)` into a fallback GLO-90 cell `(43, 40)`. The pinned
+catalog planned both cells with complete coverage. Both raw raster audits
+reported EPSG:4326, pixel registration `Point`, zero invalid pixels and the
+expected 3600×3600 / 1200×1200 dimensions. Their fetched TIFF SHA-256 values
+were `2b2c0cac572cc67d9d2732c019e76d6d46359b8a0d60cd8fe764bc32596965d8`
+and `528af41185c235fc0777187d01b669ab046378a824bbf528a1652308d6621fa0`.
+The 58×72 working grid contained 2,096 GLO-30 and 2,080 GLO-90 pixels with
+zero no-data pixels. It selected the region-wide 90 m / 50 m contour profile,
+producing 19 records and 398 points. Two runs under macOS arm64, Python
+3.11.13, rasterio 1.4.4, GDAL 3.10.3, PROJ 9.7.1, contourpy 1.3.2 and
+NumPy 1.26.4 produced identical 13,777-byte evidence with SHA-256
+`e46c49b2b11655375c4af6466652ed52c3b92877576ced5be2aaae6fe3565fa4`.
+This verifies one mixed-source acquisition and deterministic processing path;
+it does not establish visual seam quality, water masks or a production-ready
+artifact. The public height-only inputs did not include those quality masks.
+
 ## Still required before production approval
 
 - Preserve a durable copy of the reviewed terms and define a change check for
