@@ -61,6 +61,11 @@ companion pairs. No provider has thereby gained production approval.
   purges its bounded encoded-tile cache on memory pressure. Replacement/removal
   does not change routes or camera state. Saved-map details expose contour
   quality, intervals, source releases, surface model, datum, and attribution.
+  For selections wholly inside the app's mainland-China coordinate region, the
+  iPhone resamples the WGS-84 companion tiles into MapKit's GCJ-02 pixel space
+  on demand. The signed companion and ESP32 map remain WGS-84. A selection
+  crossing that region's boundary suppresses the iPhone overlay until regional
+  alignment is qualified; no uniform geographic offset is applied.
 - CAP2 bit 30/client version 28, visibility bit 13, independent Map/Map +
   Navigation preferences, configurable-screen persistence, and active-map
   health gate the device toggle. Contours default off.
