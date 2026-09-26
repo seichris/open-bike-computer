@@ -4802,7 +4802,7 @@ static void handleGpsPayload(
   gpsFreshnessState.accept(arrivals);
   const auto sourceSample = gps_input_freshness::sourceSampleFrom(packet, arrivals.lastPacketMs);
   gps.presentationSample = sourceSample;
-  bleDebugStats.updateWith([sourceSample](BLEDebugStats &stats) {
+  bleDebugStats.update([sourceSample](BLEDebugStats &stats) {
     stats.gpsSource = sourceSample;
     stats.gpsPacketCount = gpsFreshnessState.packetCount;
     stats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;

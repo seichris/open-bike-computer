@@ -1,6 +1,7 @@
 #include "../../lib/ble_navigation/gps_input_freshness.hpp"
 #include "../../lib/gps/gps_ride_observation.hpp"
 #include "../../lib/maps/src/mapPresentation.hpp"
+#include "../../lib/gui/src/uiUpdatePolicy.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -133,6 +134,19 @@ int main() {
   const GpsSampleTiming onboard{true, true, 105000, RidePositionSource::HardwareNmea};
   assert(onboard.fresh(105500));
   assert(presentationSample(onboard, {}).fresh(105500));
+  // The position can remain numerically unchanged after the source expires;
+  // the Ride Stats change tracker still needs a GPS-source transition.
+  ui_update_policy::ChangeTracker uiTracker;
+  ui_update_policy::SourceSignatures uiSignatures;
+  uiSignatures[ui_update_policy::Source::Gps] =
+      presentationStatusBits(onboard, 105500);
+  (void)uiTracker.observe(uiSignatures);
+  (void)uiTracker.take(ui_update_policy::kAllSources);
+  uiSignatures[ui_update_policy::Source::Gps] =
+      presentationStatusBits(onboard, 108000);
+  assert(!onboard.fresh(108000));
+  assert(uiTracker.observe(uiSignatures) ==
+         ui_update_policy::sourceMask(ui_update_policy::Source::Gps));
   assert(!presentationSample(fresh, {}).fresh(102000));
   sourcePresenter.observe({{2, 0}, 90, true, 0, 1, onboard.capturedAtMs, onboard.ageKnown}, 105500);
   assert(!sourcePresenter.present(105500).predictionExhausted);

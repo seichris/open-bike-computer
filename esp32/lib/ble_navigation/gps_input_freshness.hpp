@@ -28,6 +28,12 @@ inline SourceSample presentationSample(const SourceSample &current,
   return current.source == RidePositionSource::AuthenticatedBle ? ble : current;
 }
 
+inline uint8_t presentationStatusBits(const SourceSample &sample,
+                                      uint32_t nowMs) {
+  return static_cast<uint8_t>((sample.fresh(nowMs) ? 1U : 0U) |
+                              (sample.speedAvailable ? 2U : 0U));
+}
+
 /** Arrival timing retained by the latest-state GPS mailbox.
  *
  * The payload itself may be replaced while the UI task is busy, but every
