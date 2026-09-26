@@ -44,6 +44,7 @@ _NON_RETRYABLE_BUILD_ERROR_CODES = frozenset(
         "building_workload_receipt_mismatch",
         "generic_geometry_amplification_limit",
         "generic_geometry_invalid",
+        "topography_companion_admission",
     }
 )
 

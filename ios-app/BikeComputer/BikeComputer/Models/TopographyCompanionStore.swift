@@ -4,6 +4,10 @@ import SQLite3
 import ImageIO
 import Darwin
 
+nonisolated enum TopographyCompanionLimits {
+    static let maximumTiles = 163_840
+}
+
 /// Supplied by authenticated catalog publication metadata, never inferred from
 /// a filename or a downloaded database's self-declared identity.
 nonisolated struct TopographyCompanionReceipt: Codable, Equatable, Sendable {
@@ -51,7 +55,10 @@ nonisolated struct TopographyCompanionMetadata: Codable, Equatable, Sendable {
               tileSize == 256, scales == [1, 2], minimumZoom == 9, maximumZoom == 16,
               mapId == receipt.mapID, intermediateSha256 == receipt.intermediateSha256,
               sourcePolicySha256 == receipt.sourcePolicySha256, attributionSha256 == receipt.attributionSha256,
-              boundsE7.count == 4, (0...16384).contains(tileCount) else { throw TopographyCompanionError.metadata }
+              boundsE7.count == 4,
+              (0...TopographyCompanionLimits.maximumTiles).contains(tileCount) else {
+            throw TopographyCompanionError.metadata
+        }
         guard -1800000000 <= boundsE7[0], boundsE7[0] < boundsE7[2], boundsE7[2] <= 1800000000,
               -850511288 <= boundsE7[1], boundsE7[1] < boundsE7[3], boundsE7[3] <= 850511288 else {
             throw TopographyCompanionError.metadata
@@ -410,7 +417,9 @@ actor TopographyCompanionStore {
             guard (0..<4).allSatisfy({ sqlite3_column_type(tiles, Int32($0)) == SQLITE_INTEGER }) else { throw TopographyCompanionError.tile }
             let values = (0..<4).map { Int(sqlite3_column_int64(tiles, Int32($0))) }
             let key = TileKey(z: values[0], x: values[1], y: values[2], scale: values[3])
-            guard Self.valid(key), keys.count < 16384 else { throw TopographyCompanionError.tile }
+            guard Self.valid(key), keys.count < TopographyCompanionLimits.maximumTiles else {
+                throw TopographyCompanionError.tile
+            }
             _ = try Self.tileData(tiles, pngColumn: 4, shaColumn: 5, scale: key.scale)
             keys.insert(key)
             status = sqlite3_step(tiles)

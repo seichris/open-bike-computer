@@ -78,9 +78,11 @@ The profile fixes schema/profile 1, style `contours-transparent-20-50-v1`, XYZ
 north-origin Web Mercator, 256-point tile geometry, scales `[1,2]`, zoom 9–16.
 PNG tiles use RGBA and dimensions `256 * scale` on each axis. Each tile has its
 own SHA-256. Both scales must exist for each tile key; entirely transparent
-pairs are omitted. At most 16,384 rows, 1 MiB per PNG and 256 MiB per database
+pairs are omitted. At most 163,840 rows, 1 MiB per PNG and 256 MiB per database
 are allowed. Unknown schema objects, mismatched counts/digests/dimensions and
 wrong map/intermediate bindings reject the artifact.
+Companion generation also bounds contour-to-tile references at 2,500,000 before
+rasterization. Tile and reference limits are independent of the file byte limit.
 
 The iPhone reader requires a separate trusted receipt binding file bytes/SHA,
 map entry, device-content receipt, map ID, intermediate, source policy and
