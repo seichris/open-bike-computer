@@ -25,7 +25,8 @@ from .topography_pipeline import canonical_bytes
 
 APPLICATION_ID = 0x42544F50  # BTOP
 MAX_BYTES = 256 * 1024 * 1024
-MAX_TILES = 16_384  # Includes both display scales.
+MAX_TILES = 163_840  # Includes both display scales.
+MAX_REFERENCES = 2_500_000
 MAX_TILE_BYTES = 1024 * 1024
 MIN_ZOOM, MAX_ZOOM = 9, 16
 STYLE_ID = "contours-transparent-20-50-v1"
@@ -33,6 +34,10 @@ SCHEMA = (
     "CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)",
     "CREATE TABLE tiles (z INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, scale INTEGER NOT NULL, png BLOB NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY (z, x, y, scale)) WITHOUT ROWID",
 )
+
+
+class TopographyCompanionAdmissionError(ValueError):
+    code = "topography_companion_admission"
 
 
 def _digest(value: str) -> bool:
@@ -163,8 +168,10 @@ def write_companion(path: Path, compiled: CompiledTopography, *, map_id: str,
                     for y in range(top, bottom + 1):
                         references += 1
                         tiles.setdefault((z, x, y), []).append((bool(contour.flags & 1), points))
-                        if len(tiles) * 2 > MAX_TILES or references > 250_000:
-                            raise ValueError("companion exceeds tile/reference admission budget")
+                        if len(tiles) * 2 > MAX_TILES:
+                            raise TopographyCompanionAdmissionError("companion exceeds tile admission budget")
+                        if references > MAX_REFERENCES:
+                            raise TopographyCompanionAdmissionError("companion exceeds reference admission budget")
     metadata = {"schemaVersion": 1, "profileVersion": 1, "styleId": STYLE_ID, "tileScheme": "xyz", "tileSize": 256,
                 "scales": [1, 2], "minimumZoom": MIN_ZOOM, "maximumZoom": MAX_ZOOM, "mapId": map_id,
                 "intermediateSha256": compiled.intermediate_sha256, "sourcePolicySha256": source_policy_sha256,

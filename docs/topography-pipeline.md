@@ -212,7 +212,8 @@ authenticated catalog grant, signed map manifest, or source-license approval.
 Current bounds are four million sampled and compiler-input contour points,
 four million compiled points and 256 blocks per pair, 4,096 contour
 records/65,536 points per block, 256 points per record, 512 m maximum encoded
-segment, 16,384 companion tiles (both scales), and 256 MiB per companion.
+segment, 163,840 companion tiles (both scales), 2,500,000 contour-to-tile
+references, and 256 MiB per companion.
 Exceeding a bound rejects the result rather than silently truncating terrain.
 These map-wide limits are an interim bound for the development canary. Tiled,
 reusable processing for routine 2,500 km² selections is tracked in
