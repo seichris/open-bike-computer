@@ -26,8 +26,8 @@
 
 ### ESP32 firmware
 
-Before the first build/upload/device-debug action in a task, ask which physical
-device is connected. Do not assume 1.75 versus 2.06.
+Before the first build/upload/device-debug action in a task, identify which
+physical device is connected. Do not assume 1.75 versus 2.06.
 
 ```sh
 cd esp32
@@ -79,8 +79,8 @@ the documented relocatability gate.
 Optional device nicknames are stored outside Git with
 `tools/device_registry.py`. `--device-name NAME` must resolve to one enrolled
 board family and stable serial, and the environment must match that family.
-This shorthand never guesses a board or replaces the required connected-model
-confirmation immediately before flashing.
+This shorthand never guesses a board or replaces connected-model verification
+immediately before flashing.
 
 After the locked runtime handoff, a clean pioarduino installation first
 converts content-pinned tool wrappers into the
@@ -114,7 +114,7 @@ the debugger is not a separate image and cannot be attached to arbitrary
 already-flashed firmware. Ordinary `WAVESHARE_AMOLED_*` and
 `*_PRODUCTION` profiles intentionally omit the browser service, and release
 workflows never select `*_REMOTE_DEBUG`. Therefore, choose the matching
-`*_REMOTE_DEBUG` profile for an explicitly authorized development flash when
+`*_REMOTE_DEBUG` profile for a development flash when
 browser debugging is useful, while keeping normal production/release flashes
 debugger-free. See `docs/remote-device-debugging.md` for session startup and
 security requirements.
@@ -309,11 +309,11 @@ When firmware is requested from current or latest GitHub `main`, fetch
 Do not let an active checkout, an unpushed commit, or unrelated local changes
 enter the artifact.
 
-Immediately before any flash write, restate the physical board model, selected
-profile, device nickname and stable serial (or the deliberately selected port
-when no serial exists), exact Git SHA, and attested artifact/flash-plan identity.
-Obtain explicit user confirmation at that point. Earlier approval to build,
-inspect, or prepare a release is not approval for the destructive write.
+Immediately before any flash write, verify and record the physical board model,
+selected profile, device nickname and stable serial (or the deliberately
+selected port when no serial exists), exact Git SHA, and attested artifact/flash
+plan identity. Follow the scope of the user's task when deciding whether to
+flash; a request only to build or inspect does not authorize a device write.
 
 Green CI, a successful build, or a merged pull request is not physical firmware
 acceptance. A production-enabled hardware-path change must retain a visible
@@ -325,7 +325,7 @@ Treat the 1.75-inch and 2.06-inch boards as separate qualification targets.
 
 Tagged releases package the production images using the attested flash plan;
 see `docs/firmware-factory-release.md`. The factory archive does not waive the
-normal device-identity, confirmation, ready-state, or readback requirements.
+normal device-identity, ready-state, or readback requirements.
 Production disables serial `BOOT_META`; use its owner-authenticated
 `boot/acceptance` checkpoint and `tools/verify_firmware_boot_acceptance.py` as
 documented in `docs/firmware-factory-release.md`. Diagnostic serial captures

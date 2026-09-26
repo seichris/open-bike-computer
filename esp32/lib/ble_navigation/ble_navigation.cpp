@@ -2837,6 +2837,68 @@ static std::string genericTransferStatusJson() {
     status_json::appendUnsignedField(body, "sequence", transferStatus.errorSequence);
     body += "}";
   }
+  if (!transferStatus.networkStart.ok()) {
+    const auto &failure = transferStatus.networkStart;
+    const auto appendMemory = [&body](const char *name,
+                                      const device_transfer::NetworkMemorySnapshot &memory) {
+      status_json::appendFieldPrefix(body, name);
+      body += "{\"internalFree\":" + std::to_string(memory.internalFree);
+      status_json::appendUnsignedField(body, "internalLargest", memory.internalLargest);
+      status_json::appendUnsignedField(body, "dmaFree", memory.dmaFree);
+      status_json::appendUnsignedField(body, "dmaLargest", memory.dmaLargest);
+      body += "}";
+    };
+    status_json::appendFieldPrefix(body, "wifiStartFailure");
+    body += "{\"step\":\"";
+    body += device_transfer::networkStartCode(failure.failedStep);
+    body += "\",\"espError\":" + std::to_string(failure.espError);
+    appendMemory("before", failure.before);
+    appendMemory("after", failure.after);
+    body += "}";
+  }
+  if (transferStatus.networkStart.mode.attempted) {
+    const auto appendMemory = [&body](const char *name,
+                                      const device_transfer::NetworkMemorySnapshot &memory) {
+      status_json::appendFieldPrefix(body, name);
+      body += "{\"internalFree\":" + std::to_string(memory.internalFree);
+      status_json::appendUnsignedField(body, "internalLargest", memory.internalLargest);
+      status_json::appendUnsignedField(body, "dmaFree", memory.dmaFree);
+      status_json::appendUnsignedField(body, "dmaLargest", memory.dmaLargest);
+      body += "}";
+    };
+    const auto appendTransition = [&body, &appendMemory](
+        const char *name, const device_transfer::NetworkTransitionMemory &phase) {
+      if (!phase.attempted)
+        return;
+      status_json::appendFieldPrefix(body, name);
+      body += "{";
+      body += "\"before\":";
+      body += "{\"internalFree\":" + std::to_string(phase.before.internalFree);
+      status_json::appendUnsignedField(body, "internalLargest", phase.before.internalLargest);
+      status_json::appendUnsignedField(body, "dmaFree", phase.before.dmaFree);
+      status_json::appendUnsignedField(body, "dmaLargest", phase.before.dmaLargest);
+      body += "}";
+      appendMemory("after", phase.after);
+      body += "}";
+    };
+    status_json::appendFieldPrefix(body, "wifiStartupPhases");
+    body += "{";
+    // First member is emitted without appendFieldPrefix's comma contract.
+    body += "\"mode\":{\"before\":{\"internalFree\":" +
+            std::to_string(transferStatus.networkStart.mode.before.internalFree);
+    status_json::appendUnsignedField(body, "internalLargest",
+        transferStatus.networkStart.mode.before.internalLargest);
+    status_json::appendUnsignedField(body, "dmaFree",
+        transferStatus.networkStart.mode.before.dmaFree);
+    status_json::appendUnsignedField(body, "dmaLargest",
+        transferStatus.networkStart.mode.before.dmaLargest);
+    body += "}";
+    appendMemory("after", transferStatus.networkStart.mode.after);
+    body += "}";
+    appendTransition("ramStorage", transferStatus.networkStart.ramStorage);
+    appendTransition("accessPoint", transferStatus.networkStart.accessPoint);
+    body += "}";
+  }
   const auto &failure = transferStatus.lastTransferFailure;
   if (failure.reason != device_transfer::TransferFailureReason::None) {
     status_json::appendFieldPrefix(body, "firstTransferFailure");
@@ -3884,7 +3946,11 @@ static void processPendingTransferControl() {
     notifyMapTransferStatus(mapTransferStatusCharacteristic);
   }
   if (request.notifications & ble_transfer::NotifyGeneric) {
-    resetPendingDeviceTransferStatusChunks();
+    // A status poll must finish any in-flight DSTC stream. The iPhone polls
+    // once per second while entering transfer mode; restarting a multi-chunk
+    // response on each poll can prevent it from ever receiving a complete
+    // token-bearing DSTS snapshot under BLE notification backpressure. Mode
+    // changes and disconnects reset the stream above at their auth boundary.
     notifyGenericTransferStatus(mapTransferStatusCharacteristic);
   }
   if (request.notifications & ble_transfer::NotifyRendererDiagnostics) {

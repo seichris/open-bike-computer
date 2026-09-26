@@ -1988,6 +1988,7 @@ void setup() {
     return mapView.requestStorageControl(work, context);
   });
   firmwareUpdateHttp.configure(&deviceTransferHttp);
+  mapTransferHttp.setOperationOwner(firmwareUpdateHttp.operationOwner());
   deviceTransferHttp.setStatusChangedCallback(
       queueDeviceTransferStatusNotification);
   deviceDebugHttp.configure(&deviceTransferHttp);

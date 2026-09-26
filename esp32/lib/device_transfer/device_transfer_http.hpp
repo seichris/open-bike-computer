@@ -58,6 +58,7 @@ struct HttpTransferStatus {
   uint32_t workerStackHighWaterBytes = 0;
   uint32_t internalOwnerStackHighWaterBytes = 0;
   std::string resourcePhase;
+  NetworkStartResult networkStart;
   TransferFailureRecord lastTransferFailure;
 };
 
@@ -165,6 +166,7 @@ private:
   uint32_t minimumPsramLargest_ = UINT32_MAX;
   uint32_t workerStackHighWaterBytes_ = 0;
   std::string resourcePhase_ = "unobserved";
+  NetworkStartResult networkStart_;
   bool powerLockHeld_ = false;
   struct HandlerRegistration {
     std::string pathPrefix;

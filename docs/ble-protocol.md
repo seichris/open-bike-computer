@@ -1872,6 +1872,17 @@ password and reports a hotspot fallback.
 for an active hotspot) `apPassphrase`; `baseUrl` remains empty until the
 selected listener is ready. Stable fallback reasons are `ssid_unavailable`,
 `authentication_failed`, `association_timeout`, and `endpoint_unreachable`.
+On failed hotspot startup, authenticated `DSTS.lastError.code` identifies
+`wifi_owner_create`, `wifi_owner_dispatch`, `wifi_memory`, `wifi_mode`,
+`wifi_ram_storage`, or `wifi_softap`. Optional `wifiStartFailure` contains
+`step`, numeric `espError` when available, and `before`/`after` internal and
+DMA free and largest blocks at the failing substep. The status persists after
+the listener fails, is cleared at the next admitted session, and contains no
+SSID, password, bearer token, TLS secret, or map data. Older firmware omits it.
+When AP setup reaches the internal owner, optional `wifiStartupPhases` retains
+before/after internal and DMA blocks for the attempted `mode`, `ramStorage`,
+and `accessPoint` transitions, including successful transitions before a later
+failure. Missing phases were not attempted.
 
 `DSTS` also includes a top-level `storage` object. `storage.backend` is one of
 `sdmmc`, `legacy_spi_migration`, `spi`, `ffat`, or `unavailable`, and

@@ -2667,6 +2667,18 @@ struct NavigationProtocolTests {
                 lastTransferOutcome: "unconfirmed",
                 lastTransferMapID: "map-a",
                 candidateMapID: "map-a",
+                lastDeviceState: "idle",
+                backgroundUploadSucceeded: true,
+                observedIdleOnAnotherMap: true,
+                statusMessage: "Activation paused. Tap Upload to resume."
+            ),
+            "a fresh idle status on another map permits retry after a completed upload"
+        )
+        assert(
+            PausedMapUploadResumePolicy.isAvailable(
+                lastTransferOutcome: "unconfirmed",
+                lastTransferMapID: "map-a",
+                candidateMapID: "map-a",
                 lastDeviceState: "paused",
                 backgroundUploadSucceeded: true
             ),
@@ -11829,6 +11841,72 @@ struct NavigationProtocolTests {
         assert(persisted404Completed, "persisted 404 should stop")
         assert(!persisted404Manager.hasPendingMapJob, "persisted 404 clears stale durable state")
         assert(persisted404Manager.errorMessage?.contains("404") == true, "persisted 404 is visible")
+
+        let failedSuite = "offline-map-persisted-failure-\(UUID().uuidString)"
+        let failedDefaults = UserDefaults(suiteName: failedSuite)!
+        defer { failedDefaults.removePersistentDomain(forName: failedSuite) }
+        let failedServer = "https://persisted-failure.example"
+        let failedInstallationID = "inst_v2_1234567890abcdef1234567890abcdef"
+        failedDefaults.set(failedServer, forKey: "offlineMap.serverURL")
+        failedDefaults.set(failedInstallationID, forKey: "offlineMap.clientInstallationId")
+        try! OfflineMapInstallationCredentialStore(defaults: failedDefaults).save(
+            OfflineMapInstallationCredential(
+                clientInstallationId: failedInstallationID,
+                clientInstallationToken: "v1." + String(repeating: "C", count: 43)
+            ),
+            serverURLString: failedServer
+        )
+        OfflineMapJobPersistence.save(
+            jobId: "job-persisted-failure",
+            serverURLString: failedServer,
+            defaults: failedDefaults
+        )
+        let failedResponse = try! JSONSerialization.data(withJSONObject: [
+            "jobId": "job-persisted-failure",
+            "status": "failed",
+            "errorCode": "building_relation_incomplete",
+            "error": "selected building relation closure is incomplete",
+            "sourceRegion": [
+                "id": "geofabrik-asia-china",
+                "name": "Sichuan",
+                "provider": "geofabrik",
+            ],
+        ])
+        OfflineMapTestURLProtocol.configure { request in
+            if request.url?.path == "/v1/map-jobs/job-persisted-failure" {
+                return (200, failedResponse)
+            }
+            return (404, Data())
+        }
+        let failedManager = OfflineMapManager(
+            defaults: failedDefaults,
+            mapPlatformSession: session
+        )
+        failedManager.resumePendingMapJobIfNeeded()
+        let failedJobStopped = await waitForMapTaskCompletion(failedManager)
+        assert(failedJobStopped, "failed job recovery should stop")
+        assert(failedManager.hasPendingMapJob, "terminal failure stays visible in Saved Maps")
+        assert(failedManager.hasTerminalMapJobFailure, "terminal failure is not retryable")
+        assertEqual(failedManager.currentJob?.sourceRegion?.name, "Sichuan", "failed map keeps its name")
+        assert(
+            failedManager.errorMessage?.contains("Some buildings") == true,
+            "failed map keeps the actionable server error"
+        )
+
+        let relaunchedFailedManager = OfflineMapManager(
+            defaults: failedDefaults,
+            mapPlatformSession: session
+        )
+        relaunchedFailedManager.resumePendingMapJobIfNeeded()
+        let relaunchedFailedJobStopped = await waitForMapTaskCompletion(relaunchedFailedManager)
+        assert(
+            relaunchedFailedJobStopped,
+            "failed job recovery should also stop after relaunch"
+        )
+        assert(relaunchedFailedManager.hasPendingMapJob, "failed map survives app relaunch")
+        assert(relaunchedFailedManager.hasTerminalMapJobFailure, "relaunch restores terminal state")
+        relaunchedFailedManager.forgetPendingMapJob()
+        assert(!relaunchedFailedManager.hasPendingMapJob, "failed map can be explicitly discarded")
     }
 
     @MainActor
@@ -13605,6 +13683,26 @@ struct NavigationProtocolTests {
         bleManager.mapTransferActiveMapId = "old-map"
         bleManager.mapTransferActiveSessionId = "old-session"
         bleManager.mapTransferActivationStatus = "idle"
+        manager.reconcileLastTransfer(bleManager: bleManager)
+        assertEqual(
+            manager.statusMessage,
+            "Waiting for device map status",
+            "a restored transfer waits for fresh authenticated device status"
+        )
+        bleManager.applyAuthenticatedMapTransferStatus(
+            MapTransferDeviceStatus(
+                enabled: false,
+                activeMapId: "old-map",
+                activeSessionId: "old-session",
+                activation: nil,
+                protocols: [1, 2],
+                streamFormatVersions: [1],
+                streamTrust: nil,
+                firmwareVersion: nil,
+                firmwareBuild: nil,
+                firmwareGitSha: nil
+            )
+        )
         manager.reconcileLastTransfer(bleManager: bleManager)
         assertEqual(
             manager.statusMessage,
@@ -24887,6 +24985,28 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceTransferResourceSnapshot?.minimumDmaFree,
                     45056,
                     "status parser retains the minimum DMA evidence")
+        assert(manager.deviceTransferWiFiStartFailure == nil,
+               "older firmware omits optional Wi-Fi startup diagnostics")
+        let wifiFailure = """
+        {"configured":true,"enabled":false,"mode":"","lastError":{"code":"wifi_ram_storage","message":"Wi-Fi startup failed","sequence":18},"wifiStartFailure":{"step":"wifi_ram_storage","espError":258,"before":{"internalFree":44000,"internalLargest":29000,"dmaFree":36000,"dmaLargest":21000},"after":{"internalFree":42000,"internalLargest":27000,"dmaFree":34000,"dmaLargest":19000}}}
+        """
+        assert(manager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(wifiFailure.utf8)
+        ), "classified Wi-Fi failure is consumed")
+        assertEqual(manager.deviceTransferWiFiStartFailure?.step,
+                    "wifi_ram_storage",
+                    "status parser keeps the failed Wi-Fi substep")
+        assertEqual(manager.deviceTransferWiFiStartFailure?.espError,
+                    258,
+                    "status parser keeps the underlying ESP result")
+        assertEqual(manager.deviceTransferWiFiStartFailure?.after.dmaLargest,
+                    19000,
+                    "status parser keeps failure-time DMA headroom")
+        assert(manager.handleDeviceTransferStatusNotification(packet),
+               "older firmware status remains decodable after a failure")
+        assert(manager.deviceTransferWiFiStartFailure == nil,
+               "older firmware clears stale optional Wi-Fi diagnostics")
         assertEqual(
             manager.deviceTransferResourceSnapshot?
                 .internalOwnerStackHighWaterBytes,

@@ -35,7 +35,8 @@ bool take(size_t amount, size_t size, size_t &offset) {
 }
 
 bool baseEnd(const uint8_t *data, size_t size, size_t &offset) {
-  if (size < 6 || data[3] != 4)
+  // FMB v5 preserves the v4 base geometry and building section layout.
+  if (size < 6 || (data[3] != 4 && data[3] != 5))
     return false;
   offset = 4;
   const uint16_t polygonCount = le16(data + offset);

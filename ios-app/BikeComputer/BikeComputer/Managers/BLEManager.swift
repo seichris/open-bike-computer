@@ -994,6 +994,20 @@ struct DeviceTransferResourceSnapshot: Equatable {
     let phase: String
 }
 
+struct DeviceTransferWiFiStartFailure: Equatable {
+    struct Memory: Equatable {
+        let internalFree: UInt32
+        let internalLargest: UInt32
+        let dmaFree: UInt32
+        let dmaLargest: UInt32
+    }
+
+    let step: String
+    let espError: Int32
+    let before: Memory
+    let after: Memory
+}
+
 #if HOST_TESTING
 final class BLEScanDriverForTesting {
     struct Start: Equatable {
@@ -1146,6 +1160,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferActivationError: String?
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
+    @Published private(set) var hasFreshMapTransferStatus = false
     @Published var deviceTransferMode: String = ""
     @Published var deviceTransferBaseURL: URL?
     @Published var deviceTransferAccessPointSSID: String?
@@ -1171,6 +1186,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
     @Published private(set) var deviceTransferResourceSnapshot:
         DeviceTransferResourceSnapshot?
+    @Published private(set) var deviceTransferWiFiStartFailure:
+        DeviceTransferWiFiStartFailure?
     @Published private(set) var firmwareMaintenanceActive = false
     @Published private(set) var firmwareMaintenanceStage = "normal"
     @Published private(set) var firmwareMaintenanceCorrelation: UInt32 = 0
@@ -6730,6 +6747,7 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferActivationError = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
+        hasFreshMapTransferStatus = false
         mapTransferStatusChunkTransferID = nil
         mapTransferStatusChunkCount = 0
         mapTransferStatusChunks.removeAll()
@@ -6760,6 +6778,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferLastErrorSequence = nil
         deviceTransferStatusRevision = 0
         deviceTransferResourceSnapshot = nil
+        deviceTransferWiFiStartFailure = nil
         firmwareMaintenanceActive = false
         firmwareMaintenanceStage = "normal"
         firmwareMaintenanceCorrelation = 0
@@ -10957,6 +10976,27 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             deviceTransferLastErrorMessage = nil
             deviceTransferLastErrorSequence = nil
         }
+        if let failure = object["wifiStartFailure"] as? [String: Any],
+           let step = failure["step"] as? String,
+           let before = failure["before"] as? [String: Any],
+           let after = failure["after"] as? [String: Any] {
+            func memory(_ values: [String: Any]) -> DeviceTransferWiFiStartFailure.Memory {
+                DeviceTransferWiFiStartFailure.Memory(
+                    internalFree: (values["internalFree"] as? NSNumber)?.uint32Value ?? 0,
+                    internalLargest: (values["internalLargest"] as? NSNumber)?.uint32Value ?? 0,
+                    dmaFree: (values["dmaFree"] as? NSNumber)?.uint32Value ?? 0,
+                    dmaLargest: (values["dmaLargest"] as? NSNumber)?.uint32Value ?? 0
+                )
+            }
+            deviceTransferWiFiStartFailure = DeviceTransferWiFiStartFailure(
+                step: step,
+                espError: (failure["espError"] as? NSNumber)?.int32Value ?? 0,
+                before: memory(before), after: memory(after)
+            )
+        } else {
+            // Older firmware has no classified Wi-Fi startup telemetry.
+            deviceTransferWiFiStartFailure = nil
+        }
 #if DEBUG
         if let code = deviceTransferLastErrorCode, !code.isEmpty {
             // Firmware limits this authenticated status field to non-secret
@@ -11225,6 +11265,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferActivationProgress = nil
             mapTransferActivationError = nil
         }
+        hasFreshMapTransferStatus = true
     }
 
     private func applyMapTransferStatusBody(_ body: Data) -> Bool {
@@ -11316,6 +11357,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferStatusDescription = "transfer mode disabled"
         }
 
+        hasFreshMapTransferStatus = true
         log("Map transfer status: \(mapTransferStatusDescription)")
         return true
     }

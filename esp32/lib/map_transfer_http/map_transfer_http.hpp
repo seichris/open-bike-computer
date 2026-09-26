@@ -11,6 +11,8 @@
 #include "map_transfer.hpp"
 #include "map_stream_receiver.hpp"
 
+namespace firmware_update { class DeviceOperationOwner; }
+
 namespace map_transfer {
 
 using HttpTransferStatus = device_transfer::HttpTransferStatus;
@@ -43,6 +45,9 @@ public:
   void resumePendingActivations();
   using StorageControlSubmit = bool (*)(void (*)(void *), void *);
   void setStorageControlSubmit(StorageControlSubmit submit) { storageControlSubmit_ = submit; }
+  void setOperationOwner(firmware_update::DeviceOperationOwner *owner) {
+    operationOwner_ = owner;
+  }
   bool requestRuntimeRollback();
   void submitPendingRollback();
   bool takeRuntimeRollback(ActiveMapSelection &restored, bool &succeeded);
@@ -78,6 +83,7 @@ private:
   DeferredActivation deferredActivation_;
   enum class RollbackKind { None, Transfer, Runtime };
   StorageControlSubmit storageControlSubmit_ = nullptr;
+  firmware_update::DeviceOperationOwner *operationOwner_ = nullptr;
   RollbackKind rollbackKind_ = RollbackKind::None;
   bool rollbackSubmitted_ = false;
   bool rollbackComplete_ = false;
@@ -113,6 +119,10 @@ private:
                                bool peerClosedCleanly);
   void requestAutomaticExit();
   void executeActivation(const std::string &sessionId, bool automaticExit);
+  static void ownedActivation(void *context, const char *sessionId,
+                              bool automaticExit);
+  static void ownedInstalledCleanup(void *context, const char *sessionId,
+                                    bool automaticExit);
   bool runStreamActivationTask(const std::string &sessionId,
                                bool automaticExit);
   void updateStreamInstallState(const MapStreamInstallSnapshot &snapshot,

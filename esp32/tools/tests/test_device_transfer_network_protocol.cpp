@@ -1,4 +1,5 @@
 #include "../../lib/device_transfer/device_transfer_network_protocol.hpp"
+#include "../../lib/device_transfer/device_transfer_network_owner.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -22,6 +23,16 @@ static std::vector<uint8_t> command(const std::string &ssid,
 }
 
 int main() {
+  const device_transfer::NetworkMemorySnapshot observedFailure{
+      42811, 14836, 35179, 14836};
+  assert(!device_transfer::wifiStartupMemoryAboveObservedFailure(
+      observedFailure));
+  const device_transfer::NetworkMemorySnapshot admitted{
+      60U * 1024U, 32U * 1024U, 48U * 1024U, 32U * 1024U};
+  assert(device_transfer::wifiStartupMemoryAboveObservedFailure(admitted));
+  assert(std::string(device_transfer::networkStartCode(
+             device_transfer::NetworkStartStep::Memory)) == "wifi_memory");
+
   LanCredentials credentials;
   const auto valid = command("Home Wi-Fi", "correct horse battery staple");
   assert(device_transfer::parseRemoteDebugLanCommand(
