@@ -935,7 +935,8 @@ void updateMetricLayout(const ride_telemetry_presenter::ViewModel &model) {
 ride_telemetry_presenter::ViewModel currentViewModel() {
   const workout_telemetry::Snapshot workout =
       workout_telemetry_runtime::snapshot(millis());
-  const auto gpsSource = bleNavServer.getDebugStats().gpsSource;
+  const auto gpsSource = gps_input_freshness::presentationSample(
+      gps.presentationSample, bleNavServer.getDebugStats().gpsSource);
   const ride_telemetry_presenter::LegacyRideTelemetry legacy{
       gps.gpsData.speed,
       gps.gpsData.altitude,

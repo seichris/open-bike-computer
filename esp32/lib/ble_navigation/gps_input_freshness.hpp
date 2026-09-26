@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gps_position_protocol.hpp"
+#include "../gps/gps_sample_timing.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -10,22 +11,22 @@ namespace gps_input_freshness {
 
 // Measurement metadata travels with the latest payload, separately from packet
 // cadence. Legacy packets cannot establish source freshness from arrival alone.
-struct SourceSample {
-  bool ageKnown = false;
-  bool speedAvailable = false;
-  uint32_t capturedAtMs = 0;
+using SourceSample = GpsSampleTiming;
 
-  static SourceSample from(const gps_position_protocol::Packet &packet,
-                           uint32_t arrivalMs) {
-    return {packet.hasSampleAge, packet.hasSpeed &&
-                (!packet.hasRideDetectionQuality || packet.fixValid),
-            packet.hasSampleAge ? arrivalMs - packet.sampleAgeMs : arrivalMs};
-  }
+inline SourceSample sourceSampleFrom(const gps_position_protocol::Packet &packet,
+                                     uint32_t arrivalMs) {
+  return {packet.hasSampleAge, packet.hasSpeed &&
+              (!packet.hasRideDetectionQuality || packet.fixValid),
+          packet.hasSampleAge ? arrivalMs - packet.sampleAgeMs : arrivalMs,
+          RidePositionSource::AuthenticatedBle};
+}
 
-  bool fresh(uint32_t nowMs, uint32_t horizonMs = 2500) const {
-    return ageKnown && static_cast<uint32_t>(nowMs - capturedAtMs) < horizonMs;
-  }
-};
+// Lease/session invalidation is published through the synchronized BLE slot;
+// callbacks must not mutate the UI-owned physical source directly.
+inline SourceSample presentationSample(const SourceSample &current,
+                                       const SourceSample &ble) {
+  return current.source == RidePositionSource::AuthenticatedBle ? ble : current;
+}
 
 /** Arrival timing retained by the latest-state GPS mailbox.
  *

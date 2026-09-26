@@ -2,10 +2,12 @@
 
 ## Scope and provenance
 
-Implementation branch: `fix/bluetooth-data-reliability`, based on plan commit
-`19b9ddb383f1592f53c2e9d230b7402d4f080a4d`, whose parent is reviewed GitHub main
-`eaee846393a1cd44214e23d9d9088a5c193a6b49`. Work used an isolated checkout; the
-primary working tree was preserved. The implementation fixes DATA-01 through
+Implementation branch: `fix/bluetooth-data-reliability`. The original plan and
+audit used GitHub main `eaee846393a1cd44214e23d9d9088a5c193a6b49`; the branch was
+rebased onto freshly fetched main `61cbc5740505cce9f4174f9f600a790937c41c01`
+(an unrelated development map-platform image promotion). The rebased plan commit
+is `6fa2b330f`. Work used an isolated checkout; the primary working tree was
+preserved. The implementation fixes DATA-01 through
 DATA-04 and delivers the first shared architecture and measured optimization
 slice from the [plan](bluetooth-data-reliability-and-architecture-plan.md).
 
@@ -17,7 +19,7 @@ is lossless. Workout persistence remains independent of the BLE display stream.
 
 | Area | Result |
 | --- | --- |
-| Source freshness (DATA-01) | Firmware retains source capture age separately from packet arrival. Map prediction uses capture time, including mailbox/UI delay. Repeated expired coordinates cannot restart convergence; new stationary fixes remain observations. Marker opacity and legacy Ride Stats expose stale/unknown GPS; unavailable speed is not a measured zero. Workout freshness and terminal summaries remain independent. |
+| Source freshness (DATA-01) | Firmware retains source capture age separately from packet arrival. Map prediction uses capture time, including mailbox/UI delay. Repeated expired coordinates cannot restart convergence; new stationary fixes remain observations. Onboard NMEA retains its own valid-fix capture clock, including stationary updates; BLE lease invalidation cannot invalidate the onboard source. Marker opacity and legacy Ride Stats expose stale/unknown GPS; unavailable speed is not a measured zero. Workout freshness and terminal summaries remain independent. |
 | Startup retries (DATA-02) | Phone retries publish the current retained source within their navigation epoch. Stop/replacement cancels pending work; an already-fired retired callback cannot alter a successor. Publishing a heartbeat no longer reaccepts the source. |
 | Clock semantics (DATA-03) | Shared field encoder and dispatch transform serve phone and Watch, including fallback, workout-only and replay. UnixTime is current dispatch time; sample age is anchored once and advances monotonically across queue delay/reconnect, saturating safely. Invalid/nonfinite inputs cannot trap or fabricate coordinates. |
 | Active recovery (DATA-04) | Shared reducer models cancellation and timeout. Watch and phone publish an actionable blocked state after five seconds without a disconnect callback, retaining the connection fence rather than unsafely reconnecting. Real boundary/stop clears the deadline; retired timers cannot poison successors. Watch retains active demand and exact phone handoff identity. Phone warning appears in My Bike Computers. |
@@ -68,11 +70,26 @@ windows and acknowledged-write preference are unchanged.
 
 ## Validation record
 
-Results are recorded below after the final source is frozen. Host tests use
-production paths with framework doubles where required. Native builds and
-simulator runs are separate from device acceptance.
+Local results on 2026-09-26:
 
-Pending final local results and exact-head CI.
+| Check | Result / evidence boundary |
+| --- | --- |
+| Generated BLE contract check | Passed; no wire-layout/capability changes. |
+| Navigation production-path regressions | Passed, including current startup retry/retired epoch and actual phone manager bounded recovery. Full runner also exercises download, route, radio and sensor contracts. |
+| Shared ride and actual Watch adapter | Passed: 46 adapter cases, 226 assertions, zero failures. |
+| Workout contract tests | Passed, including 275 recording-ownership and 48 session-coordinator assertions. |
+| Ride diagnostics tests | Passed, including archive validation. |
+| C++ host regressions | GPS freshness/golden packet, map presentation, pose policy, workout state and ride delivery passed with `-Wall -Wextra -Werror`. GPS suite rerun after onboard-source compatibility correction. |
+| Watch source graph typecheck | Passed with installed watchOS SDK 26.5. The runner explicitly did not check the SDK-27 HealthKit zone adapter. |
+| Native iOS platform tests | Passed. |
+| Native watchOS platform tests | Not locally qualified: the attempted run stalled in simulator launch/diagnostics. Source/host checks are not substitutes for this platform gate. |
+| Unsigned native Debug and Release builds | Passed; no device installation. |
+| Full target firmware builds and GitHub CI | Follow the current exact-head results on [PR #521](https://github.com/seichris/open-bike-computer/pull/521). A superseded draft fast run was cancelled when full review CI began; its cancelled gate is not a product test failure. Full CI requests only the configured 1.75 profiles; the 2.06 zone-contract host job is not a 2.06 firmware build. |
+
+Host tests use production paths with framework doubles where required. Initial
+local Swift attempts invalidated by concurrent source edits were discarded and
+rerun after the Swift source was frozen. Native builds, simulator tests and
+physical device acceptance are distinct gates.
 
 ## Remaining gates and deliberately deferred work
 
