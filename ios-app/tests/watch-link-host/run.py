@@ -85,7 +85,7 @@ def main() -> int:
                    '-lCombine', '-lCoreBluetooth', '-lSecurity']
         if not args.baseline:
             command += ['-D', 'FIXED_LIFECYCLE']
-        command += [str(generated), str(pure), str(shared / 'RideBLETransportStateMachine.swift'),
+        command += [str(generated), str(pure), str(shared / 'RideBLETransportStateMachine.swift'), str(shared / 'RideGPSPacket.swift'),
                     str(HERE / 'BoundaryDoubles.swift'), str(HERE / 'ManualClock.swift'),
                     str(fixture), str(HERE / 'Tests.swift'), '-o', str(executable)]
         subprocess.run(command, check=True)

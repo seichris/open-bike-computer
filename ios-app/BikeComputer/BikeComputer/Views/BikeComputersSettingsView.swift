@@ -38,6 +38,12 @@ struct BikeComputersSettingsView: View {
     var body: some View {
         Form {
             bikeComputerSection
+            if let message = bleManager.rideRecoveryMessage {
+                Section {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
             if shouldShowSensorManagement {
                 sensorProfilesSection
             }

@@ -53,6 +53,28 @@ enum Tests {
     }
     static var location: NavigationLocationSampleV1 { .init(coordinate: .init(latitude: 1, longitude: 2), horizontalAccuracyMeters: 3, courseDegrees: 4, speedMetersPerSecond: 5, altitudeMeters: 6, timestamp: Date(timeIntervalSince1970: 0)) }
     static func main() async {
+        await run("unchanged route suppression preserves replacement and reconnect") {
+            let f = Fixture(); defer { f.close() }
+            for _ in 0..<20 {
+                f.link.updateNavigation(location: location, snapshot: snapshot(77))
+                f.link.testDrainATT(on: f.peer)
+            }
+            let routeID = WatchDirectBLEProtocolV1.routeUUID
+            expect(f.peer.writes.filter { $0.characteristic.uuid.uuidString == routeID }.count == 1,
+                   "20 unchanged snapshots submit one route instead of 20")
+            // An in-flight workout blocks B, then the latest route returns to A.
+            f.link.setWorkoutDemand(true)
+            f.link.updateWorkout(.init(identity: .init(state: .running)), gps: nil, motion: nil)
+            f.link.updateNavigation(location: location, snapshot: snapshot(88))
+            f.link.updateNavigation(location: location, snapshot: snapshot(77))
+            f.link.testDrainATT(on: f.peer)
+            expect(!f.peer.writes.contains { $0.data == Data([88]) }, "unsent B cannot survive newer A")
+            f.link.testWriterFailure(); f.link.testDrop(f.peer); await settle()
+            f.clock.advance(by: .seconds(1)); await settle()
+            f.link.testFinishReconnect(f.peer)
+            expect(f.peer.writes.filter { $0.characteristic.uuid.uuidString == routeID }.count == 2,
+                   "reconnect forces a fresh route submission")
+        }
         await run("maneuver distance advances across small GPS increments") {
             let f = Fixture(); defer { f.close() }
             var current = snapshot(77)
@@ -380,6 +402,34 @@ enum Tests {
             expect(f.link.testCentral.connections.isEmpty, "no unsafe same-peer reconnect")
             f.link.testDrop(f.peer)
             expect(f.link.testCentral.connections.count == 1, "late disconnect safely resumes successor")
+        }
+        await run("active recovery cancellation has a bounded visible failure") {
+            let f = Fixture(); defer { f.close() }
+            f.link.testWriterFailure()
+            await settle()
+            expect(f.link.testRecoveryPhase == .cancelling, "cancellation is a reducer substate")
+            f.clock.advance(by: .seconds(5)); await settle()
+            expect(f.link.testRecoveryPhase == .cancellationTimedOut, "deadline marks recovery blocked")
+            expect(f.link.lastError == RideBLERecoveryPolicyV1.blockedMessage, "blocked recovery is actionable")
+            f.link.testWriterFailure()
+            expect(f.link.lastError == RideBLERecoveryPolicyV1.blockedMessage, "repeated failure does not hide the blocked instruction")
+            f.link.setNavigationDemand(true)
+            f.link.updateNavigation(location: location, snapshot: snapshot(99))
+            expect(f.link.testCentral.connections.isEmpty && f.peer.writes.isEmpty, "deadline must not reuse ambiguous callbacks")
+            expect(f.link.testPreparationID == f.id, "active demand retains exact phone handoff")
+            f.link.testRadio(.poweredOff)
+            f.link.testRadio(.poweredOn)
+            expect(f.link.testCentral.connections.count == 1, "real radio boundary permits reconnect")
+            expect(f.link.testRecoveryPhase == nil, "successor clears recovery deadline state")
+        }
+        await run("disconnect before recovery deadline cannot fail successor") {
+            let f = Fixture(); defer { f.close() }
+            f.link.testWriterFailure(); await settle()
+            f.link.testDrop(f.peer); await settle()
+            f.clock.advance(by: .seconds(1)); await settle()
+            f.link.testFinishReconnect(f.peer)
+            f.clock.advance(by: .seconds(10)); await settle()
+            expect(f.link.state.isReady, "cancelled old deadline cannot poison new connection")
         }
         await run("active ride disconnect retains preparation and retries") {
             let f = Fixture(); defer { f.close() }

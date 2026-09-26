@@ -978,6 +978,7 @@ static void resetRideDeliveryTracking() {
 }
 
 static void advanceRidePayloadGeneration() {
+  bleDebugStats.updateWith([](BLEDebugStats &stats) { stats.gpsSource = {}; });
   uint32_t next = ridePayloadGeneration.fetch_add(
       1, std::memory_order_acq_rel) + 1U;
   if (next == 0) {
@@ -4865,7 +4866,10 @@ static void handleGpsPayload(
 #endif
 
   gpsFreshnessState.accept(arrivals);
-  bleDebugStats.updateWith([](BLEDebugStats &stats) {
+  const auto sourceSample = gps_input_freshness::sourceSampleFrom(packet, arrivals.lastPacketMs);
+  gps.presentationSample = sourceSample;
+  bleDebugStats.update([sourceSample](BLEDebugStats &stats) {
+    stats.gpsSource = sourceSample;
     stats.gpsPacketCount = gpsFreshnessState.packetCount;
     stats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
     stats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
@@ -4878,16 +4882,20 @@ static void handleGpsPayload(
   if (previousDiagnosticGpsLogMs == 0 ||
       static_cast<uint32_t>(nowMs - previousDiagnosticGpsLogMs) >= 30'000U) {
     lastRideDiagnosticsGpsLogMs.store(nowMs, std::memory_order_release);
-    char fields[192] = {};
+    char fields[320] = {};
     snprintf(fields, sizeof(fields),
              "{\"fixValid\":%s,\"speedAvailable\":%s,"
              "\"accuracyAvailable\":%s,\"lastGapMs\":%lu,"
-             "\"maximumGapMs\":%lu}",
+             "\"maximumGapMs\":%lu,\"sourceAgeKnown\":%s,"
+             "\"sourceAgeMs\":%lu,\"mailboxDelayMs\":%lu}",
              packet.fixValid ? "true" : "false",
              packet.hasSpeed ? "true" : "false",
              packet.hasHorizontalAccuracy ? "true" : "false",
              static_cast<unsigned long>(bleDebugStats.read().lastGpsPacketGapMs),
-             static_cast<unsigned long>(bleDebugStats.read().maximumGpsPacketGapMs));
+             static_cast<unsigned long>(bleDebugStats.read().maximumGpsPacketGapMs),
+             sourceSample.ageKnown ? "true" : "false",
+             static_cast<unsigned long>(sourceSample.ageKnown ? nowMs - sourceSample.capturedAtMs : 0),
+             static_cast<unsigned long>(nowMs - arrivals.lastPacketMs));
     ride_diagnostics::record(ride_diagnostics::Level::Info, "gps",
                              "quality_checkpoint", fields);
   }

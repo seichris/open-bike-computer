@@ -61,6 +61,11 @@ companion pairs. No provider has thereby gained production approval.
   purges its bounded encoded-tile cache on memory pressure. Replacement/removal
   does not change routes or camera state. Saved-map details expose contour
   quality, intervals, source releases, surface model, datum, and attribution.
+  For selections wholly inside the app's mainland-China coordinate region, the
+  iPhone resamples the WGS-84 companion tiles into MapKit's GCJ-02 pixel space
+  on demand. The signed companion and ESP32 map remain WGS-84. A selection
+  crossing that region's boundary suppresses the iPhone overlay until regional
+  alignment is qualified; no uniform geographic offset is applied.
 - CAP2 bit 30/client version 28, visibility bit 13, independent Map/Map +
   Navigation preferences, configurable-screen persistence, and active-map
   health gate the device toggle. Contours default off.
@@ -131,8 +136,22 @@ cmp "$terrain_cache/alps-a.json" "$terrain_cache/alps-b.json"
 `stage` accepts the same bounds and stages receipts without contour processing.
 `plan` exits 2 for missing cells. `sample` refuses any catalog gap, an oversized
 request, or an existing output path. It accepts `--max-tiles` (default 8, maximum
-256), but the independent four-million-pixel limit normally binds first. A
+256), but the independent 16-million-pixel limit normally binds first. A
 one-degree 30 m sample exceeds that pixel bound; use a small inspection area.
+
+The development map-wide contour budgets are 16 million raster pixels, 4 million
+sampled points, 40,000 sampled records, and 4 million compiled device points.
+These are four times the previous budgets to admit a roughly fourfold area.
+The operator encoder also accepts up to 128 MiB of serialized sample evidence,
+four times its former input cap, so it can consume a sample at the new budget.
+The FMB5 section bounds remain 65,536 points and 4,096 records **per block**;
+the 256-block cap remains a geometry/format safety bound. The 256 MiB `.btopo`
+limit remains aligned across the producer, artifact receipt, and iPhone reader:
+the previous Sichuan companion was 46,845,952 bytes, so a linear fourfold
+estimate is below that limit, and generation still fails if actual tiles exceed
+it. Regional native-read windows remain capped at 4 million pixels per chunk
+to bound transient `float64` allocations; they are distinct from the full
+contour grid. These retained bounds require no firmware or iPhone format change.
 
 `sample` additionally checks the four-pixel processing halo and uses a fixed
 region-wide quality profile. Thus `plan` (catalog coverage for the requested
@@ -190,10 +209,27 @@ The output contains `device/VECTMAP/`, a separate `.btopo`, `ATTRIBUTION.txt`,
 and `topography-receipt.json`. That receipt is development evidence, **not** an
 authenticated catalog grant, signed map manifest, or source-license approval.
 
-Current bounds are 256 blocks/400,000 compiled points per pair, 4,096 contour
+Current bounds are four million sampled and compiler-input contour points,
+four million compiled points and 256 blocks per pair, 4,096 contour
 records/65,536 points per block, 256 points per record, 512 m maximum encoded
 segment, 16,384 companion tiles (both scales), and 256 MiB per companion.
 Exceeding a bound rejects the result rather than silently truncating terrain.
+These map-wide limits are an interim bound for the development canary. Tiled,
+reusable processing for routine 2,500 km² selections is tracked in
+[issue #509](https://github.com/seichris/open-bike-computer/issues/509).
+
+### Sichuan complexity check on 2026-09-24
+
+The failed 311.96 km² development job `14133e0c016f4178bbf1` was sampled
+again from its cached elevation inputs in a separate diagnostic process, with
+network acquisition disabled and the proposed point limits applied in memory.
+It produced 1,295 intermediate contour records and 422,855 canonical input
+points. Compilation produced 4,981 device records and 405,818 points across
+36 blocks; the busiest block held 226 records and 20,570 points. A temporary
+iPhone companion built and validated with 3,264 tiles and 34,562,048 bytes.
+This checks the contour and companion budgets for that exact selection; the
+original job remains failed, and no completed map pack or physical rendering
+has been validated from these diagnostics.
 
 Repeatability is qualified within the same native runtime. Cross-platform
 SQLite/Pillow/PROJ byte identity has not been qualified; producer environment
@@ -266,8 +302,9 @@ Known limitations, intentionally **not** production claims:
 - exact projection/sampling is chunked with cancellation checks; each native
   contour call is bounded but not interruptible mid-call, so production workers
   still need execution deadlines;
-- no elevation labels, hillshade, qualified route contrast, MapKit coordinate
-  correction, or physical firmware render qualification yet.
+- no elevation labels, hillshade, qualified route contrast, or physical firmware
+  render qualification yet. The iPhone MapKit overlay applies the mainland-China
+  WGS-84/GCJ-02 warp, but its regional visual alignment remains to be qualified.
 
 ## Local evidence
 
@@ -302,18 +339,38 @@ image, GitHub CI, and hardware gates remain separate.
 
 ## Remaining release gates
 
-1. Complete [source review](templates/topography-source-review.md), including
-   exact attribution/disclaimers, retention rights, masks, and source-boundary
-   quality samples. Do not treat a terms URL as a complete attribution notice.
+On 2026-09-25 the maintainer confirmed that use of the pinned 2021 public
+Copernicus DEM sources is acceptable. This resolves the source-use decision for
+those exact releases. The [2021 source review](topography-source-review-2021.md)
+records the licence and exact notices now emitted into archives and shown in
+the iPhone map details. Reviewed terms are retained and their upstream hashes
+were rechecked on 2026-09-25. Further source-boundary quality and physical
+qualification remain open; this does not approve other data releases.
+This change makes the development generation policy offer format 4 to every
+installation after its image and lock are promoted.
+The production policy v3 and paired catalog promotion code are prepared but
+not selected by the production Compose lock. The catalog promotion switch
+defaults to off, and the worker checks source approval before generating
+production contours. This keeps production closed until the remaining physical
+and source-notice gates are recorded.
+Promotion also requires the companion's source-policy digest to match the
+approved production policy. Maps generated before that approval, including
+the current development qualification job, remain development artifacts;
+they must be regenerated under the approved policy before production
+promotion.
+
+1. Complete the [2021 source review](topography-source-review-2021.md), including
+   masks, source-boundary quality samples and notice placement on every public
+   surface. Recheck retained terms against upstream before production release.
 2. Run app and firmware builds, unit/integration suites, image-size checks, and
    simulator smoke tests for the exact branch head.
 3. Qualify one exact signed renderer-format-4 artifact on both Waveshare boards
    (including the 1.75-inch target) and representative iPhones, with contour-on/
    contour-off memory, frame-time, SD-I/O, power, cancellation, and route-contrast
    evidence.
-4. Record regional alignment/source-boundary evidence and production legal
-   approval, then implement/enable companion-preserving production promotion and
-   switch the production policy only after the recorded gates pass.
+4. Record regional alignment/source-boundary evidence and the exact source
+   notices, then enable companion-preserving production promotion and select
+   production policy v3 only after the recorded gates pass.
 5. Deploy canary configuration deliberately and verify exact-head catalog,
    download, transfer, restart, offline, sharing, deletion, and rollback flows.
    No purchase checks belong in any gate.

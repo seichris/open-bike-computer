@@ -15,11 +15,13 @@ from shapely.geometry import LineString, box, shape
 from shapely.ops import transform
 
 from .topography_artifacts import Contour, ContourSection, encode_contour_section
-from .topography_pipeline import canonical_bytes, canonical_line
+from .topography_pipeline import MAX_CONTOUR_POINTS, MAX_CONTOUR_RECORDS, canonical_bytes, canonical_line
 
 BLOCK_METRES = 4096
 MAX_BLOCKS = 256
-MAX_COMPILED_POINTS = 400_000
+# Block clipping and seam splitting can add points to the sampled intermediate.
+# Keep the map-wide compiled budget aligned with the larger sample budget.
+MAX_COMPILED_POINTS = 4_000_000
 MAX_WORLD_METRES = math.pi * 6378137
 
 
@@ -55,7 +57,7 @@ def compile_contours(sample: dict, selection: dict, *, corridor_width_m: float =
 
     if (sample.get("kind") != "bicino-contour-evidence-v1"
             or sample.get("verticalDatum") != "EPSG:3855"
-            or len(sample.get("contours", [])) > 10_000):
+            or len(sample.get("contours", [])) > MAX_CONTOUR_RECORDS):
         raise ValueError("unsupported or oversized contour intermediate")
     minor, index = sample["minorIntervalM"], sample["indexIntervalM"]
     encode_contour_section(ContourSection(minor, index, ()))
@@ -101,7 +103,7 @@ def compile_contours(sample: dict, selection: dict, *, corridor_width_m: float =
         cancel()
         points = record["pointsMm"]
         input_points += len(points)
-        if not 2 <= len(points) or input_points > 200_000:
+        if not 2 <= len(points) or input_points > MAX_CONTOUR_POINTS:
             raise ValueError("contour intermediate exceeds input point bounds")
         if any(len(point) != 2 or any(type(value) is not int or abs(value) > 100_000_000_000 for value in point) for point in points):
             raise ValueError("invalid millimetre contour coordinates")

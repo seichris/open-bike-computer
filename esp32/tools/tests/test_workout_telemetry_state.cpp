@@ -86,6 +86,19 @@ void assertResultPreservesState(Reducer &reducer, const uint8_t *bytes,
 } // namespace
 
 int main() {
+  {
+    ride_telemetry_presenter::LegacyRideTelemetry staleGps{};
+    staleGps.speedKilometersPerHour = 36;
+    staleGps.gpsFresh = false;
+    const auto model = ride_telemetry_presenter::makeViewModel({}, staleGps);
+    assert(!model.speedTenthsKmh.available && model.stale);
+    assert(ride_telemetry_presenter::shouldShowStatus(model));
+    assert(std::strcmp(ride_telemetry_presenter::statusLabel(model), "GPS stale / unavailable") == 0);
+    staleGps.gpsFresh = true;
+    staleGps.speedAvailable = false;
+    assert(!ride_telemetry_presenter::makeViewModel({}, staleGps).speedTenthsKmh.available);
+  }
+
   State activityState;
   const SessionState liveStates[] = {
       SessionState::Starting,

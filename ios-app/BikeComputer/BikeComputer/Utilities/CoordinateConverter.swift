@@ -10,7 +10,7 @@
 import Foundation
 import CoreLocation
 
-class CoordinateConverter {
+nonisolated class CoordinateConverter {
     
     // Semi-major axis of Earth (meters)
     private static let a: Double = 6378245.0

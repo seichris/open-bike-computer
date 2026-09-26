@@ -20,7 +20,11 @@ from label_pipeline import extract_join_metadata, extract_label_tags
 
 IMG_WIDTH, IMG_HEIGHT = pow( 2, 12), pow( 2, 12) # 4096 x 4096
 BACKGROUND_COLOR = 0xDDDDDD
-MAX_GENERIC_POLYGON_PIECES_PER_SOURCE = 2048
+# Dense OSM multipolygons with holes can require more than 2,048 pieces even
+# after clipping to one 4 km block. Keep this source bound below the separate
+# per-block guard; the Chengdu woodland case requires 2,620 pieces and encodes
+# to about 81 KiB of polygon data with this limit.
+MAX_GENERIC_POLYGON_PIECES_PER_SOURCE = 4096
 MAX_GENERIC_POLYGON_PIECES_PER_BLOCK = 32768
 MAX_GEOMETRY_DROP_SAMPLES = 8
 _GEOMETRY_EQUIVALENCE_RELATIVE_TOLERANCE = 1e-9

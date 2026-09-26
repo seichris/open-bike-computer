@@ -10,6 +10,7 @@
 #include "mainScreenRegistry.hpp"
 #include "worldRadioScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
+#include "../../ble_navigation/gps_input_freshness.hpp"
 #include "../../ble_navigation/screen_configuration.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../device_debug/device_debug_camera.hpp"
@@ -176,8 +177,14 @@ uint64_t navigationSignature() {
   return hash;
 }
 
-uint64_t gpsSignature() {
+uint64_t gpsSignature(uint32_t nowMs) {
   uint64_t hash = FNV_OFFSET;
+  const auto sourceSample = gps_input_freshness::presentationSample(
+      gps.presentationSample, bleNavServer.getDebugStats().gpsSource);
+  // A source can expire without changing any GPSDATA field. Make that
+  // transition invalidate Ride Stats so its stale status and speed update.
+  hashScalar(hash, gps_input_freshness::presentationStatusBits(sourceSample,
+                                                                nowMs));
   hashScalar(hash, gps.gpsData.satellites);
   hashScalar(hash, gps.gpsData.fixMode);
   hashScalar(hash, isGpsFixed);
@@ -311,7 +318,7 @@ ui_update_policy::SourceSignatures captureSourceSignatures(uint32_t nowMs) {
 
   ui_update_policy::SourceSignatures signatures;
   signatures[ui_update_policy::Source::Navigation] = navigationSignature();
-  signatures[ui_update_policy::Source::Gps] = gpsSignature();
+  signatures[ui_update_policy::Source::Gps] = gpsSignature(nowMs);
   signatures[ui_update_policy::Source::Route] = routeOverlay.revision();
   signatures[ui_update_policy::Source::Workout] = cachedWorkoutSignature;
   uint64_t phoneBattery = FNV_OFFSET;

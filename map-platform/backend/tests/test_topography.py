@@ -15,9 +15,10 @@ from unittest.mock import patch
 from map_platform.topography_cache import ElevationCache, _SourceRedirects
 from map_platform.topography_sources import (
     TopographySourcePolicy, geocells, load_topography_source_policy,
-    parse_tile_index, plan_elevation,
+    parse_tile_index, plan_elevation, require_production_topography_approval,
 )
-from map_platform.topography_pipeline import canonical_bytes, canonical_line, contour_sample
+from map_platform.generation_profiles import GenerationProfilePolicy
+from map_platform.topography_pipeline import canonical_bytes, canonical_line, contour_sample, extract_contours
 from map_platform.topography_grid import contour_grid, processing_region, region_resolution
 from map_platform.topography_cli import main as cli_main
 
@@ -55,7 +56,7 @@ class TopographyPolicyTests(unittest.TestCase):
             lambda p: p.update(schemaVersion=True),
             lambda p: p.update(access="premium"),
             lambda p: p.update(extra=1),
-            lambda p: p["sources"][0].update(productionApproved=True),
+            lambda p: p["sources"][0].update(productionApproved="yes"),
             lambda p: p["sources"][0].update(priority=True),
             lambda p: p["sources"][1].update(priority=100),
             lambda p: p["sources"][0].update(origin="http://localhost"),
@@ -76,6 +77,22 @@ class TopographyPolicyTests(unittest.TestCase):
             target.write_text('{"schemaVersion":1,"schemaVersion":1}')
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 TopographySourcePolicy.load(target)
+
+    def test_production_generation_requires_approved_pinned_sources(self):
+        profile = GenerationProfilePolicy.load(
+            ROOT / "map-platform/config/generation-profile-policy-v3.json"
+        )
+        with self.assertRaisesRegex(ValueError, "have not been approved"):
+            require_production_topography_approval(profile, self.policy, "production")
+        require_production_topography_approval(profile, self.policy, "development")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sources.json"
+            value = json.loads(POLICY.read_bytes())
+            for source in value["sources"]:
+                source["productionApproved"] = True
+            path.write_text(json.dumps(value))
+            approved = TopographySourcePolicy.load(path)
+            require_production_topography_approval(profile, approved, "production")
 
     def test_half_open_cells_negative_coordinates_dateline_and_poles(self):
         self.assertEqual(geocells([-1, -1, 0, 0]), ((-1, -1),))
@@ -438,11 +455,49 @@ class TopographyPipelineTests(unittest.TestCase):
     def test_large_grid_rejected_before_tile_download(self):
         with patch.object(self.cache, "stage", side_effect=AssertionError("must not download")):
             with self.assertRaisesRegex(ValueError, "pixel bounds"):
-                contour_sample(self.policy, self.cache, [6, 0, 7, 1])
+                contour_sample(self.policy, self.cache, [6, 0, 8, 2])
 
     def test_contour_complexity_limit(self):
         with patch("map_platform.topography_pipeline.MAX_CONTOUR_POINTS", 1), self.assertRaisesRegex(ValueError, "complexity"):
             contour_sample(self.policy, self.cache, [6.2, 0.2, 6.25, 0.25])
+
+    def test_fourfold_map_budgets_and_exact_contour_boundaries(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from map_platform.topography_pipeline import MAX_GRID_PIXELS, MAX_CONTOUR_POINTS, MAX_CONTOUR_RECORDS
+        from map_platform.topography_geometry import MAX_COMPILED_POINTS
+
+        self.assertEqual((MAX_GRID_PIXELS, MAX_CONTOUR_POINTS, MAX_CONTOUR_RECORDS, MAX_COMPILED_POINTS),
+                         (16_000_000, 4_000_000, 40_000, 4_000_000))
+        grid = SimpleNamespace(width=2, height=2, left=0, top=0, resolution=30)
+        lines = [np.array([[float(i), 0.0], [float(i) + .5, 0.0]]) for i in range(3)]
+        generator = Mock()
+        generator.lines.return_value = lines
+        with patch("contourpy.contour_generator", return_value=generator):
+            with patch("map_platform.topography_pipeline.MAX_CONTOUR_RECORDS", 3), \
+                 patch("map_platform.topography_pipeline.MAX_CONTOUR_POINTS", 6):
+                records, _ = extract_contours(np.zeros((2, 2), dtype="float32"), grid, 20, 100)
+                self.assertEqual(len(records), 3)
+            with patch("map_platform.topography_pipeline.MAX_CONTOUR_RECORDS", 2), \
+                 self.assertRaisesRegex(ValueError, "complexity"):
+                extract_contours(np.zeros((2, 2), dtype="float32"), grid, 20, 100)
+            with patch("map_platform.topography_pipeline.MAX_CONTOUR_POINTS", 5), \
+                 self.assertRaisesRegex(ValueError, "complexity"):
+                extract_contours(np.zeros((2, 2), dtype="float32"), grid, 20, 100)
+
+    def test_dense_contour_above_previous_point_limit_is_accepted(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+
+        line = np.column_stack((np.arange(200_001) / 1000, np.zeros(200_001)))
+        grid = SimpleNamespace(width=2, height=2, left=0, top=0, resolution=30)
+        generator = Mock()
+        generator.lines.return_value = [line]
+        with patch("contourpy.contour_generator", return_value=generator):
+            records, missing = extract_contours(np.zeros((2, 2), dtype="float32"), grid, 20, 100)
+        self.assertEqual(missing, 0)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(len(records[0][2]), 200_001)
 
     def test_partial_no_data_is_reported_without_zero_filling(self):
         receipt = self.cache.stage(self.policy.sources[0], (6, 0))

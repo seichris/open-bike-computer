@@ -1081,6 +1081,7 @@ class BLEManager: NSObject, ObservableObject {
     private var workoutZoneSequence: UInt32 = 0
     @Published private(set) var rideTransportPhase:
         RideBLETransportPhaseV1 = .idle
+    @Published private(set) var rideRecoveryMessage: String?
     @Published private(set) var rideTransportFailureReason:
         RideBLETransportFailureReasonV1?
     @Published private(set) var rendererDiagnosticsSnapshotJSON: String?
@@ -1509,6 +1510,8 @@ class BLEManager: NSObject, ObservableObject {
     // carry no application write ID.
     private var navigationWriteResponseTimeout: TimeInterval = 5
 #endif
+    private var rideRecoveryCancellationTimer: Timer?
+    private var rideRecoveryCancellationTimeout = RideBLERecoveryPolicyV1.cancellationTimeoutSeconds
     private var navigationWriteStallRecoveryForTesting: (() -> Void)?
     private var connectionTimeoutTimer: Timer?
     private var pendingScannedConnectionTimeoutTimer: Timer?
@@ -1703,6 +1706,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     deinit {
+        rideRecoveryCancellationTimer?.invalidate()
 #if DEBUG
         navigationQueueMetricsTimer?.invalidate()
 #endif
@@ -4190,6 +4194,8 @@ class BLEManager: NSObject, ObservableObject {
         deviceGPSOverrideToken == nil
     }
 
+    private var gpsSampleClockCache = RideGPSSampleClockCache()
+
     /// Send GPS position and optional ride telemetry to ESP32.
     /// Format: 30-byte legacy payload plus the negotiated 6-byte GPS-quality tail.
     @discardableResult
@@ -4205,6 +4211,7 @@ class BLEManager: NSObject, ObservableObject {
         horizontalAccuracyMeters: Double? = nil,
         locationTimestamp: Date? = nil
     ) -> Bool {
+        let sampleClock = gpsSampleClockCache.sample(locationTimestamp)
         guard isConnected,
               let endpoint = navigationWriteEndpoint,
               isNavigationReady else {
@@ -4217,8 +4224,7 @@ class BLEManager: NSObject, ObservableObject {
             supportsExplicitInvalidHeading: supportsExplicitInvalidGPSHeading
         )
         let includeRideDetectionQuality = supportsGPSPositionQualityV1
-        let buildData = {
-            DeviceGPSPacketBuilder.data(
+        let originalData = DeviceGPSPacketBuilder.data(
                 lat: lat,
                 lon: lon,
                 heading: wireHeading,
@@ -4231,7 +4237,8 @@ class BLEManager: NSObject, ObservableObject {
                 locationTimestamp: locationTimestamp,
                 includeRideDetectionQuality: includeRideDetectionQuality
             )
-        }
+        let dispatch = RideGPSDispatch(frame: originalData, sampleClock: sampleClock)
+        let buildData = { dispatch.payload() }
         let data = buildData()
 
         if let peripheral = connectedPeripheral,
@@ -4965,6 +4972,7 @@ class BLEManager: NSObject, ObservableObject {
         navigationFlushRetryTimer?.invalidate()
         navigationFlushRetryTimer = nil
         isNavigationReady = false
+        armRideRecoveryCancellationDeadline()
         if let navigationWriteStallRecoveryForTesting {
             navigationWriteStallRecoveryForTesting()
             return
@@ -6879,6 +6887,11 @@ class BLEManager: NSObject, ObservableObject {
         _ event: RideBLETransportEventV1
     ) -> RideBLETransportTransitionV1 {
         let transition = rideTransportStateMachine.reduce(event)
+        if rideTransportStateMachine.phase != .recovering {
+            rideRecoveryCancellationTimer?.invalidate()
+            rideRecoveryCancellationTimer = nil
+            rideRecoveryMessage = nil
+        }
         rideTransportPhase = rideTransportStateMachine.phase
         rideTransportFailureReason = rideTransportStateMachine.lastFailure
         diagnosticsRecorder?.record(
@@ -6897,6 +6910,25 @@ class BLEManager: NSObject, ObservableObject {
             ]
         )
         return transition
+    }
+
+    private func armRideRecoveryCancellationDeadline() {
+        let generation = rideTransportStateMachine.generation
+        guard reduceRideTransport(.recoveryCancellationRequested(generation: generation)) == .applied else { return }
+        rideRecoveryCancellationTimer = Timer.scheduledOnMainActor(
+            withTimeInterval: rideRecoveryCancellationTimeout, repeats: false
+        ) { [weak self] _ in
+            self?.rideRecoveryCancellationExpired(generation: generation)
+        }
+    }
+
+    private func rideRecoveryCancellationExpired(generation: UInt64) {
+        guard reduceRideTransport(.recoveryCancellationTimedOut(generation: generation)) == .applied else { return }
+        rideRecoveryCancellationTimer = nil
+        rideRecoveryMessage = RideBLERecoveryPolicyV1.blockedMessage
+        log("Ride recovery cancellation timed out; waiting for a real disconnect or radio boundary")
+        // A timeout does not prove disconnection. Keep the current connection
+        // fenced and do not reuse its unidentified ATT callbacks.
     }
 
     private func clearDebugEvents() {
@@ -6980,6 +7012,22 @@ class BLEManager: NSObject, ObservableObject {
     ) {
         navigationWriteResponseTimeout = timeout
         navigationWriteStallRecoveryForTesting = recovery
+        _ = reduceRideTransport(.beginConnection)
+        let generation = rideTransportStateMachine.generation
+        _ = reduceRideTransport(.linkConnected(generation: generation))
+        _ = reduceRideTransport(.authenticated(generation: generation))
+        _ = reduceRideTransport(.leaseAccepted(generation: generation, leaseGeneration: 1))
+        _ = reduceRideTransport(.capabilitiesAccepted(generation: generation, schemaVersion: 1))
+    }
+
+    func installRideRecoveryDeadlineForTesting(timeout: TimeInterval) {
+        rideRecoveryCancellationTimeout = timeout
+    }
+
+    func retireRideRecoveryForTesting() -> () -> Void {
+        let generation = rideTransportStateMachine.generation
+        clearConnectionState()
+        return { [weak self] in self?.rideRecoveryCancellationExpired(generation: generation) }
     }
 
     @discardableResult
@@ -8908,6 +8956,7 @@ class BLEManager: NSObject, ObservableObject {
         isNavigationReady = false
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
 
+        armRideRecoveryCancellationDeadline()
         if let navigationWriteStallRecoveryForTesting {
             navigationWriteStallRecoveryForTesting()
             return
@@ -8933,6 +8982,7 @@ class BLEManager: NSObject, ObservableObject {
         failureHandler?()
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
 
+        armRideRecoveryCancellationDeadline()
         if let navigationWriteStallRecoveryForTesting {
             navigationWriteStallRecoveryForTesting()
             return

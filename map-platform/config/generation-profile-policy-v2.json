@@ -8,8 +8,8 @@
   ],
   "channels": {
     "development": {
-      "globalProfiles": ["legacy-vector-v1", "street-labels-v1", "buildings-3d-v1"],
-      "canaryProfiles": ["topographic-contours-v1"],
+      "globalProfiles": ["legacy-vector-v1", "street-labels-v1", "buildings-3d-v1", "topographic-contours-v1"],
+      "canaryProfiles": [],
       "disabledProfiles": []
     },
     "production": {

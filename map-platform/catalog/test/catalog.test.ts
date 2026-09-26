@@ -2610,6 +2610,70 @@ describe("catalog lifecycle boundaries", () => {
     });
   });
 
+  it("promotes a qualified topographic stream with its exact companion", async () => {
+    const enabled = { ...env, TOPOGRAPHY_PROMOTION_ENABLED: "1" };
+    const source = developmentTopographicPublication("topography-pair");
+    await finalizePublication(
+      env,
+      source,
+      source.publicationId,
+      await sha256Hex(JSON.stringify(source)),
+      null,
+      verifyTestArtifact,
+    );
+    expect(
+      (await listPromotionCandidates(enabled, null, 100)).mapEntryIds,
+    ).toContain(source.mapEntryId);
+    const grant = await createPromotionGrant(enabled, source.mapEntryId);
+    expect(grant.state).toBe("granted");
+    if (grant.state !== "granted" || !grant.companion)
+      throw new Error("paired grant is missing");
+    expect(grant.companion.artifact.sha256).toBe(source.artifacts[1].sha256);
+    const companionToken = grant.companion.downloadURL.split("/").at(-1)!;
+    expect(
+      (await resolveDownloadGrant(enabled, companionToken, "promotion")).id,
+    ).toBe(source.artifacts[1].artifactId);
+
+    const stream = structuredClone(source.artifacts[0]);
+    stream.artifactId = fixtureID("artifact");
+    stream.bucketSlot = "production";
+    stream.deliveryTier = "production";
+    stream.sha256 = "a".repeat(64);
+    stream.objectKey += ".promoted";
+    const companion = structuredClone(source.artifacts[1]);
+    companion.artifactId = fixtureID("artifact");
+    companion.bucketSlot = "production";
+    companion.deliveryTier = "production";
+    companion.objectKey = companion.objectKey.replace(
+      "/topography-ios-v1/",
+      "/topography-ios-v1/production/",
+    );
+    const production = validatePublication({
+      ...source,
+      publicationId: "promotion:production:topography-pair",
+      deliveryState: "production",
+      artifacts: [stream, companion],
+    });
+    const finalized = await finalizePublication(
+      enabled,
+      production,
+      production.publicationId,
+      await sha256Hex(JSON.stringify(production)),
+      grant.leaseId,
+      verifyTestArtifact,
+    );
+    expect(finalized.state).toBe("finalized");
+    const rows = await env.DB.prepare(
+      "SELECT format FROM artifacts WHERE map_entry_id = ? AND delivery_tier = 'production' ORDER BY format",
+    )
+      .bind(source.mapEntryId)
+      .all<{ format: string }>();
+    expect(rows.results.map((row) => row.format)).toEqual([
+      "bike-map-stream-v1",
+      "topography-ios-v1",
+    ]);
+  });
+
   it("discovers development maps with bounded keyset pagination and excludes blocked maps", async () => {
     const maps = [
       developmentPublication("auto-a"),

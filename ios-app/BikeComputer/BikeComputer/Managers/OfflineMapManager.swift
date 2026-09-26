@@ -2063,13 +2063,8 @@ final class OfflineMapManager: ObservableObject {
         }
     }
     var canRequestTopographicMap: Bool {
-        serverURLString == OfflineMapServiceConfig.developmentServerURLString
-    }
-    var registeredDevelopmentInstallationID: String? {
-        guard canRequestTopographicMap else { return nil }
-        return bicinoServiceSession.loadedCredential(
-            serverURLString: serverURLString
-        )?.clientInstallationId
+        serverURLString == OfflineMapServiceConfig.developmentServerURLString ||
+            serverURLString == OfflineMapServiceConfig.productionServerURLString
     }
     @Published private(set) var currentJob: OfflineMapJob?
     @Published private(set) var downloadURL: URL?
@@ -2137,9 +2132,13 @@ final class OfflineMapManager: ObservableObject {
     }
 
     var hasDownloadedPendingDeviceInstall: Bool {
-        guard OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
-              let activeJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults),
-              OfflineMapJobPersistence.downloadedJobId(defaults: defaults) == activeJobId,
+        OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults) &&
+            hasLocallySavedPendingMap
+    }
+
+    var hasLocallySavedPendingMap: Bool {
+        guard let jobId = OfflineMapJobPersistence.activeJobId(defaults: defaults),
+              OfflineMapJobPersistence.downloadedJobId(defaults: defaults) == jobId,
               let mapId = OfflineMapJobPersistence.downloadedMapId(defaults: defaults),
               let cachedURL = try? cachedPackURL(mapId: mapId) else {
             return false
@@ -2291,7 +2290,8 @@ final class OfflineMapManager: ObservableObject {
         self.includeTopographyInNewMaps = (defaults.object(
             forKey: OfflineMapDefaults.includeTopographyInNewMapsKey
         ) as? Bool ?? false) &&
-            resolvedServerURL == OfflineMapServiceConfig.developmentServerURLString
+            (resolvedServerURL == OfflineMapServiceConfig.developmentServerURLString ||
+             resolvedServerURL == OfflineMapServiceConfig.productionServerURLString)
         self.lastTransferMapId = defaults.string(forKey: OfflineMapDefaults.lastTransferMapIdKey) ?? ""
         let restoredTransferOutcome = defaults.string(
             forKey: OfflineMapDefaults.lastTransferOutcomeKey
@@ -2349,7 +2349,7 @@ final class OfflineMapManager: ObservableObject {
     func createJobFromSelectedMapArea(bleManager: BLEManager) {
         guard canStartNewMapJob() else { return }
         guard !includeTopographyInNewMaps || canRequestTopographicMap else {
-            errorMessage = "Topographic map creation is available on the development server only."
+            errorMessage = "This map server does not support topographic map creation."
             return
         }
         guard !includeTopographyInNewMaps ||
@@ -2414,7 +2414,7 @@ final class OfflineMapManager: ObservableObject {
     ) {
         guard canStartNewMapJob() else { return }
         guard !includeTopographyInNewMaps || canRequestTopographicMap else {
-            errorMessage = "Topographic map creation is available on the development server only."
+            errorMessage = "This map server does not support topographic map creation."
             return
         }
         guard !includeTopographyInNewMaps ||
@@ -5285,6 +5285,11 @@ final class OfflineMapManager: ObservableObject {
         installOnDevice: Bool,
         bleManager: BLEManager?
     ) async throws -> Bool {
+        if !installOnDevice, restoreDownloadedPackIfAvailable(jobId: jobId) {
+            clearPersistedJob(markHandled: true)
+            statusMessage = "map downloaded"
+            return true
+        }
         if installOnDevice, restoreDownloadedPackIfAvailable(jobId: jobId) {
             guard let bleManager,
                   bleManager.isConnected,

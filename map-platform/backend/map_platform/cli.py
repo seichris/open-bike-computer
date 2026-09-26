@@ -48,13 +48,13 @@ from .monitoring import (
     MapMonitoringStore,
 )
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
-from .topography_rollout import topography_target4_generation_allowlist
 from .preparation_estimates import load_estimate_coordinator
 from .rate_limits import purge_expired_rate_limits
 from .resource_report import worker_resource_report
 from .source_cache import SourceCache, default_backend_data_root
 from .sources import SourceIndex
 from .strava_integrations import StravaIntegrationService
+from .topography_sources import load_topography_source_policy, require_production_topography_approval
 from .worker import (
     ExpiredArtifactCleanupError,
     MapWorker,
@@ -782,11 +782,16 @@ def main() -> int:
     )
     generation_controls = {}
     if args.command == "create-job":
+        generation_profile_policy = load_generation_profile_policy(repo_root)
+        deployment_channel = configured_deployment_channel()
+        require_production_topography_approval(
+            generation_profile_policy, load_topography_source_policy(repo_root),
+            deployment_channel,
+        )
         generation_controls = {
             "building_target3_allowlist": building_target3_generation_allowlist(),
-            "topography_target4_allowlist": topography_target4_generation_allowlist(),
-            "generation_profile_policy": load_generation_profile_policy(repo_root),
-            "deployment_channel": configured_deployment_channel(),
+            "generation_profile_policy": generation_profile_policy,
+            "deployment_channel": deployment_channel,
         }
     service = MapJobService(
         source_index,
@@ -853,6 +858,7 @@ def main() -> int:
             producer_build_sha256=producer_build_sha256,
             producer_image_digest=producer_image_digest,
             work_root=data_root / "promotions",
+            source_policy=load_topography_source_policy(repo_root),
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
@@ -891,6 +897,7 @@ def main() -> int:
                 else None
             ),
             building_task_store=building_task_store,
+            deployment_channel=configured_deployment_channel(),
         )
         estimate_coordinator.producer_build_sha256 = producer_build_sha256
         estimate_coordinator.producer_image_digest = producer_image_digest

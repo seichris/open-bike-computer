@@ -59,6 +59,7 @@ xcrun swiftc -D HOST_TESTING -parse-as-library -o "${OUT_DIR}/tests" \
   ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
   ios-app/BikeComputer/RideShared/WireBytes.swift \
   ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
+  ios-app/BikeComputer/RideShared/RideGPSPacket.swift \
   ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift \
