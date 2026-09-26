@@ -56,6 +56,7 @@ extension WatchDeviceLink {
         pendingPhonePreparationReconciliation
     }
     var testPendingACK: WatchBLEOutboundGroupV1? { pendingApplicationAckGroup }
+    var testRecoveryPhase: RideBLERecoveryPhaseV1? { transportStateMachine.recoveryPhase }
     var testWriter: RideBLEWriterStateV1 { transportStateMachine.writerState }
     var testIntent: WatchDirectRidePreparationIntentV1? {
         guard let data = defaults.data(forKey: directRidePreparationIntentKey) else { return nil }
@@ -136,6 +137,7 @@ extension WatchDeviceLink {
         testDrainATT(on: peer)
     }
     func testDispose() {
+        recoveryCancellationTask?.cancel()
         reconnectTask?.cancel(); operationTimeoutTask?.cancel()
         leaseReleaseAckTask?.cancel(); writerWatchdogTask?.cancel()
         withoutResponseWatchdogTask?.cancel(); applicationAckWatchdogTask?.cancel()

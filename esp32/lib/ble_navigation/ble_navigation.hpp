@@ -16,6 +16,7 @@
 #include <Arduino.h>
 #include <atomic>
 #include "ble_radio_policy.hpp"
+#include "gps_input_freshness.hpp"
 #include "destination_picker_protocol.hpp"
 #include "map_profile_protocol.hpp"
 #include "renderer_diagnostics_ble_protocol.hpp"
@@ -221,6 +222,7 @@ struct BLEDebugStats {
   uint32_t navPacketCount = 0;
   uint32_t routePacketCount = 0;
   uint32_t gpsPacketCount = 0;
+  gps_input_freshness::SourceSample gpsSource{};
   uint32_t settingsPacketCount = 0;
   uint32_t rejectedUnauthenticatedCount = 0;
   uint32_t lastConnectMs = 0;

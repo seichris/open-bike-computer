@@ -796,6 +796,8 @@ static void updateCurrentPositionMarker(lv_obj_t *marker,
 
   const bool isNavigating =
       routeOverlay.hasRoute() || hasCurrentNavigationData();
+  const bool fresh = bleNavServer.getDebugStats().gpsSource.fresh(millis());
+  lv_obj_set_style_opa(marker, fresh ? LV_OPA_COVER : LV_OPA_50, 0);
   const uint8_t scale = currentMarkerScale();
   const int16_t rotationTenths = static_cast<int16_t>(
       std::round(map_presentation::normalizeDegrees(rotationDegrees) * 10.0));
@@ -4024,16 +4026,16 @@ void Maps::updatePresentedPoseForScreen(uint32_t nowMs, bool mapVisible) {
                     lat2y(gps.gpsData.latitude)};
     fix.headingDegrees = resolvedHeading;
     fix.headingValid = headingValid;
-    fix.speedMetersPerSecond = gps.gpsData.speed / 3.6;
+    fix.sourceTimeKnown = bleStats.gpsSource.ageKnown;
+    fix.speedMetersPerSecond = bleStats.gpsSource.ageKnown && bleStats.gpsSource.speedAvailable
+                                  ? gps.gpsData.speed / 3.6 : 0.0;
     const double latitudeRadians =
         gps.gpsData.latitude * 3.14159265358979323846 / 180.0;
     fix.worldUnitsPerMeter =
         1.0 / std::max(0.2, std::fabs(std::cos(latitudeRadians)));
-    // The accepted transport timestamp owns physical freshness. Route-bearing
-    // changes use updateHeading below and cannot re-observe this position.
-    fix.timestampMs = bleStats.gpsPacketCount != 0
-                          ? bleStats.lastGpsPacketMs
-                          : nowMs;
+    // The source measurement owns freshness; arrival remains a separate BLE
+    // diagnostic. Queue and UI delays must not restart the prediction horizon.
+    fix.timestampMs = bleStats.gpsSource.capturedAtMs;
     if (poseInputAction ==
         map_pose_input_policy::Action::ObservePhysicalFix) {
       posePresenter.observe(fix, nowMs);

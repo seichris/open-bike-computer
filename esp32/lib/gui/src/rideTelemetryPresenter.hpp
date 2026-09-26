@@ -17,6 +17,8 @@ struct LegacyRideTelemetry {
   uint32_t elapsedSeconds = 0;
   bool hasRouteRemaining = false;
   uint32_t routeRemainingMeters = 0;
+  bool gpsFresh = true;
+  bool speedAvailable = true;
 };
 
 struct ViewModel {
@@ -130,8 +132,10 @@ inline ViewModel makeViewModel(
     return model;
   }
 
+  model.stale = !legacy.gpsFresh;
   model.speedTenthsKmh = {
-      true, static_cast<uint32_t>(legacy.speedKilometersPerHour) * 10U};
+      legacy.gpsFresh && legacy.speedAvailable,
+      static_cast<uint32_t>(legacy.speedKilometersPerHour) * 10U};
   model.altitudeMeters = {true, legacy.altitudeMeters};
   model.distanceMeters = {true, legacy.distanceMeters};
   model.elapsedSeconds = {true, legacy.elapsedSeconds};
@@ -361,6 +365,7 @@ inline void formatBottomMetric(BottomMetric metric, const ViewModel &model,
 }
 
 inline const char *statusLabel(const ViewModel &model) {
+  if (!model.usesWorkout && model.stale) return "GPS stale / unavailable";
   if (!model.usesWorkout) {
     return "LEGACY RIDE";
   }
@@ -390,6 +395,7 @@ inline const char *statusLabel(const ViewModel &model) {
 }
 
 inline bool shouldShowStatus(const ViewModel &model) {
+  if (!model.usesWorkout && model.stale) return true;
   if (!model.usesWorkout) {
     return false;
   }

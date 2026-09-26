@@ -405,6 +405,16 @@ Completion checklist:
 - [ ] Physical validation is recorded per board/controller or explicitly remains pending.
 - [ ] Optional optimizations have measurements; deferred architecture work is labeled deferred.
 
+## Implementation status
+
+The compatible repairs and first architecture/optimization slice are implemented
+on `fix/bluetooth-data-reliability`; see
+[implementation and validation record](bluetooth-data-reliability-implementation.md).
+The original checklist above remains the full acceptance checklist, including
+physical qualification; baseline results below must not be read as fix results.
+Broader lifecycle migration, protocol extensions and hardware-dependent tuning
+remain explicitly deferred as described in that record.
+
 ## Evidence available when this plan was written
 
 The preceding source audit used the exact baseline above in a clean detached

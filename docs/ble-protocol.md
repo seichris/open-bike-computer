@@ -365,6 +365,21 @@ resynchronization from logical state. Each client admits a critical group to its
 outbound queue atomically, and replaceable telemetry cannot evict it; firmware
 then serializes and tracks its individual members through completion.
 
+Active phone and Watch recovery uses a separate five-second cancellation
+deadline after a writer/application failure. If CoreBluetooth never reports the
+disconnect, the controller displays a recovery-blocked instruction to turn
+Bluetooth off and on in Settings. This is not a successful reconnect. The
+connection stays fenced until an actual disconnect/failure/radio boundary;
+timeout alone never permits reuse of unidentified ATT callbacks. Watch demand
+and its exact phone preparation identity remain retained. A retired timer cannot
+change a successor connection. On iPhone the warning appears in My Bike Computers.
+
+Watch route snapshots compare plaintext geometry against the last submitted
+route in the current connection. Unchanged replaceable geometry is skipped;
+critical clears and reconnect resynchronization always dispatch. Protection is
+constructed only once the selected write mode is writable. These changes do not
+alter queue capacity, critical ACK requirements, or acknowledged-write preference.
+
 Golden vectors (command payload bytes `aa bb`):
 
 ```text
@@ -492,7 +507,7 @@ Little-endian binary packet:
 Lat: Int32 microdegrees
 Lon: Int32 microdegrees
 Heading: UInt16 degrees, 0...359; 0xFFFF invalid when CAP2 bit 13 is negotiated
-UnixTime: UInt32 seconds since 1970-01-01T00:00:00Z (optional)
+UnixTime: UInt32 current sender time at dispatch, seconds since 1970-01-01T00:00:00Z (optional)
 Speed: UInt16 centimeters/second, 0xFFFF invalid (optional)
 Altitude: Int16 meters (optional)
 DistanceTraveled: UInt32 meters (optional)
@@ -515,8 +530,25 @@ client that negotiated CAP2 bit `17` appends the six-byte quality-v1 tail for a
 36-byte payload. The quality tail carries the original Core Location horizontal
 accuracy and sample age; it never fabricates HDOP. `SampleAge`, rather than the
 sender's wall clock, is subtracted from the BLE arrival timestamp before ride
-detection evaluates freshness. The
-Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
+detection and map presentation evaluate source freshness. UI/mailbox delay adds
+to this age; packet arrival/cadence remains a separate transport diagnostic.
+The Waveshare firmware uses the optional Unix time to sync the onboard PCF85063
+RTC. Both controllers refresh UnixTime and SampleAge at the final writable
+plaintext dispatch boundary, before protection. Source age is anchored when the
+source is first retained and advances with monotonic time, including queue wait
+and reconnect replay. A repeated timestamp retains its anchor; changed coordinates
+are not required for a genuinely new stationary observation. Ages saturate at
+65534 ms; 65535 means unknown. A future-invalid or unknown age cannot claim a
+valid fix. Older Watch builds that used capture time as UnixTime need an app
+update; firmware cannot safely infer or compensate for that older clock meaning.
+
+Map prediction retains its 1.5-second full-speed and 2.5-second maximum windows,
+measured from source capture. Expired repeats at the same position do not restart
+convergence. A stale or unknown-source marker remains visible at reduced opacity;
+legacy Ride Stats shows GPS stale/unavailable and withholds measured speed rather
+than inventing zero. Independent workout telemetry retains its own freshness and
+terminal-summary rules. Legacy packets without quality still move the marker,
+but cannot establish source freshness or enable velocity prediction.
 
 Quality-v1 is accepted only as a complete 36-byte payload. Unknown schemas,
 reserved flag bits, truncated or oversized extensions, mismatched accuracy

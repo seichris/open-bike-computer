@@ -8,6 +8,25 @@
 
 namespace gps_input_freshness {
 
+// Measurement metadata travels with the latest payload, separately from packet
+// cadence. Legacy packets cannot establish source freshness from arrival alone.
+struct SourceSample {
+  bool ageKnown = false;
+  bool speedAvailable = false;
+  uint32_t capturedAtMs = 0;
+
+  static SourceSample from(const gps_position_protocol::Packet &packet,
+                           uint32_t arrivalMs) {
+    return {packet.hasSampleAge, packet.hasSpeed &&
+                (!packet.hasRideDetectionQuality || packet.fixValid),
+            packet.hasSampleAge ? arrivalMs - packet.sampleAgeMs : arrivalMs};
+  }
+
+  bool fresh(uint32_t nowMs, uint32_t horizonMs = 2500) const {
+    return ageKnown && static_cast<uint32_t>(nowMs - capturedAtMs) < horizonMs;
+  }
+};
+
 /** Arrival timing retained by the latest-state GPS mailbox.
  *
  * The payload itself may be replaced while the UI task is busy, but every
