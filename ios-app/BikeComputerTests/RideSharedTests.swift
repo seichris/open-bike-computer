@@ -11,12 +11,52 @@ enum RideSharedTests {
         try testRideBLETransportStateMachine()
         try testRideBLEATTWatchdogPolicy()
         try testWatchDirectBLEContract()
+        try testGPSDispatchAndGoldenPacket()
         testMotionDispatchAge()
         try testFavoriteSyncPolicyAndCoordinateNormalization()
         try testGPXImport()
         try testStravaAthleteRoutePages()
         try testStravaRouteContractAndReloadBookmarks()
         print("RideSharedTests passed")
+    }
+
+    private static func testGPSDispatchAndGoldenPacket() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let sample = NavigationLocationSampleV1(coordinate: .init(latitude: 1, longitude: 2),
+            horizontalAccuracyMeters: 5, courseDegrees: 90, speedMetersPerSecond: 10,
+            altitudeMeters: 6, timestamp: now.addingTimeInterval(-30))
+        let packet = WatchRidePacketEncoderV1.gps(sample, snapshot: nil,
+            distanceTraveledMeters: 123, elapsedSeconds: 45, includeRideDetectionQuality: true, now: now)
+        let hex = packet.map { String(format: "%02x", $0) }.joined()
+        let fixture = try String(contentsOfFile: "../protocol/fixtures/gps-quality-v1.hex", encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        expect(hex == fixture, "Watch encoder matches shared Swift/C++ GPS vector")
+        var cache = RideGPSSampleClockCache()
+        let clock = cache.sample(sample.timestamp, now: now, uptime: 100)
+        let replayClock = cache.sample(sample.timestamp, now: now.addingTimeInterval(-3600), uptime: 102)
+        expect(clock == replayClock, "requeue does not re-anchor source age after wall-clock jump")
+        let queued = RideGPSDispatch(frame: packet, sampleClock: replayClock)
+            .payload(now: now.addingTimeInterval(-3600), uptime: 102)
+        expect(Int(queued[34]) + (Int(queued[35]) << 8) == 32000,
+               "dispatch adds monotonic queue residence while wall time moves backward")
+        let unix = (0..<4).reduce(UInt32(0)) { $0 | UInt32(queued[10 + $1]) << ($1 * 8) }
+        expect(unix == 1_999_996_400, "clock field is current dispatch wall time, not capture time")
+        expect(clock.ageMilliseconds(at: 200) == 65534, "old age saturates to stale, not unknown")
+        expect(clock.ageMilliseconds(at: 99) == 65535, "invalid monotonic time is unknown")
+        let future = RideGPSSampleClock(timestamp: now.addingTimeInterval(10), now: now, uptime: 0)
+        let invalid = RideGPSDispatch(frame: packet, sampleClock: future).payload(now: now, uptime: 1)
+        expect(invalid[31] & 1 == 0 && invalid[34] == 255 && invalid[35] == 255,
+               "future source cannot assert a valid fresh fix")
+        let negativeHeading = RideGPSPacketEncoder.data(lat: 1, lon: 2, heading: -1,
+            unixTime: 0, speed: 0, altitude: 0, distance: 0, elapsed: 0,
+            remaining: nil, accuracy: 5, sampleAgeMs: 0, includeQuality: false)
+        expect(negativeHeading[8] == 255 && negativeHeading[9] == 255,
+               "negative CoreLocation heading remains unavailable rather than wrapping")
+        let bad = RideGPSPacketEncoder.data(lat: .nan, lon: .infinity, heading: .nan,
+            unixTime: 0, speed: .nan, altitude: .infinity, distance: .nan, elapsed: .nan,
+            remaining: .nan, accuracy: .nan, sampleAgeMs: .max, includeQuality: true)
+        expect(bad.count == 36 && bad[31] == 0 && bad[0] == 255,
+               "non-finite source encodes invalid coordinates without trapping")
     }
 
     private static func testMotionDispatchAge() {

@@ -895,6 +895,7 @@ struct NavigationProtocolTests {
         testNavigationEngineRetriesRejectedRouteGeometryOnSameSegment()
         testNavigationEngineClearsRouteGeometryOnStop()
         testNavigationEngineClearsRouteGeometryWhenReadyAndIdle()
+        testGPSStartupRetriesUseLatestGeneration()
         testNavigationEngineRefreshesElapsedWithoutLocationChange()
         testNavigationEngineClearsRideTelemetryOnStop()
         testNavigationEngineRestoresPhysicalGPSAfterSimulation()
@@ -22281,6 +22282,7 @@ struct NavigationProtocolTests {
             timeout: 0.01,
             recovery: { watchdogRecoveries += 1 }
         )
+        watchdogManager.installRideRecoveryDeadlineForTesting(timeout: 0.01)
         assert(watchdogManager.requestDeviceCapabilities(),
                "watchdog fixture sends one acknowledged write")
         assertEqual(watchdogWrites.count, 1,
@@ -22289,6 +22291,21 @@ struct NavigationProtocolTests {
                "missing acknowledged completion triggers bounded recovery")
         assert(!watchdogManager.isNavigationReady,
                "stall recovery closes the unusable navigation session")
+
+        assert(waitForMainLoop(timeout: 1) { watchdogManager.rideRecoveryMessage != nil },
+               "missing cancellation callback produces an actionable phone warning")
+        assertEqual(watchdogManager.rideTransportPhase, .recovering,
+                    "deadline never claims that the old connection disconnected")
+        assert(!watchdogManager.requestDeviceCapabilities(),
+               "blocked recovery does not dispatch new ride work")
+        assertEqual(watchdogWrites.count, 1, "no writes reuse the ambiguous connection")
+        let lateDeadline = watchdogManager.retireRideRecoveryForTesting()
+        watchdogManager.installNavigationWriteStallRecoveryForTesting(timeout: 1, recovery: {})
+        lateDeadline()
+        assert(watchdogManager.rideRecoveryMessage == nil,
+               "retired deadline cannot poison a successor connection")
+        assertEqual(watchdogManager.rideTransportPhase, .ready,
+                    "real disconnect boundary permits successor readiness")
 
         let noResponseWatchdogManager = BLEManager()
         noResponseWatchdogManager.isConnected = true
@@ -26213,6 +26230,36 @@ struct NavigationProtocolTests {
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
         assertEqual(manager.sentRouteGeometry, [Data()], "idle readiness should clear route geometry")
+    }
+
+    static func testGPSStartupRetriesUseLatestGeneration() {
+        var callbacks: [@MainActor () -> Void] = []
+        var cancellations = 0
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let engine = NavigationEngine(scheduleRetry: { _, callback in
+            callbacks.append(callback)
+            return { cancellations += 1 }
+        })
+        engine.setBLEManager(manager)
+        let route = TestRoute(instructions: "Continue", coordinates: [
+            CLLocationCoordinate2D(latitude: 37, longitude: -122),
+            CLLocationCoordinate2D(latitude: 37.01, longitude: -122)
+        ])
+        engine.startNavigation(with: route, initialLocation: testLocation(latitude: 37, longitude: -122))
+        let retired = callbacks
+        engine.processExternalLocation(testLocation(latitude: 37.0001, longitude: -122))
+        callbacks.forEach { $0() }
+        assertEqual(Int32(bitPattern: readUInt32LE(manager.sentGPSPositions.last!, offset: 0)),
+                    37_000_100, "both delayed retries publish the latest GPS, never the initial fix")
+        engine.stopNavigation()
+        engine.startNavigation(with: route, initialLocation: testLocation(latitude: 37.0002, longitude: -122))
+        let count = manager.sentGPSPositions.count
+        retired.forEach { $0() }
+        assertEqual(manager.sentGPSPositions.count, count, "retired callbacks cannot publish into a successor navigation epoch")
+        assert(cancellations >= 2, "stop cancels outstanding retries")
+        engine.stopNavigation()
     }
 
     static func testNavigationEngineRefreshesElapsedWithoutLocationChange() {

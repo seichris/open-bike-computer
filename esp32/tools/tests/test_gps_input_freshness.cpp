@@ -1,11 +1,14 @@
 #include "../../lib/ble_navigation/gps_input_freshness.hpp"
 #include "../../lib/gps/gps_ride_observation.hpp"
 #include "../../lib/maps/src/mapPresentation.hpp"
+#include "../../lib/gui/src/uiUpdatePolicy.hpp"
 
 #include <cassert>
 #include <cstdint>
 #include <limits>
 #include <vector>
+#include <fstream>
+#include <string>
 
 int main() {
   using namespace gps_input_freshness;
@@ -87,6 +90,67 @@ int main() {
   qualityPacket[15] = 0xFF;
   assert(!gps_position_protocol::decode(qualityPacket.data(),
                                         qualityPacket.size(), decodedQuality));
+
+  // One checked-in vector is also asserted by the production Swift encoder.
+  std::ifstream fixture("protocol/fixtures/gps-quality-v1.hex");
+  if (!fixture) fixture.open("../protocol/fixtures/gps-quality-v1.hex");
+  std::string hex;
+  fixture >> hex;
+  assert(hex.size() == 72);
+  std::vector<uint8_t> crossLanguage;
+  for (size_t i = 0; i < hex.size(); i += 2)
+    crossLanguage.push_back(static_cast<uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+  gps_position_protocol::Packet source{};
+  assert(gps_position_protocol::decode(crossLanguage.data(), crossLanguage.size(), source));
+  assert(source.latitudeMicrodegrees == 1000000 && source.unixTime == 2000000000);
+  assert(source.sampleAgeMs == 30000 && source.speedCentimetersPerSecond == 1000);
+  const auto metadata = sourceSampleFrom(source, 100000);
+  assert(metadata.ageKnown && metadata.capturedAtMs == 70000 && !metadata.fresh(100000));
+  map_presentation::Presenter sourcePresenter;
+  sourcePresenter.observe({{0, 0}, 90, true, 10, 1, metadata.capturedAtMs, metadata.ageKnown}, 100000);
+  const auto oldPose = sourcePresenter.present(100500);
+  assert(oldPose.observationAgeMs == 30500 && oldPose.predictionExhausted);
+  source.sampleAgeMs = 31000;
+  const auto repeated = sourceSampleFrom(source, 101000);
+  sourcePresenter.observe({{0, 0}, 90, true, 10, 1, repeated.capturedAtMs, repeated.ageKnown}, 101000);
+  assert(sourcePresenter.present(101500).predictionExhausted);
+  assert(sourcePresenter.present(101500).sourceTimestampMs == 70000);
+  source.sampleAgeMs = 100;
+  const auto fresh = sourceSampleFrom(source, 102000);
+  sourcePresenter.observe({{1, 0}, 90, true, 10, 1, fresh.capturedAtMs, fresh.ageKnown}, 102000);
+  assert(!sourcePresenter.present(102000).predictionExhausted);
+  source.hasSampleAge = false;
+  const auto unknown = sourceSampleFrom(source, 103000);
+  sourcePresenter.observe({{2, 0}, 90, true, 10, 1, unknown.capturedAtMs, unknown.ageKnown}, 103000);
+  assert(sourcePresenter.present(104000).predictionExhausted);
+  assert(sourcePresenter.present(104000).observationAgeMs == UINT32_MAX);
+  assert(sourcePresenter.present(104000).position.x == 2);
+  source.hasSampleAge = true;
+  source.sampleAgeMs = 1000;
+  const auto wrappedSource = sourceSampleFrom(source, 500);
+  assert(wrappedSource.fresh(600));
+
+  // An onboard source owns its capture clock independently of BLE diagnostics.
+  const GpsSampleTiming onboard{true, true, 105000, RidePositionSource::HardwareNmea};
+  assert(onboard.fresh(105500));
+  assert(presentationSample(onboard, {}).fresh(105500));
+  // The position can remain numerically unchanged after the source expires;
+  // the Ride Stats change tracker still needs a GPS-source transition.
+  ui_update_policy::ChangeTracker uiTracker;
+  ui_update_policy::SourceSignatures uiSignatures;
+  uiSignatures[ui_update_policy::Source::Gps] =
+      presentationStatusBits(onboard, 105500);
+  (void)uiTracker.observe(uiSignatures);
+  (void)uiTracker.take(ui_update_policy::kAllSources);
+  uiSignatures[ui_update_policy::Source::Gps] =
+      presentationStatusBits(onboard, 108000);
+  assert(!onboard.fresh(108000));
+  assert(uiTracker.observe(uiSignatures) ==
+         ui_update_policy::sourceMask(ui_update_policy::Source::Gps));
+  assert(!presentationSample(fresh, {}).fresh(102000));
+  sourcePresenter.observe({{2, 0}, 90, true, 0, 1, onboard.capturedAtMs, onboard.ageKnown}, 105500);
+  assert(!sourcePresenter.present(105500).predictionExhausted);
+  assert(sourcePresenter.present(105500).observationAgeMs == 500);
 
   GpsRideObservation hardware{};
   hardware.source = RidePositionSource::HardwareNmea;

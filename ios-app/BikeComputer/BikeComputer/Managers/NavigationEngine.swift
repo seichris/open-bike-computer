@@ -60,6 +60,9 @@ class NavigationEngine: NSObject, ObservableObject {
     // Test and real navigation share one device-pose heartbeat contract. The
     // firmware grace window is sized to bridge one missed 1 Hz heartbeat.
     private let devicePoseHeartbeatInterval: TimeInterval = 1.0
+    typealias RetryScheduler = (TimeInterval, @escaping @MainActor () -> Void) -> (() -> Void)
+    private let scheduleRetry: RetryScheduler
+    private var initialGPSRetryCancellations: [() -> Void] = []
     private let now: () -> Date
     
     // Simulation state
@@ -73,12 +76,18 @@ class NavigationEngine: NSObject, ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private let liveLocationStartTolerance: CLLocationDistance = 150
 
-    init(now: @escaping () -> Date = Date.init) {
+    init(now: @escaping () -> Date = Date.init, scheduleRetry: RetryScheduler? = nil) {
         self.now = now
+        self.scheduleRetry = scheduleRetry ?? { delay, action in
+            let work = DispatchWorkItem { MainActor.assumeIsolated { action() } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            return { work.cancel() }
+        }
         super.init()
     }
 
     deinit {
+        initialGPSRetryCancellations.forEach { $0() }
         rideTelemetryTimer?.invalidate()
         simulationTimer?.invalidate()
     }
@@ -252,6 +261,7 @@ class NavigationEngine: NSObject, ObservableObject {
         distanceToManeuver = Int(min(sharedRoute.steps[0].distanceMeters.rounded(), Double(Int32.max)))
         isSimulationMode = isTestMode
         isNavigating = true
+        cancelInitialGPSRetries()
         navigationEpoch &+= 1
         courseResolver.reset(epoch: navigationEpoch)
         
@@ -335,6 +345,7 @@ class NavigationEngine: NSObject, ObservableObject {
         }
         currentRoute = sharedRoute
         cacheRouteCoordinates(from: sharedRoute)
+        cancelInitialGPSRetries()
         navigationEpoch &+= 1
         courseResolver.reset(epoch: navigationEpoch)
         currentSnapshot = nil
@@ -391,6 +402,7 @@ class NavigationEngine: NSObject, ObservableObject {
         navigationRuntime.stop()
         offlineDeleteAfter = nil
         usesOfflineArchive = false
+        cancelInitialGPSRetries()
         navigationEpoch &+= 1
         courseResolver.reset(epoch: navigationEpoch)
         currentRoute = nil
@@ -704,7 +716,7 @@ class NavigationEngine: NSObject, ObservableObject {
     private func resendCurrentDeviceGpsPosition() {
         guard let lastDeviceGpsLocation else { return }
 
-        sendDeviceGpsPosition(lastDeviceGpsLocation.location,
+        publishDeviceGpsPosition(lastDeviceGpsLocation.location,
                               convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute,
                               includeRideTelemetry: isNavigating)
     }
@@ -737,7 +749,7 @@ class NavigationEngine: NSObject, ObservableObject {
         guard isNavigating,
               !isSimulationMode,
               let lastDeviceGpsLocation else { return }
-        sendDeviceGpsPosition(
+        publishDeviceGpsPosition(
             lastDeviceGpsLocation.location,
             convertFromMapKitRoute: lastDeviceGpsLocation.convertFromMapKitRoute
         )
@@ -822,6 +834,12 @@ class NavigationEngine: NSObject, ObservableObject {
 
     private func sendDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool, includeRideTelemetry: Bool = true) {
         lastDeviceGpsLocation = (location, convertFromMapKitRoute)
+        publishDeviceGpsPosition(location, convertFromMapKitRoute: convertFromMapKitRoute,
+                                 includeRideTelemetry: includeRideTelemetry)
+    }
+
+    private func publishDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool,
+                                         includeRideTelemetry: Bool = true) {
         guard bleManager?.allowsAutomaticDeviceGPSWrites ?? true else {
             return
         }
@@ -861,16 +879,23 @@ class NavigationEngine: NSObject, ObservableObject {
                                     locationTimestamp: location.timestamp)
     }
 
-    private func sendInitialDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool) {
-        sendDeviceGpsPosition(location, convertFromMapKitRoute: convertFromMapKitRoute)
+    private func cancelInitialGPSRetries() {
+        initialGPSRetryCancellations.forEach { $0() }
+        initialGPSRetryCancellations.removeAll()
+    }
 
+    private func sendInitialDeviceGpsPosition(_ location: CLLocation, convertFromMapKitRoute: Bool) {
+        cancelInitialGPSRetries()
+        sendDeviceGpsPosition(location, convertFromMapKitRoute: convertFromMapKitRoute)
+        let epoch = navigationEpoch
         for delay in [0.5, 1.5] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self, self.isNavigating else { return }
-                self.sendDeviceGpsPosition(location, convertFromMapKitRoute: convertFromMapKitRoute)
-            }
+            initialGPSRetryCancellations.append(scheduleRetry(delay) { [weak self] in
+                guard let self, self.isNavigating, self.navigationEpoch == epoch else { return }
+                self.resendCurrentDeviceGpsPosition()
+            })
         }
     }
+
 }
 
 // MARK: - Route Geometry for Device Map
