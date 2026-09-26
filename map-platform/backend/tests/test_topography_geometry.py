@@ -19,7 +19,11 @@ from map_platform.artifacts import (
 )
 from map_platform.building_scope import BuildingScopeError
 from map_platform.topography_artifacts import encode_contour_section
-from map_platform.topography_companion import validate_companion, write_companion
+from map_platform.topography_companion import (
+    TopographyCompanionAdmissionError,
+    validate_companion,
+    write_companion,
+)
 from map_platform.topography_geometry import compile_contours
 from map_platform.topography_pack import assemble_topographic_pack
 from map_platform.map_artifact_validation import validate_fmb5
@@ -236,6 +240,30 @@ class TopographyGeometryTests(unittest.TestCase):
             validate_companion(first, expected_intermediate="f" * 64)
         with self.assertRaises(FileExistsError):
             self.companion(first)
+
+    def test_companion_admission_identifies_the_exceeded_budget(self):
+        compiled = compile_contours(self.sample, self.selection)
+        for limit, message in (
+            ("MAX_TILES", "tile admission budget"),
+            ("MAX_REFERENCES", "reference admission budget"),
+        ):
+            with self.subTest(limit=limit), patch(
+                f"map_platform.topography_companion.{limit}", 0
+            ):
+                with self.assertRaisesRegex(
+                    TopographyCompanionAdmissionError, message
+                ) as raised:
+                    write_companion(
+                        self.root / f"{limit}.btopo",
+                        compiled,
+                        map_id="test-map",
+                        source_policy_sha256="a" * 64,
+                        attribution_sha256="b" * 64,
+                        bounds_e7=self.sample["boundsE7"],
+                    )
+                self.assertEqual(
+                    raised.exception.code, "topography_companion_admission"
+                )
 
     def test_companion_rejects_corruption_and_unexpected_schema(self):
         original = self.root / "original.btopo"
