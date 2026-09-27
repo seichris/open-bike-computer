@@ -21,7 +21,7 @@ else:
     _FASTAPI_IMPORT_ERROR = None
 
 from .admin_inventory import map_inventory
-from .admission import AdmissionCapacityError, AdmissionPolicy
+from .admission import AdmissionCapacityError, QueueAdmissionPolicy
 from .app_attest import (
     APP_ATTEST_ATTESTATION_PURPOSE,
     APP_ATTEST_MAP_CREATE_PURPOSE,
@@ -357,7 +357,7 @@ def create_app(
         "0",
     ).strip().lower() in {"1", "true", "yes"}
     limits = JobLimits(max_active_jobs=int(os.environ.get("MAP_PLATFORM_MAX_ACTIVE_JOBS", "25")))
-    admission_policy = AdmissionPolicy.from_environment()
+    admission_policy = QueueAdmissionPolicy.from_environment(deployment_channel)
     source_provider = GeofabrikSourceProvider.from_environment(data_root)
     job_store = JobStore(
         data_root / "jobs",
@@ -527,6 +527,8 @@ def create_app(
         client_app_build_sha256: str | None,
     ) -> dict[str, Any]:
         result = job.to_dict()
+        if job.status == JobStatus.QUEUED or job.scheduler_yielded:
+            result["queuePosition"] = job_store.queue_position(job.job_id)
         _project_building_progress(
             result,
             building_task_store.progress(job.job_id),

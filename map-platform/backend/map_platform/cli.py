@@ -7,7 +7,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from .admission import AdmissionPolicy
+from .admission import QueueAdmissionPolicy
 from .artifacts import create_artifact_store_from_environment
 from .catalog import (
     CatalogClient,
@@ -635,7 +635,7 @@ def main() -> int:
     )
     store = JobStore(
         data_root / "jobs",
-        admission_policy=AdmissionPolicy.from_environment(),
+        admission_policy=QueueAdmissionPolicy.from_environment(configured_deployment_channel()),
     )
     building_task_store = BuildingTaskStore(data_root / "building-tasks.sqlite3")
     if args.command == "build-plan":

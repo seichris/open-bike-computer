@@ -286,16 +286,15 @@ conservative and can be tuned with:
 - `MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR` (default `60` per IP)
 - `MAP_PLATFORM_MAX_REQUEST_BODY_BYTES` (default `2097152` for every non-GET request; large enough for the maximum supported route corridor)
 
-Every accepted map also receives a durable `map-cost-v2` reservation derived
-from its area, geometry complexity, source count, and renderer version. The API
-atomically enforces the per-installation rolling budget and global queued-cost
-ceiling with idempotent creation; workers independently enforce the running-cost
-ceiling before claiming work. Terminal and cancelled jobs release global
-capacity, while their recent cost remains in the installation window. Public
-work cannot consume the operator reserve. Admission-state corruption fails
-closed instead of silently undercounting work.
-Renderer format 4 reserves eight area units, versus four for format 3; stored
-`map-cost-v1` reservations remain valid for jobs accepted before the change.
+The API atomically places valid requests in a durable queue. Development allows
+20 waiting jobs without a per-installation or rolling cost budget. Production
+allows ten public waiting jobs, with two additional operator places, and at
+most two waiting jobs per installation. Each stack starts one build at a time.
+Accepted jobs remain queued while the worker is busy; only new requests are
+rejected when the queue is full. Source and geometry limits, persistent request
+rate limits, idempotent creation, and worker resource gates still apply.
+Historical job records may contain `map-cost-v1` or `map-cost-v2` metadata;
+those fields remain readable but do not affect the queue.
 
 Production Compose requires `MAP_PLATFORM_TRUSTED_PROXY_CIDRS` to contain the
 comma-separated CIDRs of the
@@ -421,17 +420,22 @@ Useful production environment variables:
   source-cache, maintenance, and downloaded-map inventory API routes. If unset,
   those routes are disabled; the normal worker loop and CLI maintenance remain
   available.
-- `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
-  API, default `25`.
-- `MAP_PLATFORM_MAX_QUEUED_COST` and `MAP_PLATFORM_MAX_RUNNING_COST`: global
-  durable cost ceilings, defaults `4000` and `800`.
-- `MAP_PLATFORM_OPERATOR_RESERVED_QUEUED_COST` and
-  `MAP_PLATFORM_OPERATOR_RESERVED_RUNNING_COST`: capacity unavailable to public
-  requests but usable by the local operator create command, defaults `400` and
-  `100`.
-- `MAP_PLATFORM_INSTALLATION_COST_LIMIT` and
-  `MAP_PLATFORM_INSTALLATION_COST_WINDOW_SECONDS`: rolling per-installation
-  cost budget and window, defaults `1200` units per `86400` seconds.
+- `MAP_PLATFORM_MAX_PENDING_JOBS`: maximum waiting jobs. Production defaults to
+  `12` (10 public places plus two reserved for operators). Development defaults
+  to `20` waiting jobs, with no rolling cost budget.
+- `MAP_PLATFORM_MAX_PENDING_PER_INSTALLATION`: maximum waiting public jobs for
+  one installation, default `2` in production and unlimited in development.
+- `MAP_PLATFORM_OPERATOR_RESERVED_PENDING_JOBS`: production waiting places
+  held for operator jobs, default `2`; development defaults to `0`.
+- `MAP_PLATFORM_MAX_RUNNING_JOBS`: jobs a stack may actively build at once,
+  default `1`. Development and production have separate workers and queues.
+  An accepted waiting job reports a one-based estimated `queuePosition` in
+  public job responses. It changes as jobs start, finish, or are cancelled;
+  the worker may skip a yielded job that cannot currently resume.
+  A full queue rejects a *new* request with `map_queue_full` or
+  `installation_queue_full`; it does not fail an accepted job.
+- `MAP_PLATFORM_MAX_ACTIVE_JOBS` and the former cost-budget variables are
+  legacy settings and do not apply to the queue policy.
 - `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts from
   their immutable completion time, default `30`; later downloads and label
   changes do not extend it. Must be between `1` and `3650`.
