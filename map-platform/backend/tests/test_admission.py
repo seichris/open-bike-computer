@@ -157,6 +157,22 @@ class QueueAdmissionTests(unittest.TestCase):
                 })
             self.assertEqual(raised.exception.code, "admission_state_unavailable")
 
+    def test_historical_terminal_record_does_not_block_new_queue_entry(self):
+        policy = QueueAdmissionPolicy(2, 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = JobStore(root, admission_policy=policy)
+            store.save(job("old", cost=100, status=JobStatus.READY))
+            (root / "old.json").write_text("not json")
+            service = MapJobService(SourceIndex([source()]), store)
+            created = service.create_job({
+                "mode": "custom_bbox",
+                "bbox": [103.8, 1.2, 103.9, 1.3],
+                "clientInstallationId": "installation_alpha",
+                "clientRequestId": "request_new_entry",
+            })
+            self.assertEqual(created.status, JobStatus.QUEUED)
+
     def test_historical_cost_metadata_remains_readable(self):
         historical = job("historical", cost=17, status=JobStatus.READY)
         restored = MapJob.from_dict(json.loads(json.dumps(historical.to_dict(include_internal=True))))

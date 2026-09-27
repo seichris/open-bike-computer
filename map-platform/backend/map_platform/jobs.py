@@ -1862,9 +1862,7 @@ class MapJobService:
                         )
                     return existing
             if self.store.admission_policy is not None:
-                jobs = self.store._admission_jobs_unlocked(
-                    installation_id=job.client_installation_id,
-                )
+                jobs = self.store._admission_jobs_unlocked()
                 self.store.admission_policy.validate_create(job, jobs)
                 active_jobs = [existing_job for existing_job in jobs if existing_job.status in ACTIVE_STATUSES]
             else:
