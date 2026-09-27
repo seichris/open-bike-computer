@@ -890,6 +890,10 @@ private struct DownloadingMapsSettingsSection: View {
                 SettingsValueRow(title: "Source", value: sourceSummary)
             }
 
+            if let queueDescription = manager.currentJob?.queueDescription {
+                SettingsValueRow(title: "Queue", value: queueDescription)
+            }
+
             if let preparationEstimatePresentation {
                 SettingsValueRow(
                     title: preparationEstimatePresentation.title,
@@ -1281,6 +1285,8 @@ private struct PendingSavedMapRow: View {
                         .lineLimit(2)
                     Text(manager.hasTerminalMapJobFailure
                         ? "Map preparation ended"
+                        : manager.currentJob?.queueDescription != nil
+                            ? (manager.currentJob?.queueDescription ?? "Waiting in map queue")
                         : manager.downloadProgress >= 1
                             ? "Finishing map on this iPhone"
                             : "Downloading to this iPhone")

@@ -314,6 +314,23 @@ class MapJobRunAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return response.json()["jobId"]
 
+    def test_queued_job_position_updates_when_build_starts(self):
+        first = self.post_map_job()
+        second = self.post_map_job()
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json()["queuePosition"], 1)
+        self.assertEqual(second.json()["queuePosition"], 2)
+
+        self.client.app.state.job_store.claim_next("test-worker")
+        response = self.client.get(
+            f"/v1/map-jobs/{second.json()['jobId']}",
+            params=self.installation_params(self.installation),
+            headers=self.installation_headers(self.installation),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["queuePosition"], 1)
+
     def test_admin_building_plan_alerts_is_authenticated_and_read_only(self):
         task_store = self.client.app.state.building_task_store
         task_store.create_plan(

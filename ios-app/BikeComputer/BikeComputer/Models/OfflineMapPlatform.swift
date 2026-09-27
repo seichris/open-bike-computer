@@ -318,6 +318,7 @@ enum GeoJSONCoordinates: Codable, Equatable {
 struct OfflineMapJob: Decodable, Equatable {
     let jobId: String
     let status: String
+    let queuePosition: Int?
     let createdAt: String?
     let updatedAt: String?
     let error: String?
@@ -344,6 +345,14 @@ struct OfflineMapJob: Decodable, Equatable {
 
     var isTerminal: Bool {
         return ["ready", "failed", "expired", "cancelled"].contains(status)
+    }
+
+    var queueDescription: String? {
+        guard status == "queued" || queuePosition != nil else { return nil }
+        guard let queuePosition, queuePosition > 0 else { return "Waiting in map queue" }
+        if queuePosition == 1 { return "Next in map queue" }
+        let ahead = queuePosition - 1
+        return "\(ahead) map \(ahead == 1 ? "job" : "jobs") ahead of you"
     }
 
     var mayBeLegacyRetryTransition: Bool {
@@ -1303,6 +1312,18 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
                 return "We couldn't build this map. Try again. If it keeps failing, report the problem."
             }
         case .serverStatus(let status, let body):
+            if status == 429,
+               let data = body.data(using: .utf8),
+               let envelope = try? JSONDecoder().decode(OfflineMapAPIErrorEnvelope.self, from: data) {
+                switch envelope.detail.code {
+                case "map_queue_full":
+                    return "The map queue is full. Try again after a map starts."
+                case "installation_queue_full":
+                    return "You already have maps waiting in the queue. Try again after one starts."
+                default:
+                    break
+                }
+            }
             return "Map server returned \(status): \(body)"
         }
     }
