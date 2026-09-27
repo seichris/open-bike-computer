@@ -429,8 +429,9 @@ Useful production environment variables:
   held for operator jobs, default `2`; development defaults to `0`.
 - `MAP_PLATFORM_MAX_RUNNING_JOBS`: jobs a stack may actively build at once,
   default `1`. Development and production have separate workers and queues.
-  An accepted waiting job reports a one-based `queuePosition` in public job
-  responses; the position changes as jobs start, finish, or are cancelled.
+  An accepted waiting job reports a one-based estimated `queuePosition` in
+  public job responses. It changes as jobs start, finish, or are cancelled;
+  the worker may skip a yielded job that cannot currently resume.
   A full queue rejects a *new* request with `map_queue_full` or
   `installation_queue_full`; it does not fail an accepted job.
 - `MAP_PLATFORM_MAX_ACTIVE_JOBS` and the former cost-budget variables are

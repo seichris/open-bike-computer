@@ -962,6 +962,7 @@ struct NavigationProtocolTests {
         await testManagedInstallationMigration()
         testOfflineMapPreparationTimeEstimate()
         testOfflineMapJobProgressDecoding()
+        testOfflineMapQueuePositionPresentation()
         testOfflineMapJobPhaseOnlyProgressDecoding()
         testOfflineMapJobProgressAbsentFallback()
         testOfflineMapProgressPresentation()
@@ -9690,6 +9691,31 @@ struct NavigationProtocolTests {
             buildingProgress.detail,
             "231 of 266 map blocks · 7 of 8 chunks ready · 1 active",
             "aggregate progress explains block and chunk completion"
+        )
+    }
+
+    static func testOfflineMapQueuePositionPresentation() {
+        func decode(_ status: String, position: Int?) -> OfflineMapJob {
+            var payload: [String: Any] = ["jobId": "queue-test", "status": status]
+            if let position { payload["queuePosition"] = position }
+            let data = try! JSONSerialization.data(withJSONObject: payload)
+            return try! JSONDecoder().decode(OfflineMapJob.self, from: data)
+        }
+
+        assertEqual(
+            decode("queued", position: 2).queueDescription,
+            "Estimated queue position: 2",
+            "queue position is presented as an estimate"
+        )
+        assertEqual(
+            decode("queued", position: nil).queueDescription,
+            "Waiting in map queue",
+            "older servers still show the waiting state"
+        )
+        assertEqual(
+            decode("converting_features", position: 1).queueDescription,
+            "Estimated queue position: 1",
+            "yielded work can rejoin the waiting queue"
         )
     }
 

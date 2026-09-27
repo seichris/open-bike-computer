@@ -1497,7 +1497,11 @@ class JobStore:
             return None
 
     def queue_position(self, job_id: str) -> int | None:
-        """Return a one-based waiting position from durable scheduler state."""
+        """Estimate a one-based position among durable waiting jobs.
+
+        A yielded parent can be temporarily ineligible for worker resources,
+        so the next actual claim may skip ahead of this waiting order.
+        """
         with self._queue_lock():
             jobs = self._admission_jobs_unlocked()
             waiting = [job for job in jobs if is_waiting(job)]

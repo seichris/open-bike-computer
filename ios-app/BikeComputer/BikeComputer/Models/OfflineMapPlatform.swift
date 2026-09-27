@@ -350,9 +350,7 @@ struct OfflineMapJob: Decodable, Equatable {
     var queueDescription: String? {
         guard status == "queued" || queuePosition != nil else { return nil }
         guard let queuePosition, queuePosition > 0 else { return "Waiting in map queue" }
-        if queuePosition == 1 { return "Next in map queue" }
-        let ahead = queuePosition - 1
-        return "\(ahead) map \(ahead == 1 ? "job" : "jobs") ahead of you"
+        return "Estimated queue position: \(queuePosition)"
     }
 
     var mayBeLegacyRetryTransition: Bool {
