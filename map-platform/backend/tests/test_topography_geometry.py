@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +27,7 @@ from map_platform.topography_companion import (
 )
 from map_platform.topography_geometry import compile_contours
 from map_platform.topography_pack import assemble_topographic_pack
+from map_platform.topography_pipeline import canonical_bytes as topography_canonical_bytes
 from map_platform.map_artifact_validation import validate_fmb5
 from map_platform.map_signing import P256MapArtifactSigner
 from map_platform.map_stream import write_map_stream_artifact
@@ -216,10 +218,35 @@ class TopographyGeometryTests(unittest.TestCase):
             producer_build_sha256="a" * 64, producer_image_digest="sha256:" + "b" * 64,
             topography_builder=lambda *_args, **_kwargs: (receipt, output / receipt["companion"]["filename"]),
         )
+        input_body = {
+            "schemaVersion": 1, "sourcePolicySha256": receipt["sourcePolicySha256"],
+            "processingGrid": {"policy": "test"}, "gridSize": [2, 2],
+            "qualityMode": receipt["qualityMode"], "inputs": receipt["inputs"],
+            "algorithm": "test", "runtime": {"rasterio": "test"},
+            "topographyProfileVersion": 1,
+        }
+        job._topography_reuse_identity = {
+            **input_body,
+            "identitySha256": hashlib.sha256(topography_canonical_bytes(input_body)).hexdigest(),
+        }
+        job.build_cache_key = "c" * 64
+        job.build_compatibility_key = "d" * 64
         packaged = pipeline._package_map(job, device, self.root / "pipeline.zip", validate_final_artifact=True)
         self.assertEqual({artifact.format for artifact in packaged.artifacts},
                          {"zip-stored-v1", "bike-map-stream-v1", "topography-ios-v1"})
         self.assertTrue(packaged.artifact_metrics["finalArtifactValidation"]["zipReceiptValidated"])
+        candidate = deepcopy(job)
+        candidate.status = JobStatus.READY
+        candidate.pack_path = str(packaged.legacy_archive_path)
+        candidate.artifacts = packaged.artifacts
+        requesting = deepcopy(job)
+        with patch("map_platform.pipeline.stable_map_id", return_value="test-map"):
+            self.assertTrue(pipeline.validate_exact_reuse_candidate(requesting, candidate))
+            # A retained immutable artifact remains reusable after local ZIP cleanup.
+            packaged.legacy_archive_path.unlink()
+            self.assertTrue(pipeline.validate_exact_reuse_candidate(requesting, candidate))
+            requesting._topography_reuse_identity["qualityMode"] = "coarse-50m-v1"
+            self.assertFalse(pipeline.validate_exact_reuse_candidate(requesting, candidate))
 
     def companion(self, path):
         compiled = compile_contours(self.sample, self.selection)

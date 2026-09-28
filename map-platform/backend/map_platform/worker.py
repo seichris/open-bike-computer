@@ -15,6 +15,8 @@ from .jobs import (
     JobStore,
 )
 from .models import JobStatus, MapJob
+from .map_labels import renderer_format_version
+from .topography_artifacts import TOPOGRAPHY_RENDERER_FORMAT_VERSION
 from .monitoring import MapMonitoringStore, build_map_job_monitoring_event
 from .pipeline import (
     BuildingChunkSchedulingYield,
@@ -394,7 +396,10 @@ class MapWorker:
                                 outcome_class="full_build",
                                 force=True,
                             )
-                        if not self.pipeline.uses_chunked_preprocessing(job):
+                        if (
+                            not self.pipeline.uses_chunked_preprocessing(job)
+                            and renderer_format_version(job.request) != TOPOGRAPHY_RENDERER_FORMAT_VERSION
+                        ):
                             for parent in self.store.find_subset_reuse_candidates(
                                 job,
                                 build_compatibility_key=reuse_keys.compatibility,

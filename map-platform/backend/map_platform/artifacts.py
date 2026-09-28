@@ -4,6 +4,7 @@ import base64
 import hashlib
 import os
 import re
+import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -311,6 +312,22 @@ class FileSystemArtifactStore:
             and sha256_file(path) == sha256
         )
 
+    def fetch_to(self, object_key: str, destination: Path, *, sha256: str, expected_bytes: int) -> None:
+        source = self.local_path(object_key)
+        if source is None or not self.verify(object_key, sha256=sha256, expected_bytes=expected_bytes):
+            raise ArtifactStoreError("immutable artifact is missing or corrupt")
+        if destination.exists():
+            raise ArtifactStoreError("artifact materialization destination already exists")
+        try:
+            with source.open("rb") as input_file, destination.open("xb") as output_file:
+                shutil.copyfileobj(input_file, output_file, 1024 * 1024)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            _verify_file(destination, sha256, expected_bytes)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+
     def absent(self, object_key: str) -> bool:
         return self.local_path(object_key) is None
 
@@ -450,6 +467,39 @@ class S3ArtifactStore:
             return False
         return True
 
+    def fetch_to(self, object_key: str, destination: Path, *, sha256: str, expected_bytes: int) -> None:
+        _validate_object_key(object_key)
+        if destination.exists() or not self.verify(object_key, sha256=sha256, expected_bytes=expected_bytes):
+            raise ArtifactStoreError("immutable artifact is missing or destination exists")
+        if type(expected_bytes) is not int or not 0 < expected_bytes <= MAXIMUM_ARTIFACT_BYTES:
+            raise ValueError("artifact materialization size is invalid")
+        response = None
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=self._key(object_key))
+            body = response["Body"]
+            digest, copied = hashlib.sha256(), 0
+            with destination.open("xb") as output_file:
+                while chunk := body.read(min(1024 * 1024, expected_bytes - copied + 1)):
+                    copied += len(chunk)
+                    if copied > expected_bytes:
+                        raise ArtifactStoreError("immutable artifact exceeds its receipt")
+                    digest.update(chunk)
+                    output_file.write(chunk)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            if copied != expected_bytes or digest.hexdigest() != sha256:
+                raise ArtifactStoreError("immutable artifact bytes differ from its receipt")
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            if isinstance(exc, ArtifactStoreError):
+                raise
+            raise ArtifactStoreError(f"failed to materialize artifact: {exc}") from exc
+        finally:
+            if response is not None:
+                close = getattr(response.get("Body"), "close", None)
+                if close is not None:
+                    close()
+
     def absent(self, object_key: str) -> bool:
         _validate_object_key(object_key)
         return self._head(self._key(object_key)) is None
@@ -578,6 +628,11 @@ class MirroredArtifactStore:
             sha256=sha256,
             expected_bytes=expected_bytes,
         )
+
+    def fetch_to(self, object_key: str, destination: Path, *, sha256: str, expected_bytes: int) -> None:
+        if not self.verify(object_key, sha256=sha256, expected_bytes=expected_bytes):
+            raise ArtifactStoreError("immutable mirrored artifact is missing or corrupt")
+        self.primary.fetch_to(object_key, destination, sha256=sha256, expected_bytes=expected_bytes)
 
     def absent(self, object_key: str) -> bool:
         return self.primary.absent(object_key) and self.mirror.absent(object_key)
