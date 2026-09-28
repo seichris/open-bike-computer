@@ -580,8 +580,9 @@ Useful production environment variables:
   one `osmium extract` multi-output scan, verifies each shard and publishes
   the complete generation atomically. After an equivalent-output and disk
   comparison, set `MAP_PLATFORM_SOURCE_SHARD_MODE=prepared-only` on the worker
-  alongside the exact prepared-source SHA allowlist. Missing coverage or a
-  corrupt shard fails closed. This regional path does not yet avoid the
+  alongside the exact prepared-source SHA allowlist. Extraction for standard
+  and topo maps from that snapshot then reads the verified local shards.
+  Missing coverage or a corrupt shard fails closed. This regional path does not yet avoid the
   source-cache validation of the original PBF or establish a planet generation;
   global capacity, incremental publication and cross-region seams remain
   separate gates.

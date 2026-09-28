@@ -2056,6 +2056,7 @@ class MapBuildPipeline:
             cached_source = self._cached_source_for_job(job)
             source_pbf = cached_source.path
             source_snapshot_sha256 = cached_source.sha256
+            extraction_source_sha256 = source_snapshot_sha256
             calibration_generation_execution: dict[str, Any] = {}
             (
                 _,
@@ -2131,7 +2132,13 @@ class MapBuildPipeline:
             scope_diagnostics["identity"] = building_identity
             scope_diagnostics["blockCacheIdentity"] = block_cache_identity
         else:
-            source_pbf = self._source_pbf_path(job)
+            if self.source_shard_mode == "prepared-only":
+                cached_source = self._cached_source_for_job(job)
+                source_pbf = cached_source.path
+                extraction_source_sha256 = cached_source.sha256
+            else:
+                source_pbf = self._source_pbf_path(job)
+                extraction_source_sha256 = None
             source_snapshot_sha256 = None
             building_identity = None
             calibration_generation = None
@@ -2214,6 +2221,8 @@ class MapBuildPipeline:
                 if selected_scope:
                     extract_kwargs["scope_plan"] = scope_plan
                     extract_kwargs["source_snapshot_sha256"] = source_snapshot_sha256
+                elif extraction_source_sha256 is not None:
+                    extract_kwargs["source_snapshot_sha256"] = extraction_source_sha256
                 if cancellation_check is not None:
                     extract_kwargs["cancellation_check"] = cancellation_check
                 source_extraction_metrics = self._extract_pbf(
@@ -2224,6 +2233,8 @@ class MapBuildPipeline:
                 )
             else:
                 extract_kwargs = {"bounds": source_bounds}
+                if extraction_source_sha256 is not None:
+                    extract_kwargs["source_snapshot_sha256"] = extraction_source_sha256
                 if cancellation_check is not None:
                     extract_kwargs["cancellation_check"] = cancellation_check
                 source_extraction_metrics = self._extract_pbf(
@@ -6721,13 +6732,17 @@ class MapBuildPipeline:
             else []
         )
         source_shards: tuple[Path, ...] = ()
-        if (scope_plan is not None and source_snapshot_sha256 is not None
+        if (source_snapshot_sha256 is not None
                 and self.source_shard_mode == "prepared-only"
                 and self._prepared_source_required(source_snapshot_sha256)):
-            shard_rectangles = tuple(
-                (x_to_lon(rectangle[0]), y_to_lat(rectangle[1]),
-                 x_to_lon(rectangle[2]), y_to_lat(rectangle[3]))
-                for rectangle in scope_plan.document["sourceScope"]["rectanglesMeters"]
+            shard_rectangles = (
+                tuple(
+                    (x_to_lon(rectangle[0]), y_to_lat(rectangle[1]),
+                     x_to_lon(rectangle[2]), y_to_lat(rectangle[3]))
+                    for rectangle in scope_plan.document["sourceScope"]["rectanglesMeters"]
+                ) if scope_plan is not None else (
+                    (bounds.min_lon, bounds.min_lat, bounds.max_lon, bounds.max_lat),
+                )
             )
             try:
                 source_shards = select_shards(
@@ -6888,19 +6903,19 @@ class MapBuildPipeline:
             merge_command_metrics = self._last_command_execution_metrics()
             if merge_command_metrics:
                 extraction_metrics["mergeCommand"] = merge_command_metrics
-        if scope_plan is not None:
-            if source_shards:
-                try:
-                    if source_shards != select_shards(
-                        self.paths.building_cache_root, source_snapshot_sha256, shard_rectangles,
-                    ):
-                        raise ValueError("source shard selection changed")
-                except (OSError, TypeError, ValueError) as exc:
-                    clipped_pbf.unlink(missing_ok=True)
-                    raise BuildingScopeError(
-                        "building_source_shards_unavailable", "prepared source shards changed during extraction",
-                    ) from exc
-            elif sha256_file(source_pbf) != source_snapshot_sha256:
+        if source_shards:
+            try:
+                if source_shards != select_shards(
+                    self.paths.building_cache_root, source_snapshot_sha256, shard_rectangles,
+                ):
+                    raise ValueError("source shard selection changed")
+            except (OSError, TypeError, ValueError) as exc:
+                clipped_pbf.unlink(missing_ok=True)
+                raise BuildingScopeError(
+                    "building_source_shards_unavailable", "prepared source shards changed during extraction",
+                ) from exc
+        elif scope_plan is not None:
+            if sha256_file(source_pbf) != source_snapshot_sha256:
                 clipped_pbf.unlink(missing_ok=True)
                 raise BuildingScopeError(
                     "building_source_snapshot_changed",

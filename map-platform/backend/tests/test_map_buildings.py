@@ -2343,6 +2343,37 @@ class MapBuildingContractTests(unittest.TestCase):
             self.assertNotIn(str(root / "country.osm.pbf"), runner.calls[0][0])
             self.assertEqual(clipped.read_bytes(), b"clipped")
 
+    def test_prepared_source_shards_are_available_to_standard_extraction(self):
+        class MaterializingRunner(RecordingRunner):
+            def run(self, args, *, cwd=None):
+                super().run(args, cwd=cwd)
+                Path(args[args.index("-o") + 1]).write_bytes(b"clipped")
+                return ""
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS": "a" * 64,
+            "MAP_PLATFORM_SOURCE_SHARD_MODE": "prepared-only",
+        }):
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(self._request())
+            shard = root / "prepared-shard.osm.pbf"
+            shard.write_bytes(b"shard")
+            clipped = root / "clipped.osm.pbf"
+            runner = MaterializingRunner()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"), runner=runner,
+            )
+            with patch("map_platform.pipeline.select_shards", return_value=(shard,)) as select, \
+                    patch("map_platform.pipeline.sha256_file", side_effect=AssertionError("country hash")):
+                pipeline._extract_pbf(
+                    job, root / "country.osm.pbf", clipped,
+                    source_snapshot_sha256="a" * 64,
+                )
+            self.assertEqual(select.call_count, 2)
+            self.assertIn(str(shard), runner.calls[0][0])
+            self.assertNotIn(str(root / "country.osm.pbf"), runner.calls[0][0])
+            self.assertEqual(clipped.read_bytes(), b"clipped")
+
     @unittest.skipUnless(shutil.which("osmium"), "osmium is required")
     def test_selected_multi_rectangle_extract_runs_with_real_osmium(self):
         request = self._request()
