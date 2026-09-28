@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from xml.etree import ElementTree
 
-from map_platform.source_shards import prepare_shards, select_shards
+from map_platform.source_shards import NoShardCoverageError, prepare_shards, select_shards
 
 
 @unittest.skipUnless(shutil.which("osmium"), "osmium CLI is required")
@@ -54,7 +54,7 @@ class SourceShardTests(unittest.TestCase):
                         for obj in tree]
 
             self.assertEqual(objects(from_shards), objects(direct))
-            with self.assertRaisesRegex(ValueError, "no ready"):
+            with self.assertRaisesRegex(NoShardCoverageError, "no ready"):
                 select_shards(cache, sha, [(2.1, 0.1, 2.2, 0.2)])
             shards[0].write_bytes(b"corrupt")
             with self.assertRaisesRegex(ValueError, "differs"):

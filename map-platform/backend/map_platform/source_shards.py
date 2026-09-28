@@ -29,6 +29,10 @@ MAX_REQUEST_BYTES = 8 * 1024 * 1024 * 1024
 MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024
 
 
+class NoShardCoverageError(ValueError):
+    """No sealed generation covers this request; the source PBF may be used."""
+
+
 def _canonical(value: dict) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                       allow_nan=False).encode("utf-8")
@@ -212,7 +216,7 @@ def select_shards(cache_root: Path, source_sha256: str,
                 raise ValueError("source shard differs from its sealed manifest")
             paths.append(shard)
         return tuple(paths)
-    raise ValueError("no ready source shard generation covers this map")
+    raise NoShardCoverageError("no ready source shard generation covers this map")
 
 
 def main() -> None:
