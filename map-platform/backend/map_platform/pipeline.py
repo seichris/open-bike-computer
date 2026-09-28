@@ -72,6 +72,7 @@ from .topography_artifacts import (
 from .topography_cache import ElevationCache
 from .preparation_objects import create_preparation_store_from_environment
 from .prepared_source_catalog import PreparedSourceCatalog, source_index_location
+from .source_shards import select_shards
 from .topography_companion import validate_companion
 from .topography_geometry import compile_contours
 from .topography_pack import assemble_topographic_pack
@@ -1044,6 +1045,7 @@ _BUILDING_FAILURE_CODES = {
     "building_block_cache_unavailable",
     "building_chunks_incomplete",
     "building_source_snapshot_changed",
+    "building_source_shards_unavailable",
     "building_scope_policy_invalid",
     "building_workload_receipt_mismatch",
     "building_resource_admission",
@@ -1069,6 +1071,7 @@ _BUILDING_FAILURE_MESSAGES = {
     "building_block_cache_unavailable": "selected building block cache is unavailable",
     "building_chunks_incomplete": "selected building chunks are incomplete",
     "building_source_snapshot_changed": "selected building source snapshot changed",
+    "building_source_shards_unavailable": "prepared source shards do not cover this map",
     "building_scope_policy_invalid": "selected building scope policy is invalid",
     "building_workload_receipt_mismatch": (
         "selected building workload receipt does not match the source closure"
@@ -1772,6 +1775,11 @@ class MapBuildPipeline:
         )
         if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in self.prepared_source_snapshots):
             raise ValueError("invalid prepared source snapshot allowlist")
+        self.source_shard_mode = os.environ.get(
+            "MAP_PLATFORM_SOURCE_SHARD_MODE", "disabled"
+        ).strip().lower()
+        if self.source_shard_mode not in {"disabled", "prepared-only"}:
+            raise ValueError("invalid source shard mode")
         if deployment_channel not in {"development", "production"}:
             raise ValueError("invalid map pipeline deployment channel")
         self.deployment_channel = deployment_channel
@@ -6712,10 +6720,40 @@ class MapBuildPipeline:
             if renderer_has_buildings(renderer_format_version(job.request))
             else []
         )
+        source_shards: tuple[Path, ...] = ()
+        if (scope_plan is not None and source_snapshot_sha256 is not None
+                and self.source_shard_mode == "prepared-only"
+                and self._prepared_source_required(source_snapshot_sha256)):
+            shard_rectangles = tuple(
+                (x_to_lon(rectangle[0]), y_to_lat(rectangle[1]),
+                 x_to_lon(rectangle[2]), y_to_lat(rectangle[3]))
+                for rectangle in scope_plan.document["sourceScope"]["rectanglesMeters"]
+            )
+            try:
+                source_shards = select_shards(
+                    self.paths.building_cache_root, source_snapshot_sha256, shard_rectangles,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise BuildingScopeError(
+                    "building_source_shards_unavailable", "prepared source shards are unavailable",
+                ) from exc
+            extraction_metrics["sourceShardCount"] = len(source_shards)
+            extraction_metrics["sourceShardBytes"] = sum(path.stat().st_size for path in source_shards)
+            if len(source_shards) == 1:
+                source_pbf = source_shards[0]
+            else:
+                merged_source = clipped_pbf.parent / "selected-source-shards.osm.pbf"
+                self._run_command(
+                    ["osmium", "merge", *(str(path) for path in source_shards),
+                     "-o", str(merged_source), "--overwrite"],
+                    policy=GENERIC_EXTRACTION_COMMAND_POLICY,
+                    cancellation_check=cancellation_check,
+                )
+                source_pbf = merged_source
         if scope_plan is not None:
             if source_snapshot_sha256 is None:
                 raise ValueError("plan-aware extraction requires a source identity")
-            if sha256_file(source_pbf) != source_snapshot_sha256:
+            if not source_shards and sha256_file(source_pbf) != source_snapshot_sha256:
                 raise BuildingScopeError(
                     "building_source_snapshot_changed",
                     "source snapshot changed before selected-area extraction",
@@ -6851,7 +6889,18 @@ class MapBuildPipeline:
             if merge_command_metrics:
                 extraction_metrics["mergeCommand"] = merge_command_metrics
         if scope_plan is not None:
-            if sha256_file(source_pbf) != source_snapshot_sha256:
+            if source_shards:
+                try:
+                    if source_shards != select_shards(
+                        self.paths.building_cache_root, source_snapshot_sha256, shard_rectangles,
+                    ):
+                        raise ValueError("source shard selection changed")
+                except (OSError, TypeError, ValueError) as exc:
+                    clipped_pbf.unlink(missing_ok=True)
+                    raise BuildingScopeError(
+                        "building_source_shards_unavailable", "prepared source shards changed during extraction",
+                    ) from exc
+            elif sha256_file(source_pbf) != source_snapshot_sha256:
                 clipped_pbf.unlink(missing_ok=True)
                 raise BuildingScopeError(
                     "building_source_snapshot_changed",

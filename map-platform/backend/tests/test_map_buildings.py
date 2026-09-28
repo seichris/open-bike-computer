@@ -2305,6 +2305,44 @@ class MapBuildingContractTests(unittest.TestCase):
             self.assertEqual(runner.calls[2][0][:2], ["osmium", "merge"])
             self.assertEqual((root / "clipped.pbf").read_bytes(), b"merged")
 
+    def test_prepared_source_extract_reads_only_selected_shards(self):
+        class MaterializingRunner(RecordingRunner):
+            def run(self, args, *, cwd=None):
+                super().run(args, cwd=cwd)
+                if "-o" in args:
+                    Path(args[args.index("-o") + 1]).write_bytes(b"clipped")
+                return ""
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS": "a" * 64,
+            "MAP_PLATFORM_SOURCE_SHARD_MODE": "prepared-only",
+        }):
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(self._request())
+            plan = plan_building_scope(
+                job, calibration_cell_size_meters=8192,
+                calibration_halo_cells=1, calibration_minimum_samples=3,
+            )
+            shard = root / "prepared-shard.osm.pbf"
+            shard.write_bytes(b"shard")
+            clipped = root / "clipped.osm.pbf"
+            runner = MaterializingRunner()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"), runner=runner,
+            )
+            with patch("map_platform.pipeline.select_shards", return_value=(shard,)) as select, \
+                    patch("map_platform.pipeline.sha256_file", side_effect=AssertionError("country hash")):
+                metrics = pipeline._extract_pbf(
+                    job, root / "country.osm.pbf", clipped, scope_plan=plan,
+                    source_snapshot_sha256="a" * 64,
+                )
+            self.assertEqual(select.call_count, 2)
+            self.assertEqual(metrics["sourceShardCount"], 1)
+            self.assertEqual(metrics["sourceShardBytes"], 5)
+            self.assertIn(str(shard), runner.calls[0][0])
+            self.assertNotIn(str(root / "country.osm.pbf"), runner.calls[0][0])
+            self.assertEqual(clipped.read_bytes(), b"clipped")
+
     @unittest.skipUnless(shutil.which("osmium"), "osmium is required")
     def test_selected_multi_rectangle_extract_runs_with_real_osmium(self):
         request = self._request()

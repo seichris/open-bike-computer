@@ -561,9 +561,30 @@ Useful production environment variables:
   validation and regional output comparison have passed. This path reuses
   one complete regional snapshot. For selected ready snapshots, building
   closure is exported from the verified index and merged with the clipped PBF
-  without `osmium getid` over the country source. `osmium extract` still reads
-  that source per new geometry; planet sharding and cross-region seam
-  qualification remain separate work.
+  without `osmium getid` over the country source. To avoid the initial country
+  `osmium extract` for a measured region, prepare a complete one-degree grid
+  from the same pinned PBF before enabling the separate shard gate:
+
+  ```sh
+  python -m map_platform.source_shards \
+    --source-pbf /path/to/pinned-source.osm.pbf \
+    --source-sha256 EXACT_64_HEX_SHA256 \
+    --cache-root /data/building-cache \
+    --west INTEGER --south INTEGER --east INTEGER --north INTEGER
+  ```
+
+  The bounds are integer longitude/latitude edges, with east and north
+  exclusive; choose a grid that covers the full source rectangles of pilot
+  jobs, including their building buffer. One generation is capped at 256
+  cells and one request at 64 cells or 8 GiB of shard input. Preparation runs
+  one `osmium extract` multi-output scan, verifies each shard and publishes
+  the complete generation atomically. After an equivalent-output and disk
+  comparison, set `MAP_PLATFORM_SOURCE_SHARD_MODE=prepared-only` on the worker
+  alongside the exact prepared-source SHA allowlist. Missing coverage or a
+  corrupt shard fails closed. This regional path does not yet avoid the
+  source-cache validation of the original PBF or establish a planet generation;
+  global capacity, incremental publication and cross-region seams remain
+  separate gates.
 - `MAP_PLATFORM_S3_API_ACCESS_KEY_ID`,
   `MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY`, and optional
   `MAP_PLATFORM_S3_API_SESSION_TOKEN`: separate short-lived API credentials
