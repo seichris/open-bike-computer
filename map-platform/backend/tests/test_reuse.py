@@ -31,6 +31,7 @@ from map_platform.reuse import (
     required_blocks,
     reuse_keys,
 )
+from map_platform.topography_pipeline import canonical_bytes as topography_canonical_bytes
 from map_platform import reuse as reuse_module
 from map_platform.sources import SourceIndex
 from map_platform.worker import MapWorker
@@ -126,6 +127,38 @@ class MapReuseTests(unittest.TestCase):
                 "internationalFallback": "en",
             },
         }
+
+    def test_topography_exact_key_requires_verified_dem_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MapJobService(SourceIndex([self.source]), JobStore(tmp))
+            job = service.create_job({"mode": "custom_bbox", "bbox": [103.70, 1.20, 104.00, 1.50]})
+            job.request = self._renderer_request(4)
+            base = {
+                "schemaVersion": 1, "sourcePolicySha256": "a" * 64,
+                "processingGrid": {"policy": "test"}, "gridSize": [100, 100],
+                "qualityMode": "standard-20m-v1",
+                "inputs": [{"sourceId": "dem", "sha256": "b" * 64, "bytes": 100}],
+                "algorithm": "test", "runtime": {"rasterio": "test"},
+                "topographyProfileVersion": 1,
+            }
+            def sealed(value):
+                return {**value, "identitySha256": hashlib.sha256(topography_canonical_bytes(value)).hexdigest()}
+            self.assertIsNone(reuse_keys(job, producer_build_sha256=PRODUCER_BUILD,
+                                          producer_image_digest=PRODUCER_IMAGE))
+            first = reuse_keys(job, producer_build_sha256=PRODUCER_BUILD,
+                               producer_image_digest=PRODUCER_IMAGE,
+                               topography_input_identity=sealed(base))
+            self.assertIsNotNone(first)
+            changed = {**base, "inputs": [{"sourceId": "dem", "sha256": "c" * 64, "bytes": 100}]}
+            second = reuse_keys(job, producer_build_sha256=PRODUCER_BUILD,
+                                producer_image_digest=PRODUCER_IMAGE,
+                                topography_input_identity=sealed(changed))
+            self.assertNotEqual(first, second)
+            forged = sealed(base)
+            forged["inputs"][0]["bytes"] = 101
+            self.assertIsNone(reuse_keys(job, producer_build_sha256=PRODUCER_BUILD,
+                                          producer_image_digest=PRODUCER_IMAGE,
+                                          topography_input_identity=forged))
 
     def test_exact_key_ignores_ownership_but_not_geometry_or_pack_name(self):
         with tempfile.TemporaryDirectory() as tmp:

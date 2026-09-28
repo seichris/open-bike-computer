@@ -19,6 +19,7 @@ from map_platform.topography_sources import (
 )
 from map_platform.generation_profiles import GenerationProfilePolicy
 from map_platform.topography_pipeline import canonical_bytes, canonical_line, contour_sample, extract_contours
+from map_platform.topography_reuse import sample_matches_input_identity, topography_input_identity, valid_input_identity
 from map_platform.topography_grid import contour_grid, processing_region, region_resolution
 from map_platform.topography_cli import main as cli_main
 
@@ -352,8 +353,11 @@ class TopographyPipelineTests(unittest.TestCase):
 
     def test_real_raster_reprojection_and_contours_are_byte_identical(self):
         bounds = [6.2, 0.2, 6.25, 0.25]
+        preflight = topography_input_identity(self.policy, self.cache, bounds)
+        self.assertTrue(valid_input_identity(preflight))
         first = contour_sample(self.policy, self.cache, bounds)
         second = contour_sample(self.policy, self.cache, bounds)
+        self.assertTrue(sample_matches_input_identity(first, preflight))
         self.assertEqual(canonical_bytes(first), canonical_bytes(second))
         self.assertTrue(first["contours"])
         self.assertFalse(first["productionEligible"])

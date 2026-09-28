@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import io
 import sys
 import tempfile
 import unittest
@@ -64,6 +65,13 @@ class FakeS3Client:
         }
         self.put_calls += 1
 
+    def get_object(self, *, Bucket, Key):
+        try:
+            body = self.objects[(Bucket, Key)]["body"]
+        except KeyError as exc:
+            raise FakeS3Error(404, "NoSuchKey") from exc
+        return {"Body": io.BytesIO(body)}
+
     def generate_presigned_url(self, method, *, Params, ExpiresIn, HttpMethod):
         return f"https://objects.invalid/{Params['Key']}?expires={ExpiresIn}&method={method}&http={HttpMethod}"
 
@@ -73,6 +81,25 @@ class FakeS3Client:
 
 
 class ArtifactStoreTests(unittest.TestCase):
+    def test_s3_materialization_rehashes_downloaded_bytes(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.bin"
+            source.write_bytes(b"immutable map bytes")
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            client = FakeS3Client()
+            store = S3ArtifactStore(client, "test-bucket", prefix="test")
+            store.put(source, "maps/test.bin", sha256=digest, media_type="application/octet-stream")
+            destination = root / "copy.bin"
+            store.fetch_to("maps/test.bin", destination, sha256=digest, expected_bytes=source.stat().st_size)
+            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            destination.unlink()
+            client.objects[("test-bucket", "test/maps/test.bin")]["body"] = b"corrupt map content"
+            with self.assertRaises(ArtifactStoreError):
+                store.fetch_to("maps/test.bin", destination, sha256=digest, expected_bytes=source.stat().st_size)
+            self.assertFalse(destination.exists())
+
     def test_installed_boto3_model_supports_conditional_checksum_put(self):
         try:
             import boto3

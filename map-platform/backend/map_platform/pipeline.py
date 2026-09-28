@@ -9,6 +9,7 @@ import os
 import re
 import select
 import signal
+import sqlite3
 import shutil
 import subprocess
 import sys
@@ -62,15 +63,18 @@ from .map_buildings import (
     load_building_calibration_window,
 )
 from .topography_artifacts import (
+    TOPOGRAPHY_PROFILE_VERSION,
     TOPOGRAPHY_RENDERER_FORMAT_VERSION,
     renderer_has_buildings,
     renderer_has_labels,
     vector_renderer_format_version,
 )
 from .topography_cache import ElevationCache
+from .topography_companion import validate_companion
 from .topography_geometry import compile_contours
 from .topography_pack import assemble_topographic_pack
-from .topography_pipeline import contour_sample
+from .topography_pipeline import canonical_bytes as topography_canonical_bytes, contour_sample
+from .topography_reuse import sample_matches_input_identity, topography_input_identity, valid_input_identity
 from .topography_sources import load_topography_source_policy
 from .building_scope import (
     BuildingScopeError,
@@ -2082,6 +2086,7 @@ class MapBuildPipeline:
                     producer_image_digest=self.producer_image_digest,
                     source_snapshot_sha256=source_snapshot_sha256,
                     building_preprocessing_identity=building_identity,
+                    topography_input_identity=getattr(job, "_topography_reuse_identity", None),
                 )
                 if (
                     expected_build_keys is None
@@ -4944,10 +4949,7 @@ class MapBuildPipeline:
         on_phase_progress=None,
         cancellation_check=None,
     ) -> MapReuseKeys | None:
-        format_version = renderer_format_version(job.request)
-        if format_version == TOPOGRAPHY_RENDERER_FORMAT_VERSION:
-            return None
-        selected_target_three = self.uses_selected_preprocessing(job)
+        selected_buildings = self.uses_selected_preprocessing(job)
         producer_identity_available = bool(
             re.fullmatch(r"[0-9a-f]{64}", self.producer_build_sha256 or "")
             and re.fullmatch(
@@ -4955,12 +4957,12 @@ class MapBuildPipeline:
                 self.producer_image_digest or "",
             )
         )
-        if not selected_target_three and not producer_identity_available:
+        if not selected_buildings and not producer_identity_available:
             return None
         self._resolve_source_preview_geometry(job)
         source_snapshot_sha256 = job.source_region.checksum
         resolved_source = None
-        if selected_target_three:
+        if selected_buildings:
             self._emit_phase_progress(
                 on_phase_progress,
                 unit="source_cache_wait",
@@ -4999,7 +5001,7 @@ class MapBuildPipeline:
             )
             source_snapshot_sha256 = resolved_source.sha256
         building_identity = None
-        if selected_target_three:
+        if selected_buildings:
             keys = self._reuse_keys_for_cached_source(
                 job,
                 resolved_source,
@@ -5014,7 +5016,26 @@ class MapBuildPipeline:
             source_snapshot_sha256=source_snapshot_sha256,
             building_preprocessing_identity=building_identity,
             preview_sha256=self._freeze_preview_identity(job),
+            topography_input_identity=self._prepare_topography_reuse_identity(job, cancellation_check),
         )
+
+    def _prepare_topography_reuse_identity(self, job: MapJob, cancellation_check=None) -> dict[str, Any] | None:
+        if renderer_format_version(job.request) != TOPOGRAPHY_RENDERER_FORMAT_VERSION:
+            return None
+        policy = load_topography_source_policy(self.paths.repo_root)
+        if self.deployment_channel == "production" and not all(
+            source.production_approved for source in policy.sources
+        ):
+            raise ValueError("production topography sources have not been approved")
+
+        def cancel() -> None:
+            if cancellation_check is not None and cancellation_check():
+                raise CommandExecutionCancelled("topography input preparation was cancelled")
+
+        cache = ElevationCache(self.paths.work_root.parent / "topography-cache", cancellation_check=cancel)
+        identity = topography_input_identity(policy, cache, job.geometry.bounds.to_list())
+        job._topography_reuse_identity = identity
+        return identity
 
     def _reuse_keys_for_cached_source(
         self,
@@ -5122,6 +5143,7 @@ class MapBuildPipeline:
             source_snapshot_sha256=source_snapshot_sha256,
             building_preprocessing_identity=building_identity,
             preview_sha256=self._freeze_preview_identity(job),
+            topography_input_identity=self._prepare_topography_reuse_identity(job, cancellation_check),
         )
 
     @contextmanager
@@ -5202,6 +5224,7 @@ class MapBuildPipeline:
         ):
             return False
         original_map_id = job.map_id
+        original_candidate_pack_path = candidate.pack_path
         job.map_id = stable_map_id(job)
         try:
             reuse_root = self.paths.work_root / job.job_id / "exact-reuse"
@@ -5210,6 +5233,27 @@ class MapBuildPipeline:
                 prefix="exact-reuse-validation-",
                 dir=reuse_root,
             ) as temporary:
+                archive_record = next((artifact for artifact in candidate.artifacts if artifact.format == ZIP_STORED_FORMAT), None)
+                if archive_record is not None and archive_record.bytes > MAX_FINAL_ASSEMBLY_ARCHIVE_BYTES:
+                    return False
+                archive_path = Path(candidate.pack_path) if candidate.pack_path else None
+                if archive_path is not None and archive_path.is_file() and archive_record is not None:
+                    if archive_path.stat().st_size != archive_record.bytes or sha256_file(archive_path) != archive_record.sha256:
+                        archive_path = None
+                elif archive_path is not None and not archive_path.is_file():
+                    archive_path = None
+                if archive_path is None:
+                    if self.artifact_store is None or archive_record is None:
+                        return False
+                    archive_path = Path(temporary) / "candidate.zip"
+                    self.artifact_store.fetch_to(archive_record.object_key, archive_path,
+                                                 sha256=archive_record.sha256,
+                                                 expected_bytes=archive_record.bytes)
+                candidate.pack_path = str(archive_path)
+                if renderer_format_version(job.request) == TOPOGRAPHY_RENDERER_FORMAT_VERSION:
+                    return self._validate_topography_exact_candidate(
+                        job, candidate, archive_path, Path(temporary)
+                    )
                 pack_root = Path(temporary) / "pack"
                 manifest = self._stage_subset_pack(job, candidate, pack_root)
                 expected_build_identity = build_identity_manifest(
@@ -5228,10 +5272,75 @@ class MapBuildPipeline:
                         return False
                 build_manifest(job, pack_root, self._pipeline_metadata())
             return True
-        except (OSError, RuntimeError, SubsetReuseUnavailable, ValueError):
+        except (OSError, RuntimeError, SubsetReuseUnavailable, ValueError,
+                KeyError, TypeError, zipfile.BadZipFile, sqlite3.DatabaseError):
             return False
         finally:
             job.map_id = original_map_id
+            candidate.pack_path = original_candidate_pack_path
+
+    def _validate_topography_exact_candidate(
+        self, job: MapJob, candidate: MapJob, archive_path: Path, temporary: Path
+    ) -> bool:
+        inputs = getattr(job, "_topography_reuse_identity", None)
+        if not valid_input_identity(inputs) or self.artifact_store is None:
+            return False
+        archives = [value for value in candidate.artifacts if value.format == ZIP_STORED_FORMAT]
+        companions = [value for value in candidate.artifacts if value.format == TOPOGRAPHY_COMPANION_FORMAT]
+        if len(archives) != 1 or len(companions) != 1:
+            return False
+        validate_final_assembly_artifact(archive_path, archives)
+        with zipfile.ZipFile(archive_path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+        identity = manifest.get("buildIdentity")
+        topography = manifest.get("topography")
+        if (
+            manifest.get("mapId") != job.map_id
+            or manifest.get("target", {}).get("formatVersion") != TOPOGRAPHY_RENDERER_FORMAT_VERSION
+            or not isinstance(identity, dict)
+            or identity.get("exactKey") != job.build_cache_key
+            or identity.get("compatibilityKey") != job.build_compatibility_key
+            or not isinstance(topography, dict)
+            or topography.get("profileVersion") != TOPOGRAPHY_PROFILE_VERSION
+            or topography.get("sourcePolicySha256") != inputs["sourcePolicySha256"]
+            or topography.get("qualityMode") != inputs["qualityMode"]
+        ):
+            return False
+        source_receipts = {
+            entry.get("id"): entry.get("datasetReceiptSha256")
+            for entry in topography.get("sources", [])
+            if isinstance(entry, dict)
+        }
+        if not source_receipts:
+            return False
+        for source_id, expected in source_receipts.items():
+            receipts = sorted(
+                (entry for entry in inputs["inputs"] if entry.get("sourceId") == source_id),
+                key=lambda entry: (entry.get("cell"), entry.get("sha256")),
+            )
+            if not receipts or hashlib.sha256(topography_canonical_bytes(receipts)).hexdigest() != expected:
+                return False
+        companion = companions[0]
+        if (
+            companion.map_content_receipt != archives[0].manifest_receipt
+            or companion.intermediate_sha256 != topography.get("intermediateSha256")
+            or companion.source_policy_sha256 != inputs["sourcePolicySha256"]
+            or companion.attribution_sha256 != topography.get("attributionSha256")
+        ):
+            return False
+        companion_path = temporary / companion.filename
+        self.artifact_store.fetch_to(companion.object_key, companion_path,
+                                     sha256=companion.sha256,
+                                     expected_bytes=companion.bytes)
+        metadata = validate_companion(
+            companion_path,
+            expected_map_id=job.map_id,
+            expected_intermediate=companion.intermediate_sha256,
+        )
+        return (
+            metadata["sourcePolicySha256"] == inputs["sourcePolicySha256"]
+            and metadata["attributionSha256"] == topography["attributionSha256"]
+        )
 
     def _derived_candidate_base_keys(
         self,
@@ -5666,6 +5775,9 @@ class MapBuildPipeline:
             job.geometry.bounds.to_list(),
             maximum_tiles=256,
         )
+        reserved_inputs = getattr(job, "_topography_reuse_identity", None)
+        if reserved_inputs is not None and not sample_matches_input_identity(sample, reserved_inputs):
+            raise RuntimeError("topography inputs changed after build identity reservation")
         compiled = compile_contours(
             sample,
             self._topography_selection(job),
@@ -5750,6 +5862,12 @@ class MapBuildPipeline:
                 job_dir,
                 cancellation_check=cancellation_check,
             )
+            reserved_inputs = getattr(job, "_topography_reuse_identity", None)
+            if reserved_inputs is not None and not all(
+                topography_receipt.get(field) == reserved_inputs.get(field)
+                for field in ("sourcePolicySha256", "qualityMode", "inputs")
+            ):
+                raise RuntimeError("topography pair changed after build identity reservation")
             metrics["topographyGenerationSeconds"] = (
                 time.perf_counter() - topography_started
             )
@@ -8186,7 +8304,10 @@ def run_job(
                             outcome_class="full_build",
                             force=True,
                         )
-                    if not pipeline.uses_chunked_preprocessing(job):
+                    if (
+                        not pipeline.uses_chunked_preprocessing(job)
+                        and renderer_format_version(job.request) != TOPOGRAPHY_RENDERER_FORMAT_VERSION
+                    ):
                         for parent in store.find_subset_reuse_candidates(
                             job,
                             build_compatibility_key=reuse_identity.compatibility,

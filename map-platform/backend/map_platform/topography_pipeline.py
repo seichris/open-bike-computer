@@ -21,6 +21,7 @@ from .topography_sources import TopographySourcePolicy, plan_elevation
 MAX_GRID_PIXELS = 16_000_000
 MAX_CONTOUR_POINTS = 4_000_000
 MAX_CONTOUR_RECORDS = 40_000
+CONTOUR_ALGORITHM = "masked-fixed-region-halo-serial-contours-mm-v2"
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -155,7 +156,7 @@ def contour_sample(policy: TopographySourcePolicy, cache: ElevationCache,
         "gridResolutionM": resolution, "gridSize": [width, height],
         "noDataMillionths": round(missing * 1_000_000 / mosaic.size),
         "minorIntervalM": minor, "indexIntervalM": index, "sourcePixels": dict(sorted(source_pixels.items())),
-        "inputs": receipts, "algorithm": "masked-fixed-region-halo-serial-contours-mm-v2",
+        "inputs": receipts, "algorithm": CONTOUR_ALGORITHM,
         "sources": [{"sourceId": source.id, "datasetRelease": source.dataset_release,
                      "termsUrl": source.terms_url, "attributionUrl": source.attribution_url,
                      "accessReviewedAt": source.access_reviewed_at}

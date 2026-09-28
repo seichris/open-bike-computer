@@ -1056,8 +1056,10 @@ class JobStore:
                     or build_cache_key in job.build_cache_aliases
                 )
                 and job.map_id
-                and job.pack_path
-                and Path(job.pack_path).is_file()
+                and (
+                    (job.pack_path and Path(job.pack_path).is_file())
+                    or any(artifact.format == "zip-stored-v1" for artifact in job.artifacts)
+                )
             ]
             return max(candidates, key=lambda value: value.created_at) if candidates else None
 
@@ -1110,8 +1112,10 @@ class JobStore:
                 )
                 or source.build_compatibility_key != build_compatibility_key
                 or not source.map_id
-                or not source.pack_path
-                or not Path(source.pack_path).is_file()
+                or not (
+                    (source.pack_path and Path(source.pack_path).is_file())
+                    or any(artifact.format == "zip-stored-v1" for artifact in source.artifacts)
+                )
             ):
                 return None
             immediate_source_metrics = deepcopy(source.artifact_metrics or {})
@@ -1176,7 +1180,7 @@ class JobStore:
                 job_id,
                 JobStatus.READY,
                 map_id=source.map_id,
-                pack_path=source.pack_path,
+                pack_path=(source.pack_path if source.pack_path and Path(source.pack_path).is_file() else None),
                 pack_bytes=source.pack_bytes,
                 artifacts=source.artifacts,
                 artifact_metrics=artifact_metrics,
