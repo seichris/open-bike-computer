@@ -511,6 +511,24 @@ Useful production environment variables:
   `metadata-only`. Prove the selected R2 mode with
   `tools/check_r2_compatibility.py` before rollout; prefer SHA-256 and use MD5
   only when the endpoint rejects SDK SHA-256 checksum headers.
+- `MAP_PLATFORM_PREPARATION_STORE=contabo-s3` enables a separate worker-only
+  Contabo object cache for pinned topography indexes and DEM tiles. Configure
+  `MAP_PLATFORM_PREPARATION_S3_ENDPOINT_URL`,
+  `MAP_PLATFORM_PREPARATION_S3_BUCKET`,
+  `MAP_PLATFORM_PREPARATION_S3_ACCESS_KEY_ID`, and
+  `MAP_PLATFORM_PREPARATION_S3_SECRET_ACCESS_KEY` with a dedicated Contabo user
+  restricted to the preparation bucket by bucket policy. The worker writes
+  below the `map-preparation-v1` prefix. The default is `disabled`; final map
+  artifacts remain in their existing store. Run the isolated compatibility check below
+  against the selected Contabo bucket before enabling the worker. It writes and
+  deletes only random disposable objects. Both local and restored tiles are
+  rehashed against immutable receipts before use. OSM source shards are a
+  separate later rollout and are not claimed by this setting.
+
+  ```sh
+  MAP_PLATFORM_PREPARATION_SPIKE_CONFIRM=delete-disposable-object \
+    python tools/check_contabo_preparation_compatibility.py
+  ```
 - `MAP_PLATFORM_S3_API_ACCESS_KEY_ID`,
   `MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY`, and optional
   `MAP_PLATFORM_S3_API_SESSION_TOKEN`: separate short-lived API credentials

@@ -15,6 +15,7 @@ from typing import Callable
 
 from .strict_json import loads_strict_json
 from .topography_sources import ElevationSource, SHA256, parse_tile_index
+from .preparation_objects import PreparationObjectStore
 
 MAX_TILE_BYTES = 128 * 1024 * 1024
 MIN_FREE_BYTES = 256 * 1024 * 1024
@@ -52,10 +53,12 @@ class _SourceRedirects(urllib.request.HTTPRedirectHandler):
 
 
 class ElevationCache:
-    def __init__(self, root: Path, *, opener=None, cancellation_check=lambda: None):
+    def __init__(self, root: Path, *, opener=None, cancellation_check=lambda: None,
+                 remote: PreparationObjectStore | None = None):
         self.root = root
         self.opener = opener
         self.cancel = cancellation_check
+        self.remote = remote
         root.mkdir(parents=True, exist_ok=True)
         for name in ("indexes", "blobs", "receipts", "locks"):
             (root / name).mkdir(exist_ok=True)
@@ -121,16 +124,49 @@ class ElevationCache:
         target = self.root / "indexes" / (source.index_sha256 + ".txt")
         with self._lock(source.index_sha256):
             if not target.exists():
+                if shutil.disk_usage(self.root).free < source.index_bytes + MIN_FREE_BYTES:
+                    raise ValueError("insufficient elevation staging space")
                 with tempfile.TemporaryDirectory(prefix="index-", dir=self.root) as tmp:
                     staged = Path(tmp) / "index.txt"
-                    self._download(source, source.index_url, source.index_bytes, staged,
-                                   source.index_sha256, source.index_bytes)
+                    restored = self.remote is not None and self.remote.restore_blob(
+                        "dem-index", staged, sha256=source.index_sha256,
+                        expected_bytes=source.index_bytes,
+                    )
+                    if not restored:
+                        self._download(source, source.index_url, source.index_bytes, staged,
+                                       source.index_sha256, source.index_bytes)
                     parse_tile_index(source, staged.read_bytes())
                     os.replace(staged, target)
                     _sync_directory(target.parent)
             if target.is_symlink() or target.stat().st_size != source.index_bytes:
                 raise ValueError("invalid cached elevation index")
-            return parse_tile_index(source, target.read_bytes())
+            index = parse_tile_index(source, target.read_bytes())
+            if self.remote is not None:
+                self.remote.publish_blob("dem-index", target,
+                                         sha256=source.index_sha256, media_type="text/plain")
+            return index
+
+    @staticmethod
+    def _validate_receipt(receipt: dict, source: ElevationSource,
+                          cell: tuple[int, int], url: str) -> None:
+        if not isinstance(receipt, dict) or set(receipt) != {"sourceId", "indexSha256", "url", "bytes", "sha256", "cell"}:
+            raise ValueError("invalid elevation receipt fields")
+        if (receipt["sourceId"] != source.id or receipt["indexSha256"] != source.index_sha256
+                or receipt["url"] != url or receipt["cell"] != list(cell)
+                or not isinstance(receipt["cell"], list)
+                or any(type(value) is not int for value in receipt["cell"])):
+            raise ValueError("elevation receipt has different source authority")
+        if (type(receipt["bytes"]) is not int or not 0 < receipt["bytes"] <= MAX_TILE_BYTES
+                or not isinstance(receipt["sha256"], str)
+                or SHA256.fullmatch(receipt["sha256"]) is None):
+            raise ValueError("invalid elevation receipt content identity")
+
+    def _publish_remote_receipt(self, key: str, receipt: dict, path: Path) -> None:
+        if self.remote is None:
+            return
+        self.remote.publish_blob("dem-tile", path, sha256=receipt["sha256"],
+                                 media_type="image/tiff")
+        self.remote.publish_document("dem-receipt", key, receipt)
 
     def stage(self, source: ElevationSource, cell: tuple[int, int]) -> dict:
         if cell not in self.index(source):
@@ -143,15 +179,29 @@ class ElevationCache:
                 if receipt_path.is_symlink() or receipt_path.stat().st_size > 4096:
                     raise ValueError("invalid elevation receipt")
                 receipt = loads_strict_json(receipt_path.read_bytes(), description="elevation receipt")
-                if not isinstance(receipt, dict) or set(receipt) != {"sourceId", "indexSha256", "url", "bytes", "sha256", "cell"}:
-                    raise ValueError("invalid elevation receipt fields")
-                if (receipt["sourceId"] != source.id or receipt["indexSha256"] != source.index_sha256
-                        or receipt["url"] != url or receipt["cell"] != list(cell)
-                        or not isinstance(receipt["cell"], list)
-                        or any(type(value) is not int for value in receipt["cell"])):
-                    raise ValueError("elevation receipt has different source authority")
-                self.verify(receipt)
+                self._validate_receipt(receipt, source, cell, url)
+                path = self.verify(receipt)
+                self._publish_remote_receipt(key, receipt, path)
                 return receipt
+            if self.remote is not None:
+                receipt = self.remote.read_document("dem-receipt", key)
+                if receipt is not None:
+                    self._validate_receipt(receipt, source, cell, url)
+                    target = self.root / "blobs" / (receipt["sha256"] + ".tif")
+                    if not target.exists() and shutil.disk_usage(self.root).free < receipt["bytes"] + MIN_FREE_BYTES:
+                        raise ValueError("insufficient elevation staging space")
+                    if not target.exists() and not self.remote.restore_blob(
+                        "dem-tile", target, sha256=receipt["sha256"],
+                        expected_bytes=receipt["bytes"],
+                    ):
+                        raise ValueError("remote elevation receipt has no verified tile")
+                    self.verify(receipt)
+                    with tempfile.TemporaryDirectory(prefix="receipt-", dir=self.root) as tmp:
+                        staged_receipt = Path(tmp) / "receipt.json"
+                        staged_receipt.write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+                        os.replace(staged_receipt, receipt_path)
+                    _sync_directory(receipt_path.parent)
+                    return receipt
             with tempfile.TemporaryDirectory(prefix="tile-", dir=self.root) as tmp:
                 staged = Path(tmp) / "tile.tif"
                 size, digest = self._download(source, url, MAX_TILE_BYTES, staged)
@@ -167,6 +217,7 @@ class ElevationCache:
                     _sync_directory(target.parent)
                 receipt = {"sourceId": source.id, "indexSha256": source.index_sha256,
                            "url": url, "bytes": size, "sha256": digest, "cell": list(cell)}
+                self._publish_remote_receipt(key, receipt, target)
                 staged_receipt = Path(tmp) / "receipt.json"
                 with staged_receipt.open("x") as output:
                     json.dump(receipt, output, sort_keys=True, separators=(",", ":"))

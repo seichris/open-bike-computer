@@ -20,6 +20,8 @@ from map_platform.topography_sources import (
 from map_platform.generation_profiles import GenerationProfilePolicy
 from map_platform.topography_pipeline import canonical_bytes, canonical_line, contour_sample, extract_contours
 from map_platform.topography_reuse import sample_matches_input_identity, topography_input_identity, valid_input_identity
+from map_platform.preparation_objects import PreparationObjectStore
+from tests.test_artifacts import FakeS3Client
 from map_platform.topography_grid import contour_grid, processing_region, region_resolution
 from map_platform.topography_cli import main as cli_main
 
@@ -168,6 +170,28 @@ class TopographyCacheTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             self.cache.stage(self.source, (6, 0))
         self.assertEqual(len(self.urls), 2)
+
+    def test_contabo_cache_restores_verified_tile_without_origin_request(self):
+        client = FakeS3Client()
+        remote = PreparationObjectStore(client, "preparation-test")
+        first = ElevationCache(Path(self.tmp.name) / "first", opener=self.open, remote=remote)
+        receipt = first.stage(self.source, (6, 0))
+        self.assertEqual(len(self.urls), 2)
+        second = ElevationCache(
+            Path(self.tmp.name) / "second", remote=remote,
+            opener=lambda *_args, **_kwargs: self.fail("origin request on warm remote cache"),
+        )
+        self.assertEqual(second.stage(self.source, (6, 0)), receipt)
+        self.assertEqual(second.verify(receipt).read_bytes(), self.body)
+        self.assertEqual(len(self.urls), 2)
+
+        # The receipt may remain valid while the remote object is damaged.
+        third = ElevationCache(Path(self.tmp.name) / "third", remote=remote,
+                               opener=lambda *_args, **_kwargs: self.fail("origin request after corruption"))
+        tile_key = f"map-preparation-v1/dem-tile/blobs/{receipt['sha256']}"
+        client.objects[("preparation-test", tile_key)]["body"] = b"X" * len(self.body)
+        with self.assertRaisesRegex(Exception, "receipt|content|artifact"):
+            third.stage(self.source, (6, 0))
 
     def test_corrupt_index_does_not_replace_or_publish(self):
         self.index = b"bad"

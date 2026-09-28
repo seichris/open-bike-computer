@@ -70,6 +70,7 @@ from .topography_artifacts import (
     vector_renderer_format_version,
 )
 from .topography_cache import ElevationCache
+from .preparation_objects import create_preparation_store_from_environment
 from .topography_companion import validate_companion
 from .topography_geometry import compile_contours
 from .topography_pack import assemble_topographic_pack
@@ -1738,6 +1739,7 @@ class MapBuildPipeline:
         building_block_workers: int = 4,
         building_task_store: BuildingTaskStore | None = None,
         topography_builder: Callable[..., tuple[dict[str, Any], Path]] | None = None,
+        preparation_store=None,
         deployment_channel: str = "development",
     ):
         self.paths = paths
@@ -1750,6 +1752,10 @@ class MapBuildPipeline:
         self.source_preview_geometry_resolver = source_preview_geometry_resolver
         self.building_task_store = building_task_store
         self.topography_builder = topography_builder
+        self.preparation_store = (
+            preparation_store if preparation_store is not None
+            else create_preparation_store_from_environment()
+        )
         if deployment_channel not in {"development", "production"}:
             raise ValueError("invalid map pipeline deployment channel")
         self.deployment_channel = deployment_channel
@@ -5032,7 +5038,8 @@ class MapBuildPipeline:
             if cancellation_check is not None and cancellation_check():
                 raise CommandExecutionCancelled("topography input preparation was cancelled")
 
-        cache = ElevationCache(self.paths.work_root.parent / "topography-cache", cancellation_check=cancel)
+        cache = ElevationCache(self.paths.work_root.parent / "topography-cache", cancellation_check=cancel,
+                               remote=self.preparation_store)
         identity = topography_input_identity(policy, cache, job.geometry.bounds.to_list())
         job._topography_reuse_identity = identity
         return identity
@@ -5768,6 +5775,7 @@ class MapBuildPipeline:
         cache = ElevationCache(
             self.paths.work_root.parent / "topography-cache",
             cancellation_check=cancel,
+            remote=self.preparation_store,
         )
         sample = contour_sample(
             policy,
