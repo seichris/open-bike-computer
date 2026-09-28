@@ -60,6 +60,13 @@ class BuildingSourceScannerTests(unittest.TestCase):
                 self.assertEqual(precompute(self.source, sha, rules_path, cache_root), first)
             index = BuildingSourceIndex(cache_root, sha)
             self.assertEqual(index.validate_ready()["manifestSha256"], first["sourceIndexManifestSha256"])
+            index_command = [
+                sys.executable, str(ROOT / "scripts" / "build_building_source_index.py"),
+                "--source-sha256", sha, "--cache-root", str(cache_root), "--require-ready",
+            ]
+            ready_index = subprocess.run(index_command, capture_output=True, text=True)
+            self.assertEqual(ready_index.returncode, 0, ready_index.stderr)
+            self.assertIn('BUILDING_SOURCE_INDEX_STATS:', ready_index.stdout)
 
     def test_ready_only_source_index_rejects_missing_cache_without_scanning(self):
         sha = hashlib.sha256(self.source.read_bytes()).hexdigest()
@@ -96,7 +103,9 @@ class BuildingSourceScannerTests(unittest.TestCase):
             self.assertEqual(missing.returncode, 2)
             self.assertIn("complete calibration generation is not ready", missing.stderr)
             precompute(self.source, sha, ROOT / "conf" / "building_height_rules.yaml", root / "cache")
-            ready = subprocess.run(command, capture_output=True, text=True)
+            no_source_command = command[:]
+            no_source_command[2:4] = []
+            ready = subprocess.run(no_source_command, capture_output=True, text=True)
             self.assertEqual(ready.returncode, 0, ready.stderr)
             self.assertIn('"cellsHits":9', ready.stdout)
 

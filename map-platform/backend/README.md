@@ -532,8 +532,11 @@ Useful production environment variables:
 - Prepared OSM source snapshots use the same worker-only Contabo store. Run the
   offline preparer against one **pinned, checksum-verified** source PBF on a host
   with measured scratch capacity and the intended shared cache root. It builds
-  and validates the complete source index and calibration generation before
-  publishing chunked immutable files to Contabo:
+  and validates the complete source index and calibration generation. On the
+  existing VPS, omit `--publish-contabo` to use its local `/data/building-cache`
+  without purchasing Object Storage. Add the flag only after a separate
+  preparation bucket is configured; it publishes chunked immutable files for
+  cross-host restore:
 
   ```sh
   python tools/OSM_Extract/scripts/precompute_building_source.py \
@@ -544,7 +547,9 @@ Useful production environment variables:
     --publish-contabo
   ```
 
-  The existing source/calibration readers validate restored artifacts before
+  The ready-only index and calibration readers do not reread the source PBF;
+  they bind the requested source SHA-256 to the sealed cache manifests. The
+  existing source/calibration readers validate restored artifacts before
   use. Set `MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS` to comma-separated exact
   PBF SHA-256 values to require ready preparation for those snapshots only;
   a missing or corrupt generation fails closed without starting a full-source

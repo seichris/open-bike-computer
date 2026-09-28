@@ -301,22 +301,23 @@ def main() -> None:
             lock_timeout_seconds=args.lock_timeout_seconds
         )
         return
-    if args.source_pbf is None:
-        parser.error("--source-pbf is required unless --cleanup-unpublished is used")
+    if args.source_pbf is None and not args.require_ready:
+        parser.error("--source-pbf is required unless --require-ready or --cleanup-unpublished is used")
     print(
         'BUILDING_PREPROCESS_PROGRESS:{"completed":0,"indeterminate":true,"unit":"source_index"}',
         flush=True,
     )
-    try:
-        source_before = file_sha256(args.source_pbf)
-    except OSError as exc:
-        raise BuildingSourceIndexError(
-            "building_source_snapshot_changed", "source snapshot is unavailable"
-        ) from exc
-    if source_before != args.source_sha256:
-        raise BuildingSourceIndexError(
-            "building_source_snapshot_changed", "source changed before indexing"
-        )
+    if not args.require_ready:
+        try:
+            source_before = file_sha256(args.source_pbf)
+        except OSError as exc:
+            raise BuildingSourceIndexError(
+                "building_source_snapshot_changed", "source snapshot is unavailable"
+            ) from exc
+        if source_before != args.source_sha256:
+            raise BuildingSourceIndexError(
+                "building_source_snapshot_changed", "source changed before indexing"
+            )
     def scanner(spool_path):
         scan_source(args.source_pbf, spool_path)
         if file_sha256(args.source_pbf) != args.source_sha256:
@@ -328,7 +329,7 @@ def main() -> None:
         index.validate_ready() if args.require_ready
         else index.build_with_scanner(scanner)
     )
-    if file_sha256(args.source_pbf) != args.source_sha256:
+    if not args.require_ready and file_sha256(args.source_pbf) != args.source_sha256:
         raise BuildingSourceIndexError(
             "building_source_snapshot_changed",
             "source changed before source-index result publication",

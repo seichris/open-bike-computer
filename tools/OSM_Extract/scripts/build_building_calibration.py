@@ -288,7 +288,7 @@ def scan_full_pbf(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source-pbf", type=Path, required=True)
+    parser.add_argument("--source-pbf", type=Path)
     parser.add_argument("--source-sha256", required=True)
     parser.add_argument("--rules", type=Path, required=True)
     parser.add_argument("--scope-plan", type=Path, required=True)
@@ -303,22 +303,29 @@ def main() -> None:
     parser.add_argument("--require-ready", action="store_true",
                         help="read an existing complete generation; never scan the source")
     args = parser.parse_args()
+    if args.require_ready and not args.full_precompute:
+        parser.error("--require-ready requires --full-precompute")
+    if args.source_pbf is None and not args.require_ready:
+        parser.error("--source-pbf is required unless --require-ready is used")
     print(
         'BUILDING_PREPROCESS_PROGRESS:{"completed":0,"indeterminate":true,"unit":"calibration_cells"}',
         flush=True,
     )
 
-    try:
-        source_before = file_sha256(args.source_pbf)
-    except OSError as exc:
-        raise CalibrationCacheError(
-            "building_source_snapshot_changed", "source PBF is unavailable"
-        ) from exc
-    if source_before != args.source_sha256:
-        raise CalibrationCacheError(
-            "building_source_snapshot_changed",
-            "source PBF identity changed before calibration",
-        )
+    if args.require_ready:
+        source_before = args.source_sha256
+    else:
+        try:
+            source_before = file_sha256(args.source_pbf)
+        except OSError as exc:
+            raise CalibrationCacheError(
+                "building_source_snapshot_changed", "source PBF is unavailable"
+            ) from exc
+        if source_before != args.source_sha256:
+            raise CalibrationCacheError(
+                "building_source_snapshot_changed",
+                "source PBF identity changed before calibration",
+            )
     try:
         scope = load_scope(args.scope_plan)
     except (OSError, TypeError, ValueError) as exc:
@@ -381,8 +388,6 @@ def main() -> None:
             )
         return samples, rejections, scan_metrics
 
-    if args.require_ready and not args.full_precompute:
-        parser.error("--require-ready requires --full-precompute")
     if args.full_precompute:
         def scan_complete_snapshot():
             domain, samples, rejections, scan_metrics = scan_full_pbf(
@@ -422,7 +427,7 @@ def main() -> None:
             required_cells,
             populate,
         )
-    if file_sha256(args.source_pbf) != source_before:
+    if not args.require_ready and file_sha256(args.source_pbf) != source_before:
         raise CalibrationCacheError(
             "building_source_snapshot_changed",
             "source PBF identity changed before calibration result publication",
