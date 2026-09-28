@@ -89,6 +89,19 @@ recovery policy. The API service never receives the private key.
 
 ## Developer-device validation
 
+For an owner's USB-flashed bike computer that should behave like production
+firmware but install maps from Bicino Dev, build the matching
+`WAVESHARE_AMOLED_175_PERSONAL` or `WAVESHARE_AMOLED_206_PERSONAL` profile with
+`esp32/tools/build_firmware.py`. These profiles inherit production runtime
+settings and the production partition layout. They add the checked-in
+development map public key to the production trust registry; they do not accept
+arbitrary or unsigned maps. `BUILD_PROFILE` identifies the personal image
+separately from a production release. The factory and release workflows select
+only the exact `*_PRODUCTION` profiles, and a later official OTA image replaces
+the personal trust set with the trust set compiled into that OTA image. Flashing
+this profile still requires the normal per-device identity and explicit
+pre-flash approval in `AGENTS.md`.
+
 Use `allowlist` mode for the registered installation IDs of the test iPhones:
 
 ```text
