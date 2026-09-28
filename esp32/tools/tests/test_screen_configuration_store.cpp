@@ -10,6 +10,10 @@ int main(int argc, char **argv) {
   assert(initialize(mapRenderSettings));
   Document document = activeSnapshot().document;
   document.instances[0].mapProfile.visibilityMask &= ~(1UL << 8);
+  document.instances[0].mapProfile.visibilityMask |=
+      map_profile_protocol::VISIBILITY_CONTOURS;
+  document.instances[2].mapProfile.visibilityMask |=
+      map_profile_protocol::VISIBILITY_CONTOURS;
   auto duplicate = document.instances[2];
   duplicate.id = 0x80000001;
   duplicate.mapProfile.zoomLevel = 5;
@@ -22,6 +26,12 @@ int main(int argc, char **argv) {
   std::array<uint8_t, MAX_DOCUMENT_BYTES> bytes{};
   auto length = encodeDocument(document, bytes.data(), bytes.size());
   assert(commit(1, activeSnapshot().revision, bytes.data(), length).published);
+  MapRenderSettings projected = mapRenderSettings;
+  projectDocument(activeSnapshot().document, projected);
+  assert((projected.mapStyle.visibilityMask &
+          map_profile_protocol::VISIBILITY_CONTOURS) != 0);
+  assert((projected.mapNavigationStyle.visibilityMask &
+          map_profile_protocol::VISIBILITY_CONTOURS) != 0);
 
   // This is the render-time projection installed while viewing duplicate Map.
   mapRenderSettings.mapStyle.zoomLevel = 5;

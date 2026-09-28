@@ -97,7 +97,7 @@ void applyProfile(const MapProfile &source, ScreenMapRenderSettings &target) {
   target.zoomLevel = source.zoomLevel;
   target.visibilityMask =
       source.visibilityMask &
-      map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK;
+      map_profile_protocol::VISIBILITY_RENDER_FEATURE_MASK;
   target.labelDensity = source.labelDensity;
   target.labelLanguageMode = source.labelLanguageMode;
   target.labelTextSize = source.labelTextSize;

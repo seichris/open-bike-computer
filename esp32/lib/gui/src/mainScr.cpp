@@ -611,7 +611,8 @@ static void applyMapInstanceProfile(
   target.positionMarkerScale = source.positionMarkerScale;
   target.zoomLevel = source.zoomLevel;
   target.visibilityMask =
-      source.visibilityMask & MAP_VISIBILITY_EXTENDED_FEATURE_MASK;
+      source.visibilityMask &
+      map_profile_protocol::VISIBILITY_RENDER_FEATURE_MASK;
   target.labelDensity = source.labelDensity;
   target.labelLanguageMode = source.labelLanguageMode;
   target.labelTextSize = source.labelTextSize;
