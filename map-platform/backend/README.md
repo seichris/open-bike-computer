@@ -511,6 +511,82 @@ Useful production environment variables:
   `metadata-only`. Prove the selected R2 mode with
   `tools/check_r2_compatibility.py` before rollout; prefer SHA-256 and use MD5
   only when the endpoint rejects SDK SHA-256 checksum headers.
+- `MAP_PLATFORM_PREPARATION_STORE=contabo-s3` enables a separate worker-only
+  Contabo object cache for pinned topography indexes and DEM tiles. Configure
+  `MAP_PLATFORM_PREPARATION_S3_ENDPOINT_URL`,
+  `MAP_PLATFORM_PREPARATION_S3_BUCKET`,
+  `MAP_PLATFORM_PREPARATION_S3_ACCESS_KEY_ID`, and
+  `MAP_PLATFORM_PREPARATION_S3_SECRET_ACCESS_KEY` with a dedicated Contabo user
+  restricted to the preparation bucket by bucket policy. The worker writes
+  below the `map-preparation-v1` prefix. The default is `disabled`; final map
+  artifacts remain in their existing store. Run the isolated compatibility check below
+  against the selected Contabo bucket before enabling the worker. It writes and
+  deletes only random disposable objects. Both local and restored tiles are
+  rehashed against immutable receipts before use. OSM source shards are a
+  separate later rollout and are not claimed by this setting.
+
+  ```sh
+  MAP_PLATFORM_PREPARATION_SPIKE_CONFIRM=delete-disposable-object \
+    python tools/check_contabo_preparation_compatibility.py
+  ```
+- Prepared OSM source snapshots use the same worker-only Contabo store. Run the
+  offline preparer against one **pinned, checksum-verified** source PBF on a host
+  with measured scratch capacity and the intended shared cache root. It builds
+  and validates the complete source index and calibration generation. On the
+  existing VPS, omit `--publish-contabo` to use its local `/data/building-cache`
+  without purchasing Object Storage. Add the flag only after a separate
+  preparation bucket is configured; it publishes chunked immutable files for
+  cross-host restore:
+
+  ```sh
+  python tools/OSM_Extract/scripts/precompute_building_source.py \
+    --source-pbf /path/to/pinned-source.osm.pbf \
+    --source-sha256 EXACT_64_HEX_SHA256 \
+    --rules tools/OSM_Extract/conf/building_height_rules.yaml \
+    --cache-root /data/building-cache \
+    --publish-contabo
+  ```
+
+  The ready-only index and calibration readers do not reread the source PBF;
+  they bind the requested source SHA-256 to the sealed cache manifests. The
+  existing source/calibration readers validate restored artifacts before
+  use. Set `MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS` to comma-separated exact
+  PBF SHA-256 values to require ready preparation for those snapshots only;
+  a missing or corrupt generation fails closed without starting a full-source
+  scan in a user job. `MAP_PLATFORM_SOURCE_PREPARATION_MODE=prepared-only`
+  applies the rule to every snapshot; its default is `demand`. The restore
+  admission limit is `MAP_PLATFORM_SOURCE_PREPARATION_MAX_RESTORE_BYTES`
+  (default 64 GiB per file) plus a 2 GiB free-space reserve. Do not enable a
+  snapshot until its cold restore, source-index validation, calibration
+  validation and regional output comparison have passed. This path reuses
+  one complete regional snapshot. For selected ready snapshots, building
+  closure is exported from the verified index and merged with the clipped PBF
+  without `osmium getid` over the country source. To avoid the initial country
+  `osmium extract` for a measured region, prepare a complete one-degree grid
+  from the same pinned PBF before enabling the separate shard gate:
+
+  ```sh
+  python -m map_platform.source_shards \
+    --source-pbf /path/to/pinned-source.osm.pbf \
+    --source-sha256 EXACT_64_HEX_SHA256 \
+    --cache-root /data/building-cache \
+    --west INTEGER --south INTEGER --east INTEGER --north INTEGER
+  ```
+
+  The bounds are integer longitude/latitude edges, with east and north
+  exclusive; choose a grid that covers the full source rectangles of pilot
+  jobs, including their building buffer. One generation is capped at 256
+  cells and one request at 64 cells or 8 GiB of shard input. Preparation runs
+  one `osmium extract` multi-output scan, verifies each shard and publishes
+  the complete generation atomically. After an equivalent-output and disk
+  comparison, set `MAP_PLATFORM_SOURCE_SHARD_MODE=prepared-only` on the worker
+  alongside the exact prepared-source SHA allowlist. Extraction for standard
+  and topo maps from that snapshot then reads the verified local shards.
+  Missing coverage or a corrupt shard fails closed. This regional path does not yet avoid the
+  source-cache validation of the original PBF or establish a planet generation;
+  global capacity, incremental publication and cross-region seams remain
+  separate gates. Preparation and request assembly retain at least 16 GiB
+  of free local disk in addition to their estimated shard input.
 - `MAP_PLATFORM_S3_API_ACCESS_KEY_ID`,
   `MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY`, and optional
   `MAP_PLATFORM_S3_API_SESSION_TOKEN`: separate short-lived API credentials

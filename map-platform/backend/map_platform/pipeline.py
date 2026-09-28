@@ -70,6 +70,9 @@ from .topography_artifacts import (
     vector_renderer_format_version,
 )
 from .topography_cache import ElevationCache
+from .preparation_objects import create_preparation_store_from_environment
+from .prepared_source_catalog import PreparedSourceCatalog, source_index_location
+from .source_shards import select_shards
 from .topography_companion import validate_companion
 from .topography_geometry import compile_contours
 from .topography_pack import assemble_topographic_pack
@@ -1042,6 +1045,7 @@ _BUILDING_FAILURE_CODES = {
     "building_block_cache_unavailable",
     "building_chunks_incomplete",
     "building_source_snapshot_changed",
+    "building_source_shards_unavailable",
     "building_scope_policy_invalid",
     "building_workload_receipt_mismatch",
     "building_resource_admission",
@@ -1067,6 +1071,7 @@ _BUILDING_FAILURE_MESSAGES = {
     "building_block_cache_unavailable": "selected building block cache is unavailable",
     "building_chunks_incomplete": "selected building chunks are incomplete",
     "building_source_snapshot_changed": "selected building source snapshot changed",
+    "building_source_shards_unavailable": "prepared source shards do not cover this map",
     "building_scope_policy_invalid": "selected building scope policy is invalid",
     "building_workload_receipt_mismatch": (
         "selected building workload receipt does not match the source closure"
@@ -1738,6 +1743,7 @@ class MapBuildPipeline:
         building_block_workers: int = 4,
         building_task_store: BuildingTaskStore | None = None,
         topography_builder: Callable[..., tuple[dict[str, Any], Path]] | None = None,
+        preparation_store=None,
         deployment_channel: str = "development",
     ):
         self.paths = paths
@@ -1750,6 +1756,30 @@ class MapBuildPipeline:
         self.source_preview_geometry_resolver = source_preview_geometry_resolver
         self.building_task_store = building_task_store
         self.topography_builder = topography_builder
+        self.preparation_store = (
+            preparation_store if preparation_store is not None
+            else create_preparation_store_from_environment()
+        )
+        self.prepared_source_catalog = (
+            PreparedSourceCatalog(self.preparation_store)
+            if self.preparation_store is not None else None
+        )
+        self.source_preparation_mode = os.environ.get(
+            "MAP_PLATFORM_SOURCE_PREPARATION_MODE", "demand"
+        ).strip().lower()
+        if self.source_preparation_mode not in {"demand", "prepared-only"}:
+            raise ValueError("invalid source preparation mode")
+        raw_prepared_snapshots = os.environ.get("MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS", "")
+        self.prepared_source_snapshots = frozenset(
+            value.strip() for value in raw_prepared_snapshots.split(",") if value.strip()
+        )
+        if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in self.prepared_source_snapshots):
+            raise ValueError("invalid prepared source snapshot allowlist")
+        self.source_shard_mode = os.environ.get(
+            "MAP_PLATFORM_SOURCE_SHARD_MODE", "disabled"
+        ).strip().lower()
+        if self.source_shard_mode not in {"disabled", "prepared-only"}:
+            raise ValueError("invalid source shard mode")
         if deployment_channel not in {"development", "production"}:
             raise ValueError("invalid map pipeline deployment channel")
         self.deployment_channel = deployment_channel
@@ -2026,6 +2056,7 @@ class MapBuildPipeline:
             cached_source = self._cached_source_for_job(job)
             source_pbf = cached_source.path
             source_snapshot_sha256 = cached_source.sha256
+            extraction_source_sha256 = source_snapshot_sha256
             calibration_generation_execution: dict[str, Any] = {}
             (
                 _,
@@ -2101,7 +2132,13 @@ class MapBuildPipeline:
             scope_diagnostics["identity"] = building_identity
             scope_diagnostics["blockCacheIdentity"] = block_cache_identity
         else:
-            source_pbf = self._source_pbf_path(job)
+            if self.source_shard_mode == "prepared-only":
+                cached_source = self._cached_source_for_job(job)
+                source_pbf = cached_source.path
+                extraction_source_sha256 = cached_source.sha256
+            else:
+                source_pbf = self._source_pbf_path(job)
+                extraction_source_sha256 = None
             source_snapshot_sha256 = None
             building_identity = None
             calibration_generation = None
@@ -2184,6 +2221,8 @@ class MapBuildPipeline:
                 if selected_scope:
                     extract_kwargs["scope_plan"] = scope_plan
                     extract_kwargs["source_snapshot_sha256"] = source_snapshot_sha256
+                elif extraction_source_sha256 is not None:
+                    extract_kwargs["source_snapshot_sha256"] = extraction_source_sha256
                 if cancellation_check is not None:
                     extract_kwargs["cancellation_check"] = cancellation_check
                 source_extraction_metrics = self._extract_pbf(
@@ -2194,6 +2233,8 @@ class MapBuildPipeline:
                 )
             else:
                 extract_kwargs = {"bounds": source_bounds}
+                if extraction_source_sha256 is not None:
+                    extract_kwargs["source_snapshot_sha256"] = extraction_source_sha256
                 if cancellation_check is not None:
                     extract_kwargs["cancellation_check"] = cancellation_check
                 source_extraction_metrics = self._extract_pbf(
@@ -3446,6 +3487,7 @@ class MapBuildPipeline:
     ) -> tuple[Path, dict[str, Any]]:
         scripts_root = self.paths.osm_extract_root / "scripts"
         result_path = parent_root / "source-index-result.json"
+        self._restore_prepared_source_index(source_snapshot_sha256)
         self._run_preprocessing_command(
             [
                 sys.executable,
@@ -3458,6 +3500,7 @@ class MapBuildPipeline:
                 str(self.paths.building_cache_root),
                 "--result-json",
                 str(result_path),
+                *self._source_preparation_flags(source_snapshot_sha256),
             ],
             cwd=scripts_root,
             policy=SOURCE_INDEX_COMMAND_POLICY,
@@ -3483,6 +3526,28 @@ class MapBuildPipeline:
                 "chunked source index identity is invalid",
             )
         return manifest, source_index
+
+    def _prepared_source_required(self, source_snapshot_sha256: str) -> bool:
+        return (self.source_preparation_mode == "prepared-only"
+                or source_snapshot_sha256 in self.prepared_source_snapshots)
+
+    def _source_preparation_flags(self, source_snapshot_sha256: str) -> list[str]:
+        return ["--require-ready"] if self._prepared_source_required(source_snapshot_sha256) else []
+
+    def _prepared_source_restore_limit(self) -> int:
+        return self._configured_building_storage_bytes(
+            "MAP_PLATFORM_SOURCE_PREPARATION_MAX_RESTORE_BYTES", 64 * 1024 * 1024 * 1024,
+        )
+
+    def _restore_prepared_source_index(self, source_snapshot_sha256: str) -> None:
+        if self._prepared_source_required(source_snapshot_sha256) and self.prepared_source_catalog is not None:
+            _, root = source_index_location(self.paths.building_cache_root, source_snapshot_sha256)
+            if (root / "manifest.json").is_file():
+                return
+            self.prepared_source_catalog.restore_index(
+                self.paths.building_cache_root, source_snapshot_sha256,
+                max_bytes=self._prepared_source_restore_limit(),
+            )
 
     def _persist_chunked_partition(
         self,
@@ -4768,6 +4833,8 @@ class MapBuildPipeline:
                     closure_ids_path,
                     source_snapshot_sha256,
                     chunk_root,
+                    closure_plan=closure_plan_path,
+                    source_index_manifest=source_index_manifest,
                     cancellation_check=cancellation_check,
                 )
             except BuildingScopeError as exc:
@@ -5032,7 +5099,8 @@ class MapBuildPipeline:
             if cancellation_check is not None and cancellation_check():
                 raise CommandExecutionCancelled("topography input preparation was cancelled")
 
-        cache = ElevationCache(self.paths.work_root.parent / "topography-cache", cancellation_check=cancel)
+        cache = ElevationCache(self.paths.work_root.parent / "topography-cache", cancellation_check=cancel,
+                               remote=self.preparation_store)
         identity = topography_input_identity(policy, cache, job.geometry.bounds.to_list())
         job._topography_reuse_identity = identity
         return identity
@@ -5768,6 +5836,7 @@ class MapBuildPipeline:
         cache = ElevationCache(
             self.paths.work_root.parent / "topography-cache",
             cancellation_check=cancel,
+            remote=self.preparation_store,
         )
         sample = contour_sample(
             policy,
@@ -6662,10 +6731,44 @@ class MapBuildPipeline:
             if renderer_has_buildings(renderer_format_version(job.request))
             else []
         )
+        source_shards: tuple[Path, ...] = ()
+        if (source_snapshot_sha256 is not None
+                and self.source_shard_mode == "prepared-only"
+                and self._prepared_source_required(source_snapshot_sha256)):
+            shard_rectangles = (
+                tuple(
+                    (x_to_lon(rectangle[0]), y_to_lat(rectangle[1]),
+                     x_to_lon(rectangle[2]), y_to_lat(rectangle[3]))
+                    for rectangle in scope_plan.document["sourceScope"]["rectanglesMeters"]
+                ) if scope_plan is not None else (
+                    (bounds.min_lon, bounds.min_lat, bounds.max_lon, bounds.max_lat),
+                )
+            )
+            try:
+                source_shards = select_shards(
+                    self.paths.building_cache_root, source_snapshot_sha256, shard_rectangles,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise BuildingScopeError(
+                    "building_source_shards_unavailable", "prepared source shards are unavailable",
+                ) from exc
+            extraction_metrics["sourceShardCount"] = len(source_shards)
+            extraction_metrics["sourceShardBytes"] = sum(path.stat().st_size for path in source_shards)
+            if len(source_shards) == 1:
+                source_pbf = source_shards[0]
+            else:
+                merged_source = clipped_pbf.parent / "selected-source-shards.osm.pbf"
+                self._run_command(
+                    ["osmium", "merge", *(str(path) for path in source_shards),
+                     "-o", str(merged_source), "--overwrite"],
+                    policy=GENERIC_EXTRACTION_COMMAND_POLICY,
+                    cancellation_check=cancellation_check,
+                )
+                source_pbf = merged_source
         if scope_plan is not None:
             if source_snapshot_sha256 is None:
                 raise ValueError("plan-aware extraction requires a source identity")
-            if sha256_file(source_pbf) != source_snapshot_sha256:
+            if not source_shards and sha256_file(source_pbf) != source_snapshot_sha256:
                 raise BuildingScopeError(
                     "building_source_snapshot_changed",
                     "source snapshot changed before selected-area extraction",
@@ -6800,7 +6903,18 @@ class MapBuildPipeline:
             merge_command_metrics = self._last_command_execution_metrics()
             if merge_command_metrics:
                 extraction_metrics["mergeCommand"] = merge_command_metrics
-        if scope_plan is not None:
+        if source_shards:
+            try:
+                if source_shards != select_shards(
+                    self.paths.building_cache_root, source_snapshot_sha256, shard_rectangles,
+                ):
+                    raise ValueError("source shard selection changed")
+            except (OSError, TypeError, ValueError) as exc:
+                clipped_pbf.unlink(missing_ok=True)
+                raise BuildingScopeError(
+                    "building_source_shards_unavailable", "prepared source shards changed during extraction",
+                ) from exc
+        elif scope_plan is not None:
             if sha256_file(source_pbf) != source_snapshot_sha256:
                 clipped_pbf.unlink(missing_ok=True)
                 raise BuildingScopeError(
@@ -7003,37 +7117,46 @@ class MapBuildPipeline:
             self.paths.building_cache_root,
             calibration_identity,
         )
-        try:
-            generation = calibration_generation_from_manifest(
-                sealed_manifest_path,
-                source_snapshot_sha256=source_snapshot_sha256,
-                calibration_key=calibration_identity["calibrationKey"],
-                calibration_identity=calibration_identity,
+        if (self._prepared_source_required(source_snapshot_sha256)
+                and self.prepared_source_catalog is not None
+                and not sealed_manifest_path.is_file()):
+            self.prepared_source_catalog.restore_calibration(
+                self.paths.building_cache_root, calibration_identity,
+                max_bytes=self._prepared_source_restore_limit(),
             )
-            self._emit_phase_progress(
-                on_phase_progress,
-                unit="calibration_cache",
-                completed=1,
-                total=1,
-                total_blocks=len(scope_plan.output_blocks),
-                indeterminate=False,
-            )
-            if execution_sink is not None:
-                execution_sink.update(
-                    {
-                        "cacheOutcome": "hit",
-                        "cellsRequested": generation["cellCount"],
-                        "cellsHits": generation["cellCount"],
-                        "cellsMisses": 0,
-                        "cellsRebuilt": 0,
-                        "durationSeconds": round(
-                            time.perf_counter() - generation_started, 6
-                        ),
-                    }
+        if not self._prepared_source_required(source_snapshot_sha256):
+            try:
+                generation = calibration_generation_from_manifest(
+                    sealed_manifest_path,
+                    source_snapshot_sha256=source_snapshot_sha256,
+                    calibration_key=calibration_identity["calibrationKey"],
+                    calibration_identity=calibration_identity,
                 )
-            return sealed_manifest_path, generation
-        except ValueError:
-            pass
+            except ValueError:
+                pass
+            else:
+                self._emit_phase_progress(
+                    on_phase_progress,
+                    unit="calibration_cache",
+                    completed=1,
+                    total=1,
+                    total_blocks=len(scope_plan.output_blocks),
+                    indeterminate=False,
+                )
+                if execution_sink is not None:
+                    execution_sink.update(
+                        {
+                            "cacheOutcome": "hit",
+                            "cellsRequested": generation["cellCount"],
+                            "cellsHits": generation["cellCount"],
+                            "cellsMisses": 0,
+                            "cellsRebuilt": 0,
+                            "durationSeconds": round(
+                                time.perf_counter() - generation_started, 6
+                            ),
+                        }
+                    )
+                return sealed_manifest_path, generation
         temporary_parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix="building-calibration-generation-",
@@ -7065,6 +7188,7 @@ class MapBuildPipeline:
                     "--result-json",
                     str(result_path),
                     "--full-precompute",
+                    *self._source_preparation_flags(source_snapshot_sha256),
                 ],
                 cwd=scripts_root,
                 policy=BUILDING_CALIBRATION_COMMAND_POLICY,
@@ -7130,6 +7254,7 @@ class MapBuildPipeline:
         scope_document = json.loads(scope_plan_path.read_bytes())
         total_blocks = len(scope_document["outputBlocks"])
         preprocessing_timings: dict[str, float] = {}
+        self._restore_prepared_source_index(source_snapshot_sha256)
         self._run_preprocessing_command(
             [
                 sys.executable,
@@ -7138,6 +7263,7 @@ class MapBuildPipeline:
                 "--source-sha256", source_snapshot_sha256,
                 "--cache-root", str(cache_root),
                 "--result-json", str(source_index_result),
+                *self._source_preparation_flags(source_snapshot_sha256),
             ],
             cwd=scripts_root,
             policy=SOURCE_INDEX_COMMAND_POLICY,
@@ -7208,6 +7334,8 @@ class MapBuildPipeline:
                 closure_ids,
                 source_snapshot_sha256,
                 job_dir,
+                closure_plan=closure_plan,
+                source_index_manifest=source_index_manifest,
                 cancellation_check=cancellation_check,
             )
         self._run_preprocessing_command(
@@ -7223,6 +7351,7 @@ class MapBuildPipeline:
                 "--cache-root", str(cache_root),
                 "--result-json", str(calibration_result),
                 "--full-precompute",
+                *self._source_preparation_flags(source_snapshot_sha256),
             ],
             cwd=scripts_root,
             policy=BUILDING_CALIBRATION_COMMAND_POLICY,
@@ -7315,6 +7444,7 @@ class MapBuildPipeline:
             closure_plan = root / "building-closure-plan.json"
             closure_ids = root / "building-closure-ids.txt"
             scope_plan.write(scope_path)
+            self._restore_prepared_source_index(source_snapshot_sha256)
             self._run_preprocessing_command(
                 [
                     sys.executable,
@@ -7327,6 +7457,7 @@ class MapBuildPipeline:
                     str(self.paths.building_cache_root),
                     "--result-json",
                     str(source_index_result),
+                    *self._source_preparation_flags(source_snapshot_sha256),
                 ],
                 cwd=scripts_root,
                 policy=SOURCE_INDEX_COMMAND_POLICY,
@@ -7408,23 +7539,50 @@ class MapBuildPipeline:
         source_snapshot_sha256: str,
         job_dir: Path,
         *,
+        closure_plan: Path | None = None,
+        source_index_manifest: Path | None = None,
         cancellation_check=None,
     ) -> None:
-        if sha256_file(source_pbf) != source_snapshot_sha256:
+        prepared = self._prepared_source_required(source_snapshot_sha256)
+        if not prepared and sha256_file(source_pbf) != source_snapshot_sha256:
             raise BuildingScopeError(
                 "building_source_snapshot_changed",
                 "source snapshot changed before building closure rehydration",
             )
         closure_pbf = job_dir / "building-closure.osm.pbf"
         merged_pbf = job_dir / "clipped-with-building-closure.osm.pbf"
-        self._run_command(
-            [
-                "osmium", "getid", "--add-referenced", str(source_pbf),
-                "--id-file", str(closure_ids), "-o", str(closure_pbf), "--overwrite",
-            ],
-            policy=GENERIC_EXTRACTION_COMMAND_POLICY,
-            cancellation_check=cancellation_check,
-        )
+        if prepared:
+            if closure_plan is None or source_index_manifest is None:
+                raise BuildingScopeError(
+                    "building_relation_incomplete", "prepared closure metadata is unavailable",
+                )
+            closure_xml = job_dir / "building-closure.osm"
+            self._run_command(
+                [
+                    sys.executable,
+                    str(self.paths.osm_extract_root / "scripts" / "export_building_closure.py"),
+                    "--source-index-manifest", str(source_index_manifest),
+                    "--closure-plan", str(closure_plan),
+                    "--clipped-pbf", str(clipped_pbf),
+                    "--output-xml", str(closure_xml),
+                ],
+                policy=GENERIC_EXTRACTION_COMMAND_POLICY,
+                cancellation_check=cancellation_check,
+            )
+            self._run_command(
+                ["osmium", "cat", str(closure_xml), "-o", str(closure_pbf), "--overwrite"],
+                policy=GENERIC_EXTRACTION_COMMAND_POLICY,
+                cancellation_check=cancellation_check,
+            )
+        else:
+            self._run_command(
+                [
+                    "osmium", "getid", "--add-referenced", str(source_pbf),
+                    "--id-file", str(closure_ids), "-o", str(closure_pbf), "--overwrite",
+                ],
+                policy=GENERIC_EXTRACTION_COMMAND_POLICY,
+                cancellation_check=cancellation_check,
+            )
         self._run_command(
             [
                 "osmium", "merge", str(clipped_pbf), str(closure_pbf),
@@ -7433,7 +7591,7 @@ class MapBuildPipeline:
             policy=GENERIC_EXTRACTION_COMMAND_POLICY,
             cancellation_check=cancellation_check,
         )
-        if sha256_file(source_pbf) != source_snapshot_sha256:
+        if not prepared and sha256_file(source_pbf) != source_snapshot_sha256:
             merged_pbf.unlink(missing_ok=True)
             raise BuildingScopeError(
                 "building_source_snapshot_changed",
