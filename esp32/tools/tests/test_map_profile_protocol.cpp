@@ -81,6 +81,8 @@ int main() {
   assert(visibilityMaskForMapVersion(VISIBILITY_CONTOURS, 4) == 0);
   assert(visibilityMaskForMapVersion(VISIBILITY_CONTOURS, 5) == VISIBILITY_CONTOURS);
   assert((VISIBILITY_EXTENDED_FEATURE_MASK & VISIBILITY_CONTOURS) == 0);
+  assert((VISIBILITY_RENDER_FEATURE_MASK & VISIBILITY_CONTOURS) != 0);
+  assert((VISIBILITY_RENDER_FEATURE_MASK & VISIBILITY_OVERLAY_MASK) == 0);
   assert(normalizedFeatureVisibilityMask(allLegacyFeatures) ==
          VISIBILITY_EXTENDED_FEATURE_MASK);
   assert(normalizedFeatureVisibilityMask(VISIBILITY_LOCAL_STREETS) ==
