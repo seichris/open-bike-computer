@@ -33,12 +33,13 @@ For every supported map format:
 
 This plan preserves the current final-artifact store and shared library design
 in [the R2 plan](cloudflare-r2-final-map-library-and-sharing-implementation-plan.md).
-Use **Contabo Object Storage for new immutable preparation caches**: OSM source
-shards, source indexes, calibration generations and DEM input tiles. Keep the
-500 GB VPS SSD for bounded hot-cache and scratch use. A final ZIP, stream and
-topographic companion continue through the existing signed artifact publication
-path; changing that store is a separate migration. This gives one durable cache
-backend to operate without coupling build inputs to the map-library catalog.
+Use the existing VPS SSD for the bounded regional prepared-source cache first.
+Contabo Object Storage is an optional durable cross-host copy when cold restore,
+retention or capacity measurements justify a separate purchase. A final ZIP,
+stream and topographic companion continue through the existing signed artifact
+publication path; changing that store is a separate migration. The local pilot
+does not assume that 500 GB is mounted or that the current 80 GB free fits a
+planet generation.
 
 ## Current constraints
 
@@ -97,10 +98,12 @@ different requests; neither proves which download the user called Sichuan.
 flowchart LR
   P["Pinned OSM snapshot"] --> B["Bounded offline preparation"]
   D["Pinned DEM policy and tiles"] --> T["Verified DEM tile cache"]
-  B --> C[("Contabo immutable OSM shards and manifests")]
-  T --> E[("Contabo immutable DEM blobs and receipts")]
-  C --> H["VPS bounded hot cache"]
+  B --> C[("VPS sealed regional shards and manifests")]
+  T --> E[("VPS verified DEM tiles and receipts")]
+  C --> H["VPS bounded prepared cache"]
   E --> H
+  C -. optional durable copy .-> O[("Contabo Object Storage")]
+  E -. optional durable copy .-> O
   H --> W["Map worker"]
   W --> R["Exact final-map lookup and validation"]
   R -->|hit| A[("Existing final artifact store")]
@@ -108,7 +111,8 @@ flowchart LR
   G --> A
 ```
 
-The object store holds immutable blobs and manifests. The job database holds
+The local prepared cache holds sealed blobs and manifests. An optional object
+store can retain immutable copies across hosts. The job database holds
 small keys, state, leases, refcounts or retention pins, and receipt references;
 it does not hold PBFs, indexes, tiles or finished maps. The worker downloads a
 needed shard into a local temporary file, checks its size and SHA-256, then
@@ -205,8 +209,8 @@ and safe; do not silently return a pack with the wrong embedded name or mapId.
 
 ## Resource, retention and failure policy
 
-Before setting quotas, read live `df`, existing volumes, peak scratch and
-object-store occupancy. Budget the VPS for active jobs plus one bounded shard
+Before setting quotas, read live `df`, existing volumes, peak scratch and,
+when used, object-store occupancy. Budget the VPS for active jobs plus one bounded shard
 download/build, hot-cache quota, service data and a safety reserve. Admission
 must reject or queue work before disk/RAM exhaustion. Reuse the existing
 resource reservations and fenced leases in
@@ -219,9 +223,9 @@ Retain current and previous pinned source manifests plus blobs referenced by
 in-flight jobs and rollback windows. Garbage collection is mark-and-sweep
 from verified manifest/job references, with a grace period and dry-run report.
 Never delete a blob during an active lease. Preserve DEM source receipts for
-every retained finished map. Test restore from Contabo with a cold local cache
-and corruption recovery; an object-store outage may delay new builds, but it
-must not make a corrupt cache hit. Use conditional immutable writes and a
+every retained finished map. If enabling Contabo, test restore with a cold local
+cache and corruption recovery; an object-store outage may delay new builds, but
+it must not make a corrupt cache hit. Use conditional immutable writes and a
 manifest-last publish, after a real Contabo compatibility check of conditional
 PUT, metadata/HEAD, ranges, multipart, concurrent writers and error behavior.
 Contabo [describes its Ceph API](https://help.contabo.com/en/support/solutions/articles/103000411092-object-storage-s3-compatibility-protocols-and-connection-settings)
@@ -242,8 +246,8 @@ Contabo region before choosing a shard size or refresh cadence.
 | --- | --- | --- |
 | 0. Baseline and contracts | Record the completed Sichuan job's stage timings, final bytes, source and DEM receipts, cache paths, disk/RAM peaks if available; sample dense, sparse and shard-edge regions. Define versioned manifest and preflight identity schemas. Inventory live SSD headroom and current final-artifact retention. | Measurements, no mutation of the Sichuan artifact, and written capacity/admission limits. |
 | 1. Exact topo reuse | Put cheap pinned-source and DEM-receipt lookup ahead of expensive calibration, add verified DEM preflight and a sealed-pair candidate validator. Keep format-2/3 behavior. Make catalog lookup work when only durable final artifacts remain and create installation-owned completion records. | Same-input second topo request skips conversion and DEM sampling; all changed-input/corruption cases miss or fail closed; standard reuse regression tests pass. |
-| 2. Contabo cache foundation | Prove provider semantics in an isolated bucket; add immutable blob/manifests, checksum-checked local hydration, quotas, leases, reference pins and metrics. Mirror current local prepared cache into Contabo only after validation. | Cold-local restore, interrupted upload, concurrent producer and corrupt-object drills pass within measured resource limits. |
-| 3. Regional source pilot | Precompute one pinned China generation into consistent shards/cells, including Sichuan and boundary samples. Move lookup before full-source work and remove full-source preparation from requests in ready coverage. Add `preparing/ready/failed` progress. | Fresh Sichuan-area and adjacent requests start selected-block work without a China scan; seam and overlapping-map outputs match; cold/warm latency and SSD use meet the measured budget. |
+| 2. Optional Contabo cache foundation | If cross-host durability is needed, prove provider semantics in an isolated bucket; add immutable blobs/manifests and checksum-checked local hydration. Mirror sealed prepared data only after validation. This does not block the local pilot. | Cold-local restore, interrupted upload, concurrent producer and corrupt-object drills pass within measured resource limits before enabling remote restore. |
+| 3. Regional source pilot | Precompute one pinned China generation into consistent local shards/cells, including Sichuan and boundary samples. Move lookup before full-source work and remove full-source preparation from requests in ready coverage. Add `preparing/ready/failed` progress. | Fresh Sichuan-area and adjacent requests start selected-block work without a China scan; seam and overlapping-map outputs match; cold/warm latency and SSD use meet the measured budget. |
 | 4. Global generation | Build from one pinned planet snapshot on a host with measured scratch capacity; publish resumable coverage in waves; prewarm DEM tiles by demand; add incremental refresh and retention. | Planet, seam, rollback, restore and throughput measurements support the worldwide SLO before expanding production coverage. |
 | 5. Optional wider output reuse | If needed, decouple embedded display identity from canonical payload or add verified reassembly/re-signing for different names. Evaluate topo subset reuse separately. | Names, mapId, signatures, notices, ownership and companion stay correct for every reused artifact. |
 
@@ -282,10 +286,10 @@ p95 and peak resource results before setting numeric latency SLOs.
    instrumentation for the Sichuan baseline.
 2. Implement format-4 exact reuse and remote-artifact-aware candidate
    validation without changing the final storage service.
-3. Add the Contabo compatibility test and immutable cache adapter with
-   restore/corruption tests.
-4. Publish the pinned regional source generation and remove full-source work
-   from ready-area request handling.
+3. Add the optional Contabo compatibility test and immutable cache adapter with
+   restore/corruption tests; keep local prepared caches usable without it.
+4. Publish the pinned regional source generation on the existing VPS and remove
+   full-source work from ready-area request handling.
 
 Each PR should identify its exact cache/version migration, deployment gate and
 measured acceptance result. Do not mark issue #508 complete after only the
