@@ -203,8 +203,27 @@ for environment, (base, target) in remote_debug_profiles.items():
     assert "-DDEVICE_REMOTE_DEBUG=1" in flags
     assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" in flags
 
+personal_profiles = {
+    "env:WAVESHARE_AMOLED_175_PERSONAL": "env:WAVESHARE_AMOLED_175_PRODUCTION",
+    "env:WAVESHARE_AMOLED_206_PERSONAL": "env:WAVESHARE_AMOLED_206_PRODUCTION",
+}
+for environment, production_profile in personal_profiles.items():
+    assert config.get(environment, "extends") == production_profile
+    assert inherited_option(environment, "custom_firmware_target") == inherited_option(
+        production_profile, "custom_firmware_target"
+    )
+    flags = config.get(environment, "build_flags")
+    assert f"${{{production_profile}.build_flags}}" in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" in flags
+    assert "-DDEVICE_REMOTE_DEBUG=1" not in flags
+    assert inherited_option(environment, "board_build.partitions") == "partitions.csv"
+
 for environment in config.sections():
-    if not environment.startswith("env:") or environment in remote_debug_profiles:
+    if (
+        not environment.startswith("env:")
+        or environment in remote_debug_profiles
+        or environment in personal_profiles
+    ):
         continue
     assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in config.get(
         environment,
@@ -478,6 +497,10 @@ assert (
 )
 for environment in remote_debug_profiles:
     assert environment.removeprefix("env:") not in release_candidate_workflow
+for environment in personal_profiles:
+    profile = environment.removeprefix("env:")
+    assert profile not in release_candidate_workflow
+    assert profile not in firmware_routing
 for environment, target in expected_targets.items():
     profile = environment.removeprefix("env:")
     mapping = f"target: {target}\n            environment: {profile}"
