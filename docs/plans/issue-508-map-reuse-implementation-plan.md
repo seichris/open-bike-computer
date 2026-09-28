@@ -52,6 +52,13 @@ calibration directory. These are useful regional pilot inputs, not a planet
 capacity estimate. Do not start a planet build or expand the live partition as
 an incidental step of this rollout.
 
+The development job record for `Chengdu 2` (`fc0f241b3fd0455b9615`) shows a
+format-4 China-source map created 2026-09-26 07:58:46 UTC and ready at
+09:13:43 UTC: about 75 minutes end to end, with one recorded download. The
+earlier `Chengdu 1` job (`1c7ad7be7ef54c4f8555`) took about 21 minutes and
+also has one download. These are read-only job-record measurements for two
+different requests; neither proves which download the user called Sichuan.
+
 - The backend already has exact and subset reuse for eligible standard maps.
   `map_platform/reuse.py` deliberately returns no reuse key for renderer format
   4 because the DEM receipts and compiled topographic intermediate are absent
