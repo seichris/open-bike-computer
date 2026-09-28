@@ -2277,6 +2277,34 @@ class MapBuildingContractTests(unittest.TestCase):
             self.assertEqual(len(runner.calls), 2)
             self.assertFalse((root / "clipped-with-building-closure.osm.pbf").exists())
 
+    def test_prepared_closure_uses_verified_index_instead_of_country_getid(self):
+        class MaterializingRunner(RecordingRunner):
+            def run(self, args, *, cwd=None):
+                super().run(args, cwd=cwd)
+                if args[:2] == ["osmium", "merge"]:
+                    Path(args[args.index("-o") + 1]).write_bytes(b"merged")
+                return ""
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS": "a" * 64,
+        }):
+            root = Path(tmp)
+            runner = MaterializingRunner()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"), runner=runner,
+            )
+            with patch("map_platform.pipeline.sha256_file", side_effect=AssertionError("country hash")):
+                pipeline._rehydrate_building_closure(
+                    root / "source.pbf", root / "clipped.pbf", root / "ids.txt",
+                    "a" * 64, root, closure_plan=root / "plan.json",
+                    source_index_manifest=root / "index.json",
+                )
+            self.assertEqual(len(runner.calls), 3)
+            self.assertTrue(runner.calls[0][0][1].endswith("export_building_closure.py"))
+            self.assertEqual(runner.calls[1][0][:2], ["osmium", "cat"])
+            self.assertEqual(runner.calls[2][0][:2], ["osmium", "merge"])
+            self.assertEqual((root / "clipped.pbf").read_bytes(), b"merged")
+
     @unittest.skipUnless(shutil.which("osmium"), "osmium is required")
     def test_selected_multi_rectangle_extract_runs_with_real_osmium(self):
         request = self._request()

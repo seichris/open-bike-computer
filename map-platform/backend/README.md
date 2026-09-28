@@ -559,7 +559,10 @@ Useful production environment variables:
   (default 64 GiB per file) plus a 2 GiB free-space reserve. Do not enable a
   snapshot until its cold restore, source-index validation, calibration
   validation and regional output comparison have passed. This path reuses
-  one complete regional snapshot; planet sharding and cross-region seam
+  one complete regional snapshot. For selected ready snapshots, building
+  closure is exported from the verified index and merged with the clipped PBF
+  without `osmium getid` over the country source. `osmium extract` still reads
+  that source per new geometry; planet sharding and cross-region seam
   qualification remain separate work.
 - `MAP_PLATFORM_S3_API_ACCESS_KEY_ID`,
   `MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY`, and optional

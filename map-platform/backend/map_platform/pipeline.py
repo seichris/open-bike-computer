@@ -4814,6 +4814,8 @@ class MapBuildPipeline:
                     closure_ids_path,
                     source_snapshot_sha256,
                     chunk_root,
+                    closure_plan=closure_plan_path,
+                    source_index_manifest=source_index_manifest,
                     cancellation_check=cancellation_check,
                 )
             except BuildingScopeError as exc:
@@ -7268,6 +7270,8 @@ class MapBuildPipeline:
                 closure_ids,
                 source_snapshot_sha256,
                 job_dir,
+                closure_plan=closure_plan,
+                source_index_manifest=source_index_manifest,
                 cancellation_check=cancellation_check,
             )
         self._run_preprocessing_command(
@@ -7471,23 +7475,50 @@ class MapBuildPipeline:
         source_snapshot_sha256: str,
         job_dir: Path,
         *,
+        closure_plan: Path | None = None,
+        source_index_manifest: Path | None = None,
         cancellation_check=None,
     ) -> None:
-        if sha256_file(source_pbf) != source_snapshot_sha256:
+        prepared = self._prepared_source_required(source_snapshot_sha256)
+        if not prepared and sha256_file(source_pbf) != source_snapshot_sha256:
             raise BuildingScopeError(
                 "building_source_snapshot_changed",
                 "source snapshot changed before building closure rehydration",
             )
         closure_pbf = job_dir / "building-closure.osm.pbf"
         merged_pbf = job_dir / "clipped-with-building-closure.osm.pbf"
-        self._run_command(
-            [
-                "osmium", "getid", "--add-referenced", str(source_pbf),
-                "--id-file", str(closure_ids), "-o", str(closure_pbf), "--overwrite",
-            ],
-            policy=GENERIC_EXTRACTION_COMMAND_POLICY,
-            cancellation_check=cancellation_check,
-        )
+        if prepared:
+            if closure_plan is None or source_index_manifest is None:
+                raise BuildingScopeError(
+                    "building_relation_incomplete", "prepared closure metadata is unavailable",
+                )
+            closure_xml = job_dir / "building-closure.osm"
+            self._run_command(
+                [
+                    sys.executable,
+                    str(self.paths.osm_extract_root / "scripts" / "export_building_closure.py"),
+                    "--source-index-manifest", str(source_index_manifest),
+                    "--closure-plan", str(closure_plan),
+                    "--clipped-pbf", str(clipped_pbf),
+                    "--output-xml", str(closure_xml),
+                ],
+                policy=GENERIC_EXTRACTION_COMMAND_POLICY,
+                cancellation_check=cancellation_check,
+            )
+            self._run_command(
+                ["osmium", "cat", str(closure_xml), "-o", str(closure_pbf), "--overwrite"],
+                policy=GENERIC_EXTRACTION_COMMAND_POLICY,
+                cancellation_check=cancellation_check,
+            )
+        else:
+            self._run_command(
+                [
+                    "osmium", "getid", "--add-referenced", str(source_pbf),
+                    "--id-file", str(closure_ids), "-o", str(closure_pbf), "--overwrite",
+                ],
+                policy=GENERIC_EXTRACTION_COMMAND_POLICY,
+                cancellation_check=cancellation_check,
+            )
         self._run_command(
             [
                 "osmium", "merge", str(clipped_pbf), str(closure_pbf),
@@ -7496,7 +7527,7 @@ class MapBuildPipeline:
             policy=GENERIC_EXTRACTION_COMMAND_POLICY,
             cancellation_check=cancellation_check,
         )
-        if sha256_file(source_pbf) != source_snapshot_sha256:
+        if not prepared and sha256_file(source_pbf) != source_snapshot_sha256:
             merged_pbf.unlink(missing_ok=True)
             raise BuildingScopeError(
                 "building_source_snapshot_changed",
