@@ -585,7 +585,8 @@ Useful production environment variables:
   Missing coverage or a corrupt shard fails closed. This regional path does not yet avoid the
   source-cache validation of the original PBF or establish a planet generation;
   global capacity, incremental publication and cross-region seams remain
-  separate gates.
+  separate gates. Preparation and request assembly retain at least 16 GiB
+  of free local disk in addition to their estimated shard input.
 - `MAP_PLATFORM_S3_API_ACCESS_KEY_ID`,
   `MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY`, and optional
   `MAP_PLATFORM_S3_API_SESSION_TOKEN`: separate short-lived API credentials
