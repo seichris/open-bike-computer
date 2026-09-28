@@ -180,6 +180,15 @@ class ElevationCache:
                     raise ValueError("invalid elevation receipt")
                 receipt = loads_strict_json(receipt_path.read_bytes(), description="elevation receipt")
                 self._validate_receipt(receipt, source, cell, url)
+                target = self.root / "blobs" / (receipt["sha256"] + ".tif")
+                if not target.exists() and self.remote is not None:
+                    if shutil.disk_usage(self.root).free < receipt["bytes"] + MIN_FREE_BYTES:
+                        raise ValueError("insufficient elevation staging space")
+                    if not self.remote.restore_blob(
+                        "dem-tile", target, sha256=receipt["sha256"],
+                        expected_bytes=receipt["bytes"],
+                    ):
+                        raise ValueError("local elevation receipt has no verified remote tile")
                 path = self.verify(receipt)
                 self._publish_remote_receipt(key, receipt, path)
                 return receipt

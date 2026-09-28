@@ -184,6 +184,10 @@ class TopographyCacheTests(unittest.TestCase):
         self.assertEqual(second.stage(self.source, (6, 0)), receipt)
         self.assertEqual(second.verify(receipt).read_bytes(), self.body)
         self.assertEqual(len(self.urls), 2)
+        second.verify(receipt).unlink()
+        self.assertEqual(second.stage(self.source, (6, 0)), receipt)
+        self.assertEqual(second.verify(receipt).read_bytes(), self.body)
+        self.assertEqual(len(self.urls), 2)
 
         # The receipt may remain valid while the remote object is damaged.
         third = ElevationCache(Path(self.tmp.name) / "third", remote=remote,
