@@ -22,7 +22,9 @@ def main() -> int:
         raise SystemExit("configure MAP_PLATFORM_PREPARATION_STORE=contabo-s3")
     kind = "compatibility-spike"
     slot = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
-    body = (f"bicino-preparation-compatibility-v1 {slot}\n".encode() * 40_000)[:2_000_000]
+    # Match the source-preparation chunk size rather than testing only a tiny
+    # object that may follow a different provider path.
+    body = (f"bicino-preparation-compatibility-v1 {slot}\n".encode() * 1_000_000)[:64 * 1024 * 1024]
     digest = hashlib.sha256(body).hexdigest()
     blob_key = remote._key(kind, digest)
     document_key = remote._key(kind, slot, document=True)

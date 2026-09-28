@@ -71,6 +71,7 @@ from .topography_artifacts import (
 )
 from .topography_cache import ElevationCache
 from .preparation_objects import create_preparation_store_from_environment
+from .prepared_source_catalog import PreparedSourceCatalog, source_index_location
 from .topography_companion import validate_companion
 from .topography_geometry import compile_contours
 from .topography_pack import assemble_topographic_pack
@@ -1756,6 +1757,21 @@ class MapBuildPipeline:
             preparation_store if preparation_store is not None
             else create_preparation_store_from_environment()
         )
+        self.prepared_source_catalog = (
+            PreparedSourceCatalog(self.preparation_store)
+            if self.preparation_store is not None else None
+        )
+        self.source_preparation_mode = os.environ.get(
+            "MAP_PLATFORM_SOURCE_PREPARATION_MODE", "demand"
+        ).strip().lower()
+        if self.source_preparation_mode not in {"demand", "prepared-only"}:
+            raise ValueError("invalid source preparation mode")
+        raw_prepared_snapshots = os.environ.get("MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS", "")
+        self.prepared_source_snapshots = frozenset(
+            value.strip() for value in raw_prepared_snapshots.split(",") if value.strip()
+        )
+        if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in self.prepared_source_snapshots):
+            raise ValueError("invalid prepared source snapshot allowlist")
         if deployment_channel not in {"development", "production"}:
             raise ValueError("invalid map pipeline deployment channel")
         self.deployment_channel = deployment_channel
@@ -3452,6 +3468,7 @@ class MapBuildPipeline:
     ) -> tuple[Path, dict[str, Any]]:
         scripts_root = self.paths.osm_extract_root / "scripts"
         result_path = parent_root / "source-index-result.json"
+        self._restore_prepared_source_index(source_snapshot_sha256)
         self._run_preprocessing_command(
             [
                 sys.executable,
@@ -3464,6 +3481,7 @@ class MapBuildPipeline:
                 str(self.paths.building_cache_root),
                 "--result-json",
                 str(result_path),
+                *self._source_preparation_flags(source_snapshot_sha256),
             ],
             cwd=scripts_root,
             policy=SOURCE_INDEX_COMMAND_POLICY,
@@ -3489,6 +3507,28 @@ class MapBuildPipeline:
                 "chunked source index identity is invalid",
             )
         return manifest, source_index
+
+    def _prepared_source_required(self, source_snapshot_sha256: str) -> bool:
+        return (self.source_preparation_mode == "prepared-only"
+                or source_snapshot_sha256 in self.prepared_source_snapshots)
+
+    def _source_preparation_flags(self, source_snapshot_sha256: str) -> list[str]:
+        return ["--require-ready"] if self._prepared_source_required(source_snapshot_sha256) else []
+
+    def _prepared_source_restore_limit(self) -> int:
+        return self._configured_building_storage_bytes(
+            "MAP_PLATFORM_SOURCE_PREPARATION_MAX_RESTORE_BYTES", 64 * 1024 * 1024 * 1024,
+        )
+
+    def _restore_prepared_source_index(self, source_snapshot_sha256: str) -> None:
+        if self._prepared_source_required(source_snapshot_sha256) and self.prepared_source_catalog is not None:
+            _, root = source_index_location(self.paths.building_cache_root, source_snapshot_sha256)
+            if (root / "manifest.json").is_file():
+                return
+            self.prepared_source_catalog.restore_index(
+                self.paths.building_cache_root, source_snapshot_sha256,
+                max_bytes=self._prepared_source_restore_limit(),
+            )
 
     def _persist_chunked_partition(
         self,
@@ -7011,37 +7051,46 @@ class MapBuildPipeline:
             self.paths.building_cache_root,
             calibration_identity,
         )
-        try:
-            generation = calibration_generation_from_manifest(
-                sealed_manifest_path,
-                source_snapshot_sha256=source_snapshot_sha256,
-                calibration_key=calibration_identity["calibrationKey"],
-                calibration_identity=calibration_identity,
+        if (self._prepared_source_required(source_snapshot_sha256)
+                and self.prepared_source_catalog is not None
+                and not sealed_manifest_path.is_file()):
+            self.prepared_source_catalog.restore_calibration(
+                self.paths.building_cache_root, calibration_identity,
+                max_bytes=self._prepared_source_restore_limit(),
             )
-            self._emit_phase_progress(
-                on_phase_progress,
-                unit="calibration_cache",
-                completed=1,
-                total=1,
-                total_blocks=len(scope_plan.output_blocks),
-                indeterminate=False,
-            )
-            if execution_sink is not None:
-                execution_sink.update(
-                    {
-                        "cacheOutcome": "hit",
-                        "cellsRequested": generation["cellCount"],
-                        "cellsHits": generation["cellCount"],
-                        "cellsMisses": 0,
-                        "cellsRebuilt": 0,
-                        "durationSeconds": round(
-                            time.perf_counter() - generation_started, 6
-                        ),
-                    }
+        if not self._prepared_source_required(source_snapshot_sha256):
+            try:
+                generation = calibration_generation_from_manifest(
+                    sealed_manifest_path,
+                    source_snapshot_sha256=source_snapshot_sha256,
+                    calibration_key=calibration_identity["calibrationKey"],
+                    calibration_identity=calibration_identity,
                 )
-            return sealed_manifest_path, generation
-        except ValueError:
-            pass
+            except ValueError:
+                pass
+            else:
+                self._emit_phase_progress(
+                    on_phase_progress,
+                    unit="calibration_cache",
+                    completed=1,
+                    total=1,
+                    total_blocks=len(scope_plan.output_blocks),
+                    indeterminate=False,
+                )
+                if execution_sink is not None:
+                    execution_sink.update(
+                        {
+                            "cacheOutcome": "hit",
+                            "cellsRequested": generation["cellCount"],
+                            "cellsHits": generation["cellCount"],
+                            "cellsMisses": 0,
+                            "cellsRebuilt": 0,
+                            "durationSeconds": round(
+                                time.perf_counter() - generation_started, 6
+                            ),
+                        }
+                    )
+                return sealed_manifest_path, generation
         temporary_parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
             prefix="building-calibration-generation-",
@@ -7073,6 +7122,7 @@ class MapBuildPipeline:
                     "--result-json",
                     str(result_path),
                     "--full-precompute",
+                    *self._source_preparation_flags(source_snapshot_sha256),
                 ],
                 cwd=scripts_root,
                 policy=BUILDING_CALIBRATION_COMMAND_POLICY,
@@ -7138,6 +7188,7 @@ class MapBuildPipeline:
         scope_document = json.loads(scope_plan_path.read_bytes())
         total_blocks = len(scope_document["outputBlocks"])
         preprocessing_timings: dict[str, float] = {}
+        self._restore_prepared_source_index(source_snapshot_sha256)
         self._run_preprocessing_command(
             [
                 sys.executable,
@@ -7146,6 +7197,7 @@ class MapBuildPipeline:
                 "--source-sha256", source_snapshot_sha256,
                 "--cache-root", str(cache_root),
                 "--result-json", str(source_index_result),
+                *self._source_preparation_flags(source_snapshot_sha256),
             ],
             cwd=scripts_root,
             policy=SOURCE_INDEX_COMMAND_POLICY,
@@ -7231,6 +7283,7 @@ class MapBuildPipeline:
                 "--cache-root", str(cache_root),
                 "--result-json", str(calibration_result),
                 "--full-precompute",
+                *self._source_preparation_flags(source_snapshot_sha256),
             ],
             cwd=scripts_root,
             policy=BUILDING_CALIBRATION_COMMAND_POLICY,
@@ -7323,6 +7376,7 @@ class MapBuildPipeline:
             closure_plan = root / "building-closure-plan.json"
             closure_ids = root / "building-closure-ids.txt"
             scope_plan.write(scope_path)
+            self._restore_prepared_source_index(source_snapshot_sha256)
             self._run_preprocessing_command(
                 [
                     sys.executable,
@@ -7335,6 +7389,7 @@ class MapBuildPipeline:
                     str(self.paths.building_cache_root),
                     "--result-json",
                     str(source_index_result),
+                    *self._source_preparation_flags(source_snapshot_sha256),
                 ],
                 cwd=scripts_root,
                 policy=SOURCE_INDEX_COMMAND_POLICY,

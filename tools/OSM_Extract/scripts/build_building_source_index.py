@@ -291,6 +291,8 @@ def main() -> None:
     parser.add_argument("--cache-root", type=Path, required=True)
     parser.add_argument("--result-json", type=Path)
     parser.add_argument("--cleanup-unpublished", action="store_true")
+    parser.add_argument("--require-ready", action="store_true",
+                        help="read an existing sealed index; never scan the source")
     parser.add_argument("--lock-timeout-seconds", type=float)
     args = parser.parse_args()
     index = BuildingSourceIndex(args.cache_root, args.source_sha256)
@@ -322,7 +324,10 @@ def main() -> None:
                 "building_source_snapshot_changed", "source changed during indexing"
             )
 
-    manifest = index.build_with_scanner(scanner)
+    manifest = (
+        index.validate_ready() if args.require_ready
+        else index.build_with_scanner(scanner)
+    )
     if file_sha256(args.source_pbf) != args.source_sha256:
         raise BuildingSourceIndexError(
             "building_source_snapshot_changed",

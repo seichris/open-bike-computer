@@ -300,6 +300,8 @@ def main() -> None:
         action="store_true",
         help="derive the complete cell domain from the source snapshot and materialize it",
     )
+    parser.add_argument("--require-ready", action="store_true",
+                        help="read an existing complete generation; never scan the source")
     args = parser.parse_args()
     print(
         'BUILDING_PREPROCESS_PROGRESS:{"completed":0,"indeterminate":true,"unit":"calibration_cells"}',
@@ -379,6 +381,8 @@ def main() -> None:
             )
         return samples, rejections, scan_metrics
 
+    if args.require_ready and not args.full_precompute:
+        parser.error("--require-ready requires --full-precompute")
     if args.full_precompute:
         def scan_complete_snapshot():
             domain, samples, rejections, scan_metrics = scan_full_pbf(
@@ -395,6 +399,11 @@ def main() -> None:
             sealed_manifest = cache.validate_complete_generation()
         except CalibrationCacheError:
             sealed_manifest = None
+        if args.require_ready and sealed_manifest is None:
+            raise CalibrationCacheError(
+                "building_calibration_unavailable",
+                "complete calibration generation is not ready for this source snapshot",
+            )
         if sealed_manifest is not None:
             sealed_count = len(sealed_manifest["cells"])
             cache_metrics = {

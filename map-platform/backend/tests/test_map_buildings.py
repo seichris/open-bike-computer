@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from copy import deepcopy
 import shutil
 import subprocess
@@ -170,6 +171,28 @@ def _zip_record(path: Path) -> ArtifactRecord:
 
 
 class MapBuildingContractTests(unittest.TestCase):
+    def test_prepared_only_worker_mode_never_requests_source_scans(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_SOURCE_PREPARATION_MODE": "prepared-only",
+        }):
+            root = Path(tmp)
+            pipeline = MapBuildPipeline(PipelinePaths(root, root / "work", root / "packs"))
+            self.assertEqual(pipeline._source_preparation_flags("a" * 64), ["--require-ready"])
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_SOURCE_PREPARATION_MODE": "demand",
+            "MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS": "a" * 64,
+        }):
+            root = Path(tmp)
+            pipeline = MapBuildPipeline(PipelinePaths(root, root / "work", root / "packs"))
+            self.assertEqual(pipeline._source_preparation_flags("a" * 64), ["--require-ready"])
+            self.assertEqual(pipeline._source_preparation_flags("b" * 64), [])
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_SOURCE_PREPARATION_MODE": "unknown",
+        }):
+            root = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "preparation mode"):
+                MapBuildPipeline(PipelinePaths(root, root / "work", root / "packs"))
+
     def test_cold_source_storage_preflight_is_limited_to_chunked_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -748,6 +748,19 @@ class BuildingSourceIndex:
         except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
             raise BuildingSourceIndexError("building_relation_incomplete", "source index build failed") from exc
 
+    def validate_ready(self, *, lock_timeout_seconds: float | None = None) -> dict[str, Any]:
+        """Accept only an existing sealed index, without starting a source scan."""
+        self.index_root.mkdir(parents=True, exist_ok=True)
+        with _CacheLock(self.index_root / ".write.lock", timeout_seconds=lock_timeout_seconds):
+            try:
+                return self.validate_verified_database()
+            except BuildingSourceIndexError:
+                # A restored database has a new inode. Rehash and validate it
+                # once, then bind subsequent lookups to this local file.
+                manifest = self.validate()
+                self._write_verification_receipt_locked(manifest)
+                return manifest
+
     def cleanup_unpublished_scans(
         self, *, lock_timeout_seconds: float | None = None
     ) -> None:

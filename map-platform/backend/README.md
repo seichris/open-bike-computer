@@ -529,6 +529,33 @@ Useful production environment variables:
   MAP_PLATFORM_PREPARATION_SPIKE_CONFIRM=delete-disposable-object \
     python tools/check_contabo_preparation_compatibility.py
   ```
+- Prepared OSM source snapshots use the same worker-only Contabo store. Run the
+  offline preparer against one **pinned, checksum-verified** source PBF on a host
+  with measured scratch capacity and the intended shared cache root. It builds
+  and validates the complete source index and calibration generation before
+  publishing chunked immutable files to Contabo:
+
+  ```sh
+  python tools/OSM_Extract/scripts/precompute_building_source.py \
+    --source-pbf /path/to/pinned-source.osm.pbf \
+    --source-sha256 EXACT_64_HEX_SHA256 \
+    --rules tools/OSM_Extract/conf/building_height_rules.yaml \
+    --cache-root /data/building-cache \
+    --publish-contabo
+  ```
+
+  The existing source/calibration readers validate restored artifacts before
+  use. Set `MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS` to comma-separated exact
+  PBF SHA-256 values to require ready preparation for those snapshots only;
+  a missing or corrupt generation fails closed without starting a full-source
+  scan in a user job. `MAP_PLATFORM_SOURCE_PREPARATION_MODE=prepared-only`
+  applies the rule to every snapshot; its default is `demand`. The restore
+  admission limit is `MAP_PLATFORM_SOURCE_PREPARATION_MAX_RESTORE_BYTES`
+  (default 64 GiB per file) plus a 2 GiB free-space reserve. Do not enable a
+  snapshot until its cold restore, source-index validation, calibration
+  validation and regional output comparison have passed. This path reuses
+  one complete regional snapshot; planet sharding and cross-region seam
+  qualification remain separate work.
 - `MAP_PLATFORM_S3_API_ACCESS_KEY_ID`,
   `MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY`, and optional
   `MAP_PLATFORM_S3_API_SESSION_TOKEN`: separate short-lived API credentials

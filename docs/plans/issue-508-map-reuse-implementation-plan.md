@@ -42,6 +42,16 @@ backend to operate without coupling build inputs to the map-library catalog.
 
 ## Current constraints
 
+Read-only Coolify inventory on 2026-09-28 found development and production map
+containers on `cool-ts` sharing one host. The block device reports 500 GB, but
+the mounted root partition is only 199 GB with about 80 GB free; no separate
+data mount was present. Development already has complete China source-index
+files around 4.1 GB each and calibration generations around 137,000 cells;
+one measured pair occupied about 3.9 GiB for the index and 563 MiB for the
+calibration directory. These are useful regional pilot inputs, not a planet
+capacity estimate. Do not start a planet build or expand the live partition as
+an incidental step of this rollout.
+
 - The backend already has exact and subset reuse for eligible standard maps.
   `map_platform/reuse.py` deliberately returns no reuse key for renderer format
   4 because the DEM receipts and compiled topographic intermediate are absent
