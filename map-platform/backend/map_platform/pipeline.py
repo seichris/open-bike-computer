@@ -72,7 +72,7 @@ from .topography_artifacts import (
 from .topography_cache import ElevationCache
 from .preparation_objects import create_preparation_store_from_environment
 from .prepared_source_catalog import PreparedSourceCatalog, source_index_location
-from .source_shards import select_shards
+from .source_shards import NoShardCoverageError, select_shards
 from .topography_companion import validate_companion
 from .topography_geometry import compile_contours
 from .topography_pack import assemble_topographic_pack
@@ -1778,7 +1778,7 @@ class MapBuildPipeline:
         self.source_shard_mode = os.environ.get(
             "MAP_PLATFORM_SOURCE_SHARD_MODE", "disabled"
         ).strip().lower()
-        if self.source_shard_mode not in {"disabled", "prepared-only"}:
+        if self.source_shard_mode not in {"disabled", "prepared-only", "prefer-prepared"}:
             raise ValueError("invalid source shard mode")
         if deployment_channel not in {"development", "production"}:
             raise ValueError("invalid map pipeline deployment channel")
@@ -2132,7 +2132,7 @@ class MapBuildPipeline:
             scope_diagnostics["identity"] = building_identity
             scope_diagnostics["blockCacheIdentity"] = block_cache_identity
         else:
-            if self.source_shard_mode == "prepared-only":
+            if self.source_shard_mode != "disabled":
                 cached_source = self._cached_source_for_job(job)
                 source_pbf = cached_source.path
                 extraction_source_sha256 = cached_source.sha256
@@ -6733,8 +6733,9 @@ class MapBuildPipeline:
         )
         source_shards: tuple[Path, ...] = ()
         if (source_snapshot_sha256 is not None
-                and self.source_shard_mode == "prepared-only"
-                and self._prepared_source_required(source_snapshot_sha256)):
+                and (self.source_shard_mode == "prefer-prepared"
+                     or (self.source_shard_mode == "prepared-only"
+                         and self._prepared_source_required(source_snapshot_sha256)))):
             shard_rectangles = (
                 tuple(
                     (x_to_lon(rectangle[0]), y_to_lat(rectangle[1]),
@@ -6748,23 +6749,30 @@ class MapBuildPipeline:
                 source_shards = select_shards(
                     self.paths.building_cache_root, source_snapshot_sha256, shard_rectangles,
                 )
+            except NoShardCoverageError as exc:
+                if self.source_shard_mode != "prefer-prepared":
+                    raise BuildingScopeError(
+                        "building_source_shards_unavailable", "prepared source shards are unavailable",
+                    ) from exc
+                extraction_metrics["sourceShardFallback"] = "not_covered"
             except (OSError, TypeError, ValueError) as exc:
                 raise BuildingScopeError(
                     "building_source_shards_unavailable", "prepared source shards are unavailable",
                 ) from exc
-            extraction_metrics["sourceShardCount"] = len(source_shards)
-            extraction_metrics["sourceShardBytes"] = sum(path.stat().st_size for path in source_shards)
-            if len(source_shards) == 1:
-                source_pbf = source_shards[0]
-            else:
-                merged_source = clipped_pbf.parent / "selected-source-shards.osm.pbf"
-                self._run_command(
-                    ["osmium", "merge", *(str(path) for path in source_shards),
-                     "-o", str(merged_source), "--overwrite"],
-                    policy=GENERIC_EXTRACTION_COMMAND_POLICY,
-                    cancellation_check=cancellation_check,
-                )
-                source_pbf = merged_source
+            if source_shards:
+                extraction_metrics["sourceShardCount"] = len(source_shards)
+                extraction_metrics["sourceShardBytes"] = sum(path.stat().st_size for path in source_shards)
+                if len(source_shards) == 1:
+                    source_pbf = source_shards[0]
+                else:
+                    merged_source = clipped_pbf.parent / "selected-source-shards.osm.pbf"
+                    self._run_command(
+                        ["osmium", "merge", *(str(path) for path in source_shards),
+                         "-o", str(merged_source), "--overwrite"],
+                        policy=GENERIC_EXTRACTION_COMMAND_POLICY,
+                        cancellation_check=cancellation_check,
+                    )
+                    source_pbf = merged_source
         if scope_plan is not None:
             if source_snapshot_sha256 is None:
                 raise ValueError("plan-aware extraction requires a source identity")

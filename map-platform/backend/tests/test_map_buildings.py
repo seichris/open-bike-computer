@@ -2374,6 +2374,43 @@ class MapBuildingContractTests(unittest.TestCase):
             self.assertNotIn(str(root / "country.osm.pbf"), runner.calls[0][0])
             self.assertEqual(clipped.read_bytes(), b"clipped")
 
+    def test_preferred_shards_fall_back_only_when_region_is_uncovered(self):
+        class MaterializingRunner(RecordingRunner):
+            def run(self, args, *, cwd=None):
+                super().run(args, cwd=cwd)
+                Path(args[args.index("-o") + 1]).write_bytes(b"clipped")
+                return ""
+
+        from map_platform.source_shards import NoShardCoverageError
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_SOURCE_SHARD_MODE": "prefer-prepared",
+        }):
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(self._request())
+            source = root / "country.osm.pbf"
+            source.write_bytes(b"source")
+            clipped = root / "clipped.osm.pbf"
+            runner = MaterializingRunner()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"), runner=runner,
+            )
+            with patch("map_platform.pipeline.select_shards",
+                       side_effect=NoShardCoverageError("no ready source shard generation covers this map")):
+                metrics = pipeline._extract_pbf(
+                    job, source, clipped, source_snapshot_sha256="a" * 64,
+                )
+            self.assertEqual(metrics["sourceShardFallback"], "not_covered")
+            self.assertIn(str(source), runner.calls[0][0])
+            self.assertEqual(clipped.read_bytes(), b"clipped")
+
+            with patch("map_platform.pipeline.select_shards",
+                       side_effect=ValueError("source shard differs from its sealed manifest")):
+                with self.assertRaisesRegex(BuildingScopeError, "prepared source shards are unavailable"):
+                    pipeline._extract_pbf(
+                        job, source, clipped, source_snapshot_sha256="a" * 64,
+                    )
+
     @unittest.skipUnless(shutil.which("osmium"), "osmium is required")
     def test_selected_multi_rectangle_extract_runs_with_real_osmium(self):
         request = self._request()

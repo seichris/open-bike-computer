@@ -579,10 +579,14 @@ Useful production environment variables:
   cells and one request at 64 cells or 8 GiB of shard input. Preparation runs
   one `osmium extract` multi-output scan, verifies each shard and publishes
   the complete generation atomically. After an equivalent-output and disk
-  comparison, set `MAP_PLATFORM_SOURCE_SHARD_MODE=prepared-only` on the worker
-  alongside the exact prepared-source SHA allowlist. Extraction for standard
-  and topo maps from that snapshot then reads the verified local shards.
-  Missing coverage or a corrupt shard fails closed. This regional path does not yet avoid the
+  comparison, set `MAP_PLATFORM_SOURCE_SHARD_MODE=prefer-prepared` on the worker.
+  Extraction for standard and topo maps uses verified local shards wherever a
+  sealed generation covers the complete request. Outside prepared coverage it
+  reads the pinned source PBF, so map creation remains available in every
+  supported area. A corrupt shard or manifest fails closed; only absent coverage
+  uses the source PBF. `prepared-only` remains available for a deliberately
+  restricted region and rejects missing coverage for snapshots in
+  `MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS`. The preferred regional path does not yet avoid the
   source-cache validation of the original PBF or establish a planet generation;
   global capacity, incremental publication and cross-region seams remain
   separate gates. Preparation and request assembly retain at least 16 GiB
