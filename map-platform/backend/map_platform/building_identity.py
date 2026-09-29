@@ -15,7 +15,9 @@ from .map_buildings import BUILDING_PROFILE_VERSION
 BUILDING_PREPROCESSING_IDENTITY_SCHEMA_VERSION = 1
 BUILDING_EXTRACTION_ALGORITHM_VERSION = 1
 BUILDING_SOURCE_INDEX_SCHEMA_VERSION = 1
-BUILDING_SOURCE_INDEX_ALGORITHM_VERSION = 2
+# v3 excludes multipolygons for other mapped features from building-parent
+# closure, so an unrelated clipped relation cannot poison a source index.
+BUILDING_SOURCE_INDEX_ALGORITHM_VERSION = 3
 # v2 records the reviewed single-explicit-part standalone normalization. A
 # cache built with v1 must never be reused because relation association and FMB
 # part flags can differ even when the source snapshot is unchanged.

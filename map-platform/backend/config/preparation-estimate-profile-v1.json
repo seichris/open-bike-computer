@@ -7,7 +7,7 @@
   "buildingProfileVersion": 1,
   "algorithmVersions": {
     "buildingNormalization": 2,
-    "buildingSourceIndex": 2,
+    "buildingSourceIndex": 3,
     "relationClosure": 2
   },
   "baselines": {
