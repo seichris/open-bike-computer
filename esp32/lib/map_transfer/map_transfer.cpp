@@ -2167,6 +2167,26 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
        !targetMetadataMatches(transactionTarget, installedTarget))) {
     ActiveMapSelection active;
     InstallStatus activeStatus = readActiveMap(active);
+    if (!activeStatus.ok &&
+        (activeStatus.code == "active_invalid" ||
+         (activeStatus.code == "active_missing" && !previousRoot.empty()))) {
+      if (previousRoot.empty() ||
+          !rollbackRootMatches(previousRoot, previousMapId,
+                               previousManifestReceipt,
+                               previousSignedManifestReceipt))
+        return fail("stream_transaction_recovery",
+                    "invalid active pointer and no verified previous map");
+      ActiveMapSelection rollback;
+      rollback.mapId = previousMapId;
+      rollback.sessionId = previousSessionId;
+      rollback.root = previousRoot;
+      rollback.target = previousTarget;
+      rollback.manifestReceipt = previousManifestReceipt;
+      rollback.signedManifestReceipt = previousSignedManifestReceipt;
+      if (!writeActiveMap(rollback))
+        return fail("stream_transaction_recovery",
+                    "could not restore previous map after invalid ready state");
+    }
     if (activeStatus.ok && active.root == root) {
       if (!previousRoot.empty() &&
           rollbackRootMatches(previousRoot, previousMapId,
@@ -2214,6 +2234,39 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
   }
   ActiveMapSelection active;
   InstallStatus activeStatus = readActiveMap(active);
+  if (!activeStatus.ok &&
+      (activeStatus.code == "active_invalid" ||
+       (activeStatus.code == "active_missing" && !previousRoot.empty()))) {
+    // A pointer that was accepted by the filesystem but cannot be read back
+    // must not strand the previous, verified map. Keep the journal intact if
+    // rollback cannot be proved or written, so a later recovery can retry.
+    if (previousRoot.empty() ||
+        !rollbackRootMatches(previousRoot, previousMapId,
+                             previousManifestReceipt,
+                             previousSignedManifestReceipt)) {
+      return fail("stream_transaction_recovery",
+                  "invalid active pointer and no verified previous map");
+    }
+    ActiveMapSelection rollback;
+    rollback.mapId = previousMapId;
+    rollback.sessionId = previousSessionId;
+    rollback.root = previousRoot;
+    rollback.target = previousTarget;
+    rollback.manifestReceipt = previousManifestReceipt;
+    rollback.signedManifestReceipt = previousSignedManifestReceipt;
+    if (!writeActiveMap(rollback))
+      return fail("stream_transaction_recovery",
+                  "could not restore previous map after invalid pointer");
+    const bool cleaned = removeTree(joinPath(storageRoot_, root)) &&
+                         clearPendingStreamActivation(sessionId) &&
+                         removeTree(transactionPath + ".tmp") &&
+                         removeTree(transactionPath + ".bak") &&
+                         removeTree(transactionPath);
+    return cleaned ? InstallStatus{true, "recovered_rollback",
+                                   "restored previous map after invalid pointer"}
+                   : fail("stream_transaction_cleanup",
+                          "restored previous map but could not clean transaction");
+  }
   if (!previousRoot.empty() && targetMetadataEmpty(selected.previousTarget) &&
       activeStatus.ok) {
     if (active.root == previousRoot)
@@ -3430,7 +3483,26 @@ bool MapTransferInstaller::writeActiveMap(
             selection.signedManifestReceipt + "\"";
   }
   json += "}\n";
-  return writeTextFileAtomic(joinPath(storageRoot_, kActiveMapFile), json);
+  if (json.size() > 2048 ||
+      !writeTextFileAtomic(joinPath(storageRoot_, kActiveMapFile), json))
+    return false;
+  ActiveMapSelection readback;
+  const InstallStatus status = readActiveMap(readback);
+  return status.ok && readback.mapId == selection.mapId &&
+         readback.sessionId == selection.sessionId &&
+         readback.root == selection.root &&
+         targetMetadataMatches(readback.target, selection.target) &&
+         readback.previousMapId == selection.previousMapId &&
+         readback.previousSessionId == selection.previousSessionId &&
+         readback.previousRoot == selection.previousRoot &&
+         targetMetadataMatches(readback.previousTarget,
+                               selection.previousTarget) &&
+         readback.manifestReceipt == selection.manifestReceipt &&
+         readback.signedManifestReceipt == selection.signedManifestReceipt &&
+         readback.previousManifestReceipt ==
+             selection.previousManifestReceipt &&
+         readback.previousSignedManifestReceipt ==
+             selection.previousSignedManifestReceipt;
 }
 
 bool MapTransferInstaller::activeRootExists(const std::string &root) const {
