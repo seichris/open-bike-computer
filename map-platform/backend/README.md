@@ -482,7 +482,7 @@ Useful production environment variables:
   set the baseline; they are not independent validation. Keep format-4 ranges
   private until additional small, medium, dense, and sparse builds establish
   coverage and range width under the shadow-validation gates in
-  `docs/plans/offline-map-preparation-time-estimates-implementation-plan.md`.
+  [the historical implementation plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/offline-map-preparation-time-estimates-implementation-plan.md).
 - `MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS`: maintenance-service cleanup interval,
   default `3600`.
 - `MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS`: maximum content objects attempted
