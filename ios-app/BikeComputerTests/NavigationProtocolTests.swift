@@ -22913,6 +22913,13 @@ struct NavigationProtocolTests {
         assertEqual(sentPackets.count, 1,
                     "failed retry transport does not report an unsent packet")
 
+        // Keep ACK deadlines under test control during queue recovery. A real
+        // 20 ms timeout can retry before the run-loop observer sees the first
+        // write on a busy CI runner.
+        var queuedAckRetries: [DispatchWorkItem] = []
+        manager.installPowerButtonHonkRetrySchedulerForTesting { _, workItem in
+            queuedAckRetries.append(workItem)
+        }
         var transportReady = false
         sentPackets.removeAll()
         manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
@@ -22927,17 +22934,24 @@ struct NavigationProtocolTests {
                     "backpressured PWR configuration is not reported as written")
         assert(manager.powerButtonHonkConfigurationError == nil,
                "ACK timeout does not start while the PWR configuration is queued")
+        assertEqual(queuedAckRetries.count, 0,
+                    "queued PWR configuration schedules no ACK deadline")
 
         transportReady = true
-        assert(waitForMainLoop(timeout: 2) { sentPackets.count == 1 },
-               "queued PWR configuration is eventually handed to the transport")
+        manager.flushPendingNavigationWritesForTesting()
+        assertEqual(sentPackets.count, 1,
+                    "queued PWR configuration is handed to the recovered transport")
+        assertEqual(queuedAckRetries.count, 1,
+                    "the actual PWR transport write starts one ACK deadline")
         let recoveredAfterBackpressure = powerButtonHonkStatus(
             for: sentPackets[0],
             applied: 1
         )
         assert(manager.handlePowerButtonHonkStatusNotification(recoveredAfterBackpressure),
                "queued PWR configuration can be acknowledged after transport recovery")
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        assert(queuedAckRetries[0].isCancelled,
+               "successful ACK cancels the queued PWR deadline")
+        queuedAckRetries[0].perform()
         assertEqual(sentPackets.count, 1,
                     "successful ACK cancels retries after transport recovery")
     }
