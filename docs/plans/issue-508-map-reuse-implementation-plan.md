@@ -32,7 +32,7 @@ For every supported map format:
    never silently serves an older map.
 
 This plan preserves the current final-artifact store and shared library design
-in [the R2 plan](cloudflare-r2-final-map-library-and-sharing-implementation-plan.md).
+in [the R2 plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/cloudflare-r2-final-map-library-and-sharing-implementation-plan.md).
 Use the existing VPS SSD for the bounded regional prepared-source cache first.
 Contabo Object Storage is an optional durable cross-host copy when cold restore,
 retention or capacity measurements justify a separate purchase. A final ZIP,
@@ -214,7 +214,7 @@ when used, object-store occupancy. Budget the VPS for active jobs plus one bound
 download/build, hot-cache quota, service data and a safety reserve. Admission
 must reject or queue work before disk/RAM exhaustion. Reuse the existing
 resource reservations and fenced leases in
-[Shanghai orchestration](shanghai-city-scale-3d-map-orchestration-implementation-plan.md),
+[Shanghai orchestration](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/shanghai-city-scale-3d-map-orchestration-implementation-plan.md),
 but give source-prep storage its own quota rather than consuming the current
 20 GiB building-block cache ceiling. No production planet build starts until
 measured peak RAM, scratch and I/O fit the chosen prep host.

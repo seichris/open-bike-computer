@@ -2,7 +2,7 @@
 
 ## Scope and rollout
 
-The implementation follows [the orientation plan](map-orientation-implementation-plan.md)
+The implementation follows [the orientation plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/map-orientation-implementation-plan.md)
 on GitHub main `e10aa7fa341366dd3b8e3ed74c0e069d414b8f0d`.
 `MAP_STABLE_CAMERA=1` selects the new path in ordinary and production Waveshare
 1.75-inch and 2.06-inch profiles (including derived diagnostic profiles). The

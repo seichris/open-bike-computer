@@ -28,11 +28,11 @@ corrupted. End-to-end recording durability still needs its own acceptance test.
 Related documents:
 
 - [BLE protocol](../ble-protocol.md): wire-format and authorization authority.
-- [Earlier architecture plan](bluetooth-connection-reliability-architecture-implementation-plan.md).
+- [Earlier architecture plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/bluetooth-connection-reliability-architecture-implementation-plan.md).
 - [September reassessment](bluetooth-reliability-reassessment-2026-09-06.md).
 - [Implemented shutdown repairs](bluetooth-reliability-implementation-2026-09-07.md).
 - [Remaining architecture follow-ups](bluetooth-reliability-follow-ups-2026-09-07.md).
-- [Ride diagnostics plan](ride-diagnostics-logging-implementation-plan.md).
+- [Ride diagnostics plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/ride-diagnostics-logging-implementation-plan.md).
 
 The older documents contain historical findings and validation records. Do not
 reimplement their resolved shutdown defects or treat their physical gates as

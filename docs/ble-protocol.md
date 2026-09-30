@@ -802,7 +802,7 @@ screen cycling remain unchanged.
 
 Ride automation is enabled in the production profiles, while the physical
 false-start, recovery, and board-stability gates in
-`docs/plans/automatic-ride-detection-implementation-plan.md` remain open.
+[the historical implementation plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/automatic-ride-detection-implementation-plan.md) remain open.
 Production advertises CAP2 bit `15` and runs the bounded control path. Manual
 `WREQ` and workout telemetry remain available.
 

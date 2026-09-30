@@ -43,7 +43,7 @@ before implementing.
 
 ## What changed since the original review
 
-The [original plan](bluetooth-connection-reliability-architecture-implementation-plan.md)
+The [original plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/bluetooth-connection-reliability-architecture-implementation-plan.md)
 is useful historical design evidence, but its pre-merge status was stale. Do not
 reimplement its findings as if PR #366 had never landed.
 
