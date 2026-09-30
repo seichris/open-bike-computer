@@ -1,4 +1,4 @@
-# control-plane-source-commit: 839f997ee0029b85a159f4c1158d62e2cc144b8b
+# control-plane-source-commit: a645ec3175a0c2a41fe502e9283a3f6de3076753
 # worker-source-commit: 839f997ee0029b85a159f4c1158d62e2cc144b8b
 # promotion-source-commit: 8c3a14c3c0f619a91863af99429a21a6af663830
 
@@ -11,7 +11,7 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:1030d2c361cfdbc5ef506938c80938086053df9321895576ee1a3923082afafd
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:68064b538caf390cf4544b7165c748ad823303555b1d92c0f381abaaa683749e
   worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:1030d2c361cfdbc5ef506938c80938086053df9321895576ee1a3923082afafd
 
 services:
