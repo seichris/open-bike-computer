@@ -13,6 +13,8 @@ import sys
 from building_source_index import (
     BuildingSourceIndex,
     BuildingSourceIndexError,
+    _building_tags,
+    _eligible_building_parent,
     canonical_json,
     file_sha256,
     initialize_source_index_database,
@@ -75,12 +77,8 @@ def scan_source(path: Path, spool_path: Path) -> None:
                     for member in relation.members
                     if member.type in {"n", "w", "r"}
                 ]
-                seed = (
-                    tags.get("type") == "building"
-                    or tags.get("building") not in (None, "", "no")
-                    or tags.get("building:part") not in (None, "", "no")
-                )
-                eligible_parent = seed or tags.get("type") == "multipolygon"
+                seed = _building_tags(tags)
+                eligible_parent = _eligible_building_parent(tags)
                 connection.execute(
                     "INSERT INTO raw_relations VALUES (?, ?, ?, ?, ?)",
                     (

@@ -952,7 +952,7 @@ class PipelineProgressTests(unittest.TestCase):
             source_sha256 = "1" * 64
             identity = {
                 "schemaVersion": 1,
-                "algorithmVersion": 2,
+                "algorithmVersion": 3,
                 "creationTool": "open-bike-building-source-index",
                 "sourceSnapshotSha256": source_sha256,
             }

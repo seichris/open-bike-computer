@@ -23,7 +23,7 @@ from building_calibration_cache import (
 
 
 SOURCE_INDEX_SCHEMA_VERSION = 1
-SOURCE_INDEX_ALGORITHM_VERSION = 2
+SOURCE_INDEX_ALGORITHM_VERSION = 3
 SOURCE_INDEX_CREATION_TOOL = "open-bike-building-source-index"
 SOURCE_INDEX_MAX_RELATION_DEPTH = 256
 SOURCE_INDEX_VERIFICATION_SCHEMA_VERSION = 1
@@ -31,6 +31,11 @@ SOURCE_INDEX_VERIFICATION_TOOL = "open-bike-building-source-index-verification"
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _OBJECT_KEY = re.compile(r"[nwr][0-9]+")
 _EARTH_RADIUS_METERS = 6_378_137
+_NON_BUILDING_MULTIPOLYGON_FEATURE_KEYS = frozenset({
+    "aeroway", "amenity", "boundary", "geological", "golf", "highway",
+    "landuse", "leisure", "man_made", "military", "natural", "place",
+    "power", "railway", "route", "sport", "tourism", "water", "waterway",
+})
 
 
 class BuildingSourceIndexError(RuntimeError):
@@ -48,7 +53,17 @@ def _building_tags(tags: dict[str, str]) -> bool:
 
 
 def _eligible_building_parent(tags: dict[str, str]) -> bool:
-    return _building_tags(tags) or tags.get("type") == "multipolygon"
+    if _building_tags(tags):
+        return True
+    if tags.get("type") != "multipolygon":
+        return False
+    # An outer building way can also be a member of a multipolygon for a
+    # different feature (for example, a power plant). That relation is not a
+    # building parent, even when its other members are missing from an extract.
+    return not any(
+        tags.get(key) not in (None, "", "no")
+        for key in _NON_BUILDING_MULTIPOLYGON_FEATURE_KEYS
+    )
 
 
 def _bounds_intersect_any(bounds, rectangles) -> bool:

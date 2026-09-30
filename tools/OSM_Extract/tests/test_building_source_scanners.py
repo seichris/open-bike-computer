@@ -289,6 +289,47 @@ class BuildingSourceScannerTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "building_relation_incomplete")
             self.assertFalse(index.database_path.exists())
 
+    def test_nonbuilding_multipolygon_with_missing_way_does_not_poison_building_index(self):
+        source_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="1" lat="31.0" lon="104.0"/>
+  <node id="2" lat="31.0" lon="104.001"/>
+  <node id="3" lat="31.001" lon="104.001"/>
+  <way id="10">
+    <nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="1"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <relation id="20">
+    <member type="way" ref="10" role="outer"/>
+    <member type="way" ref="999" role="outer"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="power" v="plant"/>
+  </relation>
+</osm>
+"""
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "plant.osm"
+            source.write_text(source_xml)
+            index = BuildingSourceIndex(Path(root) / "index", "1" * 64)
+            index.build_with_scanner(lambda path: scan_source(source, path))
+            closure = index.closure_for_bounds(
+                [(1_039_999_000, 309_999_000, 1_040_020_000, 310_020_000)],
+                maximum_objects=100,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+            )
+            self.assertEqual(closure["requiredWayKeys"], ["w10"])
+            self.assertEqual(closure["requiredRelationKeys"], [])
+            self.assertEqual(index.validate()["relationCount"], 0)
+
+            source.write_text(source_xml.replace(
+                '<tag k="power" v="plant"/>', '<tag k="building" v="yes"/>'
+            ))
+            incomplete = BuildingSourceIndex(Path(root) / "strict", "2" * 64)
+            with self.assertRaises(BuildingSourceIndexError) as raised:
+                incomplete.build_with_scanner(lambda path: scan_source(source, path))
+            self.assertEqual(raised.exception.code, "building_relation_incomplete")
+
     def test_scanner_and_runtime_geometry_share_boundary_anchor_cell(self):
         source = Path(__file__).parent / "fixtures" / "calibration_anchor_boundary.osm"
         anchors = {}
