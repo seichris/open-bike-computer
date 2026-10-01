@@ -67,14 +67,24 @@ def relocate_core_text(root: Path, source_project: Path, project: Path) -> int:
                 # A launcher created in a path without spaces may be restored
                 # into a path with spaces. The kernel cannot parse that Python
                 # shebang; use the standard shell/Python exec trampoline.
-                first, separator, body = data.partition(b"\n")
+                first, _, body = data.partition(b"\n")
                 command = shlex.split(first[2:].decode("utf-8"))
                 if command and "python" in Path(command[0]).name:
                     command = [argument.replace(str(source_project), str(project)) for argument in command]
                     quoted = " ".join(shlex.quote(argument) for argument in command)
                     relocated = (
                         "#!/bin/sh\n'''exec' " + quoted + ' "$0" "$@"\n' + "' '''\n"
-                    ).encode("utf-8") + body
+                    ).encode("utf-8") + body.replace(old, new)
+            elif data.startswith(b"#!/bin/sh\n'''exec' "):
+                lines = data.split(b"\n", 3)
+                if len(lines) == 4 and lines[2] == b"' '''":
+                    arguments = shlex.split(lines[1].decode("utf-8"))
+                    if arguments[0] == "exec" and arguments[-2:] == ["$0", "$@"]:
+                        command = [argument.replace(str(source_project), str(project)) for argument in arguments[1:-2]]
+                        quoted = " ".join(shlex.quote(argument) for argument in command)
+                        relocated = (
+                            "#!/bin/sh\n'''exec' " + quoted + ' "$0" "$@"\n' + "' '''\n"
+                        ).encode("utf-8") + lines[3].replace(old, new)
             path.write_bytes(relocated)
             changed += 1
     return changed
