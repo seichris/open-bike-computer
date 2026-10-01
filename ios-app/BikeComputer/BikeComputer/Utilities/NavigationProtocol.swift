@@ -25,6 +25,55 @@ nonisolated enum MapActivationVisibilityPolicy {
     }
 }
 
+// Current renderer health is independent of a historical Installed receipt.
+nonisolated struct MapSelectionHealth: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let bootID: String
+    let revision: UInt64
+    let state: String
+    let root: String
+    let operationID: String
+    let mapID: String
+    let sessionID: String
+    let affectedOperationID: String
+
+    var isValid: Bool {
+        schemaVersion == 1 && MapOperationQueryPacket.make(operationID: bootID) != nil &&
+        ["unknown", "ready", "degraded", "rolling_back", "rollback_failed"].contains(state) &&
+        (operationID.isEmpty || MapOperationQueryPacket.make(operationID: operationID) != nil) &&
+        (affectedOperationID.isEmpty || MapOperationQueryPacket.make(operationID: affectedOperationID) != nil) &&
+        (root.isEmpty || (root.hasPrefix("/maps/") && !root.split(separator: "/").contains("..")))
+    }
+}
+
+nonisolated struct MapSelectionHealthProjection {
+    private(set) var health: MapSelectionHealth?
+    private(set) var hasObservedHealth = false
+
+    // A changed boot requires a new authenticated connection epoch. Revision
+    // monotonicity is meaningful only within that pinned boot.
+    mutating func apply(_ incoming: MapSelectionHealth?, fieldPresent: Bool,
+                        activeRoot: String?, mapID: String?, sessionID: String?) -> Bool {
+        hasObservedHealth = hasObservedHealth || fieldPresent
+        guard let incoming else { return !hasObservedHealth } // old firmware only
+        guard incoming.isValid else { return false }
+        if let health {
+            guard incoming.bootID == health.bootID, incoming.revision >= health.revision,
+                  incoming.revision != health.revision || incoming == health else { return false }
+            if !health.operationID.isEmpty && incoming.root == health.root &&
+                incoming.mapID == health.mapID && incoming.sessionID == health.sessionID {
+                guard incoming.operationID == health.operationID else { return false }
+            }
+        }
+        guard (incoming.state == "unknown" && incoming.root.isEmpty) ||
+              (incoming.root == activeRoot && !incoming.root.isEmpty &&
+               incoming.mapID == mapID && incoming.sessionID == sessionID) else { return false }
+        health = incoming
+        return incoming.state == "ready" && incoming.revision > 0 &&
+            !incoming.mapID.isEmpty && (!incoming.sessionID.isEmpty || incoming.operationID.isEmpty)
+    }
+}
+
 // Durable operation queries are deliberately bounded and cannot carry delimiters.
 nonisolated enum MapOperationQueryPacket {
     static func make(operationID: String) -> Data? {

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "../power_management/power_management.hpp"
+#include "storage_stream_admission.hpp"
 #include "Stream.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdspi_host.h"
@@ -129,6 +130,7 @@ private:
 class Storage {
 private:
   std::atomic<bool> isSdLoaded;
+  mutable storage_shutdown::StreamAdmission streamAdmission_;
   std::atomic<bool> shutdownAdmissionClosed_{false};
   std::atomic<bool> shutdownStarted_{false};
   std::atomic<bool> shutdownComplete_{false};
@@ -180,6 +182,10 @@ public:
   esp_err_t initSPIFFS();
   SDCardInfo getSDCardInfo();
   bool getSdLoaded() const;
+  // Registered streams hold shutdown admission through their complete
+  // fopen -> fclose lifetime. Only close streams returned by this instance.
+  // Exhaustion/shutdown rejects open before reaching the backend; unknown or
+  // already-closing streams return EOF rather than closing a foreign handle.
   FILE *open(const char *path, const char *mode);
   int close(FILE *file);
   bool exists(const char *path);

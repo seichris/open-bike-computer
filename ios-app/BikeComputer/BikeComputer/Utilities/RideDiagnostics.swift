@@ -53,6 +53,9 @@ enum RideDiagnosticsRideLifecyclePolicy {
 /// privacy contract reviewable at one call site.
 nonisolated enum RideDiagnosticsFieldPolicy {
     static let allowedKeys: Set<String> = [
+        "operationId", "cleanupFailed", "freeBytes", "largestBytes",
+        "minimumFreeBytes", "minimumLargestBytes", "tlsStackBytes", "ownerStackBytes",
+        "rendererStackBytes", "stackAvailableMask",
         "accuracy", "accuracyAvailable", "accuracyBucket", "acknowledgedKind",
         "active", "activeStage", "ageMs", "alertMode",
         "applyErrorCode", "applyErrorDomain", "applyResult", "attempt",
@@ -92,6 +95,8 @@ nonisolated enum RideDiagnosticsFieldPolicy {
         "writerProgressMs", "writtenCount",
     ]
     static let firmwareNumberKeys: Set<String> = [
+        "freeBytes", "largestBytes", "minimumFreeBytes", "minimumLargestBytes",
+        "tlsStackBytes", "ownerStackBytes", "rendererStackBytes", "stackAvailableMask",
         "accuracy", "activeStage", "ageMs", "alertMode",
         "applyErrorCode", "attempt", "blockLoadMs", "bootSequence",
         "bytes", "chunk", "commandClass", "completedStage",
@@ -111,6 +116,7 @@ nonisolated enum RideDiagnosticsFieldPolicy {
         "writerDetail", "writerProgressMs", "writtenCount",
     ]
     static let firmwareBooleanKeys: Set<String> = [
+        "cleanupFailed",
         "accuracyAvailable", "active", "authorized", "autoPauseEnabled",
         "available", "background", "clockSynchronized", "connectCompleted",
         "connectStarted", "connectionReused", "diagnosticHold", "fallback",

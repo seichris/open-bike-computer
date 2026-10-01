@@ -9,7 +9,7 @@ strategy. HTTP upload completion is **not** installation success.
 
 ### Existing clients and firmware
 
-Map finalization has an implicit irreversible commit grant. The parser must
+Legacy map finalization has an implicit irreversible commit grant. The parser must
 verify declared body length, signed manifest, every completed file/hash, and all
 counts before requesting the grant. The shared server atomically checks current
 authorization, write permission, mode, shutdown admission, and unique ownership.
@@ -41,8 +41,22 @@ intent before entry and sends these additional signed-stream request headers:
 
 The firmware independently hashes and validates the body. Same ID plus matching
 identity returns the retained state rather than reactivating; conflicting
-content/length/session returns conflict. This version uses the implicit grant
-after verified preparation; it does not expose a separate commit POST.
+content/length/session returns conflict. An operation-aware upload persists only
+nonactivatable `.operation-prepared` staging and returns a prepared receipt.
+The client persists commit intent, then POSTs
+`/map-transfer/operations/<id>/commit` with an empty body, matching
+`X-Map-Operation-ID`, and the saved `X-Map-Stream-SHA256`. Only this request may
+acquire the grant, persist accepted intent and promote ready/pending metadata.
+Known accepted/installed IDs return their retained receipt on retry. A reset
+between accepted intent and promotion resumes device-owned completion.
+
+POST `/map-transfer/operations/<id>/cancel` with the same headers cancels
+receiving/prepared work; accepted/installed is too late and returns its unchanged
+receipt with HTTP 409. A cancellation before manifest admission includes the
+full saved artifact identity headers and original admission token, creating a
+cancelled record that fences the stopped original upload. See the BLE protocol
+for exact headers. Lost prepared/commit/cancel responses are reconciled by exact
+ID; legacy uploads without operation headers retain implicit P2 grant behavior.
 
 Authenticated `GET /map-transfer/operations/<id>` and BLE `MOPQ|<id>` query the
 same bounded receipt. BLE replies use the existing complete `MSTS` assembly and
@@ -76,6 +90,27 @@ records use conservative #540 recovery and do not gain historical authorization
 or exact-operation receipt guarantees. Foreign-card operation records cannot
 prove success for the new device. Renderer acknowledgement is followed by
 storage-worker terminal receipt persistence before installed status publication.
+Operation-backed journal/pending/previous-root evidence remains until that receipt;
+only then does verified terminal cleanup mark consumed and remove the journal.
+A monotonic internal NVS metadata-reader floor is persisted/read back on the
+internal operation owner before any operation-backed prepared metadata is written.
+Boot also latches existing or foreign operation ledgers before OTA maintenance;
+unknown/latch-failed state blocks maintenance admission. The floor never depends
+on SD presence during OTA and has no erase/downgrade override. Clean devices with
+no new-format history still accept legacy schema-1 releases without mounting SD.
+Once floor 1 is recorded, every OTA candidate (including newer build numbers and
+developer-requested downgrades) needs a signed reader capability of at least 1.
+
+Release manifests retain the schema-1 signature for old updaters and add
+`mapMetadataReaderVersion: 1` plus `mapMetadataReaderSignature`. The additional
+P-256 signature covers the canonical schema-2 payload: the same ordered target,
+version, build, full Git SHA, image length/SHA, URL and updater protocol, followed
+by `mapMetadataReaderVersion`. New iOS verifies and relays both signatures; new
+firmware verifies the attestation before using the capability and rechecks the
+NVS floor before boot selection. Old manifests and apps cannot assert compatibility
+via unsigned fields or build-number comparisons. Incompatible updates fail with
+`metadata_reader_incompatible`; physical USB flashing is outside this OTA guard.
+
 Early main boot recovery binds its own installer to the exact read-only
 eFuse identity derivation used by ownership, before journal recovery or map
 rendering. BLE initialization still performs its normal NVS/authentication
@@ -136,6 +171,17 @@ closed; it never forces deep sleep while late writes may remain. Manual light
 suspend is conservatively deferred until a reversible barrier is available.
 Automatic lock-managed IDF light sleep remains separate.
 
+A terminal deferral emits one UI-thread callback. On a normally initialized
+display it shows a preallocated, built-in-font “Shutdown deferred / Leave device
+powered on” notice, hides the ordinary screen and overlay layers, and dims the
+panel. It performs one refresh, not a timer/event loop; no storage opens or owner
+restarts are triggered. Ordinary LVGL/input work stays paused, while a deferred
+drain continues servicing operation/renderer completion mailboxes. Later-stage
+deferrals retain the visible notice with bounded 50 ms idle polling and the
+watchdog heartbeat. Late ACKs do not authorize forced sleep or reset.
+Maintenance/early-startup paths without an initialized display do not attempt
+unsafe display initialization; RTC and serial retain the failure evidence.
+
 The only existing manual-suspend caller is the legacy non-Arduino-GFX LVGL
 `gpioClickEvent`, registered with `POWER_SAVE` in T-Deck and Elecrow profiles.
 Neither Waveshare profile registers that callback. This change deliberately
@@ -143,6 +189,17 @@ refuses that legacy manual MCU-suspend action too, rather than retain a storage
 barrier bypass; implementing a reversible suspend/resume barrier is an explicit
 remaining compatibility gate. The button's existing sleep message is replaced
 with an unavailable notice so it does not promise entry into sleep.
+
+## Selection metadata power-loss recovery
+
+Two bounded sequence/checksum predecessor anchors retain verified selection
+evidence across canonical-pointer and journal cleanup. They preserve the complete
+prior selection, never create operation success, and restore only exact verified
+content. Current/history retention is bounded to four roots under normal sequential
+installs; candidate/staging reservations remain additional. Anchor hashing runs on
+the storage owner with real-byte progress and cooperative yielding. See
+[the shadow model and original counterexamples](map-metadata-power-loss-model.md)
+for exact host coverage and the remaining physical/downgrade limits.
 
 ## Validation and release gates
 

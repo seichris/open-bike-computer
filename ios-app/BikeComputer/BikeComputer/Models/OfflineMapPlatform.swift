@@ -1535,6 +1535,8 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
         let error: TransferError?
     }
 
+    var selectionHealth: MapSelectionHealth? = nil
+    var activeRoot: String? = nil
     var mapOperationsV1: Bool? = nil
     let enabled: Bool?
     let activeMapId: String?
@@ -2481,6 +2483,62 @@ struct MapTransferDeviceClient {
         _ = try await send(request: request, data: Data())
     }
 
+    nonisolated func commitOperation(operationID: String, streamSHA256: String) async throws -> DeviceMapOperationReceipt {
+        try await controlOperation(operationID: operationID, streamSHA256: streamSHA256, action: .commit)
+    }
+
+    nonisolated func cancelOperation(record: DeviceMapOperationRecord) async throws -> DeviceMapOperationReceipt {
+        try await controlOperation(operationID: record.wireOperationID, streamSHA256: record.streamSHA256,
+                                   action: .cancel, cancellationIdentity: record)
+    }
+
+    private nonisolated func controlOperation(operationID: String, streamSHA256: String,
+                                              action: DeviceMapOperationControlAction,
+                                              cancellationIdentity: DeviceMapOperationRecord? = nil) async throws -> DeviceMapOperationReceipt {
+        guard DeviceMapOperationReceipt.isLowerHex(operationID, count: 32),
+              DeviceMapOperationReceipt.isLowerHex(streamSHA256, count: 64),
+              action == .commit || action == .cancel else { throw OfflineMapPlatformError.invalidResponse }
+        var request = URLRequest(url: baseURL.appendingPathComponent("map-transfer/operations/" + operationID + "/" + action.rawValue))
+        request.httpMethod = "POST"
+        request.setValue("0", forHTTPHeaderField: "Content-Length")
+        request.setValue(operationID, forHTTPHeaderField: "X-Map-Operation-ID")
+        request.setValue(streamSHA256, forHTTPHeaderField: "X-Map-Stream-SHA256")
+        if action == .cancel {
+            guard let record = cancellationIdentity, let epoch = record.admissionEpoch,
+                  let revision = record.admissionRevision,
+                  DeviceMapOperationReceipt.isLowerHex(epoch, count: 32),
+                  DeviceMapOperationReceipt.isLowerHex(record.manifestReceipt, count: 64),
+                  DeviceMapOperationReceipt.isLowerHex(record.signedManifestReceipt, count: 64),
+                  [record.sessionID, record.mapID].allSatisfy({
+                      !$0.isEmpty && $0.utf8.count <= 128 && !$0.contains("\r") && !$0.contains("\n")
+                  }) else { throw OfflineMapPlatformError.invalidResponse }
+            request.setValue(record.sessionID, forHTTPHeaderField: "X-Map-Content-Session")
+            request.setValue(record.mapID, forHTTPHeaderField: "X-Map-Map-ID")
+            request.setValue(record.manifestReceipt, forHTTPHeaderField: "X-Map-Manifest-Receipt")
+            request.setValue(record.signedManifestReceipt, forHTTPHeaderField: "X-Map-Signed-Manifest-Receipt")
+            request.setValue(String(record.streamBytes), forHTTPHeaderField: "X-Map-Stream-Bytes")
+            request.setValue(epoch, forHTTPHeaderField: "X-Map-Operation-Admission-Epoch")
+            request.setValue(String(revision), forHTTPHeaderField: "X-Map-Operation-Admission-Revision")
+        }
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 2
+        authorize(&request)
+        let response = try await session.upload(for: request, from: Data())
+        guard let http = response.1 as? HTTPURLResponse, response.0.count <= 4096 else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        // A conflict carries the winner's durable receipt (for example accepted
+        // after a too-late cancel), rather than a fabricated cancellation error.
+        guard http.statusCode == 200 || http.statusCode == 409 else {
+            try Self.validate(response: response.1, body: response.0)
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        let receipt = try JSONDecoder().decode(DeviceMapOperationReceipt.self, from: response.0)
+        guard receipt.schemaVersion == 1, receipt.operationID == operationID,
+              receipt.streamSHA256 == streamSHA256 else { throw OfflineMapPlatformError.invalidResponse }
+        return receipt
+    }
+
     nonisolated func operationStatus(operationID: String) async throws -> DeviceMapOperationReceipt {
         guard DeviceMapOperationReceipt.isLowerHex(operationID, count: 32) else {
             throw OfflineMapPlatformError.invalidResponse
@@ -3122,13 +3180,16 @@ final class BackgroundMapUploadCoordinator: NSObject,
         await activeUploadActivity().descriptors
     }
 
-    func retireActiveUpload(mapID: String, sessionID: String) async -> Bool {
+    func retireActiveUpload(mapID: String, sessionID: String,
+                            deviceID: String? = nil, operationID: UUID? = nil) async -> Bool {
         let tasks = await allTasks()
         let matchingTasks = tasks.filter { task in
             guard let descriptor = Self.descriptor(for: task) else {
                 return false
             }
-            return descriptor.mapID == mapID && descriptor.sessionID == sessionID
+            return descriptor.mapID == mapID && descriptor.sessionID == sessionID &&
+                (deviceID == nil || descriptor.deviceID == deviceID) &&
+                (operationID == nil || descriptor.operationID == operationID)
         }
         markTasksRetired(matchingTasks.map(\.taskIdentifier))
         for task in matchingTasks
@@ -3141,7 +3202,9 @@ final class BackgroundMapUploadCoordinator: NSObject,
             let remaining = await activeUploadActivity()
             if !remaining.hasUnidentifiedTask,
                remaining.descriptors.allSatisfy({
-                   $0.mapID != mapID || $0.sessionID != sessionID
+                   $0.mapID != mapID || $0.sessionID != sessionID ||
+                       (deviceID != nil && $0.deviceID != deviceID) ||
+                       (operationID != nil && $0.operationID != operationID)
                }) {
                 return true
             }

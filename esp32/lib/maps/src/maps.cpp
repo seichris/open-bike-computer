@@ -26,6 +26,7 @@
 #include "../../power_management/power_management.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../renderer_diagnostics/renderer_diagnostics.hpp"
+#include "../../renderer_diagnostics/renderer_stack_metrics.hpp"
 #include "../../runtime_watchdog_diagnostics/runtime_watchdog_diagnostics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
 #include "../../ui_scheduler/ui_scheduler.hpp"
@@ -4540,12 +4541,23 @@ bool Maps::prepareMapScene(const RenderRequest &request, RenderResult &result) {
 }
 
 void Maps::renderWorkerLoop() {
+  uint32_t lastStackSampleMs = 0;
+  const auto sampleStack = [&lastStackSampleMs](bool force) {
+    const uint32_t now = millis();
+    if (force || static_cast<uint32_t>(now - lastStackSampleMs) >= 1000U) {
+      renderer_diagnostics::sampleRendererStackBytes(
+          static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)));
+      lastStackSampleMs = now;
+    }
+  };
+  sampleStack(true);
   gMapRenderWorkerTaskHandle = xTaskGetCurrentTaskHandle();
   runtime_watchdog_diagnostics::registerCurrentTask(
       runtime_watchdog_diagnostics::Role::MapRender,
       runtime_watchdog_diagnostics::Phase::Waiting);
   MAPIO_LOG("MAPIO: render-worker started core=%d\n", xPortGetCoreID());
   while (!renderWorkerShutdown.load(std::memory_order_acquire)) {
+    sampleStack(false);
     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
     if (renderWorkerShutdown.load(std::memory_order_acquire))
       break;
@@ -4762,6 +4774,7 @@ void Maps::renderWorkerLoop() {
           runtime_watchdog_diagnostics::Role::MapRender,
           runtime_watchdog_diagnostics::Phase::Waiting,
           request.version.sequence);
+      sampleStack(false);
       taskYIELD();
       if (processPendingStorageControl() || processPendingVectorMapActivation())
         break;
@@ -4785,6 +4798,7 @@ void Maps::renderWorkerLoop() {
   } else {
     renderWorkerTaskHandle = nullptr;
   }
+  sampleStack(true);
   gMapRenderWorkerTaskHandle = nullptr;
   gMapRenderControlOperation.store(false, std::memory_order_release);
   renderWorkerExited.store(true, std::memory_order_release);

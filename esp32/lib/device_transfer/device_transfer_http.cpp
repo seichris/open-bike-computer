@@ -1,5 +1,8 @@
 #include "device_transfer_http.hpp"
 #include "commit_boundary_policy.hpp"
+#include "lifecycle_resource_event.hpp"
+#include "../renderer_diagnostics/renderer_stack_metrics.hpp"
+#include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_maintenance/firmware_maintenance_policy.hpp"
 #include "../power_management/power_management.hpp"
@@ -14,7 +17,6 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <new>
-#include <sstream>
 
 namespace device_transfer {
 namespace {
@@ -514,6 +516,13 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
         apPassphrase_ = generateSessionToken().substr(0, 24);
       }
       if (!wasEnabled) {
+        resourceCycle_ = nextHttpTransferGeneration(resourceCycle_);
+        resourceSample_ = 0;
+        workerStackHighWaterBytes_ = 0;
+        workerStackSampleAvailable_ = false;
+        std::snprintf(resourceMode_, sizeof(resourceMode_), "%s",
+                      lifecycle_resources::modeName(requestedMode.c_str()));
+        resourceOperation_[0] = '\0';
         lastTransferFailure_ = {};
         networkStart_ = {};
         if (requestedMode != "debug" && requestedMode != "diagnostics")
@@ -599,6 +608,7 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
       }
       if (firmware_maintenance::active())
         firmware_maintenance::setStage(firmware_maintenance::Stage::Failed);
+      observeResources("worker_failed");
       signalStatusChanged();
       return false;
     }
@@ -1172,6 +1182,23 @@ void HttpTransferServer::noteDiagnosticsModeDecision(bool matches) {
   unlockState();
 }
 
+bool HttpTransferServer::bindResourceOperation(
+    const HttpRequest &request, const std::string &mode,
+    const std::string &operationID) {
+  lockState();
+  const bool authorized =
+      isHttpTransferGenerationCurrent(enabled_, transferGeneration_,
+                                      request.transferGeneration) &&
+      mode_ == mode && authenticatedBleSessionId_ != 0 &&
+      !sessionToken_.empty() && constantTimeEqual(request.transferToken, sessionToken_);
+  const bool bound = authorized && lifecycle_resources::bindOperation(
+      resourceOperation_, operationID.c_str());
+  unlockState();
+  if (bound)
+    observeResources("operation_selected");
+  return bound;
+}
+
 HttpTransferServer::CommitGrant HttpTransferServer::beginAuthorizedCommit(
     const HttpRequest &request, const std::string &mode,
     const std::string &operation, const std::string &artifact) {
@@ -1190,10 +1217,16 @@ HttpTransferServer::CommitGrant HttpTransferServer::beginAuthorizedCommit(
     // No grant was published; do not leave the state mutex locked.
   }
   if (grant != 0) {
+    // A generic OTA request has no map identity header. Keep its adapter-bound
+    // operation, while accepting only validated UUID syntax for map identity.
+    if (mode == "map")
+      (void)lifecycle_resources::bindOperation(resourceOperation_, request.mapOperationID.c_str());
     currentRequestAuthorized_ = true;
     lastUsefulTrafficMs_ = millis();
   }
   unlockState();
+  if (grant != 0)
+    observeResources("commit_granted");
   return grant;
 }
 
@@ -1201,8 +1234,10 @@ bool HttpTransferServer::endAuthorizedCommit(CommitGrant grant) {
   lockState();
   const bool ended = commitBoundary_.end(grant);
   unlockState();
-  if (ended)
+  if (ended) {
+    observeResources("grant_released");
     signalStatusChanged();
+  }
   return ended;
 }
 
@@ -1221,6 +1256,7 @@ bool HttpTransferServer::commitInProgress() const {
 
 void HttpTransferServer::beginShutdown() {
   setCommitAdmissionClosed(true);
+  observeResources("shutdown_requested");
   clearAuthenticatedBleSession();
 }
 
@@ -1294,9 +1330,18 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   std::string version;
   std::string requestLineTrailing;
   {
-    std::stringstream requestStream(requestLine);
-    requestStream >> request.method >> request.path >> version;
-    requestStream >> requestLineTrailing;
+    size_t position = 0;
+    const auto readToken = [&]() {
+      const size_t start = requestLine.find_first_not_of(" \t\n\r\f\v", position);
+      if (start == std::string::npos) return std::string();
+      const size_t end = requestLine.find_first_of(" \t\n\r\f\v", start);
+      position = end == std::string::npos ? requestLine.size() : end;
+      return requestLine.substr(start, position - start);
+    };
+    request.method = readToken();
+    request.path = readToken();
+    version = readToken();
+    requestLineTrailing = readToken();
   }
   if (request.method.empty() || request.path.empty() ||
       version != "HTTP/1.1" || !requestLineTrailing.empty()) {
@@ -1343,12 +1388,17 @@ bool HttpTransferServer::handleClient(TransferClient &client,
               "transfer encoding is not supported");
     return false;
   }
+  request.mapContentSession = std::move(securityHeaders.mapContentSession);
+  request.mapLogicalID = std::move(securityHeaders.mapLogicalID);
+  request.mapManifestReceipt = std::move(securityHeaders.mapManifestReceipt);
+  request.mapSignedManifestReceipt = std::move(securityHeaders.mapSignedManifestReceipt);
+  request.mapStreamBytes = std::move(securityHeaders.mapStreamBytes);
   request.mapOperationAdmissionEpoch = std::move(securityHeaders.mapOperationAdmissionEpoch);
   request.mapOperationAdmissionRevision = securityHeaders.mapOperationAdmissionRevision;
   request.hasMapOperationAdmissionRevision = securityHeaders.hasMapOperationAdmissionRevision;
   request.mapOperationID = std::move(securityHeaders.mapOperationID);
   request.mapStreamSHA256 = std::move(securityHeaders.mapStreamSHA256);
-  request.mapOperationHeadersPresent = securityHeaders.mapOperationSeen || securityHeaders.mapStreamSHA256Seen || securityHeaders.mapOperationAdmissionRevisionSeen || securityHeaders.mapOperationAdmissionEpochSeen;
+  request.mapOperationHeadersPresent = securityHeaders.mapOperationSeen || securityHeaders.mapStreamSHA256Seen || securityHeaders.mapOperationAdmissionRevisionSeen || securityHeaders.mapOperationAdmissionEpochSeen || securityHeaders.operationIdentityHeadersSeen != 0;
   request.transferToken = std::move(securityHeaders.transferToken);
   request.contentType = std::move(securityHeaders.contentType);
   request.contentLength = securityHeaders.contentLength;
@@ -1502,11 +1552,55 @@ void HttpTransferServer::observeResources(const char *phase) {
   minimumPsramLargest_ = std::min(minimumPsramLargest_, psramLargest);
   if (workerTask_ != nullptr && currentTask == workerTask_) {
     workerStackHighWaterBytes_ =
-        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)) *
-        sizeof(StackType_t);
+        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+    workerStackSampleAvailable_ = true;
   }
   resourcePhase_ = phase == nullptr ? "unknown" : phase;
+  lifecycle_resources::Snapshot sample;
+  NetworkOperationOwner *owner = networkOperationOwner_;
+  // At most 64 five-record checkpoints per admitted session. Repeated payload
+  // samples and arbitrary handler phases cannot flood the reserved recorder.
+  const bool emit = resourceCycle_ != 0 && resourceSample_ < 64 &&
+                    lifecycle_resources::checkpoint(phase);
+  if (emit) {
+    sample.cycle = resourceCycle_;
+    sample.sample = ++resourceSample_;
+    sample.generation = transferGeneration_;
+    sample.free[0] = internalFree; sample.largest[0] = internalLargest;
+    sample.free[1] = dmaFree; sample.largest[1] = dmaLargest;
+    sample.free[2] = psramFree; sample.largest[2] = psramLargest;
+    sample.minimumFree[0] = minimumInternalFree_;
+    sample.minimumFree[1] = minimumDmaFree_;
+    sample.minimumFree[2] = minimumPsramFree_;
+    sample.minimumLargest[0] = minimumInternalLargest_;
+    sample.minimumLargest[1] = minimumDmaLargest_;
+    sample.minimumLargest[2] = minimumPsramLargest_;
+    sample.tlsStack = workerStackHighWaterBytes_;
+    sample.stackAvailableMask = workerStackSampleAvailable_ ? 1U : 0U;
+    sample.cleanupFailed = networkStopFailed_;
+    std::memcpy(sample.mode, resourceMode_, sizeof(sample.mode));
+    std::memcpy(sample.operation, resourceOperation_, sizeof(sample.operation));
+  }
   unlockState();
+  if (emit) {
+    sample.ownerStack = owner == nullptr ? 0 : owner->stackHighWaterBytes();
+    sample.rendererStack = renderer_diagnostics::rendererStackHighWaterBytes();
+    if (owner != nullptr && owner->stackSampleAvailable())
+      sample.stackAvailableMask |= 2U;
+    if (renderer_diagnostics::rendererStackSampleAvailable())
+      sample.stackAvailableMask |= 4U;
+    char fields[320] = {};
+    if (lifecycle_resources::metadata(fields, sample, phase))
+      (void)ride_diagnostics::record(ride_diagnostics::Level::Info,
+          "lifecycle", "transfer_checkpoint", fields);
+    for (unsigned pool = 0; pool < 3; ++pool)
+      if (lifecycle_resources::pool(fields, sample, pool))
+        (void)ride_diagnostics::record(ride_diagnostics::Level::Info,
+            "lifecycle", "transfer_resources", fields);
+    if (lifecycle_resources::stacks(fields, sample))
+      (void)ride_diagnostics::record(ride_diagnostics::Level::Info,
+          "lifecycle", "transfer_stacks", fields);
+  }
 }
 
 void HttpTransferServer::signalStatusChanged() {

@@ -28,10 +28,145 @@ class MapCommitRecoveryTests(unittest.TestCase):
         body = method(source, "handleInstallStream")
         grant = body.index("pendingCommitGrant_ = grant")
         closed = body.index("client.requestHttpResponseClose()", grant)
-        self.assertLess(closed, body.index("if (!acceptOperation", grant))
         self.assertLess(closed, body.index("receiver->finish()", grant))
         self.assertLess(body.index("CommitRecovery recovery;"),
                         body.index("beginAuthorizedCommit("))
+        control = method(source, "handleOperationControl")
+        self.assertLess(control.index("client.requestHttpResponseClose()"), control.index("store.accept(record.identity)"))
+
+    def test_actual_activation_failure_rearms_reserved_disposition(self):
+        source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
+        retry = source[source.index("void MapTransferHttpServer::retryAcceptedActivation("):
+                       source.index("bool MapTransferHttpServer::recoverCommitDisposition(")]
+        execute = source[source.index("void MapTransferHttpServer::executeActivation("):
+                         source.index("bool MapTransferHttpServer::runStreamActivationTask(")]
+        fixture = r'''
+#include <cassert>
+#include <new>
+#include <string>
+namespace power_management {
+enum class LockDomain { Transfer };
+struct ScopedLock { explicit ScopedLock(LockDomain) {} };
+}
+namespace ui_scheduler { enum class WakeReason { Transfer }; void notify(WakeReason) {} }
+class MapTransferHttpServer {
+public:
+  struct StateGuard { explicit StateGuard(MapTransferHttpServer &) {} };
+  struct Recovery {
+    struct Identity { std::string session; } identity;
+    bool armed=false, responseCompleted=true;
+    bool pending() const { return !identity.session.empty(); }
+  } commitRecovery_;
+  bool pendingRendererAcknowledgement_=false;
+  bool grantOwned=true, automaticExit=false;
+  int outcome=0, runs=0;
+  bool runStreamActivationTask(const std::string &, bool) {
+    ++runs;
+    if(outcome==2) throw std::bad_alloc();
+    if(outcome==1) {pendingRendererAcknowledgement_=true;return true;}
+    return false;
+  }
+  void requestAutomaticExit() {automaticExit=true;}
+  void retryAcceptedActivation(const std::string &);
+  void executeActivation(const std::string &, bool);
+};
+''' + retry + execute + r'''
+int main() {
+  for(int outcome: {0,2}) {
+    MapTransferHttpServer server;
+    server.commitRecovery_.identity.session="accepted-session";
+    server.outcome=outcome;
+    server.executeActivation("accepted-session",true);
+    assert(server.grantOwned && server.commitRecovery_.armed && !server.automaticExit);
+    assert(server.commitRecovery_.identity.session=="accepted-session");
+    // Actual recovery may now retry; eventual renderer handoff retires the
+    // dormant disposition while retaining the grant for its ACK/receipt.
+    server.outcome=1;
+    server.executeActivation("accepted-session",true);
+    assert(server.runs==2 && server.pendingRendererAcknowledgement_);
+    assert(!server.commitRecovery_.pending() && server.grantOwned && !server.automaticExit);
+  }
+  MapTransferHttpServer stale;
+  stale.commitRecovery_.identity.session="new-session";
+  stale.executeActivation("old-session",true);
+  assert(!stale.commitRecovery_.armed && stale.commitRecovery_.identity.session=="new-session");
+  stale.pendingRendererAcknowledgement_=true;
+  stale.retryAcceptedActivation("new-session");
+  assert(!stale.commitRecovery_.armed); // never race an outstanding renderer ACK
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="activation-disposition-") as temporary:
+            path = Path(temporary)
+            (path / "test.cpp").write_text(fixture)
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(path / "test.cpp"), "-o", str(path / "test")], check=True)
+            subprocess.run([str(path / "test")], check=True)
+
+    def test_new_operation_same_content_gets_fresh_renderer_handoff(self):
+        source = (ROOT / "lib/map_transfer_http/map_transfer_http.cpp").read_text()
+        body = source[source.index("void MapTransferHttpServer::beginDeferredActivation("):
+                      source.index("void MapTransferHttpServer::ownedActivation(")]
+        fixture = r'''
+#include <cassert>
+#include <new>
+#include <string>
+using esp_err_t=int;
+constexpr int ESP_OK=0, ESP_ERR_INVALID_STATE=1, ESP_ERR_TIMEOUT=2;
+enum class ActivationBeginResult {Started, AlreadyInstalled, Busy};
+struct Progress {int a,b,c,d;};
+struct ActivationState {
+  bool installed=true; unsigned begins=0;
+  ActivationBeginResult begin(const std::string &,int,unsigned) {
+    ++begins; return installed?ActivationBeginResult::AlreadyInstalled:ActivationBeginResult::Started;
+  }
+  void finish(const char *,const char *,const char *,const char *) {installed=false;}
+  void updateProgress(Progress) {}
+};
+struct Transfer {void sampleResources(const char *) {}};
+using Work=void (*)(void *,const char *,bool);
+struct Owner {
+  Work called=nullptr; int result=ESP_OK;
+  int runMapActivation(Work work,void *,const std::string &,bool) {called=work;return result;}
+};
+class MapTransferHttpServer {
+public:
+  struct StateGuard {explicit StateGuard(MapTransferHttpServer &) {}};
+  struct DeferredActivation {std::string sessionId; unsigned minimumSequence=0;};
+  struct {struct {std::string operation;} identity;} commitRecovery_;
+  ActivationState activationState_; bool streamStatusActive_=true; unsigned retries=0;
+  Transfer transfer; Transfer *transferServer_=&transfer;
+  Owner owner; Owner *operationOwner_=&owner;
+  static void ownedActivation(void *,const char *,bool) {}
+  static void ownedInstalledCleanup(void *,const char *,bool) {}
+  void retryAcceptedActivation(const std::string &) {++retries;}
+  void finishActivation(const char *,const char *,const char *,const char *) {}
+  void setLastError(const char *,const char *) {}
+  void beginDeferredActivation(const DeferredActivation &,bool);
+};
+''' + body + r'''
+int main() {
+  MapTransferHttpServer fresh;
+  fresh.commitRecovery_.identity.operation="new-logical-operation";
+  fresh.beginDeferredActivation({"same-content",4},true);
+  assert(fresh.owner.called==MapTransferHttpServer::ownedActivation);
+  assert(fresh.activationState_.begins==2 && !fresh.streamStatusActive_);
+  MapTransferHttpServer legacy;
+  legacy.beginDeferredActivation({"same-content",4},true);
+  assert(legacy.owner.called==MapTransferHttpServer::ownedInstalledCleanup);
+  legacy.owner.result=ESP_ERR_INVALID_STATE;
+  legacy.beginDeferredActivation({"same-content",4},true);
+  assert(legacy.retries==1);
+  legacy.owner.result=ESP_ERR_TIMEOUT;
+  legacy.beginDeferredActivation({"same-content",4},true);
+  assert(legacy.retries==1); // late live owner cannot race storage retry
+}
+'''
+        with tempfile.TemporaryDirectory(prefix="activation-reinstall-") as temporary:
+            path = Path(temporary)
+            (path / "test.cpp").write_text(fixture)
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(path / "test.cpp"), "-o", str(path / "test")], check=True)
+            subprocess.run([str(path / "test")], check=True)
 
     def test_storage_disposition_retains_unknown_and_resolves_known(self):
         compiler = shutil.which("c++")
@@ -59,7 +194,7 @@ struct MapOperationStorage : operation::Storage {
 std::vector<uint8_t> MapOperationStorage::slots[2];
 bool MapOperationStorage::failRead = false;
 bool MapOperationStorage::failWrite = false;
-struct Status { bool ok; };
+struct Status { bool ok; std::string code; Status(bool value, std::string reason="") : ok(value), code(reason) {} };
 struct ReadyStreamMap {
   std::string operationID, mapId, manifestReceipt, signedManifestReceipt;
 };
@@ -68,6 +203,9 @@ struct Installer {
   ReadyStreamMap marker;
   Status readReadyStreamMap(const std::string &, ReadyStreamMap &out) {
     out = marker; return {ready};
+  }
+  Status promotePreparedOperation(const std::string &, const std::string &) {
+    return {ready, ready ? "ok" : "stream_ready_invalid"};
   }
   Status discardUnselectedStreamMap(const std::string &) {
     discarded = discardable; return {discardable};

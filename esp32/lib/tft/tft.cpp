@@ -78,16 +78,13 @@ void touchCalibrate()
 
   if (f != NULL)
   {
+    if (!repeatCalib && fread((char *)calData, sizeof(char), 16, f) == 16)
+      calDataOK = 1;
+    // The read stream must close even for a repeated/empty calibration; its
+    // lifetime now correctly prevents shutdown from unmounting underneath it.
+    storage.close(f);
     if (repeatCalib)
-      remove(calibrationFile);
-    else
-    {
-      if (fread((char *)calData, sizeof(char), 16, f))
-      {
-        calDataOK = 1;
-        storage.close(f);
-      }
-    }
+      storage.remove(calibrationFile);
   }
   else
     log_e("Touch calibration doesn't exists");

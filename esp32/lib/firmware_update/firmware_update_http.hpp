@@ -64,6 +64,7 @@ private:
   std::string actualSha256_;
   std::string pendingVersion_;
   uint32_t pendingBuild_ = 0;
+  uint32_t pendingMapMetadataReader_ = 0;
   bool allowDowngrade_ = false;
   std::string errorCode_;
   std::string errorMessage_;

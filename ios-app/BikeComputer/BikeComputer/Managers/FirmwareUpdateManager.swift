@@ -85,9 +85,12 @@ struct FirmwareReleaseManifest: Codable, Equatable {
     let url: URL
     let minUpdaterProtocol: Int
     let signature: String?
+    var mapMetadataReaderVersion: Int? = nil
+    var mapMetadataReaderSignature: String? = nil
 
     var isSupportedByApp: Bool {
-        schemaVersion == 1 && minUpdaterProtocol <= 1
+        (schemaVersion == 1 || schemaVersion == 2) && minUpdaterProtocol <= 1 &&
+            (schemaVersion != 2 || mapMetadataReaderVersion != nil)
     }
 }
 
@@ -261,12 +264,22 @@ enum FirmwareManifestSignatureVerifier {
             return false
         }
         let payload = canonicalPayload(for: manifest)
-        return publicKey.isValidSignature(signature, for: Data(payload.utf8))
+        guard publicKey.isValidSignature(signature, for: Data(payload.utf8)) else { return false }
+        if manifest.schemaVersion == 1,
+           manifest.mapMetadataReaderVersion != nil || manifest.mapMetadataReaderSignature != nil {
+            guard manifest.mapMetadataReaderVersion != nil,
+                  let encoded = manifest.mapMetadataReaderSignature,
+                  let data = Data(base64Encoded: encoded),
+                  let readerSignature = try? P256.Signing.ECDSASignature(derRepresentation: data) else { return false }
+            return publicKey.isValidSignature(readerSignature,
+                for: Data(canonicalPayload(for: manifest, readerAttestation: true).utf8))
+        }
+        return true
     }
 
-    static func canonicalPayload(for manifest: FirmwareReleaseManifest) -> String {
-        [
-            "schemaVersion=\(manifest.schemaVersion)",
+    static func canonicalPayload(for manifest: FirmwareReleaseManifest, readerAttestation: Bool = false) -> String {
+        var fields = [
+            "schemaVersion=\(readerAttestation ? 2 : manifest.schemaVersion)",
             "target=\(manifest.target)",
             "version=\(manifest.version)",
             "build=\(manifest.build)",
@@ -275,7 +288,11 @@ enum FirmwareManifestSignatureVerifier {
             "sha256=\(manifest.sha256)",
             "url=\(manifest.url.absoluteString)",
             "minUpdaterProtocol=\(manifest.minUpdaterProtocol)"
-        ].joined(separator: "\n") + "\n"
+        ]
+        if readerAttestation || manifest.schemaVersion == 2 {
+            fields.append("mapMetadataReaderVersion=\(manifest.mapMetadataReaderVersion ?? 0)")
+        }
+        return fields.joined(separator: "\n") + "\n"
     }
 }
 
@@ -1059,6 +1076,12 @@ struct FirmwareUpdateDeviceClient {
             "releaseUrl": manifest.url.absoluteString,
             "allowDowngrade": allowDowngrade
         ]
+        if let reader = manifest.mapMetadataReaderVersion {
+            body["mapMetadataReaderVersion"] = reader
+        }
+        if let signature = manifest.mapMetadataReaderSignature {
+            body["mapMetadataReaderSignature"] = signature
+        }
         if let operationID, let admissionRevision, let admissionEpoch {
             body["operationId"] = operationID
             body["admissionRevision"] = admissionRevision

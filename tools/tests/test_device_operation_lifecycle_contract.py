@@ -39,6 +39,28 @@ class DeviceOperationLifecycleContractTests(unittest.TestCase):
         self.assertIn("completedTaskIDs.insert(task.taskIdentifier)", completion)
         self.assertNotIn("removeAccessoryNetworkConfiguration", completion)
 
+    def test_precommit_transport_recovery_requires_fresh_captured_context(self):
+        resume = MANAGER[MANAGER.index("func resumeMapTransfer("):MANAGER.index("private func performEnterMapTransfer(")]
+        self.assertIn("verifiedPrecommitRecovery: Bool = false", resume)
+        self.assertIn("recoveryDeviceID == deviceID", resume)
+        self.assertIn("recoveryConnectionEpoch == epoch", resume)
+        self.assertIn("bleManager.transferConnectionEpoch == epoch", resume)
+        self.assertIn("bleManager.deviceTransferStatusRevision != revision", resume)
+        self.assertIn("bleManager.deviceTransferMode.isEmpty", resume)
+        self.assertIn("bleManager.deviceTransferSessionToken?.isEmpty != false", resume)
+        self.assertIn("coordinator.retireStoppedMapForPrecommitRecovery", resume)
+        self.assertIn("expectedConnectionEpoch: epoch", resume)
+        self.assertIn("operationLease?.connectionEpoch == expectedConnectionEpoch", resume)
+        self.assertIn("guard let lease = operationLease else { return coordinator.isCleanupComplete }", MANAGER)
+
+    def test_debug_exit_fixture_waits_for_its_enter_command(self):
+        tests = (ROOT / "ios-app/BikeComputerTests/NavigationProtocolRideTests.swift").read_text()
+        fixture = tests[tests.index("static func testDeviceTransferManagerConfirmsDebugExit()"):tests.index("static func testDeviceTransferManagerCompensatesCancelledDebugEntry()")]
+        self.assertLess(fixture.index("handleDeviceCapabilitiesNotification("), fixture.index("installNavigationWriteEndpoint("))
+        self.assertIn('!sentPackets.contains(Data("DTRNenter|debug".utf8))', fixture)
+        self.assertLess(fixture.index('!sentPackets.contains(Data("DTRNenter|debug".utf8))'), fixture.index("let activeStatus"))
+        self.assertNotIn("where sentPackets.isEmpty", fixture)
+
     def test_debug_owner_outlives_view_recreation(self):
         section = SETTINGS[SETTINGS.index("private struct RemoteDeviceDebugSettingsSection"):]
         self.assertIn("static let sharedTransferManager = DeviceTransferManager()", section)

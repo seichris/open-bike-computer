@@ -27,8 +27,7 @@
 #include <Wire.h>
 #include <cmath>
 #include <hal.hpp>
-#include <iomanip>
-#include <sstream>
+#include <cstdio>
 
 #define SD_OCR_SDHC_CAP (1 << 30)
 
@@ -166,10 +165,9 @@ std::string formatSize(uint64_t size) {
     order++;
     formatted_size /= 1024;
   }
-  std::ostringstream oss;
-  oss << std::fixed << std::setprecision(2) << formatted_size << " "
-      << suffixes[order];
-  return oss.str();
+  char text[48];
+  std::snprintf(text, sizeof(text), "%.2f %s", formatted_size, suffixes[order]);
+  return text;
 }
 } // namespace
 
@@ -179,7 +177,11 @@ std::string formatSize(uint64_t size) {
 Storage::Storage() : isSdLoaded(false), card(nullptr) {}
 
 bool Storage::pollShutdownQuiescence() {
+  streamAdmission_.closeAdmission();
   shutdownAdmissionClosed_.store(true, std::memory_order_release);
+  // An admitted fopen or fclose may still be blocked in the backend. Never
+  // launch unmount until its complete stream lifetime has retired.
+  if (!streamAdmission_.quiescent()) return false;
   if (!shutdownStarted_.exchange(true, std::memory_order_acq_rel)) {
     // xTaskCreate uses an internal stack. An unmount/cache operation must
     // never run on the renderer's PSRAM stack or in the UI event loop.
@@ -194,11 +196,14 @@ bool Storage::pollShutdownQuiescence() {
 
 void Storage::shutdownTask(void *context) {
   auto &self = *static_cast<Storage *>(context);
-  bool stopped = self.mountMutex == nullptr ||
-      xSemaphoreTake(self.mountMutex, pdMS_TO_TICKS(100)) == pdTRUE;
+  bool stopped = self.streamAdmission_.quiescent();
+  if (stopped)
+    stopped = self.mountMutex == nullptr ||
+        xSemaphoreTake(self.mountMutex, pdMS_TO_TICKS(100)) == pdTRUE;
   const bool locked = stopped && self.mountMutex != nullptr;
   if (stopped) {
-    // All known writing owners have already ACKed/closed their streams.
+    // Raw POSIX map/diagnostic owners already ACKed, and wrapper streams plus
+    // transient metadata/mount operations have all retired their tracked leases.
     // Catch any buffered C stream failure before deregistering its VFS.
     stopped = ::fflush(nullptr) == 0;
     if (stopped) {
@@ -229,6 +234,8 @@ void Storage::shutdownTask(void *context) {
 }
 
 bool Storage::ensureSdMounted(bool allowInternalFallback) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
@@ -324,6 +331,8 @@ bool Storage::canRetryRemovableSd() const {
 }
 
 uint64_t Storage::removableSdFreeBytes() const {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return 0;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   if (!isSdLoaded.load())
@@ -342,6 +351,8 @@ uint64_t Storage::removableSdFreeBytes() const {
 }
 
 StoragePreparation Storage::prepareDiagnosticsStorage() {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return StoragePreparation::MountFailed;
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire))
     return StoragePreparation::MountFailed;
   power_management::ScopedLock powerLock(
@@ -412,6 +423,8 @@ bool Storage::canRetryDiagnosticsSd() const {
 }
 
 uint64_t Storage::diagnosticsSdFreeBytes() const {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return 0;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   if (!getDiagnosticsSdLoaded())
@@ -440,6 +453,8 @@ const char *Storage::diagnosticsRootPath() const {
  * @brief Initialize removable storage with the active board backend
  */
 esp_err_t Storage::initSD() {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return ESP_FAIL;
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return ESP_FAIL;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
@@ -790,6 +805,8 @@ esp_err_t Storage::initSD() {
  * @return esp_err_t Error code
  */
 esp_err_t Storage::initSPIFFS() {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return ESP_FAIL;
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return ESP_FAIL;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
@@ -839,6 +856,8 @@ esp_err_t Storage::initSPIFFS() {
  * @return SDCardInfo structure containing SD card information
  */
 SDCardInfo Storage::getSDCardInfo() {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return {};
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   SDCardInfo info{};
@@ -918,7 +937,14 @@ FILE *Storage::open(const char *path, const char *mode) {
   if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return nullptr;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-  return fopen(path, mode);
+  const size_t slot = streamAdmission_.reserveOpen();
+  if (slot == storage_shutdown::StreamAdmission::kInvalid) {
+    errno = EBUSY;
+    return nullptr;
+  }
+  FILE *file = fopen(path, mode);
+  streamAdmission_.finishOpen(slot, file);
+  return file;
 }
 
 /**
@@ -930,7 +956,16 @@ FILE *Storage::open(const char *path, const char *mode) {
 int Storage::close(FILE *file) {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
-  return fclose(file);
+  const size_t slot = streamAdmission_.beginClose(file);
+  if (slot == storage_shutdown::StreamAdmission::kInvalid) {
+    errno = EINVAL;
+    return EOF;
+  }
+  const int result = fclose(file);
+  // fclose retires the stream even when its final flush fails. Record that
+  // uncertainty permanently, while still allowing the caller to complete.
+  streamAdmission_.finishClose(slot, result == 0);
+  return result;
 }
 
 /**
@@ -940,6 +975,8 @@ int Storage::close(FILE *file) {
  * @return size_t Size of the file in bytes
  */
 size_t Storage::size(const char *path) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return 0;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   struct stat st;
@@ -1049,6 +1086,8 @@ int Storage::flush(FILE *file) {
  * @return true if the file exists, false otherwise
  */
 bool Storage::exists(const char *path) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   struct stat st;
@@ -1062,6 +1101,8 @@ bool Storage::exists(const char *path) {
  * @return true if the directory was created successfully, false otherwise
  */
 bool Storage::mkdir(const char *path) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   return ::mkdir(path, 0777) == 0;
@@ -1074,6 +1115,8 @@ bool Storage::mkdir(const char *path) {
  * @return true if the file was removed successfully, false otherwise
  */
 bool Storage::remove(const char *path) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   return ::remove(path) == 0;
@@ -1086,6 +1129,8 @@ bool Storage::remove(const char *path) {
  * @return true if the directory was removed successfully, false otherwise
  */
 bool Storage::rmdir(const char *path) {
+  storage_shutdown::OperationLease operation(streamAdmission_);
+  if (!operation.held()) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   return ::rmdir(path) == 0;

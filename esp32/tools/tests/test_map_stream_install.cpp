@@ -974,9 +974,18 @@ void testConsumedReadyRootsAreNotReactivatedAndArePruned() {
   assert(selected.sessionId == "history-c");
   assert(selected.previousSessionId == "history-b");
   assert(installer.pruneObsoleteInstalledMaps());
+  // Both independent anchors retain the complete predecessor selection,
+  // including its rollback root. History is bounded at four roots, not two.
+  assert(exists(root + "/VECTMAP/.maps/history-a"));
+  for (const char *session : {"history-d", "history-e"}) {
+    prepareReadyRoot(root, session);
+    assert(installer.activateReadyStreamMap(session).ok);
+    assert(installer.pruneObsoleteInstalledMaps());
+  }
   assert(!exists(root + "/VECTMAP/.maps/history-a"));
-  assert(exists(root + "/VECTMAP/.maps/history-b"));
-  assert(exists(root + "/VECTMAP/.maps/history-c"));
+  for (const char *session : {"history-b", "history-c", "history-d", "history-e"})
+    assert(exists(root + "/VECTMAP/.maps/" + session));
+  assert(installer.recoverPendingStreamActivation().code == "stream_pending_none");
 }
 
 void testFrozenMapIdEdgesInstallAndActivate() {
@@ -1417,19 +1426,24 @@ void testDeviceBoundOperationActivationAndReceipt() {
   assert(ledger.restore()==op::Result::Ok);
   assert(ledger.initializeAdmission(100)==op::Result::Ok);
   assert(ledger.admit(identity,ledger.admissionRevision())==op::Result::Ok);
-  assert(ledger.prepare(identity)==op::Result::Ok);
-  // Even a mistakenly invoked finish cannot confer authority on prepared data.
+  // Upload completion creates only nonactivatable prepared metadata.
   assert(receiver.finish().ok);
-  assert(exists(root+"/VECTMAP/.maps/operation-session/.operation-ready"));
+  assert(receiver.snapshot().state==MapStreamInstallState::Prepared);
+  assert(exists(root+"/VECTMAP/.maps/operation-session/.operation-prepared"));
+  assert(!exists(root+"/VECTMAP/.maps/operation-session/.operation-ready"));
+  assert(!exists(root+"/VECTMAP/.pending-stream-activation.json"));
+  assert(ledger.prepare(identity)==op::Result::Ok);
   assert(!exists(root+"/VECTMAP/.maps/operation-session/.ready"));
   MapTransferInstaller installer(root); installer.setOperationDeviceID(device);
-  assert(!installer.recoverPendingStreamActivation().ok);
+  assert(installer.recoverPendingStreamActivation().ok);
+  assert(!installer.promotePreparedOperation(identity.session,identity.operation).ok);
   ActiveMapSelection selected; assert(!installer.readActiveMap(selected).ok);
   assert(ledger.accept(identity)==op::Result::Ok);
   MapTransferInstaller beforeOwnershipInit(root);
-  assert(!beforeOwnershipInit.recoverPendingStreamActivation().ok);
+  assert(!beforeOwnershipInit.promotePreparedOperation(identity.session,identity.operation).ok);
   MapTransferInstaller otherDevice(root); otherDevice.setOperationDeviceID(std::string(32,'f'));
-  assert(!otherDevice.recoverPendingStreamActivation().ok);
+  assert(!otherDevice.promotePreparedOperation(identity.session,identity.operation).ok);
+  assert(installer.promotePreparedOperation(identity.session,identity.operation).ok);
   // Reproduce a real crash after pointer rename but before cleanup/renderer:
   // main's early installer must bind immutable device identity and recover the
   // exact transaction BEFORE it exposes that pointer to the renderer.
@@ -1460,7 +1474,9 @@ void testDeviceBoundOperationActivationAndReceipt() {
   assert(mainBootInstaller.readActiveMap(selected).ok);
   assert(selected.sessionId==identity.session);
   assert(selected.manifestReceipt==identity.manifest);
-  assert(!exists(root+"/VECTMAP/.activation-transaction.json"));
+  assert(exists(root+"/VECTMAP/.activation-transaction.json"));
+  assert(!exists(root+"/VECTMAP/.maps/operation-session/.activation-consumed"));
+  assert(!mainBootInstaller.finalizeOperation(identity.session,identity.operation).ok);
   op::Record receipt;
   op::Store rebooted(storage,device); assert(rebooted.restore()==op::Result::Ok);
   assert(rebooted.query(identity,receipt)==op::Result::Ok);
@@ -1469,10 +1485,231 @@ void testDeviceBoundOperationActivationAndReceipt() {
                                       selected.signedManifestReceipt)==op::Result::Ok);
   op::Store finalBoot(storage,device); assert(finalBoot.restore()==op::Result::Ok);
   assert(finalBoot.query(identity,receipt)==op::Result::Ok && receipt.phase==op::Phase::Installed);
+  assert(exists(root+"/VECTMAP/.activation-transaction.json"));
+  assert(mainBootInstaller.finalizeOperation(identity.session,identity.operation).ok);
+  assert(!exists(root+"/VECTMAP/.activation-transaction.json"));
+  assert(!exists(root+"/VECTMAP/.pending-stream-activation.json"));
   assert(map_transfer::operationReceiptJson(receipt).find("\"phase\":\"installed\"")!=std::string::npos);
   // The copied card retains usable signed map content, never local operation authority.
   assert(otherDevice.readActiveMap(selected).ok);
   op::Store foreign(storage,std::string(32,'f')); assert(foreign.restore()==op::Result::ForeignDevice);
+}
+
+void testExplicitOperationPromotionAndTerminalCrashBoundaries() {
+  namespace op=map_transfer::operation;
+  const auto fixture=readGoldenFixture();
+  const auto stream=decodeHex(fixture.at("stream_hex"));
+  const auto publicKey=decodeHex(fixture.at("public_key_x963_hex"));
+  map_transfer::MapStreamTrustStore trust;
+  assert(trust.add("map-test-2026-01",publicKey.data(),publicKey.size()));
+  const std::string device(32,'a'), operation(32,'2'), session="explicit-operation";
+  size_t promotionCuts=0, terminalCuts=0;
+  for (bool replacement : {false,true}) {
+    const auto baseline=tempRoot();
+    if (replacement) {
+      prepareReadyRoot(baseline,"previous-operation");
+      MapTransferInstaller previous(baseline);
+      assert(previous.activateReadyStreamMap("previous-operation").ok);
+    }
+    MapStreamReceiver receiver(trust,baseline,session,stream.size(),"9.0.0",1024*1024,{},{},{},{},operation);
+    assert(receiver.feed(stream.data(),stream.size()) && receiver.readyToFinish());
+    assert(receiver.finish().ok && receiver.snapshot().state==MapStreamInstallState::Prepared);
+    const auto snapshot=receiver.snapshot();
+    map_transfer::Sha256Hasher hash; hash.update(stream.data(),stream.size());
+    op::Identity identity{device,operation,snapshot.manifestReceipt,snapshot.signedManifestReceipt,
+                         hash.finalHex(),stream.size(),session,snapshot.mapId};
+    map_transfer::MapOperationStorage disk(baseline); op::Store store(disk,device);
+    assert(store.restore()==op::Result::Ok && store.initializeAdmission(100)==op::Result::Ok);
+    assert(store.admit(identity,store.admissionRevision())==op::Result::Ok);
+    assert(store.prepare(identity)==op::Result::Ok);
+    const auto clone=[&](const std::string &source) {
+      const auto root=tempRoot();
+      std::filesystem::copy(source,root,std::filesystem::copy_options::recursive |
+                                        std::filesystem::copy_options::overwrite_existing);
+      return root;
+    };
+    // Reboot and lost preparation response can only reveal Prepared. Neither
+    // .ready, pending nor consumed exists, and no recovery pass activates it.
+    for (unsigned pass=0;pass<3;++pass) {
+      MapTransferInstaller boot(baseline); boot.setOperationDeviceID(device);
+      assert(boot.recoverInterruptedActivation().ok);
+      assert(boot.recoverPendingStreamActivation().ok);
+      ActiveMapSelection active;
+      const auto selected=boot.readActiveMap(active);
+      assert(replacement ? selected.ok && active.sessionId=="previous-operation" : !selected.ok);
+      assert(!exists(baseline+"/VECTMAP/.maps/"+session+"/.operation-ready"));
+    }
+    // Cancel-first is durable, idempotent, and forbids all later promotion.
+    const auto cancelledRoot=clone(baseline);
+    map_transfer::MapOperationStorage cancelledDisk(cancelledRoot); op::Store cancelled(cancelledDisk,device);
+    assert(cancelled.restore()==op::Result::Ok && cancelled.cancel(identity)==op::Result::Ok);
+    assert(cancelled.cancel(identity)==op::Result::Replay);
+    assert(cancelled.accept(identity)==op::Result::NotAccepted);
+    MapTransferInstaller cancelledInstaller(cancelledRoot); cancelledInstaller.setOperationDeviceID(device);
+    assert(!cancelledInstaller.promotePreparedOperation(session,operation).ok);
+    assert(!exists(cancelledRoot+"/VECTMAP/.pending-stream-activation.json"));
+    assert(store.accept(identity)==op::Result::Ok);
+    assert(store.cancel(identity)==op::Result::TooLate);
+    // The baseline now models an immediate reset AFTER accepted intent but
+    // BEFORE any ready/pending mutation. Every recovery starts from this disk.
+    for (bool rejectReplace : {false,true}) {
+      const auto probeRoot=clone(baseline);
+      MutationCrashInstaller probe(probeRoot,SIZE_MAX,rejectReplace); probe.setOperationDeviceID(device);
+      assert(probe.promotePreparedOperation(session,operation).ok);
+      const size_t mutations=probe.mutations;
+      assert(mutations>0);
+      for (size_t cut=0;cut<mutations;++cut) {
+        const auto root=clone(baseline);
+        MutationCrashInstaller interrupted(root,cut,rejectReplace); interrupted.setOperationDeviceID(device);
+        bool reached=false;
+        try { (void)interrupted.promotePreparedOperation(session,operation); }
+        catch (const SimulatedInstallerPowerCut &) { interrupted.restoreCutImage(); reached=true; }
+        assert(reached); ++promotionCuts;
+        for (size_t pass=0;pass<3;++pass) {
+          MutationCrashInstaller recovery(root,pass,rejectReplace); recovery.setOperationDeviceID(device);
+          try { (void)recovery.promotePreparedOperation(session,operation); }
+          catch (const SimulatedInstallerPowerCut &) { recovery.restoreCutImage(); }
+        }
+        MapTransferInstaller recovered(root); recovered.setOperationDeviceID(device);
+        assert(recovered.promotePreparedOperation(session,operation).ok);
+        assert(recovered.recoverPendingStreamActivation().ok);
+        assert(exists(root+"/VECTMAP/.activation-transaction.json"));
+        assert(exists(root+"/VECTMAP/.pending-stream-activation.json"));
+        assert(!exists(root+"/VECTMAP/.maps/"+session+"/.activation-consumed"));
+        assert(!recovered.finalizeOperation(session,operation).ok);
+        map_transfer::MapOperationStorage restoredDisk(root); op::Store restored(restoredDisk,device); op::Record receipt;
+        assert(restored.restore()==op::Result::Ok && restored.query(identity,receipt)==op::Result::Ok);
+        assert(receipt.phase==op::Phase::Accepted);
+        assert(restored.rendererAcknowledged(identity,identity.manifest,identity.signedManifest)==op::Result::Ok);
+        assert(recovered.finalizeOperation(session,operation).ok);
+        assert(!exists(root+"/VECTMAP/.activation-transaction.json"));
+        std::filesystem::remove_all(root);
+      }
+    }
+    // Cut each terminal cleanup boundary only AFTER the renderer receipt is
+    // durably Installed. Journal evidence survives until then, including reboot.
+    const auto terminalBase=clone(baseline);
+    MapTransferInstaller selected(terminalBase); selected.setOperationDeviceID(device);
+    assert(selected.promotePreparedOperation(session,operation).ok);
+    assert(selected.recoverPendingStreamActivation().ok);
+    map_transfer::MapOperationStorage terminalDisk(terminalBase); op::Store terminal(terminalDisk,device);
+    assert(terminal.restore()==op::Result::Ok);
+    assert(terminal.rendererAcknowledged(identity,identity.manifest,identity.signedManifest)==op::Result::Ok);
+    const auto cleanupProbeRoot=clone(terminalBase);
+    MutationCrashInstaller cleanupProbe(cleanupProbeRoot); cleanupProbe.setOperationDeviceID(device);
+    assert(cleanupProbe.finalizeOperation(session,operation).ok);
+    for (size_t cut=0;cut<cleanupProbe.mutations;++cut) {
+      const auto root=clone(terminalBase);
+      MutationCrashInstaller interrupted(root,cut); interrupted.setOperationDeviceID(device);
+      bool reached=false;
+      try { (void)interrupted.finalizeOperation(session,operation); }
+      catch (const SimulatedInstallerPowerCut &) { interrupted.restoreCutImage(); reached=true; }
+      assert(reached); ++terminalCuts;
+      for (size_t pass=0;pass<3;++pass) {
+        MutationCrashInstaller recovery(root,pass); recovery.setOperationDeviceID(device);
+        try { (void)recovery.finalizeOperation(session,operation); }
+        catch (const SimulatedInstallerPowerCut &) { recovery.restoreCutImage(); }
+      }
+      MapTransferInstaller recovered(root); recovered.setOperationDeviceID(device);
+      assert(recovered.finalizeOperation(session,operation).ok);
+      assert(!exists(root+"/VECTMAP/.activation-transaction.json"));
+      assert(!exists(root+"/VECTMAP/.pending-stream-activation.json"));
+      map_transfer::MapOperationStorage restoredDisk(root); op::Store restored(restoredDisk,device); op::Record receipt;
+      assert(restored.restore()==op::Result::Ok && restored.query(identity,receipt)==op::Result::Ok);
+      assert(receipt.phase==op::Phase::Installed);
+      std::filesystem::remove_all(root);
+    }
+    // Renderer failure preserves journal until failed receipt is persisted;
+    // the next boot can then remove only the rejected, unselected candidate.
+    const auto failedRoot=clone(baseline);
+    MapTransferInstaller failedInstaller(failedRoot); failedInstaller.setOperationDeviceID(device);
+    assert(failedInstaller.promotePreparedOperation(session,operation).ok);
+    assert(failedInstaller.recoverPendingStreamActivation().ok);
+    assert(failedInstaller.rollbackActiveMap(session).ok);
+    assert(exists(failedRoot+"/VECTMAP/.activation-transaction.json"));
+    map_transfer::MapOperationStorage failedDisk(failedRoot); op::Store failed(failedDisk,device);
+    assert(failed.restore()==op::Result::Ok && failed.fail(identity)==op::Result::Ok);
+    MapTransferInstaller failedBoot(failedRoot); failedBoot.setOperationDeviceID(device);
+    assert(failedBoot.recoverInterruptedActivation().ok);
+    assert(!exists(failedRoot+"/VECTMAP/.activation-transaction.json"));
+  }
+  std::cout << "operation promotion cuts=" << promotionCuts << " terminal cleanup cuts=" << terminalCuts << "\n";
+}
+
+void testPreparedReinstallCannotInheritLegacyAuthorityOrDeletePriorMap() {
+  namespace op=map_transfer::operation;
+  const auto fixture=readGoldenFixture();
+  const auto stream=decodeHex(fixture.at("stream_hex"));
+  const auto publicKey=decodeHex(fixture.at("public_key_x963_hex"));
+  map_transfer::MapStreamTrustStore trust;
+  assert(trust.add("map-test-2026-01",publicKey.data(),publicKey.size()));
+  for (bool priorOperation : {false,true}) {
+  const auto root=tempRoot(); const std::string session="same-content", device(32,'a'), operation(32,'3');
+  const std::string oldOperation(32,'4');
+  MapStreamReceiver legacy(trust,root,session,stream.size(),"9.0.0",1024*1024,{},{},{},{},priorOperation ? oldOperation : "");
+  assert(legacy.feed(stream.data(),stream.size()) && legacy.finish().ok);
+  MapTransferInstaller installer(root); installer.setOperationDeviceID(device);
+  op::Identity oldIdentity;
+  if (priorOperation) {
+    map_transfer::Sha256Hasher oldHash; oldHash.update(stream.data(),stream.size());
+    oldIdentity={device,oldOperation,legacy.snapshot().manifestReceipt,legacy.snapshot().signedManifestReceipt,
+                 oldHash.finalHex(),stream.size(),session,legacy.snapshot().mapId};
+    map_transfer::MapOperationStorage oldDisk(root); op::Store oldStore(oldDisk,device);
+    assert(oldStore.restore()==op::Result::Ok && oldStore.initializeAdmission(100)==op::Result::Ok);
+    assert(oldStore.admit(oldIdentity,oldStore.admissionRevision())==op::Result::Ok);
+    assert(oldStore.prepare(oldIdentity)==op::Result::Ok && oldStore.accept(oldIdentity)==op::Result::Ok);
+    assert(installer.promotePreparedOperation(session,oldOperation).ok);
+    assert(installer.activateReadyStreamMap(session).ok);
+    assert(oldStore.rendererAcknowledged(oldIdentity,oldIdentity.manifest,oldIdentity.signedManifest)==op::Result::Ok);
+    assert(installer.finalizeOperation(session,oldOperation).ok);
+  } else {
+    assert(installer.activateReadyStreamMap(session).ok);
+  }
+  ActiveMapSelection original;
+  assert(installer.readActiveMap(original).ok);
+  MapStreamReceiver prepare(trust,root,session,stream.size(),"9.0.0",1024*1024,{},{},{},{},operation);
+  assert(prepare.feed(stream.data(),stream.size()) && prepare.finish().ok);
+  assert(prepare.snapshot().bytesSkipped>0);
+  map_transfer::Sha256Hasher hash; hash.update(stream.data(),stream.size());
+  op::Identity identity{device,operation,prepare.snapshot().manifestReceipt,prepare.snapshot().signedManifestReceipt,
+                       hash.finalHex(),stream.size(),session,prepare.snapshot().mapId};
+  map_transfer::MapOperationStorage disk(root); op::Store store(disk,device);
+  assert(store.restore()==op::Result::Ok);
+  if (!priorOperation) assert(store.initializeAdmission(100)==op::Result::Ok);
+  assert(store.admit(identity,store.admissionRevision())==op::Result::Ok && store.prepare(identity)==op::Result::Ok);
+  MapStreamInstallSnapshot recovered;
+  assert(readRecoverableMapStreamInstall(root,recovered)==MapStreamRecoveryResult::Found);
+  assert(recovered.state==MapStreamInstallState::Prepared);
+  assert(!installer.activateReadyStreamMap(session).ok); // old .ready is not this grant
+  ActiveMapSelection stillOriginal;
+  assert(installer.readActiveMap(stillOriginal).ok && stillOriginal.root==original.root);
+  const auto cancelledRoot=tempRoot();
+  std::filesystem::copy(root,cancelledRoot,std::filesystem::copy_options::recursive |
+                                        std::filesystem::copy_options::overwrite_existing);
+  map_transfer::MapOperationStorage cancelledDisk(cancelledRoot); op::Store cancelled(cancelledDisk,device);
+  assert(cancelled.restore()==op::Result::Ok && cancelled.cancel(identity)==op::Result::Ok);
+  MapTransferInstaller cancelledInstaller(cancelledRoot); cancelledInstaller.setOperationDeviceID(device);
+  assert(cancelledInstaller.cancelOperationStaging(session,operation).ok);
+  assert(cancelledInstaller.readActiveMap(stillOriginal).ok && stillOriginal.root==original.root);
+  assert(exists(cancelledRoot+original.root+(priorOperation ? "/.operation-ready" : "/.ready")));
+  assert(!exists(cancelledRoot+original.root+"/.operation-prepared"));
+  assert(store.accept(identity)==op::Result::Ok);
+  assert(installer.promotePreparedOperation(session,operation).ok);
+  assert(!exists(root+original.root+"/.activation-consumed"));
+  assert(installer.activateReadyStreamMap(session).ok);
+  assert(exists(root+"/VECTMAP/.activation-transaction.json"));
+  assert(installer.rollbackActiveMap(session).ok);
+  assert(installer.readActiveMap(stillOriginal).ok && stillOriginal.root==original.root);
+  assert(store.fail(identity)==op::Result::Ok);
+  assert(installer.finalizeOperation(session,operation).ok);
+  assert(installer.readActiveMap(stillOriginal).ok && stillOriginal.root==original.root);
+  assert(exists(root+original.root+"/.activation-consumed"));
+  assert(readRecoverableMapStreamInstall(root,recovered)==MapStreamRecoveryResult::None);
+  if (priorOperation) {
+    op::Record oldReceipt;
+    assert(store.query(oldIdentity,oldReceipt)==op::Result::Ok && oldReceipt.phase==op::Phase::Installed);
+  }
+  }
 }
 
 void testStartingNewStreamPrunesAbandonedPausedSessions() {
@@ -1495,6 +1732,8 @@ void testStartingNewStreamPrunesAbandonedPausedSessions() {
 
 int main() {
   testDeviceBoundOperationActivationAndReceipt();
+  testExplicitOperationPromotionAndTerminalCrashBoundaries();
+  testPreparedReinstallCannotInheritLegacyAuthorityOrDeletePriorMap();
   testReceiverCommitCancellationBarriers();
   testResumeRejectsSameLengthCheckpointCorruption();
   testDirectWriteCheckpointAndReady();

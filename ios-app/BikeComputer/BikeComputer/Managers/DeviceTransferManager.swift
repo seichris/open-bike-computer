@@ -880,11 +880,11 @@ final class DeviceTransferManager {
 
     private func cleanupOperation(bleManager: BLEManager) async -> Bool {
         if let cleanupTask { return await cleanupTask.value }
-        guard let lease = operationLease else { return true }
+        guard let lease = operationLease else { return coordinator.isCleanupComplete }
         if !remoteAcceptancePossible {
             coordinator.finish(lease, remoteClear: true)
             operationLease = nil
-            return true
+            return coordinator.isCleanupComplete
         }
         // Unstructured task deliberately does not inherit cancellation. Keep the
         // root claim until the bounded remote-clear attempt has completed.
@@ -924,7 +924,7 @@ final class DeviceTransferManager {
             }
             self.coordinator.finish(lease, remoteClear: clear)
             if self.operationLease == lease { self.operationLease = nil }
-            return clear
+            return clear && self.coordinator.isCleanupComplete
         }
         cleanupTask = cleanup
         let result = await cleanup.value
@@ -1027,14 +1027,24 @@ final class DeviceTransferManager {
     /// unresolved commit. A fresh authenticated session identity is mandatory.
     func resumeMapTransfer(
         bleManager: BLEManager,
+        verifiedPrecommitRecovery: Bool = false,
+        recoveryDeviceID: String? = nil,
+        recoveryConnectionEpoch: UInt64? = nil,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> DeviceTransferSession {
         guard cleanupTask == nil, bleManager.isNavigationReady,
               let deviceID = bleManager.connectedDeviceID else {
             throw DeviceOperationCoordinator.Failure.busy
         }
+        if verifiedPrecommitRecovery {
+            guard recoveryDeviceID == deviceID,
+                  recoveryConnectionEpoch == bleManager.transferConnectionEpoch else {
+                throw DeviceOperationCoordinator.Failure.staleOwner
+            }
+        }
         if operationLease == nil, coordinator.unresolved == nil, coordinator.lease == nil {
-            return try await enterMapTransfer(bleManager: bleManager, status: status)
+            return try await enterMapTransfer(bleManager: bleManager, expectedDeviceID: deviceID,
+                                              expectedConnectionEpoch: bleManager.transferConnectionEpoch, status: status)
         }
         guard let stored = coordinator.unresolved, stored.deviceID == deviceID,
               stored.mode == DeviceTransferSession.Mode.map.rawValue,
@@ -1051,6 +1061,23 @@ final class DeviceTransferManager {
             guard bleManager.isNavigationReady, bleManager.connectedDeviceID == deviceID,
                   bleManager.transferConnectionEpoch == epoch else {
                 throw DeviceOperationCoordinator.Failure.staleOwner
+            }
+            if verifiedPrecommitRecovery,
+               recoveryDeviceID == deviceID, recoveryConnectionEpoch == epoch,
+               bleManager.deviceTransferStatusRevision != revision,
+               bleManager.deviceTransferMode.isEmpty,
+               bleManager.deviceTransferSessionToken?.isEmpty != false {
+                coordinator.removeConfiguration = { Self.removeAccessoryNetworkConfiguration(ssid: $0) }
+                try coordinator.retireStoppedMapForPrecommitRecovery(deviceID: deviceID,
+                                                                    currentOwner: operationLease)
+                operationLease = nil
+                authorizationToken = nil
+                authorizationGeneration = nil
+                remoteAcceptancePossible = false
+                // Only the transport lease changes. The caller retains the
+                // original durable operation ID and prepares no new artifact.
+                return try await enterMapTransfer(bleManager: bleManager, expectedDeviceID: deviceID,
+                                                  expectedConnectionEpoch: epoch, status: status)
             }
             if bleManager.deviceTransferStatusRevision != revision,
                bleManager.deviceTransferMode == stored.mode,
@@ -1077,10 +1104,17 @@ final class DeviceTransferManager {
 
     func enterMapTransfer(
         bleManager: BLEManager,
+        expectedDeviceID: String? = nil,
+        expectedConnectionEpoch: UInt64? = nil,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> DeviceTransferSession {
         try await beginOperation(mode: .map, bleManager: bleManager)
         do {
+            guard (expectedDeviceID == nil || operationLease?.deviceID == expectedDeviceID),
+                  (expectedConnectionEpoch == nil || operationLease?.connectionEpoch == expectedConnectionEpoch) else {
+                throw DeviceOperationCoordinator.Failure.staleOwner
+            }
+            try Task.checkCancellation()
             var session = try await performEnterMapTransfer(bleManager: bleManager, status: status)
             try Task.checkCancellation()
             guard ownsConnection(bleManager) else { throw DeviceOperationCoordinator.Failure.staleOwner }

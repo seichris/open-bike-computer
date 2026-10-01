@@ -191,6 +191,8 @@ bool Power::processShutdown() {
         static_cast<uint8_t>(shutdownBarrier_.failedStage()));
     Serial.printf("POWER_BARRIER: shutdown deferred stage=%u; no sleep permit\n",
                   static_cast<unsigned>(shutdownBarrier_.failedStage()));
+    if (deferredNotice_ != nullptr)
+      deferredNotice_(static_cast<uint8_t>(shutdownBarrier_.failedStage()));
   }
   if (shutdownBarrier_.permit()) {
     sleep_audit::recorderSealed(true);

@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <atomic>
 #include <functional>
 
 #include "../device_transfer/device_transfer_http.hpp"
@@ -11,6 +12,7 @@
 #include "map_transfer.hpp"
 #include "map_stream_receiver.hpp"
 #include "map_operation_journal.hpp"
+#include "map_selection_health.hpp"
 #include "../device_transfer/operation_admission_policy.hpp"
 
 namespace firmware_update { class DeviceOperationOwner; }
@@ -43,6 +45,9 @@ public:
   void setLastError(const std::string &code, const std::string &message);
   void process();
   bool shutdownQuiescent() const;
+  uint32_t storageProgressSequence() const {
+    return storageProgressSequence_.load(std::memory_order_relaxed);
+  }
   HttpTransferStatus status() const;
   MapActivationSnapshot activationSnapshot() const;
   std::string activationStatusJson(bool compact = false) const;
@@ -56,6 +61,12 @@ public:
   void setOperationOwner(firmware_update::DeviceOperationOwner *owner) {
     operationOwner_ = owner;
   }
+  std::string selectionHealthJson() const;
+  // Boot recovery/storage worker only: resolves retained operation identity.
+  void observeBootSelection(const ActiveMapSelection &selected, bool loaded,
+                            bool preserveAffected = false);
+  void markSelectionDegraded();
+  void acknowledgeRuntimeRollback(const std::string &root, bool loaded);
   bool requestRuntimeRollback();
   void submitPendingRollback();
   void submitPendingOperationTask();
@@ -85,7 +96,10 @@ private:
     const MapTransferHttpServer &owner_;
   };
   std::string storageRoot_ = "/sdcard";
+  std::atomic<uint32_t> storageProgressSequence_{0};
   std::string operationDeviceID_;
+  MapSelectionHealth selectionHealth_;
+  std::string selectionOperationID(const ActiveMapSelection &selected) const;
   mutable operation::AdmissionFence operationAdmission_;
   bool observeOperationRevision(uint64_t revision) const;
   bool permitsOperationAdmission(const std::string &epoch, uint64_t revision) const;
@@ -103,15 +117,21 @@ private:
     operation::Identity identity;
     device_transfer::HttpResponseCompletionToken response;
     bool armed = false;
+    bool responseCompleted = false;
     bool pending() const { return !identity.session.empty(); }
   };
   CommitRecovery commitRecovery_;
   void armCommitRecovery(const device_transfer::HttpRequest &request);
+  void retryAcceptedActivation(const std::string &sessionId);
   bool recoverCommitDisposition(const CommitRecovery &recovery);
   static void operationTask(void *context);
   void executeOperationTask();
   std::string readOperationStatus(const std::string &operationID) const;
-  bool acceptOperation(const device_transfer::HttpRequest &request,
+  bool admitReceivingOperation(const device_transfer::HttpRequest &request,
+                               const MapStreamInstallSnapshot &snapshot);
+  bool handleOperationControl(const device_transfer::HttpRequest &request,
+                              device_transfer::TransferClient &client);
+  bool recordPreparedOperation(const device_transfer::HttpRequest &request,
                        const MapStreamInstallSnapshot &snapshot,
                        const std::string &streamHash);
   std::string pendingMapOperationID_;

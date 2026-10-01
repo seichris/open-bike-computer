@@ -77,6 +77,7 @@ public:
   virtual bool stopWiFi() = 0;
   virtual bool healthy() const = 0;
   virtual uint32_t stackHighWaterBytes() const = 0;
+  virtual bool stackSampleAvailable() const { return false; }
   // Called after the HTTP worker has stopped using the network. A poisoned
   // owner must retain its task and staging buffers for the rest of this boot.
   virtual bool release() = 0;

@@ -13,7 +13,7 @@ class MapOperationCompositionTests(unittest.TestCase):
 
     def test_new_metadata_does_not_masquerade_as_legacy_ready(self):
         stream = (ROOT / 'lib/map_transfer/map_stream_install.cpp').read_text()
-        self.assertIn('operationID_.empty() ? kReadyFile : ".operation-ready"', stream)
+        self.assertIn('operationID_.empty() ? kReadyFile : ".operation-prepared"', stream)
         install = (ROOT / 'lib/map_transfer/map_transfer.cpp').read_text()
         self.assertGreaterEqual(install.count('acceptedMapOperation(storageRoot_, operationDeviceID_'), 2)
 

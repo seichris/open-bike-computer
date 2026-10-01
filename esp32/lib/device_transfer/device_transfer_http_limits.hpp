@@ -131,6 +131,13 @@ inline bool parseHttpUint64(const std::string &text, uint64_t &value) {
 }
 
 struct HttpSecurityHeaders {
+  std::string mapContentSession;
+  std::string mapLogicalID;
+  std::string mapManifestReceipt;
+  std::string mapSignedManifestReceipt;
+  std::string mapStreamBytes;
+  uint8_t operationIdentityHeadersSeen = 0;
+
   std::string mapOperationID;
   std::string mapOperationAdmissionEpoch;
   bool mapOperationAdmissionEpochSeen = false;
@@ -189,7 +196,27 @@ struct HttpSecurityHeaders {
   }
 
   void accept(const std::string &name, const std::string &value) {
-    if (name == "x-map-operation-admission-epoch") {
+    if (name == "x-map-content-session") {
+      mapOperationDuplicate = mapOperationDuplicate || (operationIdentityHeadersSeen & 1);
+      operationIdentityHeadersSeen |= 1;
+      mapContentSession = value;
+    } else if (name == "x-map-map-id") {
+      mapOperationDuplicate = mapOperationDuplicate || (operationIdentityHeadersSeen & 2);
+      operationIdentityHeadersSeen |= 2;
+      mapLogicalID = value;
+    } else if (name == "x-map-manifest-receipt") {
+      mapOperationDuplicate = mapOperationDuplicate || (operationIdentityHeadersSeen & 4);
+      operationIdentityHeadersSeen |= 4;
+      mapManifestReceipt = value;
+    } else if (name == "x-map-signed-manifest-receipt") {
+      mapOperationDuplicate = mapOperationDuplicate || (operationIdentityHeadersSeen & 8);
+      operationIdentityHeadersSeen |= 8;
+      mapSignedManifestReceipt = value;
+    } else if (name == "x-map-stream-bytes") {
+      mapOperationDuplicate = mapOperationDuplicate || (operationIdentityHeadersSeen & 16);
+      operationIdentityHeadersSeen |= 16;
+      mapStreamBytes = value;
+    } else if (name == "x-map-operation-admission-epoch") {
       mapOperationDuplicate = mapOperationDuplicate || mapOperationAdmissionEpochSeen;
       mapOperationAdmissionEpoch = mapOperationAdmissionEpochSeen ? "" : value;
       mapOperationAdmissionEpochSeen = true;

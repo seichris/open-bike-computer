@@ -171,7 +171,19 @@ public:
   virtual ~MapTransferInstaller() = default;
   InstallStatus readReadyStreamMap(const std::string &sessionId,
                                    ReadyStreamMap &ready) const;
+  InstallStatus readPreparedOperation(const std::string &sessionId,
+                                      ReadyStreamMap &prepared) const;
+  InstallStatus cancelOperationStaging(const std::string &sessionId,
+                                       const std::string &operationID) const;
+  InstallStatus finalizeOperation(const std::string &sessionId,
+                                  const std::string &operationID) const;
+  InstallStatus promotePreparedOperation(const std::string &sessionId,
+                                         const std::string &operationID) const;
   void setOperationDeviceID(std::string device) { operationDeviceID_ = std::move(device); }
+  using StorageProgressCallback = void (*)(void *);
+  void setStorageProgressCallback(StorageProgressCallback callback, void *context) {
+    storageProgressCallback_ = callback; storageProgressContext_ = context;
+  }
 
   InstallStatus validateManifestText(const std::string &manifestText,
                                      MapManifest &manifest) const;
@@ -246,8 +258,13 @@ protected:
                                    const std::string &text) const;
 
 private:
+  bool preparationBlocksActivation(const ReadyStreamMap &ready) const;
+  InstallStatus readStreamMapMetadata(const std::string &sessionId,
+                                      ReadyStreamMap &ready, bool prepared) const;
   std::string storageRoot_;
   std::string operationDeviceID_;
+  StorageProgressCallback storageProgressCallback_ = nullptr;
+  void *storageProgressContext_ = nullptr;
 
   // Share error-result construction across the many validation exits. Owning
   // parameters move into the result rather than allocating a second copy.
@@ -282,6 +299,11 @@ private:
   bool installedMapContentsMatch(const std::string &root,
                                  const MapManifest &manifest) const;
   bool writeActiveMap(const ActiveMapSelection &selection) const;
+  InstallStatus parseActiveMapText(const std::string &text, ActiveMapSelection &selection) const;
+  bool persistPredecessorAnchor(const ActiveMapSelection &incoming) const;
+  InstallStatus recoverSelectionAnchor() const;
+  bool selectionAnchorProtectsRoot(const std::string &root) const;
+  bool anchorSelectionVerified(const ActiveMapSelection &selection) const;
   InstallStatus
   recoverStreamActivationTransaction(const std::string &transaction) const;
   bool clearPendingStreamActivation(const std::string &sessionId) const;

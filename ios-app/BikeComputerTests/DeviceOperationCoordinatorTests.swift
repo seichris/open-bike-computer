@@ -79,6 +79,33 @@ struct DeviceOperationCoordinatorTests {
         precondition(restored.lease == resumed, "resume lost confirmation root when upload released")
         restored.finish(resumed, remoteClear: true)
 
+        let precommit = try restored.acquire(deviceID: "board-B", mode: "map", epoch: 8)
+        precondition(!restored.isCleanupComplete)
+        let runningUpload = restored.retain(operationID: precommit.id)!
+        do {
+            try restored.retireStoppedMapForPrecommitRecovery(deviceID: "board-B", currentOwner: precommit)
+            fatalError("precommit recovery displaced an OS upload claim")
+        } catch DeviceOperationCoordinator.Failure.busy { }
+        restored.release(runningUpload)
+        let applying = try restored.beginApply(precommit)
+        do {
+            try restored.retireStoppedMapForPrecommitRecovery(deviceID: "board-B", currentOwner: precommit)
+            fatalError("precommit recovery displaced a pending apply")
+        } catch DeviceOperationCoordinator.Failure.staleOwner { }
+        restored.finishApply(applying, for: precommit)
+        do {
+            try restored.retireStoppedMapForPrecommitRecovery(deviceID: "board-B", currentOwner: nil)
+            fatalError("precommit recovery stole a live root")
+        } catch DeviceOperationCoordinator.Failure.busy { }
+        try restored.retireStoppedMapForPrecommitRecovery(deviceID: "board-B", currentOwner: precommit)
+        precondition(restored.isCleanupComplete)
+        let freshTransport = try restored.acquire(deviceID: "board-B", mode: "map", epoch: 8)
+        precondition(freshTransport.id != precommit.id, "recovery needs a fresh transport lease")
+        restored.finish(freshTransport, remoteClear: false)
+        precondition(!restored.isCleanupComplete, "nil live lease must not hide unresolved cleanup")
+        restored.reconcileClear(deviceID: "board-B")
+        precondition(restored.isCleanupComplete)
+
         let cancelledParent = Task { @MainActor in
             precondition(Task.isCancelled, "barrier: parent must already be cancelled")
             let cleanup = DeviceOperationCleanupTask.start { !Task.isCancelled }

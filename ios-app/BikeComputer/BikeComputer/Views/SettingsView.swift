@@ -829,6 +829,18 @@ private struct DownloadingMapsSettingsSection: View {
                 StatusValueRow(status: "Checking device activation", isBusy: false)
             }
 
+            if manager.canCancelCurrentMapOperation {
+                Button("Cancel map installation", role: .destructive) {
+                    Task { await manager.cancelCurrentMapOperation(bleManager: bleManager) }
+                }
+                .disabled(!bleManager.isNavigationReady)
+                .accessibilityHint("Requests cancellation before the device accepts installation")
+            } else if manager.isCurrentMapOperationAccepted {
+                Text("Device accepted this map. Waiting for installation to finish.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
             if let downloadProgress = manager.downloadByteProgress {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {

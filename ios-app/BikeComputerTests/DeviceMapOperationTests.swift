@@ -12,7 +12,8 @@ struct DeviceMapOperationTests {
         let url = directory.appendingPathComponent("operations.json")
         let store = DeviceMapOperationStore(url: url)
         let deviceID = String(repeating: "a", count: 32)
-        let record = DeviceMapOperationRecord(
+        func makeRecord() -> DeviceMapOperationRecord {
+            DeviceMapOperationRecord(
             schemaVersion: 1, deviceID: deviceID, operationID: UUID(),
             sessionID: "session", mapID: "map", manifestReceipt: String(repeating: "b", count: 64),
             signedManifestReceipt: String(repeating: "c", count: 64),
@@ -21,6 +22,8 @@ struct DeviceMapOperationTests {
             connectionEpoch: 7, observation: "in_progress", cleanup: "pending", usesDurableProtocol: true,
             lastReceipt: nil, admissionEpoch: String(repeating: "e", count: 32), admissionRevision: 42
         )
+        }
+        let record = makeRecord()
         func receipt(_ phase: String, _ revision: UInt64, overrides: [String: Any] = [:]) throws -> DeviceMapOperationReceipt {
             var json: [String: Any] = ["schemaVersion": 1, "deviceID": record.deviceID,
                 "operationID": record.wireOperationID, "sessionID": record.sessionID, "mapID": record.mapID,
@@ -117,6 +120,164 @@ struct DeviceMapOperationTests {
         changedAdmission.admissionRevision = 43
         expectFailure({ try store.save(changedAdmission) }, "original admission is immutable")
         try check(try DeviceMapOperationStore(url: url).records()[0] == persisted)
+
+        // Deterministic cancellation/commit linearization: the older prepared
+        // continuation must re-read durable intent before any network send.
+        let cancelStore = DeviceMapOperationStore(url: directory.appendingPathComponent("cancel.json"))
+        try cancelStore.save(record)
+        _ = try cancelStore.ingest(receipt("prepared", 2))
+        let stalePrepared = try cancelStore.records()[0]
+        try check(stalePrepared.nextControlAction == .commit && !stalePrepared.isTerminal)
+        try check(stalePrepared.permitsPrecommitSessionRecovery(after: receipt("prepared", 2)),
+                  "fresh exact Prepared evidence permits re-establishing a stopped transport")
+        try check(!stalePrepared.permitsPrecommitSessionRecovery(after: receipt("prepared", 2,
+            overrides: ["deviceID": "foreign"])), "another device cannot authorize precommit session recovery")
+        try check(!stalePrepared.permitsPrecommitSessionRecovery(after: receipt("receiving", 1)),
+                  "stale precommit state cannot authorize recovery")
+        var sentCommitCount = 0
+        _ = try cancelStore.requestCancellation(operationID: record.operationID)
+        expectFailure({
+            _ = try cancelStore.requestCommit(operationID: record.operationID)
+            sentCommitCount += 1
+        }, "cancel-first must fence an older prepared commit continuation")
+        try check(sentCommitCount == 0)
+        expectFailure({ try cancelStore.save(stalePrepared) }, "stale prepared snapshot cannot erase cancellation")
+        let restartedCancelStore = DeviceMapOperationStore(url: directory.appendingPathComponent("cancel.json"))
+        try check(try restartedCancelStore.records()[0].nextControlAction == .cancel,
+                  "cancel intent survives app termination using the same operation ID")
+        _ = try restartedCancelStore.ingest(receipt("cancelled", 3))
+        try check(try restartedCancelStore.records()[0].observation == "cancelled_before_commit")
+
+        let commitURL = directory.appendingPathComponent("commit.json")
+        let commitStore = DeviceMapOperationStore(url: commitURL)
+        try commitStore.save(record)
+        _ = try commitStore.ingest(receipt("prepared", 2))
+        let restoredPrepared = DeviceMapOperationStore(url: commitURL)
+        try check(try restoredPrepared.records()[0].nextControlAction == .commit,
+                  "termination between prepared upload and commit resumes control without upload")
+        _ = try restoredPrepared.requestCommit(operationID: record.operationID,
+                                               now: Date(timeIntervalSince1970: 123))
+        try check(try DeviceMapOperationStore(url: commitURL).records()[0].commitRequestedAt != nil,
+                  "commit intent is durable before transport sends the request")
+        try restoredPrepared.markControlResponseUnknown(operationID: record.operationID)
+        try check(try restoredPrepared.records()[0].observation == "result_unknown",
+                  "lost commit response is unknown, never cancelled or installed")
+        _ = try restoredPrepared.requestCancellation(operationID: record.operationID)
+        _ = try restoredPrepared.ingest(receipt("accepted", 3))
+        let grantWon = try restoredPrepared.records()[0]
+        try check(grantWon.observation == "commit_accepted" && grantWon.nextControlAction == .query,
+                  "grant-first wins over cancel intent; only terminal query is allowed")
+        try check(!grantWon.permitsPrecommitSessionRecovery(after: receipt("prepared", 2)),
+                  "a retained accepted grant cannot be erased by precommit recovery")
+        try check(try restoredPrepared.ingest(receipt("cancelled", 4)) == nil,
+                  "late cancellation cannot change accepted work to cancelled")
+        expectFailure({ _ = try restoredPrepared.requestCommit(operationID: record.operationID) },
+                      "accepted operation never starts another commit attempt")
+        _ = try restoredPrepared.ingest(receipt("installed", 4))
+        try check(try restoredPrepared.records()[0].isTerminal)
+
+        let premanifest = DeviceMapOperationStore(url: directory.appendingPathComponent("premanifest.json"))
+        try premanifest.save(record)
+        _ = try premanifest.requestCancellation(operationID: record.operationID)
+        try check(try premanifest.records()[0].nextControlAction == .cancel,
+                  "pre-manifest cancellation sends full saved identity rather than a new upload")
+        expectFailure({ try premanifest.beginUpload(operationID: record.operationID, deviceID: deviceID,
+            appNamespace: record.appNamespace, uploadAttemptID: UUID()) }, "cancel intent fences upload retry")
+        _ = try premanifest.ingest(receipt("cancelled", 1))
+        try check(try premanifest.records()[0].isTerminal)
+
+        let history = DeviceMapOperationStore(url: directory.appendingPathComponent("history.json"))
+        let now = Date()
+        for index in 0..<70 {
+            var terminal = makeRecord()
+            try check(terminal.apply(receipt("installed", 5, overrides: ["operationID": terminal.wireOperationID])))
+            terminal.acknowledgedAt = now.addingTimeInterval(Double(index - 100))
+            terminal.cleanup = "complete"
+            terminal.uploadResponseBody = Data(repeating: 1, count: 100)
+            try history.save(terminal)
+        }
+        let fullHistory = try history.records()
+        try check(fullHistory.filter { $0.retiredAt == nil }.count <= 64,
+                  "acknowledged cleaned terminal history has a bounded full-record window")
+        try check(fullHistory.count == 70, "compaction retains exact-ID tombstones")
+        try check(fullHistory.filter { $0.retiredAt != nil }.allSatisfy { $0.uploadResponseBody == nil })
+        var unacknowledged = makeRecord()
+        try check(unacknowledged.apply(receipt("installed", 5, overrides: ["operationID": unacknowledged.wireOperationID])))
+        unacknowledged.cleanup = "complete"
+        try history.save(unacknowledged)
+        var transportPending = makeRecord()
+        try check(transportPending.apply(receipt("installed", 5, overrides: ["operationID": transportPending.wireOperationID])))
+        transportPending.cleanup = "complete"
+        transportPending.acknowledgedAt = now
+        transportPending.uploadAttemptID = UUID()
+        try history.save(transportPending)
+        let protectedUnknown = makeRecord()
+        try history.save(protectedUnknown)
+        try history.pruneAcknowledgedHistory(now: now.addingTimeInterval(31 * 24 * 60 * 60))
+        try check(try history.records().contains { $0.operationID == protectedUnknown.operationID },
+                  "history expiry never removes unresolved work")
+        try check(try history.records().contains { $0.operationID == unacknowledged.operationID && $0.retiredAt == nil },
+                  "terminal receipt without confirmed device ACK is never pruned")
+        try check(try history.records().contains { $0.operationID == transportPending.operationID && $0.retiredAt == nil },
+                  "terminal receipt cannot prune an active or missing OS transport callback")
+        try check(try history.records().filter { $0.retiredAt != nil }.isEmpty,
+                  "expired tombstones leave room for later operations")
+        let legacyHistory = DeviceMapOperationStore(url: directory.appendingPathComponent("legacy-history.json"))
+        let legacyProcess = DeviceMapOperationStore.observationProcessID
+        func legacyRecord() -> DeviceMapOperationRecord {
+            var value = makeRecord()
+            value.usesDurableProtocol = false
+            value.observationProcessID = legacyProcess
+            return value
+        }
+        var mismatchedLegacy = legacyRecord()
+        try check(!mismatchedLegacy.confirmLegacyTerminal(outcome: "installed_confirmed",
+            deviceID: "other", connectionEpoch: 7, processID: legacyProcess), "legacy proof requires exact device")
+        try check(!mismatchedLegacy.confirmLegacyTerminal(outcome: "installed_confirmed",
+            deviceID: deviceID, connectionEpoch: 8, processID: legacyProcess), "legacy proof requires original epoch")
+        try check(!mismatchedLegacy.confirmLegacyTerminal(outcome: "installed_confirmed",
+            deviceID: deviceID, connectionEpoch: 7, processID: UUID()), "legacy proof cannot survive unconfirmed relaunch")
+        try check(mismatchedLegacy.legacyTerminalConfirmedAt == nil && !mismatchedLegacy.isTerminal)
+        for index in 0..<150 {
+            var completed = legacyRecord()
+            try legacyHistory.save(completed)
+            try check(completed.confirmLegacyTerminal(
+                outcome: index.isMultiple(of: 2) ? "installed_confirmed" : "failed_or_rolled_back",
+                deviceID: deviceID, connectionEpoch: 7, processID: legacyProcess,
+                now: now.addingTimeInterval(Double(index - 200))))
+            try legacyHistory.save(completed)
+            try legacyHistory.markCleanupComplete(operationID: completed.operationID)
+        }
+        let relaunchedLegacy = DeviceMapOperationStore(url: directory.appendingPathComponent("legacy-history.json"))
+        let legacyRecords = try relaunchedLegacy.records()
+        try check(legacyRecords.count == 150 && legacyRecords.filter { $0.retiredAt == nil }.count <= 64,
+                  "more than 128 confirmed cleaned legacy installs retain local tombstones without exhausting admission")
+        try check(legacyRecords.allSatisfy { $0.lastReceipt == nil && $0.acknowledgedAt == nil },
+                  "legacy compaction never fabricates a device receipt or ACK")
+        var unconfirmedLegacy = legacyRecord()
+        unconfirmedLegacy.observation = "installed_confirmed"
+        unconfirmedLegacy.cleanup = "complete"
+        try legacyHistory.save(unconfirmedLegacy)
+        var activeLegacy = legacyRecord()
+        try check(activeLegacy.confirmLegacyTerminal(outcome: "installed_confirmed", deviceID: deviceID,
+            connectionEpoch: 7, processID: legacyProcess))
+        activeLegacy.cleanup = "complete"
+        activeLegacy.uploadAttemptID = UUID()
+        try legacyHistory.save(activeLegacy)
+        try legacyHistory.pruneAcknowledgedHistory(now: now.addingTimeInterval(31 * 24 * 60 * 60))
+        try check(try legacyHistory.records().contains { $0.operationID == unconfirmedLegacy.operationID && $0.retiredAt == nil },
+                  "legacy terminal label without original observation proof is never compacted")
+        try check(try legacyHistory.records().contains { $0.operationID == activeLegacy.operationID && $0.retiredAt == nil },
+                  "legacy proof cannot compact an outstanding upload callback")
+        let saturatedLegacy = DeviceMapOperationStore(url: directory.appendingPathComponent("legacy-saturated.json"))
+        for _ in 0..<128 { try saturatedLegacy.save(legacyRecord()) }
+        expectFailure({ try saturatedLegacy.save(legacyRecord()) }, "128 unresolved legacy operations still refuse admission")
+        try check(try saturatedLegacy.records().count == 128)
+
+        let saturated = DeviceMapOperationStore(url: directory.appendingPathComponent("saturated.json"))
+        for _ in 0..<128 { try saturated.save(makeRecord()) }
+        expectFailure({ try saturated.save(makeRecord()) }, "128 unresolved records must refuse new admission")
+        try check(try saturated.records().count == 128)
 
         let failedDestination = directory.appendingPathComponent("not-a-file")
         try FileManager.default.createDirectory(at: failedDestination, withIntermediateDirectories: false)

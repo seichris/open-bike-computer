@@ -20,11 +20,16 @@ class RuntimeRollbackFailureTests(unittest.TestCase):
 #include <string>
 #include <new>
 #include <utility>
-struct ActiveMapSelection { std::string sessionId; };
+#include "map_selection_health.hpp"
+struct ActiveMapSelection { std::string sessionId, root, mapId; };
 struct Status { bool ok = true; };
 struct Installer {
   Status rollbackActiveMap(const std::string &) { return {}; }
-  Status readActiveMap(ActiveMapSelection &) { throw std::bad_alloc(); }
+  bool failRead = true;
+  Status readActiveMap(ActiveMapSelection &selected) {
+    if (failRead) throw std::bad_alloc();
+    selected = {"old-session", "/maps/old", "old-map"}; return {};
+  }
 };
 struct Activation {
   void finish(std::string, std::string, std::string, std::string) {}
@@ -44,10 +49,13 @@ public:
   std::string rollbackSession_ = "already-selected";
   std::string rollbackOperationID_, terminalOperationID_, terminalSessionID_, terminalMapID_;
   bool terminalAutomaticExit_ = false, terminalFailed_ = false;
+  bool operationStatusNotification_ = false;
   bool rollbackAutomaticExit_ = false;
   bool rollbackSucceeded_ = false;
   bool rollbackComplete_ = false;
   ActiveMapSelection rollbackRestored_;
+  map_transfer::MapSelectionHealth selectionHealth_;
+  std::string selectionOperationID(const ActiveMapSelection &) { return "restored-op"; }
   Installer installer_;
   Activation activationState_;
   void lockState() {}
@@ -60,15 +68,34 @@ public:
         fixture += method + r'''
 int main() {
   MapTransferHttpServer server;
+  server.selectionHealth_.select("/maps/new","installed-operation","new-map","new-session",true);
+  server.selectionHealth_.degrade("/maps/new");
+  server.selectionHealth_.beginRollback();
   server.executeRollback();
-  return server.rollbackComplete_ && !server.rollbackSucceeded_ ? 0 : 1;
+  if (!server.rollbackComplete_ || server.rollbackSucceeded_ ||
+      server.selectionHealth_.state != "rollback_failed" ||
+      server.selectionHealth_.affectedOperationID != "installed-operation") return 1;
+  MapTransferHttpServer success;
+  success.installer_.failRead = false;
+  success.selectionHealth_.select("/maps/new","installed-operation","new-map","new-session",true);
+  success.selectionHealth_.degrade("/maps/new");
+  success.selectionHealth_.beginRollback();
+  success.executeRollback();
+  if (!success.rollbackComplete_ || !success.rollbackSucceeded_ ||
+      success.selectionHealth_.state != "unknown" ||
+      success.selectionHealth_.affectedOperationID != "installed-operation") return 2;
+  if (success.selectionHealth_.acknowledge("/maps/new",true)) return 3;
+  if (!success.selectionHealth_.acknowledge("/maps/old",true) ||
+      success.selectionHealth_.state != "ready" ||
+      success.selectionHealth_.operationID != "restored-op") return 4;
+  return 0;
 }
 '''
         with tempfile.TemporaryDirectory(prefix="rollback-failure-") as temporary:
             path = Path(temporary)
             (path / "test.cpp").write_text(fixture)
             subprocess.run([compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                            str(path / "test.cpp"), "-o", str(path / "test")], check=True)
+                            "-I", str(ROOT / "lib/map_transfer"), str(path / "test.cpp"), "-o", str(path / "test")], check=True)
             result = subprocess.run([str(path / "test")])
             self.assertEqual(result.returncode, 0,
                              "allocation failure after rollback cannot publish restoration success")

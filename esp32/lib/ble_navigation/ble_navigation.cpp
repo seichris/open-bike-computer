@@ -1,3 +1,4 @@
+#include "../firmware_update/firmware_metadata_compatibility.hpp"
 #include "power.hpp"
 extern Power power;
 /**
@@ -2691,6 +2692,7 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
   }
   if (activeMapStatus.available) {
     body += ",\"activeMapId\":\"" + status_json::escape(activeMap.mapId) + "\"";
+    body += ",\"activeRoot\":\"" + status_json::escape(activeMap.root) + "\"";
     if (!activeMap.sessionId.empty()) {
       body += ",\"activeSessionId\":\"" +
               status_json::escape(activeMap.sessionId) + "\"";
@@ -2745,6 +2747,7 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
             "\"}";
   }
 
+  body += ",\"selectionHealth\":" + mapTransferHttp.selectionHealthJson();
   body += ",\"activation\":" + mapTransferHttp.activationStatusJson(true);
   const auto operation=mapTransferHttp.operationStatusJson();
   if (!operation.empty()) body += ",\"operation\":" + operation;
@@ -3723,6 +3726,9 @@ static void processPendingTransferControl() {
       deviceTransferHttp.setLastError(
           "transfer_busy",
           "finish the active device transfer before installing firmware");
+    } else if (!firmware_update::metadata_compatibility::allowsReader(UINT32_MAX)) {
+      deviceTransferHttp.setLastError(
+          "metadata_floor_unavailable", "resolve map metadata compatibility before firmware maintenance");
     } else if (!firmware.otaEligible) {
       deviceTransferHttp.setLastError(
           firmware.eligibilityCode,

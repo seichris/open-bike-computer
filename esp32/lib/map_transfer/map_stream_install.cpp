@@ -8,9 +8,8 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <fstream>
+#include <memory>
 #include <new>
-#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -272,12 +271,12 @@ bool readText(const std::string &path, std::string &value,
   uint64_t bytes = 0;
   if (!regularFileSize(path, bytes) || bytes > maximumBytes)
     return false;
-  std::ifstream input(path, std::ios::binary);
-  if (!input)
-    return false;
-  value.assign(std::istreambuf_iterator<char>(input),
-               std::istreambuf_iterator<char>());
-  return input.good() || input.eof();
+  struct FileCloser { void operator()(FILE *file) const { std::fclose(file); } };
+  std::unique_ptr<FILE, FileCloser> input(std::fopen(path.c_str(), "rb"));
+  if (!input) return false;
+  value.resize(static_cast<size_t>(bytes));
+  const size_t read = bytes == 0 ? 0 : std::fread(&value[0], 1, value.size(), input.get());
+  return read == bytes && std::fgetc(input.get()) == EOF && !std::ferror(input.get());
 }
 
 std::string jsonEscape(const std::string &value) {
@@ -412,6 +411,8 @@ const char *mapStreamInstallStateCode(MapStreamInstallState state) {
     return "paused";
   case MapStreamInstallState::Finalizing:
     return "finalizing";
+  case MapStreamInstallState::Prepared:
+    return "prepared";
   case MapStreamInstallState::Ready:
     return "ready";
   case MapStreamInstallState::Failed:
@@ -501,6 +502,8 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
     const std::string root = joinPath(mapsRoot, sessionId);
     const bool operationReady = regularFileExists(joinPath(root, ".operation-ready")) ||
                                 regularFileExists(joinPath(root, ".operation-ready.bak"));
+    const bool operationPrepared = regularFileExists(joinPath(root, ".operation-prepared")) ||
+        regularFileExists(joinPath(root, ".operation-prepared.bak"));
     const bool ready = operationReady || regularFileExists(joinPath(root, kReadyFile)) ||
                        regularFileExists(joinPath(root, kReadyFile) + ".bak");
     const bool consumed =
@@ -509,22 +512,22 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
     const bool installing =
         regularFileExists(joinPath(root, kInstallingFile)) ||
         regularFileExists(joinPath(root, kInstallingFile) + ".bak");
-    if ((!ready || consumed) && !installing)
+    if ((!ready || consumed) && !installing && !operationPrepared)
       continue;
     MapStreamInstallSnapshot candidate;
     std::string marker;
     bool markerValid = false;
     const std::string markerPath =
-        joinPath(root, operationReady ? ".operation-ready" : (ready ? kReadyFile : kInstallingFile));
+        joinPath(root, operationPrepared ? ".operation-prepared" : (operationReady ? ".operation-ready" : (ready ? kReadyFile : kInstallingFile)));
     for (const std::string &path : {markerPath, markerPath + ".bak"}) {
       std::string value;
       if (!readText(path, value, 2048))
         continue;
       MapStreamInstallSnapshot parsed;
       parsed.state =
-          ready ? MapStreamInstallState::Ready : MapStreamInstallState::Paused;
-      parsed.currentStep = ready ? 2 : 1;
-      parsed.finalizationCompleted = ready ? parsed.finalizationTotal : 0;
+          operationPrepared ? MapStreamInstallState::Prepared : (ready ? MapStreamInstallState::Ready : MapStreamInstallState::Paused);
+      parsed.currentStep = (ready || operationPrepared) ? 2 : 1;
+      parsed.finalizationCompleted = (ready || operationPrepared) ? parsed.finalizationTotal : 0;
       parsed.sessionId = jsonString(value, "sessionId");
       parsed.mapId = jsonString(value, "mapId");
       parsed.manifestReceipt = jsonString(value, "manifestReceipt");
@@ -534,7 +537,7 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
           jsonUnsigned(value, "validationVersion", haveValidation);
       if (parsed.sessionId == sessionId && safeMapIdentifier(parsed.mapId) &&
           parsed.signedManifestReceipt.size() == 64 &&
-          (!ready || (haveValidation && validation == 1))) {
+          (!(ready || operationPrepared) || (haveValidation && validation == 1))) {
         candidate = std::move(parsed);
         marker = std::move(value);
         markerValid = true;
@@ -591,7 +594,7 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
         invalid = true;
         continue;
       }
-    } else if (ready) {
+    } else if (ready || operationPrepared) {
       bool haveFiles = false;
       const uint64_t totalFiles = jsonUnsigned(marker, "fileCount", haveFiles);
       if (!haveFiles || totalFiles == 0 || totalFiles > UINT32_MAX) {
@@ -1017,10 +1020,20 @@ bool MapStreamInstallSession::loadMatchingCheckpoint(
       return true;
     }
   }
-  const std::string readyPath = joinPath(inactiveRoot(), operationID_.empty() ? kReadyFile : ".operation-ready");
+  const std::string readyPath = joinPath(inactiveRoot(), operationID_.empty() ? kReadyFile : ".operation-prepared");
   for (const std::string &path : {readyPath, readyPath + ".bak"}) {
     if (storage_->readText(path, value, 2048) && tryReady(value))
       return true;
+  }
+  if (!operationID_.empty()) {
+    // A new attempt may reuse identical installed bytes, but every skipped byte
+    // is compared against this signed retransmission by onFileData. Preparation
+    // creates a separate marker and never inherits the older commit authority.
+    for (const char *name : {".operation-ready", ".ready"}) {
+      const auto path=joinPath(inactiveRoot(),name);
+      for (const auto &candidate : {path,path+".bak"})
+        if (storage_->readText(candidate,value,2048) && tryReady(value)) return true;
+    }
   }
   resetResume();
   return false;
@@ -1112,9 +1125,21 @@ bool MapStreamInstallSession::writeFinalMetadata(
       "\",\"signedManifestReceipt\":\"" + status_.signedManifestReceipt +
       "\",\"streamFormatVersion\":1,\"validationVersion\":1" +
       (operationID_.empty() ? std::string() : ",\"operationID\":\"" + operationID_ + "\"") + "}\n";
-  if (!writeFileAtomic(*storage_, joinPath(inactiveRoot(), operationID_.empty() ? kReadyFile : ".operation-ready"), ready))
-    return fail("stream_ready_write", "could not publish map ready marker");
+  if (!writeFileAtomic(*storage_, joinPath(inactiveRoot(), operationID_.empty() ? kReadyFile : ".operation-prepared"), ready))
+    return fail(operationID_.empty() ? "stream_ready_write" : "stream_prepared_write",
+                operationID_.empty() ? "could not publish map ready marker" : "could not publish prepared map marker");
   advanceFinalization();
+  if (!operationID_.empty()) {
+    if (!storage_->removeTree(joinPath(inactiveRoot(), kInstallingFile)) ||
+        !storage_->syncDirectory(inactiveRoot()))
+      return fail("stream_prepared_cleanup", "prepared stream cleanup is pending");
+    status_.state = MapStreamInstallState::Prepared;
+    status_.durableFilePrefix = status_.totalFiles;
+    status_.finalizationCompleted = status_.finalizationTotal;
+    status_.errorCode.clear(); status_.errorMessage.clear();
+    publishStatus();
+    return true;
+  }
   const std::string pending =
       std::string("{\"manifestReceipt\":\"") + status_.manifestReceipt +
       "\",\"mapId\":\"" + jsonEscape(status_.mapId) + "\",\"root\":\"" +

@@ -19,6 +19,7 @@ enum class MapStreamInstallState {
   Receiving,
   Paused,
   Finalizing,
+  Prepared,
   Ready,
   Failed,
 };

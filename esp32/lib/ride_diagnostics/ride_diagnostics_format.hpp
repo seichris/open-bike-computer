@@ -8,6 +8,9 @@
 namespace ride_diagnostics::detail {
 
 constexpr const char *kAllowedFieldKeys[] = {
+    "operationId", "cleanupFailed", "freeBytes", "largestBytes",
+    "minimumFreeBytes", "minimumLargestBytes", "tlsStackBytes", "ownerStackBytes",
+    "rendererStackBytes", "stackAvailableMask",
     "accuracy", "accuracyAvailable", "accuracyBucket", "acknowledgedKind",
     "active", "activeStage", "ageMs", "alertMode",
     "applyErrorCode", "applyErrorDomain", "applyResult", "attempt",
@@ -75,6 +78,8 @@ inline bool fieldKeyIn(const char *key, const char *const *keys,
 
 inline bool allowedFieldValueKind(const char *key, FieldValueKind kind) {
 static constexpr const char *kNumberKeys[] = {
+      "freeBytes", "largestBytes", "minimumFreeBytes", "minimumLargestBytes",
+      "tlsStackBytes", "ownerStackBytes", "rendererStackBytes", "stackAvailableMask",
       "accuracy", "activeStage", "ageMs", "alertMode",
       "applyErrorCode", "attempt", "blockLoadMs", "bootSequence",
       "bytes", "chunk", "commandClass", "completedStage",
@@ -94,6 +99,7 @@ static constexpr const char *kNumberKeys[] = {
       "writerDetail", "writerProgressMs", "writtenCount",
   };
 static constexpr const char *kBooleanKeys[] = {
+      "cleanupFailed",
       "accuracyAvailable", "active", "authorized", "autoPauseEnabled",
       "available", "background", "clockSynchronized", "connectCompleted",
       "connectStarted", "connectionReused", "diagnosticHold", "fallback",

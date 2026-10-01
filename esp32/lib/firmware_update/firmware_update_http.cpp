@@ -1,3 +1,4 @@
+#include "firmware_metadata_compatibility.hpp"
 #include "firmware_update_http.hpp"
 #include "firmware_update_policy.hpp"
 
@@ -19,7 +20,6 @@ extern Power power;
 #include <mbedtls/md.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
-#include <sstream>
 #include <vector>
 
 namespace firmware_update {
@@ -215,18 +215,18 @@ static std::string manifestPayload(uint32_t schemaVersion,
                                    const std::string &gitSha, uint32_t size,
                                    const std::string &sha256,
                                    const std::string &releaseUrl,
-                                   uint32_t minUpdaterProtocol) {
-  std::ostringstream payload;
-  payload << "schemaVersion=" << schemaVersion << "\n"
-          << "target=" << target << "\n"
-          << "version=" << version << "\n"
-          << "build=" << build << "\n"
-          << "gitSha=" << gitSha << "\n"
-          << "size=" << size << "\n"
-          << "sha256=" << sha256 << "\n"
-          << "url=" << releaseUrl << "\n"
-          << "minUpdaterProtocol=" << minUpdaterProtocol << "\n";
-  return payload.str();
+                                   uint32_t minUpdaterProtocol,
+                                   uint32_t mapMetadataReaderVersion = 0) {
+  std::string payload = "schemaVersion=" + std::to_string(schemaVersion) + "\n" +
+      "target=" + target + "\n" + "version=" + version + "\n" +
+      "build=" + std::to_string(build) + "\n" + "gitSha=" + gitSha + "\n" +
+      "size=" + std::to_string(size) + "\n" + "sha256=" + sha256 + "\n" +
+      "url=" + releaseUrl + "\n" +
+      "minUpdaterProtocol=" + std::to_string(minUpdaterProtocol) + "\n";
+  if (schemaVersion == 2)
+    payload += "mapMetadataReaderVersion=" +
+               std::to_string(mapMetadataReaderVersion) + "\n";
+  return payload;
 }
 
 static bool verifyManifestSignature(const std::string &payload,
@@ -641,6 +641,7 @@ void FirmwareUpdateHttpServer::handleBegin(
   uint32_t build = 0;
   uint32_t size = 0;
   uint32_t minUpdaterProtocol = 0;
+  uint32_t mapMetadataReaderVersion = 0;
   bool allowDowngrade = false;
   if (!findJsonUint(body, "schemaVersion", schemaVersion) ||
       !findJsonString(body, "version", version) ||
@@ -657,7 +658,8 @@ void FirmwareUpdateHttpServer::handleBegin(
   }
   findJsonBool(body, "allowDowngrade", allowDowngrade);
 
-  if (schemaVersion != 1 ||
+  if ((schemaVersion != 1 && schemaVersion != 2) ||
+      (schemaVersion == 2 && !findJsonUint(body, "mapMetadataReaderVersion", mapMetadataReaderVersion)) ||
       minUpdaterProtocol > firmware_metadata::kUpdaterProtocolVersion) {
     fail(client, 400, "manifest_unsupported",
          "firmware manifest is not supported");
@@ -674,10 +676,32 @@ void FirmwareUpdateHttpServer::handleBegin(
   }
   const std::string signedPayload =
       manifestPayload(schemaVersion, target, version, build, gitSha, size,
-                      sha256, releaseUrl, minUpdaterProtocol);
+                      sha256, releaseUrl, minUpdaterProtocol, mapMetadataReaderVersion);
   if (!verifyManifestSignature(signedPayload, manifestSignature)) {
     fail(client, 400, "manifest_signature_invalid",
          "firmware manifest signature is invalid");
+    return;
+  }
+  if (schemaVersion == 1) {
+    uint32_t attestedReader = 0;
+    std::string readerSignature;
+    const bool hasReader = findJsonUint(body, "mapMetadataReaderVersion", attestedReader);
+    const bool hasSignature = findJsonString(body, "mapMetadataReaderSignature", readerSignature);
+    if (hasReader || hasSignature) {
+      if (!hasReader || !hasSignature || !verifyManifestSignature(
+          manifestPayload(2, target, version, build, gitSha, size, sha256,
+                          releaseUrl, minUpdaterProtocol, attestedReader), readerSignature)) {
+        fail(client,400,"metadata_reader_signature_invalid","map reader attestation is invalid");
+        return;
+      }
+      mapMetadataReaderVersion = attestedReader;
+    }
+  }
+  // Capability is inside the verified release signature and bound to image SHA.
+  // A greater build number or developer downgrade flag cannot bypass this floor.
+  if (!metadata_compatibility::allowsReader(mapMetadataReaderVersion)) {
+    fail(client,409,"metadata_reader_incompatible",
+         "signed firmware does not support retained map operation metadata");
     return;
   }
   if (build <= firmware_metadata::build() && !allowDowngrade) {
@@ -730,6 +754,7 @@ void FirmwareUpdateHttpServer::handleBegin(
   operationRecord.imageBytes = size;
 #endif
   resetUploadState();
+  pendingMapMetadataReader_ = mapMetadataReaderVersion;
   pendingReceipt_ = operationRecord;
   pendingReceiptRevision_ = admissionRevision;
   esp_ota_handle_t handle = 0;
@@ -744,6 +769,12 @@ void FirmwareUpdateHttpServer::handleBegin(
          "another firmware transaction owns the OTA lifecycle");
     return;
   }
+
+#if FIRMWARE_OPERATIONS_V1_ENABLED
+  // Signed manifest, durable admission, device binding and replay checks above
+  // selected this exact operation. Correlation conveys no authorization.
+  (void)transferServer_->bindResourceOperation(request, "firmware", operationId);
+#endif
 
   lockState();
   status_ = "receiving";
@@ -958,6 +989,12 @@ void FirmwareUpdateHttpServer::handleFinalize(
   }
   operationRevisionHighWater_.store(pendingReceiptRevision_ + 1);
 #endif
+  if (!metadata_compatibility::allowsReader(pendingMapMetadataReader_)) {
+    transferServer_->endAuthorizedCommit(commitGrant);
+    resetUploadState();
+    fail(client,409,"metadata_reader_incompatible","map metadata compatibility changed before boot selection");
+    return;
+  }
   result = operationOwner_.selectBootPartition(updatePartition);
   if (result != ESP_OK) {
     transferServer_->endAuthorizedCommit(commitGrant);

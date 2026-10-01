@@ -38,6 +38,9 @@ public:
   bool release() override;
   bool healthy() const override;
   uint32_t stackHighWaterBytes() const override;
+  bool stackSampleAvailable() const override {
+    return stackSampleAvailable_.load(std::memory_order_acquire);
+  }
 
   bool startStation(const std::string &ssid,
                     const std::string &password) override;
@@ -58,6 +61,7 @@ public:
   esp_err_t abort(esp_ota_handle_t handle);
   esp_err_t description(const esp_partition_t *partition,
                         esp_app_desc_t &description);
+  esp_err_t protectMetadataReaderFloor(uint32_t reader);
   esp_err_t selectBootPartition(const esp_partition_t *partition);
   esp_err_t acceptFirmwareOperation(const receipt::Record &record, uint32_t revision);
   esp_err_t acknowledgeFirmwareOperation(const receipt::Record &record);
@@ -74,6 +78,7 @@ private:
     Abort,
     Description,
     SelectBoot,
+    ProtectMetadataReaderFloor,
     AcceptFirmwareOperation,
     AcknowledgeFirmwareOperation,
     StartStation,
@@ -124,6 +129,7 @@ private:
   uint8_t resultQueueBuffer_[sizeof(Result)]{};
   std::atomic<TaskHandle_t> workerTask_{nullptr};
   std::atomic<uint32_t> lastStackHighWaterBytes_{0};
+  std::atomic<bool> stackSampleAvailable_{false};
   alignas(4) uint8_t writeBuffer_[kMaximumWriteBytes]{};
   char networkSsid_[33]{};
   char networkPassword_[65]{};

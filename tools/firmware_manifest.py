@@ -61,7 +61,11 @@ def sha256_hex(path: pathlib.Path) -> str:
 
 def canonical_payload(manifest: dict[str, object]) -> bytes:
     lines = []
-    for field in SIGNATURE_FIELDS:
+    schema = manifest.get("schemaVersion")
+    if schema not in (1, 2):
+        raise ValueError("unsupported manifest schema")
+    fields = SIGNATURE_FIELDS + (("mapMetadataReaderVersion",) if schema == 2 else ())
+    for field in fields:
         if field not in manifest:
             raise ValueError(f"manifest is missing {field}")
         lines.append(f"{field}={manifest[field]}")
@@ -125,6 +129,13 @@ def write_manifest(args: argparse.Namespace) -> None:
         "minUpdaterProtocol": args.min_updater_protocol,
     }
     manifest["signature"] = sign_manifest(manifest, args.private_key_base64)
+    reader = getattr(args, "map_metadata_reader_version", None)
+    if reader is not None:
+        if reader != 1:
+            raise ValueError("unsupported map metadata reader version")
+        attestation = dict(manifest, schemaVersion=2, mapMetadataReaderVersion=reader)
+        manifest["mapMetadataReaderVersion"] = reader
+        manifest["mapMetadataReaderSignature"] = sign_manifest(attestation, args.private_key_base64)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
@@ -150,6 +161,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--tag")
     parser.add_argument("--asset-name")
     parser.add_argument("--min-updater-protocol", type=int, default=1)
+    parser.add_argument("--map-metadata-reader-version", type=int)
     args = parser.parse_args(argv)
     write_manifest(args)
     return 0

@@ -1,3 +1,4 @@
+#include "firmware_metadata_compatibility.hpp"
 #include "device_operation_owner.hpp"
 
 #include <cstring>
@@ -241,6 +242,17 @@ esp_err_t DeviceOperationOwner::selectBootPartition(
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
+esp_err_t DeviceOperationOwner::protectMetadataReaderFloor(uint32_t reader) {
+  // Read-only fast path avoids allocating an idle 16 KiB owner on every boot.
+  if (metadata_compatibility::floorAlreadyProtected(reader)) return ESP_OK;
+  Command command;
+  command.operation = Operation::ProtectMetadataReaderFloor;
+  command.receiptRevision = reader;
+  Result result;
+  const auto dispatch = execute(command, result);
+  return dispatch == ESP_OK ? result.error : dispatch;
+}
+
 esp_err_t DeviceOperationOwner::acceptFirmwareOperation(const receipt::Record &record, uint32_t revision) {
   Command command; command.operation = Operation::AcceptFirmwareOperation;
   command.firmwareReceipt = record; command.receiptRevision = revision;
@@ -381,6 +393,9 @@ void DeviceOperationOwner::run() {
       result.error = esp_ota_get_partition_description(
           command.partition, &result.description);
       break;
+    case Operation::ProtectMetadataReaderFloor:
+      result.error = metadata_compatibility::requireReader(command.receiptRevision) ? ESP_OK : ESP_FAIL;
+      break;
     case Operation::SelectBoot:
       result.error = esp_ota_set_boot_partition(command.partition);
       break;
@@ -498,9 +513,9 @@ void DeviceOperationOwner::run() {
       result.networkStart.after = step->after;
     }
     lastStackHighWaterBytes_.store(
-        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)) *
-            sizeof(StackType_t),
+        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)),
         std::memory_order_release);
+    stackSampleAvailable_.store(true, std::memory_order_release);
     (void)xQueueSend(resultQueue_, &result, portMAX_DELAY);
     if (command.operation == Operation::Shutdown)
       (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);

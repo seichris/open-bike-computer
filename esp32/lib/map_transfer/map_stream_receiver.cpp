@@ -50,7 +50,8 @@ bool MapStreamReceiver::failed() const { return parser_.failed(); }
 
 MapStreamReceiveResult MapStreamReceiver::result() const {
   if (parser_.complete())
-    return {true, 200, "stream_ready", ""};
+    return {true, 200, installer_.snapshot().state == MapStreamInstallState::Prepared
+                           ? "stream_prepared" : "stream_ready", ""};
 
   const MapStreamInstallSnapshot &state = installer_.snapshot();
   if (state.state == MapStreamInstallState::Paused) {

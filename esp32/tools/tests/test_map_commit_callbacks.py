@@ -58,7 +58,7 @@ public:
   };
   struct Recovery {
     device_transfer::HttpResponseCompletionToken response;
-    bool present = false, armed = false;
+    bool present = false, armed = false, responseCompleted = false;
     bool pending() const { return present; }
   };
   struct StateGuard { StateGuard(MapTransferHttpServer &) {} };
@@ -90,16 +90,18 @@ int main() {
     MapTransferHttpServer server;
     const auto grant = server.boundary.begin(true, true, true, "/map/one", "signed");
     server.deferredActivation_ = {{7, "PUT", "/map/one", 11}, "one", 2};
+    server.commitRecovery_ = {{7, "PUT", "/map/one", 11}, true, false, false};
     // Revocation / shutdown after grant must not affect callback ownership.
     server.boundary.closeAdmission(true);
     if (outcome == 0) server.responseDidAbort(first); // enqueue / write failure
     else server.responseDidComplete(first, outcome == 1); // clean / lost close
     assert(server.dispatched == 1);
+    assert(server.commitRecovery_.responseCompleted && !server.commitRecovery_.armed);
     assert(server.automaticExit == (outcome == 1));
     assert(server.boundary.owns(grant)); // receipt delivery is not renderer ACK
     server.responseDidAbort(first);
     server.responseDidComplete(first, true);
-    assert(server.dispatched == 1);
+    assert(server.dispatched == 1 && !server.commitRecovery_.armed);
     assert(server.boundary.end(grant));
     server.boundary.closeAdmission(false);
     const auto next = server.boundary.begin(true, true, true, "/map/one", "signed");

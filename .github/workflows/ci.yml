@@ -412,6 +412,7 @@ jobs:
         run: |
           for test in \
             test_ride_diagnostics_format \
+            test_lifecycle_resource_event \
             test_runtime_watchdog_policy \
             test_ride_diagnostics_queue_policy \
             test_ride_diagnostics_control \
@@ -422,6 +423,7 @@ jobs:
               "tools/tests/${test}.cpp" -o "/tmp/${test}"
             "/tmp/${test}"
           done
+          python3 tools/tests/test_lifecycle_resources.py
           python3 tools/tests/test_watchdog_scheduler_contract.py
       - name: Verify generated pre-connection assets
         run: |
@@ -818,6 +820,11 @@ jobs:
             tools/tests/test_durable_operation.cpp \
             -o /tmp/test_durable_operation
           /tmp/test_durable_operation
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            -Ilib/map_transfer -Ilib/device_transfer \
+            tools/tests/test_map_selection_health.cpp \
+            -o /tmp/test_map_selection_health
+          /tmp/test_map_selection_health
       - name: Map transfer host tests
         run: |
           g++ -std=c++17 \
@@ -885,26 +892,28 @@ jobs:
             $(pkg-config --cflags --libs mbedcrypto) \
             -o /tmp/test_map_stream_compiled_trust_development
           /tmp/test_map_stream_compiled_trust_development
-          g++ -std=c++17 -Wall -Wextra -Werror \
-            lib/map_transfer/map_transfer.cpp \
-            lib/map_transfer/map_operation_journal.cpp \
-            lib/device_transfer/durable_operation.cpp \
-            lib/map_transfer/map_stream_format.cpp \
-            lib/map_transfer/map_stream_crypto.cpp \
-            lib/map_transfer/map_stream_sha.cpp \
-            lib/map_transfer/map_stream_trust.cpp \
-            lib/map_transfer/map_stream_parser.cpp \
-            lib/map_transfer/map_stream_install.cpp \
-            lib/map_transfer/map_stream_receiver.cpp \
-            lib/map_transfer/map_stream_compiled_trust.cpp \
-            lib/maps/src/mapBlockFormat.cpp \
-            lib/maps/src/mapLabelBlock.cpp \
-            lib/maps/src/mapFontAsset.cpp \
-            lib/maps/src/mapFontAssetFormat.cpp \
-            tools/tests/test_map_stream_install.cpp \
-            $(pkg-config --cflags --libs mbedcrypto) \
-            -o /tmp/test_map_stream_install
-          /tmp/test_map_stream_install
+          for test in test_map_stream_install test_map_selection_anchors test_map_metadata_power_loss; do
+            g++ -std=c++17 -Wall -Wextra -Werror \
+              lib/map_transfer/map_transfer.cpp \
+              lib/map_transfer/map_operation_journal.cpp \
+              lib/device_transfer/durable_operation.cpp \
+              lib/map_transfer/map_stream_format.cpp \
+              lib/map_transfer/map_stream_crypto.cpp \
+              lib/map_transfer/map_stream_sha.cpp \
+              lib/map_transfer/map_stream_trust.cpp \
+              lib/map_transfer/map_stream_parser.cpp \
+              lib/map_transfer/map_stream_install.cpp \
+              lib/map_transfer/map_stream_receiver.cpp \
+              lib/map_transfer/map_stream_compiled_trust.cpp \
+              lib/maps/src/mapBlockFormat.cpp \
+              lib/maps/src/mapLabelBlock.cpp \
+              lib/maps/src/mapFontAsset.cpp \
+              lib/maps/src/mapFontAssetFormat.cpp \
+              tools/tests/${test}.cpp \
+              $(pkg-config --cflags --libs mbedcrypto) \
+              -o /tmp/${test}
+            /tmp/${test}
+          done
       - name: Transfer control dispatch host tests
         run: |
           python -m unittest tools.tests.test_ble_notification_dispatch
@@ -916,6 +925,8 @@ jobs:
             tools/tests/test_map_transfer_status_chunk_session.cpp \
             -o /tmp/test_map_transfer_status_chunk_session
           /tmp/test_map_transfer_status_chunk_session
+      - name: Firmware text size helper equivalence
+        run: python -m unittest tools.tests.test_firmware_text_size
       - name: Device transfer HTTP limit host tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror \
@@ -932,7 +943,7 @@ jobs:
             -o /tmp/test_device_transfer_network_protocol
           /tmp/test_device_transfer_network_protocol
           python -m unittest tools.tests.test_map_operation_contract
-          python -m unittest tools.tests.test_map_commit_callbacks tools.tests.test_map_commit_recovery
+          python -m unittest tools.tests.test_map_commit_callbacks tools.tests.test_map_commit_recovery tools.tests.test_map_operation_control
           python -m unittest tools.tests.test_map_activation_handoff
       - name: Sound protocol host tests
         run: |

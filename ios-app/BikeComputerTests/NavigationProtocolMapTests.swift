@@ -405,6 +405,105 @@ extension NavigationProtocolTests {
     }
 
     static func testProvisionalActiveMapVisibility() {
+        let boot = String(repeating: "a", count: 32)
+        let operation = String(repeating: "b", count: 32)
+        func health(_ state: String, _ revision: UInt64, bootID: String? = nil,
+                    root: String = "/maps/current", mapID: String = "candidate",
+                    sessionID: String = "current-session") -> MapSelectionHealth {
+            MapSelectionHealth(schemaVersion: 1, bootID: bootID ?? boot, revision: revision,
+                state: state, root: root, operationID: operation, mapID: mapID,
+                sessionID: sessionID, affectedOperationID: state == "ready" ? "" : operation)
+        }
+        var projection = MapSelectionHealthProjection()
+        func apply(_ value: MapSelectionHealth?, present: Bool = true) -> Bool {
+            projection.apply(value, fieldPresent: present, activeRoot: "/maps/current",
+                mapID: "candidate", sessionID: "current-session")
+        }
+        assert(apply(nil, present: false), "old firmware preserves legacy visibility policy")
+        assert(!apply(health("unknown", 0)), "unknown never grants green presence")
+        assert(apply(health("ready", 1)), "grounded current ready selection is visible")
+        assert(!apply(health("degraded", 2)), "runtime degradation hides historical installed selection")
+        assert(projection.health?.state == "degraded", "current health records degradation independently")
+        assert(!apply(health("ready", 1)), "stale ready cannot erase degradation")
+        assert(!apply(health("ready", 2)), "conflicting same revision is rejected")
+        assert(!apply(health("ready", 3, root: "/maps/wrong")), "wrong root is rejected")
+        assert(!apply(health("ready", 3, mapID: "other")), "wrong map is rejected")
+        assert(!apply(health("ready", 3, sessionID: "old")), "wrong session is rejected")
+        assert(!apply(health("ready", 3, bootID: String(repeating: "c", count: 32))), "wrong boot is rejected")
+        let wrongOperation = MapSelectionHealth(schemaVersion: 1, bootID: boot, revision: 3,
+            state: "ready", root: "/maps/current", operationID: String(repeating: "d", count: 32),
+            mapID: "candidate", sessionID: "current-session", affectedOperationID: "")
+        assert(!apply(wrongOperation), "same root and content cannot silently change operation identity")
+        assert(projection.health?.revision == 2, "rejected observations never replace saved health")
+        assert(!apply(nil, present: false), "missing new health cannot downgrade to legacy fallback")
+        assert(!apply(health("rolling_back", 3)), "rollback pending is not healthy")
+        assert(!apply(health("rollback_failed", 4)), "failed rollback remains hidden")
+        assert(apply(health("ready", 5)), "fresh grounded recovery can restore current presence")
+        assert(apply(health("ready", 5)), "identical health replay is idempotent")
+        var malformed = MapSelectionHealthProjection()
+        assert(!malformed.apply(nil, fieldPresent: true, activeRoot: nil, mapID: nil, sessionID: nil),
+               "malformed advertised health cannot fall back to legacy green")
+        assert(!malformed.apply(nil, fieldPresent: false, activeRoot: nil, mapID: nil, sessionID: nil),
+               "malformed capability remains conservative in this connection")
+        let legacyHealth = MapSelectionHealth(schemaVersion: 1, bootID: boot, revision: 1,
+            state: "ready", root: "/maps/legacy", operationID: "", mapID: "legacy",
+            sessionID: "", affectedOperationID: "")
+        var legacyProjection = MapSelectionHealthProjection()
+        assert(legacyProjection.apply(legacyHealth, fieldPresent: true,
+            activeRoot: "/maps/legacy", mapID: "legacy", sessionID: ""),
+            "legacy selections are grounded by exact root and map without a session")
+
+        let ble = BLEManager()
+        ble.isConnected = true
+        ble.setConnectedDeviceIDForTesting("health-device")
+        ble.deviceTransferSessionToken = "health-token"
+        let context = ble.captureMapTransferHTTPStatusContext()!
+        func statusData(_ state: String, _ revision: UInt64) -> Data {
+            Data("""
+            {"activeRoot":"/maps/current","activeMapId":"candidate","activeSessionId":"current-session",
+             "selectionHealth":{"schemaVersion":1,"bootID":"\(boot)","revision":\(revision),
+             "state":"\(state)","root":"/maps/current","operationID":"\(operation)",
+             "mapID":"candidate","sessionID":"current-session","affectedOperationID":""}}
+            """.utf8)
+        }
+        let historicalReceipt = Data("""
+        {"operation":{"schemaVersion":1,"deviceID":"health-device",
+        "operationID":"\(operation)","phase":"installed","revision":7}}
+        """.utf8)
+        assert(ble.handleMapTransferStatusNotification(
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + historicalReceipt))
+        let readyData = statusData("ready", 1)
+        let ready = try! JSONDecoder().decode(MapTransferDeviceStatus.self, from: readyData)
+        assert(ble.applyAuthenticatedMapTransferStatus(ready, context: context))
+        assert(ble.activeDeviceMap?.mapID == "candidate", "HTTP ready grants grounded current presence")
+        assert(ble.handleMapTransferStatusNotification(
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + statusData("degraded", 2)))
+        assert(ble.activeDeviceMap == nil && ble.mapSelectionHealth?.state == "degraded",
+               "native BLE degradation immediately removes green presence")
+        assert(ble.mapOperationStatus?.phase == "installed" && ble.mapOperationStatus?.revision == 7,
+               "runtime health does not rewrite the historical Installed receipt")
+        assert(ble.applyAuthenticatedMapTransferStatus(ready, context: context))
+        assert(ble.activeDeviceMap == nil && ble.mapSelectionHealth?.revision == 2,
+               "late HTTP ready cannot undo newer native BLE health")
+        let accepted = Data("""
+        {"operation":{"schemaVersion":1,"deviceID":"health-device",
+        "operationID":"\(operation)","phase":"accepted","revision":6}}
+        """.utf8)
+        assert(ble.handleMapTransferStatusNotification(
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + accepted))
+        assert(ble.handleMapTransferStatusNotification(
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + statusData("ready", 3)))
+        assert(ble.activeDeviceMap == nil && ble.mapOperationStatus?.phase == "accepted",
+               "renderer ready does not promote a live Accepted operation before durable Installed")
+        ble.setConnectedDeviceIDForTesting("another-device")
+        assert(!ble.applyAuthenticatedMapTransferStatus(ready, context: context),
+               "health uses the same exact-device HTTP context fence")
+        assert(ble.activeDeviceMap == nil, "wrong-device health never restores presence")
+        assert(ble.handleMapTransferStatusNotification(
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + statusData("ready", 4)))
+        assert(ble.activeDeviceMap == nil && ble.mapSelectionHealth?.revision == 3,
+               "native health remains bound to its original connected device")
+
         for mapID in ["", "stale-map", "candidate"] {
             for status in ["activating", "failed", "accepted", "ready"] {
                 assert(MapActivationVisibilityPolicy.hidesActiveSelection(
@@ -4916,6 +5015,46 @@ extension NavigationProtocolTests {
         }
         assertEqual(acceptedSequence, 9,
                     "activation acknowledgement exposes the queued attempt sequence")
+        let operation = DeviceMapOperationRecord(schemaVersion: 1, deviceID: String(repeating: "a", count: 32),
+            operationID: UUID(), sessionID: "session-1", mapID: "map-1",
+            manifestReceipt: String(repeating: "b", count: 64), signedManifestReceipt: String(repeating: "c", count: 64),
+            streamSHA256: String(repeating: "d", count: 64), streamBytes: 123, artifactFilename: "map.bmap",
+            appNamespace: "test", createdAt: Date(), connectionEpoch: 1, observation: "in_progress",
+            cleanup: "pending", usesDurableProtocol: true, lastReceipt: nil,
+            admissionEpoch: String(repeating: "e", count: 32), admissionRevision: 42)
+        let responseReceipt = DeviceMapOperationReceipt(schemaVersion: 1, deviceID: operation.deviceID,
+            operationID: operation.wireOperationID, sessionID: operation.sessionID, mapID: operation.mapID,
+            manifestReceipt: operation.manifestReceipt, signedManifestReceipt: operation.signedManifestReceipt,
+            streamSHA256: operation.streamSHA256, streamBytes: operation.streamBytes, phase: "accepted", revision: 3, status: nil)
+        var controls: [String] = []
+        FirmwareRequestCaptureProtocol.handler = { request, body in
+            let action = request.url!.lastPathComponent
+            controls.append(action)
+            assertEqual(request.httpMethod, "POST", "operation controls are explicit POSTs")
+            assertEqual(request.value(forHTTPHeaderField: "X-Map-Operation-ID"), operation.wireOperationID,
+                        "commit/cancel retain original operation ID")
+            assertEqual(request.value(forHTTPHeaderField: "X-Map-Stream-SHA256"), operation.streamSHA256,
+                        "commit/cancel bind exact body digest")
+            assert(body.isEmpty, "operation controls use an empty body")
+            if action == "cancel" {
+                assertEqual(request.value(forHTTPHeaderField: "X-Map-Content-Session"), operation.sessionID,
+                            "cancel can fence a pre-manifest upload with full saved identity")
+                assertEqual(request.value(forHTTPHeaderField: "X-Map-Operation-Admission-Epoch"), operation.admissionEpoch,
+                            "cancel never refreshes admission after reboot")
+                assertEqual(request.value(forHTTPHeaderField: "X-Map-Operation-Admission-Revision"), "42", "cancel retains original revision")
+            }
+            return (HTTPURLResponse(url: request.url!, statusCode: action == "cancel" ? 409 : 200,
+                                    httpVersion: nil, headerFields: nil)!, try JSONEncoder().encode(responseReceipt))
+        }
+        var committed: DeviceMapOperationReceipt?
+        var lateCancellation: DeviceMapOperationReceipt?
+        await runMainActorAsyncTest {
+            committed = try await client.commitOperation(operationID: operation.wireOperationID, streamSHA256: operation.streamSHA256)
+            lateCancellation = try await client.cancelOperation(record: operation)
+        }
+        assertEqual(controls, ["commit", "cancel"], "prepare upload is separate from explicit controls")
+        assertEqual(committed?.phase, "accepted", "commit returns accepted, never installed by HTTP alone")
+        assertEqual(lateCancellation?.phase, "accepted", "409 cancellation retains the accepted winner")
     }
 
     static func testMapTransferSessionIdentityUsesManifestContent() {
@@ -4938,6 +5077,13 @@ extension NavigationProtocolTests {
     }
 
     static func testMapActivationReconciliationMatrix() {
+        let settingsURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputer/Views/SettingsView.swift")
+        let settingsSource = try! String(contentsOf: settingsURL, encoding: .utf8)
+        assert(settingsSource.contains("manager.cancelCurrentMapOperation(bleManager: bleManager)") &&
+               settingsSource.contains("manager.canCancelCurrentMapOperation") &&
+               settingsSource.contains("manager.isCurrentMapOperationAccepted"),
+               "UI distinguishes requested pregrant cancellation from an accepted operation")
         let operationID = String(repeating: "a", count: 32)
         assertEqual(MapOperationQueryPacket.make(operationID: operationID), Data("MOPQ|\(operationID)".utf8),
                     "operation status query preserves its exact bounded identity")
@@ -5161,6 +5307,9 @@ extension NavigationProtocolTests {
         let defaults = UserDefaults(suiteName: "map-confirmation-\(UUID().uuidString)")!
         let manager = OfflineMapManager(defaults: defaults)
         let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.setConnectedDeviceIDForTesting("map-test-device")
+        bleManager.deviceTransferSessionToken = "map-test-token"
         let client = MapTransferDeviceClient(
             baseURL: URL(string: "http://192.168.4.20:8080")!,
             session: session
@@ -5274,6 +5423,27 @@ extension NavigationProtocolTests {
         assertEqual(manager.statusMessage.hasPrefix("activating map-1"), true,
                     "pending confirmation retains activation status")
         assert(statusRequests > 1, "confirmation limit covers repeated pending polls")
+        FirmwareRequestCaptureProtocol.handler = { request, _ in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { bleManager.deviceTransferSessionToken = "rotated-token" }
+            } else {
+                DispatchQueue.main.sync {
+                    MainActor.assumeIsolated { bleManager.deviceTransferSessionToken = "rotated-token" }
+                }
+            }
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                    Data("{\"activeMapId\":\"stale-map\",\"activation\":{\"status\":\"installed\",\"sequence\":8,\"sessionId\":\"session-1\",\"mapId\":\"map-1\"}}".utf8))
+        }
+        var staleConfirmation: MapActivationConfirmationResult?
+        await runMainActorAsyncTest {
+            staleConfirmation = try await manager.confirmActivatedMap(expectedMapId: "map-1", sessionId: "session-1",
+                previousMapId: "old", previousSessionId: "old", previousSequence: 7, acceptedSequence: 8,
+                client: client, bleManager: bleManager, timeout: 0.02, pollIntervalNanoseconds: 1_000_000)
+        }
+        if case .continuesOnDevice? = staleConfirmation {} else {
+            assert(false, "a rotated token during HTTP status await cannot complete activation")
+        }
+        assert(bleManager.mapTransferActiveMapId != "stale-map", "late old-token HTTP status cannot overwrite BLE state")
     }
 
     static func testMapTransferDeviceStatusDecodesActivationFailure() {
@@ -5331,6 +5501,26 @@ extension NavigationProtocolTests {
             "file_sha256: sha mismatch for VECTMAP/new-map/1.fmb",
             "authenticated HTTP status projects the device activation error"
         )
+        bleManager.isConnected = true
+        bleManager.setConnectedDeviceIDForTesting("device-a")
+        bleManager.deviceTransferSessionToken = "token-a"
+        let context = bleManager.captureMapTransferHTTPStatusContext()!
+        assert(bleManager.applyAuthenticatedMapTransferStatus(status, context: context), "matching HTTP context applies")
+        bleManager.deviceTransferSessionToken = "token-b"
+        assert(!bleManager.applyAuthenticatedMapTransferStatus(status, context: context), "token rotation fences late response")
+        bleManager.deviceTransferSessionToken = "token-a"
+        let wrongGeneration = MapTransferHTTPStatusContext(deviceID: context.deviceID,
+            selectedDeviceID: context.selectedDeviceID, connectionEpoch: context.connectionEpoch,
+            transferGeneration: context.transferGeneration &+ 1, authorizationDigest: context.authorizationDigest)
+        assert(!bleManager.applyAuthenticatedMapTransferStatus(status, context: wrongGeneration), "authorization generation is independent of BLE epoch")
+        let wrongEpoch = MapTransferHTTPStatusContext(deviceID: context.deviceID,
+            selectedDeviceID: context.selectedDeviceID, connectionEpoch: context.connectionEpoch &+ 1,
+            transferGeneration: context.transferGeneration, authorizationDigest: context.authorizationDigest)
+        assert(!bleManager.applyAuthenticatedMapTransferStatus(status, context: wrongEpoch), "same-device reconnect fences late response")
+        bleManager.setConnectedDeviceIDForTesting("device-b")
+        assert(!bleManager.applyAuthenticatedMapTransferStatus(status, context: context), "another device cannot receive old HTTP state")
+        bleManager.isConnected = false
+        assert(bleManager.captureMapTransferHTTPStatusContext() == nil, "disconnected state cannot authorize HTTP projection")
         let operationID = String(repeating: "a", count: 32)
         let operationBody = Data("""
         {"operation":{"schemaVersion":1,"deviceID":"device-a","operationID":"\(operationID)","status":"result_unavailable"}}
@@ -5394,6 +5584,23 @@ extension NavigationProtocolTests {
             ),
             "firmware manifest signature verifies over canonical release metadata"
         )
+
+        var attested = manifest
+        attested.mapMetadataReaderVersion = 1
+        let readerKey = try! P256.Signing.PrivateKey(rawRepresentation: Data(repeating: 0, count: 31) + Data([1]))
+        attested.mapMetadataReaderSignature = try! readerKey.signature(for: Data(
+            FirmwareManifestSignatureVerifier.canonicalPayload(for: attested, readerAttestation: true).utf8))
+            .derRepresentation.base64EncodedString()
+        let readerPublicKey = readerKey.publicKey.x963Representation.base64EncodedString()
+        assert(FirmwareManifestSignatureVerifier.verify(attested, publicKeyBase64: readerPublicKey),
+               "additive reader attestation verifies without changing schema1 image signature")
+        attested.mapMetadataReaderVersion = 0
+        assert(!FirmwareManifestSignatureVerifier.verify(attested, publicKeyBase64: readerPublicKey),
+               "reader capability cannot be altered independently of signed exact image")
+        attested.mapMetadataReaderVersion = 1
+        attested.mapMetadataReaderSignature = nil
+        assert(!FirmwareManifestSignatureVerifier.verify(attested, publicKeyBase64: readerPublicKey),
+               "unsigned reader declaration cannot bypass downgrade floor")
 
         let tampered = FirmwareReleaseManifest(
             schemaVersion: manifest.schemaVersion,

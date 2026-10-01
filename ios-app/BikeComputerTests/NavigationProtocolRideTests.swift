@@ -5176,7 +5176,7 @@ extension NavigationProtocolTests {
                 status: { _ in }
             )
         }
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|debug".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
@@ -5479,7 +5479,7 @@ extension NavigationProtocolTests {
                 status: { statuses.append($0) }
             )
         }
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(where: { $0.starts(with: Data("DTRNenter|debug".utf8)) }) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
 
@@ -5517,21 +5517,29 @@ extension NavigationProtocolTests {
         bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
+        _ = bleManager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 1, 0])
+        )
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+        )
         var sentPackets: [Data] = []
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 64,
             canSend: { true },
             write: { sentPackets.append($0) }
         ))
-        _ = bleManager.handleDeviceCapabilitiesNotification(
-            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 1, 0])
-        )
         let entry = Task {
             try await manager.enterRemoteDebug(bleManager: bleManager, status: { _ in })
         }
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|debug".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
+        assert(sentPackets.contains(Data("DTRNenter|debug".utf8)),
+               "debug exit fixture waits for its enter command, not capability settings")
+        assert(bleManager.deviceTransferMode.isEmpty,
+               "debug exit fixture publishes readiness only after admission")
         let fingerprint = String(repeating: "a", count: 64)
         let activeStatus = """
         {"configured":true,"enabled":true,"mode":"debug","baseUrl":"https://192.168.31.195:8080","networkTransport":"lan","sessionToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tls":{"identityVersion":1,"certificateSha256":"\(fingerprint)"},"transferGeneration":1,"capabilities":{"secureTransferV1":true}}
@@ -5548,7 +5556,7 @@ extension NavigationProtocolTests {
                 bleManager: bleManager
             )
         }
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNexit".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
@@ -5605,7 +5613,7 @@ extension NavigationProtocolTests {
                 status: { _ in }
             )
         }
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|debug".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         task.cancel()
@@ -5661,7 +5669,7 @@ extension NavigationProtocolTests {
                 status: { _ in }
             )
         }
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|firmware".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         assertEqual(
@@ -5747,7 +5755,7 @@ extension NavigationProtocolTests {
                 status: { _ in }
             )
         }
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|firmware".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         assertEqual(
@@ -5818,7 +5826,7 @@ extension NavigationProtocolTests {
                 status: { _ in }
             )
         }
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|firmware".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         task.cancel()
@@ -5865,7 +5873,7 @@ extension NavigationProtocolTests {
                 bleManager: bleManager
             )
         }
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DSTS".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
@@ -5896,7 +5904,7 @@ extension NavigationProtocolTests {
                 }
             )
         }
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNprepare|firmware".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
@@ -6009,7 +6017,7 @@ extension NavigationProtocolTests {
             )
         }
 
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|map".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         assertEqual(sentPackets.count, 1,
@@ -6087,7 +6095,7 @@ extension NavigationProtocolTests {
             )
         }
 
-        for _ in 0..<100 where sentPackets.isEmpty {
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|map".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         assertEqual(sentPackets.count, 1,

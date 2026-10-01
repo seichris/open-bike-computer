@@ -55,10 +55,21 @@ class MapActivationHandoffTests(unittest.TestCase):
         body = method_body("handleInstallStream")
         prepared = body.index("receiver->readyToFinish()")
         grant = body.index("beginAuthorizedCommit(")
-        finish = body.index("receiver->finish()")
+        finish = body.index("receiver->finish()", grant)
         self.assertLess(prepared, grant)
         self.assertLess(grant, finish)
         self.assertIn("receiver->abort()", body[:finish])
+        # Operation-aware finish produces only prepared metadata and returns
+        # before this legacy implicit grant. It cannot register activation.
+        operation = body[body.index('if (!request.mapOperationID.empty()) {'):
+                         body.index('// Allocate the recovery identity')]
+        self.assertIn('recordPreparedOperation(', operation)
+        self.assertIn('receiver->finish()', operation)
+        self.assertNotIn('beginAuthorizedCommit(', operation)
+        self.assertNotIn('deferActivationUntilResponse(', operation)
+        control = method_body('handleOperationControl')
+        self.assertLess(control.index('beginAuthorizedCommit('), control.index('store.accept(record.identity)'))
+        self.assertLess(control.index('store.accept(record.identity)'), control.index('promotePreparedOperation('))
 
     def test_both_response_outcomes_preserve_accepted_work(self):
         for name in ("responseDidComplete", "responseDidAbort"):
@@ -75,10 +86,13 @@ class MapActivationHandoffTests(unittest.TestCase):
         self.assertNotIn("handlePut(", SOURCE)
 
     def test_dedicated_task_is_reserved_for_signed_stream_boot_recovery(self):
-        # Only the declaration and the two boot-recovery entry points may
-        # create a standalone task; live HTTP remains internal-owner dispatched.
-        self.assertEqual(SOURCE.count("startActivationTask("), 3)
-        self.assertIn("startActivationTask(", method_body("resumePendingActivations"))
+        # Legacy boot recovery retains its dedicated task. Accepted operation
+        # recovery is serialized through storage control, including promotion.
+        self.assertEqual(SOURCE.count("startActivationTask("), 2)
+        boot = method_body("resumePendingActivations")
+        self.assertNotIn("startActivationTask(", boot)
+        self.assertIn("recovery.armed=true", boot)
+        self.assertIn("submitPendingOperationTask()", boot)
         self.assertIn(
             "startActivationTask(",
             method_body("resumePendingStreamActivation"),

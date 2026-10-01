@@ -70,6 +70,9 @@ REQUIRED_MANIFEST_KEYS = {
 # bundle; this prevents a future call site from quietly widening the privacy
 # boundary.
 ALLOWED_FIELD_KEYS = {
+    "operationId", "cleanupFailed", "freeBytes", "largestBytes",
+    "minimumFreeBytes", "minimumLargestBytes", "tlsStackBytes", "ownerStackBytes",
+    "rendererStackBytes", "stackAvailableMask",
     "accuracy", "accuracyAvailable", "accuracyBucket", "acknowledgedKind",
     "active", "activeStage", "ageMs", "alertMode",
     "applyErrorCode", "applyErrorDomain", "applyResult", "attempt",
@@ -109,6 +112,8 @@ ALLOWED_FIELD_KEYS = {
     "writerProgressMs", "writtenCount",
 }
 FIRMWARE_NUMBER_FIELD_KEYS = {
+    "freeBytes", "largestBytes", "minimumFreeBytes", "minimumLargestBytes",
+    "tlsStackBytes", "ownerStackBytes", "rendererStackBytes", "stackAvailableMask",
     "accuracy", "activeStage", "ageMs", "alertMode",
     "applyErrorCode", "attempt", "blockLoadMs", "bootSequence",
     "bytes", "chunk", "commandClass", "completedStage",
@@ -128,6 +133,7 @@ FIRMWARE_NUMBER_FIELD_KEYS = {
     "writerDetail", "writerProgressMs", "writtenCount",
 }
 FIRMWARE_BOOLEAN_FIELD_KEYS = {
+    "cleanupFailed",
     "accuracyAvailable", "active", "authorized", "autoPauseEnabled",
     "available", "background", "clockSynchronized", "connectCompleted",
     "connectStarted", "connectionReused", "diagnosticHold", "fallback",

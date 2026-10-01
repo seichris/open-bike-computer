@@ -64,6 +64,37 @@ final class DeviceOperationCoordinator {
         transferGeneration = nil
         defaults.removeObject(forKey: key)
     }
+    var isCleanupComplete: Bool {
+        lease == nil && unresolved == nil && !unreadableCleanupRecord &&
+            claims.isEmpty && pendingApplies.isEmpty
+    }
+
+    /// Fresh authenticated empty status plus the caller's exact precommit
+    /// receipt permits replacing an expired transport, never its logical map
+    /// operation. No OS upload, pending apply, or other manager may be displaced.
+    func retireStoppedMapForPrecommitRecovery(deviceID: String, currentOwner: Lease?) throws {
+        guard !unreadableCleanupRecord, pendingApplies.isEmpty,
+              let stored = unresolved, stored.deviceID == deviceID, stored.mode == "map" else {
+            throw Failure.staleOwner
+        }
+        if let lease {
+            guard lease == stored, currentOwner == lease, claims == [lease.id] else {
+                throw Failure.busy
+            }
+        } else {
+            guard currentOwner == nil, claims.isEmpty else { throw Failure.busy }
+        }
+        if let network = ssid ?? recordedSSID { removeConfiguration(network) }
+        claims.removeAll()
+        lease = nil
+        unresolved = nil
+        ssid = nil
+        recordedSSID = nil
+        tokenDigest = nil
+        transferGeneration = nil
+        defaults.removeObject(forKey: key)
+    }
+
     private func persist() {
         guard let unresolved else { return }
         let record = CleanupRecord(lease: unresolved, ssid: recordedSSID,

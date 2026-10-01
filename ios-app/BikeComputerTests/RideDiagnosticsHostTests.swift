@@ -4,6 +4,33 @@ import Foundation
 @main
 enum RideDiagnosticsHostTests {
     static func main() throws {
+        // Match the bounded firmware resource producer's numeric/boolean/string
+        // types; retain the existing importer privacy and field-count limits.
+        for key in ["freeBytes", "largestBytes", "minimumFreeBytes",
+                    "minimumLargestBytes", "tlsStackBytes", "ownerStackBytes",
+                    "rendererStackBytes", "stackAvailableMask"] {
+            precondition(RideDiagnosticsFieldPolicy.isAllowed(key))
+            precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+                key: key, value: NSNumber(value: UInt32.max)))
+            precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+                key: key, value: NSNumber(value: true)))
+            precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+                key: key, value: "123"))
+        }
+        precondition(RideDiagnosticsFieldPolicy.isAllowed("cleanupFailed"))
+        precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "cleanupFailed", value: NSNumber(value: false)))
+        precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "cleanupFailed", value: NSNumber(value: 0)))
+        precondition(RideDiagnosticsFieldPolicy.isAllowed("operationId"))
+        precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "operationId", value: "123456781234abcdABCD123456789abc"))
+        precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "operationId", value: NSNumber(value: 1)))
+        for key in ["sessionToken", "password", "tlsCertificateSha256"] {
+            precondition(!RideDiagnosticsFieldPolicy.isAllowed(key))
+        }
+
         var now = Date()
         let defaultsSuite = "ride-diagnostics-host-\(UUID().uuidString)"
         let defaults = try require(UserDefaults(suiteName: defaultsSuite))

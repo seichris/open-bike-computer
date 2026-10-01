@@ -64,6 +64,12 @@ struct HttpTransferStatus {
 };
 
 struct HttpRequest {
+  std::string mapContentSession;
+  std::string mapLogicalID;
+  std::string mapManifestReceipt;
+  std::string mapSignedManifestReceipt;
+  std::string mapStreamBytes;
+
   std::string mapOperationAdmissionEpoch;
   uint64_t mapOperationAdmissionRevision = 0;
   bool hasMapOperationAdmissionRevision = false;
@@ -125,6 +131,10 @@ public:
   void setLastError(const std::string &code, const std::string &message);
   void noteStatusChanged(const char *resourcePhase);
   void sampleResources(const char *resourcePhase);
+  // Diagnostics only: call after consumer manifest/operation validation. Fenced
+  // by current request authority; cannot authorize work or alter a receipt.
+  bool bindResourceOperation(const HttpRequest &request, const std::string &mode,
+                             const std::string &operationID);
   void process();
   HttpTransferStatus status() const;
   bool isRequestAuthorized(const HttpRequest &request);
@@ -184,7 +194,14 @@ private:
   uint32_t minimumPsramFree_ = UINT32_MAX;
   uint32_t minimumPsramLargest_ = UINT32_MAX;
   uint32_t workerStackHighWaterBytes_ = 0;
+  bool workerStackSampleAvailable_ = false;
   std::string resourcePhase_ = "unobserved";
+  // Boot-local correlation, retained through revocation/owner cleanup. Never
+  // use the rotating authorization token as an operation identifier.
+  uint32_t resourceCycle_ = 0;
+  uint32_t resourceSample_ = 0;
+  char resourceMode_[12] = {};
+  char resourceOperation_[37] = {};
   NetworkStartResult networkStart_;
   bool powerLockHeld_ = false;
   struct HandlerRegistration {

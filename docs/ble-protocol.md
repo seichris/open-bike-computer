@@ -2136,7 +2136,10 @@ bulk upload:
 | Method | Path | Meaning |
 | --- | --- | --- |
 | `GET` | `/map-transfer/status` | Read transfer status and active map metadata. |
-| `PUT` | `/map-transfer/sessions/{sessionId}/install-stream` | Stream one signed v2 artifact directly into an inactive root, then start durable device-owned activation. |
+| `PUT` | `/map-transfer/sessions/{sessionId}/install-stream` | Stream one signed v2 artifact into an inactive root. Legacy requests implicitly grant commit; operation-aware requests return only prepared staging. |
+| `POST` | `/map-transfer/operations/{operationID}/commit` | Explicitly accept an authenticated, exact prepared operation; requires `mapOperationsV1`. |
+| `POST` | `/map-transfer/operations/{operationID}/cancel` | Durably cancel receiving/prepared work; an already accepted commit is too late to cancel. |
+| `GET` | `/map-transfer/operations/{operationID}` | Query the exact device-bound durable result, including after a lost response. |
 
 Every former `pack.zip`, per-file, manifest, and explicit-activation route
 returns `426 signed_stream_required`. Firmware also discards any pending
@@ -2149,10 +2152,16 @@ The v2 stream route requires
 endpoint. It does not retain the request artifact. Arbitrary network chunks are
 fed into the transport-independent signed-stream receiver, which validates
 every `.fmb` or legacy `.fmp` block while writing and hashing each new payload
-byte once into the inactive root. A successful response means the
-ready and pending markers are durable; Step 3 activation is then device-owned
-and is resumed after reboot. A truncated request remains paused at its durable
-checkpoint for a matching retry.
+byte once into the inactive root. For legacy requests without operation headers,
+HTTP 200 `status: ready` follows the implicit authorization-to-commit grant and
+ready/pending writes; accepted work remains device-owned after response loss or
+BLE revocation. Operation-aware uploads instead return HTTP 200 `status: prepared`
+and an exact prepared receipt, with only `.operation-prepared` metadata. They do
+not acquire a commit grant or write a ready/pending marker. Only the separate
+commit request may persist accepted intent and promote that staging. A truncated
+request remains paused at its checkpoint for an exact matching retry. File
+synchronization/readback is subject to the separately documented SD power-loss
+qualification; HTTP success is not a hardware durability attestation.
 Renderer validation also enforces a 2 MiB encoded block limit, at most 16,384
 features, at most 262,144 points, and at most 262,144 decoded polygon-grid
 entries per block. ASCII input is normalized for CRLF, must end with a physical
@@ -2182,17 +2191,21 @@ were already structurally validated during their unavoidable write/hash pass,
 so activation adds no full payload scan. Only that acknowledgement emits
 `installed` and closes
 transfer mode. A rejected renderer root restores the previous valid selection
-and emits `renderer_reload`. Authorization revoked before response completion
-discards an unselected ready stream so it cannot activate under a later BLE
-session.
+and emits `renderer_reload`. Revocation before a commit grant prevents
+boot-eligible writes. Once a grant is accepted, clean response completion,
+response abort, lost close acknowledgement, and BLE revocation cannot revoke
+that accepted work. Both response completion paths dispatch the same accepted
+activation; uncertain finalization is reconciled on the serialized storage owner.
+For operation-backed maps the journal, pending intent and previous-root evidence
+remain through renderer ACK and terminal receipt persistence. Only then may
+consumed/checkpoint/journal cleanup run.
 
-An accepted activation returns HTTPS 202 with the boot-local activation
-`sequence`. The app matches that acknowledgement to later HTTPS/BLE terminal
-status so a cached same-session result cannot be mistaken for the new attempt.
-If a manifest HEAD encounters an interrupted activation journal, firmware first
-returns 503 and then performs exceptional recovery. The app permits a bounded
-long wait only after that explicit recovery/busy response; ordinary transport
-timeouts retain a short retry limit.
+Legacy successful upload returns HTTPS 200 `ready`; there is no manifest-HEAD
+recovery or unsigned explicit-activation endpoint. New operation commit returns
+HTTPS 200 with the exact accepted receipt, or its retained terminal receipt on
+an idempotent retry. The app queries the exact device/operation/artifact after a
+lost response; a timeout does not establish cancellation, failure or success.
+Boot-local activation sequence alone is not a durable operation receipt.
 
 The HTTPS service is configured by firmware at boot but remains disabled until
 BLE transfer control binds it to an authenticated owner session. BLE disconnect
@@ -2281,13 +2294,35 @@ manifest before accepting the operation. Reusing an operation ID with another
 hash, length or content session is a conflict. A retry of an accepted/terminal
 operation returns its retained result rather than rewriting selected content.
 
-The current experiment uses the implicit P2 commit grant after complete-body
-verification. It persists `prepared`, then `accepted`, before finalization can
-write boot-eligible metadata. It does **not** add a separate client commit POST.
-Interrupted pre-grant receiving data has no durable result and remains
-nonactivatable. Transport cancellation after acceptance does not revoke the
-accepted operation. A lost acceptance response requires querying the exact ID,
-not treating a network error as cancellation or starting another attempt.
+The operation-aware protocol separates preparation from commit. Once the signed
+manifest is verified, the receiver persists the exact `receiving` identity.
+Completed body validation writes only `.operation-prepared` and persists
+`prepared`; upload returns HTTP 200 `{ok:true,status:"prepared",operation:receipt}`.
+No grant, `.operation-ready`, pending marker, or autonomous boot activation exists
+at this point. Legacy uploads without operation headers retain the P2 implicit
+grant and HTTP 200 `ready` behavior.
+
+The owner POSTs `/map-transfer/operations/<id>/commit` with an empty body and
+`X-Map-Operation-ID` matching the path plus the exact saved `X-Map-Stream-SHA256`.
+The firmware checks device-bound prepared metadata, takes the unique grant,
+persists `accepted`, then promotes ready/pending metadata. It returns HTTP 200
+with the direct accepted receipt; a retry returns the same accepted/installed
+result. A cancelled/failed operation returns HTTP 409 with its retained receipt;
+a conflicting digest is HTTP 409 `operation_conflict`. A crash after accepted
+intent but before promotion resumes promotion and activation on the storage owner.
+A lost response always requires exact-ID reconciliation, not a new attempt.
+
+The same empty-body/header format at `/map-transfer/operations/<id>/cancel`
+returns HTTP 200 with a direct cancelled receipt for receiving/prepared work
+(and repeated cancellation). Accepted/installed work returns HTTP 409 with its
+unchanged receipt. Cancellation before manifest admission additionally supplies
+`X-Map-Content-Session`, `X-Map-Map-ID`, `X-Map-Manifest-Receipt`,
+`X-Map-Signed-Manifest-Receipt`, `X-Map-Stream-Bytes`, and the original admission
+epoch/revision. The firmware consumes that creation token into a full-identity
+cancelled record, preventing the stopped original upload from later creating
+prepared state. Stale/unknown admission returns `result_unavailable`; it never
+refreshes the old attempt or claims a proved cancellation. Transport revocation
+alone is not a durable cancelled receipt.
 
 Authenticated `GET /map-transfer/operations/<operationID>` returns a bounded
 JSON receipt. Owner-authenticated `MOPQ|<operationID>` queues the same query on
@@ -2372,3 +2407,42 @@ only the exact retained terminal result. No BLE authority, session token, or
 SD journal is reused as OTA operation identity. See
 [OTA lifecycle contract](wifi-device-operation-lifecycle.md#sd-independent-ota-operation-receipts-qualification-gate)
 for durable acceptance, replay/retention and qualification behavior.
+
+### Signed OTA metadata-reader compatibility
+
+A release may add `mapMetadataReaderVersion` and `mapMetadataReaderSignature` to
+the existing schema-1 firmware manifest and `/firmware-update/begin` JSON. The
+secondary P-256 signature covers canonical schema version 2 with the same exact
+image fields and an additional final `mapMetadataReaderVersion=<n>\n` line. The
+primary schema-1 signature remains unchanged for old updater compatibility.
+New firmware never trusts an unsigned capability, and no build number or
+`allowDowngrade` value overrides its SD-independent monotonic NVS reader floor.
+Reader incompatibility returns `metadata_reader_incompatible` before writing an
+OTA image and is checked again before selecting the boot partition. See the
+[lifecycle compatibility contract](wifi-device-operation-lifecycle.md) for the
+internal-owner persistence and existing/foreign-card latching requirements.
+
+### Current map selection health
+
+`MSTS` and authenticated HTTP map status also carry `activeRoot` and a separate
+`selectionHealth` object. This is live renderer evidence, not an operation
+receipt. All keys are present: `schemaVersion: 1`, `bootID` (32 lowercase hex),
+`revision` (boot-scoped increasing integer), `state`, `root`, `operationID`,
+`mapID`, `sessionID`, and `affectedOperationID`. Identity strings may be empty
+for missing/legacy selections; roots are installer roots without `/sdcard`.
+States are `unknown`, `ready`, `degraded`, `rolling_back`, and `rollback_failed`.
+Only a boot renderer probe or matching renderer ACK can establish `ready`.
+Storage rollback alone leaves the restored root `unknown` until renderer ACK.
+
+A runtime failure preserves its original operation in `affectedOperationID`,
+including after a previous map has been restored. The installed operation
+receipt remains historical success and is never rewritten by this health
+channel. The status retains at most one current selection and one affected
+operation; no runtime-event history is accumulated. Health updates are pushed
+through the existing authenticated, chunked map-status notification path.
+
+Clients fence boot/revision freshness within their authenticated connection,
+match `root`, `mapID`, and `sessionID` to the independently reported active
+selection, and suppress current-use presence for anything other than `ready`.
+A live install additionally requires its exact durable Installed receipt: a
+renderer ACK with failed receipt persistence cannot confer operation success.

@@ -1,0 +1,128 @@
+# Wi-Fi lifecycle resource qualification evidence
+
+This is software instrumentation and a capture-analysis procedure, **not physical
+acceptance**. No new board, card, iPhone, firmware build, or release qualification
+is established by host tests. Worldwide signed-map rollout remains closed.
+
+## Production event path
+
+`HttpTransferServer::observeResources` continues to collect the existing
+internal/DMA/PSRAM free, largest-block and sampled boot minima used by
+authenticated status. Selected lifecycle boundaries also enqueue records through
+the existing persistent ride diagnostics recorder. Production retains its
+existing `PERSISTENT_RIDE_DIAGNOSTICS` setting; detailed logging and remote-debug
+profile exclusions are unchanged. Export records only through the existing
+owner-authenticated diagnostics transport. SD unavailable/recorder disabled or
+dropped records means missing evidence, not a successful measurement.
+
+Each checkpoint consists of five bounded records, joined by the existing
+`bootSequence`, `firmwareFingerprint`, and new `attempt` + `sampleCount` fields:
+
+- `transfer_checkpoint`: allowlisted mode/phase, boot-local session cycle,
+  rotating authorization generation, validated map/OTA UUID (empty until consumer selection/grant),
+  and cleanup-failure flag
+- Three `transfer_resources`: internal, DMA and PSRAM free/largest bytes and
+  their boot-lifetime **sampled** minima (not allocator lifetime watermarks)
+- `transfer_stacks`: TLS worker, internal network/flash owner, and renderer
+  self-sampled stack high-water reserve bytes; `stackAvailableMask` bits 1/2/4
+  identify TLS/owner/renderer availability separately from numeric zero (exhausted)
+
+The session cycle survives revocation and is separate from generation/token.
+Map operation UUID is associated at grant; OTA UUID is bound by the consumer
+after signed manifest, device/admission and replay validation. Both compact
+32-hex and hyphenated UUID spellings are preserved exactly; empty generic grant
+headers never erase a validated binding. The binding API checks current request
+generation, BLE/token authority and consumer mode without granting authority.
+Earlier samples correlate through the same session cycle. Diagnostics/debug use
+the boot-local session cycle, not a claim of a durable installation identity. Credentials, pins, tokens, SSIDs,
+network addresses, arbitrary request paths/errors and artifact strings are not
+accepted by the formatter. No authorization authority is derived from records.
+
+Boundaries include acquisition before worker creation, network readiness,
+authorized commit grant, grant release, map activation dispatch, terminal map
+publication when supplied by its owner, OTA boot selection, cancellation,
+network stop, owner release, worker-creation failure and shutdown request.
+`grant_released` and `after_map_activation` **do not mean installed**. Pair map
+terminal receipts with renderer acknowledgement and fresh authenticated status.
+Shutdown records are produced before recorder sealing; missing post-shutdown
+records do not prove successful shutdown. At most 64 checkpoints (320 records)
+are emitted per admitted session. Payload-loop samples are excluded. The
+recorder's existing bounded queue, drop counters, integrity and retention remain
+authoritative; no second recorder or unbounded event backlog is added.
+
+Renderer samples run on its own task, at most once per second at existing work
+boundaries and once at start/exit. Readers use an atomic boot-lifetime minimum;
+they never inspect a possibly freed worker handle. TLS reserve resets at new
+session admission and samples only on its own worker. Owner reserve comes from
+its existing self-sampled atomic, with an explicit availability bit. The pinned
+ESP32-S3 FreeRTOS `task.h` documents high-water values in bytes and its
+`portmacro.h` defines `StackType_t` as `uint8_t`; no word multiplier is applied. Flash/storage controls on that same owner and
+renderer control work share those stack measurements. Rendering, full refresh,
+buffer ownership and scheduler policy are unchanged.
+
+`owner_released` is before the HTTP task's own deletion, so its heap observation
+is not a fully idle baseline. Compare the *next* `transfer_entry` (after the
+previous worker-stop fence) to earlier entry samples to check for leaks. Keep
+failure-admission cases separately; do not hide failed attempts with a retry.
+
+## Reproducible capture analysis
+
+For each exact board/profile candidate separately, record target and stable
+serial, Git/image hash/attestation, app build/bundle/Git, SD vendor/capacity/FAT,
+network topology, signed artifact receipt and operator scenario/fault index in
+an evidence manifest. Do not combine different images/cards into one passing
+campaign. Boot fingerprint is correlation only, not firmware attestation.
+
+Export complete, hash/length-verified diagnostics JSONL chunks and run:
+
+    python3 esp32/tools/analyze_lifecycle_resources.py --profile WAVESHARE_AMOLED_175_PRODUCTION evidence/175-production/events-*.jsonl
+    python3 esp32/tools/analyze_lifecycle_resources.py --profile WAVESHARE_AMOLED_206_PRODUCTION evidence/206-production/events-*.jsonl
+
+For ordinary profiles use `WAVESHARE_AMOLED_175` or `WAVESHARE_AMOLED_206` with
+that candidate's separate evidence directory. For each opt-in debug candidate:
+
+    python3 esp32/tools/analyze_lifecycle_resources.py --profile WAVESHARE_AMOLED_175_REMOTE_DEBUG evidence/175-debug/events-*.jsonl
+    python3 esp32/tools/analyze_lifecycle_resources.py --profile WAVESHARE_AMOLED_206_REMOTE_DEBUG evidence/206-debug/events-*.jsonl
+
+`--profile` is an operator assertion to match the attested evidence manifest,
+not automatic verification of firmware identity. The report includes the exact
+selected profile and required modes. Mixed firmware fingerprints are rejected;
+each board/profile remains a separate analysis, even when images share a Git SHA.
+
+The analyzer checks 100 completed sessions, at least 20 of each supported mode
+(map, firmware and diagnostics for ordinary/production; all four including debug
+for remote-debug profiles), complete five-record checkpoints, cycle sequence gaps,
+startup readiness and failed cleanup; it reports entry free/largest trends.
+Unexpected modes for the selected profile, malformed JSON, missing/invalid
+record fields, and unreadable files produce useful errors and a nonzero exit.
+They cannot turn a partial capture into complete evidence.
+Exit zero means only structurally complete event evidence. It cannot prove no
+task/file leak, adequate reserve, exact binary identity, renderer acceptance,
+SD persistence, NEHotspot behavior or safe physical shutdown. Review minima and
+trends per mode/artifact/network, along with recorder drops/storage faults,
+reboots and poisoned-owner failures. Review missing stack availability and zero/low measured reserve as blockers.
+
+## Separate acceptance matrix (all pending physical evidence)
+
+| Gate | 1.75 ordinary / production / debug | 2.06 ordinary / production / debug |
+| --- | --- | --- |
+| Exact-head attested build | Required separately | Required separately; automatic 1.75 CI is insufficient |
+| 100 all-mode start/stop sessions, >=20/mode | Pending | Pending |
+| Fragmentation, large signed map, TLS/admission failure; measured reserves | Pending | Pending |
+| Map first/replacement, exact renderer terminal receipt and cold boot | Pending | Pending |
+| iPhone join, lock/background/suspension/force-quit/relaunch, cancel/lost response | Pending | Pending |
+| Two-board same-SSID/identity and all-consumer contention | Pending | Pending |
+| OTA accept/reject/rollback without SD; diagnostics complete chunks; debug LAN/browser revoke | Pending | Pending |
+| Shutdown in every transfer/commit/renderer phase and bounded timeout | Pending | Pending |
+| Each metadata/recovery mutation power cut, >=3 FAT32 cards, repeated recovery | Pending | Pending |
+
+Debug mode is intentionally unavailable in ordinary/production profiles. Perform
+its >=20-session row on the separate opt-in debug candidate. Select the exact
+ordinary/production profile to require all three supported modes rather than
+enabling debug or lowering every mode's minimum to zero. Omitting `--profile`
+retains the conservative four-mode requirement. Minimum counts must be positive;
+explicitly lowered counts describe partial evidence only and do not waive the
+100-cycle/20-per-supported-mode qualification requirement. Qualify exact production bytes with the
+owner-authenticated boot-acceptance checkpoint, not serial from debug bytes.
+Follow [AGENTS.md](../AGENTS.md) before any board write. This procedure grants no
+hardware-write, cohort-promotion or deployment authorization.
