@@ -46,6 +46,7 @@ void Power::begin() {
  *
  */
 void Power::powerDeepSleep() {
+  if (!shutdownBarrier_.permit()) return;
   int32_t bluedroidStopResult = sleep_audit::policy::kNotAttempted;
   int32_t bluetoothStopResult = sleep_audit::policy::kNotAttempted;
 #ifndef DISABLE_BLUETOOTH
@@ -54,7 +55,9 @@ void Power::powerDeepSleep() {
 #endif
   bluetoothStopResult = esp_bt_controller_disable();
 #endif
-  const int32_t wifiStopResult = esp_wifi_stop();
+  // The internal network owner has already stopped Wi-Fi and drained before
+  // the permit was issued. Never touch its driver from this UI stack.
+  const int32_t wifiStopResult = sleep_audit::policy::kNotAttempted;
   esp_deep_sleep_disable_rom_logging();
   delay(10);
 
@@ -80,6 +83,7 @@ void Power::powerDeepSleep() {
  * @param millis
  */
 void Power::powerLightSleepTimer(int millis) {
+  if (!shutdownBarrier_.permit()) return;
   esp_sleep_enable_timer_wakeup(millis * 1000);
   esp_light_sleep_start();
 }
@@ -89,6 +93,7 @@ void Power::powerLightSleepTimer(int millis) {
  *
  */
 void Power::powerLightSleep() {
+  if (!shutdownBarrier_.permit()) return;
   esp_sleep_enable_ext1_wakeup(1ull << BOARD_BOOT_PIN, ESP_EXT1_WAKEUP_ANY_LOW);
   esp_light_sleep_start();
 }
@@ -114,27 +119,9 @@ void Power::powerOffPeripherals() {
  * @brief Core light suspend and TFT off
  */
 void Power::deviceSuspend() {
-#ifndef USE_ARDUINO_GFX
-  int brightness = tft.getBrightness();
-  lv_msgbox_close(powerMsg);
-  lv_refr_now(display);
-  tftOff();
-  powerLightSleep();
-  tftOn(brightness);
-#else
-  const display_power::State resumeState = displayPowerManager.state();
-  lv_msgbox_close(powerMsg);
-  lv_refr_now(display);
-  displayPowerManager.requestState(display_power::State::Off);
-  displayPowerManager.applyPendingPanelChange();
-  powerLightSleep();
-  displayPowerManager.requestState(resumeState);
-  displayPowerManager.applyPendingPanelChange();
-#endif
-  while (digitalRead(BOARD_BOOT_PIN) != 1) {
-    delay(5);
-  };
-  log_v("Exited sleep mode");
+  // Explicit suspend has no reversible storage/recorder barrier yet. Automatic
+  // IDF light sleep remains managed by the existing domain locks.
+  Serial.println("POWER_BARRIER: explicit suspend deferred (no resume barrier)");
 }
 
 /**
@@ -142,25 +129,80 @@ void Power::deviceSuspend() {
  *
  */
 void Power::deviceShutdown() {
+  shutdownRequested_.store(true, std::memory_order_release);
+}
+
+void Power::deviceRestart() {
+  restartRequested_.store(true, std::memory_order_release);
+  deviceShutdown();
+}
+
+void Power::configureShutdown(bool (*begin)(), bool (*drain)(),
+                              bool (*renderer)(), bool (*accepted)(),
+                              bool (*storage)(), uint64_t (*progress)()) {
+  beginShutdown_ = begin;
+  drainShutdown_ = drain;
+  stopRenderer_ = renderer;
+  acceptedWork_ = accepted;
+  stopStorage_ = storage;
+  progress_ = progress;
+}
+
+bool Power::processShutdown() {
+  if (!shutdownRequested_.load(std::memory_order_acquire)) return false;
+  using shutdown_barrier::Stage;
+  if (shutdownBarrier_.stage() == Stage::Idle) {
+    shutdownBarrier_.request(millis());
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  sleep_audit::RequestContext context;
-  context.configuredTimeoutSeconds = mapRenderSettings.disconnectedSleepTimeoutSeconds;
-  context.connected = bleNavServer.isConnected();
-  context.displayState = static_cast<uint8_t>(displayPowerManager.state());
-  context.audioPlaying = waveshare_board::speaker::isPlaying();
-  sleep_audit::requested(context);
+    sleep_audit::RequestContext context;
+    context.configuredTimeoutSeconds = mapRenderSettings.disconnectedSleepTimeoutSeconds;
+    context.connected = bleNavServer.isConnected();
+    context.displayState = static_cast<uint8_t>(displayPowerManager.state());
+    context.audioPlaying = waveshare_board::speaker::isPlaying();
+    sleep_audit::requested(context);
 #endif
-  bool diagnosticsSealed = ride_diagnostics::prepareForShutdown();
-  if (!diagnosticsSealed) {
-    // A transient producer/seal race should not silently discard the final
-    // controlled-shutdown boundary. Retry once; a persistent storage failure
-    // is retained in the recorder's RTC fault capsule for the next boot.
-    delay(25);
-    diagnosticsSealed = ride_diagnostics::prepareForShutdown(3000);
+    // No callbacks, no permit. Early/partial startup safely stays awake.
+    if (beginShutdown_ != nullptr) beginShutdown_();
+    if (progress_ != nullptr) lastProgress_ = progress_();
   }
-  sleep_audit::recorderSealed(diagnosticsSealed);
-  Serial.printf("RIDE_DIAGNOSTICS: shutdown checkpoint sealed=%d\n",
-                diagnosticsSealed);
-  powerOffPeripherals();
-  powerDeepSleep();
+  const Stage stage = shutdownBarrier_.stage();
+  bool drained = false, renderer = false, sealed = false, storageStopped = false;
+  if (stage == Stage::Drain && progress_ != nullptr) {
+    const uint64_t progress = progress_();
+    if (progress != lastProgress_) {
+      lastProgress_ = progress;
+      shutdownBarrier_.noteProgress(millis());
+    }
+  }
+  if (stage == Stage::Drain && drainShutdown_ != nullptr)
+    drained = drainShutdown_();
+  if (stage == Stage::Renderer && stopRenderer_ != nullptr)
+    renderer = stopRenderer_();
+  if (stage == Stage::Diagnostics) {
+    // Recorder joins an outstanding seal instead of replacing its completion.
+    // A bounded failure leaves its writer paused and never permits sleep.
+    if (!diagnosticsRequested_) {
+      diagnosticsRequested_ = true;
+      sealed = ride_diagnostics::prepareForShutdown(20);
+    } else {
+      sealed = ride_diagnostics::sealActiveChunk(20);
+    }
+  }
+  if (stage == Stage::Storage && stopStorage_ != nullptr)
+    storageStopped = stopStorage_();
+  shutdownBarrier_.poll(millis(), drained, renderer, sealed, storageStopped,
+                       acceptedWork_ != nullptr && acceptedWork_());
+  if (shutdownBarrier_.stage() == Stage::Deferred && stage != Stage::Deferred) {
+    Serial.printf("POWER_BARRIER: shutdown deferred stage=%u; no sleep permit\n",
+                  static_cast<unsigned>(shutdownBarrier_.failedStage()));
+  }
+  if (shutdownBarrier_.permit()) {
+    sleep_audit::recorderSealed(true);
+    if (restartRequested_.load(std::memory_order_acquire)) ESP.restart();
+    powerOffPeripherals();
+    powerDeepSleep();
+  }
+  // Drain must keep servicing renderer/rollback mailboxes. Once stopped, do
+  // not let ordinary UI work start readers or new storage commands again.
+  return shutdownBarrier_.stage() != Stage::Drain;
 }

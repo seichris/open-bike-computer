@@ -4370,6 +4370,7 @@ bool Maps::renderResultStillCurrent(const RenderResult &result) const {
 }
 
 bool Maps::startRenderWorker() {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
   if (renderWorkerTaskHandle != nullptr) {
     return !renderWorkerShutdown.load(std::memory_order_acquire);
   }
@@ -4414,6 +4415,29 @@ bool Maps::startRenderWorker() {
     return false;
   }
   return true;
+}
+
+bool Maps::pollShutdownQuiescence() {
+  // Called only after transfer activation, rollback and their UI mailboxes
+  // are terminal. Never stop the sole storage owner before it ACKs that work.
+  shutdownAdmissionClosed_.store(true, std::memory_order_release);
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, 0) != pdTRUE) return false;
+  const bool pending = pendingStorageControl_ != nullptr ||
+                       pendingVectorMapActivationValid;
+  if (pending) {
+    if (renderStateMutex != nullptr) xSemaphoreGive(renderStateMutex);
+    return false;
+  }
+  renderWorkerRestartAfterExit.store(false, std::memory_order_release);
+  renderWorkerShutdown.store(true, std::memory_order_release);
+  gMapRenderWorkerShutdown.store(true, std::memory_order_release);
+  const TaskHandle_t worker = renderWorkerTaskHandle;
+  if (worker != nullptr) xTaskNotifyGive(worker);
+  const bool stopped = worker == nullptr &&
+      renderWorkerExited.load(std::memory_order_acquire);
+  if (renderStateMutex != nullptr) xSemaphoreGive(renderStateMutex);
+  return stopped;
 }
 
 bool Maps::stopRenderWorker() {
@@ -5844,6 +5868,7 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
 }
 
 bool Maps::requestStorageControl(void (*work)(void *), void *context) {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
   if (work == nullptr || renderWorkerShutdown.load(std::memory_order_acquire))
     return false;
   if (renderWorkerTaskHandle == nullptr && !startRenderWorker())
@@ -5896,6 +5921,7 @@ bool Maps::processPendingStorageControl() {
 }
 
 bool Maps::requestVectorMapFolderActivation(const std::string &folder) try {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
   std::string ownedFolder = folder; // Allocate before taking the render mutex.
   if (folder.empty())
     return false;

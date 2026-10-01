@@ -26,9 +26,12 @@ public:
                     MapStreamCheckpointPolicy checkpointPolicy = {},
                     MapStreamNowCallback now = {},
                     std::shared_ptr<MapStreamStorage> storage = {},
-                    MapStreamStatusCallback onStatus = {});
+                    MapStreamStatusCallback onStatus = {},
+                    std::string operationID = {});
 
   bool feed(const uint8_t *data, size_t size);
+  bool readyToFinish() const;
+  MapStreamReceiveResult abort();
   MapStreamReceiveResult finish();
   const MapStreamInstallSnapshot &snapshot() const;
   uint64_t receivedBytes() const;

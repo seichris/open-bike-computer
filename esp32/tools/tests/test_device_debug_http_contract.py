@@ -405,9 +405,21 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             IOS_TRANSFER_MANAGER.index("func exitRemoteDebug(") :
             IOS_TRANSFER_MANAGER.index("private func joinDeviceNetworkIfNeeded")
         ]
-        self.assertIn("deviceTransferStatusRevision != initialRevision", exit_method)
-        self.assertIn("deviceTransferMode.isEmpty", exit_method)
-        self.assertIn("deviceTransferSessionToken?.isEmpty != false", exit_method)
+        self.assertIn("guard operationLease != nil", exit_method)
+        self.assertIn("await cleanupOperation(bleManager: bleManager)", exit_method)
+        self.assertIn("Failure.cleanupUnresolved", exit_method)
+        cleanup = IOS_TRANSFER_MANAGER[
+            IOS_TRANSFER_MANAGER.index("private func cleanupOperation") :
+            IOS_TRANSFER_MANAGER.index("func releaseFirmwareAfterReboot")
+        ]
+        self.assertIn("DeviceOperationCleanupTask.start", cleanup)
+        self.assertIn("self.ownsConnection(bleManager)", cleanup)
+        self.assertIn("deviceTransferStatusRevision != revision", cleanup)
+        self.assertIn("deviceTransferMode.isEmpty", cleanup)
+        self.assertIn("deviceTransferSessionToken?.isEmpty != false", cleanup)
+        self.assertIn("self.coordinator.finish(lease, remoteClear: clear)", cleanup)
+        self.assertLess(cleanup.index("requestDeviceTransferExit()"),
+                        cleanup.index("deviceTransferStatusRevision != revision"))
 
     def test_disconnect_and_owner_recovery_revoke_debug_sessions(self):
         disconnect = BLE[

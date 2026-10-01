@@ -1,4 +1,5 @@
 #include "map_transfer.hpp"
+#include "map_operation_journal.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 #include "../maps/src/mapFontAsset.hpp"
 #include "../maps/src/mapLabelBlock.hpp"
@@ -1427,7 +1428,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
   }
   manifestOutput.close();
   if (!manifestOutput.good() || !removeTree(manifestPath) ||
-      ::rename(manifestTemp.c_str(), manifestPath.c_str()) != 0) {
+      renameStoragePath(manifestTemp.c_str(), manifestPath.c_str()) != 0) {
     removeTree(manifestTemp);
     return fail("archive_write", "could not finish extracted manifest");
   }
@@ -1571,7 +1572,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
         return fail("file_sha256", "archive map file sha256 mismatch: " + path);
       }
       if (!removeTree(destination) ||
-          ::rename(tempDestination.c_str(), destination.c_str()) != 0) {
+          renameStoragePath(tempDestination.c_str(), destination.c_str()) != 0) {
         removeTree(tempDestination);
         return fail("archive_write", "could not publish extracted map file");
       }
@@ -1784,6 +1785,7 @@ MapTransferInstaller::readReadyStreamMap(const std::string &sessionId,
     candidate.sessionId = sessionId;
     candidate.root = std::string("/VECTMAP/.maps/") + sessionId;
     candidate.mapId = jsonStringValue(marker, "mapId");
+    candidate.operationID = jsonStringValue(marker, "operationID");
     candidate.manifestReceipt = jsonStringValue(marker, "manifestReceipt");
     candidate.signedManifestReceipt =
         jsonStringValue(marker, "signedManifestReceipt");
@@ -1807,9 +1809,15 @@ MapTransferInstaller::readReadyStreamMap(const std::string &sessionId,
   };
   std::string value;
   bool markerFound = false;
-  for (const std::string &path : candidates(joinPath(root, kStreamReadyFile))) {
+  const bool operationReady = fileExists(joinPath(root, ".operation-ready")) ||
+                              fileExists(joinPath(root, ".operation-ready.bak"));
+  for (const std::string &path : candidates(joinPath(root, operationReady ? ".operation-ready" : kStreamReadyFile))) {
     ReadyStreamMap candidate;
-    if (readTextFile(path, value, 2048) && parseMarker(value, candidate)) {
+    if (readTextFile(path, value, 2048) && parseMarker(value, candidate) &&
+        (!operationReady || (candidate.operationID.size() == 32 &&
+          std::all_of(candidate.operationID.begin(), candidate.operationID.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+          })))) {
       ready = std::move(candidate);
       markerFound = true;
       break;
@@ -1916,6 +1924,10 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
   InstallStatus readyStatus = readReadyStreamMap(sessionId, ready);
   if (!readyStatus.ok)
     return readyStatus;
+  if (!ready.operationID.empty() &&
+      !acceptedMapOperation(storageRoot_, operationDeviceID_, ready.operationID,
+                            ready.sessionId, ready.manifestReceipt, ready.signedManifestReceipt))
+    return fail("operation_not_accepted", "map operation authorization requires reconciliation");
   MapManifest readyManifest;
   const InstallStatus manifestStatus =
       readInstalledManifest(ready.root, readyManifest);
@@ -2154,6 +2166,10 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
   }
   ReadyStreamMap ready;
   InstallStatus readyStatus = readReadyStreamMap(sessionId, ready);
+  if (readyStatus.ok && !ready.operationID.empty() &&
+      !acceptedMapOperation(storageRoot_, operationDeviceID_, ready.operationID,
+                            ready.sessionId, ready.manifestReceipt, ready.signedManifestReceipt))
+    return fail("operation_not_accepted", "map operation authorization requires reconciliation");
   MapManifest installedManifest;
   const InstallStatus installedStatus =
       readyStatus.ok ? readInstalledManifest(root, installedManifest)
@@ -2328,7 +2344,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
           const std::string activeBackup = activePath + ".bak";
           removeTree(activePath);
           if (fileExists(activeBackup) &&
-              ::rename(activeBackup.c_str(), activePath.c_str()) == 0) {
+              renameStoragePath(activeBackup.c_str(), activePath.c_str()) == 0) {
             ActiveMapSelection backup;
             InstallStatus backupStatus = readActiveMap(backup);
             if (backupStatus.ok && activeRootExists(backup.root)) {
@@ -2369,7 +2385,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
       return {true, "recovered_rollback",
               "cleared missing active map selection"};
     }
-    if (::rename(backupPath.c_str(), transactionPath.c_str()) != 0 ||
+    if (renameStoragePath(backupPath.c_str(), transactionPath.c_str()) != 0 ||
         !readTextFile(transactionPath, transaction, 2048)) {
       return fail("transaction_recovery",
                   "could not recover map activation journal");
@@ -2967,7 +2983,8 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps(
     if (candidate == selected.root || candidate == selected.previousRoot ||
         candidate == pendingRoot || candidate == transactionRoot ||
         candidate == transactionPreviousRoot ||
-        freshReady ||
+        freshReady || fileExists(joinPath(candidatePath, ".operation-ready")) ||
+        fileExists(joinPath(candidatePath, ".operation-ready.bak")) ||
         ((keepInstallingSessionId.empty() ||
           name == keepInstallingSessionId) &&
          (fileExists(joinPath(candidatePath, kStreamInstallingFile)) ||
@@ -3181,19 +3198,30 @@ bool MapTransferInstaller::movePath(const std::string &from,
                                     const std::string &to) const {
   if (!mkdirs(dirnameOf(to)))
     return false;
-  if (::rename(from.c_str(), to.c_str()) == 0)
+  if (renameStoragePath(from.c_str(), to.c_str()) == 0)
     return true;
   if (!copyTree(from, to))
     return false;
   return removeTree(from);
 }
 
+int MapTransferInstaller::renameStoragePath(const char *from, const char *to) const {
+  storageMutationBoundary("rename", to, false);
+  const int result = ::rename(from, to);
+  storageMutationBoundary("rename", to, true);
+  return result;
+}
+
 bool MapTransferInstaller::removeTree(const std::string &path) const {
   struct stat st;
   if (::stat(path.c_str(), &st) != 0)
     return true;
-  if (!S_ISDIR(st.st_mode))
-    return ::unlink(path.c_str()) == 0;
+  if (!S_ISDIR(st.st_mode)) {
+    storageMutationBoundary("unlink", path, false);
+    const bool removed = ::unlink(path.c_str()) == 0;
+    storageMutationBoundary("unlink", path, true);
+    return removed;
+  }
   DIR *dir = ::opendir(path.c_str());
   if (!dir)
     return false;
@@ -3208,7 +3236,10 @@ bool MapTransferInstaller::removeTree(const std::string &path) const {
     }
   }
   ::closedir(dir);
-  return ::rmdir(path.c_str()) == 0;
+  storageMutationBoundary("rmdir", path, false);
+  const bool removed = ::rmdir(path.c_str()) == 0;
+  storageMutationBoundary("rmdir", path, true);
+  return removed;
 }
 
 std::string
@@ -3516,7 +3547,8 @@ bool MapTransferInstaller::activeRootExists(const std::string &root) const {
   const bool installing =
       fileExists(joinPath(path, kStreamInstallingFile)) ||
       fileExists(joinPath(path, kStreamInstallingFile) + ".bak");
-  const bool readyMarker =
+  const bool readyMarker = fileExists(joinPath(path, ".operation-ready")) ||
+      fileExists(joinPath(path, ".operation-ready.bak")) ||
       fileExists(joinPath(path, kStreamReadyFile)) ||
       fileExists(joinPath(path, kStreamReadyFile) + ".bak");
   if (installing && !readyMarker) {
@@ -3591,14 +3623,22 @@ bool MapTransferInstaller::writeTextFile(const std::string &path,
                                          const std::string &text) const {
   if (!mkdirs(dirnameOf(path)))
     return false;
+  storageMutationBoundary("open_truncate", path, false);
   std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  storageMutationBoundary("open_truncate", path, true);
   if (!output)
     return false;
+  storageMutationBoundary("write", path, false);
   output << text;
+  storageMutationBoundary("write", path, true);
+  storageMutationBoundary("flush", path, false);
   output.flush();
+  storageMutationBoundary("flush", path, true);
   if (!output.good())
     return false;
+  storageMutationBoundary("close", path, false);
   output.close();
+  storageMutationBoundary("close", path, true);
   return !output.fail();
 }
 
@@ -3613,20 +3653,20 @@ bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
   // POSIX filesystems replace the destination atomically. Some embedded FAT
   // implementations reject replacement, so retain a recoverable backup while
   // using their two-rename fallback.
-  if (::rename(temporaryPath.c_str(), path.c_str()) == 0) {
+  if (renameStoragePath(temporaryPath.c_str(), path.c_str()) == 0) {
     removeTree(backupPath);
     return true;
   }
 
   removeTree(backupPath);
   const bool hadPrevious = fileExists(path);
-  if (hadPrevious && ::rename(path.c_str(), backupPath.c_str()) != 0) {
+  if (hadPrevious && renameStoragePath(path.c_str(), backupPath.c_str()) != 0) {
     removeTree(temporaryPath);
     return false;
   }
-  if (::rename(temporaryPath.c_str(), path.c_str()) != 0) {
+  if (renameStoragePath(temporaryPath.c_str(), path.c_str()) != 0) {
     if (hadPrevious)
-      ::rename(backupPath.c_str(), path.c_str());
+      renameStoragePath(backupPath.c_str(), path.c_str());
     removeTree(temporaryPath);
     return false;
   }

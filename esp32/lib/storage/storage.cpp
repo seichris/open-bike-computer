@@ -178,7 +178,58 @@ std::string formatSize(uint64_t size) {
  */
 Storage::Storage() : isSdLoaded(false), card(nullptr) {}
 
+bool Storage::pollShutdownQuiescence() {
+  shutdownAdmissionClosed_.store(true, std::memory_order_release);
+  if (!shutdownStarted_.exchange(true, std::memory_order_acq_rel)) {
+    // xTaskCreate uses an internal stack. An unmount/cache operation must
+    // never run on the renderer's PSRAM stack or in the UI event loop.
+    if (xTaskCreate(shutdownTask, "storage_stop", 4096, this,
+                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+      // Fail closed for this boot. No blind task-creation retries.
+      return false;
+    }
+  }
+  return shutdownComplete_.load(std::memory_order_acquire);
+}
+
+void Storage::shutdownTask(void *context) {
+  auto &self = *static_cast<Storage *>(context);
+  bool stopped = self.mountMutex == nullptr ||
+      xSemaphoreTake(self.mountMutex, pdMS_TO_TICKS(100)) == pdTRUE;
+  const bool locked = stopped && self.mountMutex != nullptr;
+  if (stopped) {
+    // All known writing owners have already ACKed/closed their streams.
+    // Catch any buffered C stream failure before deregistering its VFS.
+    stopped = ::fflush(nullptr) == 0;
+    if (stopped) {
+      const StorageBackend backend = self.mountedBackend.load();
+      if (backend == StorageBackend::InternalFFat) {
+        FFat.end();
+      } else if (backend != StorageBackend::Unavailable) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(SPI_SHARED)
+        endRemovableStorage(backend);
+#else
+        stopped = esp_vfs_fat_sdcard_unmount("/sdcard", self.card) == ESP_OK;
+#endif
+      }
+      // Arduino end() has no result. Require observable VFS removal; a
+      // still-readable mount is uncertainty, never permission to sleep.
+      if (backend != StorageBackend::Unavailable)
+        stopped = stopped && !mountedDirectoryAvailable("/sdcard");
+      if (stopped) {
+        self.isSdLoaded = false;
+        self.internalFallbackMounted = false;
+        self.mountedBackend = StorageBackend::Unavailable;
+      }
+    }
+  }
+  if (locked) xSemaphoreGive(self.mountMutex);
+  self.shutdownComplete_.store(stopped, std::memory_order_release);
+  vTaskDelete(nullptr);
+}
+
 bool Storage::ensureSdMounted(bool allowInternalFallback) {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   if (mountMutex == nullptr)
@@ -387,6 +438,7 @@ const char *Storage::diagnosticsRootPath() const {
  * @brief Initialize removable storage with the active board backend
  */
 esp_err_t Storage::initSD() {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return ESP_FAIL;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -736,6 +788,7 @@ esp_err_t Storage::initSD() {
  * @return esp_err_t Error code
  */
 esp_err_t Storage::initSPIFFS() {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return ESP_FAIL;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   ESP_LOGI(TAG, "Initializing FFat as /sdcard");
@@ -860,6 +913,7 @@ bool Storage::getSdLoaded() const { return isSdLoaded.load(); }
  * @return FILE* Pointer to the opened file
  */
 FILE *Storage::open(const char *path, const char *mode) {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return nullptr;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   return fopen(path, mode);

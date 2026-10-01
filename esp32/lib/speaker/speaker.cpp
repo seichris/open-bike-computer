@@ -31,6 +31,8 @@
 namespace waveshare_board::speaker {
 
 namespace {
+std::atomic<bool> shutdownRequested{false};
+std::atomic<bool> shutdownAcknowledged{false};
 
 constexpr uint32_t SAMPLE_RATE = 16000;
 constexpr uint8_t CHANNELS = 2;
@@ -612,7 +614,14 @@ bool playNow(Sound sound) {
 void speakerTask(void *) {
   QueuedPlaybackRequest request{};
   while (true) {
-    if (xQueueReceive(soundQueue, &request, portMAX_DELAY) != pdTRUE) {
+    if (shutdownRequested.load(std::memory_order_acquire)) {
+      const bool released = releaseCodecResources() && !resourceState.any();
+      playbackActive.store(false, std::memory_order_release);
+      shutdownAcknowledged.store(released, std::memory_order_release);
+      vTaskDelete(nullptr);
+      return;
+    }
+    if (xQueueReceive(soundQueue, &request, pdMS_TO_TICKS(20)) != pdTRUE) {
       continue;
     }
 
@@ -714,6 +723,11 @@ bool begin() {
 
 bool isAvailable() { return soundQueue != nullptr; }
 
+bool pollShutdownQuiescence() {
+  shutdownRequested.store(true, std::memory_order_release);
+  return soundQueue == nullptr || shutdownAcknowledged.load(std::memory_order_acquire);
+}
+
 bool isPlaying() {
   return playbackActive.load(std::memory_order_relaxed);
 }
@@ -726,6 +740,7 @@ bool requestPlay(Sound sound, uint8_t volumePercent) {
 bool requestPlayTracked(Sound sound, uint8_t volumePercent,
                         uint32_t &requestId) {
   requestId = 0U;
+  if (shutdownRequested.load(std::memory_order_acquire)) return false;
   if (!isSupported(sound) || volumePercent > 100 || soundQueue == nullptr) {
     return false;
   }
@@ -842,6 +857,7 @@ namespace waveshare_board::speaker {
 bool begin() { return false; }
 bool isAvailable() { return false; }
 bool isPlaying() { return false; }
+bool pollShutdownQuiescence() { return true; }
 bool requestPlay(Sound, uint8_t) { return false; }
 bool requestPlayTracked(Sound, uint8_t, uint32_t &requestId) {
   requestId = 0U;

@@ -50,11 +50,13 @@ struct HttpResponseCompletionToken {
   uint32_t transferGeneration = 0;
   std::string method;
   std::string path;
+  uint64_t requestSequence = 0;
 
   bool matches(uint32_t generation, const std::string &requestMethod,
-               const std::string &requestPath) const {
+               const std::string &requestPath, uint64_t sequence) const {
     return transferGeneration != 0 && transferGeneration == generation &&
-           method == requestMethod && path == requestPath;
+           method == requestMethod && path == requestPath &&
+           requestSequence != 0 && requestSequence == sequence;
   }
 };
 
@@ -129,6 +131,14 @@ inline bool parseHttpUint64(const std::string &text, uint64_t &value) {
 }
 
 struct HttpSecurityHeaders {
+  std::string mapOperationID;
+  uint64_t mapOperationAdmissionRevision = 0;
+  bool mapOperationAdmissionRevisionSeen = false;
+  bool hasMapOperationAdmissionRevision = false;
+  std::string mapStreamSHA256;
+  bool mapOperationSeen = false;
+  bool mapStreamSHA256Seen = false;
+  bool mapOperationDuplicate = false;
   std::string transferToken;
   std::string contentType;
   uint64_t contentLength = 0;
@@ -177,7 +187,20 @@ struct HttpSecurityHeaders {
   }
 
   void accept(const std::string &name, const std::string &value) {
-    if (name == "content-length") {
+    if (name == "x-map-operation-admission-revision") {
+      mapOperationDuplicate = mapOperationDuplicate || mapOperationAdmissionRevisionSeen;
+      hasMapOperationAdmissionRevision = !mapOperationAdmissionRevisionSeen &&
+          parseHttpUint64(value,mapOperationAdmissionRevision);
+      mapOperationAdmissionRevisionSeen = true;
+    } else if (name == "x-map-operation-id") {
+      mapOperationDuplicate = mapOperationDuplicate || mapOperationSeen;
+      mapOperationID = mapOperationSeen ? "" : value;
+      mapOperationSeen = true;
+    } else if (name == "x-map-stream-sha256") {
+      mapOperationDuplicate = mapOperationDuplicate || mapStreamSHA256Seen;
+      mapStreamSHA256 = mapStreamSHA256Seen ? "" : value;
+      mapStreamSHA256Seen = true;
+    } else if (name == "content-length") {
       hasContentLength = !contentLengthSeen &&
                          parseHttpUint64(value, contentLength);
       contentLengthSeen = true;
@@ -208,7 +231,7 @@ struct HttpSecurityHeaders {
     }
   }
 
-  bool hasAmbiguousFraming() const { return transferEncodingSeen; }
+  bool hasAmbiguousFraming() const { return transferEncodingSeen || mapOperationDuplicate; }
 };
 
 } // namespace device_transfer

@@ -20,18 +20,32 @@ int main() {
   assert(otaEligibility(true, true, true, true, 3U * 1024U * 1024U) ==
          Eligibility::Eligible);
 
-  bool commitInProgress = false;
-  assert(!device_transfer::commit_boundary_policy::begin(
-      false, commitInProgress));
-  assert(device_transfer::commit_boundary_policy::cancellationAllowed(
-      commitInProgress));
-  assert(device_transfer::commit_boundary_policy::begin(
-      true, commitInProgress));
-  assert(!device_transfer::commit_boundary_policy::cancellationAllowed(
-      commitInProgress));
-  device_transfer::commit_boundary_policy::end(commitInProgress);
-  assert(device_transfer::commit_boundary_policy::cancellationAllowed(
-      commitInProgress));
+  device_transfer::commit_boundary_policy::Boundary boundary;
+  assert(boundary.begin(false, true, true, "operation", "artifact") == 0);
+  assert(boundary.begin(true, false, true, "operation", "artifact") == 0);
+  assert(boundary.begin(true, true, false, "operation", "artifact") == 0);
+  assert(boundary.begin(true, true, true, "", "artifact") == 0);
+  assert(boundary.begin(true, true, true, "operation", "") == 0);
+  boundary.closeAdmission(true);
+  assert(boundary.begin(true, true, true, "operation", "artifact") == 0);
+  boundary.closeAdmission(false);
+  const auto first = boundary.begin(true, true, true, "operation", "artifact");
+  assert(first != 0);
+  assert(!device_transfer::commit_boundary_policy::cancellationAllowed(boundary.active()));
+  assert(boundary.begin(true, true, true, "other", "other") == 0);
+  assert(!boundary.end(0));
+  assert(!boundary.end(first + 1));
+  assert(boundary.owns(first));
+  boundary.closeAdmission(true);
+  assert(boundary.owns(first)); // shutdown cannot revoke a granted owner
+  assert(boundary.end(first));
+  assert(!boundary.end(first)); // duplicate completion is harmless
+  boundary.closeAdmission(false);
+  const auto second = boundary.begin(true, true, true, "operation", "artifact");
+  assert(second != 0 && second != first);
+  assert(!boundary.end(first)); // late old completion cannot end a new grant
+  assert(boundary.owns(second));
+  assert(boundary.end(second));
 
   // Deterministic OTA barriers exercise both possible race orderings. A cancel
   // that linearizes before commit wins; after commit begins it is too late.

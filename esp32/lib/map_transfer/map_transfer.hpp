@@ -104,6 +104,7 @@ struct ActiveMapSelection {
 };
 
 struct ReadyStreamMap {
+  std::string operationID;
   std::string sessionId;
   std::string mapId;
   std::string root;
@@ -168,6 +169,9 @@ class MapTransferInstaller {
 public:
   explicit MapTransferInstaller(std::string storageRoot = "/sdcard");
   virtual ~MapTransferInstaller() = default;
+  InstallStatus readReadyStreamMap(const std::string &sessionId,
+                                   ReadyStreamMap &ready) const;
+  void setOperationDeviceID(std::string device) { operationDeviceID_ = std::move(device); }
 
   InstallStatus validateManifestText(const std::string &manifestText,
                                      MapManifest &manifest) const;
@@ -230,11 +234,19 @@ public:
   std::string stagedArchivePath(const std::string &sessionId) const;
 
 protected:
+  // Exact mutation boundary seam for crash qualification. Production is a
+  // no-op; host faults can interrupt before or after the real IO operation.
+  virtual void storageMutationBoundary(const char *operation,
+                                       const std::string &path,
+                                       bool after) const {
+    (void)operation; (void)path; (void)after;
+  }
   virtual bool writeTextFileAtomic(const std::string &path,
                                    const std::string &text) const;
 
 private:
   std::string storageRoot_;
+  std::string operationDeviceID_;
 
   // Share error-result construction across the many validation exits. Owning
   // parameters move into the result rather than allocating a second copy.
@@ -251,6 +263,7 @@ private:
   bool copyTree(const std::string &from, const std::string &to) const;
   bool movePath(const std::string &from, const std::string &to) const;
   bool removeTree(const std::string &path) const;
+  int renameStoragePath(const char *from, const char *to) const;
   std::string verificationPath(const std::string &sessionId,
                                const ManifestFile &file) const;
   bool publishStagedFiles(const std::string &sessionId,
@@ -268,8 +281,6 @@ private:
   bool installedMapContentsMatch(const std::string &root,
                                  const MapManifest &manifest) const;
   bool writeActiveMap(const ActiveMapSelection &selection) const;
-  InstallStatus readReadyStreamMap(const std::string &sessionId,
-                                   ReadyStreamMap &ready) const;
   InstallStatus
   recoverStreamActivationTransaction(const std::string &transaction) const;
   bool clearPendingStreamActivation(const std::string &sessionId) const;

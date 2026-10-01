@@ -1161,6 +1161,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
     @Published private(set) var hasFreshMapTransferStatus = false
+    @Published private(set) var mapOperationStatus: DeviceMapOperationReceipt?
+    @Published private(set) var mapOperationObservationGeneration: UInt64 = 0
+    @Published private(set) var mapOperationConnectionEpoch: UInt64 = 0
     @Published var deviceTransferMode: String = ""
     @Published var deviceTransferBaseURL: URL?
     @Published var deviceTransferAccessPointSSID: String?
@@ -1178,6 +1181,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferRemoteStatusRevision: UInt32 = 0
     @Published private(set) var supportsSecureDeviceTransferV1 = false
     @Published private(set) var supportsSignedMapStreamV1 = false
+    @Published private(set) var supportsMapOperationsV1 = false
     @Published private(set) var supportsFirmwareMaintenanceV1 = false
     @Published private(set) var deviceTransferLegacyArchivePolicy: String?
     @Published private(set) var deviceTransferLastErrorCode: String?
@@ -1492,6 +1496,8 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteResponseTimeoutTimer: Timer?
     private var navigationWriteResponseGeneration: UInt64 = 0
     private var navigationBackpressureStartedAt: Date?
+    var transferConnectionEpoch: UInt64 { rideDeliveryConnectionGeneration }
+
     private var rideDeliveryConnectionGeneration: UInt64 = 0
     private var rideTransportStateMachine = RideBLETransportStateMachineV1(
         role: .ownerPhone
@@ -5947,6 +5953,22 @@ class BLEManager: NSObject, ObservableObject {
         )
     }
 
+    @discardableResult
+    func requestMapOperationStatus(operationID: String) -> Bool {
+        guard supportsMapOperationsV1,
+              !firmwareMaintenanceReconnectExpected,
+              isNavigationReady,
+              authenticatedWriteSession != nil,
+              let packet = MapOperationQueryPacket.make(operationID: operationID) else { return false }
+        let queued = sendTransferControlPacket(
+            packet,
+            label: "map operation status",
+            coalescingKey: "transfer.map.operation.\(operationID)"
+        )
+        if queued { mapOperationStatus = nil }
+        return queued
+    }
+
     func resetMapTransferActivationObservation() {
         mapTransferActivationStatus = "idle"
         mapTransferActivationSequence = nil
@@ -6718,6 +6740,9 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func clearTransferState() {
+        mapOperationStatus = nil
+        mapOperationObservationGeneration &+= 1
+        mapOperationConnectionEpoch = transferConnectionEpoch
         mapTransferModeEnabled = false
         mapTransferBaseURL = nil
         mapTransferAccessPointSSID = nil
@@ -6771,6 +6796,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferRemoteStatusRevision = 0
         supportsSecureDeviceTransferV1 = false
         supportsSignedMapStreamV1 = false
+        supportsMapOperationsV1 = false
         supportsFirmwareMaintenanceV1 = false
         deviceTransferLegacyArchivePolicy = nil
         deviceTransferLastErrorCode = nil
@@ -10956,6 +10982,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 capabilities["secureTransferV1"] as? Bool ?? false
             supportsSignedMapStreamV1 =
                 capabilities["signedMapStreamV1"] as? Bool ?? false
+            supportsMapOperationsV1 =
+                capabilities["mapOperationsV1"] as? Bool ?? false
             supportsFirmwareMaintenanceV1 =
                 capabilities["firmwareMaintenanceV1"] as? Bool ?? false
             deviceTransferLegacyArchivePolicy =
@@ -10963,6 +10991,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         } else {
             supportsSecureDeviceTransferV1 = false
             supportsSignedMapStreamV1 = false
+            supportsMapOperationsV1 = false
             supportsFirmwareMaintenanceV1 = false
             deviceTransferLegacyArchivePolicy = nil
         }
@@ -11219,6 +11248,19 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         return applyMapTransferStatusBody(body)
     }
 
+    private func hideProvisionalActiveMap() {
+        // Firmware selects the pointer before the renderer acknowledges it. Keep a
+        // different previous selection visible, but never advertise the candidate
+        // (including a failed candidate) as an installed Saved Map.
+        guard mapTransferActivationStatus != "installed",
+              mapTransferActivationStatus != "idle",
+              let activeDeviceMap,
+              activeDeviceMap.mapID == mapTransferActivationMapId,
+              activeDeviceMap.sessionID == nil ||
+                activeDeviceMap.sessionID == mapTransferActivationSessionId else { return }
+        self.activeDeviceMap = nil
+    }
+
     func applyAuthenticatedMapTransferStatus(_ status: MapTransferDeviceStatus) {
         if let enabled = status.enabled {
             mapTransferModeEnabled = enabled
@@ -11265,6 +11307,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferActivationProgress = nil
             mapTransferActivationError = nil
         }
+        hideProvisionalActiveMap()
         hasFreshMapTransferStatus = true
     }
 
@@ -11273,6 +11316,18 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferStatusDescription = "invalid status"
             log("Received invalid map transfer status payload")
             return true
+        }
+
+        if let operation = object["operation"] as? [String: Any] {
+            mapOperationStatus = nil
+            if let data = try? JSONSerialization.data(withJSONObject: operation),
+               let receipt = try? JSONDecoder().decode(DeviceMapOperationReceipt.self, from: data),
+               receipt.schemaVersion == 1,
+               MapOperationQueryPacket.make(operationID: receipt.operationID) != nil {
+                mapOperationStatus = receipt
+                mapOperationConnectionEpoch = transferConnectionEpoch
+                mapOperationObservationGeneration &+= 1
+            }
         }
 
         mapTransferModeEnabled = object["enabled"] as? Bool ?? false
@@ -11357,6 +11412,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferStatusDescription = "transfer mode disabled"
         }
 
+        hideProvisionalActiveMap()
         hasFreshMapTransferStatus = true
         log("Map transfer status: \(mapTransferStatusDescription)")
         return true

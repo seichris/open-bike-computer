@@ -487,6 +487,7 @@ private:
   map_camera::Lag cameraLag;
   uint32_t lastCameraRequestMs = 0;
   renderer_diagnostics::CameraSample cameraEvidence{};
+  std::atomic<bool> shutdownAdmissionClosed_{false};
   std::atomic<bool> renderWorkerShutdown{false};
   std::atomic<bool> renderWorkerExited{true};
   std::atomic<bool> renderWorkerRestartAfterExit{false};
@@ -650,6 +651,7 @@ public:
   // Bounded command admission; callback/context must live through completion.
   // Runs between jobs on the sole map storage owner, never on the UI task.
   bool requestStorageControl(void (*work)(void *), void *context);
+  bool pollShutdownQuiescence();
   bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);
   void deleteMapScrSprites();
   void createMapScrSprites();

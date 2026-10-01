@@ -9,6 +9,17 @@ import Foundation
 import CoreLocation
 import MapKit
 
+// Durable operation queries are deliberately bounded and cannot carry delimiters.
+nonisolated enum MapOperationQueryPacket {
+    static func make(operationID: String) -> Data? {
+        guard operationID.utf8.count == 32,
+              operationID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            return nil
+        }
+        return Data("MOPQ|\(operationID)".utf8)
+    }
+}
+
 enum DeviceDestinationKind: String, Codable, Equatable {
     case favorite
     case recent

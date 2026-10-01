@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <new>
 #include <sstream>
 
 namespace device_transfer {
@@ -301,7 +302,7 @@ bool HttpTransferServer::bindAuthenticatedBleSession(uint64_t sessionId) {
 
 bool HttpTransferServer::suspendFirmwareAuthenticatedBleSession() {
   lockState();
-  if (!enabled_ || commitInProgress_) {
+  if (!enabled_ || commitBoundary_.active()) {
     unlockState();
     return false;
   }
@@ -318,7 +319,7 @@ void HttpTransferServer::clearAuthenticatedBleSession() {
   lockState();
   const bool hadBinding = authenticatedBleSessionId_ != 0;
   const bool wasEnabled = enabled_;
-  const bool commitInProgress = commitInProgress_;
+  const bool commitInProgress = commitBoundary_.active();
   authenticatedBleSessionId_ = 0;
   if (commitInProgress) {
     // The authenticated request already crossed the serialized activation
@@ -471,17 +472,17 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   }
   if (!enabled && wasEnabled) {
     lockState();
-    const bool commitInProgress = commitInProgress_;
-    unlockState();
+    const bool commitInProgress = commitBoundary_.active();
     if (!commit_boundary_policy::cancellationAllowed(commitInProgress)) {
+      unlockState();
       setLastError("commit_in_progress",
                    "firmware activation has crossed the commit boundary");
       return false;
     }
+    // Keep the lock from the grant check through generation revocation.
     // Revoke the request generation before stopping the listener/AP. Network
     // teardown can take long enough for a nearly complete handler to advance;
     // it must observe cancellation before it can publish or activate anything.
-    lockState();
     enabled_ = false;
     mode_.clear();
     apPassphrase_.clear();
@@ -496,6 +497,13 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   }
   if (enabled || !wasEnabled) {
     lockState();
+    if ((enabled && commitBoundary_.admissionClosed()) ||
+        (!enabled && commitBoundary_.active())) {
+      unlockState();
+      if (acquiredPowerLock)
+        power_management::release(power_management::LockDomain::Transfer);
+      return false;
+    }
     const bool transferBoundary = enabled_ != enabled ||
                                   (enabled && mode_ != mode);
     enabled_ = enabled;
@@ -799,12 +807,18 @@ void HttpTransferServer::stopNetwork() {
   server_.stop();
   if (networkOwner == nullptr)
     return;
+  bool stopped = true;
   if (startedAp)
-    (void)networkOwner->stopAccessPoint(true);
+    stopped = networkOwner->stopAccessPoint(true) && stopped;
   if (startedStation)
-    (void)networkOwner->disconnectStation(true);
+    stopped = networkOwner->disconnectStation(true) && stopped;
   if (hadNetworkActivity)
-    (void)networkOwner->stopWiFi();
+    stopped = networkOwner->stopWiFi() && stopped;
+  if (!stopped) {
+    lockState();
+    networkStopFailed_ = true;
+    unlockState();
+  }
 }
 
 void HttpTransferServer::runWorker() {
@@ -829,6 +843,7 @@ void HttpTransferServer::runWorker() {
     observeResources("network_stopped");
     if (networkOperationOwner_ != nullptr && !networkOperationOwner_->release()) {
       lockState();
+      networkStopFailed_ = true;
       if (lastErrorCode_.empty())
         rememberError("operation_owner_poisoned",
                       "internal transfer owner could not be safely released");
@@ -865,6 +880,7 @@ void HttpTransferServer::runWorker() {
       observeResources("network_stopped");
       if (networkOperationOwner_ != nullptr && !networkOperationOwner_->release()) {
         lockState();
+        networkStopFailed_ = true;
         if (lastErrorCode_.empty())
           rememberError("operation_owner_poisoned",
                         "internal transfer owner could not be safely released");
@@ -1156,26 +1172,74 @@ void HttpTransferServer::noteDiagnosticsModeDecision(bool matches) {
   unlockState();
 }
 
-bool HttpTransferServer::beginAuthorizedCommit(const HttpRequest &request) {
+HttpTransferServer::CommitGrant HttpTransferServer::beginAuthorizedCommit(
+    const HttpRequest &request, const std::string &mode,
+    const std::string &operation, const std::string &artifact) {
   lockState();
   const bool authorized =
       isHttpTransferGenerationCurrent(enabled_, transferGeneration_,
                                       request.transferGeneration) &&
       authenticatedBleSessionId_ != 0 && !sessionToken_.empty() &&
       constantTimeEqual(request.transferToken, sessionToken_);
-  if (commit_boundary_policy::begin(authorized, commitInProgress_)) {
+  CommitGrant grant = 0;
+  try {
+    grant = commitBoundary_.begin(authorized, mode_ == mode,
+        (request.method == "PUT" || request.method == "POST") &&
+            request.path == operation, operation, artifact);
+  } catch (const std::bad_alloc &) {
+    // No grant was published; do not leave the state mutex locked.
+  }
+  if (grant != 0) {
     currentRequestAuthorized_ = true;
     lastUsefulTrafficMs_ = millis();
   }
   unlockState();
-  return authorized;
+  return grant;
 }
 
-void HttpTransferServer::endAuthorizedCommit() {
+bool HttpTransferServer::endAuthorizedCommit(CommitGrant grant) {
   lockState();
-  commit_boundary_policy::end(commitInProgress_);
+  const bool ended = commitBoundary_.end(grant);
   unlockState();
-  signalStatusChanged();
+  if (ended)
+    signalStatusChanged();
+  return ended;
+}
+
+void HttpTransferServer::setCommitAdmissionClosed(bool closed) {
+  lockState();
+  commitBoundary_.closeAdmission(closed);
+  unlockState();
+}
+
+bool HttpTransferServer::commitInProgress() const {
+  lockState();
+  const bool active = commitBoundary_.active();
+  unlockState();
+  return active;
+}
+
+void HttpTransferServer::beginShutdown() {
+  setCommitAdmissionClosed(true);
+  clearAuthenticatedBleSession();
+}
+
+void HttpTransferServer::pollShutdown() {
+  lockState();
+  const bool stop = commitBoundary_.admissionClosed() && !commitBoundary_.active();
+  unlockState();
+  if (stop)
+    clearAuthenticatedBleSession();
+  process();
+}
+
+bool HttpTransferServer::isShutdownQuiescent() const {
+  lockState();
+  const bool quiet = commitBoundary_.admissionClosed() && !commitBoundary_.active() &&
+      !enabled_ && workerTask_ == nullptr && !startedAp_ && !startedStation_ &&
+      !networkStopFailed_;
+  unlockState();
+  return quiet;
 }
 
 bool HttpTransferServer::waitUntilStopped(uint32_t timeoutMs) {
@@ -1279,6 +1343,11 @@ bool HttpTransferServer::handleClient(TransferClient &client,
               "transfer encoding is not supported");
     return false;
   }
+  request.mapOperationAdmissionRevision = securityHeaders.mapOperationAdmissionRevision;
+  request.hasMapOperationAdmissionRevision = securityHeaders.hasMapOperationAdmissionRevision;
+  request.mapOperationID = std::move(securityHeaders.mapOperationID);
+  request.mapStreamSHA256 = std::move(securityHeaders.mapStreamSHA256);
+  request.mapOperationHeadersPresent = securityHeaders.mapOperationSeen || securityHeaders.mapStreamSHA256Seen || securityHeaders.mapOperationAdmissionRevisionSeen;
   request.transferToken = std::move(securityHeaders.transferToken);
   request.contentType = std::move(securityHeaders.contentType);
   request.contentLength = securityHeaders.contentLength;
@@ -1298,6 +1367,12 @@ bool HttpTransferServer::handleClient(TransferClient &client,
                                       : 0);
   lockState();
   request.transferGeneration = transferGeneration_;
+  if (requestSequence_ == UINT64_MAX) {
+    unlockState();
+    sendError(client, 503, "request_sequence_exhausted", "device restart required");
+    return false;
+  }
+  request.requestSequence = ++requestSequence_;
   unlockState();
 
   HttpRequestHandler *handler = handlerForPath(request.path);

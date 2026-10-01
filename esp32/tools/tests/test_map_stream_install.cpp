@@ -1,12 +1,15 @@
 #include "../../lib/map_transfer/map_stream_format.hpp"
 #include "../../lib/map_transfer/map_stream_install.hpp"
 #include "../../lib/map_transfer/map_stream_receiver.hpp"
+#include "../../lib/device_transfer/commit_boundary_policy.hpp"
 #include "../../lib/map_transfer/map_transfer.hpp"
+#include "../../lib/map_transfer/map_operation_journal.hpp"
 
 #include <array>
 #include <cassert>
 #include <cstdlib>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -228,6 +231,43 @@ void writeFile(const std::string &path, const std::string &value) {
   output.close();
   assert(output.good());
 }
+
+// SD controllers may acknowledge sync while bytes remain volatile. This model
+// deliberately offers immediate readback but restores only the cold baseline
+// on power loss. It proves host readback is NOT a power-persistence guarantee;
+// it does not pretend to emulate every FAT/controller ordering behavior.
+class ReadVisibleNotPowerDurableStorage final : public MapStreamStorage {
+public:
+  explicit ReadVisibleNotPowerDurableStorage(const std::string &root)
+      : root_(root), durable_(tempRoot()),
+        delegate_(map_transfer::makeDefaultMapStreamStorage()) {
+    std::filesystem::copy(root_, durable_, std::filesystem::copy_options::recursive |
+                          std::filesystem::copy_options::overwrite_existing);
+  }
+  ~ReadVisibleNotPowerDurableStorage() override {
+    std::filesystem::remove_all(durable_);
+  }
+  void powerCut() {
+    std::filesystem::remove_all(root_);
+    std::filesystem::copy(durable_, root_, std::filesystem::copy_options::recursive);
+  }
+  bool createDirectories(const std::string &p) override { return delegate_->createDirectories(p); }
+  bool removeTree(const std::string &p) override { return delegate_->removeTree(p); }
+  bool regularFileSize(const std::string &p, uint64_t &n) override { return delegate_->regularFileSize(p, n); }
+  bool readText(const std::string &p, std::string &v, size_t n) override { return delegate_->readText(p, v, n); }
+  bool forEachDirectoryEntry(const std::string &p, const std::function<bool(const map_transfer::MapStreamDirectoryEntry &)> &f) override { return delegate_->forEachDirectoryEntry(p, f); }
+  int openWrite(const std::string &p) override { return delegate_->openWrite(p); }
+  int openRead(const std::string &p) override { return delegate_->openRead(p); }
+  bool read(int fd, uint8_t *p, size_t n) override { return delegate_->read(fd, p, n); }
+  bool write(int fd, const uint8_t *p, size_t n) override { return delegate_->write(fd, p, n); }
+  bool syncFile(int fd) override { return delegate_->syncFile(fd); }
+  bool closeFile(int fd) override { return delegate_->closeFile(fd); }
+  bool renamePath(const std::string &p, const std::string &q) override { return delegate_->renamePath(p, q); }
+  bool syncDirectory(const std::string &p) override { return delegate_->syncDirectory(p); }
+private:
+  std::string root_, durable_;
+  std::shared_ptr<MapStreamStorage> delegate_;
+};
 
 const std::string kPayload0("FMB\x01\0\0\0\0", 8);
 const std::string kPayload1("FMB\x02\0\0\0\0", 8);
@@ -1018,6 +1058,21 @@ void testCrashBoundariesRemainRetryableWithMonotonicFinalization() {
     assert(readFile(root + "/VECTMAP/active-map.json").find("old") !=
            std::string::npos);
 
+    // Recovery itself is interruptible. Reapply every named fault on three
+    // consecutive recovery passes before allowing a successful completion.
+    for (unsigned pass = 0; pass != 3; ++pass) {
+      auto interruptedStorage = std::make_shared<FaultInjectingStorage>(
+          faults[index].operation, faults[index].path);
+      MapStreamInstallSession interrupted(
+          root, "finalize-" + std::to_string(index),
+          {UINT64_MAX, UINT64_MAX}, {}, interruptedStorage);
+      assert(interrupted.onManifest(manifest, kManifest));
+      assert(consumeAll(interrupted, manifest));
+      assert(!interrupted.onComplete(manifest));
+      assert(interruptedStorage->fired());
+      assert(readFile(root + "/VECTMAP/active-map.json").find("old") !=
+             std::string::npos);
+    }
     MapStreamInstallSession retry(root, "finalize-" + std::to_string(index),
                                   {1, 10000});
     assert(retry.onManifest(manifest, kManifest));
@@ -1055,6 +1110,117 @@ void testCrashBoundariesRemainRetryableWithMonotonicFinalization() {
     assert(storage->fired());
     assert(failing.snapshot().state == MapStreamInstallState::Failed);
     assert(failing.snapshot().step() == 1);
+  }
+}
+
+struct SimulatedInstallerPowerCut {};
+class MutationCrashInstaller final : public MapTransferInstaller {
+public:
+  MutationCrashInstaller(const std::string &root, size_t cut = SIZE_MAX)
+      : MapTransferInstaller(root), root_(root), image_(tempRoot()), cut_(cut) {}
+  ~MutationCrashInstaller() { std::filesystem::remove_all(image_); }
+  mutable size_t mutations = 0;
+  void restoreCutImage() const {
+    std::filesystem::remove_all(root_);
+    std::filesystem::copy(image_, root_, std::filesystem::copy_options::recursive);
+  }
+protected:
+  void storageMutationBoundary(const char *, const std::string &, bool) const override {
+    if (mutations++ != cut_) return;
+    // Snapshot before stack unwinding flushes streams, then restore this
+    // image after catching the cut, so destructors cannot mask missing sync.
+    std::filesystem::remove_all(image_);
+    std::filesystem::copy(root_, image_, std::filesystem::copy_options::recursive);
+    throw SimulatedInstallerPowerCut{};
+  }
+private:
+  std::string root_, image_;
+  size_t cut_;
+};
+
+void testEveryInstallerMutationAndInterruptedRecovery() {
+  size_t totalCuts = 0;
+  for (const bool replacement : {false, true}) {
+    const std::string baseline = tempRoot();
+    if (replacement) {
+      prepareReadyRoot(baseline, "previous");
+      MapTransferInstaller installer(baseline);
+      assert(installer.activateReadyStreamMap("previous").ok);
+    }
+    prepareReadyRoot(baseline, "candidate");
+    auto clone = [&]() {
+      const auto root = tempRoot();
+      std::filesystem::copy(baseline, root, std::filesystem::copy_options::recursive |
+                            std::filesystem::copy_options::overwrite_existing);
+      return root;
+    };
+    const std::string completeRoot = clone();
+    MutationCrashInstaller complete(completeRoot);
+    assert(complete.activateReadyStreamMap("candidate").ok);
+    const size_t mutationCount = complete.mutations;
+    assert(mutationCount > 10);
+    for (size_t cut = 0; cut != mutationCount; ++cut) {
+      const std::string root = clone();
+      MutationCrashInstaller interrupted(root, cut);
+      bool cutReached = false;
+      try { (void)interrupted.activateReadyStreamMap("candidate"); }
+      catch (const SimulatedInstallerPowerCut &) {
+        interrupted.restoreCutImage();
+        cutReached = true;
+      }
+      assert(cutReached);
+      ++totalCuts;
+      for (size_t pass = 0; pass != 3; ++pass) {
+        MutationCrashInstaller recovery(root, pass);
+        try { (void)recovery.recoverInterruptedActivation(); }
+        catch (const SimulatedInstallerPowerCut &) { recovery.restoreCutImage(); }
+      }
+      MapTransferInstaller recovered(root);
+      for (unsigned pass = 0; pass != 3; ++pass)
+        (void)recovered.recoverInterruptedActivation();
+      ActiveMapSelection selected;
+      const auto selection = recovered.readActiveMap(selected);
+      if (replacement) assert(selection.ok);
+      if (selection.ok) {
+        assert(selected.sessionId == "previous" || selected.sessionId == "candidate");
+        assert(readFile(root + selected.root + "/+0000+0000/0.fmb") == kPayload0);
+        assert(readFile(root + selected.root + "/+0000+0000/1.fmb") == kPayload1);
+      }
+      std::filesystem::remove_all(root);
+    }
+    std::filesystem::remove_all(completeRoot);
+    std::filesystem::remove_all(baseline);
+  }
+  std::cout << "installer mutation cuts exercised=" << totalCuts << "\n";
+}
+
+void testSuccessfulReadbackDoesNotProvePowerDurability() {
+  for (const bool replacement : {false, true}) {
+    const std::string root = tempRoot();
+    std::filesystem::create_directories(root + "/VECTMAP");
+    const std::string oldPointer = "{\"mapId\":\"old\",\"root\":\"/VECTMAP\"}\n";
+    if (replacement) writeFile(root + "/VECTMAP/active-map.json", oldPointer);
+    auto storage = std::make_shared<ReadVisibleNotPowerDurableStorage>(root);
+    const auto manifest = verified();
+    {
+      MapStreamInstallSession session(root, "volatile-ready", {1, 10000}, {}, storage);
+      assert(session.onManifest(manifest, kManifest));
+      assert(consumeAll(session, manifest));
+      assert(session.onComplete(manifest));
+      assert(exists(session.inactiveRoot() + "/.ready"));
+      assert(readFile(session.inactiveRoot() + "/.manifest.json") == kManifest);
+    }
+    // Three independent cold recoveries must not turn vanished prepared work
+    // into an installed result. First install is allowed to retain no map.
+    for (unsigned recovery = 0; recovery != 3; ++recovery) {
+      storage->powerCut();
+      MapStreamInstallSnapshot snapshot;
+      assert(map_transfer::readRecoverableMapStreamInstall(root, snapshot) ==
+             MapStreamRecoveryResult::None);
+      assert(!exists(root + "/VECTMAP/.maps/volatile-ready/.ready"));
+      if (replacement) assert(readFile(root + "/VECTMAP/active-map.json") == oldPointer);
+      else assert(!exists(root + "/VECTMAP/active-map.json"));
+    }
   }
 }
 
@@ -1132,6 +1298,138 @@ void testTransportIndependentReceiverOwnsExactBodyLifecycle() {
   assert(rejected.code == "stream_signing_key_unknown");
 }
 
+// Deterministic barriers invoke the actual receiver and commit policy. No
+// scheduling sleeps: revocation is placed on each side of the grant boundary.
+void testReceiverCommitCancellationBarriers() {
+  const auto fixture = readGoldenFixture();
+  const auto stream = decodeHex(fixture.at("stream_hex"));
+  const auto publicKey = decodeHex(fixture.at("public_key_x963_hex"));
+  map_transfer::MapStreamTrustStore trust;
+  assert(trust.add("map-test-2026-01", publicKey.data(), publicKey.size()));
+  {
+    const auto root = tempRoot();
+    MapStreamReceiver wrongLength(trust, root, "wrong-length", stream.size() + 1,
+                                  "9.0.0", 1024 * 1024);
+    assert(!wrongLength.feed(stream.data(), stream.size()));
+    assert(!wrongLength.readyToFinish());
+    assert(!wrongLength.abort().ok);
+    assert(!exists(root + "/VECTMAP/.pending-stream-activation.json"));
+  }
+  {
+    const auto root = tempRoot();
+    auto corrupt = stream;
+    corrupt.back() ^= 1;
+    MapStreamReceiver wrongHash(trust, root, "wrong-hash", stream.size(),
+                                "9.0.0", 1024 * 1024);
+    assert(!wrongHash.feed(corrupt.data(), corrupt.size()));
+    assert(!wrongHash.readyToFinish());
+    assert(!wrongHash.abort().ok);
+    assert(!exists(root + "/VECTMAP/.pending-stream-activation.json"));
+  }
+  for (int barrier = 0; barrier != 4; ++barrier) {
+    const auto root = tempRoot();
+    device_transfer::commit_boundary_policy::Boundary boundary;
+    bool authorized = true;
+    bool revokedDuringFinalization = false;
+    MapStreamReceiver receiver(trust, root, "barrier", stream.size(),
+                               "9.0.0", 1024 * 1024, {}, {}, {},
+        [&](const MapStreamInstallSnapshot &snapshot) {
+          if (barrier == 3 && snapshot.state == MapStreamInstallState::Finalizing) {
+            authorized = false;
+            boundary.closeAdmission(true);
+            revokedDuringFinalization = true;
+            assert(boundary.active());
+          }
+        });
+    const auto received = barrier == 0 ? stream.size() - 1 : stream.size();
+    assert(receiver.feed(stream.data(), received));
+    assert(receiver.readyToFinish() == (barrier != 0));
+    assert(!exists(root + "/VECTMAP/.maps/barrier/.ready"));
+    assert(!exists(root + "/VECTMAP/.pending-stream-activation.json"));
+    if (barrier <= 1)
+      authorized = false; // before last byte / after last byte before grant
+    const auto grant = receiver.readyToFinish()
+        ? boundary.begin(authorized, true, true, "barrier",
+                         receiver.snapshot().signedManifestReceipt) : 0;
+    if (grant == 0) {
+      assert(!receiver.abort().ok);
+      assert(!receiver.readyToFinish());
+      assert(!receiver.finish().ok); // abort is sticky, never onComplete
+      assert(!exists(root + "/VECTMAP/.maps/barrier/.ready"));
+      assert(!exists(root + "/VECTMAP/.pending-stream-activation.json"));
+      MapTransferInstaller recovery(root);
+      assert(recovery.recoverInterruptedActivation().ok);
+      map_transfer::ActiveMapSelection selected;
+      assert(!recovery.readActiveMap(selected).ok);
+    } else {
+      if (barrier == 2) {
+        authorized = false; // grant-first, revocation before finalization
+        boundary.closeAdmission(true);
+      }
+      assert(boundary.owns(grant));
+      assert(receiver.finish().ok);
+      assert(barrier != 3 || revokedDuringFinalization);
+      assert(exists(root + "/VECTMAP/.maps/barrier/.ready"));
+      assert(exists(root + "/VECTMAP/.pending-stream-activation.json"));
+      MapTransferInstaller recovery(root);
+      assert(recovery.recoverPendingStreamActivation().ok);
+      map_transfer::ActiveMapSelection selected;
+      assert(recovery.readActiveMap(selected).ok);
+      assert(selected.sessionId == "barrier");
+      assert(boundary.end(grant));
+      assert(!boundary.end(grant));
+    }
+  }
+}
+
+void testDeviceBoundOperationActivationAndReceipt() {
+  namespace op=map_transfer::operation;
+  const auto fixture=readGoldenFixture();
+  const auto stream=decodeHex(fixture.at("stream_hex"));
+  const auto publicKey=decodeHex(fixture.at("public_key_x963_hex"));
+  map_transfer::MapStreamTrustStore trust;
+  assert(trust.add("map-test-2026-01",publicKey.data(),publicKey.size()));
+  const auto root=tempRoot(); const std::string device(32,'a'), operation(32,'1');
+  MapStreamReceiver receiver(trust,root,"operation-session",stream.size(),"9.0.0",
+                             1024*1024,{},{},{},{},operation);
+  assert(receiver.feed(stream.data(),stream.size()));
+  assert(receiver.readyToFinish());
+  const auto snapshot=receiver.snapshot();
+  map_transfer::Sha256Hasher hash; hash.update(stream.data(),stream.size());
+  op::Identity identity{device,operation,snapshot.manifestReceipt,
+      snapshot.signedManifestReceipt,hash.finalHex(),stream.size(),snapshot.sessionId,snapshot.mapId};
+  map_transfer::MapOperationStorage storage(root); op::Store ledger(storage,device);
+  assert(ledger.restore()==op::Result::Ok);
+  assert(ledger.admit(identity)==op::Result::Ok);
+  assert(ledger.prepare(identity)==op::Result::Ok);
+  // Even a mistakenly invoked finish cannot confer authority on prepared data.
+  assert(receiver.finish().ok);
+  assert(exists(root+"/VECTMAP/.maps/operation-session/.operation-ready"));
+  assert(!exists(root+"/VECTMAP/.maps/operation-session/.ready"));
+  MapTransferInstaller installer(root); installer.setOperationDeviceID(device);
+  assert(!installer.recoverPendingStreamActivation().ok);
+  ActiveMapSelection selected; assert(!installer.readActiveMap(selected).ok);
+  assert(ledger.accept(identity)==op::Result::Ok);
+  MapTransferInstaller beforeOwnershipInit(root);
+  assert(!beforeOwnershipInit.recoverPendingStreamActivation().ok);
+  MapTransferInstaller otherDevice(root); otherDevice.setOperationDeviceID(std::string(32,'f'));
+  assert(!otherDevice.recoverPendingStreamActivation().ok);
+  assert(installer.recoverPendingStreamActivation().ok);
+  assert(installer.readActiveMap(selected).ok);
+  op::Record receipt;
+  op::Store rebooted(storage,device); assert(rebooted.restore()==op::Result::Ok);
+  assert(rebooted.query(identity,receipt)==op::Result::Ok);
+  assert(receipt.phase==op::Phase::Accepted); // pointer is NOT installed
+  assert(rebooted.rendererAcknowledged(identity,selected.manifestReceipt,
+                                      selected.signedManifestReceipt)==op::Result::Ok);
+  op::Store finalBoot(storage,device); assert(finalBoot.restore()==op::Result::Ok);
+  assert(finalBoot.query(identity,receipt)==op::Result::Ok && receipt.phase==op::Phase::Installed);
+  assert(map_transfer::operationReceiptJson(receipt).find("\"phase\":\"installed\"")!=std::string::npos);
+  // The copied card retains usable signed map content, never local operation authority.
+  assert(otherDevice.readActiveMap(selected).ok);
+  op::Store foreign(storage,std::string(32,'f')); assert(foreign.restore()==op::Result::ForeignDevice);
+}
+
 void testStartingNewStreamPrunesAbandonedPausedSessions() {
   const std::string root = tempRoot();
   const auto manifest = verified();
@@ -1151,6 +1449,8 @@ void testStartingNewStreamPrunesAbandonedPausedSessions() {
 } // namespace
 
 int main() {
+  testDeviceBoundOperationActivationAndReceipt();
+  testReceiverCommitCancellationBarriers();
   testResumeRejectsSameLengthCheckpointCorruption();
   testDirectWriteCheckpointAndReady();
   testResumeSkipsDurablePrefixWithoutRewriting();
@@ -1176,6 +1476,8 @@ int main() {
   testConsumedReadyRootsAreNotReactivatedAndArePruned();
   testFrozenMapIdEdgesInstallAndActivate();
   testCrashBoundariesRemainRetryableWithMonotonicFinalization();
+  testEveryInstallerMutationAndInterruptedRecovery();
+  testSuccessfulReadbackDoesNotProvePowerDurability();
   testLargeDirectoryCleanupStreamsEntries();
   testTransportIndependentReceiverOwnsExactBodyLifecycle();
   testStartingNewStreamPrunesAbandonedPausedSessions();

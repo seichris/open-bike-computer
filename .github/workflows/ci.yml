@@ -802,10 +802,19 @@ jobs:
             tools/tests/test_map_label_selection.cpp \
             -o /tmp/test_map_label_selection
           /tmp/test_map_label_selection
+      - name: Durable map operation host tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            lib/device_transfer/durable_operation.cpp \
+            tools/tests/test_durable_operation.cpp \
+            -o /tmp/test_durable_operation
+          /tmp/test_durable_operation
       - name: Map transfer host tests
         run: |
           g++ -std=c++17 \
             lib/map_transfer/map_transfer.cpp \
+            lib/map_transfer/map_operation_journal.cpp \
+            lib/device_transfer/durable_operation.cpp \
             lib/maps/src/mapBlockFormat.cpp \
             lib/maps/src/mapLabelBlock.cpp \
             lib/maps/src/mapFontAsset.cpp \
@@ -817,6 +826,8 @@ jobs:
         run: |
           g++ -std=c++17 \
             lib/map_transfer/map_transfer.cpp \
+            lib/map_transfer/map_operation_journal.cpp \
+            lib/device_transfer/durable_operation.cpp \
             lib/maps/src/mapBlockFormat.cpp \
             lib/maps/src/mapLabelBlock.cpp \
             lib/maps/src/mapFontAsset.cpp \
@@ -832,6 +843,8 @@ jobs:
           /tmp/test_map_stream_format
           g++ -std=c++17 -Wall -Wextra -Werror \
             lib/map_transfer/map_transfer.cpp \
+            lib/map_transfer/map_operation_journal.cpp \
+            lib/device_transfer/durable_operation.cpp \
             lib/maps/src/mapBlockFormat.cpp \
             lib/maps/src/mapLabelBlock.cpp \
             lib/maps/src/mapFontAsset.cpp \
@@ -848,6 +861,8 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror \
             -DMAP_STREAM_DEVELOPMENT_TRUST=1 \
             lib/map_transfer/map_transfer.cpp \
+            lib/map_transfer/map_operation_journal.cpp \
+            lib/device_transfer/durable_operation.cpp \
             lib/maps/src/mapBlockFormat.cpp \
             lib/maps/src/mapLabelBlock.cpp \
             lib/maps/src/mapFontAsset.cpp \
@@ -863,6 +878,8 @@ jobs:
           /tmp/test_map_stream_compiled_trust_development
           g++ -std=c++17 -Wall -Wextra -Werror \
             lib/map_transfer/map_transfer.cpp \
+            lib/map_transfer/map_operation_journal.cpp \
+            lib/device_transfer/durable_operation.cpp \
             lib/map_transfer/map_stream_format.cpp \
             lib/map_transfer/map_stream_crypto.cpp \
             lib/map_transfer/map_stream_sha.cpp \
@@ -905,6 +922,7 @@ jobs:
             tools/tests/test_device_transfer_network_protocol.cpp \
             -o /tmp/test_device_transfer_network_protocol
           /tmp/test_device_transfer_network_protocol
+          python -m unittest tools.tests.test_map_commit_callbacks
           python -m unittest tools.tests.test_map_activation_handoff
       - name: Sound protocol host tests
         run: |

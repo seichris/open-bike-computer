@@ -1,3 +1,5 @@
+#include "power.hpp"
+extern Power power;
 /**
  * @file ble_navigation.cpp
  * @brief BLE navigation server implementation
@@ -2659,6 +2661,7 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
           (transferStatus.secureTransferV1 ? "true" : "false") +
           ",\"signedMapStreamV1\":" +
           (transferStatus.signedMapStreamV1 ? "true" : "false") +
+          ",\"mapOperationsV1\":" + (mapTransferHttp.operationsSupported() ? "true" : "false") +
           ",\"legacyArchivePolicy\":\"" +
           status_json::escape(transferStatus.legacyArchivePolicy) + "\"}";
 
@@ -2741,6 +2744,8 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
   }
 
   body += ",\"activation\":" + mapTransferHttp.activationStatusJson(true);
+  const auto operation=mapTransferHttp.operationStatusJson();
+  if (!operation.empty()) body += ",\"operation\":" + operation;
 
   if (!transferStatus.lastErrorCode.empty() &&
       !mapTransferHttp.activationHasError()) {
@@ -2784,6 +2789,7 @@ static std::string genericTransferStatusJson() {
   body += transferStatus.secureTransferV1 ? "true" : "false";
   status_json::appendBoolField(body, "signedMapStreamV1",
                       transferStatus.signedMapStreamV1);
+  status_json::appendBoolField(body, "mapOperationsV1", mapTransferHttp.operationsSupported());
   status_json::appendBoolField(body, "firmwareMaintenanceV1",
                       kFirmwareMaintenanceSupported);
   status_json::appendStringField(body, "legacyArchivePolicy",
@@ -5202,7 +5208,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
   case 5:
     Serial.println("BLE Settings: Reboot command received! Restarting...");
     delay(500);
-    ESP.restart();
+    power.deviceRestart();
     return;
   case 6:
     mapRenderSettings.mapRotationMode =
@@ -6088,6 +6094,12 @@ public:
       return;
     }
 
+    if (hasPrefix(value, "MOPQ|")) {
+      if (requireAuthenticated("map operation query"))
+        mapTransferHttp.requestOperationStatus(value.substr(5));
+      return;
+    }
+
     if (hasPrefix(value, "MSTS")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("map transfer status")) {
@@ -6561,6 +6573,12 @@ public:
       return;
     }
 
+    if (hasPrefix(value, "MOPQ|")) {
+      if (requireAuthenticated("map operation query"))
+        mapTransferHttp.requestOperationStatus(value.substr(5));
+      return;
+    }
+
     if (hasPrefix(value, "MSTS")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
       if (!requireAuthenticated("native map transfer status")) {
@@ -6776,6 +6794,7 @@ void BLENavigationServer::init(const char *deviceName) {
     xSemaphoreGive(deviceOwnershipMutex);
   }
   if (deviceOwnershipReady) {
+    mapTransferHttp.setOperationDeviceID(stableDeviceId);
     Serial.printf("BLE: Ownership identity=%s claimed=%d name='%s'\n",
                   stableDeviceId.c_str(), ownershipClaimed,
                   effectiveDeviceName.c_str());
@@ -6983,9 +7002,11 @@ void BLENavigationServer::process() {
       static_cast<uint32_t>(millis() - ownershipRestartRequestedMs) >= 500) {
     Serial.println("BLE: Restarting after ownership removal");
     Serial.flush();
-    ESP.restart();
+    power.deviceRestart();
   }
   processPendingTransferControl();
+  if (mapTransferHttp.takeOperationStatusNotification())
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
   pumpPendingMapTransferStatusChunks();
   if (pendingMapAvailabilityStatus.load(std::memory_order_acquire) &&
       !pendingMapTransferStatusChunks.active() && bleSessionAuthenticated &&

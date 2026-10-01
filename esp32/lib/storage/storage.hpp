@@ -129,6 +129,10 @@ private:
 class Storage {
 private:
   std::atomic<bool> isSdLoaded;
+  std::atomic<bool> shutdownAdmissionClosed_{false};
+  std::atomic<bool> shutdownStarted_{false};
+  std::atomic<bool> shutdownComplete_{false};
+  static void shutdownTask(void *context);
   // True when /sdcard is currently backed by the main-branch FFat fallback.
   // Diagnostics must not treat this as removable-SD availability, but a
   // failed SD retry must restore it so the rest of the application keeps the
@@ -150,6 +154,9 @@ private:
 public:
   Storage();
 
+  // Called only after transfer, renderer and diagnostics producer ACKs.
+  // Starts a dedicated internal-stack unmount task; never waits on the UI.
+  bool pollShutdownQuiescence();
   esp_err_t initSD();
   // Remount the removable card when requested. Existing callers retain the
   // FFat fallback by default. Diagnostics keeps whichever backend owns

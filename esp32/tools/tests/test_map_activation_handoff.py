@@ -41,15 +41,31 @@ class MapActivationHandoffTests(unittest.TestCase):
 
     def test_verified_stream_response_closes_before_activation_handoff(self):
         body = method_body("handleInstallStream")
-        close = body.index("client.requestHttpResponseClose();")
+        defer = body.index("deferActivationUntilResponse(")
+        close = body.index("client.requestHttpResponseClose();", defer)
         success = body.index("sendJson(client, 200,", close)
-        defer = body.index("deferActivationUntilResponse(", success)
         self.assertLess(close, success)
-        self.assertLess(success, defer)
+        self.assertLess(defer, close)
         completion = DEVICE_TRANSFER_SOURCE.index(
             "handler->responseDidComplete(request, peerClosedCleanly);"
         )
         self.assertIn("if (keepAlive)", DEVICE_TRANSFER_SOURCE[:completion])
+
+    def test_revocation_is_fenced_before_finalizing_finish(self):
+        body = method_body("handleInstallStream")
+        prepared = body.index("receiver->readyToFinish()")
+        grant = body.index("beginAuthorizedCommit(")
+        finish = body.index("receiver->finish()")
+        self.assertLess(prepared, grant)
+        self.assertLess(grant, finish)
+        self.assertIn("receiver->abort()", body[:finish])
+
+    def test_both_response_outcomes_preserve_accepted_work(self):
+        for name in ("responseDidComplete", "responseDidAbort"):
+            body = method_body(name)
+            self.assertIn("beginDeferredActivation(deferred,", body)
+            self.assertNotIn("discardUnselectedStreamMap", body)
+            self.assertNotIn("isRequestAuthorized", body)
 
     def test_unsigned_archive_routes_are_rejected(self):
         body = method_body("handleRequest")
@@ -59,7 +75,10 @@ class MapActivationHandoffTests(unittest.TestCase):
         self.assertNotIn("handlePut(", SOURCE)
 
     def test_dedicated_task_is_reserved_for_signed_stream_boot_recovery(self):
-        self.assertEqual(SOURCE.count("startActivationTask("), 2)
+        # Only the declaration and the two boot-recovery entry points may
+        # create a standalone task; live HTTP remains internal-owner dispatched.
+        self.assertEqual(SOURCE.count("startActivationTask("), 3)
+        self.assertIn("startActivationTask(", method_body("resumePendingActivations"))
         self.assertIn(
             "startActivationTask(",
             method_body("resumePendingStreamActivation"),

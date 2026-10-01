@@ -212,7 +212,7 @@ static void processFirmwareMaintenanceMode() {
     if (disabled && deviceTransferHttp.waitUntilStopped(5500)) {
       Serial.println("FIRMWARE_MAINTENANCE: returning to normal boot");
       delay(250);
-      ESP.restart();
+      power.deviceRestart();
     }
   }
   delay(5);
@@ -1501,6 +1501,28 @@ static void processDisconnectedShutdown() {
  *
  */
 void setup() {
+  power.configureShutdown(
+      []() { deviceTransferHttp.beginShutdown(); return true; },
+      []() {
+        deviceTransferHttp.pollShutdown();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+        const bool audioStopped = waveshare_board::speaker::pollShutdownQuiescence();
+#else
+        const bool audioStopped = true;
+#endif
+        return audioStopped && deviceTransferHttp.isShutdownQuiescent() &&
+               mapTransferHttp.shutdownQuiescent();
+      },
+      []() { return mapView.pollShutdownQuiescence(); },
+      []() { return deviceTransferHttp.commitInProgress(); },
+      []() { return storage.pollShutdownQuiescence(); },
+      []() -> uint64_t {
+        const auto activation = mapTransferHttp.activationSnapshot();
+        // Only actual activation progress refreshes the no-progress watchdog;
+        // status polling/keepalives cannot extend the absolute ten-minute cap.
+        return (uint64_t{activation.sequence} << 16) |
+               (uint64_t{activation.step} << 8) | activation.progress;
+      });
 #ifdef HAS_HARDWARE_GPS
   gpsMutex = xSemaphoreCreateMutex();
 #endif
@@ -2100,7 +2122,7 @@ void setup() {
     (void)ride_diagnostics::record(ride_diagnostics::Level::Error, "boot",
                                    "confirmation_failed", "{}");
     firmwareUpdateHttp.rejectRunningApp();
-    ESP.restart();
+    power.deviceRestart();
     return;
   }
   boot_diagnostics::markReady();
@@ -2122,6 +2144,7 @@ void setup() {
  *
  */
 void loop() {
+  if (power.processShutdown()) { delay(5); return; }
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::heartbeat(
       runtime_watchdog_diagnostics::Role::Ui);
@@ -2138,7 +2161,7 @@ void loop() {
       millis() - firmware_maintenance::activeSinceMs() >= 750) {
     Serial.println("FIRMWARE_MAINTENANCE: rebooting into maintenance");
     Serial.flush();
-    ESP.restart();
+    power.deviceRestart();
   }
 #endif
   uint32_t now = millis();

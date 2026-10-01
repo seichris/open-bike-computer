@@ -5,6 +5,9 @@
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../status_json/status_json.hpp"
+#include "../power/power.hpp"
+
+extern Power power;
 
 #include <algorithm>
 #include <cctype>
@@ -772,14 +775,16 @@ void FirmwareUpdateHttpServer::handleFinalize(
     return;
   }
 
-  if (!transferServer_->beginAuthorizedCommit(request)) {
+  const auto commitGrant = transferServer_->beginAuthorizedCommit(
+      request, "firmware", request.path, expectedSha256);
+  if (commitGrant == 0) {
     resetUploadState();
     fail(client, 409, "transfer_cancelled",
          "firmware transfer authorization was revoked before activation");
     return;
   }
   if (!transaction_.beginCommit()) {
-    transferServer_->endAuthorizedCommit();
+    transferServer_->endAuthorizedCommit(commitGrant);
     resetUploadState();
     fail(client, 409, "ota_commit_state_invalid",
          "firmware transaction could not enter the commit boundary");
@@ -790,7 +795,7 @@ void FirmwareUpdateHttpServer::handleFinalize(
   transferServer_->noteStatusChanged("commit_boundary");
   result = operationOwner_.selectBootPartition(updatePartition);
   if (result != ESP_OK) {
-    transferServer_->endAuthorizedCommit();
+    transferServer_->endAuthorizedCommit(commitGrant);
     resetUploadState();
     fail(client, 500, "set_boot_partition_failed", esp_err_to_name(result));
     return;
@@ -809,8 +814,11 @@ void FirmwareUpdateHttpServer::handleFinalize(
                 updatePartition->label, pendingVersion.c_str(),
                 static_cast<unsigned>(pendingBuild), appDescription.version,
                 appDescription.project_name);
-  delay(750);
-  ESP.restart();
+  // Boot selection is complete. Close admission before releasing its grant;
+  // the main shutdown coordinator drains this HTTP worker before rebooting.
+  transferServer_->beginShutdown();
+  transferServer_->endAuthorizedCommit(commitGrant);
+  power.deviceRestart();
 }
 
 void FirmwareUpdateHttpServer::handleCancel(device_transfer::TransferClient &client) {

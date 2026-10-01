@@ -42,6 +42,8 @@ public:
   enum class RollbackKind { None, Runtime, Transfer };
   RollbackKind rollbackKind_ = RollbackKind::Runtime;
   std::string rollbackSession_ = "already-selected";
+  std::string rollbackOperationID_, terminalOperationID_, terminalSessionID_, terminalMapID_;
+  bool terminalAutomaticExit_ = false, terminalFailed_ = false;
   bool rollbackAutomaticExit_ = false;
   bool rollbackSucceeded_ = false;
   bool rollbackComplete_ = false;
@@ -51,6 +53,7 @@ public:
   void lockState() {}
   void unlockState() {}
   void requestAutomaticExit() {}
+  void releaseCommitGrant() {}
   void executeRollback();
 };
 '''

@@ -499,7 +499,9 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
         !safeSessionIdentifier(sessionId))
       continue;
     const std::string root = joinPath(mapsRoot, sessionId);
-    const bool ready = regularFileExists(joinPath(root, kReadyFile)) ||
+    const bool operationReady = regularFileExists(joinPath(root, ".operation-ready")) ||
+                                regularFileExists(joinPath(root, ".operation-ready.bak"));
+    const bool ready = operationReady || regularFileExists(joinPath(root, kReadyFile)) ||
                        regularFileExists(joinPath(root, kReadyFile) + ".bak");
     const bool consumed =
         regularFileExists(joinPath(root, kConsumedFile)) ||
@@ -513,7 +515,7 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
     std::string marker;
     bool markerValid = false;
     const std::string markerPath =
-        joinPath(root, ready ? kReadyFile : kInstallingFile);
+        joinPath(root, operationReady ? ".operation-ready" : (ready ? kReadyFile : kInstallingFile));
     for (const std::string &path : {markerPath, markerPath + ".bak"}) {
       std::string value;
       if (!readText(path, value, 2048))
@@ -624,9 +626,9 @@ MapStreamInstallSession::MapStreamInstallSession(
     std::string storageRoot, std::string sessionId,
     MapStreamCheckpointPolicy checkpointPolicy, MapStreamNowCallback now,
     std::shared_ptr<MapStreamStorage> storage,
-    MapStreamStatusCallback onStatus)
+    MapStreamStatusCallback onStatus, std::string operationID)
     : storageRoot_(std::move(storageRoot)), sessionId_(std::move(sessionId)),
-      checkpointPolicy_(checkpointPolicy), now_(std::move(now)),
+      operationID_(std::move(operationID)), checkpointPolicy_(checkpointPolicy), now_(std::move(now)),
       storage_(std::move(storage)), onStatus_(std::move(onStatus)) {
   if (!storageRoot_.empty() && storageRoot_.back() == '/')
     storageRoot_.pop_back();
@@ -642,6 +644,10 @@ MapStreamInstallSession::~MapStreamInstallSession() { closeCurrentFile(true); }
 bool MapStreamInstallSession::onManifest(
     const VerifiedMapStreamManifest &manifest,
     std::string_view canonicalManifest) {
+  if (!operationID_.empty() && (operationID_.size()!=32 ||
+      !std::all_of(operationID_.begin(),operationID_.end(),[](char c) {
+        return (c>='0' && c<='9') || (c>='a' && c<='f'); })))
+    return fail("operation_id","invalid map operation identity");
   closeCurrentFile(true);
   nextFileIndex_ = 0;
   status_.sequence++;
@@ -1011,7 +1017,7 @@ bool MapStreamInstallSession::loadMatchingCheckpoint(
       return true;
     }
   }
-  const std::string readyPath = joinPath(inactiveRoot(), kReadyFile);
+  const std::string readyPath = joinPath(inactiveRoot(), operationID_.empty() ? kReadyFile : ".operation-ready");
   for (const std::string &path : {readyPath, readyPath + ".bak"}) {
     if (storage_->readText(path, value, 2048) && tryReady(value))
       return true;
@@ -1104,8 +1110,9 @@ bool MapStreamInstallSession::writeFinalMetadata(
       "\",\"payloadBytes\":" + std::to_string(status_.totalPayloadBytes) +
       ",\"protocolVersion\":2,\"sessionId\":\"" + jsonEscape(sessionId_) +
       "\",\"signedManifestReceipt\":\"" + status_.signedManifestReceipt +
-      "\",\"streamFormatVersion\":1,\"validationVersion\":1}\n";
-  if (!writeFileAtomic(*storage_, joinPath(inactiveRoot(), kReadyFile), ready))
+      "\",\"streamFormatVersion\":1,\"validationVersion\":1" +
+      (operationID_.empty() ? std::string() : ",\"operationID\":\"" + operationID_ + "\"") + "}\n";
+  if (!writeFileAtomic(*storage_, joinPath(inactiveRoot(), operationID_.empty() ? kReadyFile : ".operation-ready"), ready))
     return fail("stream_ready_write", "could not publish map ready marker");
   advanceFinalization();
   const std::string pending =

@@ -429,6 +429,8 @@ final class FirmwareUpdateManager: ObservableObject {
                 defer {
                     if !finalized {
                         self.deviceTransferManager.exitFirmwareTransfer(bleManager: bleManager)
+                    } else {
+                        self.deviceTransferManager.releaseFirmwareAfterReboot(bleManager: bleManager)
                     }
                 }
 

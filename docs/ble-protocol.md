@@ -2245,3 +2245,95 @@ normative offsets, validation, replay/expiry and compatibility matrix. The JSON
 contract generates Swift/C++ constants and append-only widget IDs. Golden
 packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
 by both languages.
+
+### Device operation lifecycle clarification
+
+Signed-stream HTTP `ready` acknowledges validated/finalized staging, not an
+installed map. Only fresh matching terminal renderer activation can establish
+legacy success. The lifecycle extension's capability, operation IDs, authenticated
+`MOPQ` query, receipt fields, `.operation-ready` migration and qualification gate
+are specified in [Wi-Fi device operation lifecycle](wifi-device-operation-lifecycle.md).
+The extension is disabled by default pending its explicit release gates. It
+preserves the existing authenticated/chunked `MSTS` channel and introduces no
+new characteristic or unsigned map route.
+
+## Experimental device-bound map operations (qualification-gated)
+
+The implementation recognizes an opt-in map operation envelope, separate from
+signed map content identity. `MAP_OPERATIONS_V1_ENABLED` defaults to **0**; no
+production profile enables it. The existing signed stream, authentication,
+HTTPS leaf pin, bearer-token generation, and unsigned-archive rejection remain
+unchanged. `capabilities.mapOperationsV1` in authenticated MSTS/DSTS and
+`mapOperationsV1` in HTTP map status are true only when this experiment is
+compiled in, ownership identity is available, and stream storage is available.
+Do not infer support from the firmware version or the presence of a map pointer.
+
+An opt-in PUT to the existing
+`/map-transfer/sessions/<content-session>/install-stream` endpoint supplies both
+`X-Map-Operation-ID` (32 lowercase hexadecimal characters, random per attempt)
+and `X-Map-Stream-SHA256` (64 lowercase hexadecimal characters, SHA-256 of the
+**entire HTTP entity**, including the signed-stream footer). Duplicate headers,
+partial header pairs and malformed values fail closed; they never downgrade to
+a legacy upload. The device verifies the body hash, length and existing signed
+manifest before accepting the operation. Reusing an operation ID with another
+hash, length or content session is a conflict. A retry of an accepted/terminal
+operation returns its retained result rather than rewriting selected content.
+
+The current experiment uses the implicit P2 commit grant after complete-body
+verification. It persists `prepared`, then `accepted`, before finalization can
+write boot-eligible metadata. It does **not** add a separate client commit POST.
+Interrupted pre-grant receiving data has no durable result and remains
+nonactivatable. Transport cancellation after acceptance does not revoke the
+accepted operation. A lost acceptance response requires querying the exact ID,
+not treating a network error as cancellation or starting another attempt.
+
+Authenticated `GET /map-transfer/operations/<operationID>` returns a bounded
+JSON receipt. Owner-authenticated `MOPQ|<operationID>` queues the same query on
+the storage-control worker and returns a full ordinary MSTS response with an
+optional `operation` object, using existing MSTC framing when needed. The BLE
+reader must match the returned ID and fresh connection epoch. Cached operation
+objects in unrelated status notifications do not by themselves answer a query.
+A receipt uses these names:
+
+```json
+{"schemaVersion":1,"deviceID":"32 lowercase hex","operationID":"32 lowercase hex","sessionID":"content session","mapID":"logical map","manifestReceipt":"64 lowercase hex","signedManifestReceipt":"64 lowercase hex","streamSHA256":"64 lowercase hex","streamBytes":123,"phase":"accepted","revision":3}
+```
+
+`streamBytes` and `revision` are unsigned 64-bit values. Phases are `receiving`,
+`prepared`, `accepted`, `installed`, `failed`, and `cancelled`. Only `installed`
+is renderer-confirmed success. A query without a retained result returns
+`{schemaVersion:1,deviceID,operationID,status:"result_unavailable"}`; an unreadable,
+corrupt or foreign-device ledger reports `storage_unavailable`. Neither is a
+success or permission to implicitly replay an unknown attempt. The device writes
+an `installed` receipt on the storage worker **after** the exact renderer ACK,
+then publishes installed status and releases the grant. Receipt-write failure
+keeps the result pending and prevents unsafe shutdown or another installation.
+
+### Storage, migration and explicit unfinished gates
+
+- The bounded ledger has four records and two checksummed generation slots.
+  Unresolved records are never automatically evicted. At capacity, new operation
+  admission fails rather than deleting evidence. A released result-pruning and
+  acknowledgement protocol remains a prerequisite to production enablement;
+  the internal tombstone operation is not yet exposed on the wire
+- New ready metadata is named `.operation-ready`, not legacy `.ready`, and
+  carries the operation ID. Activation and transaction recovery require an
+  accepted/installed ledger record bound to the authenticated ownership device
+  ID and exact content receipts. Before ownership initialization, new operation
+  recovery defers. A fresh post-boot renderer ACK reconstructs a terminal result
+  for a previously accepted selection; pointer presence alone never does so
+- A copied SD card may still contain legitimate signed map content. Its copied
+  operation ledger is foreign and cannot confirm installation for this device
+- Legacy `.ready` and pending records retain their existing recovery behavior.
+  They have unknown historical operation authorization and are never upgraded
+  into a device-bound receipt. Older firmware does not recognize the new ready
+  filename, but firmware downgrade still requires draining accepted operations
+  and an explicit metadata compatibility check
+- The SD adapter uses file sync, close and checksummed readback. These establish
+  the host/VFS ordering model, **not** guaranteed SD-controller power durability.
+  Per-board/card power-cut qualification remains mandatory. The checksum detects
+  accidental corruption; it is not authentication against a malicious card
+- OTA operation receipts are not implemented by this SD ledger. OTA requires an
+  independent internal persistent adapter and its own boot-acceptance contract
+- Hardware build/flash, iPhone background/relaunch behavior, and production
+  rollout are separate gates; portable tests do not establish those outcomes

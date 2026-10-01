@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <string>
 
+#include "commit_boundary_policy.hpp"
 #include "device_transfer_network_protocol.hpp"
 #include "device_transfer_network_owner.hpp"
 #include "device_transfer_tls.hpp"
@@ -63,6 +64,11 @@ struct HttpTransferStatus {
 };
 
 struct HttpRequest {
+  uint64_t mapOperationAdmissionRevision = 0;
+  bool hasMapOperationAdmissionRevision = false;
+  std::string mapOperationID;
+  std::string mapStreamSHA256;
+  bool mapOperationHeadersPresent = false;
   std::string method;
   std::string path;
   std::string transferToken;
@@ -71,6 +77,7 @@ struct HttpRequest {
   bool hasContentLength = false;
   bool connectionClose = false;
   bool connectionReuseRequested = false;
+  uint64_t requestSequence = 0;
   uint32_t transferGeneration = 0;
 };
 
@@ -121,8 +128,17 @@ public:
   HttpTransferStatus status() const;
   bool isRequestAuthorized(const HttpRequest &request);
   void noteDiagnosticsModeDecision(bool matches);
-  bool beginAuthorizedCommit(const HttpRequest &request);
-  void endAuthorizedCommit();
+  using CommitGrant = commit_boundary_policy::Grant;
+  CommitGrant beginAuthorizedCommit(const HttpRequest &request,
+                                    const std::string &mode,
+                                    const std::string &operation,
+                                    const std::string &artifact);
+  bool endAuthorizedCommit(CommitGrant grant);
+  void setCommitAdmissionClosed(bool closed);
+  bool commitInProgress() const;
+  void beginShutdown();
+  void pollShutdown();
+  bool isShutdownQuiescent() const;
   bool waitUntilStopped(uint32_t timeoutMs);
 
 private:
@@ -131,6 +147,7 @@ private:
   bool enabled_ = false;
   bool startedAp_ = false;
   bool startedStation_ = false;
+  bool networkStopFailed_ = false;
   bool hotspotFallback_ = false;
   std::string hotspotFallbackReason_;
   std::string requestedHotspotFallbackReason_;
@@ -154,8 +171,9 @@ private:
   bool currentRequestAuthorized_ = false;
   uint8_t currentAuthorizationBits_ = 0;
   TransferFailureRecord lastTransferFailure_;
-  bool commitInProgress_ = false;
+  commit_boundary_policy::Boundary commitBoundary_;
   uint32_t transferGeneration_ = 0;
+  uint64_t requestSequence_ = 0;
   uint32_t statusRevision_ = 1;
   StatusChangedCallback statusChangedCallback_ = nullptr;
   uint32_t minimumInternalFree_ = UINT32_MAX;
