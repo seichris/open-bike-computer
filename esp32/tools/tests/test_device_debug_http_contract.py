@@ -80,6 +80,24 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
     def test_ios_and_firmware_benchmark_gates_are_identical(self):
         self.assertEqual(IOS_BENCHMARK_GATES, FIRMWARE_BENCHMARK_GATES)
 
+    def test_http_consumers_declare_direct_wifi_dependency_in_every_profile(self):
+        # PlatformIO deep LDF only copies a circular dependency's own include
+        # directory. HTTP public types embed WiFiServer/WiFiClient, so relying
+        # on the circular device_transfer edge drops WiFi/Network include dirs.
+        for relative in (
+            "device_debug/device_debug_http.hpp",
+            "firmware_update/firmware_update_http.hpp",
+            "map_transfer_http/map_transfer_http.hpp",
+            "ride_diagnostics/ride_diagnostics_http.hpp",
+        ):
+            header = (ROOT / "lib" / relative).read_text(encoding="utf-8")
+            direct = header.index("#include <WiFi.h>")
+            transport = header.index('#include "../device_transfer/device_transfer_http.hpp"')
+            self.assertLess(direct, transport, relative)
+            # Include must remain unconditional for ordinary/production stubs,
+            # not just the remote-debug or diagnostics profiles.
+            self.assertNotIn("#if", header[:direct], relative)
+
     def test_ordinary_builds_compile_only_route_free_debug_stubs(self):
         real_implementation = HTTP.index("#if DEVICE_REMOTE_DEBUG")
         route_registration = HTTP.index(

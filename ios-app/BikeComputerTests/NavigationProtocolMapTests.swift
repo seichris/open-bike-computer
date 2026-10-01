@@ -3253,9 +3253,10 @@ extension NavigationProtocolTests {
                 managerSource.contains(
                     "throw OfflineMapPlatformError.firmwareMapStreamUnsupported"
                 ) &&
-                managerSource.contains(
-                    "tlsCertificateSHA256:\n                            transferSession.tlsCertificateSHA256"
-                ),
+                managerSource.range(
+                    of: #"\btlsCertificateSHA256:\s*transferSession\.tlsCertificateSHA256\s*,"#,
+                    options: .regularExpression
+                ) != nil,
             "device map installation is signed-stream-only and pins background TLS"
         )
         let platformSourceURL = URL(fileURLWithPath:

@@ -6,6 +6,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+// Explicit direct dependency for PlatformIO circular-library include paths.
+#include <WiFi.h>
 #include "../device_transfer/device_transfer_http.hpp"
 #include "device_operation_owner.hpp"
 #include "firmware_update_policy.hpp"

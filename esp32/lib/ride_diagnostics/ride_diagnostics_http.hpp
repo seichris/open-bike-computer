@@ -1,5 +1,7 @@
 #pragma once
 
+// Explicit direct dependency for PlatformIO circular-library include paths.
+#include <WiFi.h>
 #include "../device_transfer/device_transfer_http.hpp"
 
 namespace ride_diagnostics {

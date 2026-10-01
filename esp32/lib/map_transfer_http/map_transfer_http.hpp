@@ -7,6 +7,8 @@
 #include <atomic>
 #include <functional>
 
+// Explicit direct dependency for PlatformIO circular-library include paths.
+#include <WiFi.h>
 #include "../device_transfer/device_transfer_http.hpp"
 #include "../device_transfer/device_transfer_http_limits.hpp"
 #include "map_transfer.hpp"
