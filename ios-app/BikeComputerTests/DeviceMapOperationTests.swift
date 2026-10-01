@@ -6,6 +6,24 @@ struct DeviceMapOperationTests {
         if try !condition() { fatalError(message) }
     }
     static func main() throws {
+        if CommandLine.arguments.count == 5 && CommandLine.arguments[1] == "completion-crash" {
+            let operationURL = URL(fileURLWithPath: CommandLine.arguments[2])
+            let responseURL = URL(fileURLWithPath: CommandLine.arguments[3])
+            let crashBeforeWrite = CommandLine.arguments[4] == "before"
+            let store = DeviceMapOperationStore(url: operationURL)
+            let record = try store.records()[0]
+            let barrier = DeviceMapUploadCompletionBarrier()
+            barrier.complete(persist: {
+                barrier.finishEvents { fatalError("OS completion crossed crash boundary") }
+                if crashBeforeWrite { exit(71) }
+                guard try store.completeUpload(operationID: record.operationID, deviceID: record.deviceID,
+                    appNamespace: record.appNamespace, mapID: record.mapID, sessionID: record.sessionID,
+                    uploadAttemptID: record.uploadAttemptID!, responseBody: Data(contentsOf: responseURL),
+                    httpStatus: 200, errorCode: nil) else { fatalError("crash fixture identity mismatch") }
+                exit(72) // process dies after durable ingest, before continuation or OS acknowledgement
+            }, publish: { _ in fatalError("client publication crossed crash boundary") })
+            return
+        }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -35,6 +53,74 @@ struct DeviceMapOperationTests {
         }
         func expectFailure(_ operation: () throws -> Void, _ label: String) {
             do { try operation(); fatalError(label) } catch { }
+        }
+        let completionURL = directory.appendingPathComponent("completion.json")
+        let completionStore = DeviceMapOperationStore(url: completionURL)
+        try completionStore.save(record)
+        let completionAttempt = UUID()
+        try completionStore.beginUpload(operationID: record.operationID, deviceID: deviceID,
+            appNamespace: record.appNamespace, uploadAttemptID: completionAttempt)
+        let responseBody = try JSONSerialization.data(withJSONObject: ["operation":
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(receipt("prepared", 2)))])
+        let completionBarrier = DeviceMapUploadCompletionBarrier()
+        var callbackOrder: [String] = []
+        completionBarrier.complete(persist: {
+            callbackOrder.append("ingest")
+            completionBarrier.finishEvents { callbackOrder.append("OS") }
+            try check(try completionStore.completeUpload(operationID: record.operationID, deviceID: deviceID,
+                appNamespace: record.appNamespace, mapID: record.mapID, sessionID: record.sessionID,
+                uploadAttemptID: completionAttempt, responseBody: responseBody, httpStatus: 200, errorCode: nil))
+            try check(callbackOrder == ["ingest"], "OS delivery cannot race persistence")
+        }, publish: { error in
+            precondition(error == nil)
+            precondition((try? DeviceMapOperationStore(url: completionURL).records()[0].lastReceipt?.phase) == "prepared")
+            callbackOrder.append("continuation")
+        })
+        try check(callbackOrder == ["ingest", "continuation", "OS"], "real completion barrier orders durable ingest and both deliveries")
+
+        let failedWriteURL = directory.appendingPathComponent("completion-write-failure.json")
+        let goodWriter = DeviceMapOperationStore(url: failedWriteURL)
+        try goodWriter.save(record)
+        try goodWriter.beginUpload(operationID: record.operationID, deviceID: deviceID,
+            appNamespace: record.appNamespace, uploadAttemptID: completionAttempt)
+        let beforeFailure = try Data(contentsOf: failedWriteURL)
+        let failingWriter = DeviceMapOperationStore(url: failedWriteURL, atomicWriter: { _, _ in
+            throw CocoaError(.fileWriteOutOfSpace)
+        })
+        var failedDelivery = false
+        var failedOSDelivery = false
+        completionBarrier.complete(persist: {
+            completionBarrier.finishEvents {
+                precondition(failedDelivery)
+                failedOSDelivery = true
+            }
+            _ = try failingWriter.completeUpload(operationID: record.operationID, deviceID: deviceID,
+                appNamespace: record.appNamespace, mapID: record.mapID, sessionID: record.sessionID,
+                uploadAttemptID: completionAttempt, responseBody: responseBody, httpStatus: 200, errorCode: nil)
+        }, publish: { error in failedDelivery = error != nil })
+        let afterFailure = try Data(contentsOf: failedWriteURL)
+        try check(failedDelivery && failedOSDelivery && afterFailure == beforeFailure,
+                  "atomic-write failure delivers an error and preserves unresolved durable intent")
+
+        let responseURL = directory.appendingPathComponent("completion-response.json")
+        try responseBody.write(to: responseURL)
+        for mode in ["before", "after"] {
+            let crashURL = directory.appendingPathComponent("crash-\(mode).json")
+            try beforeFailure.write(to: crashURL)
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+            child.arguments = ["completion-crash", crashURL.path, responseURL.path, mode]
+            try child.run()
+            child.waitUntilExit()
+            try check(child.terminationStatus == (mode == "before" ? 71 : 72), "fault probe reaches intended process-death boundary")
+            let recovered = try DeviceMapOperationStore(url: crashURL).records()[0]
+            if mode == "before" {
+                try check(recovered.lastReceipt == nil && recovered.uploadCompletedAt == nil,
+                          "death before ingest retains exact unresolved attempt")
+            } else {
+                try check(recovered.lastReceipt?.phase == "prepared" && recovered.uploadCompletedAt != nil,
+                          "death before callbacks preserves durable Prepared receipt for same-ID recovery")
+            }
         }
         try store.save(record)
         try check(try DeviceMapOperationStore(url: url).records() == [record], "atomic record survives relaunch")

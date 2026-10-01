@@ -3026,6 +3026,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
     }
 
     private let lock = NSLock()
+    private let completionBarrier = DeviceMapUploadCompletionBarrier()
     private var pendingUploads: [Int: PendingUpload] = [:]
     private var retiredTaskIDs: Set<Int> = []
     private var networkClaims: [Int: UUID] = [:]
@@ -3407,65 +3408,65 @@ final class BackgroundMapUploadCoordinator: NSObject,
         }
         let nsError = error as NSError?
         let httpStatus = (task.response as? HTTPURLResponse)?.statusCode
-        var persistenceError: Error?
-        if let descriptor, descriptor.hasDurableIdentity,
-           let operationID = descriptor.operationID, let deviceID = descriptor.deviceID,
-           let namespace = descriptor.appNamespace, let attemptID = descriptor.uploadAttemptID {
-            do {
+        completionBarrier.complete(persist: {
+            if let descriptor, descriptor.hasDurableIdentity,
+               let operationID = descriptor.operationID, let deviceID = descriptor.deviceID,
+               let namespace = descriptor.appNamespace, let attemptID = descriptor.uploadAttemptID {
                 guard try DeviceMapOperationStore.shared.completeUpload(
                     operationID: operationID, deviceID: deviceID, appNamespace: namespace,
                     mapID: descriptor.mapID, sessionID: descriptor.sessionID,
                     uploadAttemptID: attemptID, responseBody: responseBody,
                     httpStatus: httpStatus, errorCode: nsError?.code
                 ) else { throw DeviceMapOperationStore.StoreError.conflict }
-            } catch { persistenceError = error }
-        }
-        let succeeded = error == nil && persistenceError == nil && httpStatus.map { 200..<300 ~= $0 } == true
-        if let descriptor {
-            BackgroundMapUploadStateStore.markCompleted(
-            taskID: task.taskIdentifier,
-            succeeded: succeeded,
-            descriptor: descriptor,
-            responseBody: responseBody,
-            errorCode: nsError?.code,
-            httpStatusCode: httpStatus,
-            completedBytes: task.countOfBytesSent,
-            expectedBytes: task.countOfBytesExpectedToSend
-            )
-        }
-        NotificationCenter.default.post(
-            name: BackgroundMapUploadStateStore.didChangeNotification,
-            object: nil
-        )
-        // The delegate owns only its upload claim. The session owner's root
-        // claim spans confirmation and is the only authority to leave the AP.
-        // Legacy/restored descriptors with no live claim cannot remove by SSID.
-        if let networkClaim {
-            Task { @MainActor in
-                DeviceTransferManager.releaseNetworkClaim(networkClaim)
             }
-        }
-        guard let pending else { return }
-        if let persistenceError {
-            pending.continuation.resume(throwing: persistenceError)
-            return
-        }
-        if let error {
-            pending.continuation.resume(throwing: error)
-            return
-        }
-        do {
-            guard let response = task.response else {
-                throw OfflineMapPlatformError.invalidResponse
+        }, publish: { persistenceError in
+            let succeeded = error == nil && persistenceError == nil && httpStatus.map { 200..<300 ~= $0 } == true
+            if let descriptor {
+                BackgroundMapUploadStateStore.markCompleted(
+                taskID: task.taskIdentifier,
+                succeeded: succeeded,
+                descriptor: descriptor,
+                responseBody: responseBody,
+                errorCode: nsError?.code,
+                httpStatusCode: httpStatus,
+                completedBytes: task.countOfBytesSent,
+                expectedBytes: task.countOfBytesExpectedToSend
+                )
             }
-            try MapTransferDeviceClient.validate(
-                response: response,
-                body: responseBody
+            NotificationCenter.default.post(
+                name: BackgroundMapUploadStateStore.didChangeNotification,
+                object: nil
             )
-            pending.continuation.resume()
-        } catch {
-            pending.continuation.resume(throwing: error)
-        }
+            // The delegate owns only its upload claim. The session owner's root
+            // claim spans confirmation and is the only authority to leave the AP.
+            // Legacy/restored descriptors with no live claim cannot remove by SSID.
+            if let networkClaim {
+                Task { @MainActor in
+                    DeviceTransferManager.releaseNetworkClaim(networkClaim)
+                }
+            }
+            guard let pending else { return }
+            if let persistenceError {
+                pending.continuation.resume(throwing: persistenceError)
+                return
+            }
+            if let error {
+                pending.continuation.resume(throwing: error)
+                return
+            }
+            do {
+                guard let response = task.response else {
+                    throw OfflineMapPlatformError.invalidResponse
+                }
+                try MapTransferDeviceClient.validate(
+                    response: response,
+                    body: responseBody
+                )
+                pending.continuation.resume()
+            } catch {
+                pending.continuation.resume(throwing: error)
+            }
+        })
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
@@ -3474,7 +3475,9 @@ final class BackgroundMapUploadCoordinator: NSObject,
         backgroundCompletionHandler = nil
         lock.unlock()
         if let completionHandler {
-            DispatchQueue.main.async(execute: completionHandler)
+            completionBarrier.finishEvents {
+                DispatchQueue.main.async(execute: completionHandler)
+            }
         }
     }
 

@@ -1,5 +1,42 @@
 import Foundation
 
+// Shared by the real URLSession delegate and the Foundation host harness.
+// The OS event acknowledgement waits for both persistence and client delivery.
+// A failed write is delivered as an error; the already-persisted upload intent
+// remains unresolved and must be queried on recovery.
+nonisolated final class DeviceMapUploadCompletionBarrier: @unchecked Sendable {
+    private let lock = NSLock()
+    private var activeCompletions = 0
+    private var eventCompletions: [() -> Void] = []
+
+    func complete(persist: () throws -> Void, publish: (Error?) -> Void) {
+        lock.lock()
+        activeCompletions += 1
+        lock.unlock()
+        let persistenceError: Error?
+        do { try persist(); persistenceError = nil }
+        catch { persistenceError = error }
+        publish(persistenceError)
+        lock.lock()
+        activeCompletions -= 1
+        let completions = activeCompletions == 0 ? eventCompletions : []
+        if activeCompletions == 0 { eventCompletions.removeAll() }
+        lock.unlock()
+        completions.forEach { $0() }
+    }
+
+    func finishEvents(_ completion: @escaping () -> Void) {
+        lock.lock()
+        if activeCompletions > 0 {
+            eventCompletions.append(completion)
+            lock.unlock()
+        } else {
+            lock.unlock()
+            completion()
+        }
+    }
+}
+
 nonisolated enum DeviceMapOperationControlAction: String, Equatable, Sendable {
     case query, commit, cancel, none
 }
@@ -200,7 +237,11 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
     static let observationProcessID = UUID()
     private let lock = NSRecursiveLock()
     private let url: URL
-    init(url: URL? = nil) {
+    private let atomicWriter: (Data, URL) throws -> Void
+    init(url: URL? = nil, atomicWriter: @escaping (Data, URL) throws -> Void = {
+        try $0.write(to: $1, options: .atomic)
+    }) {
+        self.atomicWriter = atomicWriter
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
         self.url = url ?? base.appendingPathComponent("DeviceOperations", isDirectory: true)
@@ -259,7 +300,7 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
         records = Self.retained(records, now: Date(), reserveSlot: false, protecting: record.operationID)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(records)
-        try data.write(to: url, options: .atomic)
+        try atomicWriter(data, url)
         guard try Data(contentsOf: url) == data else { throw StoreError.invalidStore }
     }
     // Compact after durable receipt + ACK, or legacy terminal evidence observed
@@ -295,7 +336,7 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
         let retained = Self.retained(try records(), now: now, reserveSlot: false, protecting: nil)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(retained)
-        try data.write(to: url, options: .atomic)
+        try atomicWriter(data, url)
         guard try Data(contentsOf: url) == data else { throw StoreError.invalidStore }
     }
 
