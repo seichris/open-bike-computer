@@ -36,6 +36,8 @@ intent before entry and sends these additional signed-stream request headers:
 
 - `X-Map-Operation-ID`: operation identity
 - `X-Map-Stream-SHA256`: expected exact body digest (64 lowercase hexadecimal)
+- `X-Map-Operation-Admission-Epoch`: saved 32-hex boot admission epoch
+- `X-Map-Operation-Admission-Revision`: saved unsigned creation revision
 
 The firmware independently hashes and validates the body. Same ID plus matching
 identity returns the retained state rather than reactivating; conflicting
@@ -74,11 +76,33 @@ records use conservative #540 recovery and do not gain historical authorization
 or exact-operation receipt guarantees. Foreign-card operation records cannot
 prove success for the new device. Renderer acknowledgement is followed by
 storage-worker terminal receipt persistence before installed status publication.
+Early main boot recovery binds its own installer to the exact read-only
+eFuse identity derivation used by ownership, before journal recovery or map
+rendering. BLE initialization still performs its normal NVS/authentication
+checks; hardware identity alone never authorizes a session. An interrupted
+new pointer is recovered against the accepted record before rendering, and
+only a fresh renderer ACK can produce its terminal receipt.
 Immediate read-back is not a FAT/card power-durability guarantee.
 
-Retention fails closed at capacity rather than evicting unresolved/replay
-history. An operational acknowledgement/pruning and downgrade process must be
-qualified before enabling this finite-capacity experimental contract broadly.
+The ledger retains four operation records. A new attempt first requests
+`GET /map-transfer/operations/admission`, returning `schemaVersion`, `deviceID`,
+`admissionEpoch` and `admissionRevision`. The app persists that token with the new
+intent before upload; a retry never refreshes it. The epoch is unpredictable,
+128-bit and regenerated each boot. The durable revision increases with each
+journal mutation; a serialized in-memory high-water mark rejects same-boot
+journal rollback. Known IDs reconcile across boots by their durable identity;
+an absent ID needs the exact current epoch/revision to be newly admitted.
+
+After atomically ingesting a terminal receipt, the owner may POST
+`/map-transfer/operations/<id>/acknowledge` with an empty body. This converts the
+terminal record to a tombstone; it cannot acknowledge accepted/unresolved work.
+A later explicit new admission may reuse that slot. Queries of tombstoned or
+evicted IDs return `result_unavailable`, and saved stale admission tokens cannot
+recreate them. Full unacknowledged history fails closed at capacity. Receipt
+writes and acknowledgements are serialized across HTTP and storage-worker
+callbacks, avoiding lost updates. Current/previous map roots remain protected;
+normal pruning can remove obsolete consumed content after terminal completion.
+The metadata/downgrade and physical persistence gates still apply.
 OTA continues using its existing SD-independent maintenance/boot acceptance;
 map journal records are never used as OTA success evidence.
 
@@ -105,11 +129,20 @@ promise BLE or polling execution while iOS is force-terminated.
 
 Explicit shutdown/restart is a sticky request processed by a nonblocking main
 loop barrier: stop admission, drain granted work/transfer workers and network,
-stop renderer/storage-control work, seal diagnostics, then issue the one-shot
+stop renderer/storage-control work, seal diagnostics on an internal-stack task,
+flush and unmount the selected storage backend, then issue the one-shot
 power permit. A missing/failed/late ACK or deadline defers shutdown with admission
 closed; it never forces deep sleep while late writes may remain. Manual light
 suspend is conservatively deferred until a reversible barrier is available.
 Automatic lock-managed IDF light sleep remains separate.
+
+The only existing manual-suspend caller is the legacy non-Arduino-GFX LVGL
+`gpioClickEvent`, registered with `POWER_SAVE` in T-Deck and Elecrow profiles.
+Neither Waveshare profile registers that callback. This change deliberately
+refuses that legacy manual MCU-suspend action too, rather than retain a storage
+barrier bypass; implementing a reversible suspend/resume barrier is an explicit
+remaining compatibility gate. The button's existing sleep message is replaced
+with an unavailable notice so it does not promise entry into sleep.
 
 ## Validation and release gates
 
@@ -135,3 +168,59 @@ The planning document's September 30 statement that worldwide signed-map rollout
 was closed is historical. Subsequent #546/#548 approvals/promotion remain intact;
 this work does not revert existing rollout configuration or grant new rollout
 approval. The new operation protocol has its own disabled-by-default gate.
+
+### SD-independent OTA operation receipts (qualification gate)
+
+`FIRMWARE_OPERATIONS_V1_ENABLED` defaults to `0`. No shipping profile enables
+this unqualified path. With the gate enabled, owner-authenticated DSTS and
+firmware HTTP status include `firmwareOperation` protocol version 1. The record
+binds the ownership device ID, random 32-lowercase-hex operation ID, signed image
+SHA-256, exact image byte count and inactive partition address. The existing
+same-image maintenance reset, fresh BLE owner authentication, pinned HTTPS,
+manifest signature/target validation, inactive-slot requirement and actual
+post-boot OTA validity checks remain mandatory. There is no SD dependency.
+
+The client saves operation/image/device identity before begin/finalize. A fresh
+status provides `admissionEpoch` (random 128-bit per boot) and
+`admissionRevision`; begin must echo both with `operationId`. Revision advances
+only on durable transitions. Epoch fences requests captured before reboot,
+including a namespace reset without ownership reset. Replaying a saved request
+cannot acquire a newly emptied store. A client must query an unknown operation,
+not preflight the old ID as a new operation. Reconnection credentials and grants
+are never written to this receipt store.
+
+After signed bytes and ESP image validation, the internal-stack owner writes
+accepted intent under the common commit grant **before** selecting the boot
+partition. NVS failure/ambiguous completion cannot select the image. Finalize
+response loss is unresolved on the phone, with no automatic exit/cancel or
+replacement install. An accepted operation cannot be overwritten. Normal boot
+hashes the exact signed byte range before cancelling bootloader rollback, and
+only confirmed valid boot can persist `installed`. A return to the old slot
+persists `failed` (selection failure and bootloader rollback are deliberately
+not distinguished). If terminal receipt persistence fails after bootloader
+validity, the usable image stays valid and receipt stays unresolved; a later
+boot retries. Status polling performs no NVS writes and never turns readiness
+or matching version strings into receipt success.
+
+NVS contains two bounded versioned/checksummed blob slots and one retained
+operation. Read/corruption/unknown-schema failure is unavailable, never empty.
+There are at most three logical transition writes per successful operation:
+accepted, terminal, acknowledged. Failures may require explicit recovery/retry;
+there are no byte-progress or polling writes. POST
+`/firmware-update/operation/acknowledge` requires a freshly authorized firmware
+session and exact `operationId` + `imageSha256`. Only installed/failed results
+can become acknowledged tombstones. A new operation then requires the new
+revision. iOS keeps the completed identity locally and acknowledges it during
+the next maintenance session before admitting a new operation; unknown foreign
+or unmatched results cannot be silently acknowledged.
+
+Both gate values compile/run the portable receipt policy fixture. It exercises
+lost-response replay, terminal retention, mismatched ACK, pre/post-durable write
+failure at all three transitions, repeated reboot recovery, unreadable/corrupt
+storage and invalid IDs. Boot source/host tests preserve the actual VALID-state
+boundary. Swift cases cover missing/mismatched receipts, different devices,
+unauthenticated readiness, accepted-versus-installed, failure and relaunch
+persistence. NVS driver power cuts, per-profile firmware builds and iOS execution
+remain distinct qualification gates; host fixtures are not physical NVS/OTA
+acceptance evidence. Downgrades to receipt-unaware firmware can leave a receipt
+unresolved and must not be treated as installed from legacy status alone.

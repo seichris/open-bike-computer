@@ -31,7 +31,6 @@ private:
   std::atomic<bool> shutdownRequested_{false};
   std::atomic<bool> restartRequested_{false};
   shutdown_barrier::Barrier shutdownBarrier_;
-  bool diagnosticsRequested_ = false;
   bool (*beginShutdown_)() = nullptr;
   bool (*drainShutdown_)() = nullptr;
   bool (*stopRenderer_)() = nullptr;

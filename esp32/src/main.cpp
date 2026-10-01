@@ -68,6 +68,7 @@ extern xSemaphoreHandle gpsMutex;
 #endif
 
 #include "battery.hpp"
+#include "device_ownership.hpp"
 #include "gpxParser.hpp"
 #include "power.hpp"
 
@@ -1505,12 +1506,14 @@ void setup() {
       []() { deviceTransferHttp.beginShutdown(); return true; },
       []() {
         deviceTransferHttp.pollShutdown();
+        mapTransferHttp.submitPendingOperationTask();
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
         const bool audioStopped = waveshare_board::speaker::pollShutdownQuiescence();
 #else
         const bool audioStopped = true;
 #endif
-        return audioStopped && deviceTransferHttp.isShutdownQuiescent() &&
+        const bool bleWritesStopped = bleNavServer.pollShutdownQuiescence();
+        return bleWritesStopped && audioStopped && deviceTransferHttp.isShutdownQuiescent() &&
                mapTransferHttp.shutdownQuiescent();
       },
       []() { return mapView.pollShutdownQuiescence(); },
@@ -1830,6 +1833,10 @@ void setup() {
 
   {
     map_transfer::MapTransferInstaller mapInstaller("/sdcard");
+    // Bind early journal recovery before reading/rendering a candidate pointer.
+    // This is the same immutable eFuse derivation later authenticated by BLE;
+    // it neither initializes BLE nor changes ownership credentials.
+    mapInstaller.setOperationDeviceID(device_ownership::hardwareDeviceIdHex());
     map_transfer::InstallStatus recoveryStatus =
         mapInstaller.recoverInterruptedActivation();
     recordMapDiagnostic(
@@ -2144,10 +2151,12 @@ void setup() {
  *
  */
 void loop() {
-  if (power.processShutdown()) { delay(5); return; }
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::heartbeat(
       runtime_watchdog_diagnostics::Role::Ui);
+#endif
+  if (power.processShutdown()) { delay(5); return; }
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   if (boot_diagnostics::safeModeActive()) {
     delay(1000);
     return;
@@ -2419,6 +2428,7 @@ void loop() {
     updateMapActivationProgressOverlay();
     deviceTransferHttp.process();
     mapTransferHttp.submitPendingRollback();
+    mapTransferHttp.submitPendingOperationTask();
   }
 
   const BLEDebugStats bleStatsBeforeWork = bleNavServer.getDebugStats();

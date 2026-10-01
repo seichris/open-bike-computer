@@ -4,6 +4,7 @@ nonisolated struct DeviceMapOperationAdmission: Codable, Equatable {
     let schemaVersion: Int
     let deviceID: String
     let admissionRevision: UInt64
+    let admissionEpoch: String
 }
 
 // The app's durable observation is deliberately separate from device outcome.
@@ -47,12 +48,14 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable {
     var cleanup: String
     var usesDurableProtocol: Bool
     var lastReceipt: DeviceMapOperationReceipt?
+    var admissionEpoch: String? = nil
     var admissionRevision: UInt64? = nil
     var uploadAttemptID: UUID? = nil
     var uploadCompletedAt: Date? = nil
     var uploadResponseBody: Data? = nil
     var uploadHTTPStatus: Int? = nil
     var uploadErrorCode: Int? = nil
+    var observationProcessID: UUID? = nil
 
     var wireOperationID: String {
         operationID.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
@@ -97,6 +100,7 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable {
 nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
     enum StoreError: Error { case invalidStore, conflict, capacity }
     static let shared = DeviceMapOperationStore()
+    static let observationProcessID = UUID()
     private let lock = NSRecursiveLock()
     private let url: URL
     init(url: URL? = nil) {
@@ -114,6 +118,9 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
         return records
     }
     func save(_ record: DeviceMapOperationRecord) throws {
+        try save(record, replacingUploadAttempt: false)
+    }
+    private func save(_ record: DeviceMapOperationRecord, replacingUploadAttempt: Bool) throws {
         lock.lock(); defer { lock.unlock() }
         guard Self.isValid(record) else { throw StoreError.invalidStore }
         var records = try self.records()
@@ -124,9 +131,15 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
                     old.streamBytes == record.streamBytes && old.manifestReceipt == record.manifestReceipt &&
                     old.signedManifestReceipt == record.signedManifestReceipt &&
                     old.artifactFilename == record.artifactFilename && old.appNamespace == record.appNamespace &&
-                    old.createdAt == record.createdAt && old.connectionEpoch == record.connectionEpoch,
+                    old.createdAt == record.createdAt && old.connectionEpoch == record.connectionEpoch &&
+                    old.observationProcessID == record.observationProcessID,
+                  replacingUploadAttempt || old.uploadAttemptID == record.uploadAttemptID,
+                  replacingUploadAttempt || old.uploadCompletedAt == nil ||
+                    (old.uploadCompletedAt == record.uploadCompletedAt && old.uploadResponseBody == record.uploadResponseBody &&
+                     old.uploadHTTPStatus == record.uploadHTTPStatus && old.uploadErrorCode == record.uploadErrorCode),
                   !(old.usesDurableProtocol && !record.usesDurableProtocol),
                   old.admissionRevision == nil || old.admissionRevision == record.admissionRevision,
+                  old.admissionEpoch == nil || old.admissionEpoch == record.admissionEpoch,
                   !old.isTerminal || (old.observation == record.observation && old.lastReceipt == record.lastReceipt),
                   (record.lastReceipt?.revision ?? 0) >= (old.lastReceipt?.revision ?? 0),
                   old.lastReceipt?.revision != record.lastReceipt?.revision || old.lastReceipt == record.lastReceipt else {
@@ -152,7 +165,8 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
               DeviceMapOperationReceipt.isLowerHex(record.signedManifestReceipt, count: 64),
               DeviceMapOperationReceipt.isLowerHex(record.streamSHA256, count: 64) else { return false }
         if let receipt = record.lastReceipt {
-            guard record.matches(receipt), (receipt.revision ?? 0) > 0 else { return false }
+            guard record.matches(receipt), receipt.status == nil, (receipt.revision ?? 0) > 0,
+                  ["receiving", "prepared", "accepted", "installed", "failed", "cancelled"].contains(receipt.phase ?? "") else { return false }
         }
         if record.usesDurableProtocol && record.isTerminal {
             let phase = ["installed_confirmed": "installed", "failed_or_rolled_back": "failed", "cancelled_before_commit": "cancelled"][record.observation]
@@ -166,7 +180,7 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard var record = try records().first(where: { $0.operationID == operationID }),
               record.deviceID == deviceID, record.appNamespace == appNamespace,
-              record.usesDurableProtocol, record.admissionRevision != nil, !record.isTerminal,
+              record.usesDurableProtocol, record.admissionRevision != nil, record.admissionEpoch != nil, !record.isTerminal,
               record.lastReceipt?.phase != "accepted" else { throw StoreError.conflict }
         if record.uploadAttemptID == uploadAttemptID { return }
         guard record.uploadAttemptID == nil || record.uploadCompletedAt != nil else { throw StoreError.conflict }
@@ -175,7 +189,24 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
         record.uploadResponseBody = nil
         record.uploadHTTPStatus = nil
         record.uploadErrorCode = nil
+        try save(record, replacingUploadAttempt: true)
+    }
+
+    // Caller first verifies there is no matching OS-owned upload. Missing
+    // server intent is replayable only under the originally persisted admission.
+    func prepareReplayAfterUnavailable(operationID: UUID, admission: DeviceMapOperationAdmission) throws -> DeviceMapOperationRecord {
+        lock.lock(); defer { lock.unlock() }
+        guard var record = try records().first(where: { $0.operationID == operationID }),
+              record.usesDurableProtocol, !record.isTerminal, record.lastReceipt == nil,
+              admission.schemaVersion == 1, admission.deviceID == record.deviceID,
+              record.admissionEpoch == admission.admissionEpoch,
+              record.admissionRevision == admission.admissionRevision else { throw StoreError.conflict }
+        if record.uploadAttemptID != nil, record.uploadCompletedAt == nil {
+            record.uploadCompletedAt = Date()
+            record.uploadErrorCode = -1005 // Lost transport; no device result implied.
+        }
         try save(record)
+        return record
     }
 
     // Persist completion before delivering the URLSession callback. A stale or

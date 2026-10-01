@@ -253,6 +253,8 @@ static std::atomic<bool> deferredNotificationEventPending{false};
 // gate and can race the owner task with the pinned host task.
 static std::atomic<bool> deferredNotificationEventScheduled{false};
 static std::atomic<TaskHandle_t> nimbleCallbackTask{nullptr};
+static std::atomic<bool> shutdownWritesClosed{false};
+static std::atomic<uint32_t> shutdownWritesInFlight{0};
 static std::atomic<uint32_t> deferredNotificationDrops{0};
 static StaticSemaphore_t diagnosticsSessionMutexStorage;
 static SemaphoreHandle_t diagnosticsSessionMutex = nullptr;
@@ -2783,6 +2785,9 @@ static std::string genericTransferStatusJson() {
   status_json::appendStringField(body, "certificateSha256",
                         transferStatus.tlsCertificateSha256);
   body += "}";
+
+  status_json::appendFieldPrefix(body, "firmwareOperation");
+  body += firmwareUpdateHttp.operationReceiptJson();
 
   status_json::appendFieldPrefix(body, "capabilities");
   body += "{\"secureTransferV1\":";
@@ -5595,6 +5600,7 @@ public:
   TaskHandle_t previousTask = nullptr;
 
   ScopedNimbleCallback() {
+    shutdownWritesInFlight.fetch_add(1);
     previousTask = nimbleCallbackTask.exchange(
         xTaskGetCurrentTaskHandle(), std::memory_order_acq_rel);
     const uint16_t connectionHandle = activeConnHandle;
@@ -5608,6 +5614,7 @@ public:
   }
   ~ScopedNimbleCallback() {
     nimbleCallbackTask.store(previousTask, std::memory_order_release);
+    shutdownWritesInFlight.fetch_sub(1);
   }
 };
 
@@ -5661,6 +5668,7 @@ class MyMaintenanceRejectedCharacteristicCallbacks
 public:
   void onWrite(NimBLECharacteristic *) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     Serial.println(
         "BLE maintenance: rejected write to inactive riding characteristic");
   }
@@ -5934,6 +5942,7 @@ class MyNavCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     if (frame.empty()) {
       return;
@@ -6173,6 +6182,7 @@ public:
   void onWrite(NimBLECharacteristic *pChar) override {
     DeliveryCallbackScope timing(1);
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     timing.setupComplete();
     const std::string frame = pChar->getValue();
     std::string value;
@@ -6236,6 +6246,7 @@ public:
   void onWrite(NimBLECharacteristic *pChar) override {
     DeliveryCallbackScope timing(2);
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     timing.setupComplete();
     const std::string frame = pChar->getValue();
     const uint32_t receivedAtMs = millis();
@@ -6325,6 +6336,7 @@ class MyWorkoutTelemetryCharacteristicCallbacks
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     workout_telemetry_transport::dispatchAuthenticatedNativeFrame(
         frame,
@@ -6415,6 +6427,7 @@ class MyRideAutomationCharacteristicCallbacks
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     std::string payload;
     if (!unwrapOwnerAuthenticatedPayload(
@@ -6434,6 +6447,7 @@ class MyScreenConfigurationCharacteristicCallbacks
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     std::string payload;
     if (!screen_configuration::isReady() ||
@@ -6525,6 +6539,7 @@ class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     std::string value;
     bool scopedWatchSession = false;
@@ -6643,6 +6658,7 @@ class MyAuthCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     std::string value = pChar->getValue();
     if (!value.empty()) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Auth);
@@ -6795,6 +6811,7 @@ void BLENavigationServer::init(const char *deviceName) {
   }
   if (deviceOwnershipReady) {
     mapTransferHttp.setOperationDeviceID(stableDeviceId);
+    firmwareUpdateHttp.setOperationDeviceID(stableDeviceId);
     Serial.printf("BLE: Ownership identity=%s claimed=%d name='%s'\n",
                   stableDeviceId.c_str(), ownershipClaimed,
                   effectiveDeviceName.c_str());
@@ -6939,6 +6956,11 @@ void BLENavigationServer::init(const char *deviceName) {
   });
   Serial.printf("BLE: Server started, advertising as '%s'\n",
                 effectiveDeviceName.c_str());
+}
+
+bool BLENavigationServer::pollShutdownQuiescence() {
+  shutdownWritesClosed.store(true);
+  return shutdownWritesInFlight.load() == 0;
 }
 
 void BLENavigationServer::process() {

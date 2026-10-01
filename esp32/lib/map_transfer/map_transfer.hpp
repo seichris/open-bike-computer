@@ -234,6 +234,7 @@ public:
   std::string stagedArchivePath(const std::string &sessionId) const;
 
 protected:
+  virtual int renameStoragePath(const char *from, const char *to) const;
   // Exact mutation boundary seam for crash qualification. Production is a
   // no-op; host faults can interrupt before or after the real IO operation.
   virtual void storageMutationBoundary(const char *operation,
@@ -263,7 +264,7 @@ private:
   bool copyTree(const std::string &from, const std::string &to) const;
   bool movePath(const std::string &from, const std::string &to) const;
   bool removeTree(const std::string &path) const;
-  int renameStoragePath(const char *from, const char *to) const;
+
   std::string verificationPath(const std::string &sessionId,
                                const ManifestFile &file) const;
   bool publishStagedFiles(const std::string &sessionId,

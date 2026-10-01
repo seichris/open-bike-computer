@@ -342,6 +342,8 @@ uint64_t Storage::removableSdFreeBytes() const {
 }
 
 StoragePreparation Storage::prepareDiagnosticsStorage() {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire))
+    return StoragePreparation::MountFailed;
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   if (mountMutex == nullptr)

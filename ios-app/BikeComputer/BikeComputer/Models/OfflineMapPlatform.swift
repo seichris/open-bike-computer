@@ -2361,9 +2361,17 @@ struct MapTransferDeviceClient {
             contentLength: artifact.bytes
         )
 
+        if descriptor.operationID != nil && !descriptor.hasDurableIdentity {
+            throw OfflineMapPlatformError.invalidResponse
+        }
         if let operationID = descriptor.operationID, descriptor.hasDurableIdentity {
             guard let deviceID = descriptor.deviceID, let appNamespace = descriptor.appNamespace,
                   let uploadAttemptID = descriptor.uploadAttemptID else {
+                throw OfflineMapPlatformError.invalidResponse
+            }
+            guard let admissionRevision = descriptor.operationAdmissionRevision,
+                  let admissionEpoch = descriptor.operationAdmissionEpoch,
+                  DeviceMapOperationReceipt.isLowerHex(admissionEpoch, count: 32) else {
                 throw OfflineMapPlatformError.invalidResponse
             }
             try DeviceMapOperationStore.shared.beginUpload(
@@ -2375,10 +2383,8 @@ struct MapTransferDeviceClient {
                 forHTTPHeaderField: "X-Map-Operation-ID"
             )
             request.setValue(artifact.sha256, forHTTPHeaderField: "X-Map-Stream-SHA256")
-            guard let admissionRevision = descriptor.operationAdmissionRevision else {
-                throw OfflineMapPlatformError.invalidResponse
-            }
             request.setValue(String(admissionRevision), forHTTPHeaderField: "X-Map-Operation-Admission-Revision")
+            request.setValue(admissionEpoch, forHTTPHeaderField: "X-Map-Operation-Admission-Epoch")
         }
 
 #if os(iOS)
@@ -2392,9 +2398,32 @@ struct MapTransferDeviceClient {
         )
 #else
         await onTaskStarted(0)
-        let response = try await session.upload(for: request, fromFile: artifact.url)
-        try Self.validate(response: response.1, body: response.0)
-        await progress(artifact.bytes, artifact.bytes)
+        do {
+            let response = try await session.upload(for: request, fromFile: artifact.url)
+            if descriptor.hasDurableIdentity, let operationID = descriptor.operationID,
+               let deviceID = descriptor.deviceID, let namespace = descriptor.appNamespace,
+               let attemptID = descriptor.uploadAttemptID {
+                guard try DeviceMapOperationStore.shared.completeUpload(
+                    operationID: operationID, deviceID: deviceID, appNamespace: namespace,
+                    mapID: descriptor.mapID, sessionID: descriptor.sessionID, uploadAttemptID: attemptID,
+                    responseBody: response.0, httpStatus: (response.1 as? HTTPURLResponse)?.statusCode,
+                    errorCode: nil
+                ) else { throw DeviceMapOperationStore.StoreError.conflict }
+            }
+            try Self.validate(response: response.1, body: response.0)
+            await progress(artifact.bytes, artifact.bytes)
+        } catch {
+            if descriptor.hasDurableIdentity, let operationID = descriptor.operationID,
+               let deviceID = descriptor.deviceID, let namespace = descriptor.appNamespace,
+               let attemptID = descriptor.uploadAttemptID {
+                _ = try DeviceMapOperationStore.shared.completeUpload(
+                    operationID: operationID, deviceID: deviceID, appNamespace: namespace,
+                    mapID: descriptor.mapID, sessionID: descriptor.sessionID, uploadAttemptID: attemptID,
+                    responseBody: Data(), httpStatus: nil, errorCode: (error as NSError).code
+                )
+            }
+            throw error
+        }
 #endif
     }
 
@@ -2446,6 +2475,7 @@ struct MapTransferDeviceClient {
         }
         var request = URLRequest(url: baseURL.appendingPathComponent("map-transfer/operations/" + operationID + "/acknowledge"))
         request.httpMethod = "POST"
+        request.setValue("0", forHTTPHeaderField: "Content-Length")
         request.timeoutInterval = 2
         authorize(&request)
         _ = try await send(request: request, data: Data())
@@ -2636,6 +2666,7 @@ nonisolated struct BackgroundMapUploadDescriptor: Codable, Equatable {
     let connectionEpoch: UInt64?
     let operationLeaseID: UUID?
     let operationAdmissionRevision: UInt64?
+    let operationAdmissionEpoch: String?
     let mapID: String
     let sessionID: String
     let protocolVersion: Int
@@ -2658,7 +2689,8 @@ nonisolated struct BackgroundMapUploadDescriptor: Codable, Equatable {
         uploadAttemptID: UUID? = nil,
         appNamespace: String? = nil,
         connectionEpoch: UInt64? = nil,
-        operationAdmissionRevision: UInt64? = nil
+        operationAdmissionRevision: UInt64? = nil,
+        operationAdmissionEpoch: String? = nil
     ) {
         self.schemaVersion = 2
         self.deviceID = deviceID
@@ -2668,6 +2700,7 @@ nonisolated struct BackgroundMapUploadDescriptor: Codable, Equatable {
         self.connectionEpoch = connectionEpoch
         self.operationLeaseID = operationLeaseID
         self.operationAdmissionRevision = operationAdmissionRevision
+        self.operationAdmissionEpoch = operationAdmissionEpoch
         self.mapID = mapID
         self.sessionID = sessionID
         self.protocolVersion = protocolVersion

@@ -14,6 +14,7 @@
 
 #include "../device_transfer/device_transfer_network_owner.hpp"
 #include "firmware_internal_owner_policy.hpp"
+#include "firmware_operation_receipt.hpp"
 
 namespace firmware_update {
 
@@ -58,6 +59,8 @@ public:
   esp_err_t description(const esp_partition_t *partition,
                         esp_app_desc_t &description);
   esp_err_t selectBootPartition(const esp_partition_t *partition);
+  esp_err_t acceptFirmwareOperation(const receipt::Record &record, uint32_t revision);
+  esp_err_t acknowledgeFirmwareOperation(const receipt::Record &record);
   using MapOperation = void (*)(void *, const char *, bool);
   esp_err_t runMapActivation(MapOperation operation, void *context,
                              const std::string &sessionId, bool automaticExit);
@@ -71,6 +74,8 @@ private:
     Abort,
     Description,
     SelectBoot,
+    AcceptFirmwareOperation,
+    AcknowledgeFirmwareOperation,
     StartStation,
     DisconnectStation,
     StartAccessPoint,
@@ -90,6 +95,8 @@ private:
     MapOperation mapOperation = nullptr;
     void *mapContext = nullptr;
     bool automaticExit = false;
+    receipt::Record firmwareReceipt{};
+    uint32_t receiptRevision = 0;
   };
 
   struct Result {

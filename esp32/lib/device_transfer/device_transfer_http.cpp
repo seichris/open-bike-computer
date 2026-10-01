@@ -1343,11 +1343,12 @@ bool HttpTransferServer::handleClient(TransferClient &client,
               "transfer encoding is not supported");
     return false;
   }
+  request.mapOperationAdmissionEpoch = std::move(securityHeaders.mapOperationAdmissionEpoch);
   request.mapOperationAdmissionRevision = securityHeaders.mapOperationAdmissionRevision;
   request.hasMapOperationAdmissionRevision = securityHeaders.hasMapOperationAdmissionRevision;
   request.mapOperationID = std::move(securityHeaders.mapOperationID);
   request.mapStreamSHA256 = std::move(securityHeaders.mapStreamSHA256);
-  request.mapOperationHeadersPresent = securityHeaders.mapOperationSeen || securityHeaders.mapStreamSHA256Seen || securityHeaders.mapOperationAdmissionRevisionSeen;
+  request.mapOperationHeadersPresent = securityHeaders.mapOperationSeen || securityHeaders.mapStreamSHA256Seen || securityHeaders.mapOperationAdmissionRevisionSeen || securityHeaders.mapOperationAdmissionEpochSeen;
   request.transferToken = std::move(securityHeaders.transferToken);
   request.contentType = std::move(securityHeaders.contentType);
   request.contentLength = securityHeaders.contentLength;

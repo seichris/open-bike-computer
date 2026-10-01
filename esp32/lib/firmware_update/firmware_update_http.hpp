@@ -11,6 +11,7 @@
 #include "firmware_update_policy.hpp"
 
 #include <string>
+#include <atomic>
 
 namespace firmware_update {
 
@@ -47,6 +48,8 @@ public:
   bool markRunningAppValid();
   void rejectRunningApp();
   std::string bootAcceptanceJson(bool ready) const;
+  void setOperationDeviceID(const std::string &device);
+  std::string operationReceiptJson() const;
   DeviceOperationOwner *operationOwner() { return &operationOwner_; }
 
 private:
@@ -67,6 +70,11 @@ private:
   const esp_partition_t *updatePartition_ = nullptr;
   esp_ota_handle_t otaHandle_ = 0;
   bool otaOpen_ = false;
+  std::string operationDeviceID_;
+  std::string operationAdmissionEpoch_;
+  mutable std::atomic<uint32_t> operationRevisionHighWater_{0};
+  receipt::Record pendingReceipt_{};
+  uint32_t pendingReceiptRevision_ = 0;
   policy::Transaction transaction_;
   mutable DeviceOperationOwner operationOwner_;
 
@@ -81,6 +89,9 @@ private:
                    device_transfer::TransferClient &client);
   void handleFinalize(const device_transfer::HttpRequest &request,
                       device_transfer::TransferClient &client);
+  void handleOperationAcknowledgement(const device_transfer::HttpRequest &request, device_transfer::TransferClient &client);
+  bool readOperationReceipt(receipt::Record &record) const;
+  bool reconcileOperationReceipt(bool runningAccepted);
   void handleCancel(device_transfer::TransferClient &client);
   void resetUploadState();
   void reject(device_transfer::TransferClient &client, int httpStatus, const std::string &code,

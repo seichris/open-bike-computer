@@ -174,25 +174,21 @@ bool Power::processShutdown() {
       shutdownBarrier_.noteProgress(millis());
     }
   }
-  if (stage == Stage::Drain && drainShutdown_ != nullptr)
+  if ((stage == Stage::Drain ||
+       (stage == Stage::Deferred && shutdownBarrier_.failedStage() == Stage::Drain)) &&
+      drainShutdown_ != nullptr)
     drained = drainShutdown_();
   if (stage == Stage::Renderer && stopRenderer_ != nullptr)
     renderer = stopRenderer_();
-  if (stage == Stage::Diagnostics) {
-    // Recorder joins an outstanding seal instead of replacing its completion.
-    // A bounded failure leaves its writer paused and never permits sleep.
-    if (!diagnosticsRequested_) {
-      diagnosticsRequested_ = true;
-      sealed = ride_diagnostics::prepareForShutdown(20);
-    } else {
-      sealed = ride_diagnostics::sealActiveChunk(20);
-    }
-  }
+  if (stage == Stage::Diagnostics)
+    sealed = ride_diagnostics::pollShutdownQuiescence();
   if (stage == Stage::Storage && stopStorage_ != nullptr)
     storageStopped = stopStorage_();
   shutdownBarrier_.poll(millis(), drained, renderer, sealed, storageStopped,
                        acceptedWork_ != nullptr && acceptedWork_());
   if (shutdownBarrier_.stage() == Stage::Deferred && stage != Stage::Deferred) {
+    ride_diagnostics::noteShutdownDeferred(
+        static_cast<uint8_t>(shutdownBarrier_.failedStage()));
     Serial.printf("POWER_BARRIER: shutdown deferred stage=%u; no sleep permit\n",
                   static_cast<unsigned>(shutdownBarrier_.failedStage()));
   }
@@ -204,5 +200,7 @@ bool Power::processShutdown() {
   }
   // Drain must keep servicing renderer/rollback mailboxes. Once stopped, do
   // not let ordinary UI work start readers or new storage commands again.
-  return shutdownBarrier_.stage() != Stage::Drain;
+  return shutdownBarrier_.stage() != Stage::Drain &&
+      !(shutdownBarrier_.stage() == Stage::Deferred &&
+        shutdownBarrier_.failedStage() == Stage::Drain);
 }

@@ -11,6 +11,7 @@
 #include "map_transfer.hpp"
 #include "map_stream_receiver.hpp"
 #include "map_operation_journal.hpp"
+#include "../device_transfer/operation_admission_policy.hpp"
 
 namespace firmware_update { class DeviceOperationOwner; }
 
@@ -57,9 +58,23 @@ public:
   }
   bool requestRuntimeRollback();
   void submitPendingRollback();
+  void submitPendingOperationTask();
   bool takeRuntimeRollback(ActiveMapSelection &restored, bool &succeeded);
 
 private:
+  class OperationStoreGuard {
+  public:
+    explicit OperationStoreGuard(const MapTransferHttpServer &owner) : owner_(owner) {
+      if (owner_.operationStoreMutex_) xSemaphoreTakeRecursive(owner_.operationStoreMutex_,portMAX_DELAY);
+    }
+    ~OperationStoreGuard() {
+      if (owner_.operationStoreMutex_) xSemaphoreGiveRecursive(owner_.operationStoreMutex_);
+    }
+    OperationStoreGuard(const OperationStoreGuard &) = delete;
+    OperationStoreGuard &operator=(const OperationStoreGuard &) = delete;
+  private:
+    const MapTransferHttpServer &owner_;
+  };
   class StateGuard {
   public:
     explicit StateGuard(const MapTransferHttpServer &owner) : owner_(owner) { owner_.lockState(); }
@@ -71,6 +86,9 @@ private:
   };
   std::string storageRoot_ = "/sdcard";
   std::string operationDeviceID_;
+  mutable operation::AdmissionFence operationAdmission_;
+  bool observeOperationRevision(uint64_t revision) const;
+  bool permitsOperationAdmission(const std::string &epoch, uint64_t revision) const;
   std::string operationQuery_;
   std::string operationStatus_;
   bool operationTaskSubmitted_ = false;
@@ -81,9 +99,17 @@ private:
   bool terminalAutomaticExit_ = false;
   bool terminalFailed_ = false;
   std::string rollbackOperationID_;
+  struct CommitRecovery {
+    operation::Identity identity;
+    device_transfer::HttpResponseCompletionToken response;
+    bool armed = false;
+    bool pending() const { return !identity.session.empty(); }
+  };
+  CommitRecovery commitRecovery_;
+  void armCommitRecovery(const device_transfer::HttpRequest &request);
+  bool recoverCommitDisposition(const CommitRecovery &recovery);
   static void operationTask(void *context);
   void executeOperationTask();
-  void submitPendingOperationTask();
   std::string readOperationStatus(const std::string &operationID) const;
   bool acceptOperation(const device_transfer::HttpRequest &request,
                        const MapStreamInstallSnapshot &snapshot,
@@ -94,6 +120,8 @@ private:
       &ownedTransferServer_;
   MapTransferInstaller installer_{"/sdcard"};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
+  mutable SemaphoreHandle_t operationStoreMutex_ = nullptr;
+  StaticSemaphore_t operationStoreMutexStorage_{};
   StaticSemaphore_t stateMutexStorage_{};
   MapActivationState activationState_;
   MapStreamTrustStore streamTrustStore_;

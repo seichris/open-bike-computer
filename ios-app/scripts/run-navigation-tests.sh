@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+"$(dirname "${BASH_SOURCE[0]}")/run-device-map-operation-tests.sh"
+
 "$(dirname "${BASH_SOURCE[0]}")/run-native-workout-zone-tests.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,6 +22,7 @@ xcrun swiftc -parse-as-library \
   ios-app/BikeComputerTests/TopographyMapKitTileWarpTests.swift
 "${TOPOGRAPHY_ALIGNMENT_OUT}"
 
+"${SCRIPT_DIR}/run-device-operation-tests.sh"
 "${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
 bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
 bash "${SCRIPT_DIR}/run-offline-route-tests.sh"
@@ -59,6 +62,8 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift \
+  ios-app/BikeComputer/BikeComputer/Models/DeviceMapOperation.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceOperationCoordinator.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
@@ -120,6 +125,8 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
   ios-app/BikeComputerTests/DeviceScreenConfigurationTests.swift \
   ios-app/BikeComputerTests/DeviceScreenConfigurationStateTests.swift \
+  ios-app/BikeComputerTests/NavigationProtocolMapTests.swift \
+  ios-app/BikeComputerTests/NavigationProtocolRideTests.swift \
   ios-app/BikeComputerTests/NavigationProtocolTests.swift
 
 "${OUT}"
@@ -228,6 +235,8 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift \
+  ios-app/BikeComputer/BikeComputer/Models/DeviceMapOperation.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceOperationCoordinator.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift \

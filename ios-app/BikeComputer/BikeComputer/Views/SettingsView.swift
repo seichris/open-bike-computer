@@ -3223,6 +3223,9 @@ private struct RemoteDeviceDebugConsoleView: View {
 
 @MainActor
 private struct RemoteDeviceDebugSettingsSection: View {
+    // Session ownership outlives SwiftUI section recreation/dismissal.
+    @MainActor private static let sharedTransferManager = DeviceTransferManager()
+    private var remoteDebugTransferManager: DeviceTransferManager { Self.sharedTransferManager }
     @EnvironmentObject private var bleManager: BLEManager
     @AppStorage("remoteDebug.preferLAN.v1") private var preferLAN = true
     @State private var isWorking = false
@@ -3487,7 +3490,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
                     }
                     credentials = nil
                 }
-                _ = try await DeviceTransferManager().enterRemoteDebug(
+                _ = try await remoteDebugTransferManager.enterRemoteDebug(
                     bleManager: bleManager,
                     lanCredentials: credentials,
                     status: { statusMessage = $0 }
@@ -3566,7 +3569,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
         Task {
             defer { isWorking = false }
             do {
-                try await DeviceTransferManager().exitRemoteDebug(
+                try await remoteDebugTransferManager.exitRemoteDebug(
                     bleManager: bleManager
                 )
                 clearCopiedHotspotPassphraseIfOwned()

@@ -18,6 +18,8 @@ xcrun swiftc -D HOST_TESTING -parse-as-library -o "${OUT_DIR}/tests" \
   ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift \
   ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift \
+  ios-app/BikeComputer/BikeComputer/Models/DeviceMapOperation.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DeviceOperationCoordinator.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \

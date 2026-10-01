@@ -2272,7 +2272,9 @@ An opt-in PUT to the existing
 `/map-transfer/sessions/<content-session>/install-stream` endpoint supplies both
 `X-Map-Operation-ID` (32 lowercase hexadecimal characters, random per attempt)
 and `X-Map-Stream-SHA256` (64 lowercase hexadecimal characters, SHA-256 of the
-**entire HTTP entity**, including the signed-stream footer). Duplicate headers,
+**entire HTTP entity**, including the signed-stream footer). It also supplies
+the saved `X-Map-Operation-Admission-Epoch` and decimal
+`X-Map-Operation-Admission-Revision` from the new-only admission preflight below. Duplicate headers,
 partial header pairs and malformed values fail closed; they never downgrade to
 a legacy upload. The device verifies the body hash, length and existing signed
 manifest before accepting the operation. Reusing an operation ID with another
@@ -2312,15 +2314,26 @@ keeps the result pending and prevents unsafe shutdown or another installation.
 ### Storage, migration and explicit unfinished gates
 
 - The bounded ledger has four records and two checksummed generation slots.
-  Unresolved records are never automatically evicted. At capacity, new operation
-  admission fails rather than deleting evidence. A released result-pruning and
-  acknowledgement protocol remains a prerequisite to production enablement;
-  the internal tombstone operation is not yet exposed on the wire
+  Unresolved records are never automatically evicted. A new-only authenticated
+  GET `/map-transfer/operations/admission` returns schemaVersion, deviceID,
+  admissionEpoch (32 hex) and admissionRevision (UInt64). Persist both with the
+  new intent and never refresh them for a retry. Known IDs retain their exact
+  binding across boot. An absent ID requires this exact current creation token;
+  a fresh random 128-bit boot epoch and serialized RAM revision high-water
+  reject old-card, prior-boot and same-boot snapshot rollback replay. Once the
+  app has atomically saved a terminal result, POST
+  `/map-transfer/operations/<id>/acknowledge` with an empty body to replace it
+  with a tombstone and permit a later new admission to reuse its slot. It rejects
+  unresolved operations. Tombstoned/evicted queries return result_unavailable;
+  stale creation tokens cannot resurrect them. At capacity, unacknowledged
+  results block admission rather than losing evidence
 - New ready metadata is named `.operation-ready`, not legacy `.ready`, and
   carries the operation ID. Activation and transaction recovery require an
   accepted/installed ledger record bound to the authenticated ownership device
-  ID and exact content receipts. Before ownership initialization, new operation
-  recovery defers. A fresh post-boot renderer ACK reconstructs a terminal result
+  ID and exact content receipts. Early boot binds the installer to the same
+  read-only eFuse-derived identity used by ownership before recovery or renderer
+  selection; this does not create credentials or initialize BLE. Identity
+  derivation failure fails closed. A fresh post-boot renderer ACK reconstructs a terminal result
   for a previously accepted selection; pointer presence alone never does so
 - A copied SD card may still contain legitimate signed map content. Its copied
   operation ledger is foreign and cannot confirm installation for this device
@@ -2337,3 +2350,25 @@ keeps the result pending and prevents unsafe shutdown or another installation.
   independent internal persistent adapter and its own boot-acceptance contract
 - Hardware build/flash, iPhone background/relaunch behavior, and production
   rollout are separate gates; portable tests do not establish those outcomes
+
+#### Firmware operation receipt capability (gated)
+
+`FIRMWARE_OPERATIONS_V1_ENABLED=0` is the default. DSTS includes
+`firmwareOperation.protocolVersion: 0` when disabled. When enabled,
+`firmwareOperation` is an owner-authenticated object with `protocolVersion: 1`,
+`result` (`unavailable`, `accepted`, `installed`, `failed`, `acknowledged`), and
+optional `operationId` (32 lowercase hex), `imageSha256` (64 lowercase hex),
+`admissionRevision` (uint32), `admissionEpoch` (32 lowercase hex). Absence of an
+identity or admission fields never proves completion or an empty usable store.
+A readable empty local store reports unavailable with revision 0 and its fresh
+per-boot epoch. Omitted/disabled objects clear previous phone receipt evidence.
+
+The same object is returned in firmware HTTPS status. Gated begin adds
+`operationId`, `admissionRevision`, and `admissionEpoch` to the existing signed
+manifest body; no signature input changes. POST
+`/firmware-update/operation/acknowledge` takes JSON `operationId` and
+`imageSha256`, requires current authenticated firmware mode, and acknowledges
+only the exact retained terminal result. No BLE authority, session token, or
+SD journal is reused as OTA operation identity. See
+[OTA lifecycle contract](wifi-device-operation-lifecycle.md#sd-independent-ota-operation-receipts-qualification-gate)
+for durable acceptance, replay/retention and qualification behavior.

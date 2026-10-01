@@ -64,6 +64,7 @@ struct HttpTransferStatus {
 };
 
 struct HttpRequest {
+  std::string mapOperationAdmissionEpoch;
   uint64_t mapOperationAdmissionRevision = 0;
   bool hasMapOperationAdmissionRevision = false;
   std::string mapOperationID;

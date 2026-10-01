@@ -14,7 +14,12 @@ class RendererReplayTransportContractTests(unittest.TestCase):
         self.assertRegex(BLE, re.compile(
             r"pGPSCharacteristic\s*=\s*pService->createCharacteristic\(\s*"
             r"GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE \| NIMBLE_PROPERTY::WRITE_NR\);"
+            r"\s*if \(maintenanceBoot\) \{"
+            r"\s*pGPSCharacteristic->setCallbacks\(\s*"
+            r"new MyMaintenanceRejectedCharacteristicCallbacks\(\)\);"
+            r"\s*\} else \{"
             r"\s*pGPSCharacteristic->setCallbacks\(new MyGPSCharacteristicCallbacks\(\)\);"
+            r"\s*\}"
         ))
         callback = BLE.split("class MyGPSCharacteristicCallbacks", 1)[1].split(
             "class ", 1

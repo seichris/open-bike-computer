@@ -3965,8 +3965,12 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func reconcileDurableMapOperation(bleManager: BLEManager) -> Bool {
-        guard let record = currentDeviceMapOperation,
-              record.mapID == lastTransferMapId else { return false }
+        guard let record = currentDeviceMapOperation else {
+            guard defaults.string(forKey: "offlineMap.deviceOperationID") != nil else { return false }
+            statusMessage = "Saved map operation needs recovery before its result can be confirmed"
+            return true
+        }
+        guard record.mapID == lastTransferMapId else { return false }
         guard record.deviceID == bleManager.activeDeviceID else {
             statusMessage = "Reconnect the device that started this map transfer"
             return true
@@ -3974,7 +3978,8 @@ final class OfflineMapManager: ObservableObject {
         guard record.usesDurableProtocol else {
             // A legacy sequence retained across a connection/reboot is not an
             // exact-operation receipt. Do not bind old records to a new epoch.
-            if record.connectionEpoch != bleManager.transferConnectionEpoch {
+            if record.connectionEpoch != bleManager.transferConnectionEpoch ||
+                record.observationProcessID != DeviceMapOperationStore.observationProcessID {
                 statusMessage = "Map result needs verification on the original device"
                 return true
             }
@@ -5393,6 +5398,23 @@ final class OfflineMapManager: ObservableObject {
             return .absent
         }
         let expectedSessionId = identity.sessionID
+        if defaults.string(forKey: "offlineMap.deviceOperationID") != nil,
+           currentDeviceMapOperation == nil { return .pending }
+        if let operation = currentDeviceMapOperation,
+           operation.mapID == identity.mapID, operation.sessionID == expectedSessionId {
+            guard operation.deviceID == bleManager.activeDeviceID else { return .pending }
+            if operation.usesDurableProtocol {
+                _ = reconcileDurableMapOperation(bleManager: bleManager)
+                if currentDeviceMapOperation?.observation == "installed_confirmed" { return .installed }
+                if currentDeviceMapOperation?.isTerminal == true { return .absent }
+                startActivationReconciliationMonitor(bleManager: bleManager)
+                return .pending
+            }
+            if operation.connectionEpoch != bleManager.transferConnectionEpoch ||
+                operation.observationProcessID != DeviceMapOperationStore.observationProcessID {
+                return .pending
+            }
+        }
         guard bleManager.requestMapTransferStatus() else { return .absent }
         _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
         let initialDeadline = Date().addingTimeInterval(2)
@@ -5691,7 +5713,7 @@ final class OfflineMapManager: ObservableObject {
 #endif
 
         let requiresDurableReconciliation = bleManager.supportsMapOperationsV1 ||
-            currentDeviceMapOperation?.usesDurableProtocol == true
+            defaults.string(forKey: "offlineMap.deviceOperationID") != nil
         let disposition: ExistingMapStreamAttemptDisposition = requiresDurableReconciliation ||
             !bleManager.hasFreshMapTransferStatus ? .upload : ExistingMapStreamAttemptDisposition.evaluate(
             expectedSessionID: sessionId,
@@ -5744,12 +5766,26 @@ final class OfflineMapManager: ObservableObject {
                     appNamespace: BackgroundMapUploadSessionNamespace.identifier(bundleIdentifier: Bundle.main.bundleIdentifier),
                     createdAt: Date(), connectionEpoch: bleManager.transferConnectionEpoch,
                     observation: "enter_requested", cleanup: "pending", usesDurableProtocol: false,
-                    lastReceipt: nil
+                    lastReceipt: nil,
+                    observationProcessID: DeviceMapOperationStore.observationProcessID
                 )
             }
             if let deviceOperation {
                 try DeviceMapOperationStore.shared.save(deviceOperation)
                 defaults.set(deviceOperation.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+                if deviceOperation.usesDurableProtocol {
+                    recordTransfer(mapId: expectedMapId, sessionId: sessionId,
+                                   previousMapId: bleManager.mapTransferActiveMapId,
+                                   previousSessionId: bleManager.mapTransferActiveSessionId,
+                                   previousSequence: bleManager.mapTransferActivationSequence,
+                                   outcome: "unconfirmed", protocolVersion: 2,
+                                   streamFormatVersion: 1, artifactURL: packURL)
+                }
+            }
+        } else {
+            // An old operation must never attach to a legacy/unidentified device.
+            guard currentDeviceMapOperation == nil else {
+                throw OfflineMapPlatformError.backgroundMapUploadInProgress
             }
         }
         do {
@@ -5792,10 +5828,20 @@ final class OfflineMapManager: ObservableObject {
                         guard originalDeviceID == bleManager.activeDeviceID,
                               originalEpoch == bleManager.transferConnectionEpoch else { throw CancellationError() }
                         if receipt.status != nil {
-                            throw OfflineMapPlatformError.invalidPack("Previous operation result is unavailable; reconcile the device before retrying")
+                            guard receipt.status == "result_unavailable", receipt.deviceID == record.deviceID,
+                                  receipt.operationID == record.wireOperationID else {
+                                throw OfflineMapPlatformError.invalidResponse
+                            }
+                            let admission = try await client.operationAdmission()
+                            guard originalDeviceID == bleManager.activeDeviceID,
+                                  originalEpoch == bleManager.transferConnectionEpoch else { throw CancellationError() }
+                            record = try DeviceMapOperationStore.shared.prepareReplayAfterUnavailable(
+                                operationID: record.operationID, admission: admission
+                            )
+                        } else {
+                            guard record.apply(receipt) else { throw OfflineMapPlatformError.invalidResponse }
+                            try DeviceMapOperationStore.shared.save(record)
                         }
-                        guard record.apply(receipt) else { throw OfflineMapPlatformError.invalidResponse }
-                        try DeviceMapOperationStore.shared.save(record)
                         if record.isTerminal {
                             try? await client.acknowledgeOperation(operationID: record.wireOperationID)
                             guard originalDeviceID == bleManager.activeDeviceID,
@@ -5818,11 +5864,13 @@ final class OfflineMapManager: ObservableObject {
                         }
                         let admission = try await client.operationAdmission()
                         guard admission.schemaVersion == 1, admission.deviceID == record.deviceID,
+                              DeviceMapOperationReceipt.isLowerHex(admission.admissionEpoch, count: 32),
                               originalDeviceID == bleManager.activeDeviceID,
                               originalEpoch == bleManager.transferConnectionEpoch else {
                             throw OfflineMapPlatformError.invalidResponse
                         }
                         record.admissionRevision = admission.admissionRevision
+                        record.admissionEpoch = admission.admissionEpoch
                     }
                     record.observation = "in_progress"
                     try DeviceMapOperationStore.shared.save(record)
@@ -5871,7 +5919,8 @@ final class OfflineMapManager: ObservableObject {
                         rejection
                     )
                 }
-                let disposition = ExistingMapStreamAttemptDisposition.evaluate(
+                let disposition: ExistingMapStreamAttemptDisposition = deviceOperation?.usesDurableProtocol == true
+                    ? .upload : ExistingMapStreamAttemptDisposition.evaluate(
                     expectedSessionID: sessionId,
                     activeSessionID: initialDeviceStatus.activeSessionId,
                     activationStatus: initialDeviceStatus.activation?.status,
@@ -5913,6 +5962,7 @@ final class OfflineMapManager: ObservableObject {
 
                 activationMayBeInFlight = true
                 let retryProgressFloor = resumeProgressFloor
+                let uploadOperationID = deviceOperation?.operationID
                 try await client.uploadStreamInBackground(
                     artifact: artifact,
                     sessionId: sessionId,
@@ -5931,15 +5981,22 @@ final class OfflineMapManager: ObservableObject {
                         uploadAttemptID: UUID(),
                         appNamespace: deviceOperation?.appNamespace,
                         connectionEpoch: originalEpoch,
-                        operationAdmissionRevision: deviceOperation?.admissionRevision
+                        operationAdmissionRevision: deviceOperation?.admissionRevision,
+                        operationAdmissionEpoch: deviceOperation?.admissionEpoch
                     ),
                     onTaskStarted: { taskID in
+                        guard originalDeviceID == bleManager.activeDeviceID,
+                              originalEpoch == bleManager.transferConnectionEpoch,
+                              self.currentDeviceMapOperation?.operationID == uploadOperationID else { return }
                         self.recordBackgroundUploadTask(
                             taskID,
                             mapID: expectedMapId
                         )
                     }
                 ) { completedBytes, totalBytes in
+                    guard originalDeviceID == bleManager.activeDeviceID,
+                          originalEpoch == bleManager.transferConnectionEpoch,
+                          self.currentDeviceMapOperation?.operationID == uploadOperationID else { return }
                     self.transferProgress = totalBytes == 0 ? 0 :
                         Double(completedBytes) / Double(totalBytes)
                     let percent = MapUploadProgressReconciler.percentage(
@@ -5953,6 +6010,8 @@ final class OfflineMapManager: ObservableObject {
                         percentage: percent
                     )
                 }
+                guard originalDeviceID == bleManager.activeDeviceID,
+                      originalEpoch == bleManager.transferConnectionEpoch else { throw CancellationError() }
                 transferProgress = 1
                 try await confirmStreamActivation(
                     expectedMapID: expectedMapId,
@@ -6170,9 +6229,28 @@ final class OfflineMapManager: ObservableObject {
         let confirmationDeviceID = bleManager.activeDeviceID
         let confirmationEpoch = bleManager.transferConnectionEpoch
         while Date() < deadline {
+            if defaults.string(forKey: "offlineMap.deviceOperationID") != nil,
+               currentDeviceMapOperation == nil {
+                return .continuesOnDevice(lastState: "saved operation journal requires recovery")
+            }
             guard confirmationDeviceID == bleManager.activeDeviceID else { return .continuesOnDevice(lastState: "device connection changed; exact result remains unconfirmed") }
             if let operation = currentDeviceMapOperation, operation.usesDurableProtocol,
                operation.mapID == expectedMapId && operation.sessionID == sessionId {
+                guard operation.deviceID == confirmationDeviceID else {
+                    return .continuesOnDevice(lastState: "reconnect the original device")
+                }
+                if operation.observation == "installed_confirmed", operation.lastReceipt?.phase == "installed" {
+                    if confirmationEpoch == bleManager.transferConnectionEpoch {
+                        try? await client.acknowledgeOperation(operationID: operation.wireOperationID)
+                    }
+                    guard confirmationDeviceID == bleManager.activeDeviceID else {
+                        return .continuesOnDevice(lastState: "device connection changed")
+                    }
+                    return .installed
+                }
+                if operation.isTerminal {
+                    throw OfflineMapPlatformError.mapActivationFailed(operation.lastReceipt?.phase ?? "failed")
+                }
                 var receipt: DeviceMapOperationReceipt?
                 if confirmationEpoch == bleManager.transferConnectionEpoch {
                     receipt = try? await client.operationStatus(operationID: operation.wireOperationID)
@@ -6201,6 +6279,11 @@ final class OfflineMapManager: ObservableObject {
                 }
                 try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
                 continue
+            }
+            if let operation = currentDeviceMapOperation, !operation.usesDurableProtocol,
+               operation.connectionEpoch != confirmationEpoch ||
+                operation.observationProcessID != DeviceMapOperationStore.observationProcessID {
+                return .continuesOnDevice(lastState: "legacy operation requires fresh recovery evidence")
             }
             guard confirmationEpoch == bleManager.transferConnectionEpoch else { return .continuesOnDevice(lastState: "device connection changed; exact result remains unconfirmed") }
             var receivedHTTPStatus = false
@@ -6477,18 +6560,20 @@ final class OfflineMapManager: ObservableObject {
         updateLastTransferOutcome(outcome)
     }
 
-    private func updateLastTransferOutcome(_ outcome: String) {
+    private func updateLastTransferOutcome(_ requestedOutcome: String) {
         let outcome: String = {
+            if defaults.string(forKey: "offlineMap.deviceOperationID") != nil,
+               currentDeviceMapOperation == nil, ["installed", "failed"].contains(requestedOutcome) { return "unconfirmed" }
             guard let record = currentDeviceMapOperation, record.mapID == lastTransferMapId,
-                  record.usesDurableProtocol else { return outcome }
-            if outcome == "installed", record.observation != "installed_confirmed" { return "unconfirmed" }
-            if outcome == "failed", !record.isTerminal { return "unconfirmed" }
-            return outcome
+                  record.usesDurableProtocol else { return requestedOutcome }
+            if requestedOutcome == "installed", record.observation != "installed_confirmed" { return "unconfirmed" }
+            if requestedOutcome == "failed", !record.isTerminal { return "unconfirmed" }
+            return requestedOutcome
         }()
         if var record = currentDeviceMapOperation, record.mapID == lastTransferMapId {
-            if !record.usesDurableProtocol && ["installed", "failed"].contains(outcome) {
-                record.observation = outcome == "installed" ? "installed_confirmed" : "failed_or_rolled_back"
-            } else if outcome == "unconfirmed", !record.isTerminal, record.lastReceipt?.phase != "accepted" {
+            if !record.usesDurableProtocol && ["installed", "failed"].contains(requestedOutcome) {
+                record.observation = requestedOutcome == "installed" ? "installed_confirmed" : "failed_or_rolled_back"
+            } else if requestedOutcome == "unconfirmed", !record.isTerminal, record.lastReceipt?.phase != "accepted" {
                 record.observation = "result_unknown"
             }
             // Persistence failure cannot manufacture a successful durable result.

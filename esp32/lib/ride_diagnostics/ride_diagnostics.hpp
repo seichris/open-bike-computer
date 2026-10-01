@@ -144,6 +144,10 @@ bool sealActiveChunk(uint32_t timeoutMs = 2000);
 bool beginStorageTransition(uint32_t timeoutMs = 2000);
 void endStorageTransition();
 bool prepareForShutdown(uint32_t timeoutMs = 2000);
+// One-shot internal-stack seal; UI only polls its exact ACK.
+bool pollShutdownQuiescence();
+// RTC-only supporting evidence; never opens storage during a failed barrier.
+void noteShutdownDeferred(uint8_t stage);
 // Publish a lease before requesting a writer-owned seal. The subsequent seal
 // is the synchronization point with any retention pass already in progress.
 void armTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);

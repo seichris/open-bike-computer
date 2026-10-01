@@ -395,6 +395,11 @@ jobs:
       - name: Firmware manifest tests
         run: python3 -m unittest discover -s tools/tests
         working-directory: ${{ github.workspace }}
+      - name: Shutdown barrier executable fault tests
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_shutdown_barrier.cpp -o /tmp/test_shutdown_barrier
+          /tmp/test_shutdown_barrier
       - name: Runtime ownership and allocation recovery tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -pthread \
@@ -505,6 +510,10 @@ jobs:
             tools/tests/test_firmware_update_policy.cpp \
             -o /tmp/test_firmware_update_policy
           /tmp/test_firmware_update_policy
+          g++ -std=c++17 -Wall -Wextra -Werror \
+            tools/tests/test_firmware_operation_receipt.cpp \
+            -o /tmp/test_firmware_operation_receipt
+          /tmp/test_firmware_operation_receipt
           g++ -std=c++17 -Wall -Wextra -Werror \
             tools/tests/test_status_json.cpp \
             lib/status_json/status_json.cpp \
@@ -922,7 +931,8 @@ jobs:
             tools/tests/test_device_transfer_network_protocol.cpp \
             -o /tmp/test_device_transfer_network_protocol
           /tmp/test_device_transfer_network_protocol
-          python -m unittest tools.tests.test_map_commit_callbacks
+          python -m unittest tools.tests.test_map_operation_contract
+          python -m unittest tools.tests.test_map_commit_callbacks tools.tests.test_map_commit_recovery
           python -m unittest tools.tests.test_map_activation_handoff
       - name: Sound protocol host tests
         run: |

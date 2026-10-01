@@ -24,7 +24,10 @@ public:
             bool diagnosticsSealed, bool storageStopped, bool acceptedWork) {
     if (stage_ == Stage::Idle || stage_ == Stage::Ready || stage_ == Stage::Deferred)
       return;
-    const uint32_t budget = acceptedWork ? 30000U : 5000U;
+    if (stage_ == Stage::Drain && acceptedWork) acceptedSeen_ = true;
+    // Releasing a grant must not retroactively shrink the drain deadline from
+    // 30 s to 5 s on the same poll that observes its terminal ACK.
+    const uint32_t budget = stage_ == Stage::Drain && acceptedSeen_ ? 30000U : 5000U;
     if (static_cast<uint32_t>(now - started_) >= 600000U ||
         static_cast<uint32_t>(now - progress_) >= budget) {
       failed_ = stage_;
@@ -41,6 +44,7 @@ public:
 private:
   Stage stage_ = Stage::Idle;
   Stage failed_ = Stage::Idle;
+  bool acceptedSeen_ = false;
   uint32_t started_ = 0;
   uint32_t progress_ = 0;
 };

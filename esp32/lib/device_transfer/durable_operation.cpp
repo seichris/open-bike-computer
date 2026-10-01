@@ -57,6 +57,7 @@ std::vector<uint8_t> encode(const std::array<Record, kCapacity> &records,
     number(out, r.identity.streamBytes);
     out.push_back(static_cast<uint8_t>(r.phase));
     number(out, r.revision);
+    out.push_back(r.acknowledged ? 1 : 0);
   }
   number(out, checksum(out, out.size()));
   return out;
@@ -74,7 +75,7 @@ bool decode(const std::vector<uint8_t> &in,
     if (offset >= end) return false;
     const auto present = in[offset++];
     if (present == 0) continue;
-    if (present != 1 || end - offset < 273) return false;
+    if (present != 1 || end - offset < 274) return false;
     for (auto *s : {&r.identity.device, &r.identity.operation,
                     &r.identity.manifest, &r.identity.signedManifest,
                     &r.identity.stream}) {
@@ -87,12 +88,16 @@ bool decode(const std::vector<uint8_t> &in,
       if (n==0 || n>96 || end-offset<n) return false;
       s->assign(in.begin()+offset,in.begin()+offset+n); offset+=n;
     }
-    if (end-offset<17) return false;
+    if (end-offset<18) return false;
     r.identity.streamBytes = number(in, offset);
     r.phase = static_cast<Phase>(in[offset++]);
     r.revision = number(in, offset);
+    const auto acknowledged=in[offset++];
+    if (acknowledged>1) return false;
+    r.acknowledged=acknowledged!=0;
     if (!valid(r.identity) || !r.revision || r.revision > generation ||
-        r.phase < Phase::Receiving || r.phase > Phase::Forgotten) return false;
+        r.phase < Phase::Receiving || r.phase > Phase::Cancelled ||
+        (r.acknowledged && !terminal(r.phase))) return false;
   }
   if (offset != end) return false;
   for (size_t i=0;i<kCapacity;++i) for (size_t j=i+1;j<kCapacity;++j)
@@ -119,6 +124,10 @@ Result Store::restore() {
     if (!storage_.read(i, bytes)) return Result::StorageFailure;
     if (bytes.empty()) continue;
     any = true;
+    // A recognized envelope with a future schema is not a torn old write. Do
+    // not downgrade to the other slot and silently discard new semantics.
+    if (bytes.size()>=5 && bytes[0]=='O' && bytes[1]=='B' && bytes[2]=='O' &&
+        bytes[3]=='P' && bytes[4]!=kSchema) return Result::Corrupt;
     std::array<Record,kCapacity> candidate{}; uint64_t generation=0;
     if (!decode(bytes,candidate,generation)) continue;
     for (const auto &r : candidate)
@@ -151,12 +160,12 @@ Result Store::persist(std::array<Record,kCapacity> next) {
   records_=std::move(next); ++generation_; activeSlot_=target;
   return Result::Ok;
 }
-Result Store::admit(const Identity &id) {
+Result Store::admitInternal(const Identity &id) {
   size_t index=0; const auto found=locate(id,index);
-  if (found==Result::Ok) return records_[index].phase == Phase::Forgotten ? Result::Unavailable : Result::Replay;
+  if (found==Result::Ok) return records_[index].acknowledged ? Result::Unavailable : Result::Replay;
   if (found!=Result::Unavailable) return found;
   auto next=records_;
-  for (auto &r : next) if (r.identity.operation.empty() || r.phase==Phase::Forgotten) {
+  for (auto &r : next) if (r.identity.operation.empty() || r.acknowledged) {
     r={id,Phase::Receiving,generation_+1}; return persist(next);
   }
   return Result::Busy;
@@ -173,12 +182,12 @@ Result Store::admit(const Identity &id,uint64_t creationRevision) {
   const auto found=locate(id,index);
   if (found==Result::Unavailable && (generation_==0 || creationRevision!=generation_))
     return Result::Unavailable;
-  return admit(id);
+  return admitInternal(id);
 }
 Result Store::transition(const Identity &id, Phase phase) {
   size_t i=0; auto result=locate(id,i); if (result!=Result::Ok) return result;
   const auto old=records_[i].phase;
-  if (old==Phase::Forgotten) return Result::Unavailable;
+  if (records_[i].acknowledged) return Result::Unavailable;
   if (old==phase) return Result::Replay;
   bool allowed=false;
   switch (phase) {
@@ -193,7 +202,10 @@ Result Store::transition(const Identity &id, Phase phase) {
   default: break;
   }
   if (!allowed) return Result::NotAccepted;
-  auto next=records_; next[i].phase=phase; next[i].revision=generation_+1;
+  auto next=records_;
+  if (phase==Phase::Forgotten) next[i].acknowledged=true;
+  else next[i].phase=phase;
+  next[i].revision=generation_+1;
   return persist(next);
 }
 Result Store::prepare(const Identity &id) { return transition(id,Phase::Prepared); }
@@ -208,14 +220,14 @@ Result Store::rendererAcknowledged(const Identity &id, const std::string &manife
 }
 Result Store::query(const Identity &id, Record &record) const {
   size_t i=0; const auto result=locate(id,i); if (result!=Result::Ok) return result;
-  if (records_[i].phase==Phase::Forgotten) return Result::Unavailable;
+  if (records_[i].acknowledged) return Result::Unavailable;
   record=records_[i]; return Result::Ok;
 }
 Result Store::queryID(const std::string &operation, Record &record) const {
   if (!ready_) return Result::StorageFailure;
   if (!hex(operation,32)) return Result::Invalid;
   for (const auto &r : records_) if (r.identity.operation==operation) {
-    if (r.phase==Phase::Forgotten) return Result::Unavailable;
+    if (r.acknowledged) return Result::Unavailable;
     record=r; return Result::Ok;
   }
   return Result::Unavailable;

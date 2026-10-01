@@ -1116,8 +1116,10 @@ void testCrashBoundariesRemainRetryableWithMonotonicFinalization() {
 struct SimulatedInstallerPowerCut {};
 class MutationCrashInstaller final : public MapTransferInstaller {
 public:
-  MutationCrashInstaller(const std::string &root, size_t cut = SIZE_MAX)
-      : MapTransferInstaller(root), root_(root), image_(tempRoot()), cut_(cut) {}
+  MutationCrashInstaller(const std::string &root, size_t cut = SIZE_MAX,
+                         bool rejectReplace = false)
+      : MapTransferInstaller(root), root_(root), image_(tempRoot()), cut_(cut),
+        rejectReplace_(rejectReplace) {}
   ~MutationCrashInstaller() { std::filesystem::remove_all(image_); }
   mutable size_t mutations = 0;
   void restoreCutImage() const {
@@ -1125,6 +1127,16 @@ public:
     std::filesystem::copy(image_, root_, std::filesystem::copy_options::recursive);
   }
 protected:
+  int renameStoragePath(const char *from, const char *to) const override {
+    // FAT commonly refuses a replacing rename. Force the real backup/restore
+    // branch instead of assuming host POSIX replacement covers that branch.
+    if (rejectReplace_ && exists(to)) {
+      storageMutationBoundary("rename", to, false);
+      storageMutationBoundary("rename", to, true);
+      return -1;
+    }
+    return MapTransferInstaller::renameStoragePath(from, to);
+  }
   void storageMutationBoundary(const char *, const std::string &, bool) const override {
     if (mutations++ != cut_) return;
     // Snapshot before stack unwinding flushes streams, then restore this
@@ -1136,10 +1148,12 @@ protected:
 private:
   std::string root_, image_;
   size_t cut_;
+  bool rejectReplace_;
 };
 
 void testEveryInstallerMutationAndInterruptedRecovery() {
   size_t totalCuts = 0;
+  for (const bool rejectReplace : {false, true}) {
   for (const bool replacement : {false, true}) {
     const std::string baseline = tempRoot();
     if (replacement) {
@@ -1155,13 +1169,13 @@ void testEveryInstallerMutationAndInterruptedRecovery() {
       return root;
     };
     const std::string completeRoot = clone();
-    MutationCrashInstaller complete(completeRoot);
+    MutationCrashInstaller complete(completeRoot, SIZE_MAX, rejectReplace);
     assert(complete.activateReadyStreamMap("candidate").ok);
     const size_t mutationCount = complete.mutations;
     assert(mutationCount > 10);
     for (size_t cut = 0; cut != mutationCount; ++cut) {
       const std::string root = clone();
-      MutationCrashInstaller interrupted(root, cut);
+      MutationCrashInstaller interrupted(root, cut, rejectReplace);
       bool cutReached = false;
       try { (void)interrupted.activateReadyStreamMap("candidate"); }
       catch (const SimulatedInstallerPowerCut &) {
@@ -1171,7 +1185,7 @@ void testEveryInstallerMutationAndInterruptedRecovery() {
       assert(cutReached);
       ++totalCuts;
       for (size_t pass = 0; pass != 3; ++pass) {
-        MutationCrashInstaller recovery(root, pass);
+        MutationCrashInstaller recovery(root, pass, rejectReplace);
         try { (void)recovery.recoverInterruptedActivation(); }
         catch (const SimulatedInstallerPowerCut &) { recovery.restoreCutImage(); }
       }
@@ -1190,6 +1204,7 @@ void testEveryInstallerMutationAndInterruptedRecovery() {
     }
     std::filesystem::remove_all(completeRoot);
     std::filesystem::remove_all(baseline);
+  }
   }
   std::cout << "installer mutation cuts exercised=" << totalCuts << "\n";
 }
@@ -1400,7 +1415,8 @@ void testDeviceBoundOperationActivationAndReceipt() {
       snapshot.signedManifestReceipt,hash.finalHex(),stream.size(),snapshot.sessionId,snapshot.mapId};
   map_transfer::MapOperationStorage storage(root); op::Store ledger(storage,device);
   assert(ledger.restore()==op::Result::Ok);
-  assert(ledger.admit(identity)==op::Result::Ok);
+  assert(ledger.initializeAdmission(100)==op::Result::Ok);
+  assert(ledger.admit(identity,ledger.admissionRevision())==op::Result::Ok);
   assert(ledger.prepare(identity)==op::Result::Ok);
   // Even a mistakenly invoked finish cannot confer authority on prepared data.
   assert(receiver.finish().ok);
@@ -1414,8 +1430,37 @@ void testDeviceBoundOperationActivationAndReceipt() {
   assert(!beforeOwnershipInit.recoverPendingStreamActivation().ok);
   MapTransferInstaller otherDevice(root); otherDevice.setOperationDeviceID(std::string(32,'f'));
   assert(!otherDevice.recoverPendingStreamActivation().ok);
-  assert(installer.recoverPendingStreamActivation().ok);
-  assert(installer.readActiveMap(selected).ok);
+  // Reproduce a real crash after pointer rename but before cleanup/renderer:
+  // main's early installer must bind immutable device identity and recover the
+  // exact transaction BEFORE it exposes that pointer to the renderer.
+  struct BootCut {};
+  class InterruptedPointerInstaller final : public MapTransferInstaller {
+  public:
+    using MapTransferInstaller::MapTransferInstaller;
+  protected:
+    void storageMutationBoundary(const char *operation,const std::string &path,
+                                 bool after) const override {
+      if (after && std::string(operation)=="rename" &&
+          path.size()>=24 && path.substr(path.size()-24)=="/VECTMAP/active-map.json")
+        throw BootCut{};
+    }
+  };
+  InterruptedPointerInstaller interrupted(root);
+  interrupted.setOperationDeviceID(device);
+  bool powerCut=false;
+  try { (void)interrupted.activateReadyStreamMap(identity.session); }
+  catch (const BootCut &) { powerCut=true; }
+  assert(powerCut);
+  assert(exists(root+"/VECTMAP/.activation-transaction.json"));
+  assert(!beforeOwnershipInit.recoverInterruptedActivation().ok);
+  assert(!otherDevice.recoverInterruptedActivation().ok);
+  MapTransferInstaller mainBootInstaller(root);
+  mainBootInstaller.setOperationDeviceID(device);
+  assert(mainBootInstaller.recoverInterruptedActivation().ok);
+  assert(mainBootInstaller.readActiveMap(selected).ok);
+  assert(selected.sessionId==identity.session);
+  assert(selected.manifestReceipt==identity.manifest);
+  assert(!exists(root+"/VECTMAP/.activation-transaction.json"));
   op::Record receipt;
   op::Store rebooted(storage,device); assert(rebooted.restore()==op::Result::Ok);
   assert(rebooted.query(identity,receipt)==op::Result::Ok);

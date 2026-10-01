@@ -41,6 +41,10 @@ struct HttpRequest {
   uint64_t requestSequence;
 };
 }
+namespace ui_scheduler {
+enum class WakeReason { Transfer };
+void notify(WakeReason) {}
+}
 struct SerialStub {
   template<class... Args> void printf(const char *, Args...) {}
 } Serial;
@@ -52,10 +56,18 @@ public:
     uint32_t minimumSequence = 0;
     bool pending() const { return !sessionId.empty(); }
   };
+  struct Recovery {
+    device_transfer::HttpResponseCompletionToken response;
+    bool present = false, armed = false;
+    bool pending() const { return present; }
+  };
+  struct StateGuard { StateGuard(MapTransferHttpServer &) {} };
+  Recovery commitRecovery_;
   DeferredActivation deferredActivation_;
   device_transfer::commit_boundary_policy::Boundary boundary;
   unsigned dispatched = 0;
   bool automaticExit = false;
+  void armCommitRecovery(const device_transfer::HttpRequest &);
   void lockState() {}
   void unlockState() {}
   void beginDeferredActivation(const DeferredActivation &, bool peerClosed) {
@@ -67,6 +79,7 @@ public:
   void responseDidAbort(const device_transfer::HttpRequest &);
 };
 '''
+        fixture += method(source, "armCommitRecovery")
         fixture += method(source, "responseDidComplete")
         fixture += method(source, "responseDidAbort")
         fixture += r'''
@@ -97,6 +110,13 @@ int main() {
     server.responseDidAbort(later);
     assert(server.dispatched == 2 && !server.deferredActivation_.pending());
     assert(server.boundary.owns(next));
+    // A failed finalizer has no activation callback. Only its exact response
+    // callback may arm storage recovery after the receiver has unwound.
+    server.commitRecovery_ = {{7, "PUT", "/map/one", 12}, true, false};
+    server.responseDidAbort(first);
+    assert(!server.commitRecovery_.armed);
+    server.responseDidComplete(later, false);
+    assert(server.commitRecovery_.armed);
   }
 }
 '''

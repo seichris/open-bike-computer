@@ -9,6 +9,22 @@ import Foundation
 import CoreLocation
 import MapKit
 
+// Pointer identity can be visible while the renderer ACK is still pending.
+nonisolated enum MapActivationVisibilityPolicy {
+    static func hidesActiveSelection(activeMapID: String, activeSessionID: String?,
+                                     activationStatus: String, activationMapID: String,
+                                     activationSessionID: String) -> Bool {
+        guard activationStatus != "installed", activationStatus != "idle" else { return false }
+        // Session identity is published at begin(), before activation mapID is
+        // known. A stale/empty mapID must not expose this provisional pointer.
+        if let activeSessionID, !activeSessionID.isEmpty, !activationSessionID.isEmpty {
+            return activeSessionID == activationSessionID
+        }
+        // Legacy descriptors without a session can only be fenced by map ID.
+        return !activationMapID.isEmpty && activeMapID == activationMapID
+    }
+}
+
 // Durable operation queries are deliberately bounded and cannot carry delimiters.
 nonisolated enum MapOperationQueryPacket {
     static func make(operationID: String) -> Data? {
@@ -989,5 +1005,20 @@ struct NavigationSendTracker {
         }
 
         return abs(snapshot.distance - lastSentSnapshot.distance) >= distanceThreshold
+    }
+}
+
+// Exact SD-independent OTA result. Omitted/disabled status is never success.
+struct FirmwareOperationReceipt: Codable, Equatable, Sendable {
+    let protocolVersion: Int
+    let operationId: String?
+    let imageSha256: String?
+    let result: String?
+    let admissionRevision: UInt32?
+    let admissionEpoch: String?
+
+    func matches(operationID: String?, image: String?) -> Bool {
+        protocolVersion == 1 && operationID != nil && image != nil &&
+        operationId == operationID && imageSha256 == image
     }
 }

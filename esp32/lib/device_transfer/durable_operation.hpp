@@ -33,6 +33,7 @@ struct Record {
   Identity identity;
   Phase phase = Phase::Receiving;
   uint64_t revision = 0;
+  bool acknowledged = false;
 };
 // Two independent bounded slots. writeDurable must make the ENTIRE supplied
 // image power-durable before returning true. Readback alone cannot satisfy this
@@ -48,7 +49,6 @@ class Store {
 public:
   Store(Storage &storage, std::string authenticatedDevice);
   Result restore();
-  Result admit(const Identity &identity);
   Result admit(const Identity &identity, uint64_t creationRevision);
   Result initializeAdmission(uint64_t seed);
   uint64_t admissionRevision() const { return generation_; }
@@ -70,6 +70,7 @@ public:
   Result queryID(const std::string &operation, Record &record) const;
   const std::array<Record, kCapacity> &records() const { return records_; }
 private:
+  Result admitInternal(const Identity &identity);
   Result transition(const Identity &, Phase);
   Result persist(std::array<Record, kCapacity> next);
   Result locate(const Identity &, size_t &) const;

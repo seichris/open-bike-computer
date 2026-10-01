@@ -621,9 +621,10 @@ void speakerTask(void *) {
       vTaskDelete(nullptr);
       return;
     }
-    if (xQueueReceive(soundQueue, &request, pdMS_TO_TICKS(20)) != pdTRUE) {
+    if (xQueueReceive(soundQueue, &request, portMAX_DELAY) != pdTRUE) {
       continue;
     }
+    if (shutdownRequested.load(std::memory_order_acquire)) continue;
 
     power_management::ScopedLock powerLock(
         power_management::LockDomain::Audio);
@@ -724,7 +725,12 @@ bool begin() {
 bool isAvailable() { return soundQueue != nullptr; }
 
 bool pollShutdownQuiescence() {
-  shutdownRequested.store(true, std::memory_order_release);
+  if (!shutdownRequested.exchange(true, std::memory_order_acq_rel) && soundQueue != nullptr) {
+    // Wake an idle task without adding a periodic idle wakeup. A full queue
+    // already guarantees it is runnable; it checks the stop flag first.
+    QueuedPlaybackRequest wake{};
+    (void)xQueueSend(soundQueue, &wake, 0);
+  }
   return soundQueue == nullptr || shutdownAcknowledged.load(std::memory_order_acquire);
 }
 

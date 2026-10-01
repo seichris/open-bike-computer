@@ -31,6 +31,12 @@ int main() {
   accepted.poll(30000, true, true, true, true, true);
   assert(accepted.stage() == Stage::Deferred);
 
+  Barrier released;
+  released.request(0);
+  released.poll(1, false, false, false, false, true);
+  released.poll(20000, true, false, false, false, false);
+  assert(released.stage() == Stage::Renderer);
+
   Barrier progressing;
   progressing.request(0);
   for (uint32_t now = 20000; now < 600000; now += 20000) {

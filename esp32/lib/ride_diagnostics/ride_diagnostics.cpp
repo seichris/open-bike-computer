@@ -94,6 +94,8 @@ constexpr std::size_t kMaximumRetainedFiles = 256;
 constexpr std::size_t kFilePruneBatch = 16;
 
 Storage *storage = nullptr;
+std::atomic<bool> shutdownSealStarted{false};
+std::atomic<bool> shutdownSealReady{false};
 QueueHandle_t normalQueue = nullptr;
 QueueHandle_t criticalQueue = nullptr;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -1091,6 +1093,7 @@ void writerTask(void *) {
 
 void startWriterTask() {
 #if PERSISTENT_RIDE_DIAGNOSTICS
+  if (storageTransitionRequested.load(std::memory_order_acquire)) return;
   if (recorderResourcesReady.load(std::memory_order_acquire) &&
       writerTaskHandle == nullptr) {
     // Arduino's SPI FatFs backend can busy-wait for up to its card-response
@@ -1792,6 +1795,12 @@ bool prepareForShutdown(uint32_t timeoutMs) {
   (void)timeoutMs;
   return true;
 #else
+  // Maintenance/partial startup never created a writer or opened a chunk.
+  // No SD presence is required to prove that this recorder has no IO to drain.
+  if (writerTaskHandle == nullptr && activeFile == nullptr) {
+    storageTransitionRequested.store(true, std::memory_order_release);
+    return true;
+  }
   (void)recordHealth("shutdown");
   (void)record(Level::Warning, "lifecycle", "controlled_shutdown", "{}");
   checkpointRequested.store(true);
@@ -1804,6 +1813,43 @@ bool prepareForShutdown(uint32_t timeoutMs) {
     updateFaultCapsule(Level::Error, "lifecycle",
                        "controlled_shutdown_unsealed", true);
   return sealed;
+#endif
+}
+
+void noteShutdownDeferred(uint8_t stage) {
+  const char *event = "shutdown_deferred";
+  switch (stage) {
+  case 1: event = "shutdown_drain_timeout"; break;
+  case 2: event = "shutdown_renderer_timeout"; break;
+  case 3: event = "shutdown_seal_timeout"; break;
+  case 4: event = "shutdown_unmount_timeout"; break;
+  default: break;
+  }
+  updateFaultCapsule(Level::Error, "lifecycle", event, false);
+}
+
+bool pollShutdownQuiescence() {
+#if !PERSISTENT_RIDE_DIAGNOSTICS
+  return true;
+#else
+  if (writerTaskHandle == nullptr && activeFile == nullptr) {
+    storageTransitionRequested.store(true, std::memory_order_release);
+    return true;
+  }
+  if (!shutdownSealStarted.exchange(true, std::memory_order_acq_rel)) {
+    // Join/publish exactly one cutoff and allow the writer's 50 ms idle wait
+    // to expire. Repeated short synchronous seal calls would replace an ACK
+    // received between polls with a fresh cutoff indefinitely.
+    const auto sealTask = [](void *) {
+      const bool sealed = prepareForShutdown(4000);
+      shutdownSealReady.store(sealed, std::memory_order_release);
+      vTaskDelete(nullptr);
+    };
+    if (xTaskCreate(sealTask, "diag_stop", 6144, nullptr,
+                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS)
+      return false;
+  }
+  return shutdownSealReady.load(std::memory_order_acquire);
 #endif
 }
 

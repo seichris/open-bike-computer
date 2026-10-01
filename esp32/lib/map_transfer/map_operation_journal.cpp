@@ -63,10 +63,16 @@ bool acceptedMapOperation(const std::string &root,const std::string &device,
                           const std::string &manifest,const std::string &signedManifest) {
   if (device.empty()) return false;
   MapOperationStorage storage(root); operation::Store store(storage,device);
-  operation::Record record;
-  if (store.restore()!=operation::Result::Ok || store.queryID(id,record)!=operation::Result::Ok) return false;
-  return (record.phase==operation::Phase::Accepted || record.phase==operation::Phase::Installed) &&
-      record.identity.session==session && record.identity.manifest==manifest &&
-      record.identity.signedManifest==signedManifest;
+  if (store.restore()!=operation::Result::Ok) return false;
+  // An acknowledged Installed tombstone still proves the prior grant while
+  // retained, so cleanup/recovery may finish. Failed/cancelled tombstones never
+  // grant activation. Reusing the slot safely removes that historical authority.
+  for (const auto &record : store.records()) {
+    if (record.identity.operation==id &&
+        (record.phase==operation::Phase::Accepted || record.phase==operation::Phase::Installed) &&
+        record.identity.session==session && record.identity.manifest==manifest &&
+        record.identity.signedManifest==signedManifest) return true;
+  }
+  return false;
 }
 } // namespace map_transfer

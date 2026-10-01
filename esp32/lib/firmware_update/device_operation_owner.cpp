@@ -241,6 +241,20 @@ esp_err_t DeviceOperationOwner::selectBootPartition(
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
+esp_err_t DeviceOperationOwner::acceptFirmwareOperation(const receipt::Record &record, uint32_t revision) {
+  Command command; command.operation = Operation::AcceptFirmwareOperation;
+  command.firmwareReceipt = record; command.receiptRevision = revision;
+  Result result; const auto dispatch = execute(command, result);
+  return dispatch == ESP_OK ? result.error : dispatch;
+}
+
+esp_err_t DeviceOperationOwner::acknowledgeFirmwareOperation(const receipt::Record &record) {
+  Command command; command.operation = Operation::AcknowledgeFirmwareOperation;
+  command.firmwareReceipt = record;
+  Result result; const auto dispatch = execute(command, result);
+  return dispatch == ESP_OK ? result.error : dispatch;
+}
+
 esp_err_t DeviceOperationOwner::execute(
     const Command &command, Result &result, const uint8_t *writeData,
     const std::string *networkSsid,
@@ -369,6 +383,17 @@ void DeviceOperationOwner::run() {
       break;
     case Operation::SelectBoot:
       result.error = esp_ota_set_boot_partition(command.partition);
+      break;
+    case Operation::AcceptFirmwareOperation: {
+      receipt::Record current{};
+      result.error = receipt::load(current) &&
+          current.revision == command.receiptRevision &&
+          receipt::accept(command.firmwareReceipt) ? ESP_OK : ESP_FAIL;
+      break;
+    }
+    case Operation::AcknowledgeFirmwareOperation:
+      result.error = receipt::acknowledge(command.firmwareReceipt.device,
+          command.firmwareReceipt.operation, command.firmwareReceipt.image) ? ESP_OK : ESP_FAIL;
       break;
     case Operation::StartStation:
       if (WiFi.getMode() == WIFI_OFF &&

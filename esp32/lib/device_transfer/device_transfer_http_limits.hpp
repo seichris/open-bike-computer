@@ -132,6 +132,8 @@ inline bool parseHttpUint64(const std::string &text, uint64_t &value) {
 
 struct HttpSecurityHeaders {
   std::string mapOperationID;
+  std::string mapOperationAdmissionEpoch;
+  bool mapOperationAdmissionEpochSeen = false;
   uint64_t mapOperationAdmissionRevision = 0;
   bool mapOperationAdmissionRevisionSeen = false;
   bool hasMapOperationAdmissionRevision = false;
@@ -187,7 +189,11 @@ struct HttpSecurityHeaders {
   }
 
   void accept(const std::string &name, const std::string &value) {
-    if (name == "x-map-operation-admission-revision") {
+    if (name == "x-map-operation-admission-epoch") {
+      mapOperationDuplicate = mapOperationDuplicate || mapOperationAdmissionEpochSeen;
+      mapOperationAdmissionEpoch = mapOperationAdmissionEpochSeen ? "" : value;
+      mapOperationAdmissionEpochSeen = true;
+    } else if (name == "x-map-operation-admission-revision") {
       mapOperationDuplicate = mapOperationDuplicate || mapOperationAdmissionRevisionSeen;
       hasMapOperationAdmissionRevision = !mapOperationAdmissionRevisionSeen &&
           parseHttpUint64(value,mapOperationAdmissionRevision);

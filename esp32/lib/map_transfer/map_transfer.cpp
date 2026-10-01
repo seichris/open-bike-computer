@@ -2978,13 +2978,14 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps(
     const bool freshReady =
         !consumed &&
         (fileExists(joinPath(candidatePath, kStreamReadyFile)) ||
-         fileExists(joinPath(candidatePath, kStreamReadyFile) + ".bak")) &&
+         fileExists(joinPath(candidatePath, kStreamReadyFile) + ".bak") ||
+         fileExists(joinPath(candidatePath, ".operation-ready")) ||
+         fileExists(joinPath(candidatePath, ".operation-ready.bak"))) &&
         readReadyStreamMap(name, recoverableReady).ok;
     if (candidate == selected.root || candidate == selected.previousRoot ||
         candidate == pendingRoot || candidate == transactionRoot ||
         candidate == transactionPreviousRoot ||
-        freshReady || fileExists(joinPath(candidatePath, ".operation-ready")) ||
-        fileExists(joinPath(candidatePath, ".operation-ready.bak")) ||
+        freshReady ||
         ((keepInstallingSessionId.empty() ||
           name == keepInstallingSessionId) &&
          (fileExists(joinPath(candidatePath, kStreamInstallingFile)) ||

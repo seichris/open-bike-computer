@@ -1194,6 +1194,7 @@ class BLEManager: NSObject, ObservableObject {
         DeviceTransferWiFiStartFailure?
     @Published private(set) var firmwareMaintenanceActive = false
     @Published private(set) var firmwareMaintenanceStage = "normal"
+    @Published private(set) var firmwareOperation: FirmwareOperationReceipt?
     @Published private(set) var firmwareMaintenanceCorrelation: UInt32 = 0
     @Published private(set) var firmwareMaintenanceReconnectExpected = false
     @Published private(set) var deviceStorageBackend: String?
@@ -6807,6 +6808,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferWiFiStartFailure = nil
         firmwareMaintenanceActive = false
         firmwareMaintenanceStage = "normal"
+        firmwareOperation = nil
         firmwareMaintenanceCorrelation = 0
         deviceStorageBackend = nil
         deviceStoragePowerCycleRequired = nil
@@ -11125,6 +11127,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             firmwareMaintenanceStage = "normal"
             firmwareMaintenanceCorrelation = 0
         }
+        firmwareOperation = (object["firmwareOperation"] as? [String: Any]).flatMap { value in
+            guard let data = try? JSONSerialization.data(withJSONObject: value) else { return nil }
+            return try? JSONDecoder().decode(FirmwareOperationReceipt.self, from: data)
+        }
         if let checkpoint = object["bootCheckpoint"] as? [String: Any] {
             firmwareBootSequence =
                 (checkpoint["bootSequence"] as? NSNumber)?.uint32Value
@@ -11252,12 +11258,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         // Firmware selects the pointer before the renderer acknowledges it. Keep a
         // different previous selection visible, but never advertise the candidate
         // (including a failed candidate) as an installed Saved Map.
-        guard mapTransferActivationStatus != "installed",
-              mapTransferActivationStatus != "idle",
-              let activeDeviceMap,
-              activeDeviceMap.mapID == mapTransferActivationMapId,
-              activeDeviceMap.sessionID == nil ||
-                activeDeviceMap.sessionID == mapTransferActivationSessionId else { return }
+        guard let activeDeviceMap,
+              MapActivationVisibilityPolicy.hidesActiveSelection(
+                activeMapID: activeDeviceMap.mapID,
+                activeSessionID: activeDeviceMap.sessionID,
+                activationStatus: mapTransferActivationStatus,
+                activationMapID: mapTransferActivationMapId,
+                activationSessionID: mapTransferActivationSessionId) else { return }
         self.activeDeviceMap = nil
     }
 
