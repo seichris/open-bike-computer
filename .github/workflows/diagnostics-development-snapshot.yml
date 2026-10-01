@@ -1,0 +1,32 @@
+name: Diagnostics development snapshot
+
+on:
+  push:
+    branches: [codex/unified-diagnostics-v2]
+    paths: [.github/workflows/diagnostics-development-snapshot.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Archive tracked source for isolated implementation and tests
+        run: |
+          git archive --format=tar.gz --output="$RUNNER_TEMP/bicino-source.tar.gz" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/source-commit.txt"
+          sha256sum "$RUNNER_TEMP/bicino-source.tar.gz" > "$RUNNER_TEMP/source-sha256.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: diagnostics-development-source
+          path: |
+            ${{ runner.temp }}/bicino-source.tar.gz
+            ${{ runner.temp }}/source-commit.txt
+            ${{ runner.temp }}/source-sha256.txt
+          retention-days: 1
+          if-no-files-found: error
