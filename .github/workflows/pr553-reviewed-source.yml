@@ -1,0 +1,58 @@
+name: PR 553 reviewed source objects
+on:
+  push:
+    branches: [implement/wifi-device-operation-lifecycle]
+    paths: [.github/workflows/pr553-reviewed-source.yml]
+permissions:
+  contents: write
+jobs:
+  objects:
+    if: github.repository == 'seichris/open-bike-computer' && github.ref == 'refs/heads/implement/wifi-device-operation-lifecycle'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 6eef692407958999a4c967bc518b3c5b77fdccba
+          persist-credentials: false
+      - name: Verify exact patch and publish blobs only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATCH: eNqtV9ty2zYQfedX7DAPJkuRuluyOp7GdZxM2qbxOM5Mp5bDgUhQQgOBDAHKVl3/exe8ibLl+NLqQSRB8GAvZ88CIYsicN05U0DaHl4W2ax9FadfIx5fyXbAvPWSw+zBVwYTIb2GUUBnPTLwvCCcheNeAN1OZ38wMFzX/Q6u4TjO97Bfvwa33zlo7YOjLweAA3/FMzkxQP8EpaGcQLAgYk5lMcaiSTHulcNenKkkU9JjsYTDQ9hTaUb3islpJqQbiwksSRBLlxNFpTIc/SqkEcm4wqXyx3xufQ+gTWVi7oYspYGK0/UEEN8lSVIgS0WTykwAFzJJ0VISKBYLdG9Bg69o1+t+2A8GPTokJBjOyLgzHPeGIRntD7qdoDvu9kb9GTnozLrwClajDZogSzqBczQW5lTQFO0OAdeGWcZ4CCykQjG1NsJmckv72jJIWaJkGx1yBVmxOdFGudp16ckF5uOJM8vUD/q9/fGs73nRIJwNu2Od+tFwWKb+qVgFE546WxOjN+hrYujLWBPjOsDZIK9YpAKY6mBVaD+zr/Q4XiILaLr98CEOKZftN3TFAvqBJB8THUxcystxngxDBJnTtAKqUY7jOA2ZIEiQ/wR4nhIhI5qWwzWW8wKsN4zMRSwVC+T/BLsBPAq+ZUwy7fon9Jm+0Om3LF1ekZR+TkJk9l3rnoeFSf2VqTMsNnoUkkS9GOj3moYnYs7ExretIlNxjHzKeZr/++EmOr6MszSg/jwlycJL1sj350w3BL2CiHEKS2RtJbBFDXaKn+eNRuGwtz/Ki68d0lVbZLyS2Wctpius0+qA020Nh1hehmOa5rHWLaAkWMCn3PsAw4QWpcDEKg7y6LRAxAqWNKWFsUlKJRUBxSlAoChsz3AM56h8QPFdl8Il6Qorh4N2KqFCy5h2NuMo43B6Bq+Gwz6QMES142xFoeGA4aQUqaxXkqBi+Pm3kzJ1iK0gXjKlRVItKEuhcFZClMZLPQTHRBG+RjlFa1eMXhlOsWwL0CKBU+JsvshnRiyVO/0GwlNKwjUOBTwLi7WWXh43w8lXSohacDYDtkziVMEpPhpO+ZDS+jYT2lbdiMqBNdGt0nDOPn48h8P8O8v3dXR93/YwvjFfUcv2EqwZoeRF79JwTs9O3r7/A2ebj3Pc1OCGE3AiJTTK+VMepneaErrXSKuyzNOPx0RSe1J3S8gppRO49mdo2YKkgkqJV+kzJbfIVmU3YFRakvLIbrTWvDli+A6hsxmM4jQPn2aRlcehvfGs7Bam7c15PLPMH7BFmE1I/XsFv8T4sVxQzjF/2CBFlidOIh0KTtdZxZslEdhIJa4nE+zwNLyL1uAoX/8IYZzznlNUAbxZIEpBIVhgO0bmL5mUuGMouedtw5UL4gYl99LTTPIVvVaWzm/CSUAtczqdCrMFJqCjMuFMcZQhadnbUDpStf2iRr4TjXyPUlbBIdadslCtI/SJcG6ldWQvvkwlLmteOtNC73D9EtG27yOyCEreOWDWyrkpxRIjj5TORWHADtOKmOQ5ovffVgxxDqF7/60OQEpxL6cVQtNlN7z5zL5oth7FeawRPgjxWTFMJxZD+wzJ0sB58nfNqsXwLIlXbwxfgnGMnTJL6WnMWbB+GMB+IHW6pD0UE5qq98KqKVFlpVVl/gGb7uTTvMlrQm96byda2KvKqkrqpgK+NRukbBjxDusJhe7kW0a4VbKnBX1bq96WfEUE/wLmcxR17pe64pcK62sR92kUoR7gYn69978nYdVBBktLa7cnSUQRk4RWrV0PnXlMu1n8DXfw3INw1fQLU5+DzMuLvFS12eblZm55eMH5OAuZoCyzOs9gAd/c2sUY7pebj/fONFpsvGZIH5RmfdzRtYbLXZj52ce8nOyUOK02+L5pgGnukLByb4CYW8Jk/TT58s9U2tbUqw8JF0fun8T9u+Me+G4uVAu7IVM7KFo7uGXMLvfLqO2Quga7zvFAWSd2g90ufbA9JvNmbdlP4DuyXZt0safpvneJhL8pYG6xxaBYa+mk1wz3IPmW4qZe79a0n6qUj1bG2C52BKjnvq8N8X19dDZ9f0mY8H2zDGq9H9DD2Ij+BQGNLAg=
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request, zlib
+          def git(*args, data=None):
+              return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null', *args], input=data)
+          assert git('rev-parse', 'HEAD^{tree}').decode().strip() == '17e64219d9454ffefed44001681b6f15299dce96'
+          patch = zlib.decompress(base64.b64decode(os.environ['PATCH'], validate=True))
+          assert len(patch) < 65536 and hashlib.sha256(patch).hexdigest() == '69b261f8ae412a5ade2661cfc66ce7d37b6e7296ee362d5f063a766eb942b7b3'
+          git('apply', '--index', '--whitespace=error-all', '-', data=patch)
+          tree = git('write-tree').decode().strip()
+          assert tree == 'b558158ad6d3b7b8e1ea9f3a891b806678fe8188'
+          expected_paths = {'.github/workflows/ci.yml', 'ios-app/scripts/run-navigation-tests.sh', 'tools/tests/test_diagnostics_source_graph.py'}
+          paths = git('diff', '--cached', '--name-only').decode().splitlines()
+          assert set(paths) == expected_paths
+          entries = []
+          for path in paths:
+              mode, sha, stage = git('ls-files', '--stage', '--', path).decode().split('\t')[0].split()
+              assert mode in ('100644', '100755') and stage == '0'
+              payload = git('show', ':' + path)
+              request = urllib.request.Request('https://api.github.com/repos/seichris/open-bike-computer/git/blobs',
+                  data=json.dumps({'content': base64.b64encode(payload).decode(), 'encoding': 'base64'}).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  assert json.load(response)['sha'] == sha
+              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': sha})
+          # No tree, commit, ref, secret or permission writes. The authorized
+          # connector commits this verified result and removes this helper.
+          result = {'tree': tree, 'entries': entries, 'staging': os.environ['GITHUB_SHA']}
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'source-objects.json').write_text(json.dumps(result))
+          print(json.dumps(result))
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: reviewed-source-objects
+          path: ${{ runner.temp }}/source-objects.json
+          retention-days: 1
+          if-no-files-found: error
