@@ -10,6 +10,17 @@ from firmware_compile_cache import configure_metadata_identity, relocate_core_te
 
 
 class FirmwareCompileCacheTests(unittest.TestCase):
+    def test_rebases_percent_encoded_package_urls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            origin = root / "old producer"
+            target = root / "new consumer"
+            target.mkdir()
+            metadata = target / ".piopm"
+            metadata.write_text('{"uri":"' + (origin / "platform-staging").as_uri() + '"}')
+            self.assertEqual(relocate_core_text(target, origin, target), 1)
+            self.assertIn((target / "platform-staging").as_uri(), metadata.read_text())
+
     def test_relocated_python_launcher_executes_in_path_with_spaces_and_quotes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

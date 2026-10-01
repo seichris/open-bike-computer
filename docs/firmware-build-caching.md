@@ -46,6 +46,9 @@ Changing a commit therefore recompiles metadata and changed sources while
 allowing unchanged libraries to be restored. Raw unverified builds retain
 their previous global identity flags. Version, board/profile, and configuration
 changes still affect normal compiler input identities.
+Verified application compiles reject `__DATE__`, `__TIME__`, and
+`__TIMESTAMP__` with `-Werror=date-time`, preventing the source clock from
+changing an object through an input absent from its compiler command.
 
 Final ELF linking is excluded from artifact caching, so each build produces
 its own linker map. Firmware/build manifests and upload plans remain private
