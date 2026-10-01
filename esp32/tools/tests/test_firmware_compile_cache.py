@@ -1,13 +1,29 @@
 import tempfile
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
 from build_firmware import _application_build_cache_identity
-from firmware_compile_cache import configure_metadata_identity
+from firmware_compile_cache import configure_metadata_identity, relocate_core_text
 
 
 class FirmwareCompileCacheTests(unittest.TestCase):
+    def test_relocated_python_launcher_executes_in_path_with_spaces_and_quotes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            origin = root / "producer"
+            target = root / "consumer with 'quotes'"
+            (target / "bin").mkdir(parents=True)
+            (target / "bin/python").symlink_to(sys.executable)
+            launcher = target / "bin/launch"
+            launcher.write_text(f"#!{origin}/bin/python\nprint('relocated')\n")
+            launcher.chmod(0o755)
+            self.assertEqual(relocate_core_text(target, origin, target), 1)
+            result = subprocess.run([str(launcher)], check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout, "relocated\n")
+
     def test_source_commit_keeps_library_namespace_but_core_change_does_not(self):
         project = Path("/project")
         first = _application_build_cache_identity(project, "WAVESHARE_AMOLED_175", "a" * 40, "1" * 64)

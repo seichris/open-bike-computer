@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 from pathlib import Path
 
 
@@ -61,6 +62,19 @@ def relocate_core_text(root: Path, source_project: Path, project: Path) -> int:
                 data.decode("utf-8")
             except UnicodeDecodeError:
                 continue
-            path.write_bytes(data.replace(old, new))
+            relocated = data.replace(old, new)
+            if data.startswith(b"#!" + old):
+                # A launcher created in a path without spaces may be restored
+                # into a path with spaces. The kernel cannot parse that Python
+                # shebang; use the standard shell/Python exec trampoline.
+                first, separator, body = data.partition(b"\n")
+                command = shlex.split(first[2:].decode("utf-8"))
+                if command and "python" in Path(command[0]).name:
+                    command = [argument.replace(str(source_project), str(project)) for argument in command]
+                    quoted = " ".join(shlex.quote(argument) for argument in command)
+                    relocated = (
+                        "#!/bin/sh\n'''exec' " + quoted + ' "$0" "$@"\n' + "' '''\n"
+                    ).encode("utf-8") + body
+            path.write_bytes(relocated)
             changed += 1
     return changed
