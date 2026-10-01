@@ -3050,7 +3050,17 @@ static std::string genericTransferStatusJson() {
     status_json::appendStringField(body, "message", firmwareStatus.errorMessage);
     body += "}";
   }
-  body += "}}";
+  body += "}";
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  status_json::appendFieldPrefix(body, "diagnostics");
+  body += ride_diagnostics::capturePolicyStatusV2();
+  const std::string liveTail = ride_diagnostics::takeLiveTailStatusV2();
+  if (!liveTail.empty()) {
+    status_json::appendFieldPrefix(body, "diagnosticsTail");
+    body += liveTail;
+  }
+#endif
+  body += "}";
   return body;
 }
 
@@ -4650,6 +4660,33 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
     queueTransferControl(ble_transfer::Action::None,
                          ble_transfer::NotifyGeneric);
 #endif
+    return;
+  }
+
+  if (command.rfind("tail|2|", 0) == 0) {
+    if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
+        !ride_diagnostics::requestLiveTailV2(command))
+      deviceTransferHttp.setLastError("tail_unavailable", "bounded live observation is unavailable");
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyGeneric);
+    return;
+  }
+
+  if (command.rfind("capture|2|", 0) == 0) {
+    if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
+        !ride_diagnostics::bindCapturePolicyV2(command))
+      deviceTransferHttp.setLastError("capture_rejected", "diagnostic policy is invalid, stale or conflicting");
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyGeneric);
+    return;
+  }
+  if (command.rfind("mark|2|", 0) == 0) {
+    const auto separator = command.rfind('|');
+    ride_diagnostics::control::IssueMarker marker;
+    const bool valid = separator != std::string::npos && separator > 7 &&
+        ride_diagnostics::control::parseIssueMarker("mark|1|" + command.substr(7, separator - 7), marker);
+    if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) || !valid ||
+        !ride_diagnostics::markIssueV2(marker.code.c_str(), marker.sequence, command.substr(separator + 1).c_str()))
+      deviceTransferHttp.setLastError("marker_rejected", "diagnostic marker is invalid or stale");
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyGeneric);
     return;
   }
 

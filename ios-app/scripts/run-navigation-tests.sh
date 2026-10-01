@@ -88,6 +88,10 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsContractV2.generated.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicyV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsAcquisitionV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsLiveTailV2.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
@@ -148,6 +152,10 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservation.swift \
   ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservation+Workout.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsContractV2.generated.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicyV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsAcquisitionV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsLiveTailV2.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift \
@@ -248,6 +256,10 @@ xcrun swiftc \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsContractV2.generated.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicyV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsAcquisitionV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsLiveTailV2.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkProtocol.swift \
   ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift \

@@ -172,7 +172,7 @@ for environment, target in expected_targets.items():
     assert "-DRIDE_AUTOMATION_SHADOW=1" in flags
     assert "-DMAP_STABLE_CAMERA=1" in flags
     assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" in flags
-    assert "-DDETAILED_RIDE_DIAGNOSTICS=0" in flags
+    assert "-DDETAILED_RIDE_DIAGNOSTICS=1" in flags
     assert "-DRIDE_AUTOMATION_TRACE=1" not in flags
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
     unflags = config.get(environment, "build_unflags")

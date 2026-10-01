@@ -2,8 +2,18 @@
 #include "ride_diagnostics_control.hpp"
 #include "ride_diagnostics_format.hpp"
 #include "ride_diagnostics_queue_policy.hpp"
+#include "ride_diagnostics_health.hpp"
+#include "../power_management/power_management.hpp"
+#include "diagnostics_capture_policy.hpp"
+#include "diagnostics_tail_policy.hpp"
+#include "diagnostics_segment_catalog.hpp"
+#include <mbedtls/sha256.h>
+#include <Preferences.h>
+#include <unistd.h>
+#include <ctime>
 
 #include <Arduino.h>
+#include <new>
 #include <atomic>
 #include <algorithm>
 #include <dirent.h>
@@ -52,6 +62,8 @@ bool parseUnsigned(const char *value, uint32_t &out);
 
 struct QueuedEvent {
   uint32_t sequence;
+  uint32_t issueMarker;
+  char capture[48];
   uint16_t length;
   bool critical;
   bool rotateBeforeWrite;
@@ -127,6 +139,8 @@ SemaphoreHandle_t queueMutationMutex = nullptr;
 SemaphoreHandle_t sealComplete = nullptr;
 SemaphoreHandle_t faultCapsuleFlushMutex = nullptr;
 FILE *activeFile = nullptr;
+mbedtls_sha256_context activeDigest{};
+bool activeDigestValid = false;
 uint32_t activeFileBytes = 0;
 uint32_t activeChunk = 1;
 std::atomic<uint32_t> activeChunkSnapshot{1};
@@ -172,6 +186,47 @@ StorageRecoveryAllowedProbe storageRecoveryAllowedProbe = nullptr;
 uint32_t runtimeBootSequence = 0;
 uint32_t captureGeneration = 0;
 uint32_t lastCheckpointMs = 0;
+std::atomic<uint32_t> lastWrittenEventSequence{0};
+std::atomic<uint32_t> durableEventSequence{0};
+using LiveTail = bicino_diagnostics::TailRing<64>;
+LiveTail *liveTail = nullptr; // Lazy, bounded PSRAM, never accessed by ISR/panic paths.
+SemaphoreHandle_t liveTailMutex = nullptr;
+std::atomic<uint32_t> liveTailDeadlineMs{0};
+std::atomic<uint32_t> liveTailDropped{0};
+bicino_diagnostics::TailRequest pendingLiveTail{};
+std::atomic<bool> liveTailPending{false};
+std::atomic<bool> durableSequenceValid{false};
+
+void observeLiveTail(uint32_t sequence, const char *line, std::size_t bytes) {
+  if (static_cast<int32_t>(liveTailDeadlineMs.load(std::memory_order_acquire) - millis()) <= 0 ||
+      liveTailMutex == nullptr || liveTail == nullptr) return;
+  if (xSemaphoreTake(liveTailMutex, 0) != pdTRUE) {
+    liveTailDropped.fetch_add(1); return; // Persistent producer still proceeds.
+  }
+  (void)liveTail->append(sequence, line, bytes);
+  xSemaphoreGive(liveTailMutex);
+}
+std::atomic<uint32_t> durableMarkerSequence{0};
+portMUX_TYPE policyMux = portMUX_INITIALIZER_UNLOCKED;
+bicino_diagnostics::CapturePolicy runtimePolicy;
+char pendingPolicyCommand[161] = {};
+std::atomic<bool> policyPersistencePending{false};
+std::atomic<bool> policyPersisted{false};
+std::atomic<bool> legacyDetailedCapture{false};
+uint32_t lastPolicyPersistAttemptMs = 0;
+uint32_t lastPolicyHealthMs = 0;
+uint32_t lastMemorySampleMs = 0;
+void persistCapturePolicyIfNeeded();
+void restoreCapturePolicy();
+void revokeCapturePolicy();
+
+int synchronizeDiagnosticFile(FILE *file) {
+  power_management::ScopedLock powerLock(power_management::LockDomain::Storage);
+  if (file == nullptr || storage == nullptr || storage->flush(file) != 0)
+    return EOF;
+  return ::fsync(::fileno(file));
+}
+
 ChunkFile retentionFiles[kMaximumRetainedFiles] = {};
 ChunkFile filePruneCandidates[kFilePruneBatch] = {};
 
@@ -229,7 +284,9 @@ bool removeChunkFile(const ChunkFile &file) {
            diagnosticsRoot(),
            static_cast<unsigned long>(file.boot),
            static_cast<unsigned long>(file.chunk));
-  return storage->remove(path);
+  const bool removed = storage->remove(path);
+  if (removed) bicino_diagnostics::removeSegmentDescriptor(*storage, path);
+  return removed;
 }
 
 void removeEmptyBootDirectories() {
@@ -276,6 +333,10 @@ const char *levelName(Level level) {
     return "warning";
   case Level::Error:
     return "error";
+  case Level::Trace:
+    return "trace";
+  case Level::Fault:
+    return "fault";
   }
   return "info";
 }
@@ -382,7 +443,7 @@ void updateFaultCapsule(Level level, const char *category, const char *event,
   currentFaultCapsule.eventCount++;
   if (storageFailure)
     currentFaultCapsule.storageErrorCount++;
-  if (level == Level::Warning || level == Level::Error || storageFailure) {
+  if (level == Level::Warning || level == Level::Error || level == Level::Fault || storageFailure) {
     if (category != nullptr) {
       strncpy(currentFaultCapsule.lastCriticalCategory, category,
               sizeof(currentFaultCapsule.lastCriticalCategory) - 1);
@@ -491,7 +552,7 @@ ActiveFileCloseResult closeActiveFile() {
       nextSequence.load(std::memory_order_relaxed));
 #endif
   const int flushResult =
-      storage != nullptr ? storage->flush(activeFile) : fflush(activeFile);
+      storage != nullptr ? synchronizeDiagnosticFile(activeFile) : fflush(activeFile);
   const int closeResult =
       storage != nullptr ? storage->close(activeFile) : fclose(activeFile);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -512,7 +573,19 @@ ActiveFileCloseResult closeAndAdvanceActiveChunk() {
   char closingPath[sizeof(activePath)] = {};
   if (activePath[0] != '\0')
     strncpy(closingPath, activePath, sizeof(closingPath) - 1);
+  uint8_t digest[32] = {};
+  const bool digestReady = activeDigestValid && mbedtls_sha256_finish(&activeDigest, digest) == 0;
+  activeDigestValid = false;
+  const uint32_t sealedBytes = activeFileBytes;
   const ActiveFileCloseResult closeResult = closeActiveFile();
+  if (digestReady && sealedBytes > 0 && closeResult == ActiveFileCloseResult::Ready && storage != nullptr) {
+    bicino_diagnostics::SegmentDescriptor descriptor;
+    descriptor.boot = bootSequence.load(); descriptor.chunk = activeChunk; descriptor.bytes = sealedBytes;
+    for (unsigned index = 0; index < 32; ++index)
+      std::snprintf(descriptor.sha256 + index * 2, 3, "%02x", digest[index]);
+    if (!bicino_diagnostics::writeSegmentDescriptor(*storage, closingPath, descriptor))
+      updateFaultCapsule(Level::Warning, "logger", "catalog_cache_unavailable", false);
+  }
   // stdio may buffer a short capture entirely until fclose(). Determine
   // whether the chunk exists only after the close has flushed those bytes.
   const bool hadActiveChunk = closingPath[0] != '\0' &&
@@ -579,6 +652,9 @@ bool openActiveFile() {
     if (activeFile == nullptr)
       return false;
     activeFileBytes = static_cast<uint32_t>(existingBytes);
+    mbedtls_sha256_free(&activeDigest);
+    mbedtls_sha256_init(&activeDigest);
+    activeDigestValid = existingBytes == 0 && mbedtls_sha256_starts(&activeDigest, 0) == 0;
     return true;
   }
   activePath[0] = '\0';
@@ -587,6 +663,7 @@ bool openActiveFile() {
 }
 
 void abandonActiveChunkAfterUncertainWrite() {
+  activeDigestValid = false;
   const bool hadPath = activePath[0] != '\0';
   (void)closeActiveFile();
   activePath[0] = '\0';
@@ -811,7 +888,10 @@ bool writeQueuedEvent(const QueuedEvent &event) {
     updateFaultCapsule(Level::Error, "storage", "write_failed", true);
     return false;
   }
+  if (activeDigestValid && mbedtls_sha256_update(&activeDigest,
+          reinterpret_cast<const uint8_t *>(event.line), result) != 0) activeDigestValid = false;
   activeFileBytes += static_cast<uint32_t>(result);
+  lastWrittenEventSequence.store(event.sequence, std::memory_order_release);
   const uint32_t nowMs = millis();
   if (event.critical || static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -820,7 +900,7 @@ bool writeQueuedEvent(const QueuedEvent &event) {
         runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
         event.sequence);
 #endif
-    if (storage->flush(activeFile) != 0) {
+    if (synchronizeDiagnosticFile(activeFile) != 0) {
       abandonActiveChunkAfterUncertainWrite();
       storage->markDiagnosticsSdUnavailable();
       storageErrors.fetch_add(1);
@@ -828,6 +908,14 @@ bool writeQueuedEvent(const QueuedEvent &event) {
       return false;
     }
     lastCheckpointMs = nowMs;
+    durableEventSequence.store(event.sequence, std::memory_order_release);
+    durableSequenceValid.store(true, std::memory_order_release);
+    if (event.issueMarker != 0) {
+      portENTER_CRITICAL(&captureMux);
+      if (std::strcmp(event.capture, activeCapture) == 0)
+        durableMarkerSequence.store(event.issueMarker, std::memory_order_release);
+      portEXIT_CRITICAL(&captureMux);
+    }
   }
   const uint32_t writtenCount = written.fetch_add(1) + 1;
   const bool alreadyPrunedThisBoot =
@@ -1038,6 +1126,7 @@ void writerTask(void *) {
       continue;
     }
     const uint32_t nowMs = millis();
+    persistCapturePolicyIfNeeded();
     if (activeFile != nullptr &&
         (checkpointRequested.exchange(false) ||
          static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U)) {
@@ -1047,8 +1136,9 @@ void writerTask(void *) {
           runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
           nextSequence.load(std::memory_order_relaxed));
 #endif
-      if (storage->flush(activeFile) == 0) {
+      if (synchronizeDiagnosticFile(activeFile) == 0) {
         lastCheckpointMs = nowMs;
+        durableEventSequence.store(lastWrittenEventSequence.load(), std::memory_order_release);
       } else {
         abandonActiveChunkAfterUncertainWrite();
         storage->markDiagnosticsSdUnavailable();
@@ -1209,8 +1299,14 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
     return false;
   }
   queued.sequence = sequence;
+  std::strncpy(queued.capture, capture, sizeof(queued.capture) - 1);
+  if (std::strcmp(category, "user") == 0 && std::strcmp(event, "issue_marker") == 0) {
+    const char *marker = std::strstr(fieldsJson, "\"sequence\":");
+    if (marker != nullptr)
+      queued.issueMarker = static_cast<uint32_t>(std::strtoul(marker + 11, nullptr, 10));
+  }
   queued.length = static_cast<uint16_t>(length);
-  queued.critical = level == Level::Error || level == Level::Warning ||
+  queued.critical = level == Level::Error || level == Level::Warning || level == Level::Fault ||
                     strcmp(category, "user") == 0 ||
                     strcmp(category, "lifecycle") == 0;
   queued.rotateBeforeWrite = rotateBeforeWrite;
@@ -1219,7 +1315,9 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
   queued.faultCapsuleBoot = faultBoot;
   queued.faultCapsuleEventCount = faultEventCount;
   queued.faultCapsuleChecksum = faultChecksum;
-  return enqueue(queued);
+  const bool admitted = enqueue(queued);
+  if (admitted) observeLiveTail(queued.sequence, queued.line, queued.length);
+  return admitted;
 }
 
 } // namespace
@@ -1299,6 +1397,7 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
            firmware_metadata::target(),
            static_cast<unsigned long>(firmware_metadata::build()));
   record(Level::Info, "boot", "recorder_started", fields);
+  restoreCapturePolicy();
   (void)flushFaultCapsulesIfPossible();
 #else
   (void)storageRef;
@@ -1323,6 +1422,33 @@ void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe) {
 }
 
 void process(uint32_t nowMs) {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  portENTER_CRITICAL(&policyMux);
+  const bool policyExpired = runtimePolicy.expire(nowMs);
+  const bool detailedPolicy = runtimePolicy.detailed(nowMs);
+  const auto policyCounts = runtimePolicy.counters();
+  portEXIT_CRITICAL(&policyMux);
+  if (policyExpired)
+    (void)record(Level::Info, "capture", "policy_expired", "{}");
+  if (static_cast<uint32_t>(nowMs - lastPolicyHealthMs) >= 30000U) {
+    lastPolicyHealthMs = nowMs;
+    char fields[160] = {};
+    std::snprintf(fields, sizeof(fields), "{\"filteredCount\":%lu,\"rateLimitedCount\":%lu}",
+                  static_cast<unsigned long>(policyCounts.filtered),
+                  static_cast<unsigned long>(policyCounts.rateLimited));
+    (void)record(Level::Info, "logger", "policy_health", fields);
+  }
+  if (detailedPolicy && static_cast<uint32_t>(nowMs - lastMemorySampleMs) >= 1000U) {
+    lastMemorySampleMs = nowMs;
+    char fields[180] = {};
+    std::snprintf(fields, sizeof(fields),
+       "{\"freeInternalBytes\":%lu,\"largestInternalBytes\":%lu,\"freePsramBytes\":%lu}",
+       static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+       static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+       static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    (void)record(Level::Debug, "memory", "heap_snapshot", fields);
+  }
+#endif
 #if PERSISTENT_RIDE_DIAGNOSTICS && DETAILED_RIDE_DIAGNOSTICS
   // The writer task owns file handles. This hook is intentionally tiny so it
   // can be called from the LVGL loop without adding storage latency there.
@@ -1398,6 +1524,22 @@ bool recordInternal(Level level, const char *category, const char *event,
   (void)fieldsJson;
   return false;
 #else
+  bicino_diagnostics::Severity severity = bicino_diagnostics::Severity::Info;
+  switch (level) {
+    case Level::Trace: severity = bicino_diagnostics::Severity::Trace; break;
+    case Level::Debug: severity = bicino_diagnostics::Severity::Debug; break;
+    case Level::Info: break;
+    case Level::Warning: severity = bicino_diagnostics::Severity::Warning; break;
+    case Level::Error: severity = bicino_diagnostics::Severity::Error; break;
+    case Level::Fault: severity = bicino_diagnostics::Severity::Fault; break;
+  }
+  portENTER_CRITICAL(&policyMux);
+  const bool legacyAutomation = legacyDetailedCapture.load(std::memory_order_relaxed) &&
+      detailedCaptureEnabled() && category != nullptr && std::strcmp(category, "rideAutomation") == 0 &&
+      severity == bicino_diagnostics::Severity::Debug;
+  const bool admitted = legacyAutomation || runtimePolicy.admit(severity, category, kMaximumEventBytes, millis());
+  portEXIT_CRITICAL(&policyMux);
+  if (!admitted) return false;
   if (!validToken(category, 32) || !validToken(event, 64)) {
     dropped.fetch_add(1);
     return false;
@@ -1456,20 +1598,9 @@ bool recordHealth(const char *reason) {
   if (reason == nullptr || !validToken(reason, 32))
     return false;
   const Stats snapshot = stats();
-  char fields[288] = {};
-  snprintf(fields, sizeof(fields),
-           "{\"reason\":\"%s\",\"enqueuedCount\":%lu,"
-           "\"writtenCount\":%lu,\"droppedCount\":%lu,"
-           "\"storageErrorCount\":%lu,\"queueDepth\":%u,"
-           "\"maxQueueDepth\":%u,\"available\":%s,\"recorderReady\":%s}",
-           reason, static_cast<unsigned long>(snapshot.enqueued),
-           static_cast<unsigned long>(snapshot.written),
-           static_cast<unsigned long>(snapshot.dropped),
-           static_cast<unsigned long>(snapshot.storageErrors),
-           static_cast<unsigned>(snapshot.queueDepth),
-           static_cast<unsigned>(snapshot.maxQueueDepth),
-           snapshot.storageAvailable ? "true" : "false",
-           snapshot.recorderReady ? "true" : "false");
+  char fields[320] = {};
+  if (!detail::formatHealthFields(snapshot, reason, fields, sizeof(fields)))
+    return false;
   return record(Level::Info, "logger", "health", fields);
 }
 
@@ -1497,7 +1628,7 @@ bool markIssue(const char *code, uint32_t markerSequence) {
   return true;
 }
 
-bool bindCapture(const char *captureID, bool detailed) {
+bool bindCaptureInternal(const char *captureID, bool detailed) {
   if (!validCaptureID(captureID))
     return false;
 #if !defined(RIDE_AUTOMATION_SHADOW) || !DETAILED_RIDE_DIAGNOSTICS
@@ -1545,6 +1676,8 @@ bool bindCapture(const char *captureID, bool detailed) {
                                   std::memory_order_relaxed);
   detailedCapture.store(detailed, std::memory_order_relaxed);
 #endif
+  if (std::strcmp(previousCapture, captureID) != 0)
+    durableMarkerSequence.store(0, std::memory_order_relaxed);
   const uint32_t previousMarkerSequence = lastMarkerSequence.load();
   lastMarkerSequence.store(control::markerSequenceAfterBinding(
       previousCapture, captureID, previousMarkerSequence));
@@ -1572,6 +1705,15 @@ bool bindCapture(const char *captureID, bool detailed) {
   return true;
 }
 
+bool bindCapture(const char *captureID, bool detailed) {
+  if (!validCaptureID(captureID)) return false;
+  // Legacy owners deliberately replace any v2 policy. A later reconnect must
+  // not resurrect a previously persisted detailed request.
+  revokeCapturePolicy();
+  legacyDetailedCapture.store(detailed, std::memory_order_release);
+  return bindCaptureInternal(captureID, detailed);
+}
+
 bool clearCaptureInternal(const DetailedCaptureLease *expected) {
   char previousCapture[48] = {};
   // Once the expected lease still matches, revocation is unconditional.
@@ -1593,6 +1735,7 @@ bool clearCaptureInternal(const DetailedCaptureLease *expected) {
 #endif
   strncpy(previousCapture, activeCapture, sizeof(previousCapture) - 1);
   activeCapture[0] = '\0';
+  durableMarkerSequence.store(0, std::memory_order_relaxed);
 #if DETAILED_RIDE_DIAGNOSTICS
   detailedCaptureDeadlineMs.store(0, std::memory_order_relaxed);
   detailedCapture.store(false, std::memory_order_relaxed);
@@ -1624,7 +1767,11 @@ bool clearCaptureInternal(const DetailedCaptureLease *expected) {
   return true;
 }
 
-void clearCapture() { (void)clearCaptureInternal(nullptr); }
+void clearCapture() {
+  revokeCapturePolicy();
+  legacyDetailedCapture.store(false, std::memory_order_release);
+  (void)clearCaptureInternal(nullptr);
+}
 
 DetailedCaptureLease detailedCaptureLease() {
 #if !DETAILED_RIDE_DIAGNOSTICS
@@ -1863,6 +2010,199 @@ bool isClosedChunk(uint32_t boot, uint32_t chunk) {
   if (boot < selectedBootSequence)
     return true;
   return chunk < activeChunkSnapshot.load();
+}
+
+namespace {
+void revokeCapturePolicy() {
+  portENTER_CRITICAL(&policyMux);
+  runtimePolicy.stop();
+  if (pendingPolicyCommand[0] != '\0') {
+    std::memset(pendingPolicyCommand, 0, sizeof(pendingPolicyCommand));
+    policyPersistencePending.store(true, std::memory_order_release);
+    policyPersisted.store(false, std::memory_order_release);
+  }
+  portEXIT_CRITICAL(&policyMux);
+}
+void persistCapturePolicyIfNeeded() {
+  if (!policyPersistencePending.load(std::memory_order_acquire) ||
+      static_cast<uint32_t>(millis() - lastPolicyPersistAttemptMs) < 1000U) return;
+  lastPolicyPersistAttemptMs = millis();
+  char command[161] = {};
+  portENTER_CRITICAL(&policyMux);
+  std::memcpy(command, pendingPolicyCommand, sizeof(command));
+  portEXIT_CRITICAL(&policyMux);
+  Preferences preferences;
+  const bool opened = preferences.begin("bicino-diag-v2", false);
+  const bool saved = opened && (command[0] == '\0'
+      ? (!preferences.isKey("capture") || preferences.remove("capture"))
+      : preferences.putString("capture", command) == std::strlen(command));
+  if (opened) preferences.end();
+  portENTER_CRITICAL(&policyMux);
+  if (saved && std::strcmp(command, pendingPolicyCommand) == 0) {
+    policyPersistencePending.store(false, std::memory_order_release);
+    policyPersisted.store(true, std::memory_order_release);
+  }
+  portEXIT_CRITICAL(&policyMux);
+}
+void restoreCapturePolicy() {
+  Preferences preferences;
+  if (!preferences.begin("bicino-diag-v2", true)) return;
+  char retained[161] = {};
+  const std::size_t size = preferences.getStringLength("capture");
+  const bool read = size > 1 && size <= sizeof(retained) &&
+      preferences.getString("capture", retained, sizeof(retained)) == size;
+  preferences.end();
+  if (read) (void)bindCapturePolicyV2(std::string(retained), true);
+}
+} // namespace
+
+bool bindCapturePolicyV2(const std::string &command, bool restoring) {
+#if !PERSISTENT_RIDE_DIAGNOSTICS
+  (void)command; (void)restoring;
+  return false;
+#else
+  bicino_diagnostics::CaptureRequest request;
+  if (!bicino_diagnostics::parseCaptureRequest(command, request)) return false;
+  const time_t wall = std::time(nullptr);
+  const uint32_t epoch = wall >= 1700000000 && static_cast<uint64_t>(wall) <= UINT32_MAX
+                             ? static_cast<uint32_t>(wall) : 0;
+  portENTER_CRITICAL(&policyMux);
+  const auto result = runtimePolicy.apply(request, millis(), epoch);
+  if (result == bicino_diagnostics::ApplyResult::Applied) {
+    if (restoring && epoch == 0) runtimePolicy.stop();
+    std::memset(pendingPolicyCommand, 0, sizeof(pendingPolicyCommand));
+    std::memcpy(pendingPolicyCommand, command.data(), command.size());
+    policyPersistencePending.store(!restoring, std::memory_order_release);
+    policyPersisted.store(restoring, std::memory_order_release);
+  }
+  const auto effective = runtimePolicy.effectiveLevels(millis());
+  portEXIT_CRITICAL(&policyMux);
+  if (result != bicino_diagnostics::ApplyResult::Applied &&
+      result != bicino_diagnostics::ApplyResult::Duplicate) return false;
+  legacyDetailedCapture.store(false, std::memory_order_release);
+  const int automationDomain = bicino_diagnostics::domainIndex("rideAutomation");
+  const bool automationDetailed = automationDomain >= 0 && effective[automationDomain] < 2;
+  if (result == bicino_diagnostics::ApplyResult::Applied && !bindCaptureInternal(
+          request.captureId,
+#if DETAILED_RIDE_DIAGNOSTICS
+          automationDetailed
+#else
+          false
+#endif
+          )) return false;
+  (void)automationDetailed;
+  if (restoring && epoch == 0)
+    (void)record(Level::Warning, "capture", "clock_unavailable_on_restore",
+                 "{\"reason\":\"baseline_only\"}");
+  return true;
+#endif
+}
+
+std::string capturePolicyStatusV2() {
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&policyMux);
+  const auto request = runtimePolicy.request();
+  const auto effective = runtimePolicy.effectiveLevels(now);
+  const auto counts = runtimePolicy.counters();
+  const uint32_t remaining = runtimePolicy.remainingSeconds(now);
+  const bool persisted = policyPersisted.load(std::memory_order_relaxed);
+  portEXIT_CRITICAL(&policyMux);
+  std::string levels;
+  levels.reserve(effective.size());
+  for (auto level : effective) levels += static_cast<char>('0' + level);
+  char body[640] = {};
+  std::snprintf(body, sizeof(body),
+      "{\"schema\":2,\"contractSHA256\":\"%s\",\"captureID\":\"%s\","
+      "\"generation\":%lu,\"effectiveLevels\":\"%s\",\"remainingSeconds\":%lu,"
+      "\"filtered\":%lu,\"rateLimited\":%lu,\"durableSequence\":%lu,"
+      "\"markerQueued\":%lu,\"markerDurable\":%lu,\"policyPersisted\":%s,"
+      "\"detailedAutomationAvailable\":%s,\"crashAvailable\":false}",
+      bicino_diagnostics::contract::kSha256, request.captureId,
+      static_cast<unsigned long>(request.generation), levels.c_str(),
+      static_cast<unsigned long>(remaining), static_cast<unsigned long>(counts.filtered),
+      static_cast<unsigned long>(counts.rateLimited), static_cast<unsigned long>(durableEventSequence.load()),
+      static_cast<unsigned long>(std::max(lastMarkerSequence.load(), durableMarkerSequence.load())), static_cast<unsigned long>(durableMarkerSequence.load()),
+      persisted ? "true" : "false",
+#if DETAILED_RIDE_DIAGNOSTICS
+      "true"
+#else
+      "false"
+#endif
+      );
+  return std::string(body);
+}
+
+bool markIssueV2(const char *code, uint32_t markerSequence, const char *incidentId) {
+  if (!validIssueCode(code) || !bicino_diagnostics::validUuid(incidentId) ||
+      !control::markerSequenceCanAdvance(lastMarkerSequence.load(), markerSequence)) return false;
+  char fields[160] = {};
+  std::snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"sequence\":%lu,\"incidentId\":\"%s\"}",
+                code, static_cast<unsigned long>(markerSequence), incidentId);
+  if (!record(Level::Warning, "user", "issue_marker", fields)) return false;
+  lastMarkerSequence.store(markerSequence);
+  checkpointRequested.store(true);
+  return true;
+}
+
+// One explicit owner-authenticated read arms a 30-second in-memory observation
+// window. It never changes persistent capture or enters disruptive Wi-Fi mode.
+bool requestLiveTailV2(const std::string &command) {
+#if !PERSISTENT_RIDE_DIAGNOSTICS
+  (void)command; return false;
+#else
+  bicino_diagnostics::TailRequest request;
+  if (!bicino_diagnostics::parseTailRequest(command, request)) return false;
+  if (liveTailMutex == nullptr) liveTailMutex = xSemaphoreCreateMutex();
+  if (liveTailMutex == nullptr || xSemaphoreTake(liveTailMutex, pdMS_TO_TICKS(5)) != pdTRUE) return false;
+  if (liveTail == nullptr) {
+    void *memory = heap_caps_malloc(sizeof(LiveTail), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (memory != nullptr) { liveTail = new (memory) LiveTail(); liveTail->begin(bootSequence.load()); }
+  }
+  if (liveTail == nullptr) { xSemaphoreGive(liveTailMutex); return false; }
+  pendingLiveTail = request; liveTailPending.store(true, std::memory_order_release);
+  liveTailDeadlineMs.store(millis() + 30000U, std::memory_order_release);
+  xSemaphoreGive(liveTailMutex);
+  return true;
+#endif
+}
+
+std::string takeLiveTailStatusV2() {
+#if !PERSISTENT_RIDE_DIAGNOSTICS
+  return {};
+#else
+  if (!liveTailPending.load(std::memory_order_acquire) || liveTailMutex == nullptr) return {};
+  auto *page = static_cast<LiveTail::Page *>(heap_caps_calloc(1, sizeof(LiveTail::Page), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (page == nullptr) return {};
+  new (page) LiveTail::Page();
+  if (xSemaphoreTake(liveTailMutex, pdMS_TO_TICKS(5)) != pdTRUE) { heap_caps_free(page); return {}; }
+  const auto request = pendingLiveTail;
+  if (liveTail == nullptr || !liveTailPending.exchange(false)) {
+    xSemaphoreGive(liveTailMutex); heap_caps_free(page); return {};
+  }
+  liveTail->page(request, *page);
+  xSemaphoreGive(liveTailMutex);
+  char header[512] = {};
+  std::snprintf(header, sizeof(header),
+    "{\"schema\":2,\"source\":\"firmware\",\"bootSequence\":%lu,\"requestedBoot\":%lu,"
+    "\"requestedAfter\":%lu,\"nextSequence\":%lu,\"oldestSequence\":%lu,\"newestSequence\":%lu,"
+    "\"bootChanged\":%s,\"gap\":%s,\"more\":%s,\"liveDropped\":%lu,"
+    "\"durableSequence\":%lu,\"durableSequenceValid\":%s,\"events\":[",
+    static_cast<unsigned long>(page->boot), static_cast<unsigned long>(request.boot),
+    static_cast<unsigned long>(request.after), static_cast<unsigned long>(page->next),
+    static_cast<unsigned long>(page->oldest), static_cast<unsigned long>(page->newest),
+    page->bootChanged ? "true" : "false", page->gap ? "true" : "false", page->more ? "true" : "false",
+    static_cast<unsigned long>(liveTailDropped.load()), static_cast<unsigned long>(durableEventSequence.load()),
+    durableSequenceValid.load() ? "true" : "false");
+  std::string body(header);
+  body.reserve(512 + page->count * kMaximumEventBytes);
+  for (std::size_t i = 0; i < page->count; ++i) {
+    if (i != 0) body += ',';
+    body.append(page->events[i].line, page->events[i].length - 1);
+  }
+  body += "]}";
+  heap_caps_free(page);
+  return body;
+#endif
 }
 
 } // namespace ride_diagnostics

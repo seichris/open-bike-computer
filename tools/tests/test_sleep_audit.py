@@ -238,7 +238,7 @@ int main() {
              ("kAllowedFieldKeys", "kNumberKeys", "kBooleanKeys")),
             (ROOT / "tools/ride_diagnostics.py",
              ("ALLOWED_FIELD_KEYS", "FIRMWARE_NUMBER_FIELD_KEYS", "FIRMWARE_BOOLEAN_FIELD_KEYS")),
-            (ROOT / "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
+            (ROOT / "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsContractV2.generated.swift",
              ("static let allowedKeys", "static let firmwareNumberKeys", "static let firmwareBooleanKeys")),
         ]
         for path, markers in sources:

@@ -12,28 +12,45 @@ import CoreFoundation
 import CryptoKit
 import Foundation
 
+// BEGIN GENERATED DIAGNOSTICS ENUMS
 nonisolated enum RideDiagnosticLevel: String, Codable, CaseIterable {
+    case trace
     case debug
     case info
     case warning
     case error
+    case fault
 }
 
 nonisolated enum RideDiagnosticCategory: String, Codable, CaseIterable {
-    case lifecycle
-    case boot
+    case audio
     case ble
-    case navigation
+    case boot
+    case capture
+    case display
     case gps
-    case workout
+    case http
+    case lifecycle
+    case logger
+    case map
+    case memory
+    case native
+    case navigation
+    case power
+    case renderer
     case rideAutomation
     case storage
-    case map
-    case power
+    case task
+    case tls
+    case touch
     case transfer
+    case update
     case user
-    case logger
+    case watchdog
+    case wifi
+    case workout
 }
+// END GENERATED DIAGNOSTICS ENUMS
 
 enum RideDiagnosticsRideLifecyclePolicy {
     static func isRideActive(
@@ -48,98 +65,7 @@ enum RideDiagnosticsRideLifecyclePolicy {
     }
 }
 
-/// Closed vocabulary shared by the recorder and device-chunk validator. A
-/// field must be added here before a producer can persist it, keeping the
-/// privacy contract reviewable at one call site.
-nonisolated enum RideDiagnosticsFieldPolicy {
-    static let allowedKeys: Set<String> = [
-        "accuracy", "accuracyAvailable", "accuracyBucket", "acknowledgedKind",
-        "active", "activeStage", "ageMs", "alertMode",
-        "applyErrorCode", "applyErrorDomain", "applyResult", "attempt",
-        "attemptId", "authorization", "authorized", "autoPauseEnabled",
-        "available", "background", "blockLoadMs", "bootSequence",
-        "bytes", "chunk", "class", "clockSynchronized",
-        "code", "commandClass", "completedStage", "connectCompleted",
-        "connectDurationMs", "connectStarted", "connectionGeneration", "connectionReused",
-        "connectionState", "consecutiveEarlyFailures", "controllerRole", "decisionSequence",
-        "diagnosticHold", "domain", "droppedCount", "durationLimit",
-        "durationMs", "enqueuedCount", "errorCode", "errorDomain",
-        "eventCount", "expectedState", "fallback", "featureFlags",
-        "firmwareBuild", "firmwareFingerprint", "firmwareTarget", "firstMissingUptimeMs",
-        "firmwareProfile", "firmwareVersion", "firmwareGitSha", "otaState",
-        "fixValid", "formatVersion", "generation", "highWater",
-        "highWaterBytes", "httpStatus", "importedCount", "kind",
-        "lastCriticalCategory", "lastCriticalEvent", "lastFailureCompletedStage", "lastFailureResetReason",
-        "lastFailureStage", "lastGapMs", "lastMissingUptimeMs", "latencyMs",
-        "leaseGeneration", "localAccessorySubnet", "mapDetail", "mapId",
-        "mapPhase", "mapProgressMs", "maxQueueDepth", "maximumGapMs",
-        "members", "messageBytes", "messageDigest", "mode",
-        "navigating", "networkObservation", "networkProtocol", "networkTransport",
-        "origin", "outcome", "pendingControl", "phase",
-        "profileVersion", "proxyConnection", "queueBytes", "queueDepth",
-        "ready", "reason", "rejectedCount", "remoteEndpointMatched",
-        "replacedCount", "resetReason", "result", "retries",
-        "rideDetectionArmed", "rideGeneration", "role", "routeLoaded",
-        "rssiBucket", "runtimeBootSequence", "safeMode", "sampleCount",
-        "schemaVersion", "scope", "sequence", "sessionPresent",
-        "sha256Prefix", "simulation", "sizeBucket", "sourceHealthMask",
-        "speedAvailable", "startMode", "state", "storage",
-        "storageErrorCount", "tlsChallenge", "tlsCompleted", "tlsDurationMs",
-        "tlsStarted", "transition", "uiPhase", "uiProgressMs",
-        "underlyingErrorCode", "underlyingErrorDomain", "viewingMap", "visitedEntries",
-        "waitedForConnectivity", "watchSequence", "watchUptimeMs", "watchdogCoreMask",
-        "watchdogUptimeMs", "workoutActive", "writerDetail", "writerPhase",
-        "writerProgressMs", "writtenCount",
-    ]
-    static let firmwareNumberKeys: Set<String> = [
-        "accuracy", "activeStage", "ageMs", "alertMode",
-        "applyErrorCode", "attempt", "blockLoadMs", "bootSequence",
-        "bytes", "chunk", "commandClass", "completedStage",
-        "connectDurationMs", "connectionGeneration", "consecutiveEarlyFailures", "decisionSequence",
-        "droppedCount", "durationMs", "enqueuedCount", "errorCode",
-        "eventCount", "firmwareBuild", "firstMissingUptimeMs", "formatVersion",
-        "generation", "highWater", "highWaterBytes", "httpStatus",
-        "importedCount", "lastFailureCompletedStage", "lastFailureResetReason", "lastFailureStage",
-        "lastGapMs", "lastMissingUptimeMs", "latencyMs", "leaseGeneration",
-        "mapDetail", "mapProgressMs", "maxQueueDepth", "maximumGapMs",
-        "members", "messageBytes", "profileVersion", "queueBytes",
-        "queueDepth", "rejectedCount", "replacedCount", "resetReason",
-        "retries", "rideGeneration", "runtimeBootSequence", "sampleCount",
-        "schemaVersion", "sequence", "sourceHealthMask", "storageErrorCount",
-        "tlsDurationMs", "uiProgressMs", "underlyingErrorCode", "visitedEntries",
-        "watchSequence", "watchUptimeMs", "watchdogCoreMask", "watchdogUptimeMs",
-        "writerDetail", "writerProgressMs", "writtenCount",
-    ]
-    static let firmwareBooleanKeys: Set<String> = [
-        "accuracyAvailable", "active", "authorized", "autoPauseEnabled",
-        "available", "background", "clockSynchronized", "connectCompleted",
-        "connectStarted", "connectionReused", "diagnosticHold", "fallback",
-        "fixValid", "localAccessorySubnet", "navigating", "pendingControl",
-        "proxyConnection", "ready", "remoteEndpointMatched", "rideDetectionArmed",
-        "routeLoaded", "safeMode", "sessionPresent", "simulation",
-        "speedAvailable", "tlsCompleted", "tlsStarted", "viewingMap",
-        "waitedForConnectivity", "workoutActive",
-    ]
-
-    static func isAllowed(_ key: String) -> Bool {
-        allowedKeys.contains(key)
-    }
-
-    static func isJSONBoolean(_ value: Any?) -> Bool {
-        guard let value else { return false }
-        return CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID()
-    }
-
-    static func isFirmwareFieldTypeValid(key: String, value: Any) -> Bool {
-        if firmwareNumberKeys.contains(key) {
-            return value is NSNumber && !isJSONBoolean(value)
-        }
-        if firmwareBooleanKeys.contains(key) {
-            return isJSONBoolean(value)
-        }
-        return value is String
-    }
-}
+// Field/type policy is generated in DiagnosticsContractV2.generated.swift.
 
 enum RideIssueCode: String, CaseIterable, Identifiable {
     case navigationWrong = "navigation_wrong"
@@ -532,6 +458,7 @@ final class RideDiagnosticsRecorder:
     @Published private(set) var retainedBytes: Int = 0
     @Published private(set) var droppedEventCount: Int = 0
     @Published private(set) var lastError: String?
+    @Published private(set) var capturePolicyV2: DiagnosticsCapturePolicyV2?
     @Published private(set) var detailedTraceEnabled = false
     @Published private(set) var detailedTraceExpiresAt: Date?
     @Published private(set) var captureBinding: RideDiagnosticsCaptureBinding
@@ -545,6 +472,11 @@ final class RideDiagnosticsRecorder:
     private let queue: DispatchQueue
     private let now: () -> Date
     private let startUptime: TimeInterval
+    private let uptime: () -> TimeInterval
+    private let policyLock = NSLock()
+    private var admissionV2 = DiagnosticsAdmissionV2()
+    private let emissionLock = NSLock()
+    private var nextEmissionSequence = 0
     private let isoFormatter: ISO8601DateFormatter
     private let userDefaults: UserDefaults
     private let privacyDigestKey = SymmetricKey(size: .bits256)
@@ -574,6 +506,8 @@ final class RideDiagnosticsRecorder:
     }
     private var captureIDCache: [String: CaptureIDCacheEntry] = [:]
     private struct PendingRecord {
+        let occurredAt: Date
+        let occurredUptimeMs: Int
         let level: RideDiagnosticLevel
         let category: RideDiagnosticCategory
         let event: String
@@ -581,7 +515,7 @@ final class RideDiagnosticsRecorder:
         let captureId: UUID?
 
         var isCritical: Bool {
-            level == .warning || level == .error ||
+            level == .warning || level == .error || level == .fault ||
                 category == .user || category == .lifecycle
         }
     }
@@ -625,6 +559,7 @@ final class RideDiagnosticsRecorder:
     init(
         rootURL: URL? = nil,
         now: @escaping () -> Date = Date.init,
+        uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         userDefaults: UserDefaults = .standard
     ) {
         let initialCaptureID = UUID()
@@ -644,7 +579,8 @@ final class RideDiagnosticsRecorder:
         self.oldestRetainedAt = nil
         self.newestRetainedAt = nil
         self.now = now
-        self.startUptime = ProcessInfo.processInfo.systemUptime
+        self.uptime = uptime
+        self.startUptime = uptime()
         self.queue = DispatchQueue(
             label: "com.bicino.ride-diagnostics",
             qos: .utility
@@ -670,6 +606,7 @@ final class RideDiagnosticsRecorder:
         queue.sync {
             do {
                 try prepareStorage()
+                try restoreCapturePolicyOnQueue()
             } catch {
                 publishError(error.localizedDescription)
             }
@@ -679,6 +616,91 @@ final class RideDiagnosticsRecorder:
             event: "recorder_started",
             fields: ["storage": "application_support"]
         )
+    }
+
+    /// Control metadata is separate from the unchanged, strictly validated v1
+    /// event tree. Old bundles remain importable byte for byte.
+    var controlRootURL: URL {
+        rootURL.deletingLastPathComponent().appendingPathComponent("v2", isDirectory: true)
+    }
+
+    var currentPolicyV2: DiagnosticsCapturePolicyV2? {
+        policyLock.withLock { admissionV2.policy }
+    }
+
+    var policyCountersV2: [String: Int] {
+        policyLock.withLock { ["filtered": admissionV2.filtered, "rateLimited": admissionV2.rateLimited] }
+    }
+
+    func applyCapturePolicyV2(_ policy: DiagnosticsCapturePolicyV2) throws {
+        guard policy.valid else { throw DiagnosticsPolicyError.invalidPolicy }
+        try queue.sync {
+            if let current = currentPolicyV2, current.captureID == policy.captureID {
+                if current == policy { return } // Do not renew a duplicate lease.
+                guard policy.generation > current.generation else { throw DiagnosticsPolicyError.invalidPolicy }
+            }
+            try FileManager.default.createDirectory(at: controlRootURL, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(policy)
+            let url = controlRootURL.appendingPathComponent("capture-policy.json")
+            try data.write(to: url, options: [.atomic])
+            applyFileProtection(to: url)
+            preDetailedContextURL = currentChunkURL
+            rotateChunk()
+            installCapturePolicyOnQueue(policy)
+            recordOnQueue(level: .info, category: .capture, event: "policy_applied", fields: [
+                "policyGeneration": String(policy.generation), "provider": "ios",
+                "mode": policy.profile, "durationLimit": String(policy.durationSeconds),
+                "diagnosticContract": DiagnosticsContractV2.sha256,
+            ])
+            guard flushOnQueue() else {
+                throw RideDiagnosticsError.unavailable("Capture policy saved; event checkpoint unavailable.")
+            }
+        }
+    }
+
+    private func installCapturePolicyOnQueue(_ policy: DiagnosticsCapturePolicyV2) {
+        policyLock.withLock { admissionV2.install(policy, now: now(), uptime: uptime()) }
+        let detailed = !policy.effectiveLevels(at: now()).isEmpty
+        detailedTraceActive = detailed
+        detailedTraceExpiry = detailed ? policy.expiresAt : nil
+        activeCaptureId = detailed ? policy.captureID : nil
+        if !detailed { standardCaptureId = policy.captureID; standardCaptureStartedAt = now() }
+        publishCaptureState()
+    }
+
+    private func restoreCapturePolicyOnQueue() throws {
+        let url = controlRootURL.appendingPathComponent("capture-policy.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let data = try Data(contentsOf: url)
+        guard data.count <= 16 * 1024,
+              let policy = try? JSONDecoder().decode(DiagnosticsCapturePolicyV2.self, from: data), policy.valid else {
+            throw RideDiagnosticsError.unavailable("Invalid retained capture policy; baseline recording only.")
+        }
+        if policy.durationSeconds > 0 && now() >= policy.expiresAt {
+            try FileManager.default.removeItem(at: url)
+            return
+        }
+        installCapturePolicyOnQueue(policy)
+    }
+
+    private func revokeCapturePolicyOnQueue() {
+        policyLock.withLock { admissionV2.policy = nil }
+        let url = controlRootURL.appendingPathComponent("capture-policy.json")
+        if FileManager.default.fileExists(atPath: url.path) {
+            do { try FileManager.default.removeItem(at: url) }
+            catch { publishError("Capture policy revocation could not be persisted.") }
+        }
+    }
+
+    @discardableResult
+    func markIncidentV2(_ code: RideIssueCode, incidentID: UUID) -> Bool {
+        queue.sync {
+            expireDetailedTraceIfNeeded()
+            let saved = recordOnQueue(level: .warning, category: .user, event: "issue_marker", fields: [
+                "code": code.rawValue, "incidentId": incidentID.uuidString.lowercased(),
+            ])
+            return saved && flushOnQueue()
+        }
     }
 
     var currentCaptureID: UUID? {
@@ -713,6 +735,9 @@ final class RideDiagnosticsRecorder:
         ).map { String(format: "%02x", $0) }.joined().prefix(16))
     }
 
+    /// Capture occurrence metadata before any queueing, formatting, or I/O.
+    /// `sequence` stays the v1 persisted-stream sequence; emissionSequence is
+    /// the producer sequence and writerDelayMs makes recorder stalls visible.
     func record(
         level: RideDiagnosticLevel = .info,
         category: RideDiagnosticCategory,
@@ -720,15 +745,32 @@ final class RideDiagnosticsRecorder:
         fields: [String: String] = [:],
         captureId: UUID? = nil
     ) {
+        let occurredAt = now()
+        let occurredUptimeMs = max(0, Int((uptime() - startUptime) * 1000))
+        let boundCapture = captureId ?? currentCaptureID
+        let emission = emissionLock.withLock { () -> Int in
+            defer { nextEmissionSequence += 1 }
+            return nextEmissionSequence
+        }
+        let admitted = policyLock.withLock {
+            admissionV2.admit(level: level.rawValue, domain: category.rawValue,
+                              estimatedBytes: 768, now: occurredAt, uptime: uptime())
+        }
+        // Preserve the v1 one-Hz automation provider for legacy-only captures.
+        let legacyTrace = currentPolicyV2 == nil && isDetailedTraceEnabled && category == .rideAutomation
+        guard admitted || legacyTrace else { return }
         let safeEvent = Self.safeEventName(event)
-        let safeFields = Self.sanitize(fields: fields)
+        var safeFields = Self.sanitize(fields: fields)
+        safeFields["emissionSequence"] = String(emission)
         guard !safeEvent.isEmpty else { return }
         enqueue(PendingRecord(
+            occurredAt: occurredAt,
+            occurredUptimeMs: occurredUptimeMs,
             level: level,
             category: category,
             event: safeEvent,
             fields: safeFields,
-            captureId: captureId
+            captureId: boundCapture
         ))
     }
 
@@ -793,6 +835,10 @@ final class RideDiagnosticsRecorder:
             do {
                 expireDetailedTraceIfNeeded()
                 expireStandardCaptureIfNeeded()
+                var fields = pending.fields
+                fields["writerDelayMs"] = String(max(
+                    0, Int((uptime() - startUptime) * 1000) - pending.occurredUptimeMs
+                ))
                 let event = RideDiagnosticEvent(
                     schema: Self.schema,
                     source: "ios",
@@ -800,16 +846,13 @@ final class RideDiagnosticsRecorder:
                     level: pending.level,
                     category: pending.category,
                     event: pending.event,
-                    wallTime: isoFormatter.string(from: now()),
-                    uptimeMs: max(
-                        0,
-                        Int((ProcessInfo.processInfo.systemUptime - startUptime) * 1000)
-                    ),
+                    wallTime: isoFormatter.string(from: pending.occurredAt),
+                    uptimeMs: pending.occurredUptimeMs,
                     processId: processId.uuidString.lowercased(),
                     captureId: (
                         pending.captureId ?? activeCaptureId ?? standardCaptureId
                     ).uuidString.lowercased(),
-                    fields: pending.fields
+                    fields: fields
                 )
                 sequence += 1
                 try append(event)
@@ -830,6 +873,7 @@ final class RideDiagnosticsRecorder:
         queue.async { [weak self] in
             guard let self else { return }
             guard !self.detailedTraceActive else { return }
+            self.revokeCapturePolicyOnQueue()
             self.expireStandardCaptureIfNeeded()
             self.preDetailedContextURL = self.currentChunkURL
             self.rotateChunk()
@@ -1411,6 +1455,12 @@ final class RideDiagnosticsRecorder:
         fields: [String: String]
     ) -> Bool {
         drainStorageOutcomes()
+        var stampedFields = fields
+        stampedFields["emissionSequence"] = String(emissionLock.withLock { () -> Int in
+            defer { nextEmissionSequence += 1 }
+            return nextEmissionSequence
+        })
+        stampedFields["writerDelayMs"] = "0"
         do {
             let event = RideDiagnosticEvent(
                 schema: Self.schema,
@@ -1420,10 +1470,10 @@ final class RideDiagnosticsRecorder:
                 category: category,
                 event: Self.safeEventName(event),
                 wallTime: isoFormatter.string(from: now()),
-                uptimeMs: max(0, Int((ProcessInfo.processInfo.systemUptime - startUptime) * 1000)),
+                uptimeMs: max(0, Int((uptime() - startUptime) * 1000)),
                 processId: processId.uuidString.lowercased(),
                 captureId: (activeCaptureId ?? standardCaptureId).uuidString.lowercased(),
-                fields: Self.sanitize(fields: fields)
+                fields: Self.sanitize(fields: stampedFields)
             )
             sequence += 1
             try append(event)
@@ -2428,6 +2478,7 @@ final class RideDiagnosticsRecorder:
 
     private func endDetailedTraceOnQueue(reason: String) {
         guard detailedTraceActive else { return }
+        revokeCapturePolicyOnQueue()
         recordOnQueue(
             level: .info,
             category: .user,
@@ -2458,6 +2509,7 @@ final class RideDiagnosticsRecorder:
     }
 
     private func beginNewStandardCapture() {
+        revokeCapturePolicyOnQueue()
         standardCaptureId = UUID()
         standardCaptureStartedAt = now()
         publishCaptureState()
@@ -2504,7 +2556,7 @@ final class RideDiagnosticsRecorder:
                 uptimeMs: max(
                     0,
                     Int(
-                        (ProcessInfo.processInfo.systemUptime - startUptime) *
+                        (uptime() - startUptime) *
                             1000
                     )
                 ),
@@ -2543,6 +2595,7 @@ final class RideDiagnosticsRecorder:
     private func publishCaptureState() {
         let enabled = detailedTraceActive
         let expiry = detailedTraceExpiry
+        let policy = currentPolicyV2
         let binding = RideDiagnosticsCaptureBinding(
             captureID: activeCaptureId ?? standardCaptureId,
             detailed: enabled
@@ -2551,6 +2604,7 @@ final class RideDiagnosticsRecorder:
             captureBindingSnapshot = binding
         }
         DispatchQueue.main.async { [weak self] in
+            self?.capturePolicyV2 = policy
             self?.detailedTraceEnabled = enabled
             self?.detailedTraceExpiresAt = expiry
             self?.captureBinding = binding

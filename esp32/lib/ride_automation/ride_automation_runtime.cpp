@@ -993,6 +993,8 @@ void processFirmwareShadow(uint32_t nowMs) {
   char output[1'536];
   if (ride_automation::formatTraceJsonLine(trace, output, sizeof(output)) >= 0)
     Serial.println(output);
+#endif
+#if DETAILED_RIDE_DIAGNOSTICS
   if (ride_diagnostics::detailedCaptureEnabled()) {
     char fields[320] = {};
     snprintf(
@@ -1002,20 +1004,20 @@ void processFirmwareShadow(uint32_t nowMs) {
         "\"sourceHealthMask\":%u,\"transition\":\"%s\","
         "\"decisionSequence\":%lu,\"fixValid\":%s,"
         "\"speedAvailable\":%s}",
-        ride_automation::lifecycleName(trace.lifecycle),
-        ride_automation::startModeName(trace.settings.startMode),
-        trace.settings.autoPauseEnabled ? "true" : "false",
-        static_cast<unsigned>(trace.profileVersion),
-        static_cast<unsigned>(trace.decision.sourceHealthMask),
-        ride_automation::transitionName(trace.decision.transition),
-        static_cast<unsigned long>(trace.decision.sequence),
-        trace.observation.gpsFixValid.available &&
-                trace.observation.gpsFixValid.value
+        ride_automation::lifecycleName(lifecycle),
+        ride_automation::startModeName(settings.startMode),
+        settings.autoPauseEnabled ? "true" : "false",
+        static_cast<unsigned>(ride_automation::kRideDetectionProfile.version),
+        static_cast<unsigned>(decision.sourceHealthMask),
+        ride_automation::transitionName(decision.transition),
+        static_cast<unsigned long>(decision.sequence),
+        observation.gpsFixValid.available &&
+                observation.gpsFixValid.value
             ? "true"
             : "false",
-        (trace.observation.wheelSpeedMetersPerSecond.available ||
-         trace.observation.cadenceRpm.available ||
-         trace.observation.gpsSpeedMetersPerSecond.available)
+        (observation.wheelSpeedMetersPerSecond.available ||
+         observation.cadenceRpm.available ||
+         observation.gpsSpeedMetersPerSecond.available)
             ? "true"
             : "false");
     ride_diagnostics::record(ride_diagnostics::Level::Debug,

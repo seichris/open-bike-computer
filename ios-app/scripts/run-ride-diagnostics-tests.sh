@@ -11,6 +11,10 @@ xcrun swiftc \
   -D HOST_TESTING \
   -parse-as-library \
   -o "${OUT}" \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsContractV2.generated.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicyV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsAcquisitionV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsLiveTailV2.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputerTests/RideDiagnosticsHostTests.swift
 

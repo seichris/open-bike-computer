@@ -101,6 +101,8 @@ class RideDiagnosticsStorageContractTests(unittest.TestCase):
         health = RECORDER.split("bool recordHealth", 1)[1].split(
             "bool recordClockAnchor", 1
         )[0]
+        self.assertIn("detail::formatHealthFields(snapshot, reason", health)
+        health = (ROOT / "lib/ride_diagnostics/ride_diagnostics_health.hpp").read_text()
         for field in (
             "enqueuedCount",
             "writtenCount",

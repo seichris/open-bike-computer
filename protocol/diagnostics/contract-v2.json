@@ -1,0 +1,987 @@
+{
+  "categories": [
+    "audio",
+    "ble",
+    "boot",
+    "capture",
+    "display",
+    "gps",
+    "http",
+    "lifecycle",
+    "logger",
+    "map",
+    "memory",
+    "native",
+    "navigation",
+    "power",
+    "renderer",
+    "rideAutomation",
+    "storage",
+    "task",
+    "tls",
+    "touch",
+    "transfer",
+    "update",
+    "user",
+    "watchdog",
+    "wifi",
+    "workout"
+  ],
+  "description": "One reviewed diagnostics vocabulary. Event wire schema 1 is retained for byte-preserving v1 import; iOS legacy fields are strings. Control, acquisition and capability contracts are version 2.",
+  "eventWireSchema": 1,
+  "fields": {
+    "accuracy": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "accuracyAvailable": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "accuracyBucket": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "acknowledgedKind": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "active": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "activeStage": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "ageMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "alertMode": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "applyErrorCode": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "applyErrorDomain": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "applyResult": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "attempt": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "attemptId": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "authorization": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "authorized": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "autoPauseEnabled": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "available": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "background": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "blockLoadMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "bootSequence": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "bytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "bytesLimit": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "bytesPerSecond": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "captureState": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "chunk": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "class": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "clockSynchronized": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "code": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "collectionId": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "commandClass": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "commandId": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "compiledLevel": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "completedStage": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "connectCompleted": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "connectDurationMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "connectStarted": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "connectionGeneration": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "connectionReused": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "connectionState": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "consecutiveEarlyFailures": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "controllerRole": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "coredumpBytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "coverageState": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "crashAvailable": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "cutoffSequence": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "decisionSequence": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "deliveryState": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "diagnosticContract": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "diagnosticHold": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "discardedBytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "domain": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "droppedCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "durableSequence": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "durationLimit": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "durationMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "effectiveLevel": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "emissionSequence": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "enqueuedCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "errorCode": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "errorDomain": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "eventCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "eventsPerSecond": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "expectedState": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "fallback": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "featureFlags": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "filteredCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "firmwareBuild": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "firmwareFingerprint": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "firmwareGitSha": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "firmwareProfile": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "firmwareTarget": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "firmwareVersion": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "firstMissingUptimeMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "firstSequence": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "fixValid": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "formatVersion": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "frameCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "frameSkippedCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "freeInternalBytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "freePsramBytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "generation": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "grantId": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "highWater": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "highWaterBytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "httpStatus": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "importedCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "incidentId": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "incidentState": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "kind": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "largestInternalBytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "lastCriticalCategory": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "lastCriticalEvent": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "lastFailureCompletedStage": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "lastFailureResetReason": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "lastFailureStage": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "lastGapMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "lastMissingUptimeMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "lastSequence": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "latencyMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "leaseGeneration": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "localAccessorySubnet": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "mapDetail": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "mapId": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "mapPhase": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "mapProgressMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "markerSequence": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "maxQueueDepth": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "maximumGapMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "members": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "messageBytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "messageDigest": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "mode": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "nativeReportCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "navigating": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "networkObservation": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "networkProtocol": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "networkTransport": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "operationId": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "origin": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "otaState": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "outcome": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "oversizedCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "partialBytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "pendingControl": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "phase": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "policyDurationMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "policyExpiresAtEpochMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "policyGeneration": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "profileVersion": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "provider": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "proxyConnection": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "queueBytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "queueDepth": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "rateLimitedCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "ready": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "reason": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "recorderReady": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "rejectedCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "rejectedFieldCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "remainingChunks": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "remoteEndpointMatched": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "replacedCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "requestedLevel": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "resetReason": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "result": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "retries": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "rideDetectionArmed": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "rideGeneration": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "role": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "routeLoaded": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "rssiBucket": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "runtimeBootSequence": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "safeMode": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "sampleCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "sampledCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "samplingIntervalMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "schemaVersion": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "scope": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "segmentCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "sequence": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "sessionPresent": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "sha256Prefix": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "simulation": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "sizeBucket": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "snapshotId": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "sourceHealthMask": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "speedAvailable": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "stackHighWaterBytes": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "bytes"
+    },
+    "startMode": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "state": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "stateAfter": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "stateBefore": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "storage": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "storageErrorCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "tlsChallenge": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "tlsCompleted": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "tlsDurationMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "tlsStarted": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "transition": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "uiPhase": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "uiProgressMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "underlyingErrorCode": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "underlyingErrorDomain": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "viewingMap": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "visitedEntries": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "waitedForConnectivity": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "watchSequence": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    },
+    "watchUptimeMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "watchdogCoreMask": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "watchdogUptimeMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "workoutActive": {
+      "privacy": "diagnostic",
+      "type": "boolean"
+    },
+    "writerDelayMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "writerDetail": {
+      "privacy": "diagnostic",
+      "type": "number"
+    },
+    "writerPhase": {
+      "privacy": "diagnostic",
+      "type": "string"
+    },
+    "writerProgressMs": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "milliseconds"
+    },
+    "writtenCount": {
+      "privacy": "diagnostic",
+      "type": "number",
+      "unit": "count"
+    }
+  },
+  "levels": [
+    "trace",
+    "debug",
+    "info",
+    "warning",
+    "error",
+    "fault"
+  ],
+  "limits": {
+    "criticalQueue": 8,
+    "eventBytes": 768,
+    "fieldBytes": 320,
+    "maximumCaptureSeconds": 14400,
+    "maximumTailEvents": 32,
+    "maximumTraceBytesPerSecond": 8192,
+    "maximumTraceEventsPerSecond": 20,
+    "normalQueue": 24
+  },
+  "privacy": {
+    "default": "sanitized",
+    "forbidden": [
+      "coordinates",
+      "addresses",
+      "route instructions",
+      "credentials",
+      "tokens",
+      "owner keys",
+      "raw health values",
+      "raw sensor samples",
+      "complete protocol payloads"
+    ],
+    "restrictedArtifactsRequireExplicitConsent": true
+  },
+  "profiles": {
+    "all": {
+      "durationSeconds": 900,
+      "levels": {
+        "audio": "trace",
+        "ble": "trace",
+        "boot": "trace",
+        "capture": "trace",
+        "display": "trace",
+        "gps": "trace",
+        "http": "trace",
+        "lifecycle": "trace",
+        "logger": "trace",
+        "map": "trace",
+        "memory": "trace",
+        "native": "trace",
+        "navigation": "trace",
+        "power": "trace",
+        "renderer": "trace",
+        "rideAutomation": "trace",
+        "storage": "trace",
+        "task": "trace",
+        "tls": "trace",
+        "touch": "trace",
+        "transfer": "trace",
+        "update": "trace",
+        "user": "trace",
+        "watchdog": "trace",
+        "wifi": "trace",
+        "workout": "trace"
+      }
+    },
+    "baseline": {
+      "durationSeconds": 0,
+      "levels": {}
+    },
+    "ble-navigation": {
+      "durationSeconds": 7200,
+      "levels": {
+        "ble": "trace",
+        "gps": "trace",
+        "navigation": "trace",
+        "rideAutomation": "trace"
+      }
+    },
+    "map-rendering": {
+      "durationSeconds": 7200,
+      "levels": {
+        "display": "trace",
+        "map": "trace",
+        "memory": "trace",
+        "renderer": "trace",
+        "storage": "trace"
+      }
+    },
+    "power": {
+      "durationSeconds": 14400,
+      "levels": {
+        "memory": "debug",
+        "power": "debug",
+        "task": "debug",
+        "watchdog": "debug"
+      }
+    },
+    "transfer": {
+      "durationSeconds": 1800,
+      "levels": {
+        "ble": "trace",
+        "http": "trace",
+        "storage": "trace",
+        "tls": "trace",
+        "transfer": "trace",
+        "update": "trace",
+        "wifi": "trace"
+      }
+    }
+  },
+  "schema": 2
+}

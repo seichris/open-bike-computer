@@ -7,31 +7,6 @@ import CryptoKit
 import CoreFoundation
 import Foundation
 
-struct DeviceDiagnosticsIndex: Codable {
-    let schema: Int
-    let source: String
-    let bootSequence: UInt32
-    let activeChunk: UInt32
-    let stats: DeviceDiagnosticsStats
-    let chunks: [DeviceDiagnosticsChunk]
-}
-
-struct DeviceDiagnosticsStats: Codable {
-    let enqueued: UInt32
-    let written: UInt32
-    let dropped: UInt32
-    let storageErrors: UInt32
-}
-
-struct DeviceDiagnosticsChunk: Codable, Identifiable {
-    let bootSequence: UInt32
-    let chunk: UInt32
-    let bytes: Int
-    let sha256: String
-
-    var id: String { "\(bootSequence)-\(chunk)-\(sha256)" }
-}
-
 enum DeviceDiagnosticsTransferError: LocalizedError {
     case deviceIdentityUnavailable
     case invalidIndex
@@ -186,7 +161,9 @@ final class DeviceDiagnosticsTransferManager {
     func downloadDeviceLogs(
         bleManager: BLEManager,
         recorder: RideDiagnosticsRecorder,
-        status: @escaping @MainActor (String) -> Void
+        status: @escaping @MainActor (String) -> Void,
+        collectionID: UUID = UUID(),
+        captureID: UUID? = nil
     ) async throws -> Int {
         guard let deviceID = bleManager.connectedDeviceID else {
             throw DeviceDiagnosticsTransferError.deviceIdentityUnavailable
@@ -198,6 +175,8 @@ final class DeviceDiagnosticsTransferManager {
             event: "diagnostics_download_started",
             fields: ["mode": DeviceTransferSession.Mode.diagnostics.rawValue]
         )
+        let acquisitionStore = DiagnosticsAcquisitionStoreV2(root: recorder.controlRootURL)
+        var acquisition: DiagnosticsAcquisitionV2?
         var openedSession: DeviceTransferSession?
         do {
             let session = try await transferManager.enterDiagnostics(
@@ -213,7 +192,30 @@ final class DeviceDiagnosticsTransferManager {
                 maximumBytes: maximumIndexBytes,
                 timeoutInterval: 300
             )
-            let index = try decodeIndex(indexData)
+            let freshIndex = try decodeIndex(indexData)
+            guard bleManager.connectedDeviceID == deviceID else { throw DiagnosticsAcquisitionError.wrongDevice }
+            if let retained = try await acquisitionStore.load(collectionID) {
+                guard retained.deviceDigest == deviceDigest, retained.captureID == captureID,
+                      Self.sha256Hex(retained.rawIndex) == retained.indexSHA256 else { throw DiagnosticsAcquisitionError.wrongDevice }
+                // Freeze the original inventory. Missing/expired chunks remain
+                // missing; never silently replace the requested acquisition.
+                let available = Set(freshIndex.chunks.map(\.id))
+                guard retained.missingIDs.isSubset(of: available) else { throw DiagnosticsAcquisitionError.invalidManifest }
+                acquisition = retained
+            } else {
+                acquisition = DiagnosticsAcquisitionV2(id: collectionID, deviceDigest: deviceDigest,
+                    captureID: captureID, index: freshIndex, rawIndex: indexData,
+                    indexSHA256: Self.sha256Hex(indexData), capabilities: bleManager.diagnosticsStatusV2)
+            }
+            guard var active = acquisition else { throw DiagnosticsAcquisitionError.invalidManifest }
+            active.received = [] // Revalidate cached files; retention may have removed earlier imports.
+            active.state = "collecting"; active.failureCode = nil; active.updatedAt = Date()
+            acquisition = active
+            try await acquisitionStore.save(active)
+            // Persist source health before any payload, even when interrupted.
+            try await recorder.importDeviceRecorderHealthAsync(deviceDigest: deviceDigest,
+                bootSequence: active.index.bootSequence, data: active.rawIndex, enforceRetention: false)
+            let index = active.index
             var imported = 0
             var previousSequenceByBoot: [UInt32: UInt64] = [:]
             var firmwareFingerprintByBoot: [UInt32: String] = [:]
@@ -222,6 +224,8 @@ final class DeviceDiagnosticsTransferManager {
                 ($0.bootSequence, $0.chunk) < ($1.bootSequence, $1.chunk)
             }
             for (offset, chunk) in chunks.enumerated() {
+                try Task.checkCancellation()
+                guard bleManager.connectedDeviceID == deviceID else { throw DiagnosticsAcquisitionError.wrongDevice }
                 guard chunk.bytes > 0, chunk.bytes <= maximumChunkBytes,
                       chunk.bootSequence > 0,
                       chunk.bootSequence <= index.bootSequence,
@@ -254,12 +258,15 @@ final class DeviceDiagnosticsTransferManager {
                     data = existing
                 } else {
                     status("downloading device chunk \(offset + 1) of \(chunks.count)")
-                    data = try await request(
-                        session: session,
-                        path: "device-diagnostics/v1/chunks/\(chunk.bootSequence)/\(chunk.chunk)",
-                        method: "GET",
-                        maximumBytes: maximumChunkBytes
-                    )
+                    if bleManager.diagnosticsStatusV2?.valid == true {
+                        data = try await downloadResumableChunk(chunk, session: session,
+                            store: acquisitionStore, deviceDigest: deviceDigest,
+                            stillConnected: { bleManager.connectedDeviceID == deviceID })
+                    } else {
+                        data = try await request(session: session,
+                            path: "device-diagnostics/v1/chunks/\(chunk.bootSequence)/\(chunk.chunk)",
+                            method: "GET", maximumBytes: maximumChunkBytes)
+                    }
                 }
                 let inspection: ChunkInspection
                 if existing != nil, let cachedInspection {
@@ -272,6 +279,7 @@ final class DeviceDiagnosticsTransferManager {
                     throw DeviceDiagnosticsTransferError.oversizedChunk
                 }
                 guard inspection.sha256 == chunk.sha256.lowercased() else {
+                    try? await acquisitionStore.removePartial(chunk, deviceDigest: deviceDigest)
                     throw DeviceDiagnosticsTransferError.hashMismatch
                 }
                 guard let validation = inspection.validation else {
@@ -297,11 +305,19 @@ final class DeviceDiagnosticsTransferManager {
                     )
                     imported += 1
                 }
+                guard bleManager.connectedDeviceID == deviceID else { throw DiagnosticsAcquisitionError.wrongDevice }
+                active.received.insert(chunk.id); active.updatedAt = Date()
+                acquisition = active
+                try await acquisitionStore.save(active)
+                try await acquisitionStore.removePartial(chunk, deviceDigest: deviceDigest)
             }
+            active.state = "delivered"; active.updatedAt = Date()
+            acquisition = active
+            try await acquisitionStore.save(active)
             try await recorder.importDeviceRecorderHealthAsync(
                 deviceDigest: deviceDigest,
                 bootSequence: index.bootSequence,
-                data: indexData
+                data: active.rawIndex
             )
 
             status("closing device diagnostics session")
@@ -316,13 +332,19 @@ final class DeviceDiagnosticsTransferManager {
             )
             return imported
         } catch {
+            if var interrupted = acquisition {
+                interrupted.state = interrupted.deliveryComplete ? "delivered" : "interrupted"
+                interrupted.failureCode = error is CancellationError ? "cancelled" : "collection_interrupted"
+                interrupted.updatedAt = Date()
+                try? await acquisitionStore.save(interrupted)
+            }
             try? await recorder.enforceRetentionAsync()
             // Cancellation propagates into the caller task, and Task.sleep in
             // the BLE exit handshake would then fail immediately. Start an
             // unstructured MainActor task (which does not inherit cancellation)
             // and await it so network restoration and device revocation get a
             // deterministic bounded cleanup attempt before we rethrow.
-            if let openedSession {
+            if let openedSession, bleManager.connectedDeviceID == deviceID {
                 let cleanup = Task { @MainActor [weak self] in
                     guard let self else { return }
                     try? await self.closeSession(
@@ -344,6 +366,28 @@ final class DeviceDiagnosticsTransferManager {
             )
             throw error
         }
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func downloadResumableChunk(_ chunk: DeviceDiagnosticsChunk,
+        session: DeviceTransferSession, store: DiagnosticsAcquisitionStoreV2,
+        deviceDigest: String, stillConnected: @MainActor () -> Bool) async throws -> Data {
+        var bytes = try await store.partial(chunk, deviceDigest: deviceDigest)
+        // Previous complete-but-unverified partials are rechecked by the caller.
+        while bytes.count < chunk.bytes {
+            try Task.checkCancellation()
+            guard stillConnected() else { throw DiagnosticsAcquisitionError.wrongDevice }
+            let count = min(16 * 1024, chunk.bytes - bytes.count)
+            let path = "device-diagnostics/v2/range/\(chunk.bootSequence)/\(chunk.chunk)/\(chunk.sha256.lowercased())/\(bytes.count)/\(count)"
+            let slice = try await request(session: session, path: path, method: "GET", maximumBytes: count)
+            guard slice.count == count else { throw DeviceDiagnosticsTransferError.oversizedChunk }
+            try await store.append(slice, to: chunk, deviceDigest: deviceDigest, expectedOffset: bytes.count)
+            bytes.append(slice)
+        }
+        return bytes
     }
 
     private static func failureFields(
@@ -637,12 +681,10 @@ final class DeviceDiagnosticsTransferManager {
                   !isJSONBoolean(object["schema"]),
                   object["schema"] as? Int == 1,
                   object["source"] as? String == "firmware",
-                  ["debug", "info", "warning", "error"].contains(
+                  RideDiagnosticLevel.allCases.map(\.rawValue).contains(
                     object["level"] as? String ?? ""
                   ),
-                  ["lifecycle", "boot", "ble", "navigation", "gps",
-                   "workout", "rideAutomation", "storage", "map", "power",
-                   "transfer", "user", "logger"].contains(
+                  RideDiagnosticCategory.allCases.map(\.rawValue).contains(
                     object["category"] as? String ?? ""
                   ),
                   let eventName = object["event"] as? String,

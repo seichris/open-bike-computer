@@ -42,6 +42,8 @@ struct BikeComputerApp: App {
                     appDelegate.setApplicationActive($0)
                 }
             )
+            .environmentObject(appDelegate.diagnosticsCollection)
+            .environmentObject(appDelegate.diagnosticsBroker)
         }
     }
 }
@@ -69,6 +71,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     private var workoutLiveActivityController: AnyObject?
     private var workoutLiveActivityCommandRouter: AnyObject?
     private var workoutLiveActivityIntentDispatcher: AnyObject?
+    lazy var diagnosticsBroker = DiagnosticsBrokerClientV2(recorder: rideDiagnosticsRecorder,
+        ble: coordinator.bleManager, collection: diagnosticsCollection)
+    lazy var diagnosticsCollection = DiagnosticsCollectionCoordinatorV2(
+        recorder: rideDiagnosticsRecorder, bleManager: coordinator.bleManager)
     private var cancellables = Set<AnyCancellable>()
     lazy var coordinator = BikeComputerCoordinator(
         destinationStore: destinationStore,
@@ -234,6 +240,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                 )
             }
             .removeDuplicates()
+            .handleEvents(receiveOutput: { [weak self] active in
+                self?.diagnosticsCollection.setRideActive(active)
+                self?.diagnosticsBroker.setRideActive(active)
+            })
             .scan((previous: false, current: false)) { state, active in
                 (previous: state.current, current: active)
             }
@@ -347,6 +357,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func setApplicationActive(_ isActive: Bool) {
+        diagnosticsCollection.setApplicationActive(isActive)
+        diagnosticsBroker.setApplicationActive(isActive)
         coordinator.setApplicationActive(isActive)
         if #available(iOS 17.0, *),
            let controller =

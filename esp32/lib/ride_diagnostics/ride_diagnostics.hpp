@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 class Storage;
 
@@ -16,6 +17,8 @@ enum class Level : uint8_t {
   Info = 1,
   Warning = 2,
   Error = 3,
+  Trace = 4,
+  Fault = 5,
 };
 
 struct Stats {
@@ -136,6 +139,12 @@ DetailedCaptureLease detailedCaptureLease();
 bool clearCaptureIfMatches(const DetailedCaptureLease &lease);
 const char *captureId();
 bool detailedCaptureEnabled();
+bool bindCapturePolicyV2(const std::string &command, bool restoring = false);
+std::string capturePolicyStatusV2();
+bool requestLiveTailV2(const std::string &command);
+std::string takeLiveTailStatusV2();
+bool markIssueV2(const char *code, uint32_t markerSequence, const char *incidentId);
+
 transfer_policy::SealPreparation
 sealActiveChunkForTransfer(uint32_t timeoutMs = 5000);
 bool sealActiveChunk(uint32_t timeoutMs = 2000);

@@ -1183,6 +1183,10 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferLastErrorSequence: UInt64?
+    @Published private(set) var diagnosticsLiveTailV2: DiagnosticsLiveTailV2?
+    private var diagnosticsTailRevisionV2: UInt64 = 0
+    @Published private(set) var diagnosticsStatusV2: DeviceDiagnosticsStatusV2?
+    @Published private(set) var diagnosticsStatusRevisionV2: UInt64 = 0
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
     @Published private(set) var deviceTransferResourceSnapshot:
         DeviceTransferResourceSnapshot?
@@ -6106,6 +6110,16 @@ class BLEManager: NSObject, ObservableObject {
             detailed: requestedDetailed
         )
         guard supportsRideDiagnostics else { return false }
+        if let policy = diagnosticsRecorder?.currentPolicyV2 {
+            // Never replace a retained v2 request with a silent v1 downgrade.
+            // Discover the contract first; the caller can report unsupported.
+            guard diagnosticsStatusV2?.valid == true else {
+                _ = requestDeviceTransferStatus()
+                scheduleDiagnosticsCaptureBindingRetry()
+                return false
+            }
+            return sendDiagnosticsPolicyV2(policy)
+        }
         // Production firmware supports standard correlation but deliberately
         // omits the detailed one-Hz producer. Downgrade the binding instead of
         // sending a mode that the connected profile must reject.
@@ -6132,6 +6146,66 @@ class BLEManager: NSObject, ObservableObject {
             scheduleDiagnosticsCaptureBindingRetry()
         }
         return queued
+    }
+
+    @discardableResult
+    func sendDiagnosticsPolicyV2(_ policy: DiagnosticsCapturePolicyV2) -> Bool {
+        guard isNavigationReady, supportsRideDiagnostics, diagnosticsStatusV2?.valid == true,
+              let command = try? policy.command() else { return false }
+        return sendTransferControlPacket(Data(command.utf8), label: "diagnostics v2 policy",
+                                         coalescingKey: "transfer.diagnostics.capture")
+    }
+
+    func readDiagnosticsTailV2(boot: UInt32, after: UInt32, limit: UInt32) async throws -> Data {
+        guard isNavigationReady, supportsRideDiagnostics, diagnosticsStatusV2?.valid == true,
+              let expectedDevice = connectedDeviceID, (1...8).contains(limit) else { throw DiagnosticsPolicyError.unsupported }
+        let revision = diagnosticsTailRevisionV2
+        let message = "DTRNtail|2|\(boot)|\(after)|\(limit)"
+        guard sendTransferControlPacket(Data(message.utf8), label: "diagnostics live tail", coalescingKey: "transfer.diagnostics.tail") else { throw DiagnosticsPolicyError.unsupported }
+        for _ in 0..<40 {
+            try Task.checkCancellation()
+            guard connectedDeviceID == expectedDevice, isNavigationReady else { throw DiagnosticsPolicyError.deviceChanged }
+            if diagnosticsTailRevisionV2 > revision, let value = diagnosticsLiveTailV2,
+               value.requestedBoot == boot, value.requestedAfter == after { return value.data }
+            try await Task.sleep(nanoseconds: 125_000_000)
+        }
+        throw DiagnosticsPolicyError.acknowledgementTimeout
+    }
+
+    func applyDiagnosticsPolicyV2(_ policy: DiagnosticsCapturePolicyV2) async throws -> DeviceDiagnosticsStatusV2 {
+        guard let deviceID = connectedDeviceID, isNavigationReady else { throw DiagnosticsPolicyError.deviceChanged }
+        let initialRevision = diagnosticsStatusRevisionV2
+        _ = requestDeviceTransferStatus()
+        for _ in 0..<20 {
+            guard connectedDeviceID == deviceID, isNavigationReady else { throw DiagnosticsPolicyError.deviceChanged }
+            if diagnosticsStatusRevisionV2 > initialRevision { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard diagnosticsStatusRevisionV2 > initialRevision, diagnosticsStatusV2?.valid == true else {
+            throw DiagnosticsPolicyError.unsupported
+        }
+        let sentAfter = diagnosticsStatusRevisionV2
+        guard sendDiagnosticsPolicyV2(policy) else { throw DiagnosticsPolicyError.unsupported }
+        for attempt in 0..<50 {
+            guard connectedDeviceID == deviceID, isNavigationReady else { throw DiagnosticsPolicyError.deviceChanged }
+            if diagnosticsStatusRevisionV2 > sentAfter, let receipt = diagnosticsStatusV2,
+               receipt.acknowledges(policy) { return receipt }
+            if attempt % 10 == 9 { _ = requestDeviceTransferStatus() }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        throw DiagnosticsPolicyError.acknowledgementTimeout
+    }
+
+    @discardableResult
+    func sendDiagnosticsIncidentV2(_ code: RideIssueCode, incidentID: UUID) -> UInt32? {
+        guard isNavigationReady, let receipt = diagnosticsStatusV2, receipt.valid,
+              receipt.captureID == diagnosticsRecorder?.currentCaptureIDString else { return nil }
+        let sequence = max(nextDiagnosticsMarkerSequence, receipt.markerQueued &+ 1)
+        guard sequence > 0 else { return nil }
+        let command = "DTRNmark|2|\(sequence)|\(code.rawValue)|\(incidentID.uuidString.lowercased())"
+        guard sendTransferControlPacket(Data(command.utf8), label: "diagnostics v2 incident", coalescingKey: nil) else { return nil }
+        nextDiagnosticsMarkerSequence = sequence &+ 1
+        return sequence
     }
 
     @discardableResult
@@ -6776,6 +6850,9 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferLastErrorCode = nil
         deviceTransferLastErrorMessage = nil
         deviceTransferLastErrorSequence = nil
+        diagnosticsStatusV2 = nil
+        diagnosticsLiveTailV2 = nil
+        diagnosticsStatusRevisionV2 = 0
         deviceTransferStatusRevision = 0
         deviceTransferResourceSnapshot = nil
         deviceTransferWiFiStartFailure = nil
@@ -10911,6 +10988,20 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             firmwareUpdateStatus = "invalid status"
             log("Received invalid device transfer status payload")
             return true
+        }
+
+        if let diagnostics = object["diagnostics"] as? [String: Any],
+           let data = try? JSONSerialization.data(withJSONObject: diagnostics),
+           let receipt = try? JSONDecoder().decode(DeviceDiagnosticsStatusV2.self, from: data), receipt.valid {
+            diagnosticsStatusV2 = receipt
+            diagnosticsStatusRevisionV2 &+= 1
+        } else {
+            diagnosticsStatusV2 = nil
+        }
+
+        if let tail = object["diagnosticsTail"] as? [String: Any],
+           let raw = try? JSONSerialization.data(withJSONObject: tail), let value = DiagnosticsLiveTailV2(data: raw) {
+            diagnosticsLiveTailV2 = value; diagnosticsTailRevisionV2 &+= 1
         }
 
         let enabled = object["enabled"] as? Bool ?? false

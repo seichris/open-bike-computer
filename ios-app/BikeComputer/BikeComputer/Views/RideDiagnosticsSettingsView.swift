@@ -4,10 +4,18 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RideDiagnosticsSettingsView: View {
     @ObservedObject var recorder: RideDiagnosticsRecorder
     @EnvironmentObject private var bleManager: BLEManager
+    @EnvironmentObject private var broker: DiagnosticsBrokerClientV2
+    @State private var importingEnrollment = false
+    @State private var allowBrokerCapture = false
+    @State private var allowBrokerCollection = false
+    @EnvironmentObject private var collection: DiagnosticsCollectionCoordinatorV2
+    @State private var selectedProfile = "ble-navigation"
+    @State private var captureError: String?
     @Environment(\.dismiss) private var dismiss
     @State private var selectedIssue: RideIssueCode = .other
     @State private var exportURL: URL?
@@ -78,20 +86,8 @@ struct RideDiagnosticsSettingsView: View {
                     }
                 }
                 Button {
-                    guard recorder.markIssue(selectedIssue) else {
-                        localMarkerStatus = "Failed"
-                        deviceMarkerStatus = "Not attempted"
-                        statusMessage = "The issue marker could not be saved on this iPhone."
-                        return
-                    }
-                    localMarkerStatus = "Saved"
-                    let deviceMarked = bleManager.sendDiagnosticsIssueMarker(selectedIssue)
-                    deviceMarkerStatus = deviceMarked
-                        ? "Queued; persistence pending"
-                        : "Failed — device not ready"
-                    statusMessage = deviceMarked
-                        ? "Issue marker saved on the iPhone and queued for Bicino."
-                        : "Issue marker saved on this iPhone; Bicino was not ready."
+                    _ = collection.mark(selectedIssue)
+                    statusMessage = collection.incidentStatus
                 } label: {
                     Label("Mark Issue Now", systemImage: "flag.fill")
                 }
@@ -108,6 +104,22 @@ struct RideDiagnosticsSettingsView: View {
             }
 
             Section {
+                Picker("Capture profile", selection: $selectedProfile) {
+                    ForEach(DiagnosticsContractV2.profiles.keys.filter { $0 != "baseline" }.sorted(), id: \.self) { Text($0).tag($0) }
+                }
+                Button("Start Bounded Capture on Both Sources") {
+                    Task { @MainActor in
+                        do {
+                            _ = try await collection.startCapture(profile: selectedProfile,
+                                durationSeconds: selectedProfile == "all" ? 900 : 7200)
+                            captureError = nil
+                        } catch {
+                            captureError = "iPhone capture is retained; Bicino did not acknowledge this policy. Inspect capabilities before riding."
+                        }
+                    }
+                }
+                .disabled(!bleManager.isNavigationReady)
+                if let captureError { Text(captureError).font(.footnote).foregroundStyle(.orange) }
                 Toggle("Detailed Ride Trace", isOn: detailedTraceBinding)
                     .disabled(
                         !bleManager.supportsDetailedRideDiagnostics &&
@@ -135,42 +147,18 @@ struct RideDiagnosticsSettingsView: View {
 
             Section {
                 Button {
-                    guard !isDownloading else { return }
-                    isDownloading = true
-                    statusMessage = "Preparing the authenticated device transfer…"
-                    downloadTask = Task { @MainActor in
-                        defer {
-                            isDownloading = false
-                            downloadTask = nil
-                        }
-                        do {
-                            let imported = try await DeviceDiagnosticsTransferManager()
-                                .downloadDeviceLogs(
-                                    bleManager: bleManager,
-                                    recorder: recorder,
-                                    status: { statusMessage = $0 }
-                                )
-                            statusMessage = imported == 0
-                                ? "Device logs were already imported."
-                                : "Imported \(imported) verified device chunk\(imported == 1 ? "" : "s")."
-                        } catch is CancellationError {
-                            statusMessage = "Device log download cancelled."
-                        } catch {
-                            statusMessage = error.localizedDescription
-                        }
-                    }
+                    collection.start()
                 } label: {
-                    Label("Download Device Logs", systemImage: "arrow.down.doc")
+                    Label("Collect iPhone + Bicino Logs", systemImage: "arrow.down.doc")
                 }
-                .disabled(
-                    isDownloading || !bleManager.isNavigationReady ||
-                        !bleManager.supportsRideDiagnostics
-                )
-                if isDownloading {
-                    Button("Cancel Device Download", role: .cancel) {
-                        statusMessage = "Cancelling device log download…"
-                        downloadTask?.cancel()
-                    }
+                .disabled(collection.isCollecting || !bleManager.isNavigationReady || !bleManager.supportsRideDiagnostics)
+                if collection.isCollecting {
+                    Button("Pause Collection", role: .cancel) { collection.cancel() }
+                    ProgressView()
+                }
+                Text(collection.status).font(.footnote).foregroundStyle(.secondary)
+                if let bundle = collection.latestBundle {
+                    ShareLink(item: bundle) { Label("Share Verified Handoff", systemImage: "square.and.arrow.up") }
                 }
                 Button {
                     exportSupportBundle()
@@ -202,6 +190,16 @@ struct RideDiagnosticsSettingsView: View {
             }
 
             Section {
+                Text(broker.status).font(.footnote)
+                Toggle("Allow Mac capture controls", isOn: $allowBrokerCapture)
+                Toggle("Allow Mac log collection", isOn: $allowBrokerCollection)
+                Button("Import Mac Enrollment File") { importingEnrollment = true }
+                if broker.paired { Button("Revoke Mac Access", role: .destructive) { broker.revoke() } }
+            } header: { Text("Codex / paired Mac") } footer: {
+                Text("Enrollment is explicit and app-family specific. The Mac can read sanitized logs; optional capture and collection grants are applied when importing. No flashing, reset, remote shell, coordinates or health streams are exposed. Open the app on the same network to deliver retained evidence.")
+            }
+
+            Section {
                 Button("Delete iPhone Logs", role: .destructive) {
                     showingDeleteConfirmation = true
                 }
@@ -209,6 +207,17 @@ struct RideDiagnosticsSettingsView: View {
             } footer: {
                 Text("Already-exported files are unaffected. Device-side chunks age out under their own retention policy.")
             }
+        }
+        .fileImporter(isPresented: $importingEnrollment, allowedContentTypes: [.json]) { result in
+            do {
+                let url = try result.get()
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                guard size > 0, size <= 16 * 1024 else { throw DiagnosticsBrokerClientError.invalidEnrollment }
+                try broker.importEnrollment(Data(contentsOf: url), allowCapture: allowBrokerCapture, allowCollection: allowBrokerCollection)
+                statusMessage = "Mac enrollment saved in this app's device-only Keychain."
+            } catch { statusMessage = "Enrollment rejected. Check app family, expiry, and the original Mac-generated file." }
         }
         .navigationTitle("Diagnostics")
         .navigationBarTitleDisplayMode(.inline)
@@ -228,7 +237,6 @@ struct RideDiagnosticsSettingsView: View {
             Button("Cancel", role: .cancel) {}
         }
         .onDisappear {
-            downloadTask?.cancel()
             exportTask?.cancel()
             exportTask = nil
             if let exportURL {
@@ -298,8 +306,11 @@ struct RideDiagnosticsSettingsView: View {
 }
 
 #Preview {
-    NavigationStack {
-        RideDiagnosticsSettingsView(recorder: RideDiagnosticsRecorder())
-    }
-    .environmentObject(BLEManager())
+    let recorder = RideDiagnosticsRecorder()
+    let ble = BLEManager()
+    let collection = DiagnosticsCollectionCoordinatorV2(recorder: recorder, bleManager: ble)
+    NavigationStack { RideDiagnosticsSettingsView(recorder: recorder) }
+        .environmentObject(ble)
+        .environmentObject(collection)
+        .environmentObject(DiagnosticsBrokerClientV2(recorder: recorder, ble: ble, collection: collection))
 }

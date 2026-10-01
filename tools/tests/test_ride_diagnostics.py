@@ -219,7 +219,7 @@ class RideDiagnosticsTests(unittest.TestCase):
     def test_swift_and_python_field_allowlists_stay_in_sync(self):
         swift_source = (
             REPO_ROOT
-            / "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift"
+            / "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsContractV2.generated.swift"
         ).read_text()
         match = re.search(
             r"allowedKeys: Set<String> = \[(.*?)\n\s*\]",

@@ -5,6 +5,8 @@
 #include "ride_diagnostics.hpp"
 #include "ride_diagnostics_http_policy.hpp"
 #include "ride_diagnostics_index_policy.hpp"
+#include "diagnostics_segment_catalog.hpp"
+#include <unistd.h>
 
 #include <Arduino.h>
 #include <dirent.h>
@@ -97,6 +99,19 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
                 device_transfer::TransferClient &client,
                 device_transfer::HttpTransferServer *server,
                 const device_transfer::HttpRequest &request) {
+  // The cache is bound to immutable file identity and size. The receiver
+  // still verifies SHA-256 over every byte; this only avoids repeated index I/O.
+  uint32_t boot = 0, number = 0;
+  const char *boots = std::strstr(path, "/boots/");
+  if (boots != nullptr && std::sscanf(boots, "/boots/%u/events-%u.jsonl", &boot, &number) == 2) {
+    bicino_diagnostics::SegmentDescriptor cached;
+    if (bicino_diagnostics::readSegmentDescriptor(storage, path, boot, number, expectedBytes, cached)) {
+      const std::string padding((expectedBytes + kIndexHashProgressBytes - 1U) / kIndexHashProgressBytes, ' ');
+      if (!requestStillAuthorized(server, request) || !device_transfer::writeHttpBytes(client,
+              reinterpret_cast<const uint8_t *>(padding.data()), padding.size())) return false;
+      out = cached.sha256; bytes = cached.bytes; return true;
+    }
+  }
   FILE *file = storage.open(path, "rb");
   if (file == nullptr)
     return false;
@@ -158,6 +173,12 @@ bool sha256File(const char *path, std::string &out, uint32_t &bytes,
   for (uint8_t byte : digest) {
     out.push_back(hex[(byte >> 4) & 0x0f]);
     out.push_back(hex[byte & 0x0f]);
+  }
+  if (boot > 0 && number > 0 && bytes == expectedBytes) {
+    bicino_diagnostics::SegmentDescriptor descriptor;
+    descriptor.boot = boot; descriptor.chunk = number; descriptor.bytes = bytes;
+    std::memcpy(descriptor.sha256, out.c_str(), sizeof(descriptor.sha256));
+    (void)bicino_diagnostics::writeSegmentDescriptor(storage, path, descriptor);
   }
   return true;
 }
@@ -483,6 +504,42 @@ bool RideDiagnosticsHttp::handleRequest(
     return true;
   }
   server_->noteDiagnosticsModeDecision(true);
+  if (request.path.rfind("/device-diagnostics/v2/", 0) == 0) {
+    exitAfterResponse_ = false;
+    refreshTransferSnapshotLease();
+    if (request.method == "GET" && request.path == "/device-diagnostics/v2/status")
+      return sendBody(client, capturePolicyStatusV2(), "application/json", server_, request);
+    bicino_diagnostics::SegmentRange range;
+    if (request.method != "GET" || !bicino_diagnostics::parseSegmentRange(request.path, range))
+      return device_transfer::sendHttpError(client, 404, "not_found", "diagnostic v2 endpoint not found");
+    Chunk chunk;
+    bicino_diagnostics::SegmentDescriptor descriptor;
+    if (!resolveClosedChunk(range.boot, range.chunk, chunk) || range.offset >= chunk.bytes ||
+        range.length > chunk.bytes - range.offset ||
+        !bicino_diagnostics::readSegmentDescriptor(storage, chunk.path.c_str(), chunk.boot, chunk.number, chunk.bytes, descriptor) ||
+        range.hash != descriptor.sha256)
+      return device_transfer::sendHttpError(client, 409, "snapshot_changed", "refresh diagnostics index before retrying");
+    FILE *file = storage.open(chunk.path.c_str(), "rb");
+    if (file == nullptr) return device_transfer::sendHttpError(client, 404, "chunk_unavailable", "diagnostic chunk unavailable");
+    if (::fseek(file, static_cast<long>(range.offset), SEEK_SET) != 0 ||
+        !requestStillAuthorized(server_, request) ||
+        !device_transfer::sendHttpHead(client, 200, range.length, "application/octet-stream")) {
+      storage.close(file); return false;
+    }
+    uint8_t buffer[4096];
+    uint32_t sent = 0;
+    bool ok = true;
+    while (sent < range.length) {
+      if (!requestStillAuthorized(server_, request)) { ok = false; break; }
+      const auto requested = std::min<std::size_t>(sizeof(buffer), range.length - sent);
+      const auto read = storage.readWithEvidence(file, buffer, requested);
+      if (read.error || read.returned == 0 || !device_transfer::writeHttpBytes(client, buffer, read.returned)) { ok = false; break; }
+      sent += static_cast<uint32_t>(read.returned);
+    }
+    if (storage.close(file) != 0) ok = false;
+    if (!ok) client.stop();
+    return ok && sent == range.length;
+  }
   const http_policy::Route route =
       http_policy::parseRoute(request.method, request.path, kPrefix);
   if (route.kind != http_policy::RouteKind::Exit) {

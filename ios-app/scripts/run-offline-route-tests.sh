@@ -42,6 +42,10 @@ xcrun swiftc -D HOST_TESTING -parse-as-library -o "${OUT_DIR}/tests" \
   ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsContractV2.generated.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicyV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsAcquisitionV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsLiveTailV2.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \

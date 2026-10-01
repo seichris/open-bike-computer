@@ -29,6 +29,10 @@ xcrun swiftc \
   ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/WatchWorkoutLaunchRequest.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsContractV2.generated.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicyV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsAcquisitionV2.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsLiveTailV2.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
   ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
