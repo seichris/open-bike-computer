@@ -3,14 +3,37 @@ import io
 import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from build_firmware import _download_verified_archive
 from generated_sdkconfig import GeneratedSdkconfigError
+from firmware_runtime import Artifact, FirmwareRuntimeError, download_verified
 
 
 class FirmwareDownloadCacheTests(unittest.TestCase):
+    def test_runtime_transport_retries_only_transient_http_failures(self):
+        artifact = Artifact("https://example.invalid/runtime", len(self.contents), self.sha256)
+        unavailable = urllib.error.HTTPError(artifact.url, 504, "gateway timeout", None, None)
+        with patch("firmware_runtime.time.sleep") as sleep:
+            opener = Mock(side_effect=[unavailable, io.BytesIO(self.contents)])
+            destination = self.root / "runtime.tar"
+            download_verified(artifact, destination, opener=opener)
+            self.assertEqual(destination.read_bytes(), self.contents)
+            self.assertEqual(opener.call_count, 2)
+            sleep.assert_called_once_with(1)
+
+    def test_runtime_digest_failure_is_not_retried(self):
+        artifact = Artifact("https://example.invalid/runtime", len(self.contents), "0" * 64)
+        opener = Mock(return_value=io.BytesIO(self.contents))
+        destination = self.root / "runtime.tar"
+        with self.assertRaisesRegex(FirmwareRuntimeError, "SHA-256"):
+            download_verified(artifact, destination, opener=opener)
+        opener.assert_called_once()
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(self.root.iterdir()), [])
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

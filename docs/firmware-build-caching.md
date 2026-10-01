@@ -73,9 +73,10 @@ hosts and both boards' ordinary/production profiles. Each job builds:
 4. A fresh worktree at a different path after the producer has been removed,
    requiring a core hit, no core bootstrap, and identical flashable image hashes.
 
-The different-path ELF and flash-plan hashes may differ because debug paths and
-private uploader/image paths are worktree-local; the actual flashable image
-hashes must match. All phases require a fresh linker map. Timing JSON and full
+Verified application compiles map project paths to `/open-bike-computer/esp32`
+so debug/file paths do not change the ELF hash embedded in ESP32 images.
+Private uploader/image paths in flash plans remain worktree-local; the actual
+flashable image hashes must match. All phases require a fresh linker map. Timing JSON and full
 logs are retained. Run this qualification before accepting changes to cache
 keys or relocation rules; passing host tests alone does not qualify relocation.
 

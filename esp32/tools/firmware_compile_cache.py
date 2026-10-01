@@ -36,7 +36,10 @@ def configure_metadata_identity(env, git_sha: str, timestamp: str) -> None:
 
     # SOURCE_DATE_EPOCH affects these macros without appearing in a SCons
     # compiler command. Reject their use rather than restoring stale dates.
-    env.Append(CCFLAGS=["-Werror=date-time"])
+    env.Append(CCFLAGS=[
+        "-Werror=date-time",
+        f"-ffile-prefix-map={project}=/open-bike-computer/esp32",
+    ])
 
     def metadata_object(build_env, node):
         source = Path(node.srcnode().get_abspath())

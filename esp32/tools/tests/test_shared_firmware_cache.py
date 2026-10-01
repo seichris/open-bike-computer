@@ -8,7 +8,10 @@ from unittest.mock import patch
 
 import generated_sdkconfig as core
 from shared_firmware_cache import publish_shared_core, restore_shared_core
-from tools.tests import test_generated_sdkconfig as fixtures
+if __package__:
+    from . import test_generated_sdkconfig as fixtures
+else:
+    import test_generated_sdkconfig as fixtures
 
 
 class SharedCoreCacheTests(unittest.TestCase):
