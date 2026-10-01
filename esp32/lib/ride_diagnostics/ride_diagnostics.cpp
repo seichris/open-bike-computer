@@ -17,6 +17,7 @@
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include <esp_attr.h>
+#include <esp_random.h>
 #endif
 
 #include "../firmware_metadata/firmware_metadata.hpp"
@@ -1607,19 +1608,50 @@ bool recordClockAnchor() {
   return recorded;
 }
 
-bool markIssue(const char *code, uint32_t markerSequence) {
+bool markIssue(const char *code, uint32_t markerSequence, const char *incidentId) {
   if (!validIssueCode(code) || markerSequence == 0 ||
+      (incidentId != nullptr && !control::validIncidentId(incidentId)) ||
       !control::markerSequenceCanAdvance(lastMarkerSequence.load(),
                                          markerSequence))
     return false;
-  char fields[96] = {};
-  snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"sequence\":%lu}",
-           code, static_cast<unsigned long>(markerSequence));
+  char fields[192] = {};
+  if (incidentId != nullptr) {
+    snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"sequence\":%lu,\"incidentId\":\"%s\",\"origin\":\"iphone\"}",
+             code, static_cast<unsigned long>(markerSequence), incidentId);
+  } else {
+    snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"sequence\":%lu}",
+             code, static_cast<unsigned long>(markerSequence));
+  }
   if (!record(Level::Warning, "user", "issue_marker", fields))
     return false;
   lastMarkerSequence.store(markerSequence);
   checkpointRequested.store(true);
   return true;
+}
+
+bool markLocalIssue(const char *code) {
+#if PERSISTENT_RIDE_DIAGNOSTICS && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+  if (!validIssueCode(code)) return false;
+  uint8_t id[16];
+  esp_fill_random(id, sizeof(id));
+  id[6] = (id[6] & 0x0f) | 0x40;
+  id[8] = (id[8] & 0x3f) | 0x80;
+  char incident[37] = {};
+  snprintf(incident, sizeof(incident),
+      "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+      id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7],
+      id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]);
+  char fields[144] = {};
+  snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"incidentId\":\"%s\",\"origin\":\"device\"}", code, incident);
+  // Local markers have their own UUID; do not consume the phone's monotonic
+  // anti-replay sequence and thereby reject a later legitimate phone marker.
+  if (!record(Level::Warning, "user", "issue_marker", fields)) return false;
+  checkpointRequested.store(true);
+  return true;
+#else
+  (void)code;
+  return false;
+#endif
 }
 
 bool bindCapture(const char *captureID, bool detailed) {

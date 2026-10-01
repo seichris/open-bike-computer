@@ -259,7 +259,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
             DiagnosticsBrokerAcknowledgement(id: command.id, state: state, code: code)
         }
         guard command.valid() else { return result("rejected", "invalid_or_expired") }
-        if command.target != "iphone" {
+        if command.requiresFirmware {
             guard let id = bleManager.connectedDeviceID,
                   recorder.deviceDigest(for: id) == command.target,
                   bleManager.isNavigationReady else { return result("rejected", "target_unavailable") }
@@ -280,14 +280,14 @@ final class DiagnosticsBrokerClient: ObservableObject {
                   let seconds = command.parameters.durationSeconds, let budget = command.parameters.budgetBytes else {
                 return result("rejected", "invalid_policy")
             }
-            if command.target != "iphone" {
+            if command.requiresFirmware {
                 guard let remote = bleManager.diagnosticsCaptureStatus,
                       remote.valid, remote.schemaDigest == DiagnosticsSchema.digest,
                       mask & ~remote.supportedMask == 0 else { return result("rejected", "provider_unavailable") }
             }
             guard let request = recorder.beginTargetedCapture(mask: mask, minimumLevel: level,
                 seconds: seconds, budgetBytes: budget) else { return result("rejected", "invalid_policy") }
-            if command.target != "iphone" {
+            if command.requiresFirmware {
                 return bleManager.sendDiagnosticsCapturePolicy(request)
                     ? result("accepted", "awaiting_device_ack") : result("rejected", "device_policy_not_queued")
             }
@@ -295,17 +295,24 @@ final class DiagnosticsBrokerClient: ObservableObject {
         case "stop_capture":
             guard let request = recorder.beginTargetedCapture(mask: DiagnosticsSchema.instrumentedMask,
                 minimumLevel: 2, seconds: 1, budgetBytes: 1024) else { return result("rejected", "stop_failed") }
-            if command.target != "iphone" { _ = bleManager.sendDiagnosticsCapturePolicy(request) }
-            return result("accepted", "baseline_requested")
+            if command.requiresFirmware {
+                return bleManager.sendDiagnosticsCapturePolicy(request)
+                    ? result("accepted", "awaiting_device_ack") : result("rejected", "device_policy_not_queued")
+            }
+            return result("accepted", "phone_baseline_applied")
         case "mark":
             guard let code = command.parameters.code.flatMap(RideIssueCode.init(rawValue:)),
-                  recorder.markIssue(code) else { return result("rejected", "phone_marker_failed") }
-            if command.target != "iphone" {
-                return bleManager.sendDiagnosticsIssueMarker(code)
+                  recorder.markIssue(code, incidentID: command.id) else { return result("rejected", "phone_marker_failed") }
+            if command.requiresFirmware {
+                return bleManager.sendDiagnosticsIssueMarker(code, incidentID: command.id)
                     ? result("accepted", "device_marker_queued") : result("accepted", "phone_only_marker")
             }
             return result("accepted", "phone_marker_saved")
         case "collect":
+            guard command.requiresFirmware else {
+                return enqueueExport(acquisitionID: nil)
+                    ? result("accepted", "local_snapshot_handoff_requested") : result("rejected", "handoff_not_started")
+            }
             let collector = DiagnosticsCollectionCoordinator.shared
             guard !collector.isRunning else { return result("rejected", "collection_busy") }
             collector.start()
@@ -402,6 +409,12 @@ final class DiagnosticsBrokerClient: ObservableObject {
                 }
                 let prepared = try await DiagnosticsCollectionCoordinator.shared.exportForCodex(recorder: recorder)
                 defer { try? FileManager.default.removeItem(at: prepared) }
+                let preparedBytes = try prepared.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                guard DiagnosticsOutboxAdmission.allows(existingCount: existing.count,
+                        existingBytes: bytes, additionalBytes: preparedBytes) else {
+                    status = "Mac handoff would exceed the outbox budget. Source evidence was retained."
+                    return
+                }
                 let destination = root.appendingPathComponent(UUID().uuidString.lowercased() + ".zip")
                 try FileManager.default.moveItem(at: prepared, to: destination)
                 var values = URLResourceValues(); values.isExcludedFromBackup = true

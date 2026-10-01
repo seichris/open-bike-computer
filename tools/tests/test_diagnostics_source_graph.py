@@ -36,6 +36,25 @@ class DiagnosticsSourceGraphTests(unittest.TestCase):
                                   f"{path.name}: BLE module missing {relative}")
         self.assertGreaterEqual(checked, 3)
 
+    def test_policy_forwarding_is_explicit_and_phone_collection_does_not_use_radio(self):
+        app = (ROOT / PREFIX / "BikeComputerApp.swift").read_text()
+        self.assertNotIn("rideDiagnosticsRecorder.$runtimeCapturePolicy", app)
+        client = (ROOT / PREFIX / "Managers/DiagnosticsBrokerClient.swift").read_text()
+        collect = client.split('case "collect":', 1)[1].split('case "export":', 1)[0]
+        self.assertIn("guard command.requiresFirmware else", collect)
+        self.assertLess(collect.index("guard command.requiresFirmware else"), collect.index("collector.start()"))
+        stop = client.split('case "stop_capture":', 1)[1].split('case "mark":', 1)[0]
+        self.assertIn('"device_policy_not_queued"', stop)
+        self.assertNotIn("_ = bleManager.sendDiagnosticsCapturePolicy", stop)
+        coordinator = (ROOT / PREFIX / "Managers/DiagnosticsCollectionCoordinator.swift").read_text()
+        self.assertIn("guard restoreFinished, !restoreFailed", coordinator)
+        self.assertIn("generation == operationGeneration", coordinator)
+        self.assertIn("cancelled: Task.isCancelled && userCancelled", coordinator)
+        self.assertIn('"ride_started"', coordinator)
+        self.assertIn("context.captureID, id: context.requestID", coordinator)
+        self.assertLess(app.index("observeRide(active: state.current)"), app.index("rideDiagnosticsRecorder?.endRideCapture()"))
+        self.assertIn("$0.canResumeAutomatically(postRideEnabled: automaticPostRideCollection) && $0.deviceDigest == digest", coordinator)
+
     def test_fast_ci_local_scripts_resolve_from_effective_directory(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
         job = workflow["jobs"]["ios-fast"]

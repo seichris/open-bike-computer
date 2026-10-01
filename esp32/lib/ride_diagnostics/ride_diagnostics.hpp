@@ -134,7 +134,9 @@ bool recordHealth(const char *reason);
 // Bounded live observation only; never reports enqueued bytes as durable.
 bool liveTailJson(uint32_t boot, uint32_t after, std::string &output);
 bool recordClockAnchor();
-bool markIssue(const char *code, uint32_t markerSequence);
+bool markIssue(const char *code, uint32_t markerSequence, const char *incidentId = nullptr);
+// Nonblocking local marker admission, not an acknowledgement of stable storage.
+bool markLocalIssue(const char *code);
 bool bindCapture(const char *captureId, bool detailed = false);
 void clearCapture();
 DetailedCaptureLease detailedCaptureLease();

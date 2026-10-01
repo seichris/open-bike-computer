@@ -79,9 +79,10 @@
     "user.issue_marker": {
       "level": "warning",
       "optional": [
+        "durable",
         "incidentId",
-        "sequence",
-        "durable"
+        "origin",
+        "sequence"
       ],
       "required": [
         "code"
@@ -1242,5 +1243,8 @@
     "error",
     "fatal"
   ],
-  "schema": 2
+  "schema": 2,
+  "protocols": {
+    "issueMarker": 2
+  }
 }

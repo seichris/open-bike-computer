@@ -2,10 +2,22 @@ import Foundation
 
 @main enum DiagnosticsAcquisitionStoreTests {
     static func main() async throws {
+        for phase in [DiagnosticsAcquisitionManifest.Phase.requested, .collecting, .partial] {
+            precondition(phase.canResumeAutomatically)
+        }
+        for phase in [DiagnosticsAcquisitionManifest.Phase.complete, .cancelled] {
+            precondition(!phase.canResumeAutomatically, "terminal jobs must not acquire a new cutoff automatically")
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = DiagnosticsAcquisitionStore(root: root)
         let job = try await store.create(deviceDigest: "0123456789abcdef", captureID: UUID())
+        let replay = try await store.create(deviceDigest: job.deviceDigest, captureID: job.captureID, id: job.id)
+        precondition(replay == job, "ride-end retries must preserve the same request identity")
+        do {
+            _ = try await store.create(deviceDigest: "fedcba9876543210", captureID: job.captureID, id: job.id)
+            fatalError("request identity was reused for another device")
+        } catch DiagnosticsAcquisitionStore.Failure.inventoryChanged {}
         let first = DiagnosticsChunkReceipt(bootSequence: 1, chunk: 1, bytes: 10, sha256: String(repeating: "a", count: 64))
         let second = DiagnosticsChunkReceipt(bootSequence: 1, chunk: 2, bytes: 20, sha256: String(repeating: "b", count: 64))
         _ = try await store.inventory(job.id, deviceDigest: job.deviceDigest, index: Data("original".utf8), chunks: [first, second])
@@ -41,6 +53,24 @@ import Foundation
         } catch DiagnosticsAcquisitionStore.Failure.invalidManifest {}
         let untouched = try await restored.load(invalid.id)
         precondition(untouched.indexData == nil)
+        let terminalReplay = try await restored.create(deviceDigest: job.deviceDigest, captureID: job.captureID, id: job.id)
+        precondition(terminalReplay.deliveryComplete, "replay cannot replace a completed cutoff")
+        let laterRide = try await restored.create(deviceDigest: job.deviceDigest, captureID: job.captureID)
+        var postRide = laterRide
+        postRide.origin = .postRide
+        precondition(postRide.canResumeAutomatically(postRideEnabled: true))
+        precondition(!postRide.canResumeAutomatically(postRideEnabled: false))
+        postRide.phase = .cancelled
+        precondition(!postRide.canResumeAutomatically(postRideEnabled: true))
+        precondition(laterRide.id != job.id && laterRide.indexData == nil,
+            "a new ride needs its own cutoff even during an asynchronous capture rotation")
+        for _ in 0..<17 { _ = try await restored.create(deviceDigest: job.deviceDigest, captureID: UUID()) }
+        do {
+            _ = try await restored.create(deviceDigest: "invalid", captureID: nil)
+            fatalError("invalid request was admitted")
+        } catch DiagnosticsAcquisitionStore.Failure.invalidManifest {}
+        let originalReceipt = try await restored.load(job.id)
+        precondition(originalReceipt.deliveryComplete, "invalid admission must not prune a completed receipt")
         print("Diagnostics acquisition persistence, cutoff, identity and completeness tests passed")
     }
 }

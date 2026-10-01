@@ -31,6 +31,26 @@ class DiagnosticsLiveTests(unittest.TestCase):
         self.assertTrue(state['gap'])
         self.assertLessEqual(len(next(iter(inbox.streams.values()))['events']),128)
         self.assertLessEqual(len(state['events']),25)
+    def test_previously_observed_source_gap_is_not_erased(self):
+        inbox=LiveInbox(); batch=self.batch(); batch['gap']=True
+        inbox.accept(batch); inbox.accept(self.batch(3))
+        self.assertTrue(inbox.query('iphone')['gap'])
+
+    def test_cursor_to_first_returned_event_gap_with_older_cached_history(self):
+        inbox=LiveInbox(); inbox.accept(self.batch(0)); inbox.accept(self.batch(8))
+        cursor={'device':'iphone','streamId':APP_PROCESS_ID,'after':5}
+        page=inbox.query('iphone',cursor)
+        self.assertEqual(page['events'][0]['sequence'],8)
+        self.assertTrue(page['gap'])
+
+    def test_incident_marker_identity_remains_queryable_without_raw_payloads(self):
+        batch=self.batch(0,1)
+        marker=batch['events'][0]
+        marker.update(category='user',event='issue_marker',level='warning')
+        marker['fields']={'code':'other','origin':'iphone','incidentId':'123e4567-e89b-12d3-a456-426614174123'}
+        inbox=LiveInbox(); inbox.accept(batch)
+        self.assertEqual(inbox.query('iphone')['events'][0]['fields']['incidentId'],marker['fields']['incidentId'])
+
     def test_uninstrumented_raw_data_rejected(self):
         batch=self.batch();batch['events'][0]['fields']['latitude']='22.11111'
         with self.assertRaises(Exception):LiveInbox().accept(batch)

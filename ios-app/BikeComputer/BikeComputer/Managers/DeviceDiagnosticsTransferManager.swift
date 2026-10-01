@@ -254,6 +254,7 @@ final class DeviceDiagnosticsTransferManager {
                 ($0.bootSequence, $0.chunk) < ($1.bootSequence, $1.chunk)
             }
             for (offset, chunk) in chunks.enumerated() {
+                try Task.checkCancellation()
                 guard chunk.bytes > 0, chunk.bytes <= maximumChunkBytes,
                       chunk.bootSequence > 0,
                       chunk.bootSequence <= index.bootSequence,

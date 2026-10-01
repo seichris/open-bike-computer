@@ -82,14 +82,15 @@ struct RideDiagnosticsSettingsView: View {
                     }
                 }
                 Button {
-                    guard recorder.markIssue(selectedIssue) else {
+                    let incidentID = UUID()
+                    guard recorder.markIssue(selectedIssue, incidentID: incidentID) else {
                         localMarkerStatus = "Failed"
                         deviceMarkerStatus = "Not attempted"
                         statusMessage = "The issue marker could not be saved on this iPhone."
                         return
                     }
                     localMarkerStatus = "Saved"
-                    let deviceMarked = bleManager.sendDiagnosticsIssueMarker(selectedIssue)
+                    let deviceMarked = bleManager.sendDiagnosticsIssueMarker(selectedIssue, incidentID: incidentID)
                     deviceMarkerStatus = deviceMarked
                         ? "Queued; persistence pending"
                         : "Failed — device not ready"
@@ -122,10 +123,12 @@ struct RideDiagnosticsSettingsView: View {
                     Text("Trace").tag(UInt32(0))
                 }
                 Button("Record Subsystem for One Hour") {
-                    _ = recorder.beginTargetedCapture(
+                    if let policy = recorder.beginTargetedCapture(
                         mask: DiagnosticsSchema.mask(for: diagnosticDomain),
                         minimumLevel: diagnosticLevel, seconds: 3600,
-                        budgetBytes: 8 * 1024 * 1024)
+                        budgetBytes: 8 * 1024 * 1024) {
+                        _ = bleManager.sendDiagnosticsCapturePolicy(policy)
+                    }
                 }
                 if let requested = recorder.runtimeCapturePolicy {
                     Text("iPhone journal policy requested for \(requested.durationSeconds / 60) minutes; 8 MiB trace budget.")
@@ -171,6 +174,11 @@ struct RideDiagnosticsSettingsView: View {
             }
 
             Section {
+                Toggle("Collect Device Logs After Rides", isOn: Binding(
+                    get: { collection.automaticPostRideCollection },
+                    set: { collection.setAutomaticPostRideCollection($0) }))
+                Text("Opt in to save post-ride requests for the original Bicino. Retrieval may switch Wi-Fi, only while the app is active and you are not riding. Pending logs remain subject to retention.")
+                    .font(.footnote)
                 Button {
                     collection.start()
                 } label: {

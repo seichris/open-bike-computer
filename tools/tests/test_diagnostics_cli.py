@@ -35,6 +35,59 @@ class DiagnosticsCLITests(unittest.TestCase):
         self.assertEqual(result['delivery'][0]['state'],'complete')
         self.assertEqual(result['recordingCoverage'],'no_detected_loss')
         self.assertEqual(result['sources'],['firmware','ios'])
+    def test_unknown_scope_cannot_borrow_another_rides_evidence(self):
+        unknown='00000000-0000-0000-0000-000000000123'
+        for selector in ('--capture', '--acquisition'):
+            status,result=self.invoke('verify',self.bundle,selector,unknown,'--require-complete')
+            self.assertEqual(status,3,result)
+            self.assertEqual(result['eventCount'],0)
+            self.assertEqual(result['missingRequiredSources'],['firmware','ios'])
+            self.assertEqual(result['scope']['matchedAcquisitions'],0)
+        status,result=self.invoke('verify',self.bundle,'--device','0000000000000000','--require-complete')
+        self.assertEqual(status,3,result)
+        self.assertEqual(result['missingRequiredSources'],['firmware'])
+
+    def test_acquisition_derives_original_capture_and_device(self):
+        status,result=self.invoke('verify',self.bundle,'--acquisition',self.acquisition['id'],'--require-complete')
+        self.assertEqual(status,0,result)
+        self.assertEqual(result['scope']['capture'],self.acquisition['captureID'].lower())
+        self.assertEqual(result['scope']['device'],self.acquisition['deviceDigest'])
+        status,result=self.invoke('verify',self.bundle,'--acquisition',self.acquisition['id'],
+            '--device','0000000000000000','--require-complete')
+        self.assertEqual(status,3,result)
+        self.assertEqual(result['eventCount'],0)
+
+    def test_unrelated_historical_partial_job_does_not_poison_scoped_delivery(self):
+        with zipfile.ZipFile(self.bundle) as archive:
+            members={name:archive.read(name) for name in archive.namelist() if name!='checksums.sha256'}
+        old=dict(self.acquisition,id='00000000-0000-0000-0000-000000000222',
+                 captureID='00000000-0000-0000-0000-000000000333',phase='partial',expected=[],verified=[])
+        old.pop('indexData')
+        name='acquisitions/'+old['id']+'.json'
+        members[name]=json.dumps(old).encode()
+        envelope=json.loads(members['manifest.json']);envelope['acquisitions'].append(name)
+        members['manifest.json']=json.dumps(envelope).encode()
+        write_zip(self.bundle,members)
+        self.assertEqual(self.invoke('verify',self.bundle,'--require-complete')[0],3)
+        status,result=self.invoke('verify',self.bundle,'--capture',self.acquisition['captureID'],'--require-complete')
+        self.assertEqual(status,0,result)
+        self.assertEqual(len(result['delivery']),1)
+
+    def test_analyzer_coverage_and_queries_use_the_same_canonical_scope(self):
+        status,result=self.invoke('analyze',self.bundle,'--capture','00000000-0000-0000-0000-000000000111')
+        self.assertEqual(status,0,result)
+        self.assertEqual(result['matchedEvents'],0)
+        self.assertEqual(result['coverage']['eventCount'],0)
+        status,result=self.invoke('query',self.bundle,'--capture',self.acquisition['captureID'].replace('-','').upper())
+        self.assertEqual(status,0,result)
+        self.assertEqual(result['matchedEvents'],4)
+
+    def test_unknown_acquisition_origin_is_not_accepted(self):
+        from bicino_diagnostics.bundle import validate_acquisition
+        self.assertEqual(validate_acquisition(dict(self.acquisition, origin='post_ride'))['origin'], 'post_ride')
+        with self.assertRaisesRegex(EvidenceError, 'origin'):
+            validate_acquisition(dict(self.acquisition, origin='remote_arbitrary'))
+
     def test_false_receipt_does_not_make_missing_evidence_complete(self):
         v1_fixture(self.inner,include_device=False)
         v2_fixture(self.bundle,self.inner,self.chunk,claims_complete=True)

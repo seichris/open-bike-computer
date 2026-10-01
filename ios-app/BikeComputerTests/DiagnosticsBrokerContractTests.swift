@@ -18,6 +18,26 @@ import Foundation
         }
         precondition(!pairing("https://192.168.1.50:8443", lifetime: 0).valid(at: date))
         precondition(!pairing("https://192.168.1.50:8443", lifetime: 100000).valid(at: date))
+        func command(target: String) throws -> DiagnosticsBrokerCommand {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "schema": 2, "id": UUID().uuidString, "kind": "collect", "target": target,
+                "parameters": [:], "createdAt": 1_800_000_000, "expiresAt": 1_800_000_060,
+            ])
+            return try JSONDecoder().decode(DiagnosticsBrokerCommand.self, from: data)
+        }
+        let phone = try command(target: "iphone")
+        let firmware = try command(target: "0123456789abcdef")
+        precondition(phone.valid(at: date) && !phone.requiresFirmware)
+        precondition(firmware.valid(at: date) && firmware.requiresFirmware)
+        let limit = DiagnosticsOutboxAdmission.maximumBytes
+        precondition(DiagnosticsOutboxAdmission.allows(existingCount: 7, existingBytes: limit - 1024, additionalBytes: 1024))
+        precondition(!DiagnosticsOutboxAdmission.allows(existingCount: 8, existingBytes: 0, additionalBytes: 1024))
+        precondition(!DiagnosticsOutboxAdmission.allows(existingCount: 7, existingBytes: limit - 1024, additionalBytes: 1025))
+        precondition(!DiagnosticsOutboxAdmission.allows(existingCount: 0, existingBytes: 0, additionalBytes: Int.max))
+        precondition(!DiagnosticsOutboxAdmission.allows(existingCount: 0, existingBytes: Int.max, additionalBytes: 1))
+        precondition(!DiagnosticsOutboxAdmission.allows(existingCount: -1, existingBytes: 0, additionalBytes: 1))
+        precondition(!DiagnosticsOutboxAdmission.allows(existingCount: 0, existingBytes: -1, additionalBytes: 1))
+        precondition(!DiagnosticsOutboxAdmission.allows(existingCount: 0, existingBytes: 0, additionalBytes: 0))
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let url = root.appendingPathComponent("commands.json")

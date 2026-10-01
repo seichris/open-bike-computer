@@ -6197,12 +6197,19 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func sendDiagnosticsIssueMarker(_ code: RideIssueCode) -> Bool {
+    func sendDiagnosticsIssueMarker(_ code: RideIssueCode, incidentID: UUID? = nil) -> Bool {
         guard supportsRideDiagnostics else { return false }
         let markerSequence = nextDiagnosticsMarkerSequence
-        let packet = Data(
-            "\(DeviceBLEProtocol.deviceTransferControlPrefix)mark|1|\(markerSequence)|\(code.rawValue)".utf8
-        )
+        // Only the matching registry attests the v2 marker wire contract.
+        // Legacy devices still get their bounded v1 marker, without claiming
+        // a shared incident UUID or durable device acknowledgement.
+        let marker: String
+        if let incidentID, diagnosticsCaptureStatus?.schemaDigest == DiagnosticsSchema.digest {
+            marker = "mark|2|\(markerSequence)|\(code.rawValue)|\(incidentID.uuidString.lowercased())"
+        } else {
+            marker = "mark|1|\(markerSequence)|\(code.rawValue)"
+        }
+        let packet = Data("\(DeviceBLEProtocol.deviceTransferControlPrefix)\(marker)".utf8)
         let queued = sendTransferControlPacket(
             packet,
             label: "diagnostics issue marker",

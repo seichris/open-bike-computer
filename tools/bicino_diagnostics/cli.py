@@ -108,7 +108,7 @@ def enqueue(root: Path, kind: str, device: str, parameters: dict) -> dict:
 
 def filter_identity(args) -> dict:
     return {key: getattr(args, key, None) for key in (
-        'source', 'category', 'level', 'capture', 'operation', 'incident', 'since', 'until')}
+        'source', 'category', 'level', 'capture', 'acquisition', 'device', 'operation', 'incident', 'since', 'until')}
 
 
 def selected_events(evidence, filters: dict) -> list[dict]:
@@ -120,15 +120,15 @@ def selected_events(evidence, filters: dict) -> list[dict]:
     if since and until and since > until:
         raise EvidenceError('since must precede until')
     result = []
-    for event in evidence.events():
+    scope, acquisitions = evidence.resolve_scope(capture=filters.get('capture'),
+        acquisition=filters.get('acquisition'), device=filters.get('device'))
+    for event in evidence.scoped_events(scope, acquisitions):
         fields = event.get('fields', {})
         if filters.get('source') and event['source'] != filters['source']:
             continue
         if filters.get('category') and event['category'] != filters['category']:
             continue
         if levels.index(event['level']) < minimum:
-            continue
-        if filters.get('capture') and str(event.get('captureId', '')).lower() != filters['capture'].lower():
             continue
         if filters.get('operation') and fields.get('operationId') != filters['operation']:
             continue
@@ -188,7 +188,8 @@ def analyze(args) -> dict:
             noteworthy = [event for event in noteworthy if any(
                 (stamp := v1._event_timestamp(event)) is not None and abs((stamp-anchor).total_seconds()) <= args.around
                 for anchor in anchors)]
-        return {'schema': 2, 'coverage': evidence.coverage(tuple(args.require.split(','))),
+        return {'schema': 2, 'coverage': evidence.coverage(tuple(args.require.split(',')),
+            capture=args.capture, acquisition=args.acquisition, device=args.device),
                 'matchedEvents': len(events), 'eventFamilies': counts.most_common(30),
                 'issueMarkers': issues[-10:], 'noteworthy': noteworthy[-15:],
                 'interpretation': 'Evidence summary, not a causal diagnosis. Use query with the capture/operation and rawReferences before making findings.'}
@@ -196,7 +197,8 @@ def analyze(args) -> dict:
 
 def verify(args) -> tuple[dict, int]:
     with open_evidence(args.bundle) as evidence:
-        value = evidence.coverage(tuple(args.require.split(',')))
+        value = evidence.coverage(tuple(args.require.split(',')),
+            capture=args.capture, acquisition=args.acquisition, device=args.device)
         value['integrity'] = 'verified'
         complete = (not value['missingRequiredSources'] and value['delivery'] and
                     all(item['state'] == 'complete' for item in value['delivery']))
@@ -283,6 +285,9 @@ def parser() -> argparse.ArgumentParser:
     for name in ('verify', 'query', 'analyze'):
         command = commands.add_parser(name)
         command.add_argument('bundle', type=Path)
+        command.add_argument('--capture', help='Only evidence bound to this capture UUID')
+        command.add_argument('--acquisition', help='Only the original inventory for this collection UUID')
+        command.add_argument('--device', type=target, help='An explicit firmware digest, or iphone')
         if name != 'query':
             command.add_argument('--require', default='ios,firmware')
         if name == 'verify':
@@ -291,7 +296,6 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument('--source', choices=['ios','firmware','host'])
             command.add_argument('--category')
             command.add_argument('--level', choices=['trace','debug','info','warning','error','fatal'])
-            command.add_argument('--capture')
             command.add_argument('--operation')
             command.add_argument('--incident')
             command.add_argument('--since')

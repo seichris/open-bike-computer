@@ -17,6 +17,13 @@ tools/bicino diag verify /absolute/path/to/bundle.zip --require ios,firmware --j
 tools/bicino diag analyze /absolute/path/to/bundle.zip --json
 ```
 
+When the user identifies a ride, use `--capture CAPTURE_UUID` and the exact
+`--device DIGEST` with verify/analyze/query, or `--acquisition COLLECTION_UUID`.
+Do not let other rides' logs satisfy source coverage, or unrelated failed jobs
+stand in for the selected acquisition. Preserve the returned scope in findings.
+Incident IDs correlate matching-registry phone/device markers; a queued marker
+is not proof of durable storage or retention pinning.
+
 For a connected, explicitly enrolled Mac broker, use `diag status` and then
 `diag capabilities --device EXACT_DEVICE_DIGEST` from that fresh observation.
 `iphone` means the paired phone, not an arbitrary connected device. Obtain

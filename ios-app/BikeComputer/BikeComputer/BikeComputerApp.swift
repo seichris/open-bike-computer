@@ -215,7 +215,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             })
         bleManager.$isNavigationReady.removeDuplicates()
             .filter { $0 }
-            .sink { _ in DiagnosticsCollectionCoordinator.shared.resumeIfPossible() }
+            .sink { _ in
+                DiagnosticsCollectionCoordinator.shared.observeConnectedDeviceDuringRide()
+                DiagnosticsCollectionCoordinator.shared.resumeIfPossible()
+            }
             .store(in: &cancellables)
         watchConnectivityCoordinator.diagnosticsRecorder =
             rideDiagnosticsRecorder
@@ -225,12 +228,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         workoutMirrorManager.diagnosticsRecorder = rideDiagnosticsRecorder
         rideAutomationCoordinator.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.firmwareUpdateManager.diagnosticsRecorder = rideDiagnosticsRecorder
-        rideDiagnosticsRecorder.$runtimeCapturePolicy
-            .compactMap { $0 }
-            .sink { [weak bleManager] policy in
-                _ = bleManager?.sendDiagnosticsCapturePolicy(policy)
-            }
-            .store(in: &cancellables)
+        // Runtime policy forwarding is explicit at each caller. An iPhone-only
+        // broker request must never mutate a connected peripheral's policy.
         rideDiagnosticsRecorder.$captureBinding
             .removeDuplicates()
             .sink { [weak bleManager] binding in
@@ -238,6 +237,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                     binding.captureID,
                     detailed: binding.detailed
                 )
+                DiagnosticsCollectionCoordinator.shared.observeConnectedDeviceDuringRide()
             }
             .store(in: &cancellables)
         Publishers.CombineLatest(
@@ -256,14 +256,15 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             .scan((previous: false, current: false)) { state, active in
                 (previous: state.current, current: active)
             }
-            .filter {
-                RideDiagnosticsRideLifecyclePolicy.didEndRide(
-                    previous: $0.previous,
-                    current: $0.current
-                )
-            }
-            .sink { [weak rideDiagnosticsRecorder] _ in
-                rideDiagnosticsRecorder?.endRideCapture()
+            .sink { [weak rideDiagnosticsRecorder] state in
+                // Snapshot the finished ride's original identities BEFORE the
+                // recorder rotates its capture. Delivery may occur much later.
+                DiagnosticsCollectionCoordinator.shared.observeRide(active: state.current)
+                if RideDiagnosticsRideLifecyclePolicy.didEndRide(
+                    previous: state.previous, current: state.current
+                ) {
+                    rideDiagnosticsRecorder?.endRideCapture()
+                }
             }
             .store(in: &cancellables)
         bleManager.bindWatchConnectivityCoordinator(

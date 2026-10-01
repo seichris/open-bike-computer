@@ -20,6 +20,8 @@ def load_registry() -> dict:
     value = json.loads(REGISTRY.read_text(encoding='utf-8'))
     if value['schema'] != 2 or value['eventFormatSchema'] != 1:
         raise ValueError('unsupported diagnostics registry')
+    if value.get('protocols') != {'issueMarker': 2}:
+        raise ValueError('unsupported diagnostics marker protocol')
     fields = value['fields']
     if len(value['domains']) > 32 or len(set(value['domains'])) != len(value['domains']):
         raise ValueError('invalid domain bit registry')

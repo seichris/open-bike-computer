@@ -4747,7 +4747,8 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
     ride_diagnostics::control::IssueMarker marker;
     if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
         !ride_diagnostics::control::parseIssueMarker(command, marker) ||
-        !ride_diagnostics::markIssue(marker.code.c_str(), marker.sequence)) {
+        !ride_diagnostics::markIssue(marker.code.c_str(), marker.sequence,
+            marker.incidentId.empty() ? nullptr : marker.incidentId.c_str())) {
       deviceTransferHttp.setLastError("marker_rejected",
                                       "issue marker was malformed or unsupported");
     }

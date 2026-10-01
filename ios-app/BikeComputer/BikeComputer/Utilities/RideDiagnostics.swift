@@ -980,7 +980,7 @@ final class RideDiagnosticsRecorder:
     }
 
     @discardableResult
-    func markIssue(_ code: RideIssueCode) -> Bool {
+    func markIssue(_ code: RideIssueCode, incidentID: UUID = UUID()) -> Bool {
         queue.sync {
             expireDetailedTraceIfNeeded()
             expireStandardCaptureIfNeeded()
@@ -988,7 +988,7 @@ final class RideDiagnosticsRecorder:
                 level: .warning,
                 category: .user,
                 event: "issue_marker",
-                fields: ["code": code.rawValue]
+                fields: ["code": code.rawValue, "incidentId": incidentID.uuidString.lowercased(), "origin": "iphone"]
             )
             return saved && flushOnQueue()
         }

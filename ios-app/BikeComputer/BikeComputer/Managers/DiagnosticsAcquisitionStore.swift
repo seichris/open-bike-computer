@@ -11,9 +11,20 @@ nonisolated struct DiagnosticsChunkReceipt: Codable, Equatable, Sendable {
 /// A collection is an immutable inventory plus mutable, replayable receipts.
 /// It is intentionally outside the v1 recorder root: v1 archives remain unchanged.
 nonisolated struct DiagnosticsAcquisitionManifest: Codable, Equatable, Sendable {
-    enum Phase: String, Codable, Sendable { case requested, collecting, partial, complete, cancelled }
+    enum Phase: String, Codable, Sendable {
+        case requested, collecting, partial, complete, cancelled
+
+        var canResumeAutomatically: Bool {
+            switch self {
+            case .requested, .collecting, .partial: return true
+            case .complete, .cancelled: return false
+            }
+        }
+    }
+    enum Origin: String, Codable, Sendable { case manual, postRide = "post_ride" }
     let schema: Int
     let id: UUID
+    var origin: Origin? = nil
     let captureID: UUID?
     let deviceDigest: String
     let createdAt: Date
@@ -23,6 +34,10 @@ nonisolated struct DiagnosticsAcquisitionManifest: Codable, Equatable, Sendable 
     var expected: [DiagnosticsChunkReceipt]
     var verified: [String]
     var failureCode: String?
+
+    func canResumeAutomatically(postRideEnabled: Bool) -> Bool {
+        phase.canResumeAutomatically && (origin != .postRide || postRideEnabled)
+    }
 
     var deliveryComplete: Bool {
         indexData != nil && phase == .complete &&
@@ -125,8 +140,21 @@ actor DiagnosticsAcquisitionStore {
         }.sorted { $0.createdAt < $1.createdAt }
     }
 
-    func create(deviceDigest: String, captureID: UUID?) throws -> DiagnosticsAcquisitionManifest {
+    func create(deviceDigest: String, captureID: UUID?, id: UUID = UUID(),
+                origin: DiagnosticsAcquisitionManifest.Origin = .manual) throws -> DiagnosticsAcquisitionManifest {
+        let now = Date()
+        let value = DiagnosticsAcquisitionManifest(schema: 2, id: id, origin: origin, captureID: captureID,
+            deviceDigest: deviceDigest, createdAt: now, updatedAt: now, phase: .requested,
+            indexData: nil, expected: [], verified: [], failureCode: nil)
+        try validate(value)
         let entries = try manifests()
+        if let existing = entries.first(where: { $0.id == id }) {
+            guard existing.deviceDigest == deviceDigest, existing.captureID == captureID,
+                  (existing.origin ?? .manual) == origin else {
+                throw Failure.inventoryChanged
+            }
+            return existing
+        }
         if entries.count >= maximumJobs {
             // Never evict an incomplete collection to create another one.
             guard let old = entries.first(where: { $0.phase == .complete || $0.phase == .cancelled }) else {
@@ -134,10 +162,6 @@ actor DiagnosticsAcquisitionStore {
             }
             try FileManager.default.removeItem(at: path(old.id))
         }
-        let now = Date()
-        let value = DiagnosticsAcquisitionManifest(schema: 2, id: UUID(), captureID: captureID,
-            deviceDigest: deviceDigest, createdAt: now, updatedAt: now, phase: .requested,
-            indexData: nil, expected: [], verified: [], failureCode: nil)
         try save(value)
         return value
     }

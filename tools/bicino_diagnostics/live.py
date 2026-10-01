@@ -58,7 +58,7 @@ class LiveInbox:
         while len(events)>128 or len(json.dumps(events).encode())>64*1024:
             del events[next(iter(events))]
         self.streams[key]={'events':events,'receivedAt':time.time(),
-                          'source':value['source'],'sourceGap':value['gap']}
+                          'source':value['source'],'sourceGap':value['gap'] or bool(previous and previous['sourceGap'])}
         self.streams.move_to_end(key)
         while len(self.streams)>4:self.streams.popitem(last=False)
 
@@ -83,6 +83,8 @@ class LiveInbox:
             if event['sequence']<=after:continue
             if len(events)>=limit or len(json.dumps(events+[event]).encode())>48*1024:break
             events.append(event)
+        if same and events and events[0]['sequence'] > after + 1:
+            gap = True
         last=events[-1]['sequence'] if events else max(after,0)
         for left,right in zip(events,events[1:]):
             gap=gap or right['sequence']>left['sequence']+1

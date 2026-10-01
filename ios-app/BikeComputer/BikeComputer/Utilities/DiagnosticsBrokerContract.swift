@@ -45,6 +45,10 @@ nonisolated struct DiagnosticsBrokerCommand: Decodable, Sendable {
     let createdAt: Int64
     let expiresAt: Int64
 
+    /// A local evidence request must not start a radio session. Firmware
+    /// targets use the app-owned collector; phone targets only queue a snapshot.
+    var requiresFirmware: Bool { target != "iphone" }
+
     func valid(at date: Date = Date()) -> Bool {
         let now = Int64(date.timeIntervalSince1970)
         guard schema == 2, createdAt <= now + 60, expiresAt > now,
@@ -113,5 +117,20 @@ actor DiagnosticsBrokerCommandJournal {
         let handle = try FileHandle(forWritingTo: root)
         defer { try? handle.close() }
         try handle.synchronize()
+    }
+}
+
+/// Disk budgets apply to the prospective total, not merely to the outbox before
+/// export. Keep admission independent of networking and injectable in host tests.
+nonisolated enum DiagnosticsOutboxAdmission {
+    static let maximumFiles = 8
+    static let maximumBytes = 400 * 1024 * 1024
+    static let maximumBundleBytes = 104 * 1024 * 1024
+
+    static func allows(existingCount: Int, existingBytes: Int, additionalBytes: Int) -> Bool {
+        existingCount >= 0 && existingCount < maximumFiles &&
+            existingBytes >= 0 && existingBytes <= maximumBytes &&
+            additionalBytes > 0 && additionalBytes <= maximumBundleBytes &&
+            additionalBytes <= maximumBytes - existingBytes
     }
 }

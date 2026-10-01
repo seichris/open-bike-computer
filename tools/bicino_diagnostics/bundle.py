@@ -32,10 +32,12 @@ def integer(value: Any, minimum: int = 0, maximum: int = 2**32-1) -> bool:
 
 def validate_acquisition(value: dict) -> dict:
     required = {'schema', 'id', 'deviceDigest', 'createdAt', 'updatedAt', 'phase', 'expected', 'verified'}
-    if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - {'captureID', 'indexData', 'failureCode'}:
+    if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - {'captureID', 'indexData', 'failureCode', 'origin'}:
         raise EvidenceError('invalid acquisition fields')
     if type(value['schema']) is not int or value['schema'] != 2 or value['phase'] not in ('requested', 'collecting', 'partial', 'complete', 'cancelled'):
         raise EvidenceError('invalid acquisition state')
+    if value.get('origin') not in (None, 'manual', 'post_ride'):
+        raise EvidenceError('invalid acquisition origin')
     try:
         uuid.UUID(value['id'])
         if value.get('captureID') is not None:
@@ -109,12 +111,70 @@ class Evidence:
             event['rawReference'] = {'member': path, 'line': line, 'bundleSha256': self.sha256}
         return correlated
 
-    def coverage(self, required: tuple[str,...] = ('ios','firmware')) -> dict:
-        events = self.events()
+    def resolve_scope(self, *, capture: str | None = None,
+                      acquisition: str | None = None, device: str | None = None) -> tuple[dict, list[dict]]:
+        """Resolve explicit identities before counting sources or receipt claims.
+
+        A different ride/device must never satisfy the requested investigation.
+        An acquisition selects its original capture/device when those selectors
+        are omitted. Unknown/mismatched selectors yield no matching inventory.
+        """
+        def canonical(value):
+            if value is None:
+                return None
+            try:
+                return str(uuid.UUID(str(value)))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise EvidenceError('invalid capture or acquisition UUID') from exc
+        capture, acquisition = canonical(capture), canonical(acquisition)
+        if device is not None and device != 'iphone' and not re.fullmatch('[0-9a-f]{16}', device):
+            raise EvidenceError('explicit pseudonymous device identity required')
+        matches = [item for item in self.acquisitions
+                   if (acquisition is None or canonical(item['id']) == acquisition)
+                   and (capture is None or canonical(item.get('captureID')) == capture)
+                   and (device is None or item['deviceDigest'] == device)]
+        if acquisition is not None and matches:
+            capture = capture or canonical(matches[0].get('captureID'))
+            device = device or matches[0]['deviceDigest']
+        return {'capture': capture, 'acquisition': acquisition, 'device': device,
+                'matchedAcquisitions': len(matches)}, matches
+
+    def scoped_events(self, scope: dict, acquisitions: list[dict]) -> list[dict]:
+        if scope['acquisition'] is not None and not acquisitions:
+            return []
+        inventory_paths = {
+            f"device/{item['deviceDigest']}/{chunk['bootSequence']}/events-{chunk['chunk']:06d}-{chunk['sha256'][:16]}.jsonl"
+            for item in acquisitions for chunk in item['expected']
+        }
+        selected = []
+        for event in self.events():
+            if scope['capture'] is not None and str(event.get('captureId', '')).lower() != scope['capture']:
+                continue
+            path = event['rawReference']['member']
+            if event['source'] == 'firmware':
+                if scope['device'] is not None and not path.startswith(f"device/{scope['device']}/"):
+                    continue
+                if scope['acquisition'] is not None and path not in inventory_paths:
+                    continue
+            elif scope['acquisition'] is not None and scope['capture'] is None:
+                # Older unbound receipts cannot establish an associated iPhone
+                # capture merely because this bundle also contains phone logs.
+                continue
+            selected.append(event)
+        return selected
+
+    def coverage(self, required: tuple[str,...] = ('ios','firmware'), *,
+                 capture: str | None = None, acquisition: str | None = None,
+                 device: str | None = None) -> dict:
+        scope, acquisitions = self.resolve_scope(capture=capture, acquisition=acquisition, device=device)
+        events = self.scoped_events(scope, acquisitions)
         sources = {e['source'] for e in events}
         missing_sources = sorted(set(required) - sources)
-        gaps = sum(s.dropped_sequences for s in self.streams)
-        tails = sum(bool(s.truncated_tail) for s in self.streams)
+        selected_paths = {event['rawReference']['member'] for event in events}
+        scoped = any(scope[key] is not None for key in ('capture', 'acquisition', 'device'))
+        streams = [stream for stream in self.streams if not scoped or stream.path in selected_paths]
+        gaps = sum(stream.dropped_sequences for stream in streams)
+        tails = sum(bool(stream.truncated_tail) for stream in streams)
         counters = []
         for event in events:
             for key in ('droppedCount','storageErrorCount'):
@@ -128,12 +188,12 @@ class Evidence:
         for key in ('droppedEventCount', 'deviceDroppedEventCount'):
             count = self.manifest.get(key, 0)
             if type(count) is int and count > 0:
-                counters.append({'stream': 'manifest.json', 'source': 'host', 'field': key, 'count': count})
+                counters.append({'stream': 'manifest.json', 'source': 'host', 'field': key, 'count': count, 'scope': 'bundle_global'})
         # Check actual evidence, not only the phone's possibly stale receipts.
         deliveries = []
         with zipfile.ZipFile(self.source) as archive:
             members = {m.filename: m for m in archive.infolist()}
-            for acquisition in self.acquisitions:
+            for acquisition in acquisitions:
                 missing = []
                 for item in acquisition['expected']:
                     name = (f"device/{acquisition['deviceDigest']}/{item['bootSequence']}/"
@@ -146,12 +206,13 @@ class Evidence:
                     'expectedChunks':len(acquisition['expected']), 'missingChunks':missing,
                     'reportedPhase':acquisition['phase']})
         degraded = bool(missing_sources or gaps or tails or counters)
-        return {'schema':2, 'bundleSha256':self.sha256, 'eventCount':len(events),
+        return {'schema':2, 'bundleSha256':self.sha256, 'scope':scope, 'eventCount':len(events),
                 'sources':sorted(sources), 'missingRequiredSources':missing_sources,
                 'delivery':deliveries, 'deliveryEvidence': 'inventoried' if deliveries else 'no_acquisition_manifest',
                 'recordingCoverage':'degraded' if degraded else 'no_detected_loss',
                 'coverageCaveat':'No detected loss is not proof that every requested provider was enabled.',
                 'sequenceGaps':gaps, 'recoverableTails':tails, 'lossCounters':counters[:100],
+                'lossAccountingScope':'selected_streams_and_bundle_global_counters' if scoped else 'bundle',
                 'nativeCrashEvidence':'not_in_standard_bundle',
                 'buildIdentity':{'app':self.manifest.get('appBuildIdentity'), 'firmware':self.manifest.get('firmwareBuildIdentities')}}
 

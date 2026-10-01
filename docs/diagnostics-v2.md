@@ -84,7 +84,12 @@ clock anchors remain raw evidence; host correlation does not rewrite them.
 Both producers record locally through a BLE disconnection. Standard retention
 and fault capsules continue to apply; volatile tails are not guaranteed through
 power loss. Mark an issue using the predefined phone categories. Device marker
-queueing is not claimed as durable device acknowledgement.
+queueing is not claimed as durable device acknowledgement. The phone assigns a
+shared incident UUID to matching-registry v2 device markers. Older firmware uses
+the v1 marker without claiming that shared UUID. On the bike, **Device Settings →
+Mark diagnostic issue** queues an independent incident ID without consuming the
+phone's anti-replay counter or starting any network connection. Use the control
+only when safe. Neither marker currently pins evidence against ordinary retention.
 
 ```sh
 tools/bicino diag collect --device DEVICE_DIGEST --json
@@ -94,6 +99,26 @@ tools/bicino diag inbox list --json
 tools/bicino diag inbox get --id BUNDLE_ID --output /private/path/ride.zip --json
 tools/bicino diag verify /private/path/ride.zip --require ios,firmware --require-complete --json
 ```
+
+Enable **Settings → Diagnostics → Collect Device Logs After Rides** to opt in
+to the post-ride queue. The app remembers at most eight authenticated
+capture/device contexts during the ride, including disconnections and capture
+rotations. Ride end queues distinct, idempotent request IDs in the bounded
+20-job acquisition journal, before losing those original identities. This queue
+needs neither Codex nor a paired Mac. Disabling the option prevents automatic
+execution of its pending post-ride requests; manual requests stay independently
+resumable. Explicit cancellation is terminal for automatic scheduling.
+
+The request survives an app restart **after it has been saved**; an app that is
+killed before receiving/persisting ride end cannot manufacture an automatic
+request afterward. Its retained logs can still be collected manually. Storage
+or queue-capacity errors are reported and do not delete the original logs.
+No retrieval occurs while riding; starting a ride interrupts a current download
+with a resumable `ride_started` result and cancellation-independent cleanup.
+Collection chooses pending jobs for the original device, not an old completed
+job or a newly connected unrelated board. One automatic attempt is made per
+eligible trigger, not a continuous retry loop. A transport error requires manual
+retry. Leaving the screen has no effect on the job lifetime.
 
 A capture and an acquisition cutoff are different identities. Collection stores
 the original authenticated index before the first body and never silently swaps
@@ -116,6 +141,26 @@ The host verifies the nested legacy archive and actual chunk bytes independently
 of the claimed receipt. Original raw members, checksums and torn tails remain
 unchanged. V1 direct archives are still accepted but cannot prove a v2 cutoff.
 
+Scope an investigation explicitly when the archive contains several rides:
+
+```sh
+tools/bicino diag verify /private/path/ride.zip --capture CAPTURE_UUID \
+  --device DEVICE_DIGEST --require ios,firmware --require-complete --json
+tools/bicino diag analyze /private/path/ride.zip --acquisition COLLECTION_UUID --json
+tools/bicino diag query /private/path/ride.zip --capture CAPTURE_UUID --incident INCIDENT_UUID --json
+```
+
+An acquisition selector derives its original capture/device; explicit conflicting
+selectors match nothing. Unknown captures cannot borrow unrelated source logs,
+and an unrelated old partial collection cannot invalidate a scoped complete one.
+Integrity still covers the entire archive. Stream-wide gaps and bundle-global
+loss counters remain conservative and are labelled separately from the event
+scope; no zero-loss proof is invented for a filtered time/capture interval.
+`collect --device iphone` queues a local snapshot/handoff only and never starts
+a firmware Wi-Fi session. An iPhone-only policy is never forwarded to a device.
+The Mac outbox checks the prospective byte total, including the prepared file,
+before publication. It never exceeds eight files / 400 MiB through admission.
+
 Delivery completeness and recording coverage are separate. Exit status 3 from
 `verify --require-complete` means valid evidence but insufficient delivery/source
 coverage. A completed download cannot prove that every desired provider was on.
@@ -134,7 +179,9 @@ an optional PSRAM ring, sends at most two per authenticated BLE observation, and
 rate-limits requests. Phone/Mac windows are bounded too. Cursors include source
 boot/process identity, and stale snapshots or missing sequences are explicit.
 Firmware live polling pauses while riding to preserve navigation priority.
-The data is labelled `observed_not_durable`; only collected retained evidence can
+A previously reported gap remains visible for that stream even after later
+successful batches. Cursor-to-first-event gaps are checked even if older cached
+events remain. The data is labelled `observed_not_durable`; only collected retained evidence can
 prove persistence. The in-memory broker buffer is not a crash recorder.
 
 ## Investigation and validation
