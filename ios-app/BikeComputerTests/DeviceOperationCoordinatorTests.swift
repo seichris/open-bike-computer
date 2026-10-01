@@ -67,6 +67,18 @@ struct DeviceOperationCoordinatorTests {
         restored.finish(reconciled, remoteClear: true)
         precondition(DeviceOperationCoordinator(defaults: defaults).unresolved == nil)
 
+        let held = try restored.acquire(deviceID: "board-B", mode: "map", epoch: 6)
+        let heldUpload = restored.retain(operationID: held.id)!
+        do {
+            _ = try restored.resumeMapRoot(deviceID: "board-B", epoch: 7, currentOwner: nil)
+            fatalError("another live manager stole a map root")
+        } catch DeviceOperationCoordinator.Failure.busy { }
+        let resumed = try restored.resumeMapRoot(deviceID: "board-B", epoch: 7, currentOwner: held)
+        precondition(resumed.id == held.id && resumed.connectionEpoch == 7)
+        restored.release(heldUpload)
+        precondition(restored.lease == resumed, "resume lost confirmation root when upload released")
+        restored.finish(resumed, remoteClear: true)
+
         let cancelledParent = Task { @MainActor in
             precondition(Task.isCancelled, "barrier: parent must already be cancelled")
             let cleanup = DeviceOperationCleanupTask.start { !Task.isCancelled }

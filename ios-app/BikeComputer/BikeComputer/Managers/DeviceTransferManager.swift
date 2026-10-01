@@ -799,7 +799,11 @@ final class DeviceTransferManager {
     private var authorizationToken: String?
     private var authorizationGeneration: UInt32?
 
-    private var coordinator: DeviceOperationCoordinator { .shared }
+    private let coordinator: DeviceOperationCoordinator
+
+    init(coordinator: DeviceOperationCoordinator? = nil) {
+        self.coordinator = coordinator ?? .shared
+    }
 
     static func retainNetworkClaim(operationLeaseID: UUID) -> UUID? {
         DeviceOperationCoordinator.shared.retain(operationID: operationLeaseID)
@@ -1019,6 +1023,58 @@ final class DeviceTransferManager {
         )
     }
 
+    /// Resume query/control for a persisted map operation without exiting its
+    /// unresolved commit. A fresh authenticated session identity is mandatory.
+    func resumeMapTransfer(
+        bleManager: BLEManager,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws -> DeviceTransferSession {
+        guard cleanupTask == nil, bleManager.isNavigationReady,
+              let deviceID = bleManager.connectedDeviceID else {
+            throw DeviceOperationCoordinator.Failure.busy
+        }
+        if operationLease == nil, coordinator.unresolved == nil, coordinator.lease == nil {
+            return try await enterMapTransfer(bleManager: bleManager, status: status)
+        }
+        guard let stored = coordinator.unresolved, stored.deviceID == deviceID,
+              stored.mode == DeviceTransferSession.Mode.map.rawValue,
+              operationLease == nil || operationLease?.id == stored.id else {
+            throw DeviceOperationCoordinator.Failure.staleOwner
+        }
+        let epoch = bleManager.transferConnectionEpoch
+        let revision = bleManager.deviceTransferStatusRevision
+        guard bleManager.requestDeviceTransferStatus() else {
+            throw OfflineMapPlatformError.transferCommandNotSent
+        }
+        for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
+            try Task.checkCancellation()
+            guard bleManager.isNavigationReady, bleManager.connectedDeviceID == deviceID,
+                  bleManager.transferConnectionEpoch == epoch else {
+                throw DeviceOperationCoordinator.Failure.staleOwner
+            }
+            if bleManager.deviceTransferStatusRevision != revision,
+               bleManager.deviceTransferMode == stored.mode,
+               coordinator.transferGeneration == bleManager.deviceTransferGeneration,
+               let token = bleManager.deviceTransferSessionToken,
+               coordinator.tokenDigest == Self.authorizationDigest(token) {
+                operationLease = try coordinator.resumeMapRoot(deviceID: deviceID, epoch: epoch,
+                                                               currentOwner: operationLease)
+                guard var session = try secureSession(mode: .map, bleManager: bleManager) else {
+                    throw OfflineMapPlatformError.missingTransferBaseURL
+                }
+                remoteAcceptancePossible = true
+                session.operationLeaseID = operationLease?.id
+                try await joinDeviceNetworkIfNeeded(session: session, statusPath: "map-transfer/status", status: status)
+                return session
+            }
+            if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
+                _ = bleManager.requestDeviceTransferStatus()
+            }
+            try await Task.sleep(nanoseconds: DeviceTransferHandshakePolicy.retryIntervalNanoseconds)
+        }
+        throw DeviceOperationCoordinator.Failure.cleanupUnresolved
+    }
+
     func enterMapTransfer(
         bleManager: BLEManager,
         status: @escaping @MainActor (String) -> Void
@@ -1231,8 +1287,9 @@ final class DeviceTransferManager {
         return .deviceMapTransferRejected(failure.message)
     }
 
-    func exitMapTransfer(bleManager: BLEManager) async {
-        _ = await cleanupOperation(bleManager: bleManager)
+    @discardableResult
+    func exitMapTransfer(bleManager: BLEManager) async -> Bool {
+        await cleanupOperation(bleManager: bleManager)
     }
 
     func enterFirmwareTransfer(
@@ -1274,6 +1331,8 @@ final class DeviceTransferManager {
         let initialDeviceTransferErrorSequence =
             bleManager.deviceTransferLastErrorSequence
         let expectedDeviceID = bleManager.connectedDeviceID
+        let expectedMaintenanceCorrelation: UInt32? = bleManager.firmwareMaintenanceActive
+            ? bleManager.firmwareMaintenanceCorrelation : nil
         var enterWasQueued = false
 
         do {
@@ -1285,9 +1344,40 @@ final class DeviceTransferManager {
 
             var sawDisconnect = false
             for attempt in 0..<DeviceTransferHandshakePolicy.firmwareAttemptCount {
-            if operationLease != nil && !ownsConnection(bleManager) {
-                throw DeviceOperationCoordinator.Failure.staleOwner
-            }
+                guard let lease = operationLease, coordinator.owns(lease),
+                      bleManager.connectedDeviceID == nil || bleManager.connectedDeviceID == expectedDeviceID else {
+                    throw DeviceOperationCoordinator.Failure.staleOwner
+                }
+                if !bleManager.isNavigationReady {
+                    guard expectedMaintenanceCorrelation != nil else {
+                        throw DeviceOperationCoordinator.Failure.staleOwner
+                    }
+                    sawDisconnect = true
+                    if attempt % 8 == 0 { bleManager.reconnectToLastDevice() }
+                    try await Task.sleep(nanoseconds: DeviceTransferHandshakePolicy.firmwareRetryIntervalNanoseconds)
+                    continue
+                }
+                guard bleManager.connectedDeviceID == expectedDeviceID else {
+                    throw DeviceOperationCoordinator.Failure.staleOwner
+                }
+                if lease.connectionEpoch != bleManager.transferConnectionEpoch {
+                    guard sawDisconnect, let expectedMaintenanceCorrelation else {
+                        throw DeviceOperationCoordinator.Failure.staleOwner
+                    }
+                    // A new authenticated BLE connection must independently
+                    // confirm the exact maintenance boot before reusing ownership.
+                    let revision = bleManager.deviceTransferStatusRevision
+                    _ = bleManager.requestDeviceTransferStatus(forMaintenanceReconnect: true)
+                    try await Task.sleep(nanoseconds: DeviceTransferHandshakePolicy.firmwareRetryIntervalNanoseconds)
+                    guard bleManager.isNavigationReady,
+                          bleManager.connectedDeviceID == expectedDeviceID,
+                          bleManager.deviceTransferStatusRevision != revision,
+                          bleManager.firmwareMaintenanceActive,
+                          bleManager.firmwareMaintenanceCorrelation == expectedMaintenanceCorrelation else {
+                        continue
+                    }
+                    operationLease = try coordinator.rebindAfterMaintenance(lease, epoch: bleManager.transferConnectionEpoch)
+                }
                 let hasFreshDeviceStatus =
                     bleManager.deviceTransferStatusRevision !=
                     initialDeviceTransferStatusRevision

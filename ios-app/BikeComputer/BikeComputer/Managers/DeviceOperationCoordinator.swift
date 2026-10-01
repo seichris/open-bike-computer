@@ -86,6 +86,25 @@ final class DeviceOperationCoordinator {
         persist()
         return value
     }
+    /// Called only after a fresh authenticated status matches the persisted
+    /// mode, device, token digest and generation. Restored OS claims survive.
+    func resumeMapRoot(deviceID: String, epoch: UInt64, currentOwner: Lease?) throws -> Lease {
+        guard let stored = unresolved, stored.mode == "map", stored.deviceID == deviceID,
+              pendingApplies.isEmpty else { throw Failure.staleOwner }
+        if let lease {
+            guard lease == stored,
+                  currentOwner == lease || !claims.contains(lease.id) else { throw Failure.busy }
+        } else if currentOwner != nil {
+            throw Failure.staleOwner
+        }
+        let resumed = Lease(id: stored.id, deviceID: stored.deviceID, mode: stored.mode, connectionEpoch: epoch)
+        lease = resumed
+        unresolved = resumed
+        claims.insert(resumed.id)
+        ssid = recordedSSID
+        persist()
+        return resumed
+    }
     func restoreClaim(operationID: UUID, deviceID: String, network: String?) -> UUID? {
         guard let stored = unresolved, stored.id == operationID, stored.deviceID == deviceID,
               stored.mode == "map", recordedSSID == network else { return nil }

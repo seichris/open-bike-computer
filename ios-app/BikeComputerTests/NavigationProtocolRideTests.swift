@@ -5129,7 +5129,12 @@ extension NavigationProtocolTests {
     }
 
     static func testDeviceTransferManagerWaitsForFreshDebugToken() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
         let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
         let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
@@ -5142,10 +5147,22 @@ extension NavigationProtocolTests {
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 64,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in
+                        _ = bleManager.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+                        )
+                    }
+                }
+            }
         ))
+        // Cached credentials are stale, but no live foreign mode is claimed.
+        // Active unowned modes are tested separately and must be refused.
         let staleStatus = """
-        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"stale-token"}
+        {"configured":true,"enabled":false,"mode":"","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"stale-token"}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
             Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
@@ -5154,7 +5171,7 @@ extension NavigationProtocolTests {
         let staleRevision = bleManager.deviceTransferStatusRevision
 
         let task = Task {
-            try await DeviceTransferManager().enterRemoteDebug(
+            try await manager.enterRemoteDebug(
                 bleManager: bleManager,
                 status: { _ in }
             )
@@ -5422,7 +5439,12 @@ extension NavigationProtocolTests {
     }
 
     static func testDeviceTransferManagerKeepsConfirmedLANDebugSession() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
         let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
         let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
@@ -5433,7 +5455,17 @@ extension NavigationProtocolTests {
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 64,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in
+                        _ = bleManager.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+                        )
+                    }
+                }
+            }
         ))
         let credentials = RemoteDebugLANCredentials(
             ssid: "Home Wi-Fi",
@@ -5441,7 +5473,7 @@ extension NavigationProtocolTests {
         )!
         var statuses: [String] = []
         let task = Task {
-            try await DeviceTransferManager().enterRemoteDebug(
+            try await manager.enterRemoteDebug(
                 bleManager: bleManager,
                 lanCredentials: credentials,
                 status: { statuses.append($0) }
@@ -5477,7 +5509,12 @@ extension NavigationProtocolTests {
     }
 
     static func testDeviceTransferManagerConfirmsDebugExit() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
         let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
         var sentPackets: [Data] = []
@@ -5486,16 +5523,28 @@ extension NavigationProtocolTests {
             canSend: { true },
             write: { sentPackets.append($0) }
         ))
+        _ = bleManager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 1, 0])
+        )
+        let entry = Task {
+            try await manager.enterRemoteDebug(bleManager: bleManager, status: { _ in })
+        }
+        for _ in 0..<100 where sentPackets.isEmpty {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let fingerprint = String(repeating: "a", count: 64)
         let activeStatus = """
-        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"http://192.168.4.1:8080","apSsid":"BikeComputer-Transfer","sessionToken":"active-token"}
+        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"https://192.168.31.195:8080","networkTransport":"lan","sessionToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tls":{"identityVersion":1,"certificateSha256":"\(fingerprint)"},"transferGeneration":1,"capabilities":{"secureTransferV1":true}}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
-            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
-                Data(activeStatus.utf8)
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(activeStatus.utf8)
         )
+        do { _ = try await entry.value }
+        catch { assert(false, "debug exit fixture acquires ownership first: \(error)") }
+        sentPackets.removeAll()
 
         let task = Task {
-            try await DeviceTransferManager().exitRemoteDebug(
+            try await manager.exitRemoteDebug(
                 bleManager: bleManager
             )
         }
@@ -5522,7 +5571,12 @@ extension NavigationProtocolTests {
     }
 
     static func testDeviceTransferManagerCompensatesCancelledDebugEntry() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
         let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
         let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
@@ -5532,11 +5586,21 @@ extension NavigationProtocolTests {
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 64,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in
+                        _ = bleManager.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+                        )
+                    }
+                }
+            }
         ))
 
         let task = Task {
-            try await DeviceTransferManager().enterRemoteDebug(
+            try await manager.enterRemoteDebug(
                 bleManager: bleManager,
                 status: { _ in }
             )
@@ -5556,7 +5620,12 @@ extension NavigationProtocolTests {
 
     @MainActor
     static func testFirmwareTransferSurvivesNetworkStartupReconnect() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
         let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
         bleManager.setConnectedDeviceIDForTesting("device-a")
@@ -5573,11 +5642,21 @@ extension NavigationProtocolTests {
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 96,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in
+                        _ = bleManager.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+                        )
+                    }
+                }
+            }
         ))
 
         let task = Task {
-            try await DeviceTransferManager().enterFirmwareTransfer(
+            try await manager.enterFirmwareTransfer(
                 bleManager: bleManager,
                 status: { _ in }
             )
@@ -5627,7 +5706,12 @@ extension NavigationProtocolTests {
 
     @MainActor
     static func testFirmwareTransferSurfacesFreshRejectionAndExits() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
         let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
 
@@ -5643,12 +5727,22 @@ extension NavigationProtocolTests {
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 64,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in
+                        _ = bleManager.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+                        )
+                    }
+                }
+            }
         ))
 
         let started = Date()
         let task = Task {
-            try await DeviceTransferManager().enterFirmwareTransfer(
+            try await manager.enterFirmwareTransfer(
                 bleManager: bleManager,
                 status: { _ in }
             )
@@ -5693,18 +5787,33 @@ extension NavigationProtocolTests {
 
     @MainActor
     static func testFirmwareTransferCancellationExits() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
         let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
         var sentPackets: [Data] = []
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 64,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in
+                        _ = bleManager.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+                        )
+                    }
+                }
+            }
         ))
 
         let task = Task {
-            try await DeviceTransferManager().enterFirmwareTransfer(
+            try await manager.enterFirmwareTransfer(
                 bleManager: bleManager,
                 status: { _ in }
             )
@@ -5726,16 +5835,30 @@ extension NavigationProtocolTests {
 
     @MainActor
     static func testFirmwareMaintenancePreparationFlow() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
         let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
         var sentPackets: [Data] = []
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 96,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in
+                        _ = bleManager.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+                        )
+                    }
+                }
+            }
         ))
-        let manager = DeviceTransferManager()
 
         let eligibility = Task {
             try await manager.requireFirmwareMaintenanceEligibility(
@@ -5810,8 +5933,46 @@ extension NavigationProtocolTests {
         }
     }
 
-    static func testDeviceTransferManagerWaitsForMapToken() async {
+    static func assertDeviceTransferAdmissionRejectsUnownedSession() async {
+        let suiteName = "transfer-admission.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let coordinator = DeviceOperationCoordinator(defaults: defaults)
+        let manager = DeviceTransferManager(coordinator: coordinator)
         let bleManager = BLEManager()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        var packets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64, canSend: { true }, write: { packets.append($0) }
+        ))
+        do {
+            _ = try await manager.enterMapTransfer(bleManager: bleManager, status: { _ in })
+            assert(false, "admission requires stable connected device identity")
+        } catch DeviceOperationCoordinator.Failure.busy { }
+        catch { assert(false, "missing identity has concrete admission error: \(error)") }
+        bleManager.setConnectedDeviceIDForTesting("device-a")
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+            Data(#"{"enabled":true,"mode":"debug","sessionToken":"foreign-token"}"#.utf8)
+        )
+        do {
+            _ = try await manager.enterMapTransfer(bleManager: bleManager, status: { _ in })
+            assert(false, "map entry cannot displace an unowned debug session")
+        } catch DeviceOperationCoordinator.Failure.busy { }
+        catch { assert(false, "foreign session has concrete busy error: \(error)") }
+        assert(packets.isEmpty, "failed ownership admission sends neither enter nor exit")
+        assert(coordinator.lease == nil, "refused admission creates no lease")
+    }
+
+    static func testDeviceTransferManagerWaitsForMapToken() async {
+        await assertDeviceTransferAdmissionRejectsUnownedSession()
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
 
@@ -5819,11 +5980,21 @@ extension NavigationProtocolTests {
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 64,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in
+                        _ = bleManager.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+                        )
+                    }
+                }
+            }
         ))
 
         let staleDeviceStatus = """
-        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sessionToken":"stale-map-token","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
+        {"configured":true,"enabled":false,"port":8080,"mode":"","baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sessionToken":"stale-map-token","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
         """
         _ = bleManager.handleDeviceTransferStatusNotification(
             Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
@@ -5832,7 +6003,7 @@ extension NavigationProtocolTests {
         let staleRevision = bleManager.deviceTransferStatusRevision
 
         let transferTask = Task {
-            try await DeviceTransferManager().enterMapTransfer(
+            try await manager.enterMapTransfer(
                 bleManager: bleManager,
                 status: { _ in }
             )
@@ -5883,7 +6054,12 @@ extension NavigationProtocolTests {
     }
 
     static func testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
         let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
         bleManager.isNavigationReady = true
 
@@ -5891,11 +6067,21 @@ extension NavigationProtocolTests {
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 64,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in
+                        _ = bleManager.handleDeviceTransferStatusNotification(
+                            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+                        )
+                    }
+                }
+            }
         ))
 
         let transferTask = Task {
-            try await DeviceTransferManager().enterMapTransfer(
+            try await manager.enterMapTransfer(
                 bleManager: bleManager,
                 status: { _ in }
             )
