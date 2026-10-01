@@ -1,4 +1,4 @@
-name: Diagnostics development snapshot
+name: Diagnostics implementation validation
 
 on:
   push:
@@ -9,24 +9,117 @@ permissions:
   contents: read
 
 jobs:
-  snapshot:
+  publish:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.publish.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          persist-credentials: false
-      - name: Archive tracked source for isolated implementation and tests
+          fetch-depth: 0
+      - id: publish
+        name: Verify and publish reviewed implementation packet
+        shell: bash
         run: |
-          git archive --format=tar.gz --output="$RUNNER_TEMP/bicino-source.tar.gz" HEAD
-          git rev-parse HEAD > "$RUNNER_TEMP/source-commit.txt"
-          sha256sum "$RUNNER_TEMP/bicino-source.tar.gz" > "$RUNNER_TEMP/source-sha256.txt"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/codex/unified-diagnostics-v2
+          git merge-base --is-ancestor 64ea423633acc7662a4fbb8083ae8757eb4c92ad HEAD
+          python3 - <<'PY'
+          import base64, hashlib, lzma, pathlib, subprocess
+          base = '64ea423633acc7662a4fbb8083ae8757eb4c92ad'
+          changed = subprocess.check_output(['git','diff','--name-only',base,'HEAD'], text=True).splitlines()
+          assert all(p.startswith('.diagnostics-workspace/') or p == '.github/workflows/diagnostics-development-snapshot.yml' for p in changed), 'concurrent source changes'
+          text = ''.join(pathlib.Path(f'.diagnostics-workspace/{i:02}.txt').read_text().strip() for i in range(1,8))
+          assert len(text) == 77244, 'packet length mismatch'
+          compressed = base64.b64decode(text, validate=True)
+          assert hashlib.sha256(compressed).hexdigest() == '969a13132be0ecc392bf777e4a06ed9c1fe334d6cc471599203c9ec53bb5d45a', 'packet digest mismatch'
+          decoder = lzma.LZMADecompressor(memlimit=128*1024*1024)
+          patch = decoder.decompress(compressed, max_length=335797)
+          assert decoder.eof and not decoder.unused_data and len(patch) == 335796, 'patch envelope mismatch'
+          assert hashlib.sha256(patch).hexdigest() == '31a2c58140da0f7b35471b741ccf364c00e2d627cdd7bf62cfa21e74841ba373', 'patch digest mismatch'
+          subprocess.run(['git','apply','--check','-'],input=patch,check=True)
+          subprocess.run(['git','apply','--index','-'],input=patch,check=True)
+          PY
+          git rm -r .diagnostics-workspace .github/workflows/diagnostics-development-snapshot.yml
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Implement unified diagnostics recording, collection and Codex broker'
+          git push origin HEAD:refs/heads/codex/unified-diagnostics-v2
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git rev-parse HEAD HEAD^{tree}
+
+  portable:
+    needs: publish
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          name: diagnostics-development-source
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - run: python3 tools/run_diagnostics_v2_tests.py --require-swift --sanitizers
+      - run: cd ios-app && ./scripts/run-ride-diagnostics-tests.sh
+
+  ios:
+    needs: publish
+    runs-on: macos-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration: [Debug, Release]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - name: Compile actual iPhone app
+        env:
+          CONFIGURATION: ${{ matrix.configuration }}
+        run: |
+          cd ios-app
+          ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj \
+            -scheme BikeComputer -configuration "$CONFIGURATION" \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/diagnostics-$CONFIGURATION" \
+            CODE_SIGNING_ALLOWED=NO build
+
+  firmware:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [WAVESHARE_AMOLED_175, WAVESHARE_AMOLED_175_PRODUCTION, WAVESHARE_AMOLED_206, WAVESHARE_AMOLED_206_PRODUCTION]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.publish.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: esp32/.pio/open-bike-build/downloads
+          key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
+      - name: Locked exact-source build and unchanged production reserve gate
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          cd esp32
+          env -u LD_LIBRARY_PATH python3 tools/build_firmware.py "$BUILD_ENVIRONMENT"
+      - name: Retain exact-image symbols and provenance
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: diagnostics-symbols-${{ matrix.target }}
           path: |
-            ${{ runner.temp }}/bicino-source.tar.gz
-            ${{ runner.temp }}/source-commit.txt
-            ${{ runner.temp }}/source-sha256.txt
-          retention-days: 1
-          if-no-files-found: error
+            esp32/.pio/build/${{ matrix.target }}/firmware.elf
+            esp32/.pio/build/${{ matrix.target }}/firmware.bin
+            esp32/.pio/build/${{ matrix.target }}/firmware.map
+            esp32/.pio/open-bike-build/manifests/
+          retention-days: 7
+          if-no-files-found: warn
