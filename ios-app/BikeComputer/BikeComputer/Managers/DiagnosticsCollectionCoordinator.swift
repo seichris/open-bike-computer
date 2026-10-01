@@ -71,7 +71,10 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     func setAutomaticPostRideCollection(_ enabled: Bool) {
         automaticPostRideCollection = enabled
         UserDefaults.standard.set(enabled, forKey: "diagnostics.post-ride-collection.v2")
-        if enabled { observeConnectedDeviceDuringRide() }
+        if enabled {
+            observeConnectedDeviceDuringRide()
+            resumeIfPossible()
+        }
     }
 
     func observeConnectedDeviceDuringRide() {
@@ -106,6 +109,11 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
         }
         guard rideIsActive else { return }
         rideIsActive = false
+        // A manual job paused by riding must resume even when automatic
+        // post-ride capture is disabled and there are no new ride contexts.
+        // The caller may be inside Published.willSet: defer the canCollect
+        // reread until navigation/workout state has actually been committed.
+        Task { [weak self] in self?.resumeIfPossible() }
         let contexts = Array(rideContexts.values).sorted { $0.requestID.uuidString < $1.requestID.uuidString }
         rideContexts.removeAll()
         guard !contexts.isEmpty else { return }
@@ -185,7 +193,14 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
         automaticRetryAllowed = !automatic // one retry per foreground/reconnect; no network retry storm
         task = Task { [weak self] in
             guard let self else { return }
-            defer { isRunning = false; task = nil }
+            defer {
+                isRunning = false
+                task = nil
+                // Riding may already have ended while transport cleanup was
+                // draining. Advance only eligible persisted jobs; retry and
+                // cancellation guards still prevent an error retry loop.
+                resumeIfPossible()
+            }
             do {
                 if manifest == nil || manifest?.deliveryComplete == true || newCutoff {
                     manifest = try await store.create(deviceDigest: digest, captureID: recorder.currentCaptureID)

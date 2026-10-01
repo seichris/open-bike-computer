@@ -214,6 +214,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                     !self.workoutSessionCoordinator.store.presentation.isWorkoutActive
             })
         bleManager.$isNavigationReady.removeDuplicates()
+            // Published emits during willSet. Resume reads the committed BLE
+            // state, so deliver on the next main-queue turn rather than here.
+            .receive(on: DispatchQueue.main)
             .filter { $0 }
             .sink { _ in
                 DiagnosticsCollectionCoordinator.shared.observeConnectedDeviceDuringRide()

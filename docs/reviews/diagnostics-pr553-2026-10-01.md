@@ -25,6 +25,12 @@ Zone Contracts. Later software changes require their own exact-head CI results.
   device/capture contexts. Leaving Settings does not own the task. A ride starting
   during collection interrupts retrieval and retains resumable partial evidence;
   cleanup retains the existing cancellation-independent lease owner.
+- Authenticated-readiness handling runs after Combine's `Published.willSet`
+  boundary so it reads committed BLE state. Ride-end resumes previously paused
+  manual work even without new post-ride contexts, and completion rechecks the
+  queue after transport cleanup. Explicit-cancel and transport-error guards
+  remain in force. Apple CI exercises the real Combine delivery boundary;
+  portable hosts report that platform-specific case as unexercised.
 - Outbox admission now includes the prepared bundle in its 400 MiB prospective
   byte budget. It cannot append a 104 MiB bundle merely because the old outbox
   was just below the limit. Request validation precedes retention eviction.

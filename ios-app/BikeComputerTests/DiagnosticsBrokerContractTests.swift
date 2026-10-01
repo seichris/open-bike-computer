@@ -1,6 +1,37 @@
 import Foundation
+#if canImport(Combine)
+import Combine
+#endif
 
 @main enum DiagnosticsBrokerContractTests {
+    #if canImport(Combine)
+    private final class ReadinessProbe {
+        @Published var ready = false
+    }
+
+    @MainActor
+    private static func verifyPublishedResumeBoundary() async {
+        let probe = ReadinessProbe()
+        var immediateReads: [Bool] = []
+        let immediate = probe.$ready.dropFirst().sink { _ in
+            immediateReads.append(probe.ready)
+        }
+        var deferred: AnyCancellable?
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            deferred = probe.$ready.dropFirst()
+                .receive(on: DispatchQueue.main)
+                .sink { ready in
+                    precondition(ready && probe.ready, "resume must read the committed readiness")
+                    continuation.resume()
+                }
+            probe.ready = true
+            precondition(immediateReads == [false], "synchronous Published delivery precedes assignment")
+        }
+        withExtendedLifetime((immediate, deferred)) { }
+        print("Combine committed-readiness resume boundary passed")
+    }
+    #endif
+
     static func main() async throws {
         let date = Date(timeIntervalSince1970: 1_800_000_000)
         func pairing(_ origin: String, lifetime: Int64 = 3600) -> DiagnosticsBrokerPairing {
@@ -64,6 +95,11 @@ import Foundation
         } catch DiagnosticsAcquisitionStore.Failure.invalidManifest { }
         let afterFailure = try Data(contentsOf: url)
         precondition(afterFailure == bytes)
+        #if canImport(Combine)
+        await verifyPublishedResumeBoundary()
+        #else
+        print("Combine publication-boundary regression requires Apple CI; not exercised on this host")
+        #endif
         print("Swift broker pairing, bounded journal and process-loss replay tests passed")
     }
 }

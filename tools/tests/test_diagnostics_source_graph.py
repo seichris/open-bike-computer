@@ -55,6 +55,19 @@ class DiagnosticsSourceGraphTests(unittest.TestCase):
         self.assertLess(app.index("observeRide(active: state.current)"), app.index("rideDiagnosticsRecorder?.endRideCapture()"))
         self.assertIn("$0.canResumeAutomatically(postRideEnabled: automaticPostRideCollection) && $0.deviceDigest == digest", coordinator)
 
+    def test_resume_rereads_committed_state_and_runs_after_cleanup(self):
+        app = (ROOT / PREFIX / "BikeComputerApp.swift").read_text()
+        readiness = app.split("bleManager.$isNavigationReady.removeDuplicates()", 1)[1].split(".store(in:", 1)[0]
+        self.assertLess(readiness.index(".receive(on: DispatchQueue.main)"), readiness.index(".sink"))
+        coordinator = (ROOT / PREFIX / "Managers/DiagnosticsCollectionCoordinator.swift").read_text()
+        ended = coordinator.split("rideIsActive = false\n", 2)[-1].split("let preceding = rideJournalTask", 1)[0]
+        self.assertIn("Task { [weak self] in self?.resumeIfPossible() }", ended)
+        self.assertLess(ended.index("self?.resumeIfPossible()"), ended.index("guard !contexts.isEmpty"))
+        task = coordinator.split("task = Task { [weak self] in", 1)[1]
+        cleanup = task.split("defer {", 1)[1].split("\n            }", 1)[0]
+        self.assertLess(cleanup.index("isRunning = false"), cleanup.index("resumeIfPossible()"))
+        self.assertLess(cleanup.index("task = nil"), cleanup.index("resumeIfPossible()"))
+
     def test_fast_ci_local_scripts_resolve_from_effective_directory(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
         job = workflow["jobs"]["ios-fast"]
