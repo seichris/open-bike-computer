@@ -1884,12 +1884,12 @@ def _validated_flash_plan(
             )
         if (
             offset_token == FLASH_PLAN_APP_OFFSET_PLACEHOLDER
-            and environment.endswith("_PRODUCTION")
+            and environment.endswith(("_PRODUCTION", "_LIFECYCLE_QUALIFICATION"))
             and application_partition_size - size
             < PRODUCTION_APPLICATION_RESERVE_BYTES
         ):
             raise GeneratedSdkconfigError(
-                "verified production firmware image leaves less than the "
+                "verified production-behavior firmware image leaves less than the "
                 f"required {PRODUCTION_APPLICATION_RESERVE_BYTES}-byte "
                 "application reserve"
             )

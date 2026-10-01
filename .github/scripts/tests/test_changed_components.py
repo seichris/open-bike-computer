@@ -252,11 +252,13 @@ class ChangedComponentsTests(unittest.TestCase):
             "WAVESHARE_AMOLED_175",
             "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
             "WAVESHARE_AMOLED_175_PRODUCTION",
+            "WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION",
         )
         targets_206 = (
             "WAVESHARE_AMOLED_206",
             "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
             "WAVESHARE_AMOLED_206_PRODUCTION",
+            "WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION",
         )
 
         self.assertEqual(

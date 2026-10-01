@@ -38,6 +38,47 @@ struct DeviceMapOperationTests {
         }
         try store.save(record)
         try check(try DeviceMapOperationStore(url: url).records() == [record], "atomic record survives relaunch")
+        let snapshotProcess = DeviceMapOperationStore.observationProcessID
+        let priorSelection = DeviceMapConfirmedSelectionSnapshot(deviceID: deviceID,
+            mapID: "previous-map", sessionID: "previous-content-session",
+            manifestReceipt: String(repeating: "e", count: 64), root: "/maps/previous",
+            operationID: String(repeating: "f", count: 32),
+            healthBootID: String(repeating: "a", count: 32), healthRevision: 8,
+            connectionEpoch: 7, observationProcessID: snapshotProcess,
+            observedAt: Date(timeIntervalSince1970: 0))
+        func capturePrevious(device: String? = nil, epoch: UInt64 = 7,
+                             process: UUID? = nil, fresh: Bool = true,
+                             confirmed: Bool = true, unconfirmed: Bool = false) -> DeviceMapConfirmedSelectionSnapshot? {
+            DeviceMapConfirmedSelectionSnapshot.capture(priorSelection,
+                currentDeviceID: device ?? deviceID, currentEpoch: epoch, currentProcessID: process ?? snapshotProcess,
+                hasFreshStatus: fresh, isConfirmed: confirmed, isUnconfirmed: unconfirmed)
+        }
+        try check(capturePrevious() == priorSelection)
+        try check(capturePrevious(device: "other-device") == nil, "prior selection must belong to operation device")
+        try check(capturePrevious(epoch: 8) == nil && capturePrevious(process: UUID()) == nil,
+                  "previous connection/process observations cannot be captured as current")
+        try check(capturePrevious(fresh: false) == nil && capturePrevious(confirmed: false) == nil &&
+                  capturePrevious(unconfirmed: true) == nil, "stale, pending and unconfirmed selections are excluded")
+        var withPrevious = makeRecord()
+        withPrevious.observationProcessID = snapshotProcess
+        withPrevious.previousConfirmedSelection = capturePrevious()
+        let snapshotURL = directory.appendingPathComponent("previous-selection.json")
+        let snapshotStore = DeviceMapOperationStore(url: snapshotURL)
+        try snapshotStore.save(withPrevious)
+        let reloadedPrevious = try DeviceMapOperationStore(url: snapshotURL).records()[0]
+        try check(reloadedPrevious.previousConfirmedSelection == priorSelection,
+                  "per-operation previous identity and health context survive relaunch")
+        try check(!reloadedPrevious.isTerminal && reloadedPrevious.nextControlAction == .query &&
+                  reloadedPrevious.lastReceipt == nil, "previous selection never proves this operation installed")
+        var replacementPrevious = reloadedPrevious
+        replacementPrevious.previousConfirmedSelection = nil
+        expectFailure({ try snapshotStore.save(replacementPrevious) }, "later callbacks cannot erase the intent snapshot")
+        var migratedJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as! [String: Any]
+        migratedJSON.removeValue(forKey: "previousConfirmedSelection")
+        let migrated = try JSONDecoder().decode(DeviceMapOperationRecord.self,
+            from: JSONSerialization.data(withJSONObject: migratedJSON))
+        try check(migrated.previousConfirmedSelection == nil && migrated == record,
+                  "older journals decode without inventing previous-selection evidence")
         for (key, value) in [("deviceID", String(repeating: "e", count: 32)), ("operationID", String(repeating: "e", count: 32)),
                              ("sessionID", "other"), ("mapID", "other"), ("manifestReceipt", String(repeating: "e", count: 64)),
                              ("signedManifestReceipt", String(repeating: "e", count: 64)), ("streamSHA256", String(repeating: "e", count: 64))] {

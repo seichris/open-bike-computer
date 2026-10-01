@@ -11,7 +11,7 @@ POOLS = ("internal", "dma", "psram")
 MODES = ("map", "firmware", "diagnostics", "debug")
 PROFILES = {
     f"WAVESHARE_AMOLED_{board}{suffix}": MODES if suffix == "_REMOTE_DEBUG" else MODES[:3]
-    for board in ("175", "206") for suffix in ("", "_PRODUCTION", "_REMOTE_DEBUG")
+    for board in ("175", "206") for suffix in ("", "_PRODUCTION", "_REMOTE_DEBUG", "_LIFECYCLE_QUALIFICATION")
 }
 PHASES = {
     "transfer_entry", "network_ready", "commit_granted", "grant_released",

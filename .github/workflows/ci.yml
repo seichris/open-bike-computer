@@ -229,7 +229,7 @@ jobs:
             has_radio=true
           fi
           case "$BUILD_ENVIRONMENT" in
-            *_PRODUCTION)
+            *_PRODUCTION|*_LIFECYCLE_QUALIFICATION)
               test "$has_radio" = false
               ;;
             *)
@@ -258,6 +258,28 @@ jobs:
                   "Missing persistent diagnostics markers: " + ", ".join(missing)
               )
           PY
+      - name: Verify nonshipping lifecycle adapter coverage
+        if: endsWith(matrix.target, '_LIFECYCLE_QUALIFICATION')
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          python3 - "${BUILD_ENVIRONMENT}" <<'PYTHON'
+          from pathlib import Path
+          import sys
+
+          profile = sys.argv[1]
+          firmware = (Path(".pio/build") / profile / "firmware.elf").read_bytes()
+          # These messages exist only inside FIRMWARE_OPERATIONS_V1_ENABLED.
+          # Keep the actual authenticated OTA adapter compiled, not only policies.
+          required = (
+              profile,
+              "fresh durable admission and operation identity required",
+              "durable OTA acceptance could not be confirmed",
+          )
+          missing = [marker for marker in required if marker.encode() + b"\0" not in firmware]
+          if missing:
+              raise SystemExit("Missing lifecycle qualification markers: " + ", ".join(missing))
+          PYTHON
       - name: Verify remote-debug artifacts include renderer metrics routes
         if: contains(matrix.target, '_REMOTE_DEBUG')
         run: |

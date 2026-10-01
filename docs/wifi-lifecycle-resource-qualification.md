@@ -126,3 +126,56 @@ explicitly lowered counts describe partial evidence only and do not waive the
 owner-authenticated boot-acceptance checkpoint, not serial from debug bytes.
 Follow [AGENTS.md](../AGENTS.md) before any board write. This procedure grants no
 hardware-write, cohort-promotion or deployment authorization.
+
+## Nonshipping enabled-protocol qualification builds
+
+The ordinary, production, personal and remote-debug profiles keep map/firmware
+operation-V1 rollout gates at their default off values. Host policy tests alone
+do not compile the OTA adapter's conditional implementation. Two explicitly
+nonshipping profiles compile both actual adapters with
+`MAP_OPERATIONS_V1_ENABLED=1` and `FIRMWARE_OPERATIONS_V1_ENABLED=1`:
+
+- `WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION`
+- `WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION`
+
+They inherit their corresponding production profile's behavior, signed-artifact
+trust, full renderer, persistent diagnostics and two 3 MiB OTA slots. They do not
+inherit the single-slot developer layout, browser service, development signer or
+detailed diagnostics. The attestation path enforces the same 64 KiB application
+reserve as production; a size failure remains a blocker. The exact distinct
+profile identity is embedded and attested. Inheriting production settings does
+not classify these bytes as a production/factory release.
+
+Following connected-model identification and the repository build rules, use
+only the normal build helper, with no upload selectors:
+
+    cd esp32
+    python3 tools/build_firmware.py WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION
+    python3 tools/build_firmware.py WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION
+
+These commands describe separate qualification candidates, not permission to
+build an unidentified board or flash hardware. The helper still requires its
+locked runtime and exact-source attestation. `--factory-output-dir` rejects
+qualification profiles; release-candidate packaging selects only the two exact
+production environments. CI never supplies an upload selector. Any later
+explicitly authorized physical qualification uses the normal clean-image,
+board/serial/profile checks and attested upload procedure without bypasses.
+
+The existing firmware CI selector now adds the corresponding qualification
+profile to each selected board's build matrix. Automatic firmware CI remains
+1.75-only, draft PRs still skip heavy builds, component-only changes still follow
+the existing routing, and manual `firmware_hardware=206`/`all` selects precisely
+those boards. No additional scheduled workflow is created. CI verifies enabled
+OTA-adapter branch markers in the linked qualification ELF, alongside the
+existing non-debug, production-behavior and persistent-diagnostics checks.
+Build success qualifies compilation and size only; physical OTA acceptance,
+rollback, durable maps and the remaining card/iPhone matrix remain pending.
+
+Analyze this profile's separate three-mode capture with its exact name:
+
+    python3 esp32/tools/analyze_lifecycle_resources.py --profile WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION evidence/175-lifecycle/events-*.jsonl
+    python3 esp32/tools/analyze_lifecycle_resources.py --profile WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION evidence/206-lifecycle/events-*.jsonl
+
+Remote-debug remains a distinct four-mode candidate. Neither its evidence nor
+these enabled-protocol qualification bytes substitute for exact production
+candidate acceptance or authorize enabling the production rollout gates.

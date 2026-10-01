@@ -73,7 +73,7 @@ class TestAnalysis(unittest.TestCase):
 
     def test_profile_requires_all_supported_modes_without_debug(self):
         for board in ("175", "206"):
-            for suffix in ("", "_PRODUCTION"):
+            for suffix in ("", "_PRODUCTION", "_LIFECYCLE_QUALIFICATION"):
                 events = fixtures()
                 for event in events:
                     if event["event"] == "transfer_checkpoint" and event["fields"]["mode"] == "debug":

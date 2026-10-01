@@ -5921,6 +5921,7 @@ final class OfflineMapManager: ObservableObject {
                 deviceOperation = existing
             } else {
                 let artifact = prepared.artifact
+                let previousSelection = previousConfirmedSelection(bleManager: bleManager)
                 deviceOperation = DeviceMapOperationRecord(
                     schemaVersion: 1, deviceID: deviceID, operationID: UUID(),
                     sessionID: sessionId, mapID: expectedMapId,
@@ -5932,7 +5933,8 @@ final class OfflineMapManager: ObservableObject {
                     createdAt: Date(), connectionEpoch: bleManager.transferConnectionEpoch,
                     observation: "enter_requested", cleanup: "pending", usesDurableProtocol: false,
                     lastReceipt: nil,
-                    observationProcessID: DeviceMapOperationStore.observationProcessID
+                    observationProcessID: DeviceMapOperationStore.observationProcessID,
+                    previousConfirmedSelection: previousSelection
                 )
             }
             if let deviceOperation {
@@ -6855,6 +6857,37 @@ final class OfflineMapManager: ObservableObject {
             outcome: outcome
         )
         updateLastTransferOutcome(outcome)
+    }
+
+    private func previousConfirmedSelection(bleManager: BLEManager) -> DeviceMapConfirmedSelectionSnapshot? {
+        guard bleManager.isConnected, let deviceID = bleManager.activeDeviceID,
+              bleManager.connectedDeviceID == deviceID,
+              let selected = bleManager.activeDeviceMap else { return nil }
+        let health = bleManager.mapSelectionHealth
+        let confirmed: Bool
+        if let health {
+            confirmed = health.state == "ready" && health.mapID == selected.mapID &&
+                health.sessionID == (selected.sessionID ?? "")
+        } else {
+            // Legacy firmware requires an exact terminal selection, never an
+            // idle or pending pointer by itself.
+            confirmed = bleManager.mapTransferActivationStatus == "installed" &&
+                bleManager.mapTransferActivationMapId == selected.mapID &&
+                selected.sessionID != nil &&
+                bleManager.mapTransferActivationSessionId == selected.sessionID
+        }
+        let observation = DeviceMapConfirmedSelectionSnapshot(deviceID: deviceID,
+            mapID: selected.mapID, sessionID: selected.sessionID,
+            manifestReceipt: selected.manifestReceipt, root: health?.root,
+            operationID: health.flatMap { $0.operationID.isEmpty ? nil : $0.operationID },
+            healthBootID: health?.bootID, healthRevision: health?.revision,
+            connectionEpoch: bleManager.transferConnectionEpoch,
+            observationProcessID: DeviceMapOperationStore.observationProcessID, observedAt: Date())
+        return DeviceMapConfirmedSelectionSnapshot.capture(observation,
+            currentDeviceID: bleManager.connectedDeviceID, currentEpoch: bleManager.transferConnectionEpoch,
+            currentProcessID: DeviceMapOperationStore.observationProcessID,
+            hasFreshStatus: bleManager.hasFreshMapTransferStatus, isConfirmed: confirmed,
+            isUnconfirmed: isUnconfirmedTransferIdentity(mapID: selected.mapID, sessionID: selected.sessionID))
     }
 
     private func recordLegacyTerminalProof(_ outcome: String, mapID: String, sessionID: String, bleManager: BLEManager) {

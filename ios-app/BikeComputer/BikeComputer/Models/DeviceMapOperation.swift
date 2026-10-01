@@ -34,6 +34,44 @@ nonisolated struct DeviceMapOperationReceipt: Codable, Equatable, Sendable {
     }
 }
 
+// Historical context only; never an installation receipt or rollback authority.
+nonisolated struct DeviceMapConfirmedSelectionSnapshot: Codable, Equatable, Sendable {
+    let deviceID: String
+    let mapID: String
+    let sessionID: String?
+    let manifestReceipt: String?
+    let root: String?
+    let operationID: String?
+    let healthBootID: String?
+    let healthRevision: UInt64?
+    let connectionEpoch: UInt64
+    let observationProcessID: UUID
+    let observedAt: Date
+
+    var isValid: Bool {
+        guard !deviceID.isEmpty, !mapID.isEmpty else { return false }
+        if let manifestReceipt,
+           !DeviceMapOperationReceipt.isLowerHex(manifestReceipt, count: 64) { return false }
+        if let healthBootID {
+            guard DeviceMapOperationReceipt.isLowerHex(healthBootID, count: 32),
+                  (healthRevision ?? 0) > 0, let root, root.hasPrefix("/maps/"),
+                  !root.split(separator: "/").contains("..") else { return false }
+        } else if healthRevision != nil || root != nil || operationID != nil { return false }
+        if let operationID, !DeviceMapOperationReceipt.isLowerHex(operationID, count: 32) { return false }
+        return true
+    }
+
+    static func capture(_ observation: Self, currentDeviceID: String?, currentEpoch: UInt64,
+                        currentProcessID: UUID, hasFreshStatus: Bool,
+                        isConfirmed: Bool, isUnconfirmed: Bool) -> Self? {
+        guard observation.isValid, hasFreshStatus, isConfirmed, !isUnconfirmed,
+              observation.deviceID == currentDeviceID,
+              observation.connectionEpoch == currentEpoch,
+              observation.observationProcessID == currentProcessID else { return nil }
+        return observation
+    }
+}
+
 nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
     let schemaVersion: Int
     let deviceID: String
@@ -65,6 +103,7 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
     var acknowledgedAt: Date? = nil
     var retiredAt: Date? = nil
     var legacyTerminalConfirmedAt: Date? = nil
+    var previousConfirmedSelection: DeviceMapConfirmedSelectionSnapshot? = nil
 
     mutating func confirmLegacyTerminal(outcome: String, deviceID: String,
                                        connectionEpoch: UInt64, processID: UUID,
@@ -191,7 +230,8 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
                     old.signedManifestReceipt == record.signedManifestReceipt &&
                     old.artifactFilename == record.artifactFilename && old.appNamespace == record.appNamespace &&
                     old.createdAt == record.createdAt && old.connectionEpoch == record.connectionEpoch &&
-                    old.observationProcessID == record.observationProcessID,
+                    old.observationProcessID == record.observationProcessID &&
+                    old.previousConfirmedSelection == record.previousConfirmedSelection,
                   replacingUploadAttempt || old.uploadAttemptID == record.uploadAttemptID,
                   replacingUploadAttempt || old.uploadCompletedAt == nil ||
                     (old.uploadCompletedAt == record.uploadCompletedAt && old.uploadResponseBody == record.uploadResponseBody &&
@@ -281,6 +321,12 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
               DeviceMapOperationReceipt.isLowerHex(record.manifestReceipt, count: 64),
               DeviceMapOperationReceipt.isLowerHex(record.signedManifestReceipt, count: 64),
               DeviceMapOperationReceipt.isLowerHex(record.streamSHA256, count: 64) else { return false }
+        if let previous = record.previousConfirmedSelection {
+            guard previous.isValid, previous.deviceID == record.deviceID,
+                  previous.connectionEpoch == record.connectionEpoch,
+                  previous.observationProcessID == record.observationProcessID,
+                  previous.observedAt <= record.createdAt else { return false }
+        }
         if let receipt = record.lastReceipt {
             guard record.matches(receipt), receipt.status == nil, (receipt.revision ?? 0) > 0,
                   ["receiving", "prepared", "accepted", "installed", "failed", "cancelled"].contains(receipt.phase ?? "") else { return false }
