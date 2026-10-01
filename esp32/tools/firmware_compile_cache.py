@@ -88,7 +88,12 @@ def relocate_core_text(root: Path, source_project: Path, project: Path) -> int:
     new_uri = project.as_uri().encode("utf-8")
 
     def rebase(contents):
-        # PlatformIO package metadata stores percent-encoded file:// URLs.
+        # Pinned PlatformIO file:// locations are raw filesystem paths. When
+        # the origin has no escaped characters its URI is indistinguishable
+        # from that raw form, so preserve raw paths in the receiving metadata.
+        if old_uri == b"file://" + old:
+            return contents.replace(old, new)
+        # Preserve explicitly percent-encoded URLs from other configuration.
         return contents.replace(old_uri, new_uri).replace(old, new)
     changed = 0
     for directory, _, files in os.walk(root, followlinks=False):

@@ -805,19 +805,24 @@ def _verified_platformio_project_config(project_dir: Path) -> tuple[Path, Path]:
     configs = _ensure_private_directory(
         project_dir, Path(".pio/open-bike-build/config")
     )
+    def file_uri_for_config(path: Path) -> str:
+        # Pinned PlatformIO consumes file:// paths verbatim, without URL
+        # decoding. Preserve spaces and escape literal % for INI interpolation.
+        return ("file://" + str(path)).replace("%", "%%")
+
     def write_verified_config(
         path: Path,
         excluded: set[str],
         project_text: str,
     ) -> None:
         package_override = "\nplatform_packages =\n" + "".join(
-            f"  {name} @ {package.as_uri()}\n"
+            f"  {name} @ {file_uri_for_config(package)}\n"
             for name, package in verified_packages
             if name not in excluded
         )
         verified_text = project_text.replace(
             f"platform = {WAVESHARE_PLATFORM_URL}",
-            f"platform = {staged_platform.as_uri()}{package_override.rstrip()}",
+            f"platform = {file_uri_for_config(staged_platform)}{package_override.rstrip()}",
         )
         if WAVESHARE_PLATFORM_URL in verified_text:
             raise BuildError(

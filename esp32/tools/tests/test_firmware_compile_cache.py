@@ -12,6 +12,18 @@ from firmware_compile_cache import configure_metadata_identity, relocate_core_te
 
 
 class FirmwareCompileCacheTests(unittest.TestCase):
+    def test_relocated_platformio_file_location_stays_a_raw_filesystem_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            origin = root / "producer"
+            target = root / "consumer with a longer path"
+            target.mkdir()
+            metadata = target / ".piopm"
+            metadata.write_text('{"uri":"file://' + str(origin / "platform-staging") + '"}')
+            self.assertEqual(relocate_core_text(target, origin, target), 1)
+            self.assertIn("file://" + str(target / "platform-staging"), metadata.read_text())
+            self.assertNotIn("%20", metadata.read_text())
+
     @unittest.skipUnless(shutil.which("cc"), "host C compiler is unavailable")
     def test_compiler_clock_is_independent_of_commit_epoch_and_source_mtime(self):
         with tempfile.TemporaryDirectory() as directory:
