@@ -36,6 +36,9 @@ attested and published as an immutable private entry before PlatformIO runs.
 The producer need not remain on disk. Shared cache entries are trusted local
 build outputs, not remotely signed releases or substitutes for the pinned
 runtime trust contract.
+Shared core transport is gzip compressed to bound storage and CI transfer cost;
+its compressed digest and original member inventory are both verified. Private
+core archives retain the existing format.
 
 Compiler objects stay private to the worktree and profile. Their namespace
 uses the exact core input key rather than the entire application Git identity.

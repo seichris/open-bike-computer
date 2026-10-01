@@ -882,7 +882,7 @@ def _core_archive_inventory(
     names: set[str] = set()
     symlink_names: set[str] = set()
     try:
-        with tarfile.open(archive_path, mode="r:") as archive:
+        with tarfile.open(archive_path, mode="r:*") as archive:
             members = archive.getmembers()
             for member in members:
                 name = member.name
@@ -1292,7 +1292,7 @@ def _extract_core_archive(
     project_root = project_dir.resolve()
     names: set[str] = set()
     symlink_names: set[str] = set()
-    with tarfile.open(archive_path, mode="r:") as archive:
+    with tarfile.open(archive_path, mode="r:*") as archive:
         for member in archive.getmembers():
             name = member.name
             parts = name.split("/")

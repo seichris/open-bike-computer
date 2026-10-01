@@ -47,6 +47,8 @@ class SharedCoreCacheTests(unittest.TestCase):
             binary = installed / "packages/framework-arduinoespressif32-libs/esp32s3/qio_opi/libcore.a"
             binary.write_bytes(b"\x00" + os.fsencode(str(origin)))
             self.publish(origin)
+        archive = next((self.root / "transport").rglob("core-artifacts.tar"))
+        self.assertEqual(archive.read_bytes()[:2], b"\x1f\x8b")
         unavailable = self.root / "unavailable"
         origin.rename(unavailable)
         target = self.project("consumer with spaces")

@@ -8,6 +8,7 @@ then publishes and verifies a new project-private core entry before use.
 from __future__ import annotations
 
 import fcntl
+import gzip
 import json
 import os
 import shutil
@@ -186,17 +187,36 @@ def publish_shared_core(project: Path, environment: str) -> None:
             # A producer never consumes this entry. Consumers always verify it
             # before restoring; avoid rehashing an unused archive on warm builds.
             return
-        core._validate_core_cache_entry(project, environment, key)
+        manifest = core._validate_core_cache_entry(project, environment, key)
         temporary = Path(tempfile.mkdtemp(prefix=f".{request_key}.", dir=entry.parent))
         try:
             destination = temporary / "core"
             destination.mkdir()
             files = {}
             for path in source.iterdir():
+                if path.name == "manifest.json":
+                    continue
                 output = destination / path.name
-                _copy_file(path, output)
+                if path.name == core.CORE_ARCHIVE_FILENAME:
+                    # Keep transport compact on disk and in Actions caches.
+                    # The member inventory remains identical to the verified
+                    # original; the compressed byte stream gets its own digest.
+                    with path.open("rb") as original, output.open("xb") as target:
+                        with gzip.GzipFile(filename="", fileobj=target, mode="wb", compresslevel=1, mtime=0) as compressed:
+                            shutil.copyfileobj(original, compressed, length=1024 * 1024)
+                else:
+                    _copy_file(path, output)
                 output.chmod(0o444)
                 files[path.name] = core._file_sha256(output)
+            archive = destination / core.CORE_ARCHIVE_FILENAME
+            metadata_manifest = destination / "manifest.json"
+            core._atomic_json(metadata_manifest, {
+                **manifest,
+                "coreArchiveSize": archive.stat().st_size,
+                "coreArchiveSha256": files[core.CORE_ARCHIVE_FILENAME],
+            })
+            metadata_manifest.chmod(0o444)
+            files["manifest.json"] = core._file_sha256(metadata_manifest)
             destination.chmod(0o555)
             metadata = temporary / "transport.json"
             core._atomic_json(metadata, {
