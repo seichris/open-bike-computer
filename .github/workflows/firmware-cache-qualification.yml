@@ -1,0 +1,52 @@
+name: Firmware cache qualification
+
+on:
+  pull_request:
+    paths:
+      - '.github/actions/firmware-build-cache/**'
+      - '.github/workflows/firmware-cache-qualification.yml'
+      - 'esp32/prebuild.py'
+      - 'esp32/tools/build_firmware.py'
+      - 'esp32/tools/generated_sdkconfig.py'
+      - 'esp32/tools/shared_firmware_cache.py'
+      - 'esp32/tools/firmware_compile_cache.py'
+      - 'esp32/tools/benchmark_firmware_cache.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-cache-qualification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    name: Cache (${{ matrix.runner }}, ${{ matrix.environment }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+        environment:
+          - WAVESHARE_AMOLED_175
+          - WAVESHARE_AMOLED_175_PRODUCTION
+          - WAVESHARE_AMOLED_206
+          - WAVESHARE_AMOLED_206_PRODUCTION
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Qualify cold, warm, source-only and relocated builds
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          env -u LD_LIBRARY_PATH python3 esp32/tools/benchmark_firmware_cache.py \
+            "$BUILD_ENVIRONMENT" --output "$RUNNER_TEMP/cache-evidence/results.json"
+      - name: Retain timing and identity evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: firmware-cache-${{ matrix.runner }}-${{ matrix.environment }}
+          path: ${{ runner.temp }}/cache-evidence/
+          if-no-files-found: error
+          retention-days: 30

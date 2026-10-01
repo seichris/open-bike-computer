@@ -135,6 +135,9 @@ class DynamicTlsLinkProofTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.project_dir = Path(self.temp_dir.name)
+        cache_patch = patch.dict(os.environ, {"OPEN_BIKE_FIRMWARE_BUILD_CACHE": str(self.project_dir.resolve() / ".pio/shared-cache")})
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
 
     def write_sdkconfig(self, dynamic: bool) -> None:
         value = "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y\n" if dynamic else ""
@@ -238,6 +241,9 @@ class FirmwareBuildTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.project_dir = Path(self.temp_dir.name)
+        cache_patch = patch.dict(os.environ, {"OPEN_BIKE_FIRMWARE_BUILD_CACHE": str(self.project_dir.resolve() / ".pio/shared-cache")})
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
         self.runtime_patch = patch.dict(
             os.environ,
             {
@@ -259,6 +265,8 @@ class FirmwareBuildTests(unittest.TestCase):
             "tools/generated_sdkconfig.py",
             "tools/pioarduino_custom_core.py",
             "tools/firmware_runtime.py",
+            "tools/firmware_compile_cache.py",
+            "tools/shared_firmware_cache.py",
         ):
             path = self.project_dir / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -562,6 +570,7 @@ class FirmwareBuildTests(unittest.TestCase):
                 "git", "add", "platformio.ini", ".gitignore", "prebuild.py",
                 "tools/build_firmware.py", "tools/generated_sdkconfig.py",
                 "tools/pioarduino_custom_core.py", "tools/firmware_runtime.py",
+                "tools/firmware_compile_cache.py", "tools/shared_firmware_cache.py",
             ],
             cwd=self.project_dir,
             check=True,
@@ -2369,6 +2378,7 @@ build_src_filter =
                 "build_firmware.record_generated_sdkconfig_defaults",
                 return_value=fake_manifest,
             ),
+            patch("build_firmware.publish_shared_core"),
         ):
             build_firmware(self.project_dir, self.environment, runner=runner)
 

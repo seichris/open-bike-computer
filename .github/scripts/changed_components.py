@@ -29,11 +29,13 @@ FULL_CI_PATHS = {
 }
 FIRMWARE_HOST_ONLY_PATH_PREFIXES = ("esp32/tools/tests/",)
 FIRMWARE_HOST_PATH_PREFIXES = (
+    ".github/actions/firmware-build-cache/",
     ".github/actions/require-immutable-releases/",
     ".github/actions/require-firmware-release-controls/",
 )
 FIRMWARE_WORKFLOW_PATHS = {
     ".github/workflows/firmware-diagnostics.yml",
+    ".github/workflows/firmware-cache-qualification.yml",
     ".github/workflows/firmware-release-candidate.yml",
     ".github/workflows/firmware-release.yml",
     ".github/workflows/firmware-runtime-performance.yml",
@@ -102,6 +104,10 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
 
         if path in FULL_CI_PATHS:
             return {component: True for component in COMPONENTS}
+
+        if path.startswith(".github/actions/firmware-build-cache/"):
+            selected["firmware_build"] = True
+            selected["firmware_host"] = True
 
         if path.startswith("esp32/"):
             selected["firmware_host"] = True

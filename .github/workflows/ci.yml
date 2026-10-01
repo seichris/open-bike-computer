@@ -158,6 +158,10 @@ jobs:
         with:
           path: esp32/.pio/open-bike-build/downloads
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
+      - name: Restore verified firmware build caches
+        uses: ./.github/actions/firmware-build-cache
+        with:
+          environment: ${{ matrix.target }}
       - name: Build with the repository-owned firmware runtime
         env:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
@@ -431,6 +435,8 @@ jobs:
             tools.tests.test_package_factory_firmware \
             tools.tests.test_firmware_build_identity \
             tools.tests.test_generated_sdkconfig \
+            tools.tests.test_shared_firmware_cache \
+            tools.tests.test_firmware_compile_cache \
             tools.tests.test_firmware_runtime \
             tools.tests.test_refresh_firmware_runtime \
             tools.tests.test_capture_boot \

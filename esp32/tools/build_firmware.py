@@ -64,6 +64,7 @@ from pioarduino_custom_core import (
     pioarduino_transform_source_sha256,
 )
 from package_factory_firmware import BundleError, package_factory_bundle
+from shared_firmware_cache import restore_shared_core, publish_shared_core
 
 
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -136,6 +137,7 @@ BUILD_ENVIRONMENT_PASSTHROUGH = {
     "LOGNAME",
     "NO_PROXY",
     "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE",
+    "OPEN_BIKE_FIRMWARE_BUILD_CACHE",
     "OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS",
     "OPEN_BIKE_FIRMWARE_WHEELHOUSE",
     "OPEN_BIKE_FIRMWARE_UV",
@@ -1201,7 +1203,10 @@ def _application_build_cache_identity(
         raise BuildError(
             "cannot select the application compiler cache without an exact core input key"
         )
-    return f"{source_identity}:{core_key}"
+    # SCons fingerprints the source, included headers and effective command.
+    # Git metadata is scoped to firmware_metadata.cpp by prebuild.py.
+    # A source-only commit must not discard unrelated library objects.
+    return f"application-v2:{core_key}"
 
 
 def _bootstrap_build_cache_identity(
@@ -1661,11 +1666,13 @@ def build_firmware(
             _remove_pioarduino_dummy(project_dir)
             _remove_environment_build(project_dir, environment)
             _reset_profile_override_inputs(project_dir, environment)
-            selected_core_key = core_input_key(project_dir, environment)
             try:
                 preserved_sdkconfigs = prepare_generated_sdkconfigs(
                     project_dir, environment
                 )
+                if not preserved_sdkconfigs and restore_shared_core(project_dir, environment):
+                    preserved_sdkconfigs = prepare_generated_sdkconfigs(project_dir, environment)
+                selected_core_key = core_input_key(project_dir, environment)
             except GeneratedSdkconfigError as error:
                 raise BuildError(str(error)) from error
             if not preserved_sdkconfigs:
@@ -1865,6 +1872,7 @@ def build_firmware(
                 )
                 manifest = None
                 if manifest_path is not None:
+                    publish_shared_core(project_dir, environment)
                     manifest = _record_build_phase_timings(
                         manifest_path,
                         {
@@ -2188,7 +2196,7 @@ def main(
                 args.upload_port,
                 **upload_options,
             )
-    except BuildError as error:
+    except (BuildError, GeneratedSdkconfigError, FirmwareRuntimeError, OSError) as error:
         print(f"Firmware build failed: {error}", file=sys.stderr)
         return 1
     return 0

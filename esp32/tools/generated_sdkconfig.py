@@ -242,7 +242,9 @@ def _runtime_provenance() -> dict[str, object] | None:
     return value
 
 
-def _core_input_key(project_dir: Path, environment: str) -> str | None:
+def _core_key_material(
+    project_dir: Path, environment: str, *, generated: bool = True
+) -> dict[str, object] | None:
     platformio_ini = project_dir / "platformio.ini"
     runtime = _runtime_provenance()
     if runtime is None or platformio_ini.is_symlink() or not platformio_ini.is_file():
@@ -251,9 +253,9 @@ def _core_input_key(project_dir: Path, environment: str) -> str | None:
         defaults, environment_config = _sdkconfig_paths(project_dir, environment)
     except GeneratedSdkconfigError:
         return None
-    if not _is_generated_sdkconfig(defaults):
+    if generated and not _is_generated_sdkconfig(defaults):
         return None
-    if os.path.lexists(environment_config):
+    if generated and os.path.lexists(environment_config):
         if not _is_generated_sdkconfig(environment_config):
             return None
         environment_sdkconfig_sha256 = _file_sha256(environment_config)
@@ -266,6 +268,8 @@ def _core_input_key(project_dir: Path, environment: str) -> str | None:
         "tools/generated_sdkconfig.py",
         "tools/pioarduino_custom_core.py",
         "tools/firmware_runtime.py",
+        "tools/firmware_compile_cache.py",
+        "tools/shared_firmware_cache.py",
     ):
         path = project_dir / relative
         if path.is_symlink() or not path.is_file():
@@ -296,7 +300,7 @@ def _core_input_key(project_dir: Path, environment: str) -> str | None:
         "environment": environment,
         "runtime": runtime,
         "platformioIniSha256": _file_sha256(platformio_ini),
-        "sdkconfigDefaultsSha256": _file_sha256(defaults),
+        "sdkconfigDefaultsSha256": _file_sha256(defaults) if generated else None,
         "environmentSdkconfigSha256": environment_sdkconfig_sha256,
         "platformArchiveSha256": WAVESHARE_PLATFORM_ARCHIVE_SHA256,
         "platformPackagesSha256": WAVESHARE_PLATFORM_PACKAGES_SHA256,
@@ -305,7 +309,20 @@ def _core_input_key(project_dir: Path, environment: str) -> str | None:
         "memoryType": WAVESHARE_MEMORY_TYPE,
         "toolInputs": tool_inputs,
     }
-    return _canonical_json_sha256(material)
+    return material
+
+
+def _core_input_key(project_dir: Path, environment: str) -> str | None:
+    material = _core_key_material(project_dir, environment)
+    return _canonical_json_sha256(material) if material is not None else None
+
+
+def core_request_key(project_dir: Path, environment: str) -> str | None:
+    """Lookup identity before generated SDK sidecars exist in a new worktree."""
+    if _has_unsupported_project_overrides(project_dir):
+        return None
+    material = _core_key_material(project_dir, environment, generated=False)
+    return _canonical_json_sha256(material) if material is not None else None
 
 
 def _core_manifest_path(
@@ -1351,8 +1368,11 @@ def _hydrate_core_cache_entry(
     environment: str,
     core_input_key: str,
     manifest: dict[str, object],
-) -> None:
-    entry = _core_cache_entry_dir(project_dir, environment, core_input_key)
+    *,
+    entry_dir: Path | None = None,
+    relocate_from: Path | None = None,
+) -> dict[str, object]:
+    entry = entry_dir or _core_cache_entry_dir(project_dir, environment, core_input_key)
     hydration_root = project_dir / ".pio/open-bike-build/hydration"
     hydration_root.mkdir(parents=True, exist_ok=True)
     if hydration_root.is_symlink() or not hydration_root.is_dir():
@@ -1371,6 +1391,9 @@ def _hydrate_core_cache_entry(
             raise GeneratedSdkconfigError(
                 f"could not hydrate the core cache archive: {error}"
             ) from error
+        if relocate_from is not None:
+            from firmware_compile_cache import relocate_core_text
+            relocate_core_text(temporary, relocate_from, project_dir)
         roots = _core_artifact_roots(project_dir, environment)
         managed_components_root = (project_dir / "managed_components").resolve()
         for logical, target, _ in roots:
@@ -1440,10 +1463,22 @@ def _hydrate_core_cache_entry(
         ) from error
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
+    if relocate_from is not None:
+        attestation = _core_attestation(project_dir, environment)
+        if attestation is None:
+            raise GeneratedSdkconfigError("relocated core cannot be attested")
+        manifest = {
+            **manifest,
+            "coreAttestation": attestation,
+            "coreAttestationSha256": _canonical_json_sha256(attestation),
+            "managedComponentsSha256": _managed_components_sha256(project_dir),
+            "libraryDependenciesSha256": _library_dependencies_sha256(project_dir, environment),
+        }
     if not _active_core_matches(project_dir, environment, manifest):
         raise GeneratedSdkconfigError(
             "hydrated custom-core outputs do not match their immutable manifest"
         )
+    return manifest
 
 
 def _publish_core_cache_entry(
