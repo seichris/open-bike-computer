@@ -20,12 +20,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Archive tracked source only
+      - name: Archive staged diagnostics for independent review
         run: |
           set -euo pipefail
           git rev-parse HEAD > "$RUNNER_TEMP/source-commit.txt"
           git rev-parse 'HEAD^{tree}' > "$RUNNER_TEMP/source-tree.txt"
-          git archive --format=tar.gz --output="$RUNNER_TEMP/pr-source.tar.gz" HEAD
+          git archive --format=tar.gz --output="$RUNNER_TEMP/pr-source.tar.gz" HEAD -- .github/diagnostics-reviewed
           (cd "$RUNNER_TEMP" && sha256sum pr-source.tar.gz > source-sha256.txt)
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
