@@ -64,7 +64,10 @@ from pioarduino_custom_core import (
     pioarduino_transform_source_sha256,
 )
 from package_factory_firmware import BundleError, package_factory_bundle
-from shared_firmware_cache import restore_shared_core, publish_shared_core
+from shared_firmware_cache import (
+    restore_shared_core, publish_shared_core,
+    restore_shared_download, publish_shared_download,
+)
 
 
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -138,6 +141,7 @@ BUILD_ENVIRONMENT_PASSTHROUGH = {
     "NO_PROXY",
     "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE",
     "OPEN_BIKE_FIRMWARE_BUILD_CACHE",
+    "XDG_CACHE_HOME",
     "OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS",
     "OPEN_BIKE_FIRMWARE_WHEELHOUSE",
     "OPEN_BIKE_FIRMWARE_UV",
@@ -501,6 +505,10 @@ def _download_verified_archive(
             archive.unlink()
 
     if archive.exists():
+        publish_shared_download(archive, sha256, size)
+        return archive
+
+    if restore_shared_download(archive, sha256, size):
         return archive
 
     temporary_name: str | None = None
@@ -539,6 +547,7 @@ def _download_verified_archive(
                 Path(temporary_name).unlink()
             except OSError:
                 pass
+    publish_shared_download(archive, sha256, size)
     return archive
 
 

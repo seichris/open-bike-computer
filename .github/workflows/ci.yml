@@ -437,6 +437,7 @@ jobs:
             tools.tests.test_generated_sdkconfig \
             tools.tests.test_shared_firmware_cache \
             tools.tests.test_firmware_compile_cache \
+            tools.tests.test_firmware_download_cache \
             tools.tests.test_firmware_runtime \
             tools.tests.test_refresh_firmware_runtime \
             tools.tests.test_capture_boot \

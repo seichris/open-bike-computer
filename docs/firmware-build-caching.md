@@ -13,6 +13,12 @@ core transport entries are shared at
 `OPEN_BIKE_FIRMWARE_BUILD_CACHE` selects an absolute isolated build-cache root,
 primarily for CI and qualification; unsafe paths are rejected.
 
+The same shared build-cache root keeps pinned download archives by SHA-256.
+Each receiving worktree verifies the pinned size, digest, owner and permissions,
+then copies the archive into its private download store without network access.
+The shared payload is immutable and atomically published; APFS file clones
+avoid duplicating unchanged archive bytes on this Mac.
+
 Shared core lookup covers the exact environment, host runtime, PlatformIO
 configuration, platform/package pins, declared component/partition inputs,
 and the core-producing tools. Generated SDK sidecars and the complete original

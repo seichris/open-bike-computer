@@ -39,12 +39,16 @@ def default_build_cache_root() -> Path:
 
 
 @contextmanager
-def _store(environment: str, request_key: str):
-    if core.ENVIRONMENT_PATTERN.fullmatch(environment) is None:
+def _store(environment: str, request_key: str, namespace: str = "cores-v1"):
+    if (
+        core.ENVIRONMENT_PATTERN.fullmatch(environment) is None
+        or core.re.fullmatch(r"[0-9a-f]{64}", request_key) is None
+        or namespace not in {"cores-v1", "downloads-v1"}
+    ):
         raise core.GeneratedSdkconfigError("invalid shared-cache environment")
     cache_root = _safe_subtree(default_build_cache_root(), (), create=True)
     # The full-root creation loop tolerates another publisher creating parents.
-    root = _safe_subtree(cache_root / "cores-v1" / environment, (), create=True)
+    root = _safe_subtree(cache_root / namespace / environment, (), create=True)
     for owned in (cache_root, root.parent, root):
         if owned.stat().st_uid != os.getuid() or owned.stat().st_mode & 0o022:
             raise core.GeneratedSdkconfigError("unsafe shared core cache ownership or permissions")
@@ -110,6 +114,63 @@ def _copy_file(source: Path, destination: Path) -> None:
         if result.returncode == 0:
             return
     shutil.copyfile(source, destination)
+
+
+def _validate_download(entry: Path, sha256: str, size: int) -> Path:
+    payload = entry / "archive"
+    if (
+        entry.is_symlink() or not entry.is_dir()
+        or entry.stat().st_uid != os.getuid()
+        or stat.S_IMODE(entry.stat().st_mode) != 0o555
+        or {p.name for p in entry.iterdir()} != {"archive"}
+        or payload.is_symlink() or not payload.is_file()
+        or payload.stat().st_uid != os.getuid() or payload.stat().st_nlink != 1
+        or stat.S_IMODE(payload.stat().st_mode) != 0o444
+        or payload.stat().st_size != size or core._file_sha256(payload) != sha256
+    ):
+        raise core.GeneratedSdkconfigError("shared pinned download is corrupt or unsafe")
+    return payload
+
+
+def restore_shared_download(destination: Path, sha256: str, size: int) -> bool:
+    with _store("archives", sha256, "downloads-v1") as entry:
+        if not os.path.lexists(entry):
+            return False
+        payload = _validate_download(entry, sha256, size)
+        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.restore")
+        if os.path.lexists(temporary):
+            raise core.GeneratedSdkconfigError("unsafe private download restoration path")
+        try:
+            _copy_file(payload, temporary)
+            temporary.chmod(0o600)
+            if temporary.stat().st_size != size or core._file_sha256(temporary) != sha256:
+                raise core.GeneratedSdkconfigError("restored pinned download changed")
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+    return True
+
+
+def publish_shared_download(source: Path, sha256: str, size: int) -> None:
+    with _store("archives", sha256, "downloads-v1") as entry:
+        if os.path.lexists(entry):
+            _validate_download(entry, sha256, size)
+            return
+        temporary = Path(tempfile.mkdtemp(prefix=f".{sha256}.", dir=entry.parent))
+        try:
+            payload = temporary / "archive"
+            _copy_file(source, payload)
+            payload.chmod(0o444)
+            temporary.chmod(0o555)
+            _validate_download(temporary, sha256, size)
+            temporary.chmod(0o700)
+            os.rename(temporary, entry)
+            entry.chmod(0o555)
+        finally:
+            if temporary.exists():
+                temporary.chmod(0o700)
+                shutil.rmtree(temporary)
 
 
 def publish_shared_core(project: Path, environment: str) -> None:
