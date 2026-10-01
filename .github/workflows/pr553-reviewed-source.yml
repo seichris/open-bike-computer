@@ -1,0 +1,70 @@
+name: PR 553 reviewed source objects
+on:
+  push:
+    branches: [implement/wifi-device-operation-lifecycle]
+    paths: [.github/workflows/pr553-reviewed-source.yml]
+permissions:
+  contents: write
+jobs:
+  objects:
+    if: github.repository == 'seichris/open-bike-computer' && github.ref == 'refs/heads/implement/wifi-device-operation-lifecycle'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 8869d1d192afb8a185debebf5e5ee940b76785c4
+          persist-credentials: false
+      - name: Verify reviewed source and publish blobs only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATCH: 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
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request, zlib
+          REPO = 'seichris/open-bike-computer'
+          BASE = '8869d1d192afb8a185debebf5e5ee940b76785c4'
+          TREE = '6d6be18f180ee3e6220a98dd408c67220570bfcf'
+          def git(*args, data=None):
+              return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null', *args], input=data)
+          def api(path, value=None):
+              request = urllib.request.Request('https://api.github.com/repos/' + REPO + '/' + path,
+                  data=None if value is None else json.dumps(value).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json'},
+                  method='GET' if value is None else 'POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  return json.load(response)
+          assert os.environ['GITHUB_REPOSITORY'] == REPO
+          assert os.environ['GITHUB_REF'] == 'refs/heads/implement/wifi-device-operation-lifecycle'
+          assert [p['sha'] for p in api('git/commits/' + os.environ['GITHUB_SHA'])['parents']] == [BASE]
+          assert git('rev-parse', 'HEAD^{tree}').decode().strip() == 'c8407a8e825b4df9a96b35e9da1dcf45ba6be6a5'
+          decoder = zlib.decompressobj()
+          patch = decoder.decompress(base64.b64decode(os.environ['PATCH'], validate=True), 65536)
+          assert decoder.eof and not decoder.unused_data and not decoder.unconsumed_tail
+          assert len(patch) == 8856 and hashlib.sha256(patch).hexdigest() == '9cc645c963e97c03410202e0dad9047b164b6bcd1e9744b572d37fcc0c71af2d'
+          git('apply', '--index', '--whitespace=error-all', '-', data=patch)
+          assert git('write-tree').decode().strip() == TREE
+          paths = git('diff', '--cached', '--name-only').decode().splitlines()
+          assert len(paths) == 5 and all(not p.startswith('.github/') for p in paths)
+          entries = []
+          for path in paths:
+              assert not path.startswith('/') and '..' not in path.split('/')
+              mode, sha, stage = git('ls-files', '--stage', '--', path).decode().split('\t')[0].split()
+              assert mode in ('100644', '100755') and stage == '0'
+              payload = git('show', ':' + path)
+              assert len(payload) < 2 * 1024 * 1024
+              result = api('git/blobs', {'content': base64.b64encode(payload).decode(), 'encoding': 'base64'})
+              assert result['sha'] == sha
+              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': sha})
+          # No patched code executes here. Native connector performs all tree,
+          # commit and ref writes and removes this temporary workflow.
+          result = {'tree': TREE, 'entries': entries, 'staging': os.environ['GITHUB_SHA']}
+          pathlib.Path(os.environ['RUNNER_TEMP'], 'source-objects.json').write_text(json.dumps(result))
+          print(json.dumps(result))
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: reviewed-source-objects
+          path: ${{ runner.temp }}/source-objects.json
+          retention-days: 1
+          if-no-files-found: error
