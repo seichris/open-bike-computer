@@ -76,10 +76,12 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             metadata.srcnode.return_value.get_abspath.return_value = str(project / "lib/firmware_metadata/firmware_metadata.cpp")
             unrelated = Mock()
             unrelated.srcnode.return_value.get_abspath.return_value = str(project / "lib/lvgl/lvgl.cpp")
-            self.assertIs(callback(env, unrelated), env.Object.return_value)
+            env.Object.return_value = [Mock()]
+            self.assertIs(callback(env, unrelated), env.Object.return_value[0])
             env.Depends.assert_called_once_with(env.Object.return_value, str(project / ".pio/open-bike-build/build-identity/WAVESHARE_AMOLED_175/firmware_compile_clock.h"))
             env.Clone.assert_not_called()
-            callback(env, metadata)
+            env.Clone.return_value.Object.return_value = [Mock()]
+            self.assertIs(callback(env, metadata), env.Clone.return_value.Object.return_value[0])
             clone = env.Clone.return_value
             self.assertEqual(clone.Depends.call_count, 2)
             header = Path(clone.Depends.call_args.args[1])

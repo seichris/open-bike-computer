@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import re
+import os
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -365,6 +368,32 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("PULL_REQUEST_DRAFT", changes)
         self.assertIn("github.event.merge_group.base_sha", changes)
         self.assertIn("github.event.merge_group.head_sha", changes)
+
+    def test_cache_qualification_failure_blocks_protected_ci_gate(self) -> None:
+        source = workflow_source("ci.yml")
+        job = mapping_block(source, "firmware-cache", indent=2)
+        gate = mapping_block(source, "gate", indent=2)
+        self.assertIn("- firmware-cache", gate)
+        self.assertIn("uses: ./.github/workflows/firmware-cache-qualification.yml", job)
+        self.assertNotIn("heavy_ci", job)
+        self.assertIn("  workflow_call:", workflow_source("firmware-cache-qualification.yml"))
+        script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+        environment = {
+            **os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "false",
+            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "false", "IOS_CHANGED": "false",
+            "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
+            **{name: "skipped" for name in ("ESP32_RESULT", "HOST_RESULT", "IOS_FAST_RESULT", "IOS_RESULT", "MAP_RESULT")},
+        }
+        for selected, result, expected in (
+            ("true", "success", 0), ("true", "failure", 1),
+            ("true", "cancelled", 1), ("true", "skipped", 1), ("false", "skipped", 0),
+        ):
+            with self.subTest(selected=selected, result=result):
+                completed = subprocess.run(
+                    ["bash", "-c", script], capture_output=True, text=True,
+                    env={**environment, "FIRMWARE_CACHE_QUALIFICATION": selected, "CACHE_RESULT": result},
+                )
+                self.assertEqual(completed.returncode, expected, completed.stdout + completed.stderr)
 
     def test_draft_prs_keep_fast_checks_and_skip_heavy_jobs(self) -> None:
         general_ci = workflow_source("ci.yml")

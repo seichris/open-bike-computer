@@ -64,13 +64,13 @@ def configure_metadata_identity(env, git_sha: str, timestamp: str) -> None:
         if source != project / "lib/firmware_metadata/firmware_metadata.cpp":
             result = build_env.Object(node)
             build_env.Depends(result, str(clock))
-            return result
+            return result[0]
         identity_env = build_env.Clone()
         identity_env.Append(CCFLAGS=["-include", str(header)])
         result = identity_env.Object(node)
         identity_env.Depends(result, str(clock))
         identity_env.Depends(result, str(header))
-        return result
+        return result[0]
 
     env.AddBuildMiddleware(metadata_object)
 

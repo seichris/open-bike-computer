@@ -71,7 +71,7 @@ saves a fresh cache snapshot with a matching-input restore prefix. CI, release
 candidates, diagnostics, and speaker builds use this action. Mutable toolchain
 trees, current firmware manifests, upload plans, and final images are excluded.
 
-The **Firmware cache qualification** workflow checks both supported native
+The **Firmware cache qualification** reusable workflow checks both supported native
 hosts and both boards' ordinary/production profiles. Each job builds:
 
 1. A cold source worktree with an empty isolated compiled-core cache.
@@ -86,6 +86,10 @@ Private uploader/image paths in flash plans remain worktree-local; the actual
 flashable image hashes must match. All phases require a fresh linker map. Timing JSON and full
 logs are retained. Run this qualification before accepting changes to cache
 keys or relocation rules; passing host tests alone does not qualify relocation.
+CI invokes it when cache tools, core configuration or pinned runtime inputs
+change, including draft PRs. The protected **CI Gate** requires every selected
+qualification job to succeed. Application-only edits use the normal firmware
+builds and avoid repeating this isolated core qualification matrix.
 
 After identifying the connected board, the same build-only check is available
 locally from the repository root:
