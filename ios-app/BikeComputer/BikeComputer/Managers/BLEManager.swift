@@ -1199,6 +1199,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferLastErrorSequence: UInt64?
+    @Published private(set) var diagnosticsCaptureStatus: DiagnosticsCaptureStatus?
+    @Published private(set) var diagnosticsLiveTail: DiagnosticsFirmwareLiveTail?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
     @Published private(set) var deviceTransferResourceSnapshot:
         DeviceTransferResourceSnapshot?
@@ -5539,6 +5541,8 @@ class BLEManager: NSObject, ObservableObject {
         supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
+        diagnosticsCaptureStatus = nil
+        diagnosticsLiveTail = nil
         supportsRideDeliveryAcknowledgement = false
         supportsWorldRadio = false
         supportsScreenConfiguration = false
@@ -6167,6 +6171,29 @@ class BLEManager: NSObject, ObservableObject {
             scheduleDiagnosticsCaptureBindingRetry()
         }
         return queued
+    }
+
+    @discardableResult
+    func requestDiagnosticsLiveTail(boot: UInt32, after: UInt32) -> Bool {
+        guard isNavigationReady, supportsRideDiagnostics,
+              diagnosticsCaptureStatus?.schemaDigest == DiagnosticsSchema.digest else { return false }
+        return sendTransferControlPacket(
+            Data("\(DeviceBLEProtocol.deviceTransferControlPrefix)live|2|\(boot)|\(after)".utf8),
+            label: "bounded live diagnostics", coalescingKey: "transfer.diagnostics.live")
+    }
+
+    @discardableResult
+    func sendDiagnosticsCapturePolicy(_ request: DiagnosticsCaptureRequest) -> Bool {
+        guard isNavigationReady, supportsRideDiagnostics, request.valid,
+              let remote = diagnosticsCaptureStatus, remote.valid,
+              remote.schemaDigest == DiagnosticsSchema.digest,
+              request.mask & ~remote.supportedMask == 0,
+              diagnosticsRecorder?.currentCaptureID == request.captureID else { return false }
+        // Enqueue the binding first on the same authenticated ordered transport.
+        guard sendDiagnosticsCaptureBinding(request.captureID) else { return false }
+        return sendTransferControlPacket(
+            Data("\(DeviceBLEProtocol.deviceTransferControlPrefix)\(request.command)".utf8),
+            label: "bounded diagnostics policy", coalescingKey: "transfer.diagnostics.policy")
     }
 
     @discardableResult
@@ -6878,6 +6905,8 @@ class BLEManager: NSObject, ObservableObject {
         supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
+        diagnosticsCaptureStatus = nil
+        diagnosticsLiveTail = nil
         supportsRideDeliveryAcknowledgement = false
         supportsWorldRadio = false
         supportsScreenConfiguration = false
@@ -10242,6 +10271,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
+        diagnosticsCaptureStatus = nil
+        diagnosticsLiveTail = nil
         supportsRideDeliveryAcknowledgement = false
         supportsWorldRadio = false
         supportsScreenConfiguration = false
@@ -10957,6 +10988,19 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             return true
         }
 
+        if let live = object["diagnosticsLive"] as? [String: Any],
+           let validated = DeviceDiagnosticsTransferManager.validatedLiveTail(live) {
+            diagnosticsLiveTail = validated
+        }
+        if let policy = object["diagnosticsPolicy"],
+           let data = try? JSONSerialization.data(withJSONObject: policy),
+           let decoded = try? JSONDecoder().decode(DiagnosticsCaptureStatus.self, from: data),
+           decoded.valid {
+            diagnosticsCaptureStatus = decoded
+        } else {
+            diagnosticsCaptureStatus = nil
+        diagnosticsLiveTail = nil
+        }
         let enabled = object["enabled"] as? Bool ?? false
         deviceTransferMode = object["mode"] as? String ?? ""
         if let baseURLString = object["baseUrl"] as? String {

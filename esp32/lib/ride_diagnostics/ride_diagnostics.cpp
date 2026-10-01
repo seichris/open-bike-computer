@@ -1,7 +1,11 @@
 #include "ride_diagnostics.hpp"
+#include "live_tail_v2.hpp"
+#include <new>
 #include "ride_diagnostics_control.hpp"
 #include "ride_diagnostics_format.hpp"
 #include "ride_diagnostics_queue_policy.hpp"
+#include "catalog_v2.hpp"
+#include <mbedtls/sha256.h>
 
 #include <Arduino.h>
 #include <atomic>
@@ -96,6 +100,7 @@ constexpr std::size_t kFilePruneBatch = 16;
 Storage *storage = nullptr;
 std::atomic<bool> shutdownSealStarted{false};
 std::atomic<bool> shutdownSealReady{false};
+live_v2::Ring *liveRing = nullptr;
 QueueHandle_t normalQueue = nullptr;
 QueueHandle_t criticalQueue = nullptr;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -129,6 +134,9 @@ SemaphoreHandle_t queueMutationMutex = nullptr;
 SemaphoreHandle_t sealComplete = nullptr;
 SemaphoreHandle_t faultCapsuleFlushMutex = nullptr;
 FILE *activeFile = nullptr;
+mbedtls_sha256_context activeHash{};
+bool activeHashValid = false;
+uint32_t activeFirstSequence = 0, activeLastSequence = 0;
 uint32_t activeFileBytes = 0;
 uint32_t activeChunk = 1;
 std::atomic<uint32_t> activeChunkSnapshot{1};
@@ -153,6 +161,8 @@ std::atomic<uint16_t> maxQueueDepth{0};
 std::atomic<uint16_t> normalQueueCriticalCount{0};
 char activeCapture[48] = {};
 portMUX_TYPE captureMux = portMUX_INITIALIZER_UNLOCKED;
+policy_v2::State runtimeCapturePolicy{};
+uint32_t lastMemorySampleMs = 0;
 #if DETAILED_RIDE_DIAGNOSTICS
 std::atomic<bool> detailedCapture{false};
 std::atomic<uint32_t> detailedCaptureDeadlineMs{0};
@@ -231,7 +241,11 @@ bool removeChunkFile(const ChunkFile &file) {
            diagnosticsRoot(),
            static_cast<unsigned long>(file.boot),
            static_cast<unsigned long>(file.chunk));
-  return storage->remove(path);
+  if (!storage->remove(path)) return false;
+  const std::string catalog = std::string(path) + ".cat2";
+  (void)storage->remove(catalog.c_str());
+  (void)storage->remove((catalog + ".tmp").c_str());
+  return true;
 }
 
 void removeEmptyBootDirectories() {
@@ -270,6 +284,10 @@ void removeEmptyBootDirectories() {
 
 const char *levelName(Level level) {
   switch (level) {
+  case Level::Trace:
+    return "trace";
+  case Level::Fatal:
+    return "fatal";
   case Level::Debug:
     return "debug";
   case Level::Info:
@@ -384,7 +402,7 @@ void updateFaultCapsule(Level level, const char *category, const char *event,
   currentFaultCapsule.eventCount++;
   if (storageFailure)
     currentFaultCapsule.storageErrorCount++;
-  if (level == Level::Warning || level == Level::Error || storageFailure) {
+  if (level >= Level::Warning || storageFailure) {
     if (category != nullptr) {
       strncpy(currentFaultCapsule.lastCriticalCategory, category,
               sizeof(currentFaultCapsule.lastCriticalCategory) - 1);
@@ -515,6 +533,18 @@ ActiveFileCloseResult closeAndAdvanceActiveChunk() {
   if (activePath[0] != '\0')
     strncpy(closingPath, activePath, sizeof(closingPath) - 1);
   const ActiveFileCloseResult closeResult = closeActiveFile();
+  // Hash state belongs to this writer and includes only complete successful
+  // writes. Publish a descriptor only after the data file's close succeeded.
+  if (closeResult == ActiveFileCloseResult::Ready && activeHashValid && activeFileBytes > 0) {
+    catalog_v2::Descriptor descriptor;
+    descriptor.boot = bootSequence.load(); descriptor.chunk = activeChunk;
+    descriptor.bytes = activeFileBytes;
+    descriptor.firstSequence = activeFirstSequence; descriptor.lastSequence = activeLastSequence;
+    if (mbedtls_sha256_finish(&activeHash, descriptor.digest.data()) == 0)
+      (void)catalog_v2::write(*storage, closingPath, descriptor);
+  }
+  mbedtls_sha256_free(&activeHash);
+  activeHashValid = false;
   // stdio may buffer a short capture entirely until fclose(). Determine
   // whether the chunk exists only after the close has flushed those bytes.
   const bool hadActiveChunk = closingPath[0] != '\0' &&
@@ -581,6 +611,11 @@ bool openActiveFile() {
     if (activeFile == nullptr)
       return false;
     activeFileBytes = static_cast<uint32_t>(existingBytes);
+    mbedtls_sha256_free(&activeHash);
+    mbedtls_sha256_init(&activeHash);
+    // Reopened legacy bytes must be hashed by the reader; do not advertise a
+    // digest over only this process's appended suffix.
+    activeHashValid = existingBytes == 0 && mbedtls_sha256_starts(&activeHash, 0) == 0;
     return true;
   }
   activePath[0] = '\0';
@@ -589,6 +624,8 @@ bool openActiveFile() {
 }
 
 void abandonActiveChunkAfterUncertainWrite() {
+  mbedtls_sha256_free(&activeHash);
+  activeHashValid = false;
   const bool hadPath = activePath[0] != '\0';
   (void)closeActiveFile();
   activePath[0] = '\0';
@@ -813,6 +850,11 @@ bool writeQueuedEvent(const QueuedEvent &event) {
     updateFaultCapsule(Level::Error, "storage", "write_failed", true);
     return false;
   }
+  if (activeFileBytes == 0) activeFirstSequence = event.sequence;
+  activeLastSequence = event.sequence;
+  if (activeHashValid && mbedtls_sha256_update(&activeHash,
+      reinterpret_cast<const uint8_t *>(event.line), result) != 0)
+    activeHashValid = false;
   activeFileBytes += static_cast<uint32_t>(result);
   const uint32_t nowMs = millis();
   if (event.critical || static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) {
@@ -1213,7 +1255,7 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
   }
   queued.sequence = sequence;
   queued.length = static_cast<uint16_t>(length);
-  queued.critical = level == Level::Error || level == Level::Warning ||
+  queued.critical = level >= Level::Warning ||
                     strcmp(category, "user") == 0 ||
                     strcmp(category, "lifecycle") == 0;
   queued.rotateBeforeWrite = rotateBeforeWrite;
@@ -1222,7 +1264,9 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
   queued.faultCapsuleBoot = faultBoot;
   queued.faultCapsuleEventCount = faultEventCount;
   queued.faultCapsuleChecksum = faultChecksum;
-  return enqueue(queued);
+  const bool accepted = enqueue(queued);
+  if (accepted && liveRing != nullptr) liveRing->append(sequence, queued.line, queued.length);
+  return accepted;
 }
 
 } // namespace
@@ -1289,6 +1333,12 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
       producerMutex != nullptr && queueMutationMutex != nullptr &&
       faultCapsuleFlushMutex != nullptr && sealComplete != nullptr &&
       retentionMutex != nullptr;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (liveRing == nullptr) {
+    void *memory = heap_caps_malloc(sizeof(live_v2::Ring), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (memory != nullptr) liveRing = new (memory) live_v2::Ring();
+  }
+#endif
   recorderResourcesReady.store(resourcesReady, std::memory_order_release);
   if (!resourcesReady) {
     Serial.println("RIDE_DIAGNOSTICS: recorder_ready=0 reason=resources");
@@ -1326,6 +1376,27 @@ void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe) {
 }
 
 void process(uint32_t nowMs) {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  if (static_cast<uint32_t>(nowMs - lastMemorySampleMs) >= 5000U) {
+    lastMemorySampleMs = nowMs;
+    portENTER_CRITICAL(&captureMux);
+    const bool sampleMemory = policy_v2::active(runtimeCapturePolicy, nowMs, activeCapture) &&
+        (runtimeCapturePolicy.request.mask & registry::domainMask("memory")) != 0;
+    portEXIT_CRITICAL(&captureMux);
+    if (sampleMemory) {
+      char fields[240] = {};
+      snprintf(fields, sizeof(fields),
+        "{\"freeInternalBytes\":%u,\"largestInternalBytes\":%u,\"freePsramBytes\":%u,"
+        "\"minimumInternalBytes\":%u,\"taskCount\":%u}",
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(uxTaskGetNumberOfTasks()));
+      (void)record(Level::Debug, "memory", "health", fields);
+    }
+  }
+#endif
 #if PERSISTENT_RIDE_DIAGNOSTICS && DETAILED_RIDE_DIAGNOSTICS
   // The writer task owns file handles. This hook is intentionally tiny so it
   // can be called from the LVGL loop without adding storage latency there.
@@ -1401,6 +1472,17 @@ bool recordInternal(Level level, const char *category, const char *event,
   (void)fieldsJson;
   return false;
 #else
+  // Filtering precedes JSON construction and never consumes storage/queue loss
+  // counters. Existing explicit RAUT capture remains bounded by its own lease.
+  portENTER_CRITICAL(&captureMux);
+  const bool policyInstalled = runtimeCapturePolicy.installed &&
+      std::strcmp(runtimeCapturePolicy.request.capture, activeCapture) == 0;
+  const bool policyAllows = policy_v2::admit(runtimeCapturePolicy,
+      static_cast<unsigned>(level), registry::domainMask(category), millis(),
+      activeCapture, kMaximumEventBytes);
+  portEXIT_CRITICAL(&captureMux);
+  if (!policyAllows && (policyInstalled || !detailedCaptureEnabled()))
+    return false;
   if (!validToken(category, 32) || !validToken(event, 64)) {
     dropped.fetch_add(1);
     return false;
@@ -1455,24 +1537,64 @@ bool record(Level level, const char *category, const char *event,
   return recordInternal(level, category, event, fieldsJson, false, 0, 0);
 }
 
+bool applyCapturePolicy(const policy_v2::Request &request) {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  portENTER_CRITICAL(&captureMux);
+  const bool accepted = policy_v2::apply(runtimeCapturePolicy, request, millis(), activeCapture);
+  portEXIT_CRITICAL(&captureMux);
+  if (accepted) {
+    char fields[240] = {};
+    snprintf(fields, sizeof(fields),
+      "{\"policyGeneration\":%lu,\"policyMask\":%lu,\"effectiveLevel\":\"%s\",\"budgetBytes\":%lu}",
+      static_cast<unsigned long>(request.generation), static_cast<unsigned long>(request.mask),
+      levelName(static_cast<Level>(request.minimumLevel)), static_cast<unsigned long>(request.budgetBytes));
+    (void)record(Level::Info, "logger", "policy_applied", fields);
+  }
+  return accepted;
+#else
+  (void)request;
+  return false;
+#endif
+}
+
+std::string capturePolicyJson() {
+  portENTER_CRITICAL(&captureMux);
+  const policy_v2::State policy = runtimeCapturePolicy;
+  const bool enabled = policy_v2::active(policy, millis(), activeCapture);
+  portEXIT_CRITICAL(&captureMux);
+  char result[512] = {};
+  snprintf(result, sizeof(result),
+    "{\"schema\":2,\"schemaDigest\":\"%s\",\"supportedMask\":%lu,\"generation\":%lu,"
+    "\"mask\":%lu,\"minimumLevel\":%lu,\"active\":%s,\"captureId\":\"%s\","
+    "\"remainingBytes\":%lu,\"filteredCount\":%lu,\"deadlineUptimeMs\":%lu,"
+    "\"baselineMinimumLevel\":2,\"rawPayloads\":false}", registry::kSha256,
+    static_cast<unsigned long>(registry::kInstrumentedMask),
+    static_cast<unsigned long>(policy.request.generation), static_cast<unsigned long>(policy.request.mask),
+    static_cast<unsigned long>(policy.request.minimumLevel), enabled ? "true" : "false", policy.request.capture,
+    static_cast<unsigned long>(policy.remaining), static_cast<unsigned long>(policy.filtered),
+    static_cast<unsigned long>(policy.deadline));
+  return result;
+}
+
+bool liveTailJson(uint32_t boot, uint32_t after, std::string &output) {
+  // Reserve outside the producer lock. Two records plus metadata fit without
+  // allocating while the producer is briefly excluded; busy reads fail fast.
+  output.reserve(2304);
+  if (liveRing == nullptr || producerMutex == nullptr ||
+      xSemaphoreTake(producerMutex, 0) != pdTRUE) return false;
+  liveRing->json(bootSequence.load(), boot, after, output);
+  xSemaphoreGive(producerMutex);
+  return true;
+}
+
 bool recordHealth(const char *reason) {
   if (reason == nullptr || !validToken(reason, 32))
     return false;
   const Stats snapshot = stats();
   char fields[288] = {};
-  snprintf(fields, sizeof(fields),
-           "{\"reason\":\"%s\",\"enqueuedCount\":%lu,"
-           "\"writtenCount\":%lu,\"droppedCount\":%lu,"
-           "\"storageErrorCount\":%lu,\"queueDepth\":%u,"
-           "\"maxQueueDepth\":%u,\"available\":%s,\"recorderReady\":%s}",
-           reason, static_cast<unsigned long>(snapshot.enqueued),
-           static_cast<unsigned long>(snapshot.written),
-           static_cast<unsigned long>(snapshot.dropped),
-           static_cast<unsigned long>(snapshot.storageErrors),
-           static_cast<unsigned>(snapshot.queueDepth),
-           static_cast<unsigned>(snapshot.maxQueueDepth),
-           snapshot.storageAvailable ? "true" : "false",
-           snapshot.recorderReady ? "true" : "false");
+  if (!detail::formatRecorderHealthFields(fields, sizeof(fields), reason,
+                                         snapshot))
+    return false;
   return record(Level::Info, "logger", "health", fields);
 }
 

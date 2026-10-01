@@ -13,26 +13,38 @@ import CryptoKit
 import Foundation
 
 nonisolated enum RideDiagnosticLevel: String, Codable, CaseIterable {
+    case trace
     case debug
     case info
     case warning
     case error
+    case fatal
 }
 
 nonisolated enum RideDiagnosticCategory: String, Codable, CaseIterable {
-    case lifecycle
-    case boot
+    case audio
     case ble
-    case navigation
+    case boot
+    case display
     case gps
-    case workout
-    case rideAutomation
-    case storage
+    case http
+    case lifecycle
+    case logger
     case map
+    case memory
+    case navigation
+    case ota
     case power
+    case rideAutomation
+    case sensor
+    case storage
+    case tasks
+    case tls
+    case touch
     case transfer
     case user
-    case logger
+    case wifi
+    case workout
 }
 
 enum RideDiagnosticsRideLifecyclePolicy {
@@ -52,81 +64,94 @@ enum RideDiagnosticsRideLifecyclePolicy {
 /// field must be added here before a producer can persist it, keeping the
 /// privacy contract reviewable at one call site.
 nonisolated enum RideDiagnosticsFieldPolicy {
+// BEGIN GENERATED DIAGNOSTICS FIELDS
     static let allowedKeys: Set<String> = [
-        "operationId", "cleanupFailed", "freeBytes", "largestBytes",
-        "minimumFreeBytes", "minimumLargestBytes", "tlsStackBytes", "ownerStackBytes",
-        "rendererStackBytes", "stackAvailableMask",
         "accuracy", "accuracyAvailable", "accuracyBucket", "acknowledgedKind",
         "active", "activeStage", "ageMs", "alertMode",
         "applyErrorCode", "applyErrorDomain", "applyResult", "attempt",
         "attemptId", "authorization", "authorized", "autoPauseEnabled",
         "available", "background", "blockLoadMs", "bootSequence",
-        "bytes", "chunk", "class", "clockSynchronized",
-        "code", "commandClass", "completedStage", "connectCompleted",
-        "connectDurationMs", "connectStarted", "connectionGeneration", "connectionReused",
-        "connectionState", "consecutiveEarlyFailures", "controllerRole", "decisionSequence",
-        "diagnosticHold", "domain", "droppedCount", "durationLimit",
-        "durationMs", "enqueuedCount", "errorCode", "errorDomain",
-        "eventCount", "expectedState", "fallback", "featureFlags",
-        "firmwareBuild", "firmwareFingerprint", "firmwareTarget", "firstMissingUptimeMs",
-        "firmwareProfile", "firmwareVersion", "firmwareGitSha", "otaState",
-        "fixValid", "formatVersion", "generation", "highWater",
-        "highWaterBytes", "httpStatus", "importedCount", "kind",
-        "lastCriticalCategory", "lastCriticalEvent", "lastFailureCompletedStage", "lastFailureResetReason",
-        "lastFailureStage", "lastGapMs", "lastMissingUptimeMs", "latencyMs",
-        "leaseGeneration", "localAccessorySubnet", "mapDetail", "mapId",
-        "mapPhase", "mapProgressMs", "maxQueueDepth", "maximumGapMs",
-        "members", "messageBytes", "messageDigest", "mode",
-        "navigating", "networkObservation", "networkProtocol", "networkTransport",
-        "origin", "outcome", "pendingControl", "phase",
-        "profileVersion", "proxyConnection", "queueBytes", "queueDepth",
-        "ready", "reason", "rejectedCount", "remoteEndpointMatched",
-        "replacedCount", "resetReason", "result", "retries",
-        "rideDetectionArmed", "rideGeneration", "role", "routeLoaded",
-        "rssiBucket", "runtimeBootSequence", "safeMode", "sampleCount",
+        "budgetBytes", "budgetRemainingBytes", "bytes", "captureGeneration",
+        "catalogGeneration", "chunk", "class", "cleanupFailed",
+        "clockSynchronized", "clockUncertaintyMs", "code", "commandClass",
+        "completedStage", "connectCompleted", "connectDurationMs", "connectStarted",
+        "connectionGeneration", "connectionReused", "connectionState", "consecutiveEarlyFailures",
+        "controllerRole", "coverage", "cutoffSequence", "decisionSequence",
+        "delivery", "diagnosticHold", "domain", "dropReason",
+        "droppedCount", "durable", "durationLimit", "durationMs",
+        "effectiveLevel", "emissionSequence", "enqueuedCount", "errorCode",
+        "errorDomain", "eventCount", "expectedChunks", "expectedState",
+        "expiresUptimeMs", "fallback", "featureFlags", "filteredCount",
+        "firmwareBuild", "firmwareFingerprint", "firmwareGitSha", "firmwareProfile",
+        "firmwareTarget", "firmwareVersion", "firstMissingUptimeMs", "fixValid",
+        "formatVersion", "freeBytes", "freeInternalBytes", "freePsramBytes",
+        "generation", "highWater", "highWaterBytes", "httpStatus",
+        "importedCount", "incidentId", "kind", "largestBytes",
+        "largestInternalBytes", "lastCriticalCategory", "lastCriticalEvent", "lastFailureCompletedStage",
+        "lastFailureResetReason", "lastFailureStage", "lastGapMs", "lastMissingUptimeMs",
+        "latencyMs", "leaseGeneration", "localAccessorySubnet", "mapDetail",
+        "mapId", "mapPhase", "mapProgressMs", "maxQueueDepth",
+        "maximumGapMs", "maximumLevel", "members", "messageBytes",
+        "messageDigest", "minimumFreeBytes", "minimumInternalBytes", "minimumLargestBytes",
+        "missingChunks", "mode", "navigating", "networkObservation",
+        "networkProtocol", "networkTransport", "operationId", "origin",
+        "otaState", "outcome", "ownerStackBytes", "pendingControl",
+        "phase", "policyGeneration", "policyMask", "profileVersion",
+        "providerId", "proxyConnection", "queueBytes", "queueDepth",
+        "ready", "reason", "recorderReady", "rejectedCount",
+        "remoteEndpointMatched", "rendererStackBytes", "replacedCount", "resetReason",
+        "result", "retries", "rideDetectionArmed", "rideGeneration",
+        "role", "routeLoaded", "rssiBucket", "runtimeBootSequence",
+        "safeMode", "sampleCount", "sampleIntervalMs", "schemaDigest",
         "schemaVersion", "scope", "sequence", "sessionPresent",
         "sha256Prefix", "simulation", "sizeBucket", "sourceHealthMask",
-        "speedAvailable", "startMode", "state", "storage",
-        "storageErrorCount", "tlsChallenge", "tlsCompleted", "tlsDurationMs",
-        "tlsStarted", "transition", "uiPhase", "uiProgressMs",
-        "underlyingErrorCode", "underlyingErrorDomain", "viewingMap", "visitedEntries",
-        "waitedForConnectivity", "watchSequence", "watchUptimeMs", "watchdogCoreMask",
-        "watchdogUptimeMs", "workoutActive", "writerDetail", "writerPhase",
-        "writerProgressMs", "writtenCount",
+        "speedAvailable", "stackAvailableMask", "startMode", "state",
+        "storage", "storageErrorCount", "taskCount", "tlsChallenge",
+        "tlsCompleted", "tlsDurationMs", "tlsStackBytes", "tlsStarted",
+        "transition", "uiPhase", "uiProgressMs", "underlyingErrorCode",
+        "underlyingErrorDomain", "unsupportedReason", "verifiedChunks", "viewingMap",
+        "visitedEntries", "waitedForConnectivity", "watchSequence", "watchUptimeMs",
+        "watchdogCoreMask", "watchdogUptimeMs", "workoutActive", "writerDelayMs",
+        "writerDetail", "writerPhase", "writerProgressMs", "writtenCount",
     ]
     static let firmwareNumberKeys: Set<String> = [
-        "freeBytes", "largestBytes", "minimumFreeBytes", "minimumLargestBytes",
-        "tlsStackBytes", "ownerStackBytes", "rendererStackBytes", "stackAvailableMask",
         "accuracy", "activeStage", "ageMs", "alertMode",
         "applyErrorCode", "attempt", "blockLoadMs", "bootSequence",
-        "bytes", "chunk", "commandClass", "completedStage",
-        "connectDurationMs", "connectionGeneration", "consecutiveEarlyFailures", "decisionSequence",
-        "droppedCount", "durationMs", "enqueuedCount", "errorCode",
-        "eventCount", "firmwareBuild", "firstMissingUptimeMs", "formatVersion",
-        "generation", "highWater", "highWaterBytes", "httpStatus",
-        "importedCount", "lastFailureCompletedStage", "lastFailureResetReason", "lastFailureStage",
-        "lastGapMs", "lastMissingUptimeMs", "latencyMs", "leaseGeneration",
-        "mapDetail", "mapProgressMs", "maxQueueDepth", "maximumGapMs",
-        "members", "messageBytes", "profileVersion", "queueBytes",
-        "queueDepth", "rejectedCount", "replacedCount", "resetReason",
-        "retries", "rideGeneration", "runtimeBootSequence", "sampleCount",
-        "schemaVersion", "sequence", "sourceHealthMask", "storageErrorCount",
-        "tlsDurationMs", "uiProgressMs", "underlyingErrorCode", "visitedEntries",
+        "budgetBytes", "budgetRemainingBytes", "bytes", "captureGeneration",
+        "catalogGeneration", "chunk", "clockUncertaintyMs", "commandClass",
+        "completedStage", "connectDurationMs", "connectionGeneration", "consecutiveEarlyFailures",
+        "cutoffSequence", "decisionSequence", "droppedCount", "durationMs",
+        "emissionSequence", "enqueuedCount", "errorCode", "eventCount",
+        "expectedChunks", "expiresUptimeMs", "filteredCount", "firmwareBuild",
+        "firstMissingUptimeMs", "formatVersion", "freeBytes", "freeInternalBytes",
+        "freePsramBytes", "generation", "highWater", "highWaterBytes",
+        "httpStatus", "importedCount", "largestBytes", "largestInternalBytes",
+        "lastFailureCompletedStage", "lastFailureResetReason", "lastFailureStage", "lastGapMs",
+        "lastMissingUptimeMs", "latencyMs", "leaseGeneration", "mapDetail",
+        "mapProgressMs", "maxQueueDepth", "maximumGapMs", "members",
+        "messageBytes", "minimumFreeBytes", "minimumInternalBytes", "minimumLargestBytes",
+        "missingChunks", "ownerStackBytes", "policyGeneration", "policyMask",
+        "profileVersion", "queueBytes", "queueDepth", "rejectedCount",
+        "rendererStackBytes", "replacedCount", "resetReason", "retries",
+        "rideGeneration", "runtimeBootSequence", "sampleCount", "sampleIntervalMs",
+        "schemaVersion", "sequence", "sourceHealthMask", "stackAvailableMask",
+        "storageErrorCount", "taskCount", "tlsDurationMs", "tlsStackBytes",
+        "uiProgressMs", "underlyingErrorCode", "verifiedChunks", "visitedEntries",
         "watchSequence", "watchUptimeMs", "watchdogCoreMask", "watchdogUptimeMs",
-        "writerDetail", "writerProgressMs", "writtenCount",
+        "writerDelayMs", "writerDetail", "writerProgressMs", "writtenCount",
     ]
     static let firmwareBooleanKeys: Set<String> = [
-        "cleanupFailed",
         "accuracyAvailable", "active", "authorized", "autoPauseEnabled",
-        "available", "background", "clockSynchronized", "connectCompleted",
-        "connectStarted", "connectionReused", "diagnosticHold", "fallback",
-        "fixValid", "localAccessorySubnet", "navigating", "pendingControl",
-        "proxyConnection", "ready", "remoteEndpointMatched", "rideDetectionArmed",
-        "routeLoaded", "safeMode", "sessionPresent", "simulation",
-        "speedAvailable", "tlsCompleted", "tlsStarted", "viewingMap",
-        "waitedForConnectivity", "workoutActive",
+        "available", "background", "cleanupFailed", "clockSynchronized",
+        "connectCompleted", "connectStarted", "connectionReused", "diagnosticHold",
+        "durable", "fallback", "fixValid", "localAccessorySubnet",
+        "navigating", "pendingControl", "proxyConnection", "ready",
+        "recorderReady", "remoteEndpointMatched", "rideDetectionArmed", "routeLoaded",
+        "safeMode", "sessionPresent", "simulation", "speedAvailable",
+        "tlsCompleted", "tlsStarted", "viewingMap", "waitedForConnectivity",
+        "workoutActive",
     ]
-
+// END GENERATED DIAGNOSTICS FIELDS
     static func isAllowed(_ key: String) -> Bool {
         allowedKeys.contains(key)
     }
@@ -538,6 +563,9 @@ final class RideDiagnosticsRecorder:
     @Published private(set) var retainedBytes: Int = 0
     @Published private(set) var droppedEventCount: Int = 0
     @Published private(set) var lastError: String?
+    @Published private(set) var runtimeCapturePolicy: DiagnosticsCaptureRequest?
+    private let policyLock = NSLock()
+    private var policyState = DiagnosticsCapturePolicyState()
     @Published private(set) var detailedTraceEnabled = false
     @Published private(set) var detailedTraceExpiresAt: Date?
     @Published private(set) var captureBinding: RideDiagnosticsCaptureBinding
@@ -551,6 +579,7 @@ final class RideDiagnosticsRecorder:
     private let queue: DispatchQueue
     private let now: () -> Date
     private let startUptime: TimeInterval
+    private let uptime: () -> TimeInterval
     private let isoFormatter: ISO8601DateFormatter
     private let userDefaults: UserDefaults
     private let privacyDigestKey = SymmetricKey(size: .bits256)
@@ -584,15 +613,19 @@ final class RideDiagnosticsRecorder:
         let category: RideDiagnosticCategory
         let event: String
         let fields: [String: String]
-        let captureId: UUID?
+        let captureId: UUID
+        let occurredAt: Date
+        let occurredUptimeMs: Int
 
         var isCritical: Bool {
-            level == .warning || level == .error ||
+            level == .warning || level == .error || level == .fatal ||
                 category == .user || category == .lifecycle
         }
     }
     private let pendingLock = NSLock()
     private var pendingRecords: [PendingRecord] = []
+    // Emission order is independent of the v1 storage-order sequence.
+    private var nextEmissionSequence: UInt64 = 0
     private var pendingDrainScheduled = false
     private var pendingAdmissionDrops = 0
     private struct StorageOutcome {
@@ -631,6 +664,7 @@ final class RideDiagnosticsRecorder:
     init(
         rootURL: URL? = nil,
         now: @escaping () -> Date = Date.init,
+        uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         userDefaults: UserDefaults = .standard
     ) {
         let initialCaptureID = UUID()
@@ -650,7 +684,8 @@ final class RideDiagnosticsRecorder:
         self.oldestRetainedAt = nil
         self.newestRetainedAt = nil
         self.now = now
-        self.startUptime = ProcessInfo.processInfo.systemUptime
+        self.uptime = uptime
+        self.startUptime = uptime()
         self.queue = DispatchQueue(
             label: "com.bicino.ride-diagnostics",
             qos: .utility
@@ -719,6 +754,34 @@ final class RideDiagnosticsRecorder:
         ).map { String(format: "%02x", $0) }.joined().prefix(16))
     }
 
+    /// Runtime policy is supported by the production journal. It does not
+    /// enable raw data, SDK logging, or compiled-out RAUT providers.
+    @discardableResult
+    func beginTargetedCapture(mask: UInt32, minimumLevel: UInt32,
+                              seconds: UInt32, budgetBytes: UInt32) -> DiagnosticsCaptureRequest? {
+        guard let capture = currentCaptureID else { return nil }
+        let request: DiagnosticsCaptureRequest? = policyLock.withLock {
+            let previous = policyState.request?.captureID == capture ? (policyState.request?.generation ?? 0) : 0
+            guard previous < UInt32.max else { return nil }
+            let next = DiagnosticsCaptureRequest(captureID: capture, generation: previous + 1,
+                mask: mask, minimumLevel: minimumLevel, durationSeconds: seconds, budgetBytes: budgetBytes)
+            return policyState.apply(next, now: uptime(), captureID: capture) ? next : nil
+        }
+        guard let request else { return nil }
+        DispatchQueue.main.async { [weak self] in self?.runtimeCapturePolicy = request }
+        record(category: .logger, event: "policy_applied", fields: [
+            "policyGeneration": String(request.generation), "policyMask": String(request.mask),
+            "effectiveLevel": DiagnosticsSchema.levels[Int(request.minimumLevel)],
+            "budgetBytes": String(request.budgetBytes), "schemaDigest": DiagnosticsSchema.digest,
+            "durationLimit": String(seconds),
+        ], captureId: capture)
+        return request
+    }
+
+    var requestedCapturePolicy: DiagnosticsCaptureRequest? {
+        policyLock.withLock { policyState.request }
+    }
+
     func record(
         level: RideDiagnosticLevel = .info,
         category: RideDiagnosticCategory,
@@ -726,17 +789,44 @@ final class RideDiagnosticsRecorder:
         fields: [String: String] = [:],
         captureId: UUID? = nil
     ) {
+        // Snapshot occurrence BEFORE sanitization, dispatch and storage I/O.
+        // In particular, never attribute queued events to a later ride.
+        let occurredAt = now()
+        let occurredUptimeMs = max(0, Int((uptime() - startUptime) * 1000))
+        let occurrenceCapture = captureId ?? currentCaptureID ?? processId
+        let admission = policyLock.withLock {
+            (policyState.request?.captureID == occurrenceCapture, policyState.admit(
+                level: level.rawValue, domain: category.rawValue, now: uptime(),
+                captureID: occurrenceCapture, maximumBytes: 8 * 1024))
+        }
+        if !admission.1 && (admission.0 || !isDetailedTraceEnabled) { return }
         let safeEvent = Self.safeEventName(event)
-        let safeFields = Self.sanitize(fields: fields)
+        var safeFields = Self.sanitize(fields: fields)
         guard !safeEvent.isEmpty else { return }
+        safeFields["emissionSequence"] = String(reserveEmissionSequence())
         enqueue(PendingRecord(
             level: level,
             category: category,
             event: safeEvent,
             fields: safeFields,
-            captureId: captureId
+            captureId: occurrenceCapture,
+            occurredAt: occurredAt,
+            occurredUptimeMs: occurredUptimeMs
         ))
     }
+
+    private func reserveEmissionSequence() -> UInt64 {
+        pendingLock.withLock {
+            let value = nextEmissionSequence
+            nextEmissionSequence &+= 1
+            return value
+        }
+    }
+
+#if HOST_TESTING
+    func suspendWriterForTesting() { queue.suspend() }
+    func resumeWriterForTesting() { queue.resume() }
+#endif
 
     private func enqueue(_ pending: PendingRecord) {
         var scheduleDrain = false
@@ -806,16 +896,15 @@ final class RideDiagnosticsRecorder:
                     level: pending.level,
                     category: pending.category,
                     event: pending.event,
-                    wallTime: isoFormatter.string(from: now()),
-                    uptimeMs: max(
-                        0,
-                        Int((ProcessInfo.processInfo.systemUptime - startUptime) * 1000)
-                    ),
+                    wallTime: isoFormatter.string(from: pending.occurredAt),
+                    uptimeMs: pending.occurredUptimeMs,
                     processId: processId.uuidString.lowercased(),
-                    captureId: (
-                        pending.captureId ?? activeCaptureId ?? standardCaptureId
-                    ).uuidString.lowercased(),
-                    fields: pending.fields
+                    captureId: pending.captureId.uuidString.lowercased(),
+                    fields: pending.fields.merging([
+                        "writerDelayMs": String(max(0,
+                            Int((uptime() - startUptime) * 1000) - pending.occurredUptimeMs
+                        )),
+                    ], uniquingKeysWith: { _, recorded in recorded })
                 )
                 sequence += 1
                 try append(event)
@@ -1426,10 +1515,13 @@ final class RideDiagnosticsRecorder:
                 category: category,
                 event: Self.safeEventName(event),
                 wallTime: isoFormatter.string(from: now()),
-                uptimeMs: max(0, Int((ProcessInfo.processInfo.systemUptime - startUptime) * 1000)),
+                uptimeMs: max(0, Int((uptime() - startUptime) * 1000)),
                 processId: processId.uuidString.lowercased(),
                 captureId: (activeCaptureId ?? standardCaptureId).uuidString.lowercased(),
-                fields: Self.sanitize(fields: fields)
+                fields: Self.sanitize(fields: fields).merging([
+                    "emissionSequence": String(reserveEmissionSequence()),
+                    "writerDelayMs": "0",
+                ], uniquingKeysWith: { _, recorded in recorded })
             )
             sequence += 1
             try append(event)
@@ -1490,6 +1582,7 @@ final class RideDiagnosticsRecorder:
             // capture graph scan.
             try writeManifest(enforceRetention: false)
         } catch {
+            synchronized = false
             publishError(error.localizedDescription)
             queueStorageOutcome(
                 event: "write_failed",
@@ -2487,7 +2580,10 @@ final class RideDiagnosticsRecorder:
         pendingStorageOutcomes.append(
             StorageOutcome(
                 event: Self.safeEventName(event),
-                fields: Self.sanitize(fields: fields)
+                fields: Self.sanitize(fields: fields).merging([
+                    "emissionSequence": String(reserveEmissionSequence()),
+                    "writerDelayMs": "0",
+                ], uniquingKeysWith: { _, recorded in recorded })
             )
         )
     }

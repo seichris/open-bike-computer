@@ -3,7 +3,51 @@ import Foundation
 
 @main
 enum RideDiagnosticsHostTests {
+    /// Exercise the real queue, not a source-string assertion. The v1 sequence
+    /// remains storage order; emissionSequence and occurrence time identify ingress.
+    static func occurrenceTimeSurvivesWriterDelay() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diagnostics-clock-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        var wall = Date(timeIntervalSince1970: 1_790_000_000)
+        var monotonic: TimeInterval = 100
+        let recorder = RideDiagnosticsRecorder(rootURL: root, now: { wall }, uptime: { monotonic })
+        recorder.flush()
+        let capture = try require(recorder.currentCaptureID)
+        recorder.suspendWriterForTesting()
+        recorder.record(category: .ble, event: "before_delay")
+        wall.addTimeInterval(90)
+        monotonic += 90
+        // Queued mode change cannot relabel the record already admitted.
+        recorder.beginDetailedTrace()
+        recorder.record(category: .ble, event: "after_delay")
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        let urls = try require(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "jsonl" }
+        let records = try urls.flatMap { url in
+            try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+            }
+        }
+        let before = try require(records.first { $0.event == "before_delay" })
+        let after = try require(records.first { $0.event == "after_delay" })
+        precondition(before.uptimeMs == 0)
+        precondition(after.uptimeMs == 90_000)
+        precondition(before.captureId == capture.uuidString.lowercased())
+        precondition(after.captureId == capture.uuidString.lowercased())
+        precondition(before.fields["writerDelayMs"] == "90000")
+        precondition(before.wallTime != after.wallTime)
+        precondition(before.fields["emissionSequence"] != after.fields["emissionSequence"])
+    }
+
     static func main() throws {
+        try occurrenceTimeSurvivesWriterDelay()
+        precondition(RideDiagnosticsFieldPolicy.isAllowed("recorderReady"))
+        precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "recorderReady", value: NSNumber(value: true)))
+        precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "recorderReady", value: NSNumber(value: 1)))
         // Match the bounded firmware resource producer's numeric/boolean/string
         // types; retain the existing importer privacy and field-count limits.
         for key in ["freeBytes", "largestBytes", "minimumFreeBytes",

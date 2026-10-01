@@ -78,6 +78,8 @@ jobs:
         run: python3 -m unittest discover -s .github/scripts/tests
       - name: Verify generated ride BLE contract
         run: python3 tools/generate_ride_ble_contract.py --check
+      - name: Verify generated diagnostics contract
+        run: python3 tools/generate_diagnostics_contract.py --check
       - id: policy
         name: Select CI cost policy
         env:
@@ -317,6 +319,12 @@ jobs:
         working-directory: ios-app
       - name: Run ride diagnostics recorder tests
         run: ./scripts/run-ride-diagnostics-tests.sh
+      - name: Durable diagnostics acquisition contracts
+        run: ./scripts/run-diagnostics-acquisition-tests.sh
+      - name: Bounded diagnostics capture policy contracts
+        run: ./scripts/run-diagnostics-policy-tests.sh
+      - name: Paired diagnostics broker contracts
+        run: ./scripts/run-diagnostics-broker-tests.sh
         working-directory: ios-app
       - name: Run shared route and Watch BLE contract tests
         run: ./scripts/run-ride-shared-tests.sh
@@ -434,6 +442,9 @@ jobs:
         run: |
           for test in \
             test_ride_diagnostics_format \
+            test_capture_policy_v2 \
+            test_diagnostics_catalog_v2 \
+            test_diagnostics_live_tail_v2 \
             test_lifecycle_resource_event \
             test_runtime_watchdog_policy \
             test_ride_diagnostics_queue_policy \

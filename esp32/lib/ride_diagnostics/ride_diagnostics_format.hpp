@@ -7,49 +7,58 @@
 
 namespace ride_diagnostics::detail {
 
+// BEGIN GENERATED DIAGNOSTICS ALLOWED_FIELDS
 constexpr const char *kAllowedFieldKeys[] = {
-    "operationId", "cleanupFailed", "freeBytes", "largestBytes",
-    "minimumFreeBytes", "minimumLargestBytes", "tlsStackBytes", "ownerStackBytes",
-    "rendererStackBytes", "stackAvailableMask",
     "accuracy", "accuracyAvailable", "accuracyBucket", "acknowledgedKind",
     "active", "activeStage", "ageMs", "alertMode",
     "applyErrorCode", "applyErrorDomain", "applyResult", "attempt",
     "attemptId", "authorization", "authorized", "autoPauseEnabled",
     "available", "background", "blockLoadMs", "bootSequence",
-    "bytes", "chunk", "class", "clockSynchronized",
-    "code", "commandClass", "completedStage", "connectCompleted",
-    "connectDurationMs", "connectStarted", "connectionGeneration", "connectionReused",
-    "connectionState", "consecutiveEarlyFailures", "controllerRole", "decisionSequence",
-    "diagnosticHold", "domain", "droppedCount", "durationLimit",
-    "durationMs", "enqueuedCount", "errorCode", "errorDomain",
-    "eventCount", "expectedState", "fallback", "featureFlags",
-    "firmwareBuild", "firmwareFingerprint", "firmwareTarget", "firstMissingUptimeMs",
-    "firmwareProfile", "firmwareVersion", "firmwareGitSha", "otaState",
-    "fixValid", "formatVersion", "generation", "highWater",
-    "highWaterBytes", "httpStatus", "importedCount", "kind",
-    "lastCriticalCategory", "lastCriticalEvent", "lastFailureCompletedStage", "lastFailureResetReason",
-    "lastFailureStage", "lastGapMs", "lastMissingUptimeMs", "latencyMs",
-    "leaseGeneration", "localAccessorySubnet", "mapDetail", "mapId",
-    "mapPhase", "mapProgressMs", "maxQueueDepth", "maximumGapMs",
-    "members", "messageBytes", "messageDigest", "mode",
-    "navigating", "networkObservation", "networkProtocol", "networkTransport",
-    "origin", "outcome", "pendingControl", "phase",
-    "profileVersion", "proxyConnection", "queueBytes", "queueDepth",
-    "ready", "reason", "rejectedCount", "remoteEndpointMatched",
-    "replacedCount", "resetReason", "result", "retries",
-    "rideDetectionArmed", "rideGeneration", "role", "routeLoaded",
-    "rssiBucket", "runtimeBootSequence", "safeMode", "sampleCount",
+    "budgetBytes", "budgetRemainingBytes", "bytes", "captureGeneration",
+    "catalogGeneration", "chunk", "class", "cleanupFailed",
+    "clockSynchronized", "clockUncertaintyMs", "code", "commandClass",
+    "completedStage", "connectCompleted", "connectDurationMs", "connectStarted",
+    "connectionGeneration", "connectionReused", "connectionState", "consecutiveEarlyFailures",
+    "controllerRole", "coverage", "cutoffSequence", "decisionSequence",
+    "delivery", "diagnosticHold", "domain", "dropReason",
+    "droppedCount", "durable", "durationLimit", "durationMs",
+    "effectiveLevel", "emissionSequence", "enqueuedCount", "errorCode",
+    "errorDomain", "eventCount", "expectedChunks", "expectedState",
+    "expiresUptimeMs", "fallback", "featureFlags", "filteredCount",
+    "firmwareBuild", "firmwareFingerprint", "firmwareGitSha", "firmwareProfile",
+    "firmwareTarget", "firmwareVersion", "firstMissingUptimeMs", "fixValid",
+    "formatVersion", "freeBytes", "freeInternalBytes", "freePsramBytes",
+    "generation", "highWater", "highWaterBytes", "httpStatus",
+    "importedCount", "incidentId", "kind", "largestBytes",
+    "largestInternalBytes", "lastCriticalCategory", "lastCriticalEvent", "lastFailureCompletedStage",
+    "lastFailureResetReason", "lastFailureStage", "lastGapMs", "lastMissingUptimeMs",
+    "latencyMs", "leaseGeneration", "localAccessorySubnet", "mapDetail",
+    "mapId", "mapPhase", "mapProgressMs", "maxQueueDepth",
+    "maximumGapMs", "maximumLevel", "members", "messageBytes",
+    "messageDigest", "minimumFreeBytes", "minimumInternalBytes", "minimumLargestBytes",
+    "missingChunks", "mode", "navigating", "networkObservation",
+    "networkProtocol", "networkTransport", "operationId", "origin",
+    "otaState", "outcome", "ownerStackBytes", "pendingControl",
+    "phase", "policyGeneration", "policyMask", "profileVersion",
+    "providerId", "proxyConnection", "queueBytes", "queueDepth",
+    "ready", "reason", "recorderReady", "rejectedCount",
+    "remoteEndpointMatched", "rendererStackBytes", "replacedCount", "resetReason",
+    "result", "retries", "rideDetectionArmed", "rideGeneration",
+    "role", "routeLoaded", "rssiBucket", "runtimeBootSequence",
+    "safeMode", "sampleCount", "sampleIntervalMs", "schemaDigest",
     "schemaVersion", "scope", "sequence", "sessionPresent",
     "sha256Prefix", "simulation", "sizeBucket", "sourceHealthMask",
-    "speedAvailable", "startMode", "state", "storage",
-    "storageErrorCount", "tlsChallenge", "tlsCompleted", "tlsDurationMs",
-    "tlsStarted", "transition", "uiPhase", "uiProgressMs",
-    "underlyingErrorCode", "underlyingErrorDomain", "viewingMap", "visitedEntries",
-    "waitedForConnectivity", "watchSequence", "watchUptimeMs", "watchdogCoreMask",
-    "watchdogUptimeMs", "workoutActive", "writerDetail", "writerPhase",
-    "writerProgressMs", "writtenCount",
+    "speedAvailable", "stackAvailableMask", "startMode", "state",
+    "storage", "storageErrorCount", "taskCount", "tlsChallenge",
+    "tlsCompleted", "tlsDurationMs", "tlsStackBytes", "tlsStarted",
+    "transition", "uiPhase", "uiProgressMs", "underlyingErrorCode",
+    "underlyingErrorDomain", "unsupportedReason", "verifiedChunks", "viewingMap",
+    "visitedEntries", "waitedForConnectivity", "watchSequence", "watchUptimeMs",
+    "watchdogCoreMask", "watchdogUptimeMs", "workoutActive", "writerDelayMs",
+    "writerDetail", "writerPhase", "writerProgressMs", "writtenCount",
 };
 
+// END GENERATED DIAGNOSTICS ALLOWED_FIELDS
 constexpr std::size_t kAllowedFieldKeyCount =
     sizeof(kAllowedFieldKeys) / sizeof(kAllowedFieldKeys[0]);
 
@@ -77,38 +86,45 @@ inline bool fieldKeyIn(const char *key, const char *const *keys,
 }
 
 inline bool allowedFieldValueKind(const char *key, FieldValueKind kind) {
-static constexpr const char *kNumberKeys[] = {
-      "freeBytes", "largestBytes", "minimumFreeBytes", "minimumLargestBytes",
-      "tlsStackBytes", "ownerStackBytes", "rendererStackBytes", "stackAvailableMask",
+// BEGIN GENERATED DIAGNOSTICS FIELD_TYPES
+  static constexpr const char *kNumberKeys[] = {
       "accuracy", "activeStage", "ageMs", "alertMode",
       "applyErrorCode", "attempt", "blockLoadMs", "bootSequence",
-      "bytes", "chunk", "commandClass", "completedStage",
-      "connectDurationMs", "connectionGeneration", "consecutiveEarlyFailures", "decisionSequence",
-      "droppedCount", "durationMs", "enqueuedCount", "errorCode",
-      "eventCount", "firmwareBuild", "firstMissingUptimeMs", "formatVersion",
-      "generation", "highWater", "highWaterBytes", "httpStatus",
-      "importedCount", "lastFailureCompletedStage", "lastFailureResetReason", "lastFailureStage",
-      "lastGapMs", "lastMissingUptimeMs", "latencyMs", "leaseGeneration",
-      "mapDetail", "mapProgressMs", "maxQueueDepth", "maximumGapMs",
-      "members", "messageBytes", "profileVersion", "queueBytes",
-      "queueDepth", "rejectedCount", "replacedCount", "resetReason",
-      "retries", "rideGeneration", "runtimeBootSequence", "sampleCount",
-      "schemaVersion", "sequence", "sourceHealthMask", "storageErrorCount",
-      "tlsDurationMs", "uiProgressMs", "underlyingErrorCode", "visitedEntries",
+      "budgetBytes", "budgetRemainingBytes", "bytes", "captureGeneration",
+      "catalogGeneration", "chunk", "clockUncertaintyMs", "commandClass",
+      "completedStage", "connectDurationMs", "connectionGeneration", "consecutiveEarlyFailures",
+      "cutoffSequence", "decisionSequence", "droppedCount", "durationMs",
+      "emissionSequence", "enqueuedCount", "errorCode", "eventCount",
+      "expectedChunks", "expiresUptimeMs", "filteredCount", "firmwareBuild",
+      "firstMissingUptimeMs", "formatVersion", "freeBytes", "freeInternalBytes",
+      "freePsramBytes", "generation", "highWater", "highWaterBytes",
+      "httpStatus", "importedCount", "largestBytes", "largestInternalBytes",
+      "lastFailureCompletedStage", "lastFailureResetReason", "lastFailureStage", "lastGapMs",
+      "lastMissingUptimeMs", "latencyMs", "leaseGeneration", "mapDetail",
+      "mapProgressMs", "maxQueueDepth", "maximumGapMs", "members",
+      "messageBytes", "minimumFreeBytes", "minimumInternalBytes", "minimumLargestBytes",
+      "missingChunks", "ownerStackBytes", "policyGeneration", "policyMask",
+      "profileVersion", "queueBytes", "queueDepth", "rejectedCount",
+      "rendererStackBytes", "replacedCount", "resetReason", "retries",
+      "rideGeneration", "runtimeBootSequence", "sampleCount", "sampleIntervalMs",
+      "schemaVersion", "sequence", "sourceHealthMask", "stackAvailableMask",
+      "storageErrorCount", "taskCount", "tlsDurationMs", "tlsStackBytes",
+      "uiProgressMs", "underlyingErrorCode", "verifiedChunks", "visitedEntries",
       "watchSequence", "watchUptimeMs", "watchdogCoreMask", "watchdogUptimeMs",
-      "writerDetail", "writerProgressMs", "writtenCount",
+      "writerDelayMs", "writerDetail", "writerProgressMs", "writtenCount",
   };
-static constexpr const char *kBooleanKeys[] = {
-      "cleanupFailed",
+  static constexpr const char *kBooleanKeys[] = {
       "accuracyAvailable", "active", "authorized", "autoPauseEnabled",
-      "available", "background", "clockSynchronized", "connectCompleted",
-      "connectStarted", "connectionReused", "diagnosticHold", "fallback",
-      "fixValid", "localAccessorySubnet", "navigating", "pendingControl",
-      "proxyConnection", "ready", "remoteEndpointMatched", "rideDetectionArmed",
-      "routeLoaded", "safeMode", "sessionPresent", "simulation",
-      "speedAvailable", "tlsCompleted", "tlsStarted", "viewingMap",
-      "waitedForConnectivity", "workoutActive",
+      "available", "background", "cleanupFailed", "clockSynchronized",
+      "connectCompleted", "connectStarted", "connectionReused", "diagnosticHold",
+      "durable", "fallback", "fixValid", "localAccessorySubnet",
+      "navigating", "pendingControl", "proxyConnection", "ready",
+      "recorderReady", "remoteEndpointMatched", "rideDetectionArmed", "routeLoaded",
+      "safeMode", "sessionPresent", "simulation", "speedAvailable",
+      "tlsCompleted", "tlsStarted", "viewingMap", "waitedForConnectivity",
+      "workoutActive",
   };
+// END GENERATED DIAGNOSTICS FIELD_TYPES
   if (fieldKeyIn(key, kNumberKeys,
                  sizeof(kNumberKeys) / sizeof(kNumberKeys[0])))
     return kind == FieldValueKind::Number;
@@ -290,6 +306,31 @@ inline bool validateFieldsJson(const char *fieldsJson,
     skipJsonWhitespace(cursor, end);
   }
   return false;
+}
+
+// Shared by the actual producer and executable host contract tests.
+// This template keeps storage/RTOS types out of the wire-format layer.
+template <typename RecorderStats>
+inline bool formatRecorderHealthFields(char *out, std::size_t capacity,
+                                       const char *reason,
+                                       const RecorderStats &snapshot) {
+  if (out == nullptr || reason == nullptr || capacity == 0)
+    return false;
+  const int length = std::snprintf(out, capacity,
+      "{\"reason\":\"%s\",\"enqueuedCount\":%lu,"
+      "\"writtenCount\":%lu,\"droppedCount\":%lu,"
+      "\"storageErrorCount\":%lu,\"queueDepth\":%u,"
+      "\"maxQueueDepth\":%u,\"available\":%s,\"recorderReady\":%s}",
+      reason, static_cast<unsigned long>(snapshot.enqueued),
+      static_cast<unsigned long>(snapshot.written),
+      static_cast<unsigned long>(snapshot.dropped),
+      static_cast<unsigned long>(snapshot.storageErrors),
+      static_cast<unsigned>(snapshot.queueDepth),
+      static_cast<unsigned>(snapshot.maxQueueDepth),
+      snapshot.storageAvailable ? "true" : "false",
+      snapshot.recorderReady ? "true" : "false");
+  return length > 0 && static_cast<std::size_t>(length) < capacity &&
+      validateFieldsJson(out, static_cast<std::size_t>(length));
 }
 
 constexpr uint32_t kFaultCapsuleMagic = 0x52444350; // "RDCP"

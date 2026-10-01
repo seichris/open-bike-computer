@@ -2767,6 +2767,11 @@ static std::string mapTransferStatusJson() {
   return composeMapTransferStatusJson(readActiveMapStatusSnapshot());
 }
 
+static std::atomic<bool> diagnosticsLiveRequested{false};
+static std::atomic<uint32_t> diagnosticsLiveBoot{0};
+static std::atomic<uint32_t> diagnosticsLiveAfter{0};
+static std::atomic<uint32_t> diagnosticsLiveLastRequest{0};
+
 static std::string genericTransferStatusJson() {
   device_transfer::HttpTransferStatus transferStatus =
       deviceTransferHttp.status();
@@ -2788,6 +2793,18 @@ static std::string genericTransferStatusJson() {
   status_json::appendStringField(body, "certificateSha256",
                         transferStatus.tlsCertificateSha256);
   body += "}";
+
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  status_json::appendFieldPrefix(body, "diagnosticsPolicy");
+  body += ride_diagnostics::capturePolicyJson();
+  if (diagnosticsLiveRequested.exchange(false)) {
+    std::string tail;
+    if (ride_diagnostics::liveTailJson(diagnosticsLiveBoot.load(), diagnosticsLiveAfter.load(), tail)) {
+      status_json::appendFieldPrefix(body, "diagnosticsLive");
+      body += tail;
+    }
+  }
+#endif
 
   status_json::appendFieldPrefix(body, "firmwareOperation");
   body += firmwareUpdateHttp.operationReceiptJson();
@@ -4670,6 +4687,46 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
     return;
   }
 
+  if (command.rfind("live|2|", 0) == 0) {
+    const std::string cursor = command.substr(7);
+    const std::size_t separator = cursor.find('|');
+    uint32_t boot = 0, after = 0;
+    auto parseCursor = [](const std::string &text, uint32_t &out) {
+      if (text.empty() || text.size() > 10) return false;
+      uint64_t number = 0;
+      for (char c : text) {
+        if (c < '0' || c > '9') return false;
+        number = number * 10 + static_cast<unsigned>(c - '0');
+        if (number > UINT32_MAX) return false;
+      }
+      out = static_cast<uint32_t>(number); return true;
+    };
+    const uint32_t now = millis();
+    if (bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) &&
+        separator != std::string::npos &&
+        parseCursor(cursor.substr(0, separator), boot) &&
+        parseCursor(cursor.substr(separator + 1), after) &&
+        static_cast<uint32_t>(now - diagnosticsLiveLastRequest.load()) >= 1000U) {
+      diagnosticsLiveLastRequest.store(now);
+      diagnosticsLiveBoot.store(boot); diagnosticsLiveAfter.store(after);
+      diagnosticsLiveRequested.store(true);
+      queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyGeneric);
+    }
+    return;
+  }
+
+  if (command.rfind("policy|", 0) == 0) {
+    ride_diagnostics::policy_v2::Request policy;
+    if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
+        !ride_diagnostics::policy_v2::parse(command, policy) ||
+        !ride_diagnostics::applyCapturePolicy(policy)) {
+      deviceTransferHttp.setLastError("diagnostics_policy_rejected",
+          "policy registry, capture, generation or resource limits did not match");
+    }
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyGeneric);
+    return;
+  }
+
   if (command.rfind("capture|", 0) == 0) {
     ride_diagnostics::control::CaptureBinding binding;
     if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
@@ -5862,6 +5919,10 @@ public:
           ride_diagnostics::Level::Warning, "transfer",
           "maintenance_ble_detached", "{}");
     }
+    diagnosticsLiveRequested.store(false);
+    diagnosticsLiveBoot.store(0);
+    diagnosticsLiveAfter.store(0);
+    diagnosticsLiveLastRequest.store(0);
     server->connected = false;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;

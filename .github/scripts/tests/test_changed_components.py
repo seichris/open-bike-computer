@@ -13,6 +13,23 @@ SPEC.loader.exec_module(changed_components)
 
 
 class ChangedComponentsTests(unittest.TestCase):
+    def test_diagnostics_registry_selects_all_producers_and_consumers(self) -> None:
+        for path in ("protocol/diagnostics/registry-v2.json",
+                     "tools/generate_diagnostics_contract.py"):
+            with self.subTest(path=path):
+                self.assertEqual(changed_components.classify_paths([path]), {
+                    "firmware_build": True, "firmware_host": True, "ios": True,
+                    "map_backend": False, "osm": False,
+                })
+
+    def test_diagnostics_cli_and_broker_select_host_tests(self) -> None:
+        for path in ("tools/bicino", "tools/bicino_diagnostics/broker.py"):
+            with self.subTest(path=path):
+                self.assertEqual(changed_components.classify_paths([path]), {
+                    "firmware_build": False, "firmware_host": True, "ios": False,
+                    "map_backend": False, "osm": False,
+                })
+
     def test_docs_only_change_skips_product_jobs(self) -> None:
         self.assertEqual(
             {

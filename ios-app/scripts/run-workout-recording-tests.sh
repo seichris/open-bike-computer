@@ -37,6 +37,8 @@ if [[ "$(uname -s)" == Darwin ]]; then
   ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift \
   ios-app/BikeComputer/WorkoutShared/WatchWorkoutLaunchRequest.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift \
   ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
   ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift \

@@ -12,6 +12,8 @@ xcrun swiftc \
   -parse-as-library \
   -o "${OUT}" \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift \
   ios-app/BikeComputerTests/RideDiagnosticsHostTests.swift
 
 BUNDLE="$(${OUT})"

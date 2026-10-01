@@ -1,0 +1,1246 @@
+{
+  "domains": [
+    "audio",
+    "ble",
+    "boot",
+    "display",
+    "gps",
+    "http",
+    "lifecycle",
+    "logger",
+    "map",
+    "memory",
+    "navigation",
+    "ota",
+    "power",
+    "rideAutomation",
+    "sensor",
+    "storage",
+    "tasks",
+    "tls",
+    "touch",
+    "transfer",
+    "user",
+    "wifi",
+    "workout"
+  ],
+  "eventFormatSchema": 1,
+  "events": {
+    "logger.health": {
+      "level": "info",
+      "optional": [
+        "reason"
+      ],
+      "required": [
+        "enqueuedCount",
+        "writtenCount",
+        "droppedCount",
+        "storageErrorCount",
+        "queueDepth",
+        "maxQueueDepth",
+        "available",
+        "recorderReady"
+      ]
+    },
+    "logger.policy_applied": {
+      "level": "info",
+      "optional": [
+        "expiresUptimeMs",
+        "captureGeneration"
+      ],
+      "required": [
+        "policyGeneration",
+        "policyMask",
+        "effectiveLevel",
+        "budgetBytes"
+      ]
+    },
+    "logger.policy_expired": {
+      "level": "info",
+      "optional": [
+        "reason"
+      ],
+      "required": [
+        "policyGeneration"
+      ]
+    },
+    "memory.health": {
+      "level": "debug",
+      "optional": [
+        "minimumInternalBytes",
+        "taskCount"
+      ],
+      "required": [
+        "freeInternalBytes",
+        "largestInternalBytes",
+        "freePsramBytes"
+      ]
+    },
+    "user.issue_marker": {
+      "level": "warning",
+      "optional": [
+        "incidentId",
+        "sequence",
+        "durable"
+      ],
+      "required": [
+        "code"
+      ]
+    }
+  },
+  "fields": {
+    "accuracy": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "accuracyAvailable": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "accuracyBucket": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "acknowledgedKind": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "active": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "activeStage": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "ageMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "alertMode": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "applyErrorCode": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "applyErrorDomain": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "applyResult": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "attempt": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "attemptId": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "authorization": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "authorized": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "autoPauseEnabled": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "available": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "background": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "blockLoadMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "bootSequence": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "budgetBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "budgetRemainingBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "bytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "captureGeneration": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "catalogGeneration": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "chunk": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "class": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "cleanupFailed": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "clockSynchronized": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "clockUncertaintyMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "code": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "commandClass": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "completedStage": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "connectCompleted": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "connectDurationMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "connectStarted": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "connectionGeneration": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "connectionReused": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "connectionState": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "consecutiveEarlyFailures": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "controllerRole": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "coverage": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "cutoffSequence": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "decisionSequence": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "delivery": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "diagnosticHold": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "domain": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "dropReason": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "droppedCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "durable": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "durationLimit": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "durationMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "effectiveLevel": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "emissionSequence": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "enqueuedCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "errorCode": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "errorDomain": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "eventCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "expectedChunks": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "expectedState": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "expiresUptimeMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "fallback": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "featureFlags": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "filteredCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "firmwareBuild": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "firmwareFingerprint": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "firmwareGitSha": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "firmwareProfile": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "firmwareTarget": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "firmwareVersion": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "firstMissingUptimeMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "fixValid": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "formatVersion": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "freeBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "freeInternalBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "freePsramBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "generation": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "highWater": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "highWaterBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "httpStatus": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "importedCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "incidentId": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "kind": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "largestBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "largestInternalBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "lastCriticalCategory": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "lastCriticalEvent": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "lastFailureCompletedStage": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "lastFailureResetReason": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "lastFailureStage": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "lastGapMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "lastMissingUptimeMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "latencyMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "leaseGeneration": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "localAccessorySubnet": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "mapDetail": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "mapId": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "mapPhase": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "mapProgressMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "maxQueueDepth": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "maximumGapMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "maximumLevel": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "members": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "messageBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "messageDigest": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "minimumFreeBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "minimumInternalBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "minimumLargestBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "missingChunks": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "mode": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "navigating": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "networkObservation": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "networkProtocol": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "networkTransport": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "operationId": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "origin": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "otaState": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "outcome": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "ownerStackBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "pendingControl": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "phase": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "policyGeneration": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "policyMask": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "profileVersion": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "providerId": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "proxyConnection": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "queueBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "queueDepth": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "ready": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "reason": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "recorderReady": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "rejectedCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "remoteEndpointMatched": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "rendererStackBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "replacedCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "resetReason": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "result": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "retries": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "rideDetectionArmed": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "rideGeneration": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "role": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "routeLoaded": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "rssiBucket": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "runtimeBootSequence": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "safeMode": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "sampleCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "sampleIntervalMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "schemaDigest": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "schemaVersion": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "scope": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "sequence": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "sessionPresent": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "sha256Prefix": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "simulation": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "sizeBucket": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "sourceHealthMask": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "speedAvailable": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "stackAvailableMask": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "startMode": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "state": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "storage": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "storageErrorCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "taskCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "tlsChallenge": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "tlsCompleted": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "tlsDurationMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "tlsStackBytes": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "tlsStarted": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "transition": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "uiPhase": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "uiProgressMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "underlyingErrorCode": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "underlyingErrorDomain": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "unsupportedReason": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "verifiedChunks": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "viewingMap": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "visitedEntries": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "waitedForConnectivity": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "watchSequence": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "watchUptimeMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "watchdogCoreMask": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "watchdogUptimeMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "workoutActive": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "writerDelayMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "writerDetail": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "writerPhase": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "writerProgressMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "writtenCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    }
+  },
+  "instrumentedDomains": [
+    "lifecycle",
+    "boot",
+    "ble",
+    "navigation",
+    "gps",
+    "workout",
+    "rideAutomation",
+    "storage",
+    "map",
+    "power",
+    "transfer",
+    "user",
+    "logger",
+    "memory"
+  ],
+  "levels": [
+    "trace",
+    "debug",
+    "info",
+    "warning",
+    "error",
+    "fatal"
+  ],
+  "schema": 2
+}

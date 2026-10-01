@@ -204,6 +204,19 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ = rideAutomationCoordinator
         let bleManager = coordinator.bleManager
         bleManager.diagnosticsRecorder = rideDiagnosticsRecorder
+        DiagnosticsBrokerClient.shared.configure(recorder: rideDiagnosticsRecorder, bleManager: bleManager)
+        DiagnosticsCollectionCoordinator.shared.configure(
+            recorder: rideDiagnosticsRecorder, bleManager: bleManager,
+            canCollect: { [weak self] in
+                guard let self else { return false }
+                return UIApplication.shared.applicationState == .active &&
+                    !self.coordinator.isNavigating &&
+                    !self.workoutSessionCoordinator.store.presentation.isWorkoutActive
+            })
+        bleManager.$isNavigationReady.removeDuplicates()
+            .filter { $0 }
+            .sink { _ in DiagnosticsCollectionCoordinator.shared.resumeIfPossible() }
+            .store(in: &cancellables)
         watchConnectivityCoordinator.diagnosticsRecorder =
             rideDiagnosticsRecorder
         locationManager.diagnosticsRecorder = rideDiagnosticsRecorder
@@ -212,6 +225,12 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         workoutMirrorManager.diagnosticsRecorder = rideDiagnosticsRecorder
         rideAutomationCoordinator.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.firmwareUpdateManager.diagnosticsRecorder = rideDiagnosticsRecorder
+        rideDiagnosticsRecorder.$runtimeCapturePolicy
+            .compactMap { $0 }
+            .sink { [weak bleManager] policy in
+                _ = bleManager?.sendDiagnosticsCapturePolicy(policy)
+            }
+            .store(in: &cancellables)
         rideDiagnosticsRecorder.$captureBinding
             .removeDuplicates()
             .sink { [weak bleManager] binding in
@@ -332,6 +351,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             state: "active"
         )
         coordinator.applicationDidBecomeActive()
+        DiagnosticsCollectionCoordinator.shared.resumeIfPossible()
         setApplicationActive(true)
     }
     
@@ -347,6 +367,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func setApplicationActive(_ isActive: Bool) {
+        DiagnosticsBrokerClient.shared.setActive(isActive)
         coordinator.setApplicationActive(isActive)
         if #available(iOS 17.0, *),
            let controller =

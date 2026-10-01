@@ -22,6 +22,7 @@ xcrun swiftc -D HOST_TESTING -parse-as-library -o "${OUT_DIR}/tests" \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceOperationCoordinator.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift \
+  ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift \
   ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift \
   ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift \
   ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift \
@@ -45,6 +46,8 @@ xcrun swiftc -D HOST_TESTING -parse-as-library -o "${OUT_DIR}/tests" \
   ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift \
+  ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift \
   ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkProtocol.swift \

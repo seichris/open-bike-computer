@@ -6,16 +6,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
+#include "capture_policy_v2.hpp"
 
 class Storage;
 
 namespace ride_diagnostics {
 
 enum class Level : uint8_t {
-  Debug = 0,
-  Info = 1,
-  Warning = 2,
-  Error = 3,
+  Trace = 0, Debug = 1, Info = 2, Warning = 3, Error = 4, Fatal = 5,
 };
 
 struct Stats {
@@ -127,7 +126,13 @@ void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe);
 
 bool record(Level level, const char *category, const char *event,
             const char *fieldsJson = "{}");
+// Runtime controls are compiled into ordinary and production images. SDK/raw
+// providers and the existing RAUT detailed producer remain separately gated.
+bool applyCapturePolicy(const policy_v2::Request &request);
+std::string capturePolicyJson();
 bool recordHealth(const char *reason);
+// Bounded live observation only; never reports enqueued bytes as durable.
+bool liveTailJson(uint32_t boot, uint32_t after, std::string &output);
 bool recordClockAnchor();
 bool markIssue(const char *code, uint32_t markerSequence);
 bool bindCapture(const char *captureId, bool detailed = false);

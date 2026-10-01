@@ -473,3 +473,16 @@ here. When changing BLE services, characteristics, framing, or payloads, update
 the firmware implementation under `esp32/lib/ble_navigation/`, the iOS
 implementation in `BLEManager.swift` and `NavigationProtocol.swift`, the
 relevant host/Swift tests, and the protocol document in the same change.
+
+## Diagnostics collection and Codex handoff
+
+Use `.agents/skills/bicino-diagnostics/SKILL.md` and `docs/diagnostics-v2.md`.
+`tools/bicino diag doctor --json` is nonmutating and never probes a serial port.
+For a retained capture, verify sources, the frozen acquisition inventory, actual
+chunk hashes, drop/gap counters and build identities before interpreting events.
+For remote capture, inspect fresh capabilities and distinguish queued requests,
+phone acceptance, device policy application and durable delivery. Never export
+pairing credentials or assume a compiled-out provider exists. Live observations
+are explicitly nondurable; keep the retained raw evidence for reproducible
+findings. Do not change partition layouts or release/physical qualification gates
+merely to get a diagnostics build to pass.

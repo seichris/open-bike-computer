@@ -189,7 +189,9 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         self.assertIn("recorder_ready=%u ui_ready=1", source("src/main.cpp"))
         self.assertIn('snapshot.recorderReady ? "true" : "false"',
                       source("lib/ride_diagnostics/ride_diagnostics_http.cpp"))
-        self.assertIn('snapshot.recorderReady ? "true" : "false"', recorder)
+        self.assertIn("formatRecorderHealthFields", recorder)
+        self.assertIn('snapshot.recorderReady ? "true" : "false"',
+                      source("lib/ride_diagnostics/ride_diagnostics_format.hpp"))
 
 
 if __name__ == "__main__":

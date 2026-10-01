@@ -152,6 +152,12 @@ protocol DeviceDiagnosticsSessionControlling: AnyObject {
 
 extension DeviceTransferManager: DeviceDiagnosticsSessionControlling {}
 
+nonisolated struct DiagnosticsFirmwareLiveTail: Sendable {
+    let bootSequence: UInt32
+    let nextSequence: UInt32
+    let bytes: Data
+}
+
 @MainActor
 final class DeviceDiagnosticsTransferManager {
     private let transferManager: any DeviceDiagnosticsSessionControlling
@@ -186,6 +192,8 @@ final class DeviceDiagnosticsTransferManager {
     func downloadDeviceLogs(
         bleManager: BLEManager,
         recorder: RideDiagnosticsRecorder,
+        acquisitionStore: DiagnosticsAcquisitionStore? = nil,
+        acquisitionID: UUID? = nil,
         status: @escaping @MainActor (String) -> Void
     ) async throws -> Int {
         guard let deviceID = bleManager.connectedDeviceID else {
@@ -206,14 +214,38 @@ final class DeviceDiagnosticsTransferManager {
             )
             openedSession = session
             status("reading device diagnostics index")
-            let indexData = try await request(
+            let freshIndexData = try await request(
                 session: session,
                 path: "device-diagnostics/v1/index",
                 method: "GET",
                 maximumBytes: maximumIndexBytes,
                 timeoutInterval: 300
             )
+            let freshIndex = try decodeIndex(freshIndexData)
+            var indexData = freshIndexData
+            if let acquisitionStore, let acquisitionID {
+                let manifest = try await acquisitionStore.inventory(
+                    acquisitionID,
+                    deviceDigest: deviceDigest,
+                    index: freshIndexData,
+                    chunks: freshIndex.chunks.map {
+                        DiagnosticsChunkReceipt(bootSequence: $0.bootSequence,
+                            chunk: $0.chunk, bytes: $0.bytes, sha256: $0.sha256.lowercased())
+                    })
+                guard let frozenIndex = manifest.indexData else {
+                    throw DeviceDiagnosticsTransferError.invalidIndex
+                }
+                indexData = frozenIndex
+            }
             let index = try decodeIndex(indexData)
+            // Persist the original cutoff before receiving any chunk. A failed
+            // transfer must leave the expected inventory, not just orphan bytes.
+            try await recorder.importDeviceRecorderHealthAsync(
+                deviceDigest: deviceDigest,
+                bootSequence: index.bootSequence,
+                data: indexData,
+                enforceRetention: false
+            )
             var imported = 0
             var previousSequenceByBoot: [UInt32: UInt64] = [:]
             var firmwareFingerprintByBoot: [UInt32: String] = [:]
@@ -253,6 +285,13 @@ final class DeviceDiagnosticsTransferManager {
                 if let existing {
                     data = existing
                 } else {
+                    guard freshIndex.chunks.contains(where: {
+                        $0.bootSequence == chunk.bootSequence && $0.chunk == chunk.chunk &&
+                        $0.bytes == chunk.bytes && $0.sha256.lowercased() == chunk.sha256.lowercased()
+                    }) else {
+                        throw DeviceDiagnosticsTransferError.deviceRejected(
+                            code: "retention_expired", message: "A required diagnostic chunk is no longer on the device. Export the partial evidence before starting a new collection.")
+                    }
                     status("downloading device chunk \(offset + 1) of \(chunks.count)")
                     data = try await request(
                         session: session,
@@ -297,12 +336,16 @@ final class DeviceDiagnosticsTransferManager {
                     )
                     imported += 1
                 }
+                if let acquisitionStore, let acquisitionID {
+                    try await acquisitionStore.verified(acquisitionID,
+                        receipt: DiagnosticsChunkReceipt(bootSequence: chunk.bootSequence,
+                            chunk: chunk.chunk, bytes: chunk.bytes, sha256: chunk.sha256.lowercased()))
+                }
             }
-            try await recorder.importDeviceRecorderHealthAsync(
-                deviceDigest: deviceDigest,
-                bootSequence: index.bootSequence,
-                data: indexData
-            )
+            if let acquisitionStore, let acquisitionID {
+                try await acquisitionStore.finish(acquisitionID)
+            }
+            try await recorder.enforceRetentionAsync()
 
             status("closing device diagnostics session")
             try await closeSession(session, bleManager: bleManager)
@@ -590,6 +633,38 @@ final class DeviceDiagnosticsTransferManager {
         return true
     }
 
+    nonisolated static func validatedLiveTail(_ object: [String: Any]) -> DiagnosticsFirmwareLiveTail? {
+        guard Set(object.keys) == Set(["schema", "available", "bootSequence", "firstSequence",
+            "lastSequence", "nextSequence", "gap", "more", "durability", "events"]),
+            !isJSONBoolean(object["schema"]), object["schema"] as? Int == 2,
+            isJSONBoolean(object["available"]), object["available"] as? Bool == true,
+            isJSONBoolean(object["gap"]), isJSONBoolean(object["more"]),
+            object["durability"] as? String == "enqueued_not_durable",
+            let events = object["events"] as? [[String: Any]], events.count <= 2,
+            let bytes = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+            bytes.count <= 4096 else { return nil }
+        var numbers: [String: UInt32] = [:]
+        for name in ["bootSequence", "firstSequence", "lastSequence", "nextSequence"] {
+            guard !isJSONBoolean(object[name]), let number = object[name] as? Int,
+                  let bounded = UInt32(exactly: number) else { return nil }
+            numbers[name] = bounded
+        }
+        guard let boot = numbers["bootSequence"], boot > 0,
+              let next = numbers["nextSequence"], let first = numbers["firstSequence"],
+              let last = numbers["lastSequence"], first <= last else { return nil }
+        if !events.isEmpty {
+            var jsonl = Data()
+            for event in events {
+                guard let line = try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]) else { return nil }
+                jsonl.append(line); jsonl.append(0x0a)
+            }
+            guard let validation = validateJSONL(jsonl), validation.bootSequence == boot,
+                  validation.firstSequence >= first, validation.lastSequence <= last,
+                  validation.lastSequence == next else { return nil }
+        }
+        return DiagnosticsFirmwareLiveTail(bootSequence: boot, nextSequence: next, bytes: bytes)
+    }
+
     private nonisolated static func validateJSONL(
         _ data: Data
     ) -> JSONLValidation? {
@@ -637,12 +712,10 @@ final class DeviceDiagnosticsTransferManager {
                   !isJSONBoolean(object["schema"]),
                   object["schema"] as? Int == 1,
                   object["source"] as? String == "firmware",
-                  ["debug", "info", "warning", "error"].contains(
+                  DiagnosticsSchema.levels.contains(
                     object["level"] as? String ?? ""
                   ),
-                  ["lifecycle", "boot", "ble", "navigation", "gps",
-                   "workout", "rideAutomation", "storage", "map", "power",
-                   "transfer", "user", "logger"].contains(
+                  DiagnosticsSchema.domains.contains(
                     object["category"] as? String ?? ""
                   ),
                   let eventName = object["event"] as? String,
