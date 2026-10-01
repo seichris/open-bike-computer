@@ -49,9 +49,10 @@ Changing a commit therefore recompiles metadata and changed sources while
 allowing unchanged libraries to be restored. Raw unverified builds retain
 their previous global identity flags. Version, board/profile, and configuration
 changes still affect normal compiler input identities.
-Verified application compiles reject `__DATE__`, `__TIME__`, and
-`__TIMESTAMP__` with `-Werror=date-time`, preventing the source clock from
-changing an object through an input absent from its compiler command.
+Verified compiles explicitly define `__DATE__`, `__TIME__`, and `__TIMESTAMP__`
+as the Unix epoch through a generated header with a compiler dependency.
+Arduino's chip report uses these macros; their fixed values prevent the source
+clock from changing an object through an input absent from its compiler command.
 ESP-IDF's optional application and bootloader compile-date descriptors are
 disabled in the custom SDK configuration; the project's firmware metadata
 continues to report the exact source commit and timestamp.

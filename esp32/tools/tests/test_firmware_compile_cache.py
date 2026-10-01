@@ -2,6 +2,8 @@ import tempfile
 import subprocess
 import sys
 import unittest
+import os
+import shutil
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -10,6 +12,28 @@ from firmware_compile_cache import configure_metadata_identity, relocate_core_te
 
 
 class FirmwareCompileCacheTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("cc"), "host C compiler is unavailable")
+    def test_compiler_clock_is_independent_of_commit_epoch_and_source_mtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            env = Mock()
+            env.subst.side_effect = {"$PROJECT_DIR": str(project), "$PIOENV": "WAVESHARE_AMOLED_175"}.__getitem__
+            configure_metadata_identity(env, "a" * 40, "2026-10-01T00:00:00Z")
+            clock = project / ".pio/open-bike-build/build-identity/WAVESHARE_AMOLED_175/firmware_compile_clock.h"
+            source = project / "clock.c"
+            source.write_text('const char *clock = __DATE__ " " __TIME__ " " __TIMESTAMP__;\n')
+            outputs = []
+            for epoch in (0, 1790859494):
+                os.utime(source, (epoch, epoch))
+                result = subprocess.run(
+                    [shutil.which("cc"), "-E", "-P", "-Werror=date-time", "-include", str(clock), str(source)],
+                    env={**os.environ, "SOURCE_DATE_EPOCH": str(epoch)},
+                    check=True, capture_output=True, text=True,
+                )
+                outputs.append(result.stdout)
+            self.assertEqual(outputs[0], outputs[1])
+            self.assertIn('"Jan  1 1970" " " "00:00:00"', outputs[0])
+
     def test_rebases_percent_encoded_package_urls(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -52,11 +76,12 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             metadata.srcnode.return_value.get_abspath.return_value = str(project / "lib/firmware_metadata/firmware_metadata.cpp")
             unrelated = Mock()
             unrelated.srcnode.return_value.get_abspath.return_value = str(project / "lib/lvgl/lvgl.cpp")
-            self.assertIs(callback(env, unrelated), unrelated)
+            self.assertIs(callback(env, unrelated), env.Object.return_value)
+            env.Depends.assert_called_once_with(env.Object.return_value, str(project / ".pio/open-bike-build/build-identity/WAVESHARE_AMOLED_175/firmware_compile_clock.h"))
             env.Clone.assert_not_called()
             callback(env, metadata)
             clone = env.Clone.return_value
-            clone.Depends.assert_called_once()
+            self.assertEqual(clone.Depends.call_count, 2)
             header = Path(clone.Depends.call_args.args[1])
             before = header.read_text()
             configure_metadata_identity(env, "b" * 40, "2026-10-02T00:00:00Z")
