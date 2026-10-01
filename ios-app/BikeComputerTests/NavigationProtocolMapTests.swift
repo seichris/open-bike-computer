@@ -3959,6 +3959,24 @@ extension NavigationProtocolTests {
             "Waiting for device map status",
             "a restored transfer waits for fresh authenticated device status"
         )
+        for staleState in ["installed", "failed", "activating"] {
+            bleManager.mapTransferActiveMapId = "custom-map-shanghai"
+            bleManager.mapTransferActiveSessionId = "shanghai-session"
+            bleManager.mapTransferActivationMapId = "custom-map-shanghai"
+            bleManager.mapTransferActivationSessionId = "shanghai-session"
+            bleManager.mapTransferActivationStatus = staleState
+            bleManager.mapTransferActivationSequence = 3
+            bleManager.mapTransferActivationStep = 2
+            bleManager.mapTransferActivationStepCount = 3
+            bleManager.mapTransferActivationProgress = 90
+            manager.reconcileLastTransfer(bleManager: bleManager)
+            assertEqual(manager.lastTransferOutcome, "unconfirmed",
+                        "stale cached \(staleState) cannot settle the restored attempt")
+            assertEqual(manager.statusMessage, "Waiting for device map status",
+                        "stale cached \(staleState) preserves the fresh-status wait")
+            assert(manager.activationProgress == nil && manager.errorMessage == nil,
+                   "stale progress and failures are not projected before authenticated status")
+        }
         bleManager.applyAuthenticatedMapTransferStatus(
             MapTransferDeviceStatus(
                 enabled: false,

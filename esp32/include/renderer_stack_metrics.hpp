@@ -1,4 +1,7 @@
 #pragma once
+
+// Shared leaf API: keep outside renderer_diagnostics so PlatformIO deep LDF
+// does not import the renderer/BLE/GUI library graph into device_transfer.
 #include <atomic>
 #include <cstdint>
 

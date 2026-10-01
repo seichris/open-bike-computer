@@ -26,7 +26,7 @@
 #include "../../power_management/power_management.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../renderer_diagnostics/renderer_diagnostics.hpp"
-#include "../../renderer_diagnostics/renderer_stack_metrics.hpp"
+#include "renderer_stack_metrics.hpp"
 #include "../../runtime_watchdog_diagnostics/runtime_watchdog_diagnostics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
 #include "../../ui_scheduler/ui_scheduler.hpp"

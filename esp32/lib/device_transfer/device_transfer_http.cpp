@@ -1,7 +1,7 @@
 #include "device_transfer_http.hpp"
 #include "commit_boundary_policy.hpp"
 #include "lifecycle_resource_event.hpp"
-#include "../renderer_diagnostics/renderer_stack_metrics.hpp"
+#include "renderer_stack_metrics.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_maintenance/firmware_maintenance_policy.hpp"

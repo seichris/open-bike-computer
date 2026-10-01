@@ -4182,14 +4182,22 @@ final class OfflineMapManager: ObservableObject {
 
     func reconcileLastTransfer(bleManager: BLEManager) {
         if lastTransferOutcome == "unconfirmed", reconcileDurableMapOperation(bleManager: bleManager) { return }
+        guard bleManager.hasFreshMapTransferStatus else {
+            lastTransferObservedIdleOnAnotherMap = false
+            if lastTransferOutcome == "unconfirmed", !lastTransferMapId.isEmpty {
+                activationProgress = nil
+                statusMessage = "Waiting for device map status"
+                errorMessage = nil
+            }
+            return
+        }
         updateActivationProgress(
             status: bleManager.mapTransferActivationStatus,
             step: bleManager.mapTransferActivationStep,
             stepCount: bleManager.mapTransferActivationStepCount,
             percentage: bleManager.mapTransferActivationProgress
         )
-        guard bleManager.hasFreshMapTransferStatus,
-              lastTransferOutcome == "unconfirmed",
+        guard lastTransferOutcome == "unconfirmed",
               !lastTransferMapId.isEmpty,
               let sessionId = defaults.string(
                 forKey: OfflineMapDefaults.lastTransferSessionIdKey

@@ -1,6 +1,6 @@
 #include "../../lib/device_transfer/lifecycle_resource_event.hpp"
 #include "../../lib/ride_diagnostics/ride_diagnostics_format.hpp"
-#include "../../lib/renderer_diagnostics/renderer_stack_metrics.hpp"
+#include "../../include/renderer_stack_metrics.hpp"
 #include <cassert>
 #include <cstring>
 #include <iostream>

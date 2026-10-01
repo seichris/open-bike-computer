@@ -125,6 +125,53 @@ class TestAnalysis(unittest.TestCase):
             self.assertTrue(any(":1501: invalid JSON" in error for error in report["errors"]))
             self.assertNotIn("Traceback", result.stderr)
 
+    def test_renderer_stack_api_is_a_project_leaf_not_a_library_edge(self):
+        root = Path(__file__).parents[2]
+        header = root / "include/renderer_stack_metrics.hpp"
+        self.assertTrue(header.is_file())
+        self.assertFalse((root / "lib/renderer_diagnostics/renderer_stack_metrics.hpp").exists())
+        includes = [line.strip() for line in header.read_text().splitlines()
+                    if line.strip().startswith("#include")]
+        self.assertEqual(includes, ["#include <atomic>", "#include <cstdint>"])
+        for relative in ("lib/device_transfer/device_transfer_http.cpp", "lib/maps/src/maps.cpp"):
+            source = (root / relative).read_text()
+            self.assertIn('#include "renderer_stack_metrics.hpp"', source)
+            self.assertNotIn("renderer_diagnostics/renderer_stack_metrics.hpp", source)
+        # Any header in that library causes deep LDF to scan its implementation,
+        # pulling renderer -> BLE -> GUI -> LVGL and closing transport cycles.
+        for path in (root / "lib/device_transfer").glob("*"):
+            if path.suffix not in (".cpp", ".hpp", ".h"):
+                continue
+            for line in path.read_text().splitlines():
+                if line.strip().startswith("#include"):
+                    self.assertNotIn("renderer_diagnostics/", line, str(path))
+
+    def test_renderer_stack_sample_is_shared_across_translation_units(self):
+        root = Path(__file__).parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "renderer.cpp").write_text('''#include "renderer_stack_metrics.hpp"
+void sample(unsigned bytes) { renderer_diagnostics::sampleRendererStackBytes(bytes); }
+''')
+            (path / "transport.cpp").write_text('''#include "renderer_stack_metrics.hpp"
+#include <cassert>
+void sample(unsigned);
+int main() {
+  using namespace renderer_diagnostics;
+  assert(!rendererStackSampleAvailable());
+  sample(2048); sample(4096);
+  assert(rendererStackSampleAvailable());
+  assert(rendererStackHighWaterBytes() == 2048);
+  sample(1024); assert(rendererStackHighWaterBytes() == 1024);
+  sample(0); sample(1024);
+  assert(rendererStackSampleAvailable() && rendererStackHighWaterBytes() == 0);
+}
+''')
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I" + str(root / "include"), str(path / "renderer.cpp"),
+                            str(path / "transport.cpp"), "-o", str(path / "test")], check=True)
+            subprocess.run([str(path / "test")], check=True)
+
     def test_actual_production_path_and_no_hot_path_recording(self):
         root = Path(__file__).parents[2]
         source = (root / "lib/device_transfer/device_transfer_http.cpp").read_text()
