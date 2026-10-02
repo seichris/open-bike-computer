@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ride_automation_policy.hpp"
+#include "../ble_navigation/ride_command_admission.hpp"
 #include "ride_detection_health.hpp"
 
 #include <cstddef>
@@ -131,7 +132,8 @@ void setCyclingMotionSource(const ride_automation::CyclingMotionSource *source);
 void beginFirmwareShadow();
 void processFirmwareShadow(uint32_t nowMs);
 bool ingestTransportFrame(const uint8_t *data, std::size_t length,
-                          uint32_t receivedAtMs);
+                          uint32_t receivedAtMs,
+                          ride_command_admission::Authorization authorization);
 UiSnapshot uiSnapshot(uint32_t nowMs);
 bool respondToStartPrompt(bool accept, uint32_t nowMs);
 bool needsAttention(uint32_t nowMs);

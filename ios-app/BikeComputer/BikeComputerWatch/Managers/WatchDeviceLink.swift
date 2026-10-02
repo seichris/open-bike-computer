@@ -380,11 +380,6 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         }
         phonePreparationAccepted = false
         guard !transportStateMachine.isReady else { return }
-        if state == .scanning {
-            central.stopScan()
-        }
-        operationTimeoutTask?.cancel()
-        operationTimeoutTask = nil
         let message: String
         switch response.errorCode {
         case "phone_navigation_active":
@@ -398,9 +393,12 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         default:
             message = "Bicino is controlled by iPhone"
         }
-        lastError = message
+        // A negative handoff retires the platform connection through the same
+        // cancellation boundary as any other failed attempt. A timer cannot
+        // invalidate CoreBluetooth's outstanding callbacks.
+        disconnectingForBusyLease = true
+        fail(message, reason: .leaseBusy)
         state = .busy
-        scheduleReconnect()
     }
 
     func directRidePreparationSubmissionDidFail(
@@ -2132,7 +2130,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             guard !Task.isCancelled, let self else { return }
             self.reconnectTask = nil
             guard self.hasDemand,
-                  self.connectionGeneration == generation else { return }
+                  self.connectionGeneration == generation,
+                  self.peripheral == nil,
+                  !self.transportStateMachine.isReady else { return }
             self.resetTransport(keepingPeripheral: false)
             self.beginIfNeeded()
         }

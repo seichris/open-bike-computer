@@ -14,7 +14,7 @@ class DeliveryTimingContractTests(unittest.TestCase):
             self.assertLess(body.index("DeliveryCallbackScope timing"),
                             body.index("ScopedNimbleCallback callbackScope"))
             self.assertLess(body.index("timing.setupComplete()"),
-                            body.index("unwrapOwnerAuthenticatedPayload"))
+                            body.index("decodeProtectedCommand"))
             self.assertIn("&timing", body)
 
     def test_timing_does_not_log_or_allocate(self):

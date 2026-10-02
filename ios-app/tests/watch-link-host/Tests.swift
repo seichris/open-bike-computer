@@ -53,6 +53,33 @@ enum Tests {
     }
     static var location: NavigationLocationSampleV1 { .init(coordinate: .init(latitude: 1, longitude: 2), horizontalAccuracyMeters: 3, courseDegrees: 4, speedMetersPerSecond: 5, altitudeMeters: 6, timestamp: Date(timeIntervalSince1970: 0)) }
     static func main() async {
+        await run("rejected preparation waits for a real cancellation boundary") {
+            for finishBeforeRetry in [false, true] {
+                let f = Fixture(); defer { f.close() }
+                f.link.testStartPendingPreparation(f.peer)
+                let request = try! WatchDirectRidePreparationRequestV1(
+                    preparationID: f.id, operation: .prepare,
+                    deviceID: "00112233445566778899aabbccddeeff")
+                f.link.directRidePreparationDidRespond(request: request,
+                    response: .init(requestID: request.requestID, accepted: false,
+                                    errorCode: "phone_navigation_active"))
+                expect(f.link.testCentral.cancellations.count == 1,
+                       "rejection cancels the outstanding connection")
+                if finishBeforeRetry { f.link.testFinishReconnect(f.peer) }
+                await settle()
+                f.clock.advance(by: .seconds(2)); await settle()
+                expect(f.link.testCentral.connections.count == 1,
+                       "no reconnect before disconnect callback")
+                expect(!f.link.state.isReady,
+                       "late setup callbacks cannot revive a retired attempt")
+                f.link.testDrop(f.peer)
+                await settle()
+                f.clock.advance(by: .seconds(1)); await settle()
+                expect(f.link.testCentral.connections.count == 2,
+                       "real disconnect permits retry")
+            }
+        }
+
         await run("unchanged route suppression preserves replacement and reconnect") {
             let f = Fixture(); defer { f.close() }
             for _ in 0..<20 {

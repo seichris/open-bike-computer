@@ -1624,6 +1624,30 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertTrue(unavailableManager.hasUnavailableRecoveryState)
     }
 
+    func testMissingLiveMirrorCompletionRetriesNewestSnapshotAndIgnoresLateCallback() async throws {
+        let probe = WatchMirrorTransportProbe()
+        let runtime = try makeMirrorRuntime(probe: probe, sendTimeout: 0.03)
+        runtime.manager.configureMirrorRuntimeForTesting(session: runtime.session,
+                                                         identity: runtime.identity, state: .running)
+        runtime.manager.startMirroringForTesting()
+        probe.completeNextStart(succeeded: true)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        try await waitUntil { probe.startCallCount == 2 }
+        probe.completeNextStart(succeeded: true)
+        try await waitUntil { probe.sentData.count == 2 }
+        let old = try WorkoutContractCodec.decode(probe.sentData[0])
+        let latest = try WorkoutContractCodec.decode(probe.sentData[1])
+        XCTAssertGreaterThan(latest.sequence, old.sequence)
+        probe.completeNextSend(succeeded: true)
+        await Task.yield()
+        XCTAssertTrue(runtime.manager.mirrorSendIsInFlightForTesting)
+        probe.completeNextSend(succeeded: true)
+        try await waitUntil { !runtime.manager.mirrorSendIsInFlightForTesting }
+    }
+
     func testProductionMirrorStartRetryAndBackpressure() async throws {
         let probe = WatchMirrorTransportProbe()
         let runtime = try makeMirrorRuntime(probe: probe)
@@ -8693,6 +8717,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
     private func makeMirrorRuntime(
         probe: WatchMirrorTransportProbe,
         shutdownTimeout: TimeInterval = 10,
+        sendTimeout: TimeInterval = 8,
         workoutConfigurationHandler:
             (@MainActor (HKWorkoutConfiguration) -> Void)? = nil,
         builderElapsedTime:
@@ -8729,6 +8754,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
             mirrorSendOperation: probe.send,
             mirrorShutdownEndSession: probe.endSession,
             mirrorRetryDelay: 0.01,
+            mirrorSendTimeout: sendTimeout,
             mirrorShutdownDeliveryTimeout: shutdownTimeout,
             initializeOnLaunch: false
         )

@@ -314,7 +314,7 @@
       "name": "Ride controller lease host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ride_controller_lease.cpp \\\n  -o ${TMPDIR}/test_ride_controller_lease\n${TMPDIR}/test_ride_controller_lease\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_scoped_watch_payload_policy.cpp \\\n  -o ${TMPDIR}/test_scoped_watch_payload_policy\n${TMPDIR}/test_scoped_watch_payload_policy\ng++ -std=c++17 -Wall -Wextra -Werror -DVERSION=\\\"ci-host\\\" \\\n  tools/tests/test_ride_delivery_protocol.cpp \\\n  -o ${TMPDIR}/test_ride_delivery_protocol\n${TMPDIR}/test_ride_delivery_protocol",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ride_controller_lease.cpp \\\n  -o ${TMPDIR}/test_ride_controller_lease\n${TMPDIR}/test_ride_controller_lease\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_scoped_watch_payload_policy.cpp \\\n  -o ${TMPDIR}/test_scoped_watch_payload_policy\n${TMPDIR}/test_scoped_watch_payload_policy\ng++ -std=c++17 -Wall -Wextra -Werror -DVERSION=\\\"ci-host\\\" \\\n  tools/tests/test_ride_delivery_protocol.cpp \\\n  -o ${TMPDIR}/test_ride_delivery_protocol\n${TMPDIR}/test_ride_delivery_protocol\ng++ -std=c++17 -Wall -Wextra -Werror tools/tests/test_ride_command_admission.cpp -o ${TMPDIR}/test_ride_command_admission\n${TMPDIR}/test_ride_command_admission",
       "tools": [
         "python3",
         "g++"
