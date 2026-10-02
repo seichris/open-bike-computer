@@ -1224,7 +1224,7 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   // Disabled firmware must reject target-5 maps instead of accepting a map
   // whose POI companion it cannot present or query.
   if (manifest.formatVersion == 5)
-    return fail("manifest_target", "POI map target is not enabled");
+    return fail("manifest_target", "POI target disabled");
 #endif
 
   uint32_t fontAssetCount = 0;
@@ -1282,7 +1282,7 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   if (manifest.formatVersion == 5) {
     if (!map_nearby_coverage::decodeManifest(
             manifestText, manifest.nearbyCoverageBlocks))
-      return fail("manifest_poi_coverage", "invalid Nearby coverage");
+      return fail("manifest_poi_coverage", "invalid coverage");
     for (const ManifestFile &file : manifest.files) {
       if (file.path.size() < 4 ||
           file.path.compare(file.path.size() - 4, 4, ".fmb") != 0)
@@ -1291,10 +1291,10 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       if (!map_poi_index::blockFromPath(manifest.mapId, file.path, x, y) ||
           !map_nearby_coverage::contains(
               manifest.nearbyCoverageBlocks, {x, y}))
-        return fail("manifest_poi_coverage", "block outside Nearby coverage");
+        return fail("manifest_poi_coverage", "block outside coverage");
     }
   } else if (manifestText.find("\"nearbyCoverage\"") != std::string::npos) {
-    return fail("manifest_poi_coverage", "coverage requires target 5");
+    return fail("manifest_poi_coverage", "coverage needs target 5");
   }
   if (((manifest.formatVersion == 2 || manifest.formatVersion == 3 ||
         manifest.formatVersion == 4 || manifest.formatVersion == 5) &&
@@ -1369,7 +1369,7 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
              !manifest.requestedFeatures.empty() ||
              manifest.poiRecordCount != 0 || poiTotal != 0 ||
              !poiSummary.empty() || !layers.empty()) {
-    return fail("manifest_pois", "legacy manifest contains POI metadata");
+    return fail("manifest_pois", "legacy POI metadata");
   }
   const bool contourIntervalsValid =
       (manifest.contourMinorIntervalM == 20 &&
@@ -1390,7 +1390,7 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   } else if (manifest.topographyProfileVersion != 0 ||
              !manifest.contourQualityMode.empty() ||
              !topographyText.empty()) {
-    return fail("manifest_topography", "map without contours contains topography metadata");
+    return fail("manifest_topography", "unexpected topography metadata");
   }
   return {true, "ok", ""};
 }
@@ -3056,7 +3056,7 @@ InstallStatus MapTransferInstaller::readActiveMapPresentation(
     if (selection.target.formatVersion == 5 &&
         !map_nearby_coverage::decodeManifest(
             manifestText, presentation.nearbyCoverageBlocks))
-      return fail("installed_poi_coverage", "installed Nearby coverage is invalid");
+    return fail("installed_poi_coverage", "invalid installed coverage");
     return {true, "ok", ""};
   }
   MapManifest manifest;
@@ -3581,7 +3581,7 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     if (file.path == std::string(kVectMapPrefix) + manifest.mapId +
                          "/assets/nearby-pois.fpi") {
       if (poiIndexFile != nullptr)
-        return fail("poi_index_contract", "duplicate Nearby index asset");
+        return fail("poi_index_contract", "duplicate POI index");
       poiIndexFile = &file;
     }
 #endif
@@ -3634,16 +3634,16 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       int32_t blockX = 0, blockY = 0;
       if (!map_poi_index::blockFromPath(manifest.mapId, file.path,
                                          blockX, blockY))
-        return fail("poi_index_contract", "noncanonical POI block path");
+        return fail("poi_index_contract", "bad POI block path");
       map_poi_block::Block pois;
       if (!map_poi_block::decode(bytes.data(), bytes.size(), pois, &error))
-        return fail("poi_block_contract", "FMB POI section is invalid");
+        return fail("poi_block_contract", "invalid FMB POIs");
       poiRecords += pois.stats.records;
       for (size_t index = 0; index < poiCategories.size(); ++index)
         poiCategories[index] += pois.stats.categories[index];
       if (pois.stats.records != 0) {
         if (expectedPoiIndex.size() >= map_poi_index::kMaximumEntries)
-          return fail("poi_index_contract", "Nearby index entry limit exceeded");
+          return fail("poi_index_contract", "index entry limit exceeded");
         map_poi_index::Entry entry;
         entry.blockX = blockX;
         entry.blockY = blockY;
@@ -3685,12 +3685,12 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
 #if MAP_POIS_RUNTIME_ENABLED
   if (manifest.formatVersion == 5) {
     if (poiRecords != manifest.poiRecordCount)
-      return fail("poi_block_contract", "FMB POI counts do not match manifest");
+      return fail("poi_block_contract", "POI counts mismatch");
     for (size_t index = 0; index < poiCategories.size(); ++index)
       if (poiCategories[index] != manifest.poiCategoryCounts[index])
-        return fail("poi_block_contract", "FMB POI counts do not match manifest");
+        return fail("poi_block_contract", "POI counts mismatch");
     if (poiIndexFile == nullptr)
-      return fail("poi_index_contract", "Nearby index is missing");
+      return fail("poi_index_contract", "POI index missing");
     std::sort(expectedPoiIndex.begin(), expectedPoiIndex.end(),
               [](const auto &left, const auto &right) {
                 return left.blockX < right.blockX ||
@@ -3700,12 +3700,12 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     for (size_t index = 1; index < expectedPoiIndex.size(); ++index)
       if (expectedPoiIndex[index].blockX == expectedPoiIndex[index - 1].blockX &&
           expectedPoiIndex[index].blockY == expectedPoiIndex[index - 1].blockY)
-        return fail("poi_index_contract", "duplicate POI block coordinates");
+        return fail("poi_index_contract", "duplicate POI blocks");
     const std::string indexPath = resolvedPath(*poiIndexFile);
     MapReadFile input(indexPath, true);
     if (!input || input.tell() < static_cast<long>(map_poi_index::kHeaderBytes) ||
         static_cast<uint64_t>(input.tell()) > map_poi_index::kMaximumBytes)
-      return fail("poi_index_contract", "Nearby index cannot be read");
+        return fail("poi_index_contract", "POI index unreadable");
     const size_t indexBytes = static_cast<size_t>(input.tell());
     input.seek(0);
     struct CompareContext {
@@ -3730,11 +3730,11 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       const size_t size = std::min(remaining, chunk.size());
       input.read(reinterpret_cast<char *>(chunk.data()), size);
       if (!input || !validator.feed(chunk.data(), size))
-        return fail("poi_index_contract", "Nearby index does not match blocks");
+        return fail("poi_index_contract", "index does not match blocks");
       remaining -= size;
     }
     if (!validator.finish() || context.next != expectedPoiIndex.size())
-      return fail("poi_index_contract", "Nearby index is incomplete or corrupt");
+      return fail("poi_index_contract", "incomplete or corrupt index");
   }
 #endif
   if ((manifest.formatVersion == 4 || manifest.contoursIncluded) &&
