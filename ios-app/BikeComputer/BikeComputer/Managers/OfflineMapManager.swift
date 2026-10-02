@@ -5990,14 +5990,18 @@ final class OfflineMapManager: ObservableObject {
                              client: MapTransferDeviceClient,
                              bleManager: BLEManager,
                              timeout: TimeInterval = OfflineMapDefaults.activationConfirmationTimeout,
-                             pollIntervalNanoseconds: UInt64 = OfflineMapDefaults.activationPollIntervalNanoseconds) async throws -> MapActivationConfirmationResult {
-        let startedAt = Date()
+                             pollIntervalNanoseconds: UInt64 = OfflineMapDefaults.activationPollIntervalNanoseconds,
+                             now: () -> Date = Date.init,
+                             sleep: (UInt64) async throws -> Void = {
+                                 try await Task.sleep(nanoseconds: $0)
+                             }) async throws -> MapActivationConfirmationResult {
+        let startedAt = now()
         var deadline = startedAt.addingTimeInterval(timeout)
         var lastObservedState = "activation request accepted"
         var observedCurrentAttempt = false
         var lastProgress: MapActivationProgressPresentation?
 
-        while Date() < deadline {
+        while now() < deadline {
             var receivedHTTPStatus = false
             do {
                 let status = try await client.status()
@@ -6021,7 +6025,7 @@ final class OfflineMapManager: ObservableObject {
                 if let activationProgress,
                    activationProgress != lastProgress {
                     lastProgress = activationProgress
-                    deadline = Date().addingTimeInterval(timeout)
+                    deadline = now().addingTimeInterval(timeout)
                 }
                 let evaluation = MapActivationReconciler.evaluate(
                     expectedMapId: expectedMapId,
@@ -6078,7 +6082,7 @@ final class OfflineMapManager: ObservableObject {
                 if let activationProgress,
                    activationProgress != lastProgress {
                     lastProgress = activationProgress
-                    deadline = Date().addingTimeInterval(timeout)
+                    deadline = now().addingTimeInterval(timeout)
                 }
                 let evaluation = MapActivationReconciler.evaluate(
                     expectedMapId: expectedMapId,
@@ -6110,9 +6114,7 @@ final class OfflineMapManager: ObservableObject {
 
             statusMessage = activationProgress?.label ??
                 "activating \(displayName(forMapId: expectedMapId))"
-            try await Task.sleep(
-                nanoseconds: pollIntervalNanoseconds
-            )
+            try await sleep(pollIntervalNanoseconds)
         }
 
         return .continuesOnDevice(
