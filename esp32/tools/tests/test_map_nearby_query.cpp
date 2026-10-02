@@ -91,6 +91,68 @@ int main() {
   assert(distanceMeters({80.0, 179.99}, {80.0, -179.99}) <
          distanceMeters({80.0, 179.99}, {80.0, 179.90}));
 
+  // Search across the anti-meridian at high latitude, not just compute a
+  // wrapped distance. Both frontier pruning and result ordering must include
+  // the nearby block on the opposite side of the longitude seam.
+  const std::array<Position, 3> seamPlaces{{
+      {80.0, 179.90}, {80.0, -179.99}, {80.0, -179.90}}};
+  std::array<map_poi_index::Entry, seamPlaces.size()> seamIndex{};
+  std::array<std::array<uint8_t, 8>, seamPlaces.size()> seamRecords{};
+  for (size_t index = 0; index < seamPlaces.size(); ++index) {
+    const double x = kMercatorRadiusM *
+                     degreesToRadians(seamPlaces[index].longitude);
+    const double y = kMercatorRadiusM * std::log(std::tan(
+        kPi / 4.0 + degreesToRadians(seamPlaces[index].latitude) / 2.0));
+    auto &entry = seamIndex[index];
+    entry.blockX = static_cast<int32_t>(std::floor(x / kBlockSizeM));
+    entry.blockY = static_cast<int32_t>(std::floor(y / kBlockSizeM));
+    const auto localX = static_cast<uint16_t>(
+        std::lround(x - double(entry.blockX) * kBlockSizeM));
+    const auto localY = static_cast<uint16_t>(
+        std::lround(y - double(entry.blockY) * kBlockSizeM));
+    assert(localX <= 4095 && localY <= 4095);
+    entry.categoryMask = 1;
+    entry.categoryCounts = {1, 0, 0, 0, 0};
+    entry.sectionOffset = 112;
+    entry.sectionBytes = 16;
+    seamRecords[index] = {
+        static_cast<uint8_t>(localX), static_cast<uint8_t>(localX >> 8U),
+        static_cast<uint8_t>(localY), static_cast<uint8_t>(localY >> 8U),
+        1, 2, 0, 0};
+  }
+  assert(prepareFrontier(seamIndex.data(), seamIndex.size(), rider, 1,
+                         25000.0, frontier));
+  assert(frontier.size() == seamPlaces.size());
+  NearestTen seamSearch(rider, 1, 25000.0);
+  for (size_t index = 0; index < seamPlaces.size(); ++index)
+    assert(seamSearch.consume(seamIndex[index], 0,
+                              seamRecords[index].data(), 1));
+  assert(seamSearch.size() == seamPlaces.size());
+  assert(seamSearch[0].blockX == seamIndex[1].blockX);
+  assert(seamSearch[1].blockX == seamIndex[0].blockX);
+  assert(seamSearch[2].blockX == seamIndex[2].blockX);
+  NearestTen seamRadiusSearch(rider, 1, 500.0);
+  for (size_t index = 0; index < seamPlaces.size(); ++index)
+    assert(seamRadiusSearch.consume(seamIndex[index], 0,
+                                    seamRecords[index].data(), 1));
+  assert(seamRadiusSearch.size() == 1);
+  assert(seamRadiusSearch[0].blockX == seamIndex[1].blockX);
+
+  // Equal-distance records must use stable record identity rather than SD
+  // batch arrival order, including when they belong to different categories.
+  auto tiedBlock = near;
+  tiedBlock.categoryCounts = {1, 1, 0, 0, 0};
+  tiedBlock.categoryMask = 3;
+  tiedBlock.sectionBytes = 24;
+  const std::array<uint8_t, 8> tiedShop{{0, 0, 0, 0, 1, 2, 0, 0}};
+  const std::array<uint8_t, 8> tiedCafe{{0, 0, 0, 0, 2, 2, 0, 0}};
+  NearestTen tiedSearch(origin, 3, 10000.0);
+  assert(tiedSearch.consume(tiedBlock, 1, tiedCafe.data(), 1));
+  assert(tiedSearch.consume(tiedBlock, 0, tiedShop.data(), 1));
+  assert(tiedSearch.size() == 2);
+  assert(tiedSearch[0].recordOrdinal == 0);
+  assert(tiedSearch[1].recordOrdinal == 1);
+
   // Compare the bounded accumulator with a brute-force scan of every record.
   // Feed the distant block first so insertion order cannot mask rank errors.
   const std::array<int32_t, 4> blockXs{{8, 1, -1, 0}};
