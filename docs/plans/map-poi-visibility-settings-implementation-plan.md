@@ -123,8 +123,9 @@ so no board-specific build or flash is evidence for this checkpoint.
 
 The September allocation remains available in code: target 5/FMB v6,
 visibility bits 14-18, and CAP2 bit 31/client 29. The topography plan's
-unimplemented hillshade reservations still need the coordinated documentation
-change described below; the runtime protocol alone is not that coordination.
+unimplemented hillshade reservations have been moved to the next prospective
+format/section and visibility bit in this PR; recheck all allocations before
+implementing hillshade.
 
 At the recorded `main` baseline, the missing pieces were point extraction,
 exact category and block ownership, a noncolliding POI section and renderer
@@ -413,10 +414,10 @@ business details without requiring them for offline category discovery.
 The [topography plan at this baseline](https://github.com/seichris/open-bike-computer/blob/0f6fc8c6f0238d5508df199f2a50b1482b62ca1d/docs/plans/issue-190-topographic-map-support-implementation-plan.md)
 proposes target 5/FMB v6/section 6 and visibility bit 14 for future hillshade.
 No implementation of that contract exists in the inspected main, but both
-reservations conflict with this POI proposal. Update the prospective hillshade
-format and visibility reservations together in the implementation PR, taking
-the next unallocated identifiers then available. Recheck main before landing
-either feature. Do not ship two different target-5 or visibility-bit meanings.
+reservations conflict with this POI proposal. This PR updates the prospective
+hillshade format and visibility reservations to target 6/FMB v7/section 7 and
+bit 19. Recheck main before landing either feature. Do not ship two different
+target-5 or visibility-bit meanings.
 
 ## Versioning and compatibility model
 
