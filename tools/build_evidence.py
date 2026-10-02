@@ -213,6 +213,8 @@ def ios(derived, configuration, before, root):
     debug_image = app / (info['CFBundleExecutable'] + '.debug.dylib')
     binary = debug_image if debug_image.exists() else launcher
     binary_uuids = dwarf_uuids(binary)
+    launcher_uuids = dwarf_uuids(launcher)
+    required_uuids = set(binary_uuids) | set(launcher_uuids)
     dsyms = sorted(products.rglob('*.dSYM'))
     files, matched, dsym_identities = {}, [], {}
     for dsym in dsyms:
@@ -220,7 +222,7 @@ def ios(derived, configuration, before, root):
             continue
         uuids = dwarf_uuids(dsym)
         dsym_identities[str(dsym.relative_to(products))] = uuids
-        if uuids == binary_uuids:
+        if required_uuids <= set(uuids):
             matched.append(str(dsym.relative_to(products)))
         for path in dsym.rglob('*'):
             if path.is_symlink():
@@ -233,7 +235,7 @@ def ios(derived, configuration, before, root):
     identity = {'source': after, 'configuration': configuration,
         'bundleIdentifier': info['CFBundleIdentifier'], 'version': info['CFBundleShortVersionString'],
         'build': info['CFBundleVersion'], 'binarySha256': sha(binary), 'binaryName': binary.name,
-        'launcherSha256': sha(launcher), 'launcherMachOUUIDs': dwarf_uuids(launcher),
+        'launcherSha256': sha(launcher), 'launcherMachOUUIDs': launcher_uuids,
         'machOUUIDs': binary_uuids, 'matchingDSYM': matched[0], 'dSYMs': dsym_identities}
     record = publish('ios', identity, files, root)
     print(json.dumps({'symbols': str(record), 'identity': identity}))

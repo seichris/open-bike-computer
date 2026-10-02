@@ -72,7 +72,7 @@ class BuildEvidenceTests(unittest.TestCase):
         with patch.object(evidence, 'source', return_value=source), patch.object(evidence, 'dwarf_uuids', return_value=uuid), contextlib.redirect_stdout(io.StringIO()):
             record = evidence.ios(derived, 'Debug', source, self.root / 'records')
         self.assertEqual(evidence.verify(record)['identity']['machOUUIDs'], [list(pair) for pair in uuid])
-        with patch.object(evidence, 'source', return_value=source), patch.object(evidence, 'dwarf_uuids', side_effect=[uuid,[('different','arm64')]]):
+        with patch.object(evidence, 'source', return_value=source), patch.object(evidence, 'dwarf_uuids', side_effect=[uuid,uuid,[('different','arm64')]]):
             with self.assertRaisesRegex(ValueError, 'matching'): evidence.ios(derived, 'Debug', source, self.root / 'records')
         with patch.object(evidence, 'source', return_value={**source,'dirty':True}):
             with self.assertRaisesRegex(ValueError, 'clean'): evidence.ios(derived, 'Debug', source, self.root / 'records')
@@ -84,7 +84,9 @@ class BuildEvidenceTests(unittest.TestCase):
         source = {'commit':'a'*40,'tree':'b'*40,'dirty':False}
         code_uuid = [('00000000-0000-0000-0000-000000000001','arm64')]
         stub_uuid = [('00000000-0000-0000-0000-000000000002','arm64')]
-        def uuids(path): return stub_uuid if path.name == 'BikeComputer' else code_uuid
+        def uuids(path):
+            if path.name.endswith('.dSYM'): return code_uuid + stub_uuid
+            return stub_uuid if path.name == 'BikeComputer' else code_uuid
         with patch.object(evidence, 'source', return_value=source), patch.object(evidence, 'dwarf_uuids', side_effect=uuids), contextlib.redirect_stdout(io.StringIO()):
             record = evidence.ios(derived, 'Debug', source, self.root / 'records')
         identity = evidence.verify(record)['identity']
