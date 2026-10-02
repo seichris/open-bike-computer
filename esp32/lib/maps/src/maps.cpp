@@ -1344,32 +1344,38 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       delete mblock; // readMapBlockBinary creates a new one
       mblock = readMapBlockBinary(file, fileSize);
       // Optional signed terrain sidecar. Legacy maps have no such file.
-      const std::string terrainPath = std::string(fileName.c_str()) + ".fme";
-      const int terrainFD = ::open(terrainPath.c_str(), O_RDONLY);
-      if (terrainFD >= 0) {
-        struct TerrainFileGuard {
-          int fd;
-          ~TerrainFileGuard() { ::close(fd); }
-        } terrainFileGuard{terrainFD};
-        struct stat terrainStat{};
-        std::vector<uint8_t, PsramAllocator<uint8_t>> bytes;
-        if (::fstat(terrainFD, &terrainStat) == 0 &&
-            terrainStat.st_size == map_terrain::BYTES) {
-          bytes.resize(map_terrain::BYTES);
-          size_t received = 0;
-          while (received < bytes.size() && !shouldCancelMapRenderWork()) {
-            const auto n = ::read(terrainFD, bytes.data() + received,
-                                  bytes.size() - received);
-            if (n <= 0)
-              break;
-            received += size_t(n);
-          }
-          if (received == bytes.size()) {
-            mblock->terrain.resize(1);
-            if (!mblock->terrain[0].decode(bytes.data(), bytes.size()))
-              mblock->terrain.clear();
+      try {
+        const std::string terrainPath = std::string(fileName.c_str()) + ".fme";
+        const int terrainFD = ::open(terrainPath.c_str(), O_RDONLY);
+        if (terrainFD >= 0) {
+          struct TerrainFileGuard {
+            int fd;
+            ~TerrainFileGuard() { ::close(fd); }
+          } terrainFileGuard{terrainFD};
+          struct stat terrainStat{};
+          std::vector<uint8_t, PsramAllocator<uint8_t>> bytes;
+          if (::fstat(terrainFD, &terrainStat) == 0 &&
+              terrainStat.st_size == map_terrain::BYTES) {
+            bytes.resize(map_terrain::BYTES);
+            size_t received = 0;
+            while (received < bytes.size() && !shouldCancelMapRenderWork()) {
+              const auto n = ::read(terrainFD, bytes.data() + received,
+                                    bytes.size() - received);
+              if (n <= 0)
+                break;
+              received += size_t(n);
+            }
+            if (received == bytes.size()) {
+              mblock->terrain.resize(1);
+              if (!mblock->terrain[0].decode(bytes.data(), bytes.size()))
+                mblock->terrain.clear();
+            }
           }
         }
+      } catch (const std::bad_alloc &) {
+        // Optional terrain must not leak the decoded map or its raw buffer,
+        // nor prevent a usable flat map when PSRAM is under pressure.
+        mblock->terrain.clear();
       }
       const uint32_t parseGridMs = MAPIO_TIME_MS() - parseStartMs;
       MAPIO_LOG("MAPIO: block ok=1 file=%s format=binary size=%u "
