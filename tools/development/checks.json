@@ -1,0 +1,688 @@
+{
+  "schema": 1,
+  "checks": [
+    {
+      "id": "ios-fast-test-generated-app-build-identity",
+      "name": "Test generated app build identity",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "python3 -m unittest discover -s scripts/tests",
+      "tools": [
+        "python3"
+      ]
+    },
+    {
+      "id": "ios-fast-run-swift-helper-tests",
+      "name": "Run Swift helper tests",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-navigation-tests.sh",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ],
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ios-fast-run-ride-diagnostics-recorder-tests",
+      "name": "Run ride diagnostics recorder tests",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-ride-diagnostics-tests.sh",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ],
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ios-fast-run-shared-route-and-watch-ble-contract-tests",
+      "name": "Run shared route and Watch BLE contract tests",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-ride-shared-tests.sh",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ],
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ios-fast-type-check-the-complete-watch-source-graph",
+      "name": "Type-check the complete Watch source graph",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-watch-source-typecheck.sh",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ],
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ios-fast-run-watch-offline-navigation-persistence-tests",
+      "name": "Run Watch offline navigation persistence tests",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-watch-offline-navigation-tests.sh",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ],
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ios-fast-run-watch-online-navigation-policy-tests",
+      "name": "Run Watch online navigation policy tests",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-watch-online-navigation-tests.sh",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ],
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ios-fast-run-workout-contracts-and-firmware-to-swift-legacy-compatibility-tests",
+      "name": "Run workout contracts and firmware-to-Swift legacy compatibility tests",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "git cat-file -e fe73e43431ed76c39159de7624c4cd9ede509434^{commit} || git fetch --no-tags --depth=1 origin fe73e43431ed76c39159de7624c4cd9ede509434\npython3 scripts/verify-legacy-workout-decoder.py",
+      "tools": [
+        "python3"
+      ]
+    },
+    {
+      "id": "esp32-host-firmware-manifest-tests",
+      "name": "Firmware manifest tests",
+      "component": "firmware_host",
+      "cwd": ".",
+      "command": "python3 -m unittest discover -s tools/tests",
+      "tools": [
+        "python3"
+      ],
+      "pythonImports": [
+        "cryptography"
+      ]
+    },
+    {
+      "id": "esp32-host-runtime-ownership-and-allocation-recovery-tests",
+      "name": "Runtime ownership and allocation recovery tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror -pthread \\\n  tools/tests/test_runtime_ownership.cpp -o ${TMPDIR}/test_runtime_ownership\n${TMPDIR}/test_runtime_ownership\npython3 tools/tests/test_runtime_ownership_contract.py\npython3 tools/tests/test_runtime_rollback_failure.py\npython3 tools/tests/test_firmware_runtime_boundaries.py",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-ride-diagnostics-and-watchdog-host-tests",
+      "name": "Ride diagnostics and watchdog host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "for test in \\\n  test_ride_diagnostics_format \\\n  test_runtime_watchdog_policy \\\n  test_ride_diagnostics_queue_policy \\\n  test_ride_diagnostics_control \\\n  test_ride_diagnostics_http_policy \\\n  test_sd_mount_retry_policy \\\n  test_storage_mount_policy; do\n  g++ -std=c++17 -Wall -Wextra -Werror \\\n    \"tools/tests/${test}.cpp\" -o \"${TMPDIR}/${test}\"\n  \"${TMPDIR}/${test}\"\ndone\npython3 tools/tests/test_watchdog_scheduler_contract.py",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-verify-generated-pre-connection-assets",
+      "name": "Verify generated pre-connection assets",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "python tools/generate_preconnection_assets.py --check\npython -m unittest tools.tests.test_preconnection_assets\npython -m unittest tools.tests.test_world_radio_assets",
+      "tools": [
+        "python3"
+      ],
+      "pythonImports": [
+        "PIL",
+        "qrcode",
+        "zxingcpp"
+      ]
+    },
+    {
+      "id": "esp32-host-gui-layout-host-tests",
+      "name": "GUI layout host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "PYTHONPATH=tools python -m unittest \\\n  tools.tests.test_build_firmware \\\n  tools.tests.test_package_factory_firmware \\\n  tools.tests.test_firmware_build_identity \\\n  tools.tests.test_generated_sdkconfig \\\n  tools.tests.test_shared_firmware_cache \\\n  tools.tests.test_firmware_compile_cache \\\n  tools.tests.test_firmware_download_cache \\\n  tools.tests.test_firmware_runtime \\\n  tools.tests.test_refresh_firmware_runtime \\\n  tools.tests.test_capture_boot \\\n  tools.tests.test_resolve_upload_port \\\n  tools.tests.test_device_registry \\\n  tools.tests.test_map_guidance_integration \\\n  tools.tests.test_map_memory_diagnostics\ng++ -std=c++17 -DWAVESHARE_AMOLED_175 \\\n  tools/tests/test_gui_layout.cpp \\\n  -o ${TMPDIR}/test_gui_layout_175\n${TMPDIR}/test_gui_layout_175\ng++ -std=c++17 \\\n  -DWAVESHARE_AMOLED_206 \\\n  tools/tests/test_gui_layout.cpp \\\n  -o ${TMPDIR}/test_gui_layout_206\n${TMPDIR}/test_gui_layout_206\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_pre_connection_presentation.cpp \\\n  -o ${TMPDIR}/test_pre_connection_presentation\n${TMPDIR}/test_pre_connection_presentation\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_building_renderer.cpp \\\n  -o ${TMPDIR}/test_map_building_renderer\n${TMPDIR}/test_map_building_renderer\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_main_screen_entry_policy.cpp \\\n  -o ${TMPDIR}/test_main_screen_entry_policy\n${TMPDIR}/test_main_screen_entry_policy",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-power-metrics-host-tests",
+      "name": "Power metrics host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "PYTHONPATH=tools python -m unittest \\\n  tools.tests.test_power_trace_summary\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_power_metrics_schema.cpp \\\n  -o ${TMPDIR}/test_power_metrics_schema\n${TMPDIR}/test_power_metrics_schema",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-display-power-and-redraw-policy-host-tests",
+      "name": "Display power and redraw policy host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_display_power_policy.cpp \\\n  -o ${TMPDIR}/test_display_power_policy\n${TMPDIR}/test_display_power_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_display_inactivity_policy.cpp \\\n  -o ${TMPDIR}/test_display_inactivity_policy\n${TMPDIR}/test_display_inactivity_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ui_scheduler_policy.cpp \\\n  -o ${TMPDIR}/test_ui_scheduler_policy\n${TMPDIR}/test_ui_scheduler_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_power_management_policy.cpp \\\n  -o ${TMPDIR}/test_power_management_policy\n${TMPDIR}/test_power_management_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_axp2101_register_policy.cpp \\\n  -o ${TMPDIR}/test_axp2101_register_policy\n${TMPDIR}/test_axp2101_register_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_boot_diagnostics_policy.cpp \\\n  -o ${TMPDIR}/test_boot_diagnostics_policy\n${TMPDIR}/test_boot_diagnostics_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_firmware_maintenance_policy.cpp \\\n  -o ${TMPDIR}/test_firmware_maintenance_policy\n${TMPDIR}/test_firmware_maintenance_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_firmware_internal_owner_policy.cpp \\\n  -o ${TMPDIR}/test_firmware_internal_owner_policy\n${TMPDIR}/test_firmware_internal_owner_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_firmware_update_policy.cpp \\\n  -o ${TMPDIR}/test_firmware_update_policy\n${TMPDIR}/test_firmware_update_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_status_json.cpp \\\n  lib/status_json/status_json.cpp \\\n  -o ${TMPDIR}/test_status_json\n${TMPDIR}/test_status_json\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_speaker_playback_policy.cpp \\\n  -o ${TMPDIR}/test_speaker_playback_policy\n${TMPDIR}/test_speaker_playback_policy\npython3 -m unittest tools.tests.test_speaker_pcm_assets\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_speaker_resource_state.cpp \\\n  -o ${TMPDIR}/test_speaker_resource_state\n${TMPDIR}/test_speaker_resource_state\ngcc -std=c11 -Wall -Wextra -Werror \\\n  -Itools/tests/host_stubs \\\n  -Ilib/esp_codec_dev/src \\\n  tools/tests/test_codec_interface_delete.c \\\n  lib/esp_codec_dev/src/esp_codec_dev_if.c \\\n  -o ${TMPDIR}/test_codec_interface_delete\n${TMPDIR}/test_codec_interface_delete\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1 \\\n  tools/tests/test_power_management_policy.cpp \\\n  -o ${TMPDIR}/test_power_management_policy_light_sleep\n${TMPDIR}/test_power_management_policy_light_sleep\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_active_low_wake_interrupt_gate.cpp \\\n  -o ${TMPDIR}/test_active_low_wake_interrupt_gate\n${TMPDIR}/test_active_low_wake_interrupt_gate\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy\n${TMPDIR}/test_ble_radio_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=3 \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy_p3\n${TMPDIR}/test_ble_radio_policy_p3\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=0 \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy_p0\n${TMPDIR}/test_ble_radio_policy_p0\nif g++ -std=c++17 -Wall -Wextra -Werror \\\n  -DBLE_TX_POWER_DBM=3 \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy_unsafe; then\n  echo \"Non-default TX power compiled without characterization\"\n  exit 1\nfi\nPYTHONPATH=tools python -m unittest \\\n  tools.tests.test_pioarduino_custom_core\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ui_update_policy.cpp \\\n  -o ${TMPDIR}/test_ui_update_policy\n${TMPDIR}/test_ui_update_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_render_policy.cpp \\\n  -o ${TMPDIR}/test_map_render_policy\n${TMPDIR}/test_map_render_policy\npython tools/tests/test_firmware_profile_config.py",
+      "tools": [
+        "python3",
+        "g++",
+        "gcc"
+      ]
+    },
+    {
+      "id": "esp32-host-two-finger-map-zoom-host-tests",
+      "name": "Two-finger Map zoom host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_cst9217_touch_frame.cpp \\\n  -o ${TMPDIR}/test_cst9217_touch_frame\n${TMPDIR}/test_cst9217_touch_frame\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_pinch_zoom.cpp \\\n  -o ${TMPDIR}/test_map_pinch_zoom\n${TMPDIR}/test_map_pinch_zoom",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-map-projection-host-tests",
+      "name": "Map projection host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_projection.cpp \\\n  -o ${TMPDIR}/test_map_projection\n${TMPDIR}/test_map_projection",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-render-ahead-map-architecture-host-tests",
+      "name": "Render-ahead map architecture host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "for test in \\\n  test_map_render_job \\\n  test_map_probe_diagnostics \\\n  test_map_presentation \\\n  test_map_camera \\\n  test_map_pose_input_policy \\\n  test_gps_input_freshness \\\n  test_map_building_admission \\\n  test_map_route_geometry \\\n  test_map_building_workspace \\\n  test_renderer_diagnostics \\\n  test_renderer_delivery_timing \\\n  test_renderer_diagnostics_ble_protocol \\\n  test_renderer_diagnostics_request; do\n  g++ -std=c++17 -Wall -Wextra -Werror \\\n    \"tools/tests/${test}.cpp\" \\\n    -o \"${TMPDIR}/${test}\"\n  \"${TMPDIR}/${test}\"\ndone",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-map-profile-protocol-host-tests",
+      "name": "Map profile protocol host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror -DMAP_STABLE_CAMERA=1 \\\n  tools/tests/test_map_camera.cpp -o ${TMPDIR}/test_map_camera_enabled\n${TMPDIR}/test_map_camera_enabled\ng++ -std=c++17 \\\n  tools/tests/test_map_profile_protocol.cpp \\\n  -o ${TMPDIR}/test_map_profile_protocol\n${TMPDIR}/test_map_profile_protocol",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-device-capabilities-protocol-host-tests",
+      "name": "Device capabilities protocol host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_capabilities_protocol.cpp \\\n  -o ${TMPDIR}/test_device_capabilities_protocol\n${TMPDIR}/test_device_capabilities_protocol",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-screen-configuration-protocol-and-ride-stats-widget-host-tests",
+      "name": "Screen configuration protocol and Ride Stats widget host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_screen_configuration_protocol.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_protocol\n${TMPDIR}/test_screen_configuration_protocol\ng++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 \\\n  tools/tests/test_screen_configuration_protocol.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_protocol_development\n${TMPDIR}/test_screen_configuration_protocol_development\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_screen_configuration_policy.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_policy\n${TMPDIR}/test_screen_configuration_policy\ng++ -std=c++17 -Wall -Wextra -Werror -Itools/tests/host_stubs \\\n  tools/tests/test_screen_configuration_store.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_store\n${TMPDIR}/test_screen_configuration_store\n${TMPDIR}/test_screen_configuration_store legacy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ride_stats_widget.cpp \\\n  -o ${TMPDIR}/test_ride_stats_widget\n${TMPDIR}/test_ride_stats_widget",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-ride-controller-lease-host-tests",
+      "name": "Ride controller lease host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ride_controller_lease.cpp \\\n  -o ${TMPDIR}/test_ride_controller_lease\n${TMPDIR}/test_ride_controller_lease\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_scoped_watch_payload_policy.cpp \\\n  -o ${TMPDIR}/test_scoped_watch_payload_policy\n${TMPDIR}/test_scoped_watch_payload_policy\ng++ -std=c++17 -Wall -Wextra -Werror -DVERSION=\\\"ci-host\\\" \\\n  tools/tests/test_ride_delivery_protocol.cpp \\\n  -o ${TMPDIR}/test_ride_delivery_protocol\n${TMPDIR}/test_ride_delivery_protocol",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-remote-device-debug-host-tests",
+      "name": "Remote device debug host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_debug_protocol.cpp \\\n  -o ${TMPDIR}/test_device_debug_protocol\n${TMPDIR}/test_device_debug_protocol\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_debug_input.cpp \\\n  -o ${TMPDIR}/test_device_debug_input\n${TMPDIR}/test_device_debug_input\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_debug_request_latch.cpp \\\n  -o ${TMPDIR}/test_device_debug_request_latch\n${TMPDIR}/test_device_debug_request_latch\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_transfer_control_dispatch.cpp \\\n  -o ${TMPDIR}/test_transfer_control_dispatch\n${TMPDIR}/test_transfer_control_dispatch\nPYTHONPATH=tools python -m unittest \\\n  tools.tests.test_device_debug_cli \\\n  tools.tests.test_device_debug_http_contract \\\n  tools.tests.test_device_debug_page \\\n  tools.tests.test_renderer_benchmark",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-filled-line-rasterizer-host-tests",
+      "name": "Filled line rasterizer host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_line_rasterizer.cpp \\\n  -o ${TMPDIR}/test_line_rasterizer\n${TMPDIR}/test_line_rasterizer",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-device-screen-protocol-host-tests",
+      "name": "Device screen protocol host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 \\\n  tools/tests/test_device_screen_protocol.cpp \\\n  -o ${TMPDIR}/test_device_screen_protocol\n${TMPDIR}/test_device_screen_protocol",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-world-radio-protocol-and-screen-registry-host-tests",
+      "name": "World Radio protocol and screen registry host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "for test in test_world_radio_protocol test_world_radio_presentation test_world_radio_globe test_main_screen_registry; do\n  g++ -std=c++17 -Wall -Wextra -Werror \\\n    \"tools/tests/${test}.cpp\" \\\n    -o \"${TMPDIR}/${test}\"\n  \"${TMPDIR}/${test}\"\ndone\ng++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 \\\n  tools/tests/test_main_screen_registry.cpp \\\n  -o ${TMPDIR}/test_main_screen_registry_development\n${TMPDIR}/test_main_screen_registry_development",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-device-ownership-crypto-host-tests",
+      "name": "Device ownership crypto host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  -DDEVICE_OWNERSHIP_HOST_TEST \\\n  lib/ble_navigation/device_ownership_crypto.cpp \\\n  tools/tests/test_device_ownership_crypto.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_device_ownership_crypto\n${TMPDIR}/test_device_ownership_crypto",
+      "tools": [
+        "python3",
+        "g++",
+        "pkg-config"
+      ],
+      "probes": [
+        {
+          "command": [
+            "pkg-config",
+            "--exists",
+            "mbedcrypto"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "esp32-host-device-ownership-state-host-tests",
+      "name": "Device ownership state host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  -DDEVICE_OWNERSHIP_HOST_TEST \\\n  -Itools/tests/host_stubs \\\n  lib/ble_navigation/device_ownership.cpp \\\n  lib/ble_navigation/device_ownership_crypto.cpp \\\n  tools/tests/test_device_ownership.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_device_ownership\n${TMPDIR}/test_device_ownership",
+      "tools": [
+        "python3",
+        "g++",
+        "pkg-config"
+      ],
+      "probes": [
+        {
+          "command": [
+            "pkg-config",
+            "--exists",
+            "mbedcrypto"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "esp32-host-destination-picker-protocol-host-tests",
+      "name": "Destination picker protocol host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_destination_picker_protocol.cpp \\\n  -o ${TMPDIR}/test_destination_picker_protocol\n${TMPDIR}/test_destination_picker_protocol",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-workout-telemetry-protocol-host-tests",
+      "name": "Workout telemetry protocol host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_workout_telemetry_protocol.cpp \\\n  -o ${TMPDIR}/test_workout_telemetry_protocol\n${TMPDIR}/test_workout_telemetry_protocol",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-workout-telemetry-state-and-presentation-host-tests",
+      "name": "Workout telemetry state and presentation host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_workout_telemetry_state.cpp \\\n  -o ${TMPDIR}/test_workout_telemetry_state\n${TMPDIR}/test_workout_telemetry_state",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-ride-automation-policy-and-trace-replay-host-tests",
+      "name": "Ride automation policy and trace replay host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ride_automation_policy.cpp \\\n  -o ${TMPDIR}/test_ride_automation_policy_production\n${TMPDIR}/test_ride_automation_policy_production\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DRIDE_AUTOMATION_AUTOMATIC_START=1 \\\n  tools/tests/test_ride_automation_policy.cpp \\\n  -o ${TMPDIR}/test_ride_automation_policy_automatic_start\n${TMPDIR}/test_ride_automation_policy_automatic_start\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ride_automation_protocol.cpp \\\n  -o ${TMPDIR}/test_ride_automation_protocol\n${TMPDIR}/test_ride_automation_protocol\nPYTHONPATH=tools python3 -m unittest \\\n  tools.tests.test_ride_trace_replay",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-map-profile-persistence-host-tests",
+      "name": "Map profile persistence host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 \\\n  tools/tests/test_map_profile_persistence.cpp \\\n  -o ${TMPDIR}/test_map_profile_persistence\n${TMPDIR}/test_map_profile_persistence",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-binary-map-block-format-host-tests",
+      "name": "Binary map block format host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapBuildingBlock.cpp \\\n  tools/tests/test_map_block_format.cpp \\\n  -o ${TMPDIR}/test_map_block_format\n${TMPDIR}/test_map_block_format\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  tools/tests/test_map_font_asset_format.cpp \\\n  -o ${TMPDIR}/test_map_font_asset_format\n${TMPDIR}/test_map_font_asset_format\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  tools/tests/test_map_label_block.cpp \\\n  -o ${TMPDIR}/test_map_label_block\n${TMPDIR}/test_map_label_block\ng++ -std=c++17 -Wall -Wextra -Werror -Wframe-larger-than=4096 \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  tools/tests/test_map_font_asset.cpp \\\n  -o ${TMPDIR}/test_map_font_asset\n${TMPDIR}/test_map_font_asset\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/maps/src/mapLabelLayout.cpp \\\n  tools/tests/test_map_label_layout.cpp \\\n  -o ${TMPDIR}/test_map_label_layout\n${TMPDIR}/test_map_label_layout\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_label_rasterizer.cpp \\\n  -o ${TMPDIR}/test_map_label_rasterizer\n${TMPDIR}/test_map_label_rasterizer\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_label_selection.cpp \\\n  -o ${TMPDIR}/test_map_label_selection\n${TMPDIR}/test_map_label_selection",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-map-transfer-host-tests",
+      "name": "Map transfer host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  tools/tests/test_map_transfer.cpp \\\n  -o ${TMPDIR}/test_map_transfer\n${TMPDIR}/test_map_transfer",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-map-stream-format-host-tests",
+      "name": "Map stream format host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_parser.cpp \\\n  tools/tests/test_map_stream_format.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_format\n${TMPDIR}/test_map_stream_format\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  tools/tests/test_map_stream_compiled_trust.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_compiled_trust_production\n${TMPDIR}/test_map_stream_compiled_trust_production\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DMAP_STREAM_DEVELOPMENT_TRUST=1 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  tools/tests/test_map_stream_compiled_trust.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_compiled_trust_development\n${TMPDIR}/test_map_stream_compiled_trust_development\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_parser.cpp \\\n  lib/map_transfer/map_stream_install.cpp \\\n  lib/map_transfer/map_stream_receiver.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  tools/tests/test_map_stream_install.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_install\n${TMPDIR}/test_map_stream_install",
+      "tools": [
+        "python3",
+        "g++",
+        "pkg-config"
+      ],
+      "probes": [
+        {
+          "command": [
+            "pkg-config",
+            "--exists",
+            "mbedcrypto"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "esp32-host-transfer-control-dispatch-host-tests",
+      "name": "Transfer control dispatch host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "python -m unittest tools.tests.test_ble_notification_dispatch\ng++ -std=c++17 \\\n  tools/tests/test_transfer_control_dispatch.cpp \\\n  -o ${TMPDIR}/test_transfer_control_dispatch\n${TMPDIR}/test_transfer_control_dispatch\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_transfer_status_chunk_session.cpp \\\n  -o ${TMPDIR}/test_map_transfer_status_chunk_session\n${TMPDIR}/test_map_transfer_status_chunk_session",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-device-transfer-http-limit-host-tests",
+      "name": "Device transfer HTTP limit host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_failure_policy.cpp \\\n  -o ${TMPDIR}/test_device_transfer_failure_policy\n${TMPDIR}/test_device_transfer_failure_policy\npython -m unittest tools.tests.test_device_transfer_failure_contract\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_http_limits.cpp \\\n  -o ${TMPDIR}/test_device_transfer_http_limits\n${TMPDIR}/test_device_transfer_http_limits\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_network_protocol.cpp \\\n  -o ${TMPDIR}/test_device_transfer_network_protocol\n${TMPDIR}/test_device_transfer_network_protocol\npython -m unittest tools.tests.test_map_activation_handoff",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-sound-protocol-host-tests",
+      "name": "Sound protocol host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 \\\n  tools/tests/test_sound_protocol.cpp \\\n  -o ${TMPDIR}/test_sound_protocol\n${TMPDIR}/test_sound_protocol",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-codec-recovery-host-tests",
+      "name": "Codec recovery host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "cc -std=c11 -Wall -Wextra \\\n  -Itools/tests/host_stubs \\\n  -Ilib/esp_codec_dev/src \\\n  tools/tests/test_codec_open.c \\\n  lib/esp_codec_dev/src/esp_codec_dev.c \\\n  -lm \\\n  -o ${TMPDIR}/test_codec_open\n${TMPDIR}/test_codec_open\ncc -std=c11 -Wall -Wextra \\\n  -Itools/tests/host_stubs \\\n  -Ilib/esp_codec_dev/src \\\n  tools/tests/test_es8311_recovery.c \\\n  lib/esp_codec_dev/src/esp_codec_dev_vol.c \\\n  -lm \\\n  -o ${TMPDIR}/test_es8311_recovery\n${TMPDIR}/test_es8311_recovery",
+      "tools": [
+        "python3",
+        "cc"
+      ]
+    },
+    {
+      "id": "development-tools",
+      "name": "Development runner and isolation tests",
+      "component": "development",
+      "cwd": ".",
+      "command": "python3 -m unittest discover -s tools/development/tests",
+      "tools": [
+        "python3"
+      ]
+    },
+    {
+      "id": "ci-routing",
+      "name": "CI selection and gate policy",
+      "component": "development",
+      "cwd": ".",
+      "command": "python3 -m unittest discover -s .github/scripts/tests",
+      "tools": [
+        "python3"
+      ]
+    },
+    {
+      "id": "firmware-build",
+      "name": "Verified firmware build",
+      "component": "firmware_build",
+      "cwd": "esp32",
+      "command": "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py WAVESHARE_AMOLED_{board}",
+      "tools": [
+        "python3"
+      ],
+      "requiresBoard": true,
+      "level": "full",
+      "timeoutSeconds": 7200
+    },
+    {
+      "id": "ios-simulator",
+      "name": "iOS and Watch simulator contracts",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-workout-platform-tests.sh ios\n./scripts/run-workout-platform-tests.sh watchos",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ],
+      "level": "full",
+      "timeoutSeconds": 3600,
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        },
+        {
+          "command": [
+            "python3",
+            "tools/development/simulator_session.py",
+            "--platform",
+            "ios",
+            "--check-only"
+          ]
+        },
+        {
+          "command": [
+            "python3",
+            "tools/development/simulator_session.py",
+            "--platform",
+            "watchos",
+            "--check-only"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "map-backend-tests",
+      "name": "Map backend unit tests",
+      "component": "map_backend",
+      "cwd": "map-platform/backend",
+      "command": "python3 -m unittest discover -s tests",
+      "tools": [
+        "python3"
+      ],
+      "pythonImports": [
+        "fastapi",
+        "httpx",
+        "pydantic"
+      ]
+    },
+    {
+      "id": "map-deploy-tests",
+      "name": "Map deployment unit tests",
+      "component": "map_backend",
+      "cwd": ".",
+      "command": "python3 -m unittest discover -s map-platform/deploy/tests",
+      "tools": [
+        "python3"
+      ]
+    },
+    {
+      "id": "osm-tests",
+      "name": "OSM extraction unit tests",
+      "component": "osm",
+      "cwd": "tools/OSM_Extract",
+      "command": "python3 -m unittest discover -s tests",
+      "tools": [
+        "python3"
+      ]
+    },
+    {
+      "id": "ios-build-containers",
+      "name": "Build and validate Debug/Release iOS containers",
+      "component": "ios",
+      "cwd": "ios-app",
+      "host": [
+        "Darwin"
+      ],
+      "level": "full",
+      "tools": [
+        "xcrun",
+        "python3"
+      ],
+      "timeoutSeconds": 3600,
+      "command": "for configuration in Debug Release; do\n  derived=\"$TMPDIR/containers/$configuration\"\n  ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration \"$configuration\" -destination 'generic/platform=iOS' -derivedDataPath \"$derived\" CODE_SIGNING_ALLOWED=NO DEBUG_INFORMATION_FORMAT=dwarf-with-dsym build\n  app=\"$derived/Build/Products/$configuration-iphoneos/BikeComputer.app\"\n  if test \"$configuration\" = Debug; then\n    bash ./scripts/verify-development-container.sh \"$app\"\n  else\n    bash ./scripts/verify-release-container.sh \"$app\"\n    if LC_ALL=C grep -aFq 'Start Remote Debugging' \"$app/BikeComputer\"; then\n      echo 'Release app contains Debug-only remote device settings' >&2\n      exit 1\n    fi\n  fi\ndone",
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -22,7 +22,7 @@ class WorkoutPlatformScriptTests(unittest.TestCase):
                     "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
                         {
                             "udid": "00000000-0000-0000-0000-000000000001",
-                            "state": "Booted",
+                            "state": "Shutdown",
                             "isAvailable": True,
                         }
                     ]
@@ -30,6 +30,7 @@ class WorkoutPlatformScriptTests(unittest.TestCase):
             },
             separators=(",", ":"),
         )
+        runtime_payload = json.dumps({"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "version": "26.5", "isAvailable": True, "supportedDeviceTypes": [{"productFamily": "iPhone", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17"}]}]})
         xcrun = bin_dir / "xcrun"
         xcrun.write_text(
             "#!/usr/bin/env bash\n"
@@ -38,6 +39,11 @@ class WorkoutPlatformScriptTests(unittest.TestCase):
             f"  printf '%s\\n' '{simulator_payload}'\n"
             "  exit 0\n"
             "fi\n"
+            "if [[ \"$*\" == \"simctl list runtimes --json\" ]]; then\n"
+            f"  printf '%s\\n' '{runtime_payload}'\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [[ \"${2:-}\" == \"create\" ]]; then echo 00000000-0000-0000-0000-000000000001; exit 0; fi\n"
             "if [[ \"${1:-}\" == \"simctl\" ]]; then exit 0; fi\n"
             "exit 64\n",
             encoding="utf-8",

@@ -127,7 +127,7 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
         if not path:
             continue
 
-        if path in FULL_CI_PATHS:
+        if path in FULL_CI_PATHS or path.startswith("tools/development/") or path in {"tools/dev-check", "tools/dev_check.py"}:
             return {component: True for component in COMPONENTS}
 
         if path.startswith(".github/actions/firmware-build-cache/"):
