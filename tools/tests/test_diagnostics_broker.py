@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import socket
 import ssl
+import subprocess
 import sys
 import tempfile
 import threading
@@ -107,6 +108,15 @@ class DiagnosticsBrokerTests(unittest.TestCase):
         self.assertEqual(self.root.stat().st_mode & 0o777,0o700)
         self.assertNotIn(self.config['token'],json.dumps(self.store.status()))
         self.assertNotIn(self.config['token'],str(broker.request(self.root,'GET','/v2/status')))
+    def test_certificate_uses_apple_compatible_named_curve(self):
+        public_key = subprocess.run(
+            ['openssl', 'x509', '-in', str(self.root/'server.crt'), '-pubkey', '-noout'],
+            check=True, capture_output=True, text=True).stdout
+        details = subprocess.run(
+            ['openssl', 'pkey', '-pubin', '-text', '-noout'], input=public_key,
+            check=True, capture_output=True, text=True).stdout
+        self.assertIn('ASN1 OID: prime256v1', details)
+        self.assertNotIn('Field Type:', details)
     def test_duplicate_token_header_and_chunked_requests_fail(self):
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT);context.check_hostname=False;context.verify_mode=ssl.CERT_NONE
         with context.wrap_socket(socket.create_connection(('127.0.0.1',self.port)),server_hostname='127.0.0.1') as sock:

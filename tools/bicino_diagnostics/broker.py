@@ -97,7 +97,10 @@ def initialize(root: Path, origin: str, pairing_output: Path, hours: int = 24) -
     key, certificate = root/'server.key', root/'server.crt'
     with tempfile.TemporaryDirectory(prefix='.certificate-',dir=root) as temporary:
         k,c = Path(temporary)/'key.pem',Path(temporary)/'cert.pem'
+        # macOS LibreSSL defaults to explicit EC parameters. Apple's TLS stack
+        # cannot import that public key, even when the exact leaf is pinned.
         subprocess.run(['openssl','req','-x509','-newkey','ec','-pkeyopt','ec_paramgen_curve:prime256v1',
+                        '-pkeyopt','ec_param_enc:named_curve',
                         '-nodes','-days','2','-subj','/CN=Bicino Diagnostics',
                         '-keyout',str(k),'-out',str(c)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=20)
         write_private(key,k.read_bytes())
