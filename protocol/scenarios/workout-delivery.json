@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "workout-delivery-v1",
+  "module": "navigation-write-queue",
+  "maxCount": 4,
+  "steps": [
+    {"action":"enqueue","label":"workout-start","writeClass":"workout"},
+    {"action":"enqueue","label":"workout-interval-old","writeClass":"workout","key":"workout"},
+    {"action":"enqueue","label":"workout-interval-fresh","writeClass":"workout","key":"workout"},
+    {"action":"flush","canSend":true},
+    {"action":"expect","depth":0,"coalesced":1,"delivered":["workout-start","workout-interval-fresh"]}
+  ]
+}

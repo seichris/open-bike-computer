@@ -24,6 +24,18 @@
 
 ## Quick commands
 
+Start validation with `tools/dev-check --plan`, then `tools/dev-check` for
+affected fast checks. Use `--suite ios --level full` or
+`--suite firmware --level full --board 175` for explicit build validation after
+identifying the connected board. Local/CI check definitions and Swift source
+graphs live under `tools/development/`; do not copy compiler source lists into
+new scripts. Keep blocked prerequisites and clean/dirty source evidence distinct.
+See `docs/development-checks.md` for selection, reports and owned simulators.
+Ordinary full builds accept uncommitted edits and reuse isolated local iOS
+DerivedData. Use `--fresh --evidence` for clean-source app qualification;
+`--evidence` explicitly retains exact-build symbols. CI keeps strict evidence
+requirements. Never describe a dirty local build as clean-commit validation.
+
 ### ESP32 firmware
 
 Before the first build/upload/device-debug action in a task, identify which
