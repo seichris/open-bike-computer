@@ -71,8 +71,9 @@ saves a fresh cache snapshot with a matching-input restore prefix. CI, release
 candidates, diagnostics, and speaker builds use this action. Mutable toolchain
 trees, current firmware manifests, upload plans, and final images are excluded.
 
-The **Firmware cache qualification** reusable workflow checks both supported native
-hosts and both boards' ordinary/production profiles. Each job builds:
+The **Firmware cache qualification** reusable workflow selects either one macOS
+1.75-inch ordinary-profile job or the full eight-job Linux/macOS matrix for both
+boards' ordinary/production profiles. Each selected job builds:
 
 1. A cold source worktree with an empty isolated compiled-core cache.
 2. A same-head warm rebuild, requiring matching image, ELF and flash-plan hashes.
@@ -86,10 +87,19 @@ Private uploader/image paths in flash plans remain worktree-local; the actual
 flashable image hashes must match. All phases require a fresh linker map. Timing JSON and full
 logs are retained. Run this qualification before accepting changes to cache
 keys or relocation rules; passing host tests alone does not qualify relocation.
-CI invokes it when cache tools, core configuration or pinned runtime inputs
-change, including draft PRs. The protected **CI Gate** requires every selected
-qualification job to succeed. Application-only edits use the normal firmware
-builds and avoid repeating this isolated core qualification matrix.
+CI selects the macOS job for cache transport/compiler tools, the build helper,
+benchmark or cache workflow/action changes, including draft PRs. Core-producing
+tools, pinned runtime inputs, PlatformIO/SDK configuration, board definitions,
+partitions and component dependency changes select the full matrix. If a PR
+changes both categories, full coverage wins. General CI workflow/routing edits
+alone do not select cache qualification; their routing and policy tests still
+run. The protected **CI Gate** requires every selected qualification job to
+succeed. Application-only edits use the normal firmware builds and fast host
+tests without repeating isolated cache qualification.
+
+Manual **Firmware cache qualification** runs default to `full`; select `macos`
+for the focused check. Explicit `all`/`firmware` CI scopes, including tagged
+release validation, continue to require the full matrix.
 
 After identifying the connected board, the same build-only check is available
 locally from the repository root:

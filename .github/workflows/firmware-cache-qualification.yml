@@ -2,7 +2,21 @@ name: Firmware cache qualification
 
 on:
   workflow_call:
+    inputs:
+      qualification:
+        description: Cache qualification coverage (macos or full)
+        type: string
+        default: full
+        required: false
   workflow_dispatch:
+    inputs:
+      qualification:
+        description: Cache qualification coverage
+        type: choice
+        default: full
+        options:
+          - full
+          - macos
 
 permissions:
   contents: read
@@ -17,17 +31,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, macos-15]
-        environment:
-          - WAVESHARE_AMOLED_175
-          - WAVESHARE_AMOLED_175_PRODUCTION
-          - WAVESHARE_AMOLED_206
-          - WAVESHARE_AMOLED_206_PRODUCTION
+        runner: ${{ fromJSON(inputs.qualification == 'macos' && '["macos-15"]' || '["ubuntu-24.04", "macos-15"]') }}
+        environment: ${{ fromJSON(inputs.qualification == 'macos' && '["WAVESHARE_AMOLED_175"]' || '["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_175_PRODUCTION", "WAVESHARE_AMOLED_206", "WAVESHARE_AMOLED_206_PRODUCTION"]') }}
     runs-on: ${{ matrix.runner }}
     # Native macOS runs need about 45 minutes before the relocated application
     # compilation. Leave room for that final build and evidence cleanup.
     timeout-minutes: 90
     steps:
+      - name: Validate qualification coverage
+        env:
+          QUALIFICATION: ${{ inputs.qualification }}
+        run: |
+          case "$QUALIFICATION" in
+            macos|full) ;;
+            *) echo "::error::Unsupported cache qualification: $QUALIFICATION"; exit 1 ;;
+          esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Qualify cold, warm, source-only and relocated builds
         env:

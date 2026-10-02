@@ -62,6 +62,7 @@ jobs:
       firmware_build: ${{ steps.components.outputs.firmware_build }}
       firmware_host: ${{ steps.components.outputs.firmware_host }}
       firmware_cache_qualification: ${{ steps.components.outputs.firmware_cache_qualification }}
+      firmware_cache_qualification_mode: ${{ steps.components.outputs.firmware_cache_qualification_mode }}
       firmware_targets: ${{ steps.components.outputs.firmware_targets }}
       heavy_ci: ${{ steps.policy.outputs.heavy_ci }}
       ios: ${{ steps.components.outputs.ios }}
@@ -143,6 +144,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.firmware_cache_qualification == 'true'
     uses: ./.github/workflows/firmware-cache-qualification.yml
+    with:
+      qualification: ${{ needs.changes.outputs.firmware_cache_qualification_mode }}
 
   esp32:
     name: ESP32 (${{ matrix.target }})

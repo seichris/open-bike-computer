@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import re
+import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -369,6 +370,27 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("github.event.merge_group.base_sha", changes)
         self.assertIn("github.event.merge_group.head_sha", changes)
 
+    def test_cache_workflow_selects_one_macos_job_or_all_eight_profiles(self) -> None:
+        source = workflow_source("firmware-cache-qualification.yml")
+        axes = {}
+        for axis in ("runner", "environment"):
+            expression = re.search(rf"(?m)^        {axis}: (.+)$", source)
+            self.assertIsNotNone(expression)
+            branches = re.fullmatch(
+                r"\$\{\{ fromJSON\(inputs\.qualification == 'macos' && '(.*?)' \|\| '(.*?)'\) \}\}",
+                expression.group(1),
+            )
+            self.assertIsNotNone(branches)
+            axes[axis] = tuple(json.loads(branch) for branch in branches.groups())
+        self.assertEqual(["macos-15"], axes["runner"][0])
+        self.assertEqual(["WAVESHARE_AMOLED_175"], axes["environment"][0])
+        self.assertEqual({"ubuntu-24.04", "macos-15"}, set(axes["runner"][1]))
+        self.assertEqual(CORE_FIRMWARE_TARGETS, set(axes["environment"][1]))
+        for trigger in ("workflow_call", "workflow_dispatch"):
+            self.assertIn("default: full", mapping_block(source, trigger, indent=2))
+        self.assertIn("benchmark_firmware_cache.py", source)
+        self.assertIn("if: always()", source)
+
     def test_cache_qualification_failure_blocks_protected_ci_gate(self) -> None:
         source = workflow_source("ci.yml")
         job = mapping_block(source, "firmware-cache", indent=2)
@@ -376,6 +398,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("- firmware-cache", gate)
         self.assertIn("uses: ./.github/workflows/firmware-cache-qualification.yml", job)
         self.assertNotIn("heavy_ci", job)
+        self.assertIn("qualification: ${{ needs.changes.outputs.firmware_cache_qualification_mode }}", job)
+        self.assertIn("firmware_cache_qualification_mode: ${{ steps.components.outputs.firmware_cache_qualification_mode }}", source)
         self.assertIn("  workflow_call:", workflow_source("firmware-cache-qualification.yml"))
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {
