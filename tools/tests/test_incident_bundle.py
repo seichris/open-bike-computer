@@ -87,7 +87,12 @@ class ScenarioTests(unittest.TestCase):
         original = json.loads((ROOT/'protocol/scenarios/workout-delivery.json').read_text())
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary)/'scenario.json'
-            for step in ({'action':'expect'},{'action':'invented'}):
+            for step in ({'action':'expect'},{'action':'invented'},
+                         {'action':'expect','accepted':True},
+                         {'action':'expect','label':'not-an-assertion'},
+                         {'action':'flush','canSend':True,'depth':42},
+                         {'action':'disconnect','delivered':[]},
+                         {'action':'enqueue','label':'turn','writeClass':'unknown'}):
                 path.write_text(json.dumps({**original,'steps':[step]}))
                 with self.assertRaises(ValueError): replay_scenario.validate(path)
 

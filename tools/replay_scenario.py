@@ -20,9 +20,12 @@ def validate(path):
         raise ValueError('unsupported scenario module/id')
     if type(value['maxCount']) is not int or not 1 <= value['maxCount'] <= 64 or not isinstance(value['steps'], list) or not 1 <= len(value['steps']) <= 1000:
         raise ValueError('scenario limits exceeded')
-    allowed = {'action','label','writeClass','key','milliseconds','canSend','depth','oldestAgeMs','coalesced','cleared','delivered','accepted'}
+    fields = {'enqueue': {'label','writeClass','key','accepted'}, 'advance': {'milliseconds'},
+              'flush': {'canSend'}, 'disconnect': set(),
+              'expect': {'depth','oldestAgeMs','coalesced','cleared','delivered'}}
     for step in value['steps']:
-        if not isinstance(step, dict) or set(step) - allowed or step.get('action') not in ('enqueue','advance','flush','disconnect','expect'):
+        if (not isinstance(step, dict) or step.get('action') not in fields or
+            set(step) - ({'action'} | fields[step['action']])):
             raise ValueError('unknown scenario action/field')
         if step['action'] == 'expect' and len(step) == 1:
             raise ValueError('empty assertion')
@@ -34,6 +37,8 @@ def validate(path):
         for key in ('label','key'):
             if key in step and (not isinstance(step[key], str) or not 1 <= len(step[key].encode()) <= 576):
                 raise ValueError('invalid scenario label/key')
+        if 'writeClass' in step and step['writeClass'] not in ('navigation','gps','route','settings','transfer','workout','other'):
+            raise ValueError('invalid write class')
         if 'delivered' in step and (not isinstance(step['delivered'], list) or
                                    any(not isinstance(label, str) for label in step['delivered'])):
             raise ValueError('invalid delivery assertion')
