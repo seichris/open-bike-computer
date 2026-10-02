@@ -9,6 +9,7 @@ import zlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT.parents[1] / "map-platform" / "backend"))
 
 from map_format import (
     MAX_BLOCK_BUILDINGS,
@@ -22,6 +23,9 @@ from map_format import (
     write_fmb,
 )
 from font_asset import FontFaceSpec, FontPackBuilder
+from map_platform.topography_artifacts import (
+    Contour, ContourSection, replace_fmb6_contours,
+)
 
 
 FONT_PATH = pathlib.Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf")
@@ -141,7 +145,10 @@ class BinaryMapFormatTests(unittest.TestCase):
     def test_shared_golden_blocks_match_producer_bytes(self):
         fixtures = golden_fmb_blocks()
         self.assertEqual(
-            set(fixtures), {"fmb_v1", "fmb_v2", "fmb_v3", "fmb_v4", "fmb_v6"}
+            set(fixtures), {
+                "fmb_v1", "fmb_v2", "fmb_v3", "fmb_v4", "fmb_v6",
+                "fmb_v6_combined",
+            }
         )
         self.assertEqual(fixtures["fmb_v1"][:4], b"FMB\x01")
 
@@ -206,6 +213,13 @@ class BinaryMapFormatTests(unittest.TestCase):
                 "fmb_v4": (root / "v4.fmb").read_bytes(),
                 "fmb_v6": (root / "v6.fmb").read_bytes(),
             }
+            contours = ContourSection(20, 100, (
+                Contour(-100, 1, ((0, 0), (100, 100), (200, 50))),
+                Contour(20, 0, ((100, 0), (300, 200))),
+            ))
+            generated["fmb_v6_combined"] = replace_fmb6_contours(
+                root / "v6.fmb", contours
+            )
 
         for name, version in (
             ("fmb_v2", 2),
@@ -215,6 +229,7 @@ class BinaryMapFormatTests(unittest.TestCase):
         ):
             self.assertEqual(expected_versions[name]["version"], version)
             self.assertEqual(generated[name], fixtures[name])
+        self.assertEqual(generated["fmb_v6_combined"], fixtures["fmb_v6_combined"])
 
     def test_fmb_records_use_classified_feature_type_bytes(self):
         polygon = feature(

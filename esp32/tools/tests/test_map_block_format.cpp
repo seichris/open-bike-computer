@@ -160,12 +160,14 @@ int main() {
     assert(map_byte_order::readLeI16(bytes + 2) == -2);
   }
   const auto golden = loadGoldenBlocks();
-  assert(golden.size() == 5);
+  assert(golden.size() == 6);
   const std::vector<uint8_t> &validV1 = golden.at("fmb_v1");
   const std::vector<uint8_t> &valid = golden.at("fmb_v2");
   const std::vector<uint8_t> &validV3 = golden.at("fmb_v3");
   const std::vector<uint8_t> &validV4 = golden.at("fmb_v4");
   const std::vector<uint8_t> &validV6 = golden.at("fmb_v6");
+  const std::vector<uint8_t> &validV6Combined =
+      golden.at("fmb_v6_combined");
 
   assert(map_block_format::validate(validV1.data(), validV1.size()));
   for (size_t size = 0; size < validV1.size(); ++size)
@@ -268,6 +270,23 @@ int main() {
          map_poi_block::Category::BicycleServices);
   assert(poiBlock.stats.categories[1] == 1);
   assert(poiBlock.stats.categories[4] == 1);
+  assert(map_block_format::validate(validV6Combined.data(),
+                                    validV6Combined.size()));
+  assert(map_building_block::decode(validV6Combined.data(),
+                                    validV6Combined.size(), buildingBlock,
+                                    &buildingError));
+  assert(buildingBlock.stats.records == 1);
+  assert(map_poi_block::decode(validV6Combined.data(),
+                               validV6Combined.size(), poiBlock, &poiError));
+  assert(poiBlock.records.size() == 2);
+  const size_t contourEntry = sectionEntryOffset(validV6Combined, 6, 5);
+  const size_t contourSection = read32(validV6Combined, contourEntry + 4U);
+  assert(read32(validV6Combined, contourEntry + 8U) == 60U);
+  assert(validV6Combined[contourSection + 6U] == 2U);
+  assert(read32(validV6Combined, contourSection + 8U) == 5U);
+  changed = validV6Combined;
+  changed[contourSection + 12U] ^= 1U;
+  assert(!map_block_format::validate(changed.data(), changed.size()));
 
   const size_t poiEntry = sectionEntryOffset(validV6, 6, 6);
   const size_t poiSection = read32(validV6, poiEntry + 4U);

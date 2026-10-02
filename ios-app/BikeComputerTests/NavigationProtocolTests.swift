@@ -1138,6 +1138,43 @@ struct NavigationProtocolTests {
         } catch {
             // Expected: a valid index CRC is not proof of block correspondence.
         }
+
+        let goldenURL = URL(fileURLWithPath: "tools/tests/fixtures/fmb/golden_blocks.txt")
+        guard let goldenText = try? String(contentsOf: goldenURL, encoding: .ascii),
+              let combinedLine = goldenText.split(separator: "\n").first(where: {
+                  $0.hasPrefix("fmb_v6_combined=")
+              }),
+              let combinedBlock = Data(hex: String(combinedLine.dropFirst("fmb_v6_combined=".count))),
+              let combinedPOI = try? BikeMapPOIIndexValidator.blockEntry(combinedBlock),
+              let directory = combinedBlock.range(of: Data("EXT6".utf8))?.lowerBound else {
+            assert(false, "the shared combined FMB6 golden block is readable")
+            return
+        }
+        func read32(_ bytes: Data, at offset: Int) -> Int? {
+            guard offset >= 0, offset <= bytes.count - 4 else { return nil }
+            return (0..<4).reduce(0) { value, shift in
+                value | Int(bytes[offset + shift]) << (shift * 8)
+            }
+        }
+        let contourEntry = directory + 8 + 4 * 16
+        guard let contourOffset = read32(combinedBlock, at: contourEntry + 4),
+              let contourLength = read32(combinedBlock, at: contourEntry + 8),
+              let contourCRC = read32(combinedBlock, at: contourEntry + 12),
+              contourOffset >= directory + 104,
+              contourLength > 12,
+              contourOffset <= combinedBlock.count - contourLength,
+              let contour = try? TopographyContourSection.validate(
+                  combinedBlock.subdata(in: contourOffset..<(contourOffset + contourLength))
+              ) else {
+            assert(false, "iPhone independently reads the shared combined contour section")
+            return
+        }
+        assertEqual(combinedPOI.categoryCounts, [0, 1, 0, 0, 1],
+                    "combined FMB6 preserves both POI categories")
+        assertEqual(contour.recordCount, 2, "combined FMB6 carries two contours")
+        assertEqual(contour.pointCount, 5, "combined FMB6 carries five contour points")
+        assertEqual(Int(crc32(combinedBlock.subdata(in: contourOffset..<(contourOffset + contourLength)))),
+                    contourCRC, "combined contour directory CRC matches its section")
     }
 
     static func testBikeMapStreamGoldenVector() {

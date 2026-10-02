@@ -62,6 +62,22 @@ class ContourArtifactsTests(unittest.TestCase):
                              combined[after_offset:after_offset + after_length])
         self.assertEqual(replace_fmb6_contours(self.path, self.section), combined)
 
+    def test_shared_combined_fmb6_golden_matches_backend_composition(self):
+        fixture = ROOT / "tools/tests/fixtures/fmb/golden_blocks.txt"
+        blocks = dict(
+            line.split("=", 1)
+            for line in fixture.read_text(encoding="ascii").splitlines()
+            if line and not line.startswith("#")
+        )
+        self.path.write_bytes(bytes.fromhex(blocks["fmb_v6"]))
+        combined = replace_fmb6_contours(self.path, self.section)
+        self.assertEqual(combined, bytes.fromhex(blocks["fmb_v6_combined"]))
+        self.path.write_bytes(combined)
+        result = validate_fmb6(self.path)
+        self.assertEqual((result.contour_records, result.contour_points), (2, 5))
+        self.assertEqual((result.poi_records, result.poi_categories),
+                         (2, (0, 1, 0, 0, 1)))
+
     def test_terrain_only_combined_block_has_empty_poi_section(self):
         self.path.write_bytes(empty_fmb6(0x12345678, self.section))
         result = validate_fmb6(self.path)
