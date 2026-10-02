@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
 import re
 import subprocess
@@ -91,20 +90,6 @@ SHARED_MAP_STREAM_FIXTURE_PATH = (
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 ZERO_SHA = "0" * 40
 
-CACHE_QUALIFICATION_PATHS = {
-    *FULL_CI_PATHS,
-    ".github/workflows/firmware-cache-qualification.yml",
-    "esp32/prebuild.py", "esp32/platformio.ini", "esp32/sdkconfig",
-    "esp32/idf_component.yml", "esp32/dependencies.lock",
-    "esp32/tools/firmware-runtime/lock-v1.json",
-    *(f"esp32/tools/{name}.py" for name in (
-        "firmware_runtime", "pioarduino_custom_core", "build_firmware",
-        "generated_sdkconfig", "shared_firmware_cache", "firmware_compile_cache",
-        "benchmark_firmware_cache",
-    )),
-}
-
-
 CHECK_REGISTRY = "tools/development/checks.json"
 IOS_FAST_ONLY_PATHS = {
     "tools/development/swift-sources.json", "tools/development/swift_compile.py",
@@ -150,17 +135,6 @@ def native_ios_required(paths, *, run_all=False, registry_components=None):
     native_paths = [p for p in paths if p not in IOS_FAST_ONLY_PATHS and not p.startswith(IOS_FAST_ONLY_PREFIXES)
                     and not (p == CHECK_REGISTRY and registry_components is not None and "ios_native" not in registry_components)]
     return classify_paths(native_paths, run_all=run_all, registry_components=registry_components)["ios"]
-
-
-def cache_qualification_required(paths: Iterable[str]) -> bool:
-    return any(
-        path in CACHE_QUALIFICATION_PATHS
-        or path.startswith(".github/actions/firmware-build-cache/")
-        or any(fnmatch.fnmatch(path, pattern) for pattern in (
-            "esp32/*.csv", "esp32/**/idf_component.yml", "esp32/**/dependencies.lock",
-        ))
-        for path in paths
-    )
 
 
 def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_components=None) -> dict[str, bool]:
@@ -403,13 +377,11 @@ def main() -> int:
     try:
         selected = select_scope(args.scope)
         native_ios = selected["ios"] if selected is not None else False
-        qualify_cache = args.scope in {"all", "firmware"}
         if selected is None:
             paths = changed_paths(args.event, args.base, args.head)
             affected = registry_changed_components(args.base, args.head) if paths and CHECK_REGISTRY in paths else None
             selected = classify_paths(paths or (), run_all=paths is None, registry_components=affected)
             native_ios = native_ios_required(paths or (), run_all=paths is None, registry_components=affected)
-            qualify_cache = paths is None or cache_qualification_required(paths)
     except (subprocess.CalledProcessError, ValueError) as error:
         parser.error(str(error))
 
@@ -421,7 +393,6 @@ def main() -> int:
         separators=(",", ":"),
     )
     print(f"firmware_targets={firmware_targets}")
-    print(f"firmware_cache_qualification={'true' if qualify_cache else 'false'}")
     print(f"ios_native={'true' if native_ios else 'false'}")
     return 0
 

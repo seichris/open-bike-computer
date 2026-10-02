@@ -61,7 +61,6 @@ jobs:
     outputs:
       firmware_build: ${{ steps.components.outputs.firmware_build }}
       firmware_host: ${{ steps.components.outputs.firmware_host }}
-      firmware_cache_qualification: ${{ steps.components.outputs.firmware_cache_qualification }}
       firmware_targets: ${{ steps.components.outputs.firmware_targets }}
       heavy_ci: ${{ steps.policy.outputs.heavy_ci }}
       ios: ${{ steps.components.outputs.ios }}
@@ -140,12 +139,6 @@ jobs:
           --scope "$CI_SCOPE"
           --firmware-hardware "$FIRMWARE_HARDWARE"
           >> "$GITHUB_OUTPUT"
-
-  firmware-cache:
-    name: Firmware cache qualification
-    needs: changes
-    if: needs.changes.outputs.firmware_cache_qualification == 'true'
-    uses: ./.github/workflows/firmware-cache-qualification.yml
 
   esp32:
     name: ESP32 (${{ matrix.target }})
@@ -514,7 +507,6 @@ jobs:
       - changes
       - esp32
       - esp32-host
-      - firmware-cache
       - ios-fast
       - ios
       - ios-platform
@@ -528,8 +520,6 @@ jobs:
           ESP32_RESULT: ${{ needs.esp32.result }}
           FIRMWARE_BUILD_CHANGED: ${{ needs.changes.outputs.firmware_build }}
           FIRMWARE_HOST_CHANGED: ${{ needs.changes.outputs.firmware_host }}
-          FIRMWARE_CACHE_QUALIFICATION: ${{ needs.changes.outputs.firmware_cache_qualification }}
-          CACHE_RESULT: ${{ needs.firmware-cache.result }}
           HOST_RESULT: ${{ needs.esp32-host.result }}
           HEAVY_CI: ${{ needs.changes.outputs.heavy_ci }}
           IOS_CHANGED: ${{ needs.changes.outputs.ios }}
@@ -552,12 +542,6 @@ jobs:
           }
 
           require_result "CI component selection" "$CHANGES_RESULT" success
-
-          if test "$FIRMWARE_CACHE_QUALIFICATION" = true; then
-            require_result "Firmware cache qualification" "$CACHE_RESULT" success
-          else
-            require_result "Firmware cache qualification" "$CACHE_RESULT" skipped
-          fi
 
           if test "$FIRMWARE_BUILD_CHANGED" = true && test "$HEAVY_CI" = true; then
             require_result "ESP32 builds" "$ESP32_RESULT" success

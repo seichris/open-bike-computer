@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import unittest
+from contextlib import redirect_stdout
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "changed_components.py"
@@ -65,19 +68,36 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))
         self.assertFalse(changed_components.native_ios_required(["tools/development/tests/test_development_checks.py"]))
 
-    def test_cache_qualification_runs_for_core_inputs_without_rebuilding_for_app_edits(self):
+    def test_cache_and_core_changes_keep_regular_builds_and_fast_tests(self):
         for path in (
-            "esp32/platformio.ini", "esp32/prebuild.py",
-            "esp32/tools/firmware_runtime.py", "esp32/tools/shared_firmware_cache.py",
-            "esp32/tools/firmware-runtime/lock-v1.json", "esp32/partitions.csv",
-            "esp32/components/custom/idf_component.yml", "esp32/dependencies.lock",
-            ".github/actions/firmware-build-cache/action.yml", ".github/workflows/ci.yml",
+            "esp32/tools/shared_firmware_cache.py", "esp32/tools/firmware_compile_cache.py",
+            "esp32/tools/build_firmware.py", "esp32/tools/firmware_runtime.py",
+            "esp32/platformio.ini", "esp32/tools/firmware-runtime/lock-v1.json",
+            ".github/actions/firmware-build-cache/action.yml",
         ):
             with self.subTest(path=path):
-                self.assertTrue(changed_components.cache_qualification_required([path]))
-        for path in ("esp32/src/main.cpp", "esp32/lib/gui/gui.cpp", "README.md", "esp32/tools/tests/test_build_firmware.py"):
-            with self.subTest(path=path):
-                self.assertFalse(changed_components.cache_qualification_required([path]))
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["firmware_build"])
+                self.assertTrue(selected["firmware_host"])
+
+    def test_cli_emits_only_regular_ci_components_and_targets(self):
+        for scope, paths, native_ios in (
+            ("auto", ["esp32/tools/shared_firmware_cache.py"], False),
+            ("auto", ["esp32/platformio.ini"], False),
+            ("auto", ["esp32/src/main.cpp"], False), ("auto", None, True),
+            ("auto", ["ios-app/BikeComputer/App.swift"], True),
+            ("auto", ["ios-app/scripts/tests/test_xcodebuild_evidence_mode.py"], False),
+            ("firmware", [], False), ("all", [], True), ("ios", [], True), ("map", [], False),
+        ):
+            with self.subTest(scope=scope, paths=paths):
+                output = io.StringIO()
+                with patch("sys.argv", [str(SCRIPT), "--event", "workflow_dispatch", "--scope", scope]), patch.object(
+                    changed_components, "changed_paths", return_value=paths
+                ), redirect_stdout(output):
+                    self.assertEqual(0, changed_components.main())
+                selected = dict(line.split("=", 1) for line in output.getvalue().splitlines())
+                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets", "ios_native"}, set(selected))
+                self.assertEqual("true" if native_ios else "false", selected["ios_native"])
 
     def test_docs_only_change_skips_product_jobs(self) -> None:
         self.assertEqual(
