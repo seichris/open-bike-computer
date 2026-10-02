@@ -2467,22 +2467,6 @@ static void revealPendingMapTileIfReady() {
   mapTileTransition.complete();
 }
 
-void showPreviousMainScreen() {
-  if (screen_configuration::isReady()) {
-    const auto &document = screen_configuration::activeSnapshot().document;
-    showScreenInstance(screen_configuration::previousEnabledInstanceIndex(
-        document, activeScreenInstanceIndex));
-    return;
-  }
-  tileName previous = static_cast<tileName>(activeTile);
-  for (unsigned count = 0; count < 8; ++count) {
-    const tileName next = nextEnabledTile(previous);
-    if (next == activeTile) break;
-    previous = next;
-  }
-  showMainTile(previous);
-}
-
 void showNextMainScreen() {
   if (screen_configuration::isReady()) {
     const auto &document = screen_configuration::activeSnapshot().document;

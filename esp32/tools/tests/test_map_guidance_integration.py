@@ -77,6 +77,15 @@ def function_body(source: str, signature: str) -> str:
 class MapGuidanceIntegrationTests(unittest.TestCase):
     """Supplemental wiring guards; behavioral contracts live in C++ tests."""
 
+    def test_buttons_and_touch_share_one_screen_cycling_implementation(self):
+        for direction in ("Next", "Previous"):
+            signature = f"void show{direction}MainScreen() {{"
+            self.assertEqual(MAIN_SCREEN_SOURCE.count(signature), 1)
+        previous = function_body(MAIN_SCREEN_SOURCE, "void showPreviousMainScreen()")
+        self.assertIn("previousEnabledInstanceIndex", previous)
+        self.assertIn("previousEnabledTile", previous)
+        self.assertIn("showPreviousMainScreen();", EPAPER_UI_SOURCE)
+
     def test_ui_submission_path_contains_no_storage_or_raster_work(self):
         generate = function_body(
             MAP_RENDERER_SOURCE, "bool Maps::generateVectorMap"
