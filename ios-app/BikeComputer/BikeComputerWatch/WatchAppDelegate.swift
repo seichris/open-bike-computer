@@ -18,6 +18,8 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
     private let workoutDeviceBridge: WatchWorkoutDeviceBridge
     private let rideAutomationCoordinator: WatchRideAutomationCoordinator
     private var cancellables = Set<AnyCancellable>()
+    private var watchConnectivityBackgroundTasks:
+        [WKWatchConnectivityRefreshBackgroundTask] = []
 
     override init() {
         let locationService = WatchLocationService()
@@ -111,6 +113,14 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
             [weak deviceLink] in
             deviceLink?.directRidePreparationAvailabilityDidChange()
         }
+        connectivityCoordinator.onDirectRideReconciliationRequest = {
+            [weak deviceLink] request in
+            deviceLink?.requestPhonePreparationReconciliation(request)
+        }
+        connectivityCoordinator.onBackgroundContentStateChanged = {
+            [weak self] in
+            self?.completeWatchConnectivityBackgroundTasksIfPossible()
+        }
         deviceLink.onDirectRidePreparationChange = {
             [weak connectivityCoordinator] operation, deviceID,
                 preparationID in
@@ -137,6 +147,30 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
                 )
             }
             .store(in: &cancellables)
+        Publishers.CombineLatest3(
+            workoutManager.$latestEnvelope,
+            workoutManager.$snapshot,
+            workoutManager.$isRecovering
+        )
+            .sink { [weak connectivityCoordinator]
+                envelope, snapshot, recovering in
+                // The initial idle value is not an authoritative tombstone
+                // while HealthKit recovery is still resolving the workout.
+                guard !recovering else { return }
+                if let envelope,
+                   let observation = WatchCyclingSensorObservationV1(
+                       envelope: envelope
+                   ) {
+                    connectivityCoordinator?.publishCyclingSensorObservation(
+                        observation
+                    )
+                } else if envelope == nil && !snapshot.state.isActive {
+                    connectivityCoordinator?.publishCyclingSensorObservation(
+                        .inactive(at: Date())
+                    )
+                }
+            }
+            .store(in: &cancellables)
         connectivityCoordinator.activate()
         navigationManager.recoverIfNeeded()
         workoutManager.$isRecovering
@@ -160,6 +194,50 @@ final class WatchAppDelegate: NSObject, WKApplicationDelegate {
 
     func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
         workoutManager.handleWorkoutConfiguration(workoutConfiguration)
+    }
+
+    func handle(_ backgroundTasks: Set<WKRefreshBackgroundTask>) {
+        for task in backgroundTasks {
+            guard let connectivityTask = task as?
+                    WKWatchConnectivityRefreshBackgroundTask else {
+                task.setTaskCompletedWithSnapshot(false)
+                continue
+            }
+            watchConnectivityBackgroundTasks.append(connectivityTask)
+            connectivityTask.expirationHandler = { [weak self, weak connectivityTask] in
+                Task { @MainActor [weak self, weak connectivityTask] in
+                    guard let self, let connectivityTask else { return }
+                    self.completeWatchConnectivityBackgroundTask(
+                        connectivityTask
+                    )
+                }
+            }
+        }
+        connectivityCoordinator.activate()
+        completeWatchConnectivityBackgroundTasksIfPossible()
+    }
+
+    private func completeWatchConnectivityBackgroundTasksIfPossible() {
+        guard connectivityCoordinator.canCompleteBackgroundDelivery else {
+            return
+        }
+        let tasks = watchConnectivityBackgroundTasks
+        watchConnectivityBackgroundTasks.removeAll()
+        for task in tasks {
+            task.expirationHandler = nil
+            task.setTaskCompletedWithSnapshot(false)
+        }
+    }
+
+    private func completeWatchConnectivityBackgroundTask(
+        _ task: WKWatchConnectivityRefreshBackgroundTask
+    ) {
+        guard let index = watchConnectivityBackgroundTasks.firstIndex(
+            where: { $0 === task }
+        ) else { return }
+        watchConnectivityBackgroundTasks.remove(at: index)
+        task.expirationHandler = nil
+        task.setTaskCompletedWithSnapshot(false)
     }
 }
 

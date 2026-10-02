@@ -95,6 +95,33 @@ def ready_job() -> MapJob:
     )
 
 
+def topographic_ready_job() -> MapJob:
+    job = ready_job()
+    content_receipt = job.artifacts[-1].manifest_receipt
+    assert content_receipt is not None
+    companion_sha256 = "3" * 64
+    job.request["target"]["rendererFormatVersion"] = 4
+    job.artifacts.append(
+        ArtifactRecord(
+            format="topography-ios-v1",
+            media_type="application/vnd.bicino.topography+sqlite3",
+            filename="shanghai-test.btopo",
+            object_key=(
+                "maps/shanghai-test/topography-ios-v1/"
+                f"{content_receipt}/{companion_sha256}.btopo"
+            ),
+            bytes=512,
+            sha256=companion_sha256,
+            manifest_receipt=content_receipt,
+            map_content_receipt=content_receipt,
+            intermediate_sha256="8" * 64,
+            source_policy_sha256="9" * 64,
+            attribution_sha256="a" * 64,
+        )
+    )
+    return job
+
+
 class SuccessfulCatalog:
     channel = "production"
 
@@ -207,6 +234,72 @@ class CatalogTests(unittest.TestCase):
             manifest_receipt="9" * 64,
         )
         self.assertEqual(map_entry_id(job), first)
+
+    def test_topographic_publication_requires_one_exact_companion(self):
+        job = topographic_ready_job()
+        payload = publication_payload(job, "development")
+        self.assertEqual(
+            payload["features"],
+            ["3d-buildings", "contours", "street-labels"],
+        )
+        companion = next(
+            artifact
+            for artifact in payload["artifacts"]
+            if artifact["format"] == "topography-ios-v1"
+        )
+        self.assertEqual(
+            companion["companionRequirements"],
+            {
+                "schemaVersion": 1,
+                "role": "topography-ios-v1",
+                "mapContentReceipt": payload["contentReceipt"],
+                "mapId": "shanghai-test",
+                "profileVersion": 1,
+                "intermediateSha256": "8" * 64,
+                "sourcePolicySha256": "9" * 64,
+                "attributionSha256": "a" * 64,
+            },
+        )
+
+        missing = topographic_ready_job()
+        missing.artifacts = [
+            artifact
+            for artifact in missing.artifacts
+            if artifact.format != "topography-ios-v1"
+        ]
+        with self.assertRaisesRegex(
+            CatalogPublicationError,
+            "requires one exact companion",
+        ):
+            publication_payload(missing, "development")
+
+        mismatched = topographic_ready_job()
+        companion_index = next(
+            index
+            for index, artifact in enumerate(mismatched.artifacts)
+            if artifact.format == "topography-ios-v1"
+        )
+        mismatched.artifacts[companion_index] = replace(
+            mismatched.artifacts[companion_index],
+            object_key=(
+                "maps/shanghai-test/topography-ios-v1/"
+                f"{'f' * 64}/{'3' * 64}.btopo"
+            ),
+            map_content_receipt="f" * 64,
+        )
+        with self.assertRaisesRegex(
+            CatalogPublicationError,
+            "requires one exact companion",
+        ):
+            publication_payload(mismatched, "development")
+
+        non_topographic = topographic_ready_job()
+        non_topographic.request["target"]["rendererFormatVersion"] = 3
+        with self.assertRaisesRegex(
+            CatalogPublicationError,
+            "non-topographic map contains a companion",
+        ):
+            publication_payload(non_topographic, "development")
 
     def test_ready_publication_is_persisted_without_changing_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -405,6 +498,35 @@ class CatalogTests(unittest.TestCase):
 
         request = open_url.call_args.args[0]
         self.assertEqual(request.get_header("User-agent"), "BicinoMapPlatform/1.0")
+
+    def test_attachment_request_keys_fit_service_auth_and_preserve_identity(self):
+        response = Mock()
+        response.read.return_value = b"{}"
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=None)
+        client = CatalogClient("https://maps.invalid", "development", "dev", "x" * 32)
+
+        def request_key(publication, credential, alias=None):
+            with patch("map_platform.catalog.urlopen", return_value=response) as open_url:
+                client.attach_library(
+                    publication_id_value=publication,
+                    library_credential=credential,
+                    alias=alias,
+                )
+            request = open_url.call_args.args[0]
+            key = request.get_header("X-catalog-idempotency-key")
+            # Match the catalog Worker's verifyServiceRequest header contract.
+            self.assertRegex(key, r"\A[A-Za-z0-9._:-]{8,128}\Z")
+            return key
+
+        for channel in ("development", "production"):
+            with self.subTest(channel=channel):
+                publication = publication_payload(ready_job(), channel)["publicationId"]
+                first = request_key(publication, "a" * 64)
+                self.assertEqual(first, request_key(publication, "a" * 64, "New alias"))
+                self.assertNotEqual(first, request_key(publication, "b" * 64))
+                self.assertNotEqual(first, request_key(publication + "-other", "a" * 64))
+        request_key("p" * 128, "a" * 128)
 
     def test_catalog_delivery_identity_only_accepts_complete_firmware_tuple(self):
         with patch.dict(

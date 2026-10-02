@@ -16,6 +16,9 @@ from map_platform.jobs import JobStore, MapJobService
 from map_platform.building_scope import BuildingScopeError, plan_building_scope
 from map_platform.models import Bounds, SourceRegion
 from map_platform.pipeline import (
+    BUILDING_CALIBRATION_COMMAND_POLICY,
+    BUILDING_PREPROCESSING_COMMAND_POLICY,
+    SOURCE_INDEX_COMMAND_POLICY,
     BuildingChunkSplitRequired,
     CommandExecutionPolicy,
     CommandExecutionTimeout,
@@ -116,6 +119,85 @@ class BuildingPhaseStreamingRunner:
 
 
 class PipelineProgressTests(unittest.TestCase):
+    def test_topography_packaging_emits_progress_without_block_counts(self):
+        source = SourceRegion(
+            id="sg",
+            provider="test",
+            name="Singapore",
+            url="https://example.invalid/sg.osm.pbf",
+            bounds=Bounds(103.0, 1.0, 104.5, 1.8),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = MapJobService(
+                SourceIndex([source]), JobStore(root / "jobs")
+            ).create_job(
+                {"mode": "custom_bbox", "bbox": [103.80, 1.30, 103.81, 1.31]}
+            )
+            # Isolate target-4 packaging from the separate admission policy.
+            job.request["target"] = {
+                "renderer": "esp32-fmb",
+                "rendererFormatVersion": 4,
+            }
+            pipeline = MapBuildPipeline(
+                PipelinePaths(
+                    Path(__file__).resolve().parents[3],
+                    root / "work",
+                    root / "packs",
+                )
+            )
+            pack_root = root / "pack"
+            pack_root.mkdir()
+            progress = []
+            with (
+                patch.object(pipeline, "_resolve_source_preview_geometry"),
+                patch.object(
+                    pipeline,
+                    "_prepare_topography",
+                    return_value=({"recordCount": 0}, root / "companion.sqlite3"),
+                ),
+                patch.object(pipeline, "_pipeline_metadata", return_value={}),
+                patch(
+                    "map_platform.pipeline.build_manifest",
+                    side_effect=RuntimeError("stop after topography progress"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "stop after topography progress"),
+            ):
+                pipeline._package_map(
+                    job,
+                    pack_root,
+                    root / "pack.zip",
+                    on_phase_progress=progress.append,
+                )
+
+            self.assertEqual(
+                [
+                    (item["phase"], item["completed"], item["total"],
+                     item["totalBlocks"], item["indeterminate"])
+                    for item in progress
+                ],
+                [
+                    ("topography_generation", 0, 1, None, True),
+                    ("topography_generation", 1, 1, None, False),
+                ],
+            )
+
+    def test_source_wide_calibration_and_scoped_preprocessing_have_distinct_deadlines(
+        self,
+    ):
+        self.assertEqual(
+            BUILDING_CALIBRATION_COMMAND_POLICY.wall_timeout_seconds,
+            6 * 60 * 60,
+        )
+        self.assertEqual(
+            BUILDING_PREPROCESSING_COMMAND_POLICY.wall_timeout_seconds,
+            30 * 60,
+        )
+        self.assertGreater(
+            BUILDING_CALIBRATION_COMMAND_POLICY.wall_timeout_seconds,
+            BUILDING_PREPROCESSING_COMMAND_POLICY.wall_timeout_seconds,
+        )
+
     def assert_process_exits(self, process_id: int, *, timeout_seconds: float = 2) -> None:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
@@ -870,7 +952,7 @@ class PipelineProgressTests(unittest.TestCase):
             source_sha256 = "1" * 64
             identity = {
                 "schemaVersion": 1,
-                "algorithmVersion": 2,
+                "algorithmVersion": 3,
                 "creationTool": "open-bike-building-source-index",
                 "sourceSnapshotSha256": source_sha256,
             }
@@ -911,6 +993,7 @@ class PipelineProgressTests(unittest.TestCase):
                         source_sha256,
                     ],
                     cwd=repo_root / "tools" / "OSM_Extract" / "scripts",
+                    policy=SOURCE_INDEX_COMMAND_POLICY,
                     on_phase_progress=None,
                     default_unit="source_index",
                     total_blocks=1,
@@ -943,6 +1026,7 @@ class PipelineProgressTests(unittest.TestCase):
             pipeline._run_preprocessing_command(
                 ["preprocess"],
                 cwd=root,
+                policy=BUILDING_CALIBRATION_COMMAND_POLICY,
                 on_phase_progress=progress.append,
                 default_unit="calibration_cells",
                 total_blocks=12,
@@ -1076,6 +1160,11 @@ class PipelineProgressTests(unittest.TestCase):
                     pipeline._run_preprocessing_command(
                         ["preprocess"],
                         cwd=root,
+                        policy=(
+                            SOURCE_INDEX_COMMAND_POLICY
+                            if unit == "source_index"
+                            else BUILDING_PREPROCESSING_COMMAND_POLICY
+                        ),
                         on_phase_progress=lambda _progress: None,
                         default_unit=unit,
                         total_blocks=12,

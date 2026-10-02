@@ -149,14 +149,37 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         )
     }
 
-    // Renderer target 3 is the only format generated for new maps. Older
-    // renderer targets remain supported only when transferring already-saved
-    // artifacts to compatible legacy firmware.
+    // Renderer target 3 remains the standard new-map format. The development
+    // topography canary explicitly requests target 4; older targets remain
+    // supported only for transferring already-saved legacy artifacts.
     private static var targetThree: RendererTarget {
         RendererTarget(
             renderer: "esp32-fmb",
             rendererFormatVersion: 3,
             firmwareVersion: nil
+        )
+    }
+
+    private static var targetFour: RendererTarget {
+        RendererTarget(
+            renderer: "esp32-fmb",
+            rendererFormatVersion: 4,
+            firmwareVersion: nil
+        )
+    }
+
+    func withTopography(_ enabled: Bool) -> OfflineMapJobRequest {
+        OfflineMapJobRequest(
+            mode: mode,
+            bbox: bbox,
+            geometry: geometry,
+            route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId,
+            installOnDevice: installOnDevice,
+            target: enabled ? Self.targetFour : Self.targetThree,
+            labels: labels ?? Self.defaultLabelProfile
         )
     }
 
@@ -236,7 +259,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             installOnDevice: installOnDevice,
             target: RendererTarget(
                 renderer: "esp32-fmb",
-                rendererFormatVersion: 3,
+                rendererFormatVersion: target?.rendererFormatVersion ?? 3,
                 firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
             ),
             labels: labels ?? Self.defaultLabelProfile
@@ -295,6 +318,7 @@ enum GeoJSONCoordinates: Codable, Equatable {
 struct OfflineMapJob: Decodable, Equatable {
     let jobId: String
     let status: String
+    let queuePosition: Int?
     let createdAt: String?
     let updatedAt: String?
     let error: String?
@@ -314,12 +338,19 @@ struct OfflineMapJob: Decodable, Equatable {
     let userLabel: String?
     let reuseStrategy: String?
     let preparationEstimate: OfflineMapPreparationEstimate?
+    let catalogMapEntryId: String?
     let downloadCount: Int?
     let firstDownloadedAt: String?
     let lastDownloadedAt: String?
 
     var isTerminal: Bool {
         return ["ready", "failed", "expired", "cancelled"].contains(status)
+    }
+
+    var queueDescription: String? {
+        guard status == "queued" || queuePosition != nil else { return nil }
+        guard let queuePosition, queuePosition > 0 else { return "Waiting in map queue" }
+        return "Estimated queue position: \(queuePosition)"
     }
 
     var mayBeLegacyRetryTransition: Bool {
@@ -383,6 +414,7 @@ struct OfflineMapBuildingProgress: Decodable, Equatable {
 nonisolated struct OfflineMapArtifact: Codable, Equatable {
     static let bikeMapStreamFormat = "bike-map-stream-v1"
     static let storedZipFormat = "zip-stored-v1"
+    static let topographyCompanionFormat = "topography-ios-v1"
 
     let format: String
     let mediaType: String
@@ -402,6 +434,10 @@ nonisolated struct OfflineMapArtifact: Codable, Equatable {
     let requiredFirmwareVersion: String?
     let requiredFirmwareBuild: UInt32?
     let requiredFirmwareGitSha: String?
+    let mapContentReceipt: String?
+    let intermediateSha256: String?
+    let sourcePolicySha256: String?
+    let attributionSha256: String?
 
     init(
         format: String,
@@ -421,7 +457,11 @@ nonisolated struct OfflineMapArtifact: Codable, Equatable {
         requiredIosBuildSha256: String? = nil,
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
-        requiredFirmwareGitSha: String? = nil
+        requiredFirmwareGitSha: String? = nil,
+        mapContentReceipt: String? = nil,
+        intermediateSha256: String? = nil,
+        sourcePolicySha256: String? = nil,
+        attributionSha256: String? = nil
     ) {
         self.format = format
         self.mediaType = mediaType
@@ -441,10 +481,15 @@ nonisolated struct OfflineMapArtifact: Codable, Equatable {
         self.requiredFirmwareVersion = requiredFirmwareVersion
         self.requiredFirmwareBuild = requiredFirmwareBuild
         self.requiredFirmwareGitSha = requiredFirmwareGitSha
+        self.mapContentReceipt = mapContentReceipt
+        self.intermediateSha256 = intermediateSha256
+        self.sourcePolicySha256 = sourcePolicySha256
+        self.attributionSha256 = attributionSha256
     }
 
     var isBikeMapStream: Bool { format == Self.bikeMapStreamFormat }
     var isStoredZip: Bool { format == Self.storedZipFormat }
+    var isTopographyCompanion: Bool { format == Self.topographyCompanionFormat }
 }
 
 nonisolated struct OfflineMapArtifactDownloadURL: Decodable, Equatable {
@@ -466,6 +511,10 @@ nonisolated struct OfflineMapArtifactDownloadURL: Decodable, Equatable {
     let requiredFirmwareVersion: String?
     let requiredFirmwareBuild: UInt32?
     let requiredFirmwareGitSha: String?
+    let mapContentReceipt: String?
+    let intermediateSha256: String?
+    let sourcePolicySha256: String?
+    let attributionSha256: String?
     let url: String
     let expiresAt: Int
     let expiresInSeconds: Int
@@ -663,14 +712,55 @@ struct OfflineMapJobProgress: Decodable, Equatable {
 
 enum OfflineMapProgressPresentation {
     static func value(job: OfflineMapJob?, downloadProgress: Double) -> Double? {
-        if job?.status == "converting_features", let progress = job?.progress {
-            return progress.displayFraction
+        if downloadProgress > 0,
+           job == nil || job?.status == "ready" {
+            // This row still represents a pending job. File transfer reaching
+            // 100% precedes artifact verification and saving the map locally.
+            return min(0.99, 0.95 + (clamped(downloadProgress) * 0.05))
         }
-        return downloadProgress > 0 ? downloadProgress : nil
+
+        guard let job else { return 0.01 }
+        switch job.status {
+        case "queued":
+            return 0.02
+        case "validating":
+            return 0.04
+        case "resolving_source":
+            return 0.06
+        case "extracting_pbf":
+            return 0.08
+        case "converting_features":
+            let phaseProgress = job.buildingProgress?.fraction
+                ?? job.progress?.displayFraction
+                ?? 0
+            return 0.10 + (clamped(phaseProgress) * 0.80)
+        case "packaging", "ready":
+            return 0.95
+        case "failed", "expired", "cancelled":
+            return nil
+        default:
+            return job.isTerminal ? nil : 0.01
+        }
+    }
+
+    private static func clamped(_ value: Double) -> Double {
+        min(max(value, 0), 1)
     }
 }
 
 enum OfflineMapDownloadingSectionPresentation {
+    static func isRecoveryOnly(
+        isServerRecoveryCheckPending: Bool,
+        hasCurrentJob: Bool,
+        hasDownloadedPack: Bool,
+        errorMessage: String?
+    ) -> Bool {
+        isServerRecoveryCheckPending &&
+            !hasCurrentJob &&
+            !hasDownloadedPack &&
+            errorMessage == nil
+    }
+
     static func isVisible(
         isBusy: Bool,
         hasPendingJob: Bool,
@@ -680,11 +770,12 @@ enum OfflineMapDownloadingSectionPresentation {
         hasDownloadedPack: Bool,
         errorMessage: String?
     ) -> Bool {
-        let isOnlyCheckingForServerMaps = isServerRecoveryCheckPending &&
-            !hasCurrentJob &&
-            !hasDownloadedPack &&
-            !hasPendingActivation &&
-            errorMessage == nil
+        let isOnlyCheckingForServerMaps = isRecoveryOnly(
+            isServerRecoveryCheckPending: isServerRecoveryCheckPending,
+            hasCurrentJob: hasCurrentJob,
+            hasDownloadedPack: hasDownloadedPack,
+            errorMessage: errorMessage
+        ) && !hasPendingActivation
         guard !isOnlyCheckingForServerMaps else { return false }
 
         return isBusy || hasPendingJob || hasPendingActivation || errorMessage != nil
@@ -726,6 +817,10 @@ struct MapActivationProgressPresentation: Equatable {
             percentage: min(max(percentage, 0), 100)
         )
     }
+
+    static func shouldClear(forTransferOutcome outcome: String) -> Bool {
+        outcome == "installed" || outcome == "failed"
+    }
 }
 
 nonisolated enum MapUploadProgressReconciler {
@@ -760,6 +855,7 @@ nonisolated enum PausedMapUploadResumePolicy {
         candidateArtifactFilename: String? = nil,
         lastDeviceState: String?,
         backgroundUploadSucceeded: Bool? = nil,
+        observedIdleOnAnotherMap: Bool = false,
         statusMessage: String = ""
     ) -> Bool {
         guard lastTransferOutcome == "unconfirmed",
@@ -776,9 +872,10 @@ nonisolated enum PausedMapUploadResumePolicy {
         if backgroundUploadSucceeded == true {
             // A successful protocol-2 upload may close the accessory HTTP
             // server before iOS receives the terminal activation response.
-            // Wait for authenticated device reconciliation instead of
-            // offering a second payload write from a stale local message.
-            return lastDeviceState == "paused"
+            // Wait for authenticated device reconciliation. A fresh status
+            // that is idle on another map can then expose an explicit retry.
+            return lastDeviceState == "paused" ||
+                (lastDeviceState == "idle" && observedIdleOnAnotherMap)
         }
         return lastDeviceState == "paused" ||
             lastDeviceState == "idle" ||
@@ -911,7 +1008,22 @@ struct OfflineMapPreparationEstimatePresentation: Equatable {
     let title: String
     let value: String
 
-    static let fallbackGraceSeconds: TimeInterval = 10
+    // These conservative bootstrap ranges mirror the checked-in
+    // map-preparation-v1 selected-area profile. They keep the UI useful while
+    // production collects shadow evidence. A valid server estimate always
+    // takes precedence, so publishing a calibrated model needs no app update.
+    private static let bootstrapFullRange = OfflineMapPreparationEstimateRange(
+        lowerSeconds: 137,
+        upperSeconds: 6_080
+    )
+    private static let bootstrapEncodingRange = OfflineMapPreparationEstimateRange(
+        lowerSeconds: 22,
+        upperSeconds: 725
+    )
+    private static let bootstrapPackagingRange = OfflineMapPreparationEstimateRange(
+        lowerSeconds: 2,
+        upperSeconds: 95
+    )
 
     static func presentation(
         for job: OfflineMapJob,
@@ -921,44 +1033,53 @@ struct OfflineMapPreparationEstimatePresentation: Equatable {
         let title = job.status == "queued"
             ? "Estimated Preparation"
             : "Estimated Remaining"
-        if job.status == "queued", job.errorCode != nil {
-            return Self(
-                title: title,
-                value: "Re-estimating after retry…"
-            )
-        }
         if let estimate = job.preparationEstimate {
             if let jobAttempt = job.attempts,
                let estimateAttempt = estimate.attempt,
                jobAttempt != estimateAttempt {
-                return Self(
-                    title: title,
-                    value: "Re-estimating after retry…"
-                )
-            }
-            if let range = estimate.validRemainingRange {
+                // A previous attempt's estimate is stale. Use the conservative
+                // bootstrap until the server publishes this attempt's range.
+            } else if let range = estimate.validRemainingRange {
                 return Self(
                     title: title,
                     value: description(for: range)
                 )
             }
-            if estimate.schemaVersion == 1,
-               estimate.state == "pending",
-               (estimate.attempt ?? 0) > 1 {
-                return Self(
-                    title: title,
-                    value: "Re-estimating after retry…"
-                )
-            }
-        }
-        let age = job.createdAt.flatMap(date(from:)).map {
-            max(0, now.timeIntervalSince($0))
         }
         return Self(
             title: title,
-            value: age.map { $0 < fallbackGraceSeconds } == true
-                ? "Estimating preparation time…"
-                : "Preparation time depends on map complexity"
+            value: description(for: bootstrapRange(for: job))
+        )
+    }
+
+    private static func bootstrapRange(
+        for job: OfflineMapJob
+    ) -> OfflineMapPreparationEstimateRange {
+        if job.status == "packaging" {
+            return bootstrapPackagingRange
+        }
+        if job.progress?.phase == "block_encoding" {
+            return bootstrapEncodingRange
+        }
+        return bootstrapFullRange
+    }
+
+    static func availablePresentation(for job: OfflineMapJob) -> Self? {
+        guard !job.isTerminal,
+              let estimate = job.preparationEstimate,
+              let range = estimate.validRemainingRange else {
+            return nil
+        }
+        if let jobAttempt = job.attempts,
+           let estimateAttempt = estimate.attempt,
+           jobAttempt != estimateAttempt {
+            return nil
+        }
+        return Self(
+            title: job.status == "queued"
+                ? "Estimated Preparation"
+                : "Estimated Remaining",
+            value: description(for: range)
         )
     }
 
@@ -1056,6 +1177,10 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
             1: ("legacy-vector-v1", []),
             2: ("street-labels-v1", ["street-labels"]),
             3: ("buildings-3d-v1", ["street-labels", "3d-buildings"]),
+            4: (
+                "topographic-contours-v1",
+                ["3d-buildings", "contours", "street-labels"]
+            ),
         ]
         guard schemaVersion == 1,
               ["development", "production"].contains(deploymentChannel),
@@ -1099,9 +1224,11 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
     case deviceSDCardUnavailable
     case deviceMapTransferRejected(String)
     case firmwareMapStreamUnsupported
+    case mapStreamCompatibilityRejected(MapInstallProtocolRejection)
     case backgroundMapUploadInProgress
     case mapActivationFailed(String)
     case transferWiFiJoinFailed(String, String)
+    case transferServerProbeFailed(String, String)
     case invalidPack(String)
     case unsupportedPackCompression(String)
     case invalidResponse
@@ -1133,12 +1260,16 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             return "Device could not start map transfer mode: \(message)"
         case .firmwareMapStreamUnsupported:
             return "This saved map cannot be installed securely. Update the device firmware and regenerate the map as a signed stream."
+        case .mapStreamCompatibilityRejected(let rejection):
+            return "This saved map cannot be installed securely (\(rejection.rawValue)). Regenerate it with this app or use compatible device firmware."
         case .backgroundMapUploadInProgress:
             return "Another map upload is already in progress. Wait for it to finish before transferring a different map."
         case .mapActivationFailed(let message):
             return "Map activation failed: \(message)"
         case .transferWiFiJoinFailed(let ssid, let message):
             return "Could not join device Wi-Fi \(ssid): \(message)"
+        case .transferServerProbeFailed(let ssid, let message):
+            return "Device transfer over \(ssid) failed: \(message)"
         case .invalidPack(let message):
             return "Invalid map pack: \(message)"
         case .unsupportedPackCompression(let path):
@@ -1179,6 +1310,18 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
                 return "We couldn't build this map. Try again. If it keeps failing, report the problem."
             }
         case .serverStatus(let status, let body):
+            if status == 429,
+               let data = body.data(using: .utf8),
+               let envelope = try? JSONDecoder().decode(OfflineMapAPIErrorEnvelope.self, from: data) {
+                switch envelope.detail.code {
+                case "map_queue_full":
+                    return "The map queue is full. Try again after a map starts."
+                case "installation_queue_full":
+                    return "You already have maps waiting in the queue. Try again after one starts."
+                default:
+                    break
+                }
+            }
             return "Map server returned \(status): \(body)"
         }
     }
@@ -1426,6 +1569,31 @@ nonisolated enum MapInstallProtocolSelection: Equatable {
     case legacyArtifactRequired
 }
 
+nonisolated enum MapInstallProtocolRejection: String, Equatable {
+    case notSignedStream = "not_signed_stream"
+    case missingSignatureCapability = "missing_signature_capability"
+    case deviceProtocolUnsupported = "device_protocol_unsupported"
+    case signingKeyNotTrusted = "signing_key_not_trusted"
+    case readerRequirementsUnsupported = "reader_requirements_unsupported"
+    case appIdentityIncomplete = "app_identity_incomplete"
+    case appIdentityMismatch = "app_identity_mismatch"
+    case firmwareIdentityIncomplete = "firmware_identity_incomplete"
+    case firmwareIdentityMismatch = "firmware_identity_mismatch"
+}
+
+nonisolated struct MapInstallProtocolEvaluation: Equatable {
+    let selection: MapInstallProtocolSelection
+    let rejection: MapInstallProtocolRejection?
+
+    static let streamV2 = Self(selection: .streamV2, rejection: nil)
+
+    static func rejected(
+        _ rejection: MapInstallProtocolRejection
+    ) -> Self {
+        Self(selection: .legacyArtifactRequired, rejection: rejection)
+    }
+}
+
 nonisolated enum MapInstallProtocolSelector {
     static func select(
         isBikeMapStream: Bool,
@@ -1443,14 +1611,51 @@ nonisolated enum MapInstallProtocolSelector {
         requiredFirmwareGitSha: String? = nil,
         deviceStatus: MapTransferDeviceStatus
     ) -> MapInstallProtocolSelection {
-        guard isBikeMapStream else { return .legacyArtifactRequired }
-        guard let signatureTrustCapability else {
-            return .legacyArtifactRequired
+        evaluate(
+            isBikeMapStream: isBikeMapStream,
+            signatureTrustCapability: signatureTrustCapability,
+            requiredIosBuild: requiredIosBuild,
+            requiredIosGitSha: requiredIosGitSha,
+            requiredIosBuildSha256: requiredIosBuildSha256,
+            currentIosBuild: currentIosBuild,
+            currentIosGitSha: currentIosGitSha,
+            currentIosBuildSha256: currentIosBuildSha256,
+            compatibleArtifactAppIdentities: compatibleArtifactAppIdentities,
+            readerRequirements: readerRequirements,
+            requiredFirmwareVersion: requiredFirmwareVersion,
+            requiredFirmwareBuild: requiredFirmwareBuild,
+            requiredFirmwareGitSha: requiredFirmwareGitSha,
+            deviceStatus: deviceStatus
+        ).selection
+    }
+
+    static func evaluate(
+        isBikeMapStream: Bool,
+        signatureTrustCapability: String? = nil,
+        requiredIosBuild: String? = nil,
+        requiredIosGitSha: String? = nil,
+        requiredIosBuildSha256: String? = nil,
+        currentIosBuild: String? = nil,
+        currentIosGitSha: String? = nil,
+        currentIosBuildSha256: String? = nil,
+        compatibleArtifactAppIdentities: [MapStreamAppBuildIdentity] = [],
+        readerRequirements: OfflineMapReaderRequirements? = nil,
+        requiredFirmwareVersion: String? = nil,
+        requiredFirmwareBuild: UInt32? = nil,
+        requiredFirmwareGitSha: String? = nil,
+        deviceStatus: MapTransferDeviceStatus
+    ) -> MapInstallProtocolEvaluation {
+        guard isBikeMapStream else {
+            return .rejected(.notSignedStream)
         }
-        guard deviceStatus.supportsBikeMapStreamV1(
-            trustCapability: signatureTrustCapability
-        ) else {
-            return .legacyArtifactRequired
+        guard let signatureTrustCapability else {
+            return .rejected(.missingSignatureCapability)
+        }
+        guard deviceStatus.supportsBikeMapStreamV1 else {
+            return .rejected(.deviceProtocolUnsupported)
+        }
+        guard deviceStatus.streamTrust?.contains(signatureTrustCapability) == true else {
+            return .rejected(.signingKeyNotTrusted)
         }
         let appRequirements = (
             requiredIosBuild,
@@ -1463,7 +1668,7 @@ nonisolated enum MapInstallProtocolSelector {
                   OfflineMapReaderCompatibilityPolicy.supports(
                     readerRequirements
                   ) else {
-                return .legacyArtifactRequired
+                return .rejected(.readerRequirementsUnsupported)
             }
         } else {
             guard let requiredAppBuild = appRequirements.0,
@@ -1472,7 +1677,7 @@ nonisolated enum MapInstallProtocolSelector {
                   let currentAppBuild = currentIosBuild,
                   let currentAppGitSHA = currentIosGitSha,
                   let currentAppBuildSHA256 = currentIosBuildSha256 else {
-                return .legacyArtifactRequired
+                return .rejected(.appIdentityIncomplete)
             }
             let requiredAppIdentity = MapStreamAppBuildIdentity(
                 schemaVersion: 1,
@@ -1492,7 +1697,7 @@ nonisolated enum MapInstallProtocolSelector {
                     compatibleArtifactAppIdentities.contains(
                         requiredAppIdentity
                     ) else {
-                return .legacyArtifactRequired
+                return .rejected(.appIdentityMismatch)
             }
         }
         let deviceRequirements = (
@@ -1506,11 +1711,13 @@ nonisolated enum MapInstallProtocolSelector {
         }
         guard let requiredVersion = deviceRequirements.0,
               let requiredBuild = deviceRequirements.1,
-              let requiredGitSHA = deviceRequirements.2,
-              deviceStatus.firmwareVersion == requiredVersion,
+              let requiredGitSHA = deviceRequirements.2 else {
+            return .rejected(.firmwareIdentityIncomplete)
+        }
+        guard deviceStatus.firmwareVersion == requiredVersion,
               deviceStatus.firmwareBuild == requiredBuild,
               deviceStatus.firmwareGitSha == requiredGitSHA else {
-            return .legacyArtifactRequired
+            return .rejected(.firmwareIdentityMismatch)
         }
         return .streamV2
     }
@@ -3124,13 +3331,6 @@ struct OfflineMapPlatformClient {
                         retryingAppAttestFailure: true
                     )
                 }
-                if Self.appAttestInvalidationCodes.contains(
-                    envelope.detail.code
-                ) {
-                    await managedAppAttestClient?.invalidate(
-                        serverURLString: baseURL.absoluteString
-                    )
-                }
             }
             throw error
         }
@@ -3161,6 +3361,9 @@ struct OfflineMapPlatformClient {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        if managedAppAttestClient != nil {
+            request.setValue("required", forHTTPHeaderField: "X-Bicino-App-Attest")
+        }
         authorizeInstallation(&request)
         let credential: OfflineMapInstallationCredential = try await send(request: request)
         let appAttestKeyIsValid = credential.appAttestKeyId.map(
@@ -3337,7 +3540,11 @@ struct OfflineMapPlatformClient {
               response.requiredIosBuildSha256 == artifact.requiredIosBuildSha256,
               response.requiredFirmwareVersion == artifact.requiredFirmwareVersion,
               response.requiredFirmwareBuild == artifact.requiredFirmwareBuild,
-              response.requiredFirmwareGitSha == artifact.requiredFirmwareGitSha else {
+              response.requiredFirmwareGitSha == artifact.requiredFirmwareGitSha,
+              response.mapContentReceipt == artifact.mapContentReceipt,
+              response.intermediateSha256 == artifact.intermediateSha256,
+              response.sourcePolicySha256 == artifact.sourcePolicySha256,
+              response.attributionSha256 == artifact.attributionSha256 else {
             throw OfflineMapPlatformError.invalidResponse
         }
         return try absoluteURL(for: response.url, baseURL: baseURL)
@@ -3493,12 +3700,6 @@ struct OfflineMapPlatformClient {
             String(data: data, encoding: .utf8) ?? ""
         )
     }
-
-    private static let appAttestInvalidationCodes = [
-        "installation_attestation_required",
-        "app_attest_key_mismatch",
-        "app_attest_invalid_key",
-    ]
 
     private static let appAttestRetryableCodes = [
         "app_attest_invalid_challenge",

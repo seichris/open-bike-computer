@@ -1,6 +1,7 @@
 import Foundation
 #if WORKOUT_CONTRACT_HOST
 import Darwin
+extension ControllableRecoveryPersistence: RideDecisionPersistence {}
 #endif
 #if WORKOUT_CONTRACT_XCTEST
 import XCTest
@@ -61,13 +62,16 @@ private struct WorkoutContractTestSuite {
 #endif
         testRideAutomationAdmissionAndOriginContract()
         testSnapshotRoundTrip()
+        testLegacyPhoneProjection()
         testSegmentRoundTripValidationAndAccumulation()
         testTerminalOutcomeRoundTripAndValidation()
+        testDiscardCompletionPacketAndAutomaticCleanupPolicy()
         testAllMessageKindsRoundTrip()
         testCompatibleMinorVersionIgnoresUnknownFields()
         testUnsupportedMajorVersionIsRejected()
         testOptionalMetricsRemainUnavailable()
         testWorkoutDevicePairGenerationStamp()
+        testWatchGPSMotionFrameUsesRawLocationIdentity()
         testWorkoutDeviceTerminalForwardingBoundary()
         testWorkoutDeviceSharedTerminalMapping()
         testInvalidEnvelopeIdentityIsRejected()
@@ -106,7 +110,9 @@ private struct WorkoutContractTestSuite {
         testInstantaneousMetricFreshnessAndSpeedFallback()
         testBuilderElapsedTimeUsesHealthKitPauseClock()
         testRoutePointFilteringHonorsWorkoutAndAccuracyBounds()
-        testRouteTimestampGateRejectsDelayedPausedBatches()
+        testRouteTimestampGateRejectsPreWorkoutBatches()
+        testPausedRouteMovementFilterPreservesCoastingAndRejectsDrift()
+        testPausedRouteContinuityBreaksOnlyStationaryPauses()
         testRouteSegmentAndQueueBounds()
         testRouteRecoveryDistanceAndAssociatedFinalizationPolicies()
         testRecoverySequenceLeasesNeverReuseReservedValues()
@@ -138,6 +144,7 @@ private struct WorkoutContractTestSuite {
         testWorkoutDiscardDisclosureRequiresFinalConfirmation()
         testIPhoneStartsUseWatchAvailabilityAndWatchStartsDirectly()
         testWatchOfflineNavigationUIFlow()
+        testWatchConnectivityBackgroundDeliveryLifecycle()
         testHeartRateZoneConfigurationLivesInIPhoneDeveloperSettings()
         testEveryDiscardSurfaceRequiresFinalConfirmation()
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
@@ -147,6 +154,13 @@ private struct WorkoutContractTestSuite {
     }
 
     private mutating func testRideAutomationGoldenVectorAndValidation() {
+        if let path = ProcessInfo.processInfo.environment["RAUT_POLICY_FRAME_PATH"] {
+            let frame = (try? Data(contentsOf: URL(fileURLWithPath: path)))
+                .flatMap(RideAutomationFrame.init)
+            expect(frame?.sourceHealthMask == RideAutomationSourceHealth.watchGpsFresh
+                   && frame?.transition == .pause,
+                   "actual firmware policy output is decodable by Swift")
+        }
         let sessionID = UUID(
             uuidString: "00112233-4455-6677-8899-AABBCCDDEEFF"
         )!
@@ -178,6 +192,10 @@ private struct WorkoutContractTestSuite {
         ])
         expect(frame.encoded() == expected, "RAUT Swift encoding must match firmware golden vector")
         expect(RideAutomationFrame(expected) == frame, "RAUT golden vector must round trip")
+        var watchFrame = frame
+        watchFrame.sourceHealthMask = RideAutomationSourceHealth.watchGpsFresh
+        expect(watchFrame.encoded().flatMap(RideAutomationFrame.init) == watchFrame,
+               "Watch GPS source health survives firmware-to-Swift decoding")
         expect(RideAutomationFrame(expected.dropLast()) == nil, "RAUT frames must be exactly 52 bytes")
         var invalid = expected
         invalid[12] = 0
@@ -186,7 +204,7 @@ private struct WorkoutContractTestSuite {
         invalid[15] = 0
         expect(RideAutomationFrame(invalid) == nil, "RAUT decisions require a nonzero sequence")
         invalid = expected
-        invalid[48] = 0x10
+        invalid[48] = 0x20
         expect(
             RideAutomationFrame(invalid) == nil,
             "RAUT source health must reject undefined bits"
@@ -261,7 +279,11 @@ private struct WorkoutContractTestSuite {
             automaticReason: .rideDetection,
             rideGeneration: 9,
             decisionSequence: 12,
-            detectorProfileVersion: 1
+            detectorProfileVersion: 3,
+            evidenceMask: 0x55AA,
+            sourceHealthMask: 0x000F,
+            candidateBeganSeconds: 88,
+            decidedAtSeconds: 99
         )
         let withAutomaticStart = RideDetectionSyncContext
             .addingPendingAutomaticStart(
@@ -310,6 +332,16 @@ private struct WorkoutContractTestSuite {
             ) == nil,
             "oversized automatic-start identities must not truncate"
         )
+        invalidAutomaticStart = withAutomaticStart
+        invalidAutomaticStart.removeValue(
+            forKey: RideDetectionSyncContext.automaticStartDecidedAtKey
+        )
+        expect(
+            RideDetectionSyncContext.pendingAutomaticStart(
+                from: invalidAutomaticStart
+            ) == nil,
+            "partial automatic-start diagnostics must fail closed"
+        )
         expect(
             RideAutomationSerialNumber.isNewer(2, than: 1)
                 && RideAutomationSerialNumber.isNewer(
@@ -326,9 +358,13 @@ private struct WorkoutContractTestSuite {
         expect(
             WorkoutSchemaVersion.current
                 .supportsRideAutomationControlContext
+                && WorkoutSchemaVersion.current
+                    .supportsWatchGPSMotionEvidence
+                && !WorkoutSchemaVersion(major: 1, minor: 5)
+                    .supportsWatchGPSMotionEvidence
                 && !WorkoutSchemaVersion(major: 1, minor: 4)
                     .supportsRideAutomationControlContext,
-            "automatic Watch controls must require the 1.5 origin contract"
+            "ride control and Watch motion additions must use their schema minors"
         )
         expect(
             !RideAutomationMonotonicClock.isExpired(
@@ -367,7 +403,8 @@ private struct WorkoutContractTestSuite {
         }
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        let store = RideDetectionSettingsStore(defaults: defaults)
+        let decisionPersistence = ControllableRecoveryPersistence()
+        let store = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
         expect(store.generation == 1, "ride settings begin at generation one")
 
         store.adoptDeviceSettings(
@@ -419,7 +456,7 @@ private struct WorkoutContractTestSuite {
         )
 #endif
 
-        let restored = RideDetectionSettingsStore(defaults: defaults)
+        let restored = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
         expect(
             restored.generation == store.generation
                 && restored.settings == store.settings,
@@ -428,7 +465,7 @@ private struct WorkoutContractTestSuite {
 
         defaults.set(-1, forKey: "rideDetection.settingsGeneration.v1")
         let corruptGenerationReload = RideDetectionSettingsStore(
-            defaults: defaults
+            defaults: defaults, decisionPersistence: decisionPersistence
         )
         expect(
             corruptGenerationReload.generation == 1,
@@ -483,7 +520,7 @@ private struct WorkoutContractTestSuite {
                 ),
             "pending automation may recover only after exact device boot and sequence proof"
         )
-        store.savePendingDecision(pendingStart)
+        try! store.saveDecisionState(watermarks: ["bike-a:7": 11], pending: pendingStart)
         expect(
             store.loadPendingDecision() == pendingStart,
             "a valid unresolved prompt must survive relaunch"
@@ -502,11 +539,61 @@ private struct WorkoutContractTestSuite {
             !mismatchedIdentity.isValidForPersistence,
             "a recovery cache cannot relabel a detector decision identity"
         )
-        store.savePendingDecision(mismatchedIdentity)
+        do {
+            try store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: mismatchedIdentity)
+            expect(false, "invalid pending identity must reject the transaction")
+        } catch {}
         expect(
-            store.loadPendingDecision() == nil,
-            "invalid pending automation must be removed rather than replayed"
+            store.loadPendingDecision() == pendingStart,
+            "invalid transaction must retain the earlier durable operation"
         )
+        decisionPersistence.failsSave = true
+        do {
+            try store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: nil)
+            expect(false, "failed save must not report success")
+        } catch {}
+        let afterFailure = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
+        expect(afterFailure.loadDecisionWatermarks() == ["bike-a:7": 11] &&
+            afterFailure.loadPendingDecision() == pendingStart,
+            "relaunch after failed commit must retain watermark and outbox together")
+        decisionPersistence.failsSave = false
+        try! store.saveDecisionState(watermarks: ["bike-a:7": 12], pending: nil)
+        let afterCommit = RideDetectionSettingsStore(defaults: defaults, decisionPersistence: decisionPersistence)
+        expect(afterCommit.loadDecisionWatermarks() == ["bike-a:7": 12] &&
+            afterCommit.loadPendingDecision() == nil, "committed state restores atomically")
+
+        let legacyName = "RideDecisionMigration.\(UUID().uuidString)"
+        let legacyDefaults = UserDefaults(suiteName: legacyName)!
+        defer { legacyDefaults.removePersistentDomain(forName: legacyName) }
+        legacyDefaults.set(["bike-a:7": 10], forKey: "rideDetection.decisionWatermarks.v1")
+        legacyDefaults.set(try! PropertyListEncoder().encode(pendingStart),
+            forKey: "rideDetection.pendingDecision.v1")
+        let migrationPersistence = ControllableRecoveryPersistence()
+        migrationPersistence.failsSave = true
+        let blockedMigration = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: migrationPersistence)
+        expect(blockedMigration.loadPendingDecision() == nil,
+            "failed migration must not replay the legacy outbox")
+        expect(legacyDefaults.data(forKey: "rideDetection.pendingDecision.v1") != nil,
+            "failed migration must retain legacy bytes for the next launch")
+        migrationPersistence.failsSave = false
+        let migrated = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: migrationPersistence)
+        expect(migrated.loadPendingDecision() == pendingStart &&
+            migrated.loadDecisionWatermarks()["bike-a:7"] == 11,
+            "migration must commit the pending identity and matching watermark together")
+        expect(legacyDefaults.object(forKey: "rideDetection.pendingDecision.v1") == nil,
+            "legacy bytes are removed only after the new journal commits")
+        let corruptPersistence = ControllableRecoveryPersistence()
+        corruptPersistence.data = Data("not a journal".utf8)
+        let corruptStore = RideDetectionSettingsStore(
+            defaults: legacyDefaults, decisionPersistence: corruptPersistence)
+        do {
+            try corruptStore.saveDecisionState(watermarks: [:], pending: nil)
+            expect(false, "corrupt durable state must fail closed, not reset watermarks")
+        } catch {}
+        expect(corruptPersistence.data == Data("not a journal".utf8),
+            "corrupt journal evidence must not be silently overwritten")
 
         let pauseFrame = RideAutomationFrame(
             kind: .decision,
@@ -611,6 +698,59 @@ private struct WorkoutContractTestSuite {
                 highestDecisionSequence: 1
             ) == .resume,
             "matching automatic pauses may auto-resume"
+        )
+        expect(
+            WorkoutTransitionOriginPolicy.resolve(
+                hasAutomaticContext: true,
+                hasExplicitManualRequest: true,
+                hasConfirmedSystemRequest: true
+            ) == .automatic
+                && WorkoutTransitionOriginPolicy.resolve(
+                    hasAutomaticContext: false,
+                    hasExplicitManualRequest: true
+                ) == .manual
+                && WorkoutTransitionOriginPolicy.resolve(
+                    hasAutomaticContext: false,
+                    hasExplicitManualRequest: false,
+                    hasConfirmedSystemRequest: true
+                ) == .system
+                && WorkoutTransitionOriginPolicy.resolve(
+                    hasAutomaticContext: false,
+                    hasExplicitManualRequest: false
+                ) == .unknown,
+            "automatic, manual, system, and unknown origins must remain distinct"
+        )
+        let systemEventAt = Date(timeIntervalSinceReferenceDate: 900)
+        let systemPauseEvent = WorkoutSystemTransitionEvent(
+            paused: true,
+            capturedAt: systemEventAt
+        )
+        expect(
+            WorkoutSystemTransitionEventPolicy.matches(
+                systemPauseEvent,
+                paused: true,
+                transitionAt: systemEventAt.addingTimeInterval(1),
+                lastManualRequestAt: .distantPast,
+                currentOrigin: .unknown
+            ),
+            "a matching HealthKit motion event should correct unknown provenance to system"
+        )
+        expect(
+            !WorkoutSystemTransitionEventPolicy.matches(
+                systemPauseEvent,
+                paused: true,
+                transitionAt: systemEventAt,
+                lastManualRequestAt: systemEventAt,
+                currentOrigin: .unknown
+            )
+                && !WorkoutSystemTransitionEventPolicy.matches(
+                    systemPauseEvent,
+                    paused: true,
+                    transitionAt: systemEventAt,
+                    lastManualRequestAt: .distantPast,
+                    currentOrigin: .automatic
+                ),
+            "manual requests and correlated Bicino automation must outrank a system event"
         )
         var wrappedStart = start
         wrappedStart.decisionSequence = 1
@@ -811,6 +951,190 @@ private struct WorkoutContractTestSuite {
                 stamped.extended[1] & 0x3F == frames.extended[1],
             "pair stamping preserves state and source bits"
         )
+
+        let sessionID = UUID(
+            uuidString: "0A78D2E6-CE96-4E2A-B8C4-8CA11C44A21E"
+        )!
+        let originSample = WorkoutDeviceTelemetrySample(
+            state: .paused,
+            sessionToken: 8,
+            hasLiveNumerics: false,
+            isCurrentSnapshot: true,
+            elapsedSeconds: nil,
+            distanceMeters: nil,
+            speedMetersPerSecond: nil,
+            currentHeartRateBPM: nil,
+            averageHeartRateBPM: nil,
+            activeEnergyKilocalories: nil,
+            cyclingPowerWatts: nil,
+            cyclingCadenceRPM: nil,
+            currentHeartRateZone: nil,
+            altitudeMeters: nil,
+            heartRateZoneCount: nil,
+            sourceFlags: [],
+            pauseOrigin: .unknown,
+            wallElapsedSeconds: 42,
+            sessionID: sessionID,
+            lastTransitionOrigin: .system
+        )
+        guard let originFrames = WorkoutDeviceFrameBuilder.frames(
+            for: originSample
+        ) else {
+            expect(false, "unknown/system origin frame should encode")
+            return
+        }
+        expect(
+            originFrames.origin[1] == 4 && originFrames.origin[26] == 3,
+            "wire provenance must not collapse unknown into absent or system into manual"
+        )
+
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_020)
+        let genericSpeedSnapshot = WorkoutSnapshotV1(
+            state: .running,
+            startDate: now.addingTimeInterval(-20),
+            currentSpeed: metric(6.4, .metersPerSecond, now, .healthKit),
+            availability: [.currentSpeed]
+        )
+        let genericSpeedSample = WorkoutDeviceTelemetrySampleMapperV1
+            .directWatchSample(
+                snapshot: genericSpeedSnapshot,
+                sessionToken: 9,
+                sessionID: sessionID
+            )
+        expect(
+            genericSpeedSample?.speedMetersPerSecond == 6.4
+                && genericSpeedSample?.sourceFlags
+                    .contains(.pairedSpeedSensor) == false,
+            "generic HealthKit speed stays visible without asserting paired-wheel capability"
+        )
+    }
+
+    private mutating func testWatchGPSMotionFrameUsesRawLocationIdentity() {
+        let sentAt = Date(timeIntervalSinceReferenceDate: 800_001_002.5)
+        let location = WorkoutLocationV1(
+            latitude: 31.2304,
+            longitude: 121.4737,
+            capturedAt: sentAt.addingTimeInterval(-2.5),
+            horizontalAccuracy: 7,
+            altitude: nil,
+            verticalAccuracy: nil,
+            course: nil,
+            speed: 3.5,
+            motionSampleEpoch: 9,
+            motionSampleSequence: 0x0102_0304
+        )
+        let running = WorkoutSnapshotV1(
+            state: .running,
+            currentSpeed: metric(
+                12,
+                .metersPerSecond,
+                sentAt,
+                .pairedCyclingSensor
+            ),
+            location: location,
+            availability: [.currentSpeed, .location]
+        )
+        guard let frame = WorkoutDeviceFrameBuilder.watchMotionFrame(
+            for: running,
+            sessionToken: 0x1234,
+            sentAt: sentAt
+        ) else {
+            expect(false, "raw Watch GPS motion frame must encode")
+            return
+        }
+        expect(
+            frame == Data([
+                4, 0x0F, 0x34, 0x12,
+                0x04, 0x03, 0x02, 0x01,
+                0x5E, 0x01, 0x46, 0x00,
+                0xC4, 0x09, 0x09, 0x00,
+            ]),
+            "motion frame uses raw location speed, quality, age, epoch, and sequence"
+        )
+        let paused = WorkoutSnapshotV1(
+            state: .paused,
+            location: location,
+            availability: [.location],
+            pauseOrigin: .automatic
+        )
+        expect(
+            WorkoutDeviceFrameBuilder.watchMotionFrame(
+                for: paused,
+                sessionToken: 0x1234,
+                sentAt: sentAt
+            )?[1] == 0x1F,
+            "automatic-pause provenance is explicit in Watch motion evidence"
+        )
+        let cachedUpdate = WorkoutDeviceFrameBuilder.watchMotionUpdate(
+            for: running,
+            sessionToken: 0x1234
+        )
+        expect(
+            cachedUpdate.flatMap {
+                WorkoutDeviceFrameBuilder.watchMotionFrame(
+                    for: $0,
+                    sentAt: sentAt.addingTimeInterval(70)
+                )
+            } == nil,
+            "a cached Watch sample must not regain freshness after reconnect"
+        )
+        let oldSchemaMotionEnvelope = makeEnvelope(
+            schemaVersion: .init(major: 1, minor: 5),
+            sequence: 90,
+            capturedAt: sentAt,
+            snapshot: running
+        )
+        expectThrows(
+            .invalidEnvelopePayload,
+            "Watch motion identity must require workout schema 1.6"
+        ) {
+            try WorkoutContractCodec.validate(oldSchemaMotionEnvelope)
+        }
+        let locationWithoutIdentity = WorkoutLocationV1(
+            latitude: location.latitude,
+            longitude: location.longitude,
+            capturedAt: location.capturedAt,
+            horizontalAccuracy: location.horizontalAccuracy,
+            altitude: nil,
+            verticalAccuracy: nil,
+            course: nil,
+            speed: location.speed
+        )
+        expect(
+            WorkoutDeviceFrameBuilder.watchMotionFrame(
+                for: .init(state: .running, location: locationWithoutIdentity),
+                sessionToken: 0x1234,
+                sentAt: sentAt
+            ) == nil,
+            "motion frame fails closed without producer identity"
+        )
+        let incompleteIdentityLocation = WorkoutLocationV1(
+            latitude: location.latitude,
+            longitude: location.longitude,
+            capturedAt: location.capturedAt,
+            horizontalAccuracy: location.horizontalAccuracy,
+            altitude: nil,
+            verticalAccuracy: nil,
+            course: nil,
+            speed: location.speed,
+            motionSampleEpoch: 9
+        )
+        let incompleteIdentityEnvelope = makeEnvelope(
+            sequence: 91,
+            capturedAt: sentAt,
+            snapshot: .init(
+                state: .running,
+                startDate: sentAt.addingTimeInterval(-10),
+                location: incompleteIdentityLocation,
+                availability: [.location]
+            )
+        )
+        expectThrows(
+            .invalidLocation,
+            "motion epoch and sequence must be paired in the shared contract"
+        ) {
+            try WorkoutContractCodec.validate(incompleteIdentityEnvelope)
+        }
     }
 
     private mutating func testWorkoutDeviceTerminalForwardingBoundary() {
@@ -983,6 +1307,37 @@ private struct WorkoutContractTestSuite {
         } catch {
             expect(false, "\(message): unexpected error \(error)")
         }
+    }
+
+    private mutating func testLegacyPhoneProjection() {
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+        let snapshot = WorkoutSnapshotV1(
+            state: .paused, startDate: now.addingTimeInterval(-90),
+            currentSpeed: metric(3, .metersPerSecond, now, .healthKit),
+            location: WorkoutLocationV1(latitude: 1, longitude: 2, capturedAt: now,
+                horizontalAccuracy: 5, altitude: nil, verticalAccuracy: nil,
+                course: nil, speed: 3, motionSampleEpoch: 1, motionSampleSequence: 1),
+            availability: [.currentSpeed, .location], pauseOrigin: .system)
+        let envelope = makeEnvelope(sequence: 1, capturedAt: now, snapshot: snapshot)
+        do {
+            if let directory = ProcessInfo.processInfo.environment["WORKOUT_LEGACY_FIXTURE_DIR"] {
+                try WorkoutContractCodec.encodeForPhone(envelope, peerVersion: nil)
+                    .write(to: URL(fileURLWithPath: directory).appendingPathComponent("projected.plist"))
+                try WorkoutContractCodec.encode(envelope)
+                    .write(to: URL(fileURLWithPath: directory).appendingPathComponent("current.plist"))
+            }
+            let projected = try WorkoutContractCodec.decode(
+                WorkoutContractCodec.encodeForPhone(envelope, peerVersion: nil))
+            expect(projected.schemaVersion.minor == 5, "unknown phone gets legacy schema")
+            expect(projected.snapshot?.currentSpeed == nil, "legacy phone never receives unsupported HK speed")
+            expect(projected.snapshot?.availability.contains(.currentSpeed) == false,
+                   "removed metric also removes availability")
+            expect(projected.snapshot?.pauseOrigin == .unknown, "legacy enum remains decodable")
+            expect(projected.snapshot?.location?.motionSampleEpoch == nil,
+                   "legacy phone does not receive motion identity")
+            expect(try WorkoutContractCodec.decode(WorkoutContractCodec.encodeForPhone(
+                envelope, peerVersion: .current)) == envelope, "new phone retains full envelope")
+        } catch { expect(false, "compatibility projection failed: \(error)") }
     }
 
     private mutating func testSnapshotRoundTrip() {
@@ -1308,6 +1663,52 @@ private struct WorkoutContractTestSuite {
         expectThrows(.invalidEnvelopePayload, "nonterminal outcome") {
             try WorkoutContractCodec.validate(invalidRunningOutcome)
         }
+    }
+
+    private mutating func testDiscardCompletionPacketAndAutomaticCleanupPolicy() {
+        let endedAt = Date(timeIntervalSinceReferenceDate: 800_000_090)
+        let start = endedAt.addingTimeInterval(-30)
+        let rejected = makeEnvelope(
+            sequence: 1, capturedAt: endedAt.addingTimeInterval(1),
+            snapshot: WorkoutSnapshotV1(
+                state: .ended, startDate: start,
+                elapsedTime: metric(31, .seconds, endedAt),
+                availability: [.elapsedTime], terminalOutcome: .discarded,
+                wallElapsedTime: metric(30, .seconds, endedAt)
+            )
+        )
+        expectThrows(.invalidMetric, "discard with stale end-time metrics") {
+            try WorkoutContractCodec.validate(rejected)
+        }
+        let terminal = WorkoutDiscardCompletionPolicy.terminalSnapshot(
+            startDate: start, errorCode: .anotherWorkoutActive
+        )
+        let completed = makeEnvelope(sequence: 2, capturedAt: endedAt, snapshot: terminal)
+        do {
+            let decoded = try roundTripWorkoutEnvelope(completed)
+            expect(decoded.snapshot == terminal, "minimal discard must round trip")
+            expect(terminal.state == .ended && terminal.terminalOutcome == .discarded,
+                   "discard completion must retain its explicit terminal result")
+            expect(terminal.availability.isEmpty && terminal.elapsedTime == nil
+                && terminal.wallElapsedTime == nil && terminal.location == nil,
+                   "discard must not require discarded builder statistics")
+            expect(terminal.errorCode == .anotherWorkoutActive,
+                   "discard must preserve a durable terminal cause")
+        } catch { expect(false, "minimal discard rejected: \(error)") }
+        for attempt in 0...50 {
+            let delay = WorkoutTerminalCleanupRetryPolicy.delay(
+                disposition: .discard, completedAttempts: attempt,
+                baseDelay: 1, saveAttemptLimit: 3
+            )
+            expect(delay != nil && delay! > 0 && delay! <= 30,
+                   "discard retries must remain automatic, rate-limited and finite")
+        }
+        expect(WorkoutTerminalCleanupRetryPolicy.delay(
+            disposition: .save, completedAttempts: 3, baseDelay: 1, saveAttemptLimit: 3
+        ) == nil, "save retains bounded recovery")
+        expect(WorkoutTerminalCleanupRetryPolicy.delay(
+            disposition: .discard, completedAttempts: 0, baseDelay: .nan, saveAttemptLimit: 3
+        ) == 1, "invalid retry delay must not spin or overflow")
     }
 
     private mutating func testAllMessageKindsRoundTrip() {
@@ -1649,7 +2050,8 @@ private struct WorkoutContractTestSuite {
         }
 
         for source in [
-            WorkoutMetricSourceV1.pairedCyclingSensor,
+            WorkoutMetricSourceV1.healthKit,
+            .pairedCyclingSensor,
             .watchLocation,
             .iPhoneLocation,
         ] {
@@ -1671,8 +2073,7 @@ private struct WorkoutContractTestSuite {
         }
 
         for source in [
-            WorkoutMetricSourceV1.healthKit,
-            .watchRoute,
+            WorkoutMetricSourceV1.watchRoute,
             .iPhoneNavigation,
             .unknown,
         ] {
@@ -1716,7 +2117,7 @@ private struct WorkoutContractTestSuite {
             snapshot: WorkoutSnapshotV1(
                 state: .running,
                 startDate: now.addingTimeInterval(-30),
-                currentSpeed: metric(8.2, .metersPerSecond, now, .healthKit),
+                currentSpeed: metric(8.2, .metersPerSecond, now, .watchRoute),
                 availability: [.currentSpeed]
             )
         )
@@ -3916,12 +4317,25 @@ private struct WorkoutContractTestSuite {
             capturedAt: now,
             source: .watchLocation
         )
+        let healthKitSpeed = WorkoutMetricCandidate(
+            value: 8.1,
+            capturedAt: now,
+            source: .healthKit
+        )
         expect(
             WorkoutMetricPrecedence.currentSpeed(
                 pairedSensor: sensorSpeed,
                 watchLocation: locationSpeed
             ) == sensorSpeed,
             "paired cycling sensor should win over Watch location"
+        )
+        expect(
+            WorkoutMetricPrecedence.currentSpeed(
+                pairedSensor: nil,
+                healthKit: healthKitSpeed,
+                watchLocation: locationSpeed
+            ) == healthKitSpeed,
+            "generic HealthKit speed should remain usable without claiming a paired sensor"
         )
         expect(
             WorkoutMetricPrecedence.currentSpeed(
@@ -3936,10 +4350,11 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             WorkoutMetricPrecedence.currentSpeed(
-                pairedSensor: WorkoutMetricCandidate(
+                pairedSensor: nil,
+                healthKit: WorkoutMetricCandidate(
                     value: 9,
                     capturedAt: now,
-                    source: .healthKit
+                    source: .watchRoute
                 ),
                 watchLocation: nil
             ) == nil,
@@ -4111,25 +4526,80 @@ private struct WorkoutContractTestSuite {
         )
     }
 
-    private mutating func testRouteTimestampGateRejectsDelayedPausedBatches() {
+    private mutating func testRouteTimestampGateRejectsPreWorkoutBatches() {
         let start = Date(timeIntervalSinceReferenceDate: 800_035_000)
-        var gate = WorkoutRouteTimestampGate(workoutStart: start)
+        let gate = WorkoutRouteTimestampGate(workoutStart: start)
         expect(gate.accepts(start), "route timestamp gate should include workout start")
+        expect(
+            !gate.accepts(start.addingTimeInterval(-0.001)),
+            "a pre-workout point must remain rejected"
+        )
+        expect(
+            gate.accepts(start.addingTimeInterval(30)),
+            "timer pauses must not create route timestamp discontinuities"
+        )
+    }
 
-        let resumeDate = start.addingTimeInterval(30)
-        gate.resume(at: resumeDate)
+    private mutating func testPausedRouteMovementFilterPreservesCoastingAndRejectsDrift() {
         expect(
-            !gate.accepts(resumeDate.addingTimeInterval(-0.001)),
-            "a paused point delivered after resume must still be rejected by capture time"
+            WorkoutPausedRoutePointFilter.accepts(
+                reportedSpeedMetersPerSecond: 6.5,
+                horizontalAccuracyMeters: 5,
+                previousHorizontalAccuracyMeters: 5,
+                segmentDistanceMeters: 6.5,
+                interval: 1
+            ),
+            "a quality moving point must preserve coasting distance during a timer pause"
         )
         expect(
-            gate.accepts(resumeDate),
-            "a point captured at the resume boundary should be accepted"
+            !WorkoutPausedRoutePointFilter.accepts(
+                reportedSpeedMetersPerSecond: 0.1,
+                horizontalAccuracyMeters: 8,
+                previousHorizontalAccuracyMeters: 8,
+                segmentDistanceMeters: 5,
+                interval: 1
+            ),
+            "stationary displacement inside the combined accuracy bound is drift"
         )
-        gate.resume(at: start.addingTimeInterval(10))
         expect(
-            gate.minimumAcceptedAt == resumeDate,
-            "an out-of-order resume callback must not move the gate backward"
+            WorkoutPausedRoutePointFilter.accepts(
+                reportedSpeedMetersPerSecond: 0.1,
+                horizontalAccuracyMeters: 4,
+                previousHorizontalAccuracyMeters: 4,
+                segmentDistanceMeters: 12,
+                interval: 2
+            ),
+            "quality displacement beyond uncertainty may prove movement when speed lags"
+        )
+        expect(
+            !WorkoutPausedRoutePointFilter.accepts(
+                reportedSpeedMetersPerSecond: 7,
+                horizontalAccuracyMeters: 26,
+                previousHorizontalAccuracyMeters: nil,
+                segmentDistanceMeters: nil,
+                interval: nil
+            ),
+            "poor-quality paused locations must not create route distance"
+        )
+    }
+
+    private mutating func testPausedRouteContinuityBreaksOnlyStationaryPauses() {
+        var stationaryPause = WorkoutPausedRouteContinuity()
+        expect(
+            !stationaryPause.setPaused(true),
+            "entering a pause should retain the current route anchor"
+        )
+        expect(
+            stationaryPause.setPaused(false),
+            "a pause with no accepted movement must break the distance segment"
+        )
+
+        var falsePauseMovement = WorkoutPausedRouteContinuity()
+        _ = falsePauseMovement.setPaused(true)
+        falsePauseMovement.noteAcceptedPoint()
+        expect(
+            !falsePauseMovement.setPaused(false),
+            "accepted paused movement must preserve route continuity"
         )
     }
 
@@ -4289,16 +4759,16 @@ private struct WorkoutContractTestSuite {
             distance.totalMeters == 150,
             "two internal segments in the first delivered batch must both count"
         )
-        distance.breakSegment()
-        distance.appendPoint(segmentDistanceFromPrevious: nil)
-        expect(
-            distance.totalMeters == 150,
-            "first point after pause must not bridge distance across the pause"
-        )
         distance.appendPoint(segmentDistanceFromPrevious: 25)
         expect(
             distance.totalMeters == 175,
-            "post-resume segments should continue the cumulative total"
+            "movement captured while paused must remain in the continuous cumulative total"
+        )
+        distance.breakSegment()
+        distance.appendPoint(segmentDistanceFromPrevious: nil)
+        expect(
+            distance.totalMeters == 175,
+            "an explicit recorder stop or recovery boundary must not invent a bridge"
         )
 
         var recoveredDistance = WorkoutRouteDistanceAccumulator(
@@ -4362,6 +4832,8 @@ private struct WorkoutContractTestSuite {
             let firstStore = WatchWorkoutRecoveryStore(persistence: persistence)
             let identity = try firstStore.begin(startDate: start)
             expect(identity.sessionToken != 0, "persisted workout token must be nonzero")
+            let firstMotionEpoch = try firstStore.beginMotionSampleProducer()
+            expect(firstMotionEpoch != 0, "Watch motion epoch must be nonzero")
             expect(firstStore.nextSequence() == 1, "first transport sequence should be one")
             var zoneAccumulator = WorkoutHeartRateZoneDurationAccumulator()
             _ = zoneAccumulator.update(
@@ -4381,6 +4853,17 @@ private struct WorkoutContractTestSuite {
             expect(
                 recoveredStore.recoveredIdentity?.sessionID == identity.sessionID,
                 "relaunch should recover the same workout identity"
+            )
+            expect(
+                recoveredStore.recoveredIdentity?.motionSampleEpoch
+                    == firstMotionEpoch,
+                "Watch motion epoch must survive relaunch"
+            )
+            let recoveredMotionEpoch = try recoveredStore
+                .beginMotionSampleProducer()
+            expect(
+                recoveredMotionEpoch != firstMotionEpoch,
+                "a recovered producer must begin a new Watch motion epoch"
             )
             expect(
                 recoveredStore.nextSequence() == WorkoutSequenceLease.defaultSize + 1,
@@ -4590,6 +5073,27 @@ private struct WorkoutContractTestSuite {
             )
         } catch {
             expect(false, "legacy recovery migration fixture threw \(error)")
+        }
+
+        let zeroMotionEpochPersistence = ControllableRecoveryPersistence()
+        do {
+            var invalidIdentity = try WatchWorkoutRecoveryStore(
+                persistence: zeroMotionEpochPersistence
+            ).begin(startDate: start)
+            invalidIdentity.motionSampleEpoch = 0
+            zeroMotionEpochPersistence.data = try PropertyListEncoder().encode(
+                invalidIdentity
+            )
+            let invalidStore = WatchWorkoutRecoveryStore(
+                persistence: zeroMotionEpochPersistence
+            )
+            expect(
+                invalidStore.loadState == .corrupt &&
+                    invalidStore.recoveredIdentity == nil,
+                "a persisted zero Watch motion epoch must fail recovery closed"
+            )
+        } catch {
+            expect(false, "invalid Watch motion epoch fixture threw \(error)")
         }
 
         let controlled = ControllableRecoveryPersistence()
@@ -4887,6 +5391,11 @@ private struct WorkoutContractTestSuite {
         }
 
         do {
+            let journalWrite = try runChild(mode: "decision-write-and-crash")
+            expect(journalWrite.0 == 0, "decision journal writer must commit before abrupt exit")
+            let journalRead = try runChild(mode: "decision-read-after-crash")
+            expect(journalRead.0 == 0 && journalRead.1 == "11|11",
+                "a separate process must recover watermark and pending operation together")
             let writeResult = try runChild(mode: "write-and-crash")
             expect(
                 writeResult.0 == 0,
@@ -7102,6 +7611,52 @@ private struct WorkoutContractTestSuite {
         )
     }
 
+    private mutating func testWatchConnectivityBackgroundDeliveryLifecycle() {
+        let watchDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputerWatch")
+        let delegateURL = watchDirectory.appendingPathComponent(
+            "WatchAppDelegate.swift"
+        )
+        let coordinatorURL = watchDirectory.appendingPathComponent(
+            "Managers/WatchConnectivityCoordinator.swift"
+        )
+        guard let delegateSource = try? String(
+            contentsOf: delegateURL,
+            encoding: .utf8
+        ), let coordinatorSource = try? String(
+            contentsOf: coordinatorURL,
+            encoding: .utf8
+        ) else {
+            expect(false, "WatchConnectivity background sources must exist")
+            return
+        }
+        expect(
+            delegateSource.contains(
+                "func handle(_ backgroundTasks: Set<WKRefreshBackgroundTask>)"
+            )
+                && delegateSource.contains(
+                    "WKWatchConnectivityRefreshBackgroundTask"
+                )
+                && delegateSource.contains(
+                    "completeWatchConnectivityBackgroundTasksIfPossible()"
+                )
+                && delegateSource.contains(
+                    "task.setTaskCompletedWithSnapshot(false)"
+                ),
+            "WatchConnectivity wakes must retain and complete their WatchKit background tasks"
+        )
+        expect(
+            coordinatorSource.contains("session.hasContentPending")
+                && coordinatorSource.contains("backgroundWorkTracker.hasWork")
+                && coordinatorSource.contains(
+                    "onBackgroundContentStateChanged?()"
+                ),
+            "Watch background completion must wait until WCSession drains its pending content"
+        )
+    }
+
     private mutating func testHeartRateZoneConfigurationLivesInIPhoneDeveloperSettings() {
         let iosAppDirectory = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -7177,23 +7732,10 @@ private struct WorkoutContractTestSuite {
             ("iPhone", iPhoneSource, "store.presentation.sessionID"),
             ("Watch", watchSource, "manager.activeSessionID"),
         ] {
-            let compactSource = source.filter { !$0.isWhitespace }
-            expect(
-                compactSource.contains(
-                    "Button(\"DiscardWorkout\",role:.destructive){requestDiscardConfirmation(for:sessionID)}"
-                ),
-                "\(surface) finish options must request, not execute, discard"
-            )
-            expect(
-                compactSource.contains(
-                    "caseoptions(sessionID:UUID)"
-                )
-                    && compactSource.contains(
-                        "casediscardConfirmation(sessionID:UUID)"
-                    )
-                    && compactSource.contains(".onChange(of:\(sessionSource))"),
-                "\(surface) finish prompts must be scoped to and invalidated with their session"
-            )
+            let compact = source.filter { !$0.isWhitespace }
+            expect(compact.contains("casediscardConfirmation(sessionID:UUID)")
+                && compact.contains(".onChange(of:\(sessionSource))"),
+                   "\(surface) discard confirmation must remain session-scoped")
         }
 
         let compactIPhoneSource = iPhoneSource.filter { !$0.isWhitespace }
@@ -7224,12 +7766,36 @@ private struct WorkoutContractTestSuite {
             "Watch dedicated discard screen must preserve disclosure choices and capture its session before dismissal"
         )
         expect(
-            watchSource.contains("\"Finish Ride?\"")
-                && watchSource.contains(
-                    "\"Saving creates a workout in your Fitness app.\""
-                ),
-            "Watch finish confirmation must use the concise rider-facing copy"
+            compactWatchSource.contains("Button(role:.destructive){manager.endAndSave()}label:")
+                && !watchSource.contains("\"Finish Ride?\"")
+                && !watchSource.contains("case options("),
+            "Watch STOP must directly end and save, without a finish-options menu"
         )
+        let settingsPosition = watchSource.range(of: "WatchSettingsView(")?.lowerBound
+        let discardPosition = watchSource.range(of: "Button(\"Discard Workout\")")?.lowerBound
+        let discardIsBelowSettings = settingsPosition.flatMap { settings in
+            discardPosition.map { settings < $0 }
+        } ?? false
+        expect(
+            compactWatchSource.contains(
+                "Button(\"DiscardWorkout\"){guardletsessionID=manager.activeSessionIDelse{return}requestDiscardConfirmation(for:sessionID)}.buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)"
+            ) && discardIsBelowSettings,
+            "Watch discard must be a gray text action below Settings"
+        )
+        let rootSource = (try? String(
+            contentsOf: iosAppDirectory.appendingPathComponent(
+                "BikeComputerWatch/Views/WatchWorkoutRootView.swift"), encoding: .utf8
+        )) ?? ""
+        let summarySource = (try? String(
+            contentsOf: iosAppDirectory.appendingPathComponent(
+                "BikeComputerWatch/Views/WorkoutSummaryView.swift"), encoding: .utf8
+        )) ?? ""
+        expect(rootSource.contains(".task(id: manager.canDismissDiscardedSummary)")
+            && rootSource.contains("manager.dismissSummary()")
+            && summarySource.contains("if summary.outcome == .discarded {")
+            && summarySource.contains("ProgressView(\"Discarding…\")")
+            && !summarySource.contains("Ride Discarded"),
+               "Watch discard must automatically dismiss after safe cleanup, not request recovery")
     }
 
     private mutating func testWorkoutUICompositionRetainsPhaseThreeExitCriteria() {
@@ -7353,10 +7919,10 @@ private struct WorkoutContractTestSuite {
                 && source.contains("connectionState == .disconnected")
                 && source.contains("connectionState == .ended")
                 && source.contains("Waiting for the final saved or discarded result")
-                && source.contains("Saved by Apple Watch")
+                && source.contains("Saved by \\(store.recordingOwner.displayName)")
                 && source.contains("Not saved to Health")
-                && source.contains("Finished on Apple Watch"),
-            "dashboard must retain unsupported, disconnected, final-wait, and terminal summary states"
+                && source.contains("Finished on \\(store.recordingOwner.displayName)"),
+            "dashboard must retain unsupported, disconnected, final-wait, and recorder-labelled terminal summary states"
         )
 
         let compactSource = source.filter { !$0.isWhitespace }
@@ -7439,9 +8005,25 @@ private struct WorkoutContractTestSuite {
                     "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
                 )
                 && compactSource.contains(
-                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard){Label(\"End\""
+                    "Button(action:onEndAndSave){Label(\"End\",systemImage:\"stop.fill\")}"
+                )
+                && !compactSource.contains(
+                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard)"
+                )
+                && compactNavigationDetailsViewSource.contains(
+                    "Button(action:onEndAndSaveWorkout){RideControlLabel(\"Endworkout\",systemImage:\"stop.fill\")}"
+                )
+                && !compactNavigationDetailsViewSource.contains(
+                    "WorkoutFinishButton(store:workoutStore,onEndAndSave:onEndAndSaveWorkout,onDiscard:onDiscardWorkout)"
                 ),
-            "dashboard labels must remain bound to the matching control closures"
+            "live workout end controls must save immediately while recovery retains explicit discard handling"
+        )
+        expect(
+            !source.contains("Bicino zones · configured maximum heart rate")
+                && !navigationDetailsViewSource.contains(
+                    "Bicino zones · configured maximum heart rate"
+                ),
+            "live workout zone strips must not show the maximum-heart-rate configuration caption"
         )
         expect(
             compactSource.contains(
@@ -7485,6 +8067,15 @@ private struct WorkoutContractTestSuite {
             ),
             "capture age must remain bound to the TimelineView's current date"
         )
+        expect(
+            compactSource.contains(
+                "ifletrecordingCoordinator,recordingCoordinator.record?.phase!=.finished{WorkoutRecordingStatusView"
+            )
+                && compactSource.contains(
+                    "ifstore.presentation.connectionState==.ended{Image(systemName:store.recordingOwner==.watch?\"applewatch\":\"iphone\")"
+                ),
+            "finished summaries must fold recorder identity into the saved banner without a duplicate ownership card"
+        )
 
         let compactContentView = contentViewSource.filter { !$0.isWhitespace }
         let compactAppSource = appSource.filter { !$0.isWhitespace }
@@ -7508,12 +8099,12 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactContentView.contains(
-                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()},onOpen:{presentedSheet=.workoutDashboard})"
+                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onOpen:{presentedSheet=.workoutDashboard})"
             )
                 && compactContentView.contains(
-                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()},onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)"
+                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onPause:workoutSessionCoordinator.pause,onResume:workoutSessionCoordinator.resume,onMarkSegment:workoutSessionCoordinator.markSegment,onEndAndSave:workoutSessionCoordinator.endAndSave,onDone:workoutSessionCoordinator.resetTerminalPresentation)"
                 ),
-            "ContentView must present the dashboard from its exact state and inject each production manager action"
+            "ContentView must present the dashboard from its exact state and route every production action through the selected recording owner"
         )
 
         let compactLiveWatchView = liveWatchViewSource.filter {
@@ -7632,11 +8223,25 @@ private struct WorkoutContractTestSuite {
         expect(
             compactLiveWatchView.contains(
                 "WorkoutCrossAppTakeoverCopyV1.live(disposition:manager.isDiscarding?.discard:.save)"
-            )
+            ),
+            "Watch live takeover copy must follow the active Save/Discard disposition"
+        )
+        // Discard is now a progress-only branch which the root dismisses after
+        // safe cleanup. Only saved rides enter the interactive summary below.
+        // Keep the branch check separate so a save-only copy assertion cannot
+        // accidentally permit the old post-discard recovery screen to return.
+        expect(
+            compactSummaryWatchView.contains(
+                "ifsummary.outcome==.discarded{ProgressView(\"Discarding…\").font(.caption).accessibilityIdentifier(\"workout-discard-progress\")}else{savedSummary}"
+            ),
+            "Watch discarded summary must show only automatic progress, without recovery actions"
+        )
+        expect(
+            compactSummaryWatchView.contains("privatevarsavedSummary:someView{")
                 && compactSummaryWatchView.contains(
-                    "WorkoutCrossAppTakeoverCopyV1.summary(disposition:summary.outcome==.saved?.save:.discard)"
+                    "ifsummary.terminalErrorCode==.anotherWorkoutActive{Label(WorkoutCrossAppTakeoverCopyV1.summary(disposition:.save),"
                 ),
-            "Watch takeover copy must remain bound to the live and terminal Save/Discard dispositions"
+            "Watch saved summary must retain the save-specific cross-app takeover warning"
         )
     }
 
@@ -7696,6 +8301,31 @@ private struct WorkoutContractTestSuite {
                 && !route.contains("Search for a destination"),
             "all destination search surfaces must use the concise label"
         )
+        let compactRoute = route.filter { !$0.isWhitespace }
+        expect(
+            compactRoute.contains(
+                "}elseif!hasSelectedDestination{Spacer(minLength:0)}"
+            ),
+            "a selected destination must not stretch the route panel with an empty spacer"
+        )
+        expect(
+            compactContent.contains(
+                "ifshowsSupplementaryMapChrome{HStack{Spacer()mapControlCluster}"
+            )
+                && compactContent.contains(
+                    "ifshouldShowOfflineMapStatusChip,showsSupplementaryMapChrome{offlineMapStatusChip"
+                )
+                && compactContent.contains(
+                    "ifshowsSupplementaryMapChrome&&coordinator.bleManager.deviceSoundsEnabled&&"
+                )
+                && compactContent.contains(
+                    ".layoutPriority(isSearchPanelExpanded?1:0)"
+                )
+                && compactContent.contains(
+                    "MainMapSearchLayoutPolicy.showsSupplementaryMapChrome(isSearchPanelExpanded:isSearchPanelExpanded)"
+                ),
+            "expanded destination search must own the keyboard-safe layout ahead of supporting map chrome"
+        )
         expect(
             compactContent.contains(
                 "HStack(alignment:.bottom,spacing:8){RouteSearchPanel("
@@ -7704,15 +8334,15 @@ private struct WorkoutContractTestSuite {
                     "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\")"
                 )
                 && compactContent.contains(
-                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()})"
+                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutSessionCoordinator.requestStart()})"
                 )
                 && compactContent.contains(
                     "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)"
                 )
                 && compactContent.contains(
-                    ".buttonStyle(.plain).fixedSize(horizontal:true,vertical:false).layoutPriority(1).accessibilityLabel(\"StartworkoutonAppleWatch\")"
+                    ".buttonStyle(.plain).fixedSize(horizontal:true,vertical:false).layoutPriority(1).accessibilityLabel(\"Startworkoutwiththeselectedrecorder\")"
                 ),
-            "the collapsed destination row must keep the full blue Watch-gated Start Workout label visible"
+            "the collapsed destination row must keep the full blue Start Workout label visible and honor recording ownership"
         )
         expect(
             compactContent.contains(
@@ -7725,10 +8355,13 @@ private struct WorkoutContractTestSuite {
                     ".onChange(of:workoutStore.presentation.isWorkoutActive){_insynchronizeRideMetricsSheet()}"
                 )
                 && compactContent.contains(
-                    "ifworkoutStore.presentation.isWorkoutActive{guardpresentedSheet==nilelse{return}rideMetricsDetent=.rideMetricsCompactpresentedSheet=.rideMetrics}"
+                "ifworkoutStore.presentation.isWorkoutActive{guardpresentedSheet==nil,savedRouteMapPreview==nilelse{return}rideMetricsDetent=.rideMetricsCompactpresentedSheet=.rideMetrics}"
                 )
                 && compactContent.contains(
                     ".sheet(item:$presentedSheet,onDismiss:handleSheetDismissal){destinationinpresentedSheetContent(for:destination)}"
+                )
+                && compactContent.contains(
+                    "ifdismissedDestination==.workoutDashboard{workoutSessionCoordinator.dismissNotice()}"
                 )
                 && compactContent.contains(
                     "SensorSettingsRoutingPolicy.openDecision("
@@ -7746,7 +8379,7 @@ private struct WorkoutContractTestSuite {
                     ".presentationDetents([.rideMetricsCompact,.large],selection:$rideMetricsDetent)"
                 )
                 && compactContent.contains(
-                    "context.dynamicTypeSize.isAccessibilitySize?360:280"
+                    "RideSheetLayoutPolicy.compactHeight(isAccessibilitySize:context.dynamicTypeSize.isAccessibilitySize,maximumHeight:context.maxDetentValue)"
                 )
                 && compactContent.contains(
                     ".presentationDragIndicator(.visible)"
@@ -7765,6 +8398,61 @@ private struct WorkoutContractTestSuite {
                 && !compactNavigation.contains("chevron.down")
                 && !compactNavigation.contains("onToggleExpansion"),
             "active workouts must own the expandable native stats sheet while navigation-only keeps the compact overlay"
+        )
+        expect(
+            compactContent.contains(
+                "ifcoordinator.routeAlternatives.isEmpty||coordinator.isNavigating{rideMetricsPanel("
+            )
+                && compactContent.contains("else{rideRoutePlanSheet}")
+                && compactContent.contains(
+                    "Label(\"Startnavigation\",systemImage:\"location.fill\")"
+                )
+                && compactContent.contains("coordinator.startSelectedRoute()")
+                && compactContent.contains(
+                    ".accessibilityIdentifier(\"rideRoutePlanSheet\")"
+                ),
+            "a pending workout route must replace covered metrics with an explicit route-selection and start surface"
+        )
+        expect(
+            compactContent.contains("route:coordinator.currentRoute")
+                && compactContent.contains(
+                    "routeAlternatives:coordinator.routeAlternatives.map{MapRouteAlternative(id:$0.id,route:$0.route)}"
+                )
+                && compactContent.contains(
+                    "selectedRouteAlternativeID:coordinator.selectedRouteAlternativeID"
+                )
+                && compactContent.contains(
+                    "onRouteAlternativeSelected:{coordinator.selectRouteAlternative($0)}"
+                )
+                && !compactContent.contains(
+                    "Taparouteonthemap,orchoosebelow.Yourworkoutkeepsrunning."
+                ),
+            "route alternatives must render and remain selectable on the map while the buttons stay available without redundant helper copy"
+        )
+        expect(
+            compactContent.contains("mapControlsBottomPadding(in:proxy)")
+                && compactContent.contains(
+                    "RideSheetLayoutPolicy.mapControlsBottomPadding("
+                )
+                && compactContent.contains(
+                    "isRideSheetPresented:presentedSheet==.rideMetrics"
+                )
+                && compactContent.contains(
+                    "isCompactDetent:rideMetricsDetent==.rideMetricsCompact"
+                ),
+            "the right-side map control cluster must clear the half-open ride sheet"
+        )
+        expect(
+            compactNavigation.contains(
+                "@ObservedObjectvarcoordinator:BikeComputerCoordinator"
+            )
+                && compactNavigation.contains(
+                    "privatevarisNavigating:Bool{coordinator.isNavigating}"
+                )
+                && compactNavigation.contains(
+                    "privatevarnavigationControl:someView{ifisNavigating{Button(action:onStopNavigation)"
+                ),
+            "the ride sheet must observe live navigation state and place End navigation before workout controls"
         )
         expect(
             compactNavigation.contains(
@@ -7987,7 +8675,6 @@ private struct WorkoutContractTestSuite {
             "onPauseWorkout",
             "onResumeWorkout",
             "onEndAndSaveWorkout",
-            "onDiscardWorkout",
         ] {
             expect(
                 compactNavigation.contains(control),
@@ -8002,7 +8689,7 @@ private struct WorkoutContractTestSuite {
                     "presentation.pendingControl==nil"
                 )
                 && compactContent.contains(
-                    "onMarkSegment:workoutMirrorManager.markSegment"
+                    "onMarkSegment:workoutSessionCoordinator.markSegment"
                 ),
             "the ride sheet must expose the numbered segment action with safe production wiring"
         )
@@ -8187,6 +8874,35 @@ private enum WorkoutContractTestRunner {
                 fileURL: URL(fileURLWithPath: path)
             )
             switch mode {
+            case "decision-write-and-crash", "decision-read-after-crash":
+                let name = "DecisionJournalChild.\(UUID().uuidString)"
+                let defaults = UserDefaults(suiteName: name)!
+                let store = RideDetectionSettingsStore(
+                    defaults: defaults,
+                    decisionPersistence: RideDecisionFilePersistence(
+                        url: URL(fileURLWithPath: path).appendingPathExtension("decisions")
+                    )
+                )
+                if mode == "decision-write-and-crash" {
+                    let frame = RideAutomationFrame(
+                        kind: .decision, transition: .start, origin: .automatic,
+                        rideGeneration: 7, decisionSequence: 11, startMode: .ask
+                    )
+                    let pending = RideAutomationPendingDecision(
+                        identity: RideAutomationDecisionIdentity(
+                            deviceID: "bike-a", rideGeneration: 7, decisionSequence: 11
+                        ),
+                        frame: frame, expectedState: nil
+                    )
+                    do {
+                        try store.saveDecisionState(watermarks: ["bike-a:7": 11], pending: pending)
+                        defaults.removePersistentDomain(forName: name)
+                        Darwin._exit(0)
+                    } catch { Darwin._exit(5) }
+                }
+                print("\(store.loadDecisionWatermarks()["bike-a:7"] ?? 0)|\(store.loadPendingDecision()?.identity.decisionSequence ?? 0)")
+                defaults.removePersistentDomain(forName: name)
+                return
             case "write-and-crash":
                 let store = WatchWorkoutRecoveryStore(persistence: persistence)
                 guard (try? store.begin(

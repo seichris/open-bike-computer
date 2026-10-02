@@ -45,6 +45,7 @@ tools/OSM_Extract/__pycache__
 tools/OSM_Extract/conf/test*
 
 map-platform/backend/.venv/
+.venv-topography/
 *.egg-info/
 map-platform/backend/data/*
 !map-platform/backend/data/.gitkeep

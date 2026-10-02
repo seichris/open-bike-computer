@@ -194,6 +194,21 @@ public:
   int openWrite(const std::string &path) override {
     return ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   }
+  int openRead(const std::string &path) override {
+    return ::open(path.c_str(), O_RDONLY);
+  }
+  bool read(int descriptor, uint8_t *data, size_t size) override {
+    while (size) {
+      const auto received = ::read(descriptor, data, size);
+      if (received < 0 && errno == EINTR)
+        continue;
+      if (received <= 0)
+        return false;
+      data += received;
+      size -= static_cast<size_t>(received);
+    }
+    return true;
+  }
   bool write(int descriptor, const uint8_t *data, size_t size) override {
     return writeAll(descriptor, data, size);
   }
@@ -657,8 +672,17 @@ MapStreamInstallSession::onFileBegin(const MapStreamFileView &file,
   }
   currentFile_ = static_cast<int>(index);
   currentSkipped_ = index < status_.durableFilePrefix;
-  if (currentSkipped_)
-    return MapStreamFileAction::ConsumeCheckpointed;
+  if (currentSkipped_) {
+    currentFd_ = storage_->openRead(filePath(inactiveRoot(), file));
+    if (currentFd_ < 0) {
+      fail("stream_checkpoint_read", "could not read checkpointed map file");
+      return MapStreamFileAction::Reject;
+    }
+    // Checkpoint durability is not proof of present SD integrity. Compare the
+    // stored bytes to the retransmission, whose SHA is verified by the parser.
+    // This stays paced by incoming chunks; there is no blocking whole-map scan.
+    return MapStreamFileAction::VerifyAndConsume;
+  }
   currentMapValidator_.reset(
       new (std::nothrow) map_renderer_format::StreamValidator(
           std::string(file.path)));
@@ -686,6 +710,15 @@ bool MapStreamInstallSession::onFileData(const MapStreamFileView &,
                                          const uint8_t *data, size_t size) {
   status_.receivedPayloadBytes += size;
   if (currentSkipped_) {
+    uint8_t stored[1024];
+    for (size_t offset = 0; offset < size;) {
+      const size_t count = std::min(size - offset, sizeof(stored));
+      if (!storage_->read(currentFd_, stored, count) ||
+          std::memcmp(stored, data + offset, count) != 0)
+        return fail("stream_checkpoint_corrupt",
+                    "checkpointed map changed; discard the transfer and retry");
+      offset += count;
+    }
     status_.bytesSkipped += size;
     return true;
   }
@@ -708,6 +741,10 @@ bool MapStreamInstallSession::onFileEnd(const MapStreamFileView &file,
     return fail("stream_file_order",
                 "map stream file completion is out of order");
   if (currentSkipped_) {
+    const bool closed = storage_->closeFile(currentFd_);
+    currentFd_ = -1;
+    if (!closed)
+      return fail("stream_checkpoint_read", "could not close checkpointed map file");
     currentFile_ = -1;
     currentSkipped_ = false;
     currentMapValidator_.reset();

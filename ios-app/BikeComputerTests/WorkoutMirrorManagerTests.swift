@@ -3,6 +3,17 @@ import HealthKit
 import WatchConnectivity
 import XCTest
 
+private nonisolated final class FakeRideDecisionPersistence: RideDecisionPersistence {
+    enum Failure: Error { case write }
+    var data: Data?
+    var failsSave = false
+    func load() throws -> Data? { data }
+    func save(_ data: Data) throws {
+        if failsSave { throw Failure.write }
+        self.data = data
+    }
+}
+
 private final class FakeWorkoutWatchConnectivitySession:
     WorkoutWatchConnectivitySession
 {
@@ -316,10 +327,12 @@ private final class FakeRideAutomationWorkoutController:
 
     func startOutdoorCyclingOnWatch() -> Bool { false }
 
+    var onAutomaticTransition: (() -> Bool)?
+
     func requestAutomaticTransition(
         _ transition: RideAutomationTransition,
         context: WorkoutControlContextV1
-    ) -> Bool { false }
+    ) -> Bool { onAutomaticTransition?() ?? false }
 
     func requestAutomaticTransitionConfirmation(
         _ transition: RideAutomationTransition,
@@ -337,7 +350,8 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
     func testPromptOutboxIsDurableBeforePublicationAndCancellationClearsIt()
         async throws
     {
-        let (defaults, settingsStore) = try makeSettingsStore()
+        let persistence = FakeRideDecisionPersistence()
+        let (defaults, settingsStore) = try makeSettingsStore(persistence: persistence)
         defer {
             defaults.removePersistentDomain(forName: defaultsSuiteName(defaults))
         }
@@ -386,6 +400,20 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
             sequence: 11,
             monotonicSeconds: 100
         )
+        persistence.failsSave = true
+        bleManager.receive(decision)
+        try await waitUntil("failed journal admission") {
+            coordinator.lastError == .watchUnavailable
+        }
+        XCTAssertNil(coordinator.startPrompt)
+        XCTAssertFalse(pendingWasDurableAtAcknowledgement)
+        XCTAssertFalse(sentFrames.contains {
+            $0.kind == .acknowledgement && $0.acknowledgedKind == .decision
+                && $0.decisionSequence == decision.decisionSequence
+        })
+        XCTAssertNil(settingsStore.loadDecisionWatermarks()["bicino-175:7"])
+        XCTAssertNil(settingsStore.loadPendingDecision())
+        persistence.failsSave = false
         bleManager.receive(decision)
         try await waitUntil("first start prompt") {
             coordinator.startPrompt?.frame == decision
@@ -447,6 +475,44 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
             coordinator.startPrompt == nil
                 && settingsStore.loadPendingDecision() == nil
         }
+    }
+
+    func testRejectedControlDoesNotAcknowledgeWhenJournalRetirementFails() async throws {
+        let persistence = FakeRideDecisionPersistence()
+        let (defaults, settingsStore) = try makeSettingsStore(persistence: persistence)
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName(defaults)) }
+        settingsStore.setAutoPauseEnabled(true)
+        let ble = FakeRideAutomationBLETransport()
+        let workout = FakeRideAutomationWorkoutController()
+        let sessionID = UUID()
+        workout.rideAutomationPresentation = WorkoutMirrorPresentationV1(
+            connectionState: .connected, snapshot: WorkoutSnapshotV1(state: .running),
+            sessionID: sessionID, capturedAt: nil, receivedAt: nil,
+            confirmedSessionState: .running, errorCode: nil, pendingControl: nil,
+            finalSnapshot: nil, navigation: .empty)
+        var sent: [RideAutomationFrame] = []
+        let coordinator = RideAutomationCoordinator(bleManager: ble,
+            workoutManager: workout, settingsStore: settingsStore)
+        ble.connect(deviceID: "bicino-175") { sent.append($0); return true }
+        try await waitUntil { sent.contains { $0.kind == .resynchronize } }
+        acknowledgeConfiguration(on: ble, settingsStore: settingsStore,
+            rideGeneration: 7, monotonicSeconds: 100)
+        try await waitUntil { coordinator.confirmedDeviceSettings == settingsStore.settings }
+        workout.onAutomaticTransition = {
+            persistence.failsSave = true
+            return false
+        }
+        var decision = startDecision(settingsStore: settingsStore,
+            rideGeneration: 7, sequence: 11, monotonicSeconds: 100)
+        decision.transition = .pause
+        decision.sessionID = sessionID
+        ble.receive(decision)
+        try await waitUntil { coordinator.lastError == .watchUnavailable }
+        XCTAssertNotNil(settingsStore.loadPendingDecision())
+        XCTAssertFalse(sent.contains {
+            $0.kind == .acknowledgement && $0.acknowledgedKind == .decision
+                && $0.decisionSequence == 11
+        }, "no terminal ACK may escape while the journal still contains a replayable control")
     }
 
     func testReconnectDeduplicationAndFirmwareBootClockReset() async throws {
@@ -618,13 +684,17 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
         }
     }
 
-    private func makeSettingsStore() throws
+    private func makeSettingsStore(
+        persistence: FakeRideDecisionPersistence = FakeRideDecisionPersistence()
+    ) throws
         -> (UserDefaults, RideDetectionSettingsStore)
     {
         let suiteName = "RideAutomationCoordinatorTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.set(suiteName, forKey: "testSuiteName")
-        return (defaults, RideDetectionSettingsStore(defaults: defaults))
+        return (defaults, RideDetectionSettingsStore(
+            defaults: defaults, decisionPersistence: persistence
+        ))
     }
 
     private func defaultsSuiteName(_ defaults: UserDefaults) -> String {
@@ -1831,10 +1901,12 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
     func testPhoneStartUsesOutdoorCyclingAndPublishesLaunchFailure() async {
         let now = Date(timeIntervalSinceReferenceDate: 800_400_000)
         let probe = WatchLaunchProbe()
+        let diagnostics = WorkoutLaunchDiagnosticsProbe()
         let manager = WorkoutMirrorManager(
             now: { now },
             launchWatchApp: probe.launch
         )
+        manager.diagnosticsRecorder = diagnostics
 
         manager.installMirroringHandler()
         manager.installMirroringHandler()
@@ -1863,19 +1935,41 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         )
         XCTAssertTrue(detail.contains("workout did not start"))
         XCTAssertFalse(detail.contains("workout continues on Watch"))
+        XCTAssertEqual(
+            diagnostics.events.first(where: {
+                $0.name == "watch_launch_requested"
+            })?.fields["state"],
+            "launchingWatch"
+        )
+        let completion = diagnostics.events.first(where: {
+            $0.name == "watch_launch_completed"
+        })
+        XCTAssertEqual(completion?.level, .warning)
+        XCTAssertEqual(completion?.fields["outcome"], "failure")
+        XCTAssertEqual(completion?.fields["result"], "applied")
+        XCTAssertEqual(completion?.fields["errorCode"], "watchUnavailable")
     }
 
     func testStaleLaunchFailureCannotCancelRetryTimeout() async throws {
         let probe = WatchLaunchProbe()
+        let diagnostics = WorkoutLaunchDiagnosticsProbe()
         let manager = WorkoutMirrorManager(
             watchLaunchTimeout: 0.02,
             launchWatchApp: probe.launch
         )
+        manager.diagnosticsRecorder = diagnostics
 
         manager.startOutdoorCyclingOnWatch()
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(manager.store.presentation.connectionState, .failed)
         XCTAssertEqual(manager.store.presentation.errorCode, .setupRequired)
+        let timeout = diagnostics.events.first(where: {
+            $0.name == "watch_launch_completed"
+                && $0.fields["outcome"] == "timeout"
+        })
+        XCTAssertEqual(timeout?.level, .warning)
+        XCTAssertEqual(timeout?.fields["result"], "applied")
+        XCTAssertEqual(timeout?.fields["errorCode"], "setupRequired")
 
         manager.startOutdoorCyclingOnWatch()
         XCTAssertEqual(manager.store.presentation.connectionState, .launchingWatch)
@@ -4226,6 +4320,32 @@ private final class FakeWorkoutBackgroundExecutionLease:
 }
 
 @available(iOS 17.0, *)
+@MainActor
+private final class WorkoutLaunchDiagnosticsProbe:
+    RideDiagnosticsEventSink {
+    struct Event {
+        let level: RideDiagnosticLevel
+        let name: String
+        let fields: [String: String]
+    }
+
+    var events: [Event] = []
+
+    func record(
+        level: RideDiagnosticLevel,
+        category: RideDiagnosticCategory,
+        event: String,
+        fields: [String: String],
+        captureId: UUID?
+    ) {
+        events.append(Event(
+            level: level,
+            name: event,
+            fields: fields
+        ))
+    }
+}
+
 private final class WatchLaunchProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var storedConfiguration: HKWorkoutConfiguration?

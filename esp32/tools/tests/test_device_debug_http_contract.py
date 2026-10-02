@@ -16,8 +16,12 @@ INPUT = (ROOT / "lib/device_debug/device_debug_input.cpp").read_text(
     encoding="utf-8"
 )
 MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+MAIN_SCREEN = (ROOT / "lib/gui/src/mainScr.cpp").read_text(encoding="utf-8")
 RENDERER_DIAGNOSTICS = (
     ROOT / "lib/renderer_diagnostics/renderer_diagnostics.cpp"
+).read_text(encoding="utf-8")
+TRANSFER_HTTP = (
+    ROOT / "lib/device_transfer/device_transfer_http.cpp"
 ).read_text(encoding="utf-8")
 IOS_TRANSFER_MANAGER = (
     ROOT.parent
@@ -26,6 +30,20 @@ IOS_TRANSFER_MANAGER = (
 IOS_SETTINGS = (
     ROOT.parent / "ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift"
 ).read_text(encoding="utf-8")
+IOS_SECURE_BENCHMARK = (
+    ROOT.parent
+    / "ios-app/BikeComputer/BikeComputer/Managers/SecureRendererBenchmarkController.swift"
+).read_text(encoding="utf-8")
+IOS_BENCHMARK_GATES = (
+    ROOT.parent
+    / "ios-app/BikeComputer/BikeComputer/Resources/renderer-benchmark-gates-v1.json"
+).read_bytes()
+FIRMWARE_BENCHMARK_GATES = (
+    ROOT / "tools/renderer_benchmark_gates.json"
+).read_bytes()
+RENDERER_BENCHMARK_DOC = (
+    ROOT.parent / "docs/renderer-benchmark.md"
+).read_text(encoding="utf-8")
 LV_CONFIG = (ROOT / "lib/lvgl/lv_conf.h").read_text(encoding="utf-8")
 LV_CONFIG_TEMPLATE = (ROOT / "tools/lv_conf_template.h").read_text(
     encoding="utf-8"
@@ -33,6 +51,35 @@ LV_CONFIG_TEMPLATE = (ROOT / "tools/lv_conf_template.h").read_text(
 
 
 class DeviceDebugHttpContractTests(unittest.TestCase):
+    def test_ios_secure_benchmark_keeps_session_credentials_in_memory(self):
+        self.assertTrue(IOS_SECURE_BENCHMARK.startswith("#if DEBUG\n"))
+        for contract in (
+            "DeviceTransferPinnedSessionFactory.make",
+            'private static let tokenHeader = "X-BikeComputer-Transfer-Token"',
+            "URLSessionConfiguration.ephemeral",
+            "configuration.connectionProxyDictionary = [:]",
+            "MapStreamAppBuildIdentity.current",
+            'deviceStorageBackend == "sdmmc"',
+            "deviceStoragePowerCycleRequired == false",
+            "UIApplication.shared.isIdleTimerDisabled",
+            "RendererBenchmarkEvidenceSecurityPolicy.isSecretFree",
+            "RideDiagnosticsStoredZipWriter.write",
+            "checksums.sha256",
+        ):
+            self.assertIn(contract, IOS_SECURE_BENCHMARK)
+        self.assertNotIn("UIPasteboard", IOS_SECURE_BENCHMARK)
+        self.assertNotIn("http://", IOS_SECURE_BENCHMARK)
+        self.assertNotIn("session-file", IOS_SECURE_BENCHMARK)
+        # The CLI has a separately authorized external session path. Its
+        # documentation must not imply that the in-app console exports secrets.
+        self.assertIn(
+            "ordinary iOS console intentionally does not export this file",
+            RENDERER_BENCHMARK_DOC,
+        )
+
+    def test_ios_and_firmware_benchmark_gates_are_identical(self):
+        self.assertEqual(IOS_BENCHMARK_GATES, FIRMWARE_BENCHMARK_GATES)
+
     def test_ordinary_builds_compile_only_route_free_debug_stubs(self):
         real_implementation = HTTP.index("#if DEVICE_REMOTE_DEBUG")
         route_registration = HTTP.index(
@@ -119,14 +166,122 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             window.index("xQueueOverwrite"),
         )
 
+    def test_renderer_snapshot_timestamp_is_captured_with_marker_state(self):
+        snapshot = RENDERER_DIAGNOSTICS[
+            RENDERER_DIAGNOSTICS.index("Snapshot snapshot()") :
+            RENDERER_DIAGNOSTICS.index("std::string toJson")
+        ]
+        self.assertLess(snapshot.index("portENTER_CRITICAL"), snapshot.index("millis()"))
+        self.assertLess(snapshot.index("millis()"), snapshot.index("diagnosticsState->snapshot"))
+        metrics = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleRendererMetrics") :
+            HTTP.index("bool DeviceDebugHttp::handleRendererWindow")
+        ]
+        self.assertIn("renderer_diagnostics::snapshot()", metrics)
+
     def test_renderer_metrics_expose_non_secret_crypto_resource_counters(self):
         for field in (
+            r'\"cryptoCountersScope\":\"window\"',
             r'\"cryptoHeadroomRejections\"',
             r'\"cryptoOperationFailures\"',
         ):
             self.assertIn(field, RENDERER_DIAGNOSTICS)
         self.assertNotIn("sessionToken", RENDERER_DIAGNOSTICS)
         self.assertNotIn("apPassphrase", RENDERER_DIAGNOSTICS)
+
+    def test_renderer_dma_minima_include_bounded_phase_attribution(self):
+        for field in (
+            r'\"windowMinimumFreeAttribution\"',
+            r'\"windowMinimumLargestBlockAttribution\"',
+            r'\"phase\"',
+            r'\"observedAtMs\"',
+            r'\"value\"',
+            r'\"frameTransferActive\"',
+        ):
+            self.assertIn(field, RENDERER_DIAGNOSTICS)
+        for phase in (
+            "SessionStart",
+            "SessionEnd",
+            "WindowStart",
+            "Periodic",
+            "RenderComplete",
+            "MetricsSnapshot",
+        ):
+            self.assertIn(
+                f"MemoryObservationPhase::{phase}", RENDERER_DIAGNOSTICS
+            )
+
+    def test_frame_transfer_overlap_scope_excludes_empty_and_stale_responses(self):
+        frame = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleFrame") :
+            HTTP.index("bool DeviceDebugHttp::handlePointer")
+        ]
+        scope = frame.index("RendererFrameTransferScope frameTransferScope;")
+        stale = frame.index("!timestampAtOrAfter")
+        response = frame.index("const uint32_t responseStartedMs")
+        release = frame.index("frameStore().releaseSnapshot()", scope)
+        self.assertLess(stale, scope)
+        self.assertLess(scope, response)
+        self.assertLess(response, release)
+        self.assertIn("setFrameTransferActive(true)", HTTP)
+        self.assertIn("setFrameTransferActive(false)", HTTP)
+
+    def test_renderer_metrics_serialize_without_small_internal_stream_buffers(self):
+        self.assertIn("class JsonBuilder", RENDERER_DIAGNOSTICS)
+        self.assertIn("body_.reserve(4096);", RENDERER_DIAGNOSTICS)
+        self.assertIn("std::to_chars", RENDERER_DIAGNOSTICS)
+        self.assertIn("struct EscapedText", RENDERER_DIAGNOSTICS)
+        self.assertNotIn("std::string jsonEscape", RENDERER_DIAGNOSTICS)
+        self.assertNotIn("std::ostringstream", RENDERER_DIAGNOSTICS)
+
+    def test_checkpoint_frame_floor_skips_stale_pixels_before_transfer(self):
+        frame = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleFrame") :
+            HTTP.index("bool DeviceDebugHttp::handlePointer")
+        ]
+        self.assertIn("parseFrameRequestPath", frame)
+        self.assertIn("query.hasCapturedAtOrAfter", frame)
+        self.assertIn("timestampAtOrAfter", frame)
+        stale_check = frame.index("!timestampAtOrAfter")
+        release = frame.index("frameStore().releaseSnapshot()", stale_check)
+        no_content = frame.index("sendHttpHead(client, 204, 0)", release)
+        payload = frame.index("snapshot.payloadBytes", no_content)
+        self.assertLess(stale_check, release)
+        self.assertLess(release, no_content)
+        self.assertLess(no_content, payload)
+
+    def test_checkpoint_frame_stream_yields_between_bounded_tls_writes(self):
+        frame = HTTP[
+            HTTP.index("bool DeviceDebugHttp::handleFrame") :
+            HTTP.index("bool DeviceDebugHttp::handlePointer")
+        ]
+        writer = TRANSFER_HTTP[
+            TRANSFER_HTTP.index("bool writeHttpBytes") :
+            TRANSFER_HTTP.index("bool sendHttpJson")
+        ]
+        self.assertIn("kFrameResponseChunkBytes = 2048", HTTP)
+        self.assertIn("kFrameResponseInterChunkDelayMs = 1", HTTP)
+        self.assertIn("kFrameResponseChunkBytes,", frame)
+        self.assertIn("kFrameResponseInterChunkDelayMs", frame)
+        self.assertIn("response_write_policy::budget(", writer)
+        self.assertIn("vTaskDelay(pdMS_TO_TICKS(budget.delayMs))", writer)
+
+    def test_non_secret_benchmark_state_uses_forced_psram(self):
+        self.assertIn("State *diagnosticsState = nullptr;", RENDERER_DIAGNOSTICS)
+        self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", RENDERER_DIAGNOSTICS)
+        self.assertIn("transfer credentials never enter it", RENDERER_DIAGNOSTICS)
+        self.assertIn("PendingMapInput *pendingSettingInputs = nullptr;", BLE)
+        self.assertIn("ensurePendingSettingInputs()", BLE)
+        init = BLE[
+            BLE.index("void BLENavigationServer::init") :
+            BLE.index("void BLENavigationServer::process")
+        ]
+        allocation_failure = init.index("!ensurePendingSettingInputs()")
+        self.assertLess(allocation_failure, init.index("return;", allocation_failure))
+        self.assertLess(
+            allocation_failure,
+            init.index("initBleIdentityAndSecurity"),
+        )
 
     def test_renderer_windows_bind_the_active_map_before_profile_change(self):
         active_identity = MAIN[
@@ -173,14 +328,29 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         transfer = (ROOT / "lib/device_transfer/device_transfer_http.cpp").read_text(
             encoding="utf-8"
         )
+        flash_owner = (
+            ROOT / "lib/firmware_update/device_operation_owner.cpp"
+        ).read_text(encoding="utf-8")
         self.assertIn(
             "apPassphrase_ = generateSessionToken().substr(0, 24);",
             transfer,
         )
         self.assertIn(
-            "WiFi.softAP(apSsid.c_str(), apPassphrase.c_str())", transfer
+            "networkOwner->startAccessPointDetailed(apSsid, apPassphrase)", transfer
         )
-        self.assertNotIn("WiFi.softAP(apSsid.c_str());", transfer)
+        owner_call = flash_owner[
+            flash_owner.index("bool DeviceOperationOwner::startAccessPoint") :
+            flash_owner.index("bool DeviceOperationOwner::stopAccessPoint")
+        ]
+        self.assertIn("startAccessPointDetailed(ssid, passphrase).ok()", owner_call)
+        ap_operation = flash_owner[
+            flash_owner.index("case Operation::StartAccessPoint:") :
+            flash_owner.index("case Operation::StopAccessPoint:")
+        ]
+        self.assertIn("WiFi.persistent(false);", ap_operation)
+        self.assertIn("esp_wifi_set_storage(WIFI_STORAGE_RAM)", ap_operation)
+        self.assertIn("WiFi.softAP(networkSsid_, networkPassword_)", ap_operation)
+        self.assertNotIn("WiFi.softAP(networkSsid_)", ap_operation)
         info = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleInfo") :
             HTTP.index("bool DeviceDebugHttp::handleFrame")
@@ -300,6 +470,22 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertLess(worker_stopped, final_cancel)
         self.assertLess(final_cancel, finish)
 
+    def test_diagnostics_exit_waits_for_worker_before_hotspot_reentry(self):
+        stop = MAIN[
+            MAIN.index("bool stopActiveDeviceTransfer()") :
+            MAIN.index("void appRemoteDebugPointerActivity()")
+        ]
+        diagnostics = stop[
+            stop.index('if (status.mode == "diagnostics")') :
+            stop.index('if (status.mode == "map")')
+        ]
+        self.assertIn("deviceTransferHttp.setEnabled(false)", diagnostics)
+        self.assertIn("deviceTransferHttp.waitUntilStopped(5500)", diagnostics)
+        self.assertLess(
+            diagnostics.index("deviceTransferHttp.setEnabled(false)"),
+            diagnostics.index("deviceTransferHttp.waitUntilStopped(5500)"),
+        )
+
     def test_remote_boot_uses_existing_waveshare_button_path(self):
         button = MAIN[
             MAIN.index("static bool processWaveshareBootButton") :
@@ -310,6 +496,18 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("const bool latchedPress =", button)
         self.assertIn("toggleNavigationScreen();", button)
         self.assertIn("confirmOwnershipPairing();", button)
+
+    def test_power_button_reverse_navigation_uses_main_screen_guard(self):
+        button = MAIN[
+            MAIN.index("static bool processWavesharePowerButton") :
+            MAIN.index("static void armOwnershipPairingAfterRenderedComparison")
+        ]
+        self.assertIn("togglePreviousNavigationScreen();", button)
+
+        toggle_start = MAIN_SCREEN.index("void togglePreviousNavigationScreen()")
+        toggle = MAIN_SCREEN[toggle_start : MAIN_SCREEN.index("/**", toggle_start)]
+        self.assertIn("!isMainScreen", toggle)
+        self.assertIn("showPreviousMainScreen();", toggle)
 
     def test_shell_security_headers_are_present(self):
         for header in (

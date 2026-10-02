@@ -653,6 +653,16 @@ does not count as a failed boot on the next reset.
 
 ### 3. Touch Coordinate Mirroring
 
+World Radio physical testing on 2026-09-13 identified a half-turn offset
+between the 1.75 CST9217 sensor and panel pixels: a shuffle tap at raw
+`(415,330)` was mapped to logical `(330,50)` rather than the bottom-left
+control. Apply `cst9217CalibratedRotation(displayRotation)` to physical primary
+and multi-contact input; with display rotation 1 the calibrated point is
+`(135,415)`. Browser input already uses panel-pixel coordinates and retains
+its existing inverse framebuffer rotation. The 2.06 mapping is unchanged.
+The corrected image still requires post-flash control/drag/pinch qualification;
+the captured mismatch alone is not physical acceptance of the new image.
+
 The CST9217 reports coordinates in native panel orientation. Depending on physical mounting, you may need to apply:
 - `x = 465 - x` (Mirror X)
 - `y = 465 - y` (Mirror Y)

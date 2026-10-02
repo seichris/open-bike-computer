@@ -168,4 +168,75 @@ private:
   uint32_t accumulatedMs_ = 0;
 };
 
+// A source-sample latch. Unlike DurationLatch, this never advances from policy
+// loop time or transport heartbeats: only a newer producer sequence extends
+// the observed capture-time span.
+class SampleSpanLatch {
+public:
+  bool update(bool known, bool condition, uint16_t epoch, uint32_t sequence,
+              uint32_t capturedAtMs, uint32_t requiredMs,
+              uint32_t maximumGapMs) {
+    if (!known || !condition || epoch == 0 || sequence == 0) {
+      reset();
+      return false;
+    }
+    if (!active_ || epoch != epoch_) {
+      begin(epoch, sequence, capturedAtMs);
+      return requiredMs == 0;
+    }
+
+    const uint32_t sequenceDelta = sequence - lastSequence_;
+    if (sequenceDelta == 0)
+      return spanMs() >= requiredMs;
+    if (sequenceDelta >= 0x80000000UL) {
+      reset();
+      return false;
+    }
+
+    const uint32_t gapMs = elapsedMs(capturedAtMs, lastCapturedAtMs_);
+    if (gapMs > maximumGapMs || gapMs >= 0x80000000UL) {
+      begin(epoch, sequence, capturedAtMs);
+      return requiredMs == 0;
+    }
+    lastSequence_ = sequence;
+    lastCapturedAtMs_ = capturedAtMs;
+    if (gapMs > largestGapMs_)
+      largestGapMs_ = gapMs;
+    return spanMs() >= requiredMs;
+  }
+
+  void reset() {
+    active_ = false;
+    epoch_ = 0;
+    lastSequence_ = 0;
+    beganAtMs_ = 0;
+    lastCapturedAtMs_ = 0;
+    largestGapMs_ = 0;
+  }
+
+  bool active() const { return active_; }
+  uint32_t beganAtMs() const { return beganAtMs_; }
+  uint32_t spanMs() const {
+    return active_ ? elapsedMs(lastCapturedAtMs_, beganAtMs_) : 0;
+  }
+  uint32_t largestGapMs() const { return largestGapMs_; }
+
+private:
+  void begin(uint16_t epoch, uint32_t sequence, uint32_t capturedAtMs) {
+    active_ = true;
+    epoch_ = epoch;
+    lastSequence_ = sequence;
+    beganAtMs_ = capturedAtMs;
+    lastCapturedAtMs_ = capturedAtMs;
+    largestGapMs_ = 0;
+  }
+
+  bool active_ = false;
+  uint16_t epoch_ = 0;
+  uint32_t lastSequence_ = 0;
+  uint32_t beganAtMs_ = 0;
+  uint32_t lastCapturedAtMs_ = 0;
+  uint32_t largestGapMs_ = 0;
+};
+
 } // namespace ride_automation

@@ -350,11 +350,28 @@ class DebugClient:
             raise DebugClientError("device renderer window response is invalid")
         return request_id
 
-    def frame(self, after: int = 0) -> tuple[dict[str, int], bytes]:
+    def frame(
+        self,
+        after: int = 0,
+        *,
+        captured_at_or_after: int | None = None,
+    ) -> tuple[dict[str, int], bytes]:
         if isinstance(after, bool) or not isinstance(after, int) or not (0 <= after <= 0xFFFFFFFF):
             raise DebugClientError("after must be a uint32 frame sequence")
+        if (
+            captured_at_or_after is not None
+            and (
+                isinstance(captured_at_or_after, bool)
+                or not isinstance(captured_at_or_after, int)
+                or not 0 <= captured_at_or_after <= 0xFFFFFFFF
+            )
+        ):
+            raise DebugClientError("captured_at_or_after must be a uint32 timestamp")
+        path = f"/device-debug/v1/frame?after={after}"
+        if captured_at_or_after is not None:
+            path += f"&capturedAtOrAfter={captured_at_or_after}"
         raw = self._request(
-            f"/device-debug/v1/frame?after={after}", allow_no_content=True
+            path, allow_no_content=True
         )
         if raw is None:
             raise DebugClientError("device has no newer frame")

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "gps_ride_observation.hpp"
+#include "gps_sample_timing.hpp"
 #include <NMEAGPS.h>
 #include <Streamers.h>
 #include <hal.hpp>
@@ -90,6 +91,7 @@ public:
     char sunsetHour[6];
     int UTC;
   } gpsData{};
+  GpsSampleTiming presentationSample{};
 
   struct SV {
     bool active;

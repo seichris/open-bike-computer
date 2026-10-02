@@ -146,7 +146,7 @@ struct WatchNavigationStatusView: View {
         case .failed:
             deviceLink.lastError ?? "Bicino connection failed"
         case .idle, .scanning, .connecting, .discovering, .authenticating,
-                .claimingLease, .ready:
+                .claimingLease, .stopping, .ready:
             nil
         }
     }

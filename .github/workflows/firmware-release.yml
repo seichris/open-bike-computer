@@ -12,13 +12,19 @@ on:
         description: Immutable firmware release tag whose OTA manifests should be redeployed
         required: true
         type: string
+      allow_older_channel:
+        description: Explicitly acknowledge recovery of an older release channel (does not enable device downgrade)
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: firmware-release-${{ github.event.workflow_run.id || inputs.release_tag }}
+  # Serialize signing AND Pages promotion/recovery across all release tags.
+  group: firmware-release-channel
   cancel-in-progress: false
 
 jobs:
@@ -95,7 +101,7 @@ jobs:
             echo "Unable to prove that release ${RELEASE_TAG} does not exist" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: firmware-release-gate-${{ github.event.workflow_run.id }}
           path: ${{ runner.temp }}/firmware-release-gate.json
@@ -144,7 +150,7 @@ jobs:
             --expected-workflow-path .github/workflows/firmware-release-candidate.yml \
             --github-output "${GITHUB_OUTPUT}" \
             --output-receipt "${RUNNER_TEMP}/firmware-release-gate-revalidated.json"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: firmware-release-gate-${{ needs.gate.outputs.candidate_run_id }}
           path: ${{ runner.temp }}/release-gate
@@ -225,6 +231,16 @@ jobs:
           test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "${GIT_SHA}"
           git merge-base --is-ancestor \
             "${GIT_SHA}" "refs/remotes/origin/${DEFAULT_BRANCH}"
+      - name: Require firmware signing authority
+        uses: ./.github/actions/require-firmware-release-controls
+        with:
+          app-id: ${{ vars.FIRMWARE_RELEASE_PREFLIGHT_APP_ID }}
+          private-key: ${{ secrets.FIRMWARE_RELEASE_PREFLIGHT_APP_PRIVATE_KEY }}
+      - name: Require an increasing release build
+        run: >-
+          python3 tools/firmware_release_history.py
+          --repository "${GITHUB_REPOSITORY}"
+          --candidate "${RUNNER_TEMP}/candidate-verification.json"
       - name: Generate signed manifests
         env:
           FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY: ${{ secrets.FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY }}
@@ -240,7 +256,6 @@ jobs:
           candidate_receipt="${RUNNER_TEMP}/candidate-verification.json"
           firmware_version="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["firmwareVersion"]["version"])' "${candidate_receipt}")"
           firmware_build="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["firmwareVersion"]["build"])' "${candidate_receipt}")"
-          git_sha_short="${GIT_SHA:0:12}"
           mkdir -p public/firmware
           for target in WAVESHARE_AMOLED_175 WAVESHARE_AMOLED_206; do
             python tools/firmware_manifest.py \
@@ -248,7 +263,7 @@ jobs:
               --target "${target}" \
               --repository "${GITHUB_REPOSITORY}" \
               --tag "${RELEASE_TAG}" \
-              --git-sha "${git_sha_short}" \
+              --git-sha "${GIT_SHA}" \
               --version "${firmware_version}" \
               --build "${firmware_build}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
@@ -313,7 +328,7 @@ jobs:
             --asset-dir "${release_assets}" \
             --require-immutable \
             --output "${RUNNER_TEMP}/publication-receipt.json"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: firmware-release-publication-receipts
           path: |
@@ -322,7 +337,7 @@ jobs:
             ${{ runner.temp }}/publication-receipt.json
           if-no-files-found: error
           retention-days: 90
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: public
 
@@ -342,7 +357,7 @@ jobs:
       pages: write
     steps:
       - id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
   recover-pages:
     name: Recover Firmware OTA Pages
@@ -407,14 +422,25 @@ jobs:
             echo "Recovery payload must contain exactly two OTA manifests" >&2
             exit 1
           fi
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Require explicit older-channel recovery
+        env:
+          ALLOW_OLDER: ${{ inputs.allow_older_channel }}
+        run: |
+          set -euo pipefail
+          options=()
+          if [ "${ALLOW_OLDER}" = true ]; then options+=(--allow-older); fi
+          python3 tools/firmware_release_history.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --recovery-assets release-assets "${options[@]}"
+          echo "Older channel explicitly authorized: ${ALLOW_OLDER}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: firmware-release-recovery-receipt-${{ inputs.release_tag }}
           path: ${{ runner.temp }}/recovery-receipt.json
           if-no-files-found: error
           retention-days: 90
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: public
       - id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

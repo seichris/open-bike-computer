@@ -41,12 +41,66 @@ function hex(bytes: ArrayBuffer): string {
   ).join("");
 }
 
+async function seedShareLanding(
+  token: string,
+  topographic = false,
+): Promise<void> {
+  const suffix = crypto.randomUUID().replaceAll("-", "");
+  const libraryID = `lib_v1_${suffix}`;
+  const mapEntryID = `map_v1_${suffix}`;
+  const now = new Date().toISOString();
+  const tokenHash = hex(
+    await crypto.subtle.digest("SHA-256", encoder.encode(token)),
+  );
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO libraries (id, created_at, updated_at) VALUES (?, ?, ?)",
+    ).bind(libraryID, now, now),
+    env.DB.prepare(
+      `INSERT INTO map_entries
+        (id, legacy_map_id, content_receipt, origin_channel, canonical_name,
+         source_region_name, bounds_json, renderer, renderer_format_version,
+         features_json, attribution_json, generated_at, delivery_state,
+         created_at, updated_at)
+       VALUES (?, ?, ?, 'production', ?, ?, NULL, 'fmb', ?, ?, '{}', ?,
+               'production', ?, ?)`,
+    ).bind(
+      mapEntryID,
+      `legacy-${suffix}`,
+      `receipt-${suffix}`,
+      "Shared Shanghai map",
+      "Shanghai",
+      topographic ? 4 : 1,
+      JSON.stringify(
+        topographic ? ["roads", "places", "contours"] : ["roads", "places"],
+      ),
+      now,
+      now,
+      now,
+    ),
+    env.DB.prepare(
+      `INSERT INTO shares
+        (id, token_hash, owner_library_id, map_entry_id, title_snapshot,
+         created_at, expires_at, revoked_at, claim_count)
+       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 0)`,
+    ).bind(
+      `shr_v1_${suffix}`,
+      tokenHash,
+      libraryID,
+      mapEntryID,
+      "Shared Shanghai map",
+      now,
+    ),
+  ]);
+}
+
 async function serviceRequest(
   path: string,
   keyID: string,
   secret: string,
+  payload: Record<string, unknown> = {},
 ): Promise<Request> {
-  const body = "{}";
+  const body = JSON.stringify(payload);
   const timestamp = String(Math.floor(Date.now() / 1000));
   const idempotencyKey = `test-request:${keyID}`;
   const bodySha256 = hex(
@@ -93,6 +147,44 @@ async function bootstrapCredential(): Promise<{
 }
 
 describe("worker public surfaces", () => {
+  it("offers installed Bicino as a recovery path on share landing pages", async () => {
+    const token = "B".repeat(43);
+    await seedShareLanding(token);
+
+    const response = await worker.fetch(
+      new Request(`https://maps-share-staging.8o.vc/s/${token}`),
+      workerEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe(
+      "text/html; charset=utf-8",
+    );
+    const html = await response.text();
+    expect(html).toContain(
+      `<meta name="apple-itunes-app" content="app-id=6788977349, app-argument=https://maps-share-staging.8o.vc/s/${token}">`,
+    );
+    expect(html).toContain(
+      "If Bicino is already installed, tap Open in the app banner above.",
+    );
+    expect(html).not.toContain("Elevation source notices");
+  });
+
+  it("shows Copernicus source and liability notices on topographic shares", async () => {
+    const token = "C".repeat(43);
+    await seedShareLanding(token, true);
+    const response = await worker.fetch(
+      new Request(`https://maps-share-staging.8o.vc/s/${token}`),
+      workerEnv(),
+    );
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Elevation source notices");
+    expect(html).toContain("produced using Copernicus WorldDEM-30");
+    expect(html).toContain("produced using Copernicus WorldDEM™-90");
+    expect(html).toContain("do not incur any liability");
+  });
+
   it("bootstraps a bearer credential but never caches it", async () => {
     const response = await worker.fetch(
       new Request("https://maps-share-staging.8o.vc/v1/libraries/bootstrap", {
@@ -438,6 +530,22 @@ describe("worker public surfaces", () => {
     );
     expect(production.status).toBe(404);
     expect(promotionKeys).toEqual([`promotion:map_v1_${"m".repeat(43)}`]);
+  });
+
+  it("restricts automatic promotion discovery to production services", async () => {
+    const path = "/v1/internal/promotions/candidates";
+    const payload = { cursor: null, limit: 50 };
+    const denied = await worker.fetch(
+      await serviceRequest(path, "test-development", "s".repeat(48), payload),
+      workerEnv(),
+    );
+    expect(denied.status).toBe(403);
+    const allowed = await worker.fetch(
+      await serviceRequest(path, "test-production", "p".repeat(48), payload),
+      workerEnv(),
+    );
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toEqual({ mapEntryIds: [], nextCursor: null });
   });
 
   it("isolates trusted service mutations from exhausted public counters", async () => {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ride_diagnostics_storage_policy.hpp"
 #include "ride_diagnostics_transfer_policy.hpp"
 
 #include <cstddef>
@@ -25,6 +26,7 @@ struct Stats {
   uint16_t queueDepth;
   uint16_t maxQueueDepth;
   bool storageAvailable;
+  bool recorderReady = false;
 };
 
 constexpr std::size_t kCaptureIdBytes = 48;
@@ -44,8 +46,6 @@ constexpr std::size_t kCriticalQueueCapacity = 8;
 constexpr std::size_t kQueueCapacity =
     kNormalQueueCapacity + kCriticalQueueCapacity;
 constexpr std::size_t kChunkBytes = 256 * 1024;
-constexpr std::size_t kRetentionBytes = 32 * 1024 * 1024;
-constexpr std::size_t kMinimumFreeSpaceBytes = 8 * 1024 * 1024;
 constexpr uint8_t kRetentionBoots = 20;
 constexpr uint8_t kRetentionDays = 14;
 
@@ -119,6 +119,8 @@ void begin(Storage &storage, uint32_t bootSequence, uint32_t firmwareFingerprint
 // Start persistent SD writes after boot-time map recovery has released storage.
 // Events recorded between begin() and this handoff remain queued.
 void startWriter();
+// Distinct from mount availability and UI boot readiness.
+bool recorderReady();
 void process(uint32_t nowMs);
 using StorageRecoveryAllowedProbe = bool (*)();
 void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe);
@@ -142,6 +144,9 @@ bool sealActiveChunk(uint32_t timeoutMs = 2000);
 bool beginStorageTransition(uint32_t timeoutMs = 2000);
 void endStorageTransition();
 bool prepareForShutdown(uint32_t timeoutMs = 2000);
+// Publish a lease before requesting a writer-owned seal. The subsequent seal
+// is the synchronization point with any retention pass already in progress.
+void armTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);
 void beginTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);
 void refreshTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);
 void endTransferSnapshotLease();

@@ -13,9 +13,11 @@ from tools.generate_map_stream_trust import (
     FORBIDDEN_FIXTURE_PUBLIC_KEYS,
     check_outputs,
     expected_outputs,
+    load_development_key,
     load_registry,
     public_registry_entry_from_private_key,
     render_cpp,
+    render_development_cpp,
     render_swift,
 )
 
@@ -34,6 +36,26 @@ class MapStreamTrustRegistryTests(unittest.TestCase):
     def write_registry(self, document: dict) -> Path:
         path = Path(self.tmp.name) / "trust.json"
         path.write_text(json.dumps(document), encoding="utf-8")
+        return path
+
+    def write_development_config(
+        self,
+        *,
+        key_id: str = "map-dev-2026-08",
+        public_key: str | None = None,
+    ) -> Path:
+        path = Path(self.tmp.name) / "Development.xcconfig"
+        path.write_text(
+            "\n".join(
+                [
+                    f"BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID = {key_id}",
+                    "BICINO_MAP_DEVELOPMENT_SIGNING_PUBLIC_KEY_X963_HEX = "
+                    + (public_key or self.public_key_hex(19)),
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
         return path
 
     def setUp(self):
@@ -74,6 +96,59 @@ class MapStreamTrustRegistryTests(unittest.TestCase):
         self.assertIn(self.public_key_hex(7), cpp)
         fingerprint = hashlib.sha256(bytes.fromhex(self.public_key_hex(7))).hexdigest()
         self.assertIn(fingerprint, cpp)
+
+    def test_development_xcconfig_generates_remote_debug_cpp_trust(self):
+        public_key = self.public_key_hex(19)
+        key = load_development_key(
+            self.write_development_config(public_key=public_key)
+        )
+        self.assertEqual(key.key_id, "map-dev-2026-08")
+        self.assertEqual(key.public_key_x963_hex, public_key)
+        cpp = render_development_cpp(key)
+        self.assertIn("kDevelopmentCompiledKey", cpp)
+        self.assertIn("map-dev-2026-08", cpp)
+        self.assertIn(public_key, cpp)
+        self.assertIn(
+            hashlib.sha256(bytes.fromhex(public_key)).hexdigest(),
+            cpp,
+        )
+
+    def test_development_trust_is_strict_and_distinct_from_production(self):
+        incomplete = Path(self.tmp.name) / "Incomplete.xcconfig"
+        incomplete.write_text(
+            "BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID = map-dev-2026-08\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "settings are incomplete"):
+            load_development_key(incomplete)
+        with self.assertRaisesRegex(ValueError, "key ID is invalid"):
+            load_development_key(
+                self.write_development_config(key_id="map-prod-2026-08")
+            )
+        with self.assertRaisesRegex(ValueError, "not a valid P-256 point"):
+            load_development_key(
+                self.write_development_config(public_key="04" + "00" * 64)
+            )
+
+        public_key = self.public_key_hex(19)
+        registry = self.write_registry(
+            {
+                "schemaVersion": 1,
+                "keys": [
+                    {
+                        "keyId": "map-prod-2026-08",
+                        "publicKeyX963Hex": public_key,
+                        "state": "trusted",
+                        "createdAt": "2026-08-26",
+                    }
+                ],
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "distinct from production"):
+            expected_outputs(
+                registry,
+                self.write_development_config(public_key=public_key),
+            )
 
     def test_schema_version_must_be_an_integer(self):
         with self.assertRaisesRegex(ValueError, "unsupported"):

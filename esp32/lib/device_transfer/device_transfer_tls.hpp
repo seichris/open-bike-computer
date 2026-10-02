@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include "../utils/src/runtime_ownership.hpp"
+#include "../utils/src/runtime_mutex.hpp"
 
 struct esp_tls;
 
@@ -25,6 +27,16 @@ struct TransferTlsIdentity {
   bool valid() const;
 };
 
+struct HttpResponseWriteDiagnostics {
+  size_t bytesWritten = 0;
+  uint32_t writeCalls = 0;
+  uint32_t zeroWriteCalls = 0;
+  uint32_t shortWriteCalls = 0;
+  uint32_t activeTlsWriteUs = 0;
+  uint32_t noProgressWaitMs = 0;
+  uint32_t intentionalDelayMs = 0;
+};
+
 enum class TransferTlsFailureStage : uint8_t {
   None = 0,
   Input,
@@ -41,6 +53,55 @@ struct TransferTlsMemorySnapshot {
   uint32_t dmaLargest = 0;
   uint32_t psramFree = 0;
   uint32_t psramLargest = 0;
+};
+
+// Fixed-size, non-secret evidence for the first failed response. Values are
+// captured before TLS and file handles are torn down.
+enum class TransferFailureReason : uint8_t {
+  None, InvalidWrite, TlsWrite, SocketPoll, TlsRead, SocketInterrupted,
+  Disconnected, NoProgressTimeout, FileRead, Authorization, HandlerAbort
+};
+const char *transferFailureReasonName(TransferFailureReason reason);
+enum class TransferFileAbortBranch : uint8_t {
+  None, AuthorizationBeforeOpen, Header, AuthorizationDuringBody,
+  Read, Write, Close
+};
+const char *transferFileAbortBranchName(TransferFileAbortBranch branch);
+
+struct TransferFailureRecord {
+  TransferFailureReason reason = TransferFailureReason::None;
+  uint32_t atMs = 0;
+  uint32_t generation = 0;
+  uint32_t responseHeaderBytes = 0;
+  uint32_t responseBodyBytes = 0;
+  uint32_t inputBytes = 0;
+  uint32_t offsetBytes = 0;
+  uint32_t attemptedBytes = 0;
+  uint32_t elapsedSinceProgressMs = 0;
+  int32_t rawTlsResult = 0;
+  int32_t immediateErrno = 0;
+  int32_t firstFatalTlsResult = 0;
+  int32_t firstFatalErrno = 0;
+  bool firstFatalSeen = false;
+  int32_t pollResult = 0;
+  int16_t pollFlags = 0;
+  uint32_t tlsWriteCalls = 0;
+  uint32_t wantReadCalls = 0;
+  uint32_t wantWriteCalls = 0;
+  uint32_t rawZeroCalls = 0;
+  uint32_t fatalWriteCalls = 0;
+  uint32_t positivePartialCalls = 0;
+  uint32_t lastWriteDurationUs = 0;
+  uint32_t fileRequested = 0;
+  uint32_t fileReturned = 0;
+  int32_t fileErrno = 0;
+  bool fileError = false;
+  bool fileEof = false;
+  TransferFileAbortBranch fileAbortBranch = TransferFileAbortBranch::None;
+  // Bits: enabled, token-present, token-match, generation-match,
+  // BLE-bound, diagnostics-mode-match. These are decisions, never token data.
+  uint8_t authorizationBits = 0;
+  TransferTlsMemorySnapshot memory;
 };
 
 // Captures only non-secret failure metadata. Certificate/key bytes, the
@@ -109,6 +170,65 @@ public:
   const TransferTlsHandshakeDiagnostics &handshakeDiagnostics() const {
     return handshakeDiagnostics_;
   }
+  const TransferFailureRecord &failureRecord() const { return failureRecord_; }
+  void noteFailure(TransferFailureReason reason, size_t input = 0,
+                   size_t offset = 0, size_t attempted = 0,
+                   uint32_t elapsed = 0);
+  void noteWriteAttempt(size_t input, size_t offset, size_t attempted,
+                        uint32_t elapsed) {
+    writeInputBytes_ = input;
+    writeOffsetBytes_ = offset;
+    writeAttemptedBytes_ = attempted;
+    writeElapsedMs_ = elapsed;
+  }
+  void noteFileRead(size_t requested, size_t returned, int errorNumber,
+                    bool error, bool eof);
+  void noteFileAbortBranch(TransferFileAbortBranch branch) {
+    failureRecord_.fileAbortBranch = branch;
+  }
+  void noteResponseHeaderComplete() {
+    responseHeaderBytes_ = responseBytesWritten_;
+    responseHeaderInProgress_ = false;
+  }
+  void noteResponseHeaderStarted() { responseHeaderInProgress_ = true; }
+  void resetHttpResponsePolicy(bool persistenceAllowed);
+  void setHttpRequestBodyLength(uint64_t contentLength) {
+    requestBodyConsumed_ = contentLength == 0;
+  }
+  void markHttpRequestBodyConsumed() { requestBodyConsumed_ = true; }
+  void requestHttpResponseKeepAlive();
+  void requestHttpResponseClose() { responseKeepAlive_ = false; }
+  void noteHttpResponseWriteStarted() { responseWriteStarted_ = true; }
+  void noteHttpResponseWriteProgress(size_t bytes) {
+    responseBytesWritten_ += bytes;
+  }
+  void noteHttpResponseNoProgressWait(uint32_t milliseconds) {
+    responseNoProgressWaitMs_ += milliseconds;
+  }
+  void noteHttpResponseIntentionalDelay(uint32_t milliseconds) {
+    responseIntentionalDelayMs_ += milliseconds;
+  }
+  void noteHttpResponseWriteFailed() {
+    responseWriteStarted_ = true;
+    responseWriteFailed_ = true;
+    responseKeepAlive_ = false;
+  }
+  bool httpResponseWriteStarted() const { return responseWriteStarted_; }
+  bool httpResponseWriteFailed() const { return responseWriteFailed_; }
+  size_t httpResponseBytesWritten() const { return responseBytesWritten_; }
+  HttpResponseWriteDiagnostics httpResponseWriteDiagnostics() const {
+    return {responseBytesWritten_, responseWriteCalls_,
+            responseZeroWriteCalls_, responseShortWriteCalls_,
+            responseActiveTlsWriteUs_, responseNoProgressWaitMs_,
+            responseIntentionalDelayMs_};
+  }
+  bool httpResponseKeepAlive() const {
+    return responseKeepAlive_ && requestBodyConsumed_;
+  }
+  const char *httpResponseConnectionValue() const {
+    return httpResponseKeepAlive() ? "keep-alive" : "close";
+  }
+  void interruptSocket();
   bool finishResponse(uint32_t timeoutMs);
   void stop();
   explicit operator bool() { return connected() != 0; }
@@ -117,7 +237,41 @@ private:
   WiFiClient socketOwner_;
   esp_tls *tls_ = nullptr;
   int socket_ = -1;
+  runtime_ownership::SocketInterruptLease<runtime_ownership::StaticMutex>
+      interruptLease_;
   bool connected_ = false;
+  bool responsePersistenceAllowed_ = false;
+  bool responseKeepAlive_ = false;
+  bool requestBodyConsumed_ = true;
+  bool responseWriteStarted_ = false;
+  bool responseWriteFailed_ = false;
+  size_t responseBytesWritten_ = 0;
+  uint32_t responseWriteCalls_ = 0;
+  uint32_t responseZeroWriteCalls_ = 0;
+  uint32_t responseShortWriteCalls_ = 0;
+  uint32_t responseActiveTlsWriteUs_ = 0;
+  uint32_t responseNoProgressWaitMs_ = 0;
+  uint32_t responseIntentionalDelayMs_ = 0;
+  size_t responseHeaderBytes_ = 0;
+  bool responseHeaderInProgress_ = false;
+  TransferFailureRecord failureRecord_;
+  uint32_t wantReadCalls_ = 0;
+  uint32_t wantWriteCalls_ = 0;
+  uint32_t rawZeroCalls_ = 0;
+  uint32_t fatalWriteCalls_ = 0;
+  uint32_t positivePartialCalls_ = 0;
+  uint32_t lastWriteDurationUs_ = 0;
+  int32_t lastRawTlsResult_ = 0;
+  int32_t lastWriteErrno_ = 0;
+  int32_t firstFatalTlsResult_ = 0;
+  int32_t firstFatalErrno_ = 0;
+  bool firstFatalSeen_ = false;
+  int32_t lastPollResult_ = 0;
+  int16_t lastPollFlags_ = 0;
+  size_t writeInputBytes_ = 0;
+  size_t writeOffsetBytes_ = 0;
+  size_t writeAttemptedBytes_ = 0;
+  uint32_t writeElapsedMs_ = 0;
   TransferTlsHandshakeDiagnostics handshakeDiagnostics_;
 };
 

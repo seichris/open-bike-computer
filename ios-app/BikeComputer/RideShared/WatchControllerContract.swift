@@ -30,6 +30,13 @@ protocol PhoneWatchControllerTransporting: AnyObject {
     func queueWatchControllerRevocation(
         _ request: WatchControllerRequestV1
     )
+
+    /// Durably asks the Watch to reconcile an exact phone handoff before an
+    /// explicit iPhone discovery attempt. The Watch releases only after its
+    /// navigation and workout restoration proves there is no active demand.
+    func queueWatchDirectRideReconciliation(
+        _ request: WatchDirectRideReconciliationRequestV1
+    )
 }
 
 struct WatchControllerCredentialV1: Codable, Equatable, Sendable {
@@ -355,6 +362,63 @@ struct WatchDirectRidePreparationRequestV1: Codable, Equatable, Sendable {
     static func decode(_ data: Data) throws -> Self {
         try PropertyListDecoder().decode(Self.self, from: data).validated()
     }
+}
+
+/// An idempotent phone-to-Watch request to reconcile a persisted direct-ride
+/// handoff. It is keyed to the same exact preparation identity as release, so
+/// delayed requests cannot affect a successor ride.
+struct WatchDirectRideReconciliationRequestV1:
+    Codable, Equatable, Sendable {
+    static let schemaVersion = 1
+    static let userInfoPayloadKey =
+        "watchDirectRideReconciliationRequestV1"
+
+    let schema: Int
+    let requestID: UUID
+    let preparationID: UUID
+    let deviceID: String
+
+    init(
+        requestID: UUID = UUID(),
+        preparationID: UUID,
+        deviceID: String
+    ) throws {
+        let validatedIdentity = try WatchDirectRidePreparationRequestV1(
+            requestID: requestID,
+            preparationID: preparationID,
+            operation: .release,
+            deviceID: deviceID
+        )
+        schema = Self.schemaVersion
+        self.requestID = validatedIdentity.requestID
+        self.preparationID = validatedIdentity.preparationID
+        self.deviceID = validatedIdentity.deviceID
+    }
+
+    func validated() throws -> Self {
+        guard schema == Self.schemaVersion else {
+            throw WatchControllerContractError.invalidEnvelope
+        }
+        return try Self(
+            requestID: requestID,
+            preparationID: preparationID,
+            deviceID: deviceID
+        )
+    }
+
+    func encoded() throws -> Data {
+        try PropertyListEncoder().encode(validated())
+    }
+
+    static func decode(_ data: Data) throws -> Self {
+        try PropertyListDecoder().decode(Self.self, from: data).validated()
+    }
+}
+
+enum WatchDirectRideReconciliationPolicyV1 {
+    /// Keeps the exact discovery request alive for a late durable release, but
+    /// replaces the progress claim with actionable guidance after this delay.
+    static let phoneWaitTimeoutSeconds: Double = 8
 }
 
 struct WatchDirectRidePreparationResponseV1: Codable, Equatable, Sendable {

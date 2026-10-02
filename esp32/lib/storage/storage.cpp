@@ -7,6 +7,8 @@
  */
 
 #include "storage.hpp"
+
+#include <cerrno>
 #include "sd_mount_retry_policy.hpp"
 #include "storage_mount_policy.hpp"
 #include "waveshare_storage_migration_policy.hpp"
@@ -904,6 +906,24 @@ size_t Storage::read(FILE *file, uint8_t *buffer, size_t size) {
   if (!file)
     return 0;
   return fread(buffer, 1, size, file);
+}
+
+StorageReadEvidence Storage::readWithEvidence(FILE *file, uint8_t *buffer,
+                                               size_t size) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  StorageReadEvidence evidence;
+  evidence.requested = size;
+  if (!file) {
+    evidence.error = true;
+    return evidence;
+  }
+  errno = 0;
+  evidence.returned = fread(buffer, 1, size, file);
+  evidence.errorNumber = errno;
+  evidence.error = ferror(file) != 0;
+  evidence.eof = feof(file) != 0;
+  return evidence;
 }
 
 /**

@@ -26,6 +26,7 @@ class StubClient(device_debug.DebugClient):
             "https://192.0.2.1:8080", TEST_TOKEN, TEST_TLS_SHA256
         )
         self.response = response
+        self.last_request = None
         self.identity = {
             "target": "WAVESHARE_AMOLED_206",
             "deviceId": "abc",
@@ -35,6 +36,7 @@ class StubClient(device_debug.DebugClient):
         }
 
     def _request(self, *args, **kwargs):
+        self.last_request = (args, kwargs)
         return self.response
 
 
@@ -47,6 +49,21 @@ class DeviceDebugCliTests(unittest.TestCase):
         metadata, decoded = StubClient(header + payload).frame()
         self.assertEqual(metadata["sequence"], 7)
         self.assertEqual(decoded, payload)
+
+    def test_frame_capture_floor_is_validated_and_encoded(self):
+        payload = bytes((0x00, 0xF8, 0xE0, 0x07))
+        header = device_debug.FRAME_HEADER.pack(
+            b"BCF1", 32, 0, 7, 9, 2, 1, 4, 1, 0, len(payload), zlib.crc32(payload)
+        )
+        client = StubClient(header + payload)
+        client.frame(6, captured_at_or_after=1234)
+        self.assertEqual(
+            client.last_request,
+            (("/device-debug/v1/frame?after=6&capturedAtOrAfter=1234",),
+             {"allow_no_content": True}),
+        )
+        with self.assertRaisesRegex(device_debug.DebugClientError, "uint32"):
+            client.frame(captured_at_or_after=-1)
 
     def test_frame_crc_rejected(self):
         payload = bytes((0x00, 0xF8, 0xE0, 0x07))

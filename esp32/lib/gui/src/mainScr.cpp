@@ -7,8 +7,13 @@
  */
 
 #include "mainScr.hpp"
+#include "mainScreenRegistry.hpp"
+#include "worldRadioScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
+#include "../../ble_navigation/gps_input_freshness.hpp"
+#include "../../ble_navigation/screen_configuration.hpp"
 #include "../../power_metrics/power_metrics.hpp"
+#include "../../device_debug/device_debug_camera.hpp"
 #include "../../route_overlay/route_overlay.hpp"
 #include "../../ride_automation/ride_automation_runtime.hpp"
 #include "destinationPickerLayout.hpp"
@@ -31,6 +36,7 @@
 // #include "../../compass/compass.hpp"
 
 bool isMainScreen = false; // Flag to indicate main screen is selected
+
 bool isScrolled = true;    // Flag to indicate when tileview was scrolled
 bool isReady = false;      // Flag to indicate when tileview scroll was finished
 bool isScrollingMap = false;  // Flag to indicate if map is scrolling
@@ -70,6 +76,7 @@ lv_obj_t *compassTile;
 lv_obj_t *navTile;
 lv_obj_t *rideStatsTile;
 lv_obj_t *batteryStatusTile;
+lv_obj_t *worldRadioTile;
 lv_obj_t *mapTile;
 lv_obj_t *satTrackTile;
 lv_obj_t *btnFullScreen;
@@ -85,6 +92,15 @@ static uint32_t mapTileTransitionStartedMs = 0;
 static bool mapTileTransitionUsedRenderAhead = false;
 static bool mapRenderAheadPending = false;
 static tileName mapRenderAheadTile = MAP;
+static uint32_t mapRenderAheadInstanceID = 0;
+static uint32_t mapRenderAheadProfileSignature = 0;
+static uint8_t activeScreenInstanceIndex =
+    screen_configuration::kInvalidInstanceIndex;
+static uint32_t activeScreenInstanceID = 0;
+static uint32_t activeScreenPayloadSignature = 0;
+static uint32_t mapRenderInstanceID = 0;
+static uint8_t mapRenderInstanceType = DEVICE_SCREEN_MAP;
+static uint32_t mapRenderProfileSignature = 0;
 struct DestinationRowContext {
   uint32_t generation = 0;
   uint16_t token = 0;
@@ -161,8 +177,14 @@ uint64_t navigationSignature() {
   return hash;
 }
 
-uint64_t gpsSignature() {
+uint64_t gpsSignature(uint32_t nowMs) {
   uint64_t hash = FNV_OFFSET;
+  const auto sourceSample = gps_input_freshness::presentationSample(
+      gps.presentationSample, bleNavServer.getDebugStats().gpsSource);
+  // A source can expire without changing any GPSDATA field. Make that
+  // transition invalidate Ride Stats so its stale status and speed update.
+  hashScalar(hash, gps_input_freshness::presentationStatusBits(sourceSample,
+                                                                nowMs));
   hashScalar(hash, gps.gpsData.satellites);
   hashScalar(hash, gps.gpsData.fixMode);
   hashScalar(hash, isGpsFixed);
@@ -252,6 +274,7 @@ uint64_t settingsSignature() {
   hashScreenMapSettings(hash, mapRenderSettings.mapStyle);
   hashScreenMapSettings(hash, mapRenderSettings.mapNavigationStyle);
   hashScalar(hash, mapRenderSettings.mapRotationMode);
+  hashScalar(hash, mapRenderSettings.mapNavigationRotationMode);
   hashScalar(hash, mapRenderSettings.tapToSwitchScreens);
   hashScalar(hash, mapRenderSettings.enabledScreensMask);
   hashScalar(hash, mapRenderSettings.defaultScreen);
@@ -295,7 +318,7 @@ ui_update_policy::SourceSignatures captureSourceSignatures(uint32_t nowMs) {
 
   ui_update_policy::SourceSignatures signatures;
   signatures[ui_update_policy::Source::Navigation] = navigationSignature();
-  signatures[ui_update_policy::Source::Gps] = gpsSignature();
+  signatures[ui_update_policy::Source::Gps] = gpsSignature(nowMs);
   signatures[ui_update_policy::Source::Route] = routeOverlay.revision();
   signatures[ui_update_policy::Source::Workout] = cachedWorkoutSignature;
   uint64_t phoneBattery = FNV_OFFSET;
@@ -337,6 +360,12 @@ void setImageAngleIfChanged(lv_obj_t *image, int16_t angle) {
 } // namespace
 
 Maps mapView;
+
+#if DEVICE_REMOTE_DEBUG
+renderer_diagnostics::CameraSample device_debug::captureMapCameraForPanelFrame() {
+  return mapView.captureCameraMetadata();
+}
+#endif
 static map_tap_arbiter::Controller mapTapController;
 static bool currentCourseUpHeading(uint16_t &headingDegrees);
 
@@ -553,8 +582,88 @@ const ScreenMapRenderSettings &currentMapStyleSettings() {
   return mapStyleSettingsForTile(static_cast<tileName>(activeTile));
 }
 
+uint32_t currentScreenInstanceID() { return activeScreenInstanceID; }
+
+uint32_t currentMapRenderInstanceID() { return mapRenderInstanceID; }
+
+uint8_t currentMapRenderInstanceType() { return mapRenderInstanceType; }
+
+uint32_t currentMapRenderProfileSignature() {
+  return mapRenderProfileSignature;
+}
+
+static void applyMapInstanceProfile(
+    const screen_configuration_protocol::ScreenInstance &instance) {
+  if (instance.type != screen_configuration_protocol::ScreenType::Map &&
+      instance.type !=
+          screen_configuration_protocol::ScreenType::MapNavigation) {
+    return;
+  }
+  const auto &source = instance.mapProfile;
+  ScreenMapRenderSettings &target =
+      instance.type == screen_configuration_protocol::ScreenType::Map
+          ? mapRenderSettings.mapStyle
+          : mapRenderSettings.mapNavigationStyle;
+  target.minPolygonSize = source.minPolygonSize;
+  target.detailLevel = source.detailLevel;
+  target.routeLineWidth = source.routeLineWidth;
+  target.streetLineWidth = source.streetLineWidth;
+  target.positionMarkerScale = source.positionMarkerScale;
+  target.zoomLevel = source.zoomLevel;
+  target.visibilityMask =
+      source.visibilityMask &
+      map_profile_protocol::VISIBILITY_RENDER_FEATURE_MASK;
+  target.labelDensity = source.labelDensity;
+  target.labelLanguageMode = source.labelLanguageMode;
+  target.labelTextSize = source.labelTextSize;
+  target.labelOrientation = source.labelOrientation;
+  mapRenderSettings.navigationOverlayVisibilityMask =
+      source.visibilityMask & MAP_VISIBILITY_OVERLAY_MASK;
+  if (instance.type == screen_configuration_protocol::ScreenType::Map) {
+    mapRenderSettings.mapRotationMode = source.rotationMode;
+  } else {
+    mapRenderSettings.mapNavigationRotationMode = source.rotationMode;
+    mapRenderSettings.mapNavigationBirdsEyeEnabled = source.birdsEyeEnabled;
+    mapRenderSettings.mapNavigationBirdsEyePerspective =
+        source.birdsEyePerspective;
+    mapRenderSettings.mapNavigation3DBuildingsEnabled =
+        source.buildings3DEnabled;
+  }
+  mapRenderInstanceID = instance.id;
+  mapRenderInstanceType = static_cast<uint8_t>(instance.type);
+  mapRenderProfileSignature =
+      screen_configuration::mapProfileSignature(instance);
+}
+
+const screen_configuration_protocol::RideStatsLayout &
+currentRideStatsLayout() {
+  static const screen_configuration_protocol::RideStatsLayout defaultLayout{};
+  if (!screen_configuration::isReady())
+    return defaultLayout;
+  const auto &snapshot = screen_configuration::activeSnapshot();
+  const uint8_t index = screen_configuration::findInstanceIndex(
+      snapshot.document, activeScreenInstanceID);
+  if (index == screen_configuration::kInvalidInstanceIndex ||
+      snapshot.document.instances[index].type !=
+          screen_configuration_protocol::ScreenType::RideStats) {
+    return defaultLayout;
+  }
+  return snapshot.document.instances[index].rideStatsLayout;
+}
+
 static void tapCycleScreenEvent(lv_event_t *event);
 static void mapGuidanceOverlayTapEvent(lv_event_t *event);
+static bool sendWorldRadioRequest(
+    const world_radio_protocol::Request &request) {
+  return bleNavServer.requestWorldRadio(request);
+}
+static void cycleFromWorldRadio() { showNextMainScreen(); }
+static bool worldRadioTapCyclesScreens() {
+  return mapRenderSettings.tapToSwitchScreens != 0;
+}
+static bool worldRadioPhoneReady() {
+  return bleNavServer.canRequestWorldRadio();
+}
 static void updateMapGuidanceOverlay();
 static void revealPendingMapTileIfReady();
 
@@ -602,125 +711,69 @@ static bool currentCourseUpHeading(uint16_t &headingDegrees) {
 }
 
 static bool isMapBackedTile(uint8_t tile) {
-  return tile == MAP || tile == MAP_GUIDANCE;
+  return main_screen_registry::isMapBacked(static_cast<tileName>(tile));
 }
 
 static uint8_t normalizedEnabledScreensMask() {
-  const uint8_t mask =
-      mapRenderSettings.enabledScreensMask & DEVICE_SCREEN_SUPPORTED_MASK;
-  return mask == 0 ? DEVICE_SCREEN_SUPPORTED_MASK : mask;
-}
-
-static uint8_t deviceScreenBit(uint8_t screen) {
-  return (screen <= DEVICE_SCREEN_BATTERY_STATUS) ? (1 << screen) : 0;
-}
-
-static constexpr uint8_t DEVICE_SCREEN_CYCLE_ORDER[] = {
-    DEVICE_SCREEN_MAP_PLUS_NAVIGATION, DEVICE_SCREEN_RIDE_STATS,
-    DEVICE_SCREEN_MAP, DEVICE_SCREEN_NAVIGATION,
-    DEVICE_SCREEN_BATTERY_STATUS};
-static constexpr uint8_t DEVICE_SCREEN_COUNT =
-    sizeof(DEVICE_SCREEN_CYCLE_ORDER) / sizeof(DEVICE_SCREEN_CYCLE_ORDER[0]);
-
-static tileName tileForDeviceScreen(uint8_t screen) {
-  switch (screen) {
-  case DEVICE_SCREEN_NAVIGATION:
-    return NAV;
-  case DEVICE_SCREEN_RIDE_STATS:
-    return RIDESTATS;
-  case DEVICE_SCREEN_MAP_PLUS_NAVIGATION:
-    return MAP_GUIDANCE;
-  case DEVICE_SCREEN_BATTERY_STATUS:
-    return BATTERY_STATUS;
-  case DEVICE_SCREEN_MAP:
-  default:
-    return MAP;
-  }
-}
-
-static uint8_t deviceScreenForTile(tileName tile) {
-  switch (tile) {
-  case NAV:
-    return DEVICE_SCREEN_NAVIGATION;
-  case RIDESTATS:
-    return DEVICE_SCREEN_RIDE_STATS;
-  case MAP_GUIDANCE:
-    return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
-  case BATTERY_STATUS:
-    return DEVICE_SCREEN_BATTERY_STATUS;
-  case MAP:
-  default:
-    return DEVICE_SCREEN_MAP;
-  }
+  return main_screen_registry::normalizedMask(
+      mapRenderSettings.enabledScreensMask);
 }
 
 static bool isScreenEnabled(tileName tile) {
-  return (normalizedEnabledScreensMask() &
-          deviceScreenBit(deviceScreenForTile(tile))) != 0;
+  return main_screen_registry::isEnabled(tile,
+                                         normalizedEnabledScreensMask());
 }
 
 static uint8_t normalizedDefaultDeviceScreen() {
-  const uint8_t mask = normalizedEnabledScreensMask();
-  uint8_t defaultScreen = mapRenderSettings.defaultScreen;
-  if (defaultScreen > DEVICE_SCREEN_BATTERY_STATUS) {
-    defaultScreen = DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
-  }
-  if (mask & deviceScreenBit(defaultScreen)) {
-    return defaultScreen;
-  }
-  for (uint8_t screen : DEVICE_SCREEN_CYCLE_ORDER) {
-    if (mask & deviceScreenBit(screen)) {
-      return screen;
-    }
-  }
-  return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
+  return main_screen_registry::normalizedDefault(
+      mapRenderSettings.defaultScreen, normalizedEnabledScreensMask());
 }
 
 static tileName configuredDefaultTile() {
-  return tileForDeviceScreen(normalizedDefaultDeviceScreen());
+  return main_screen_registry::tileForDeviceScreen(normalizedDefaultDeviceScreen());
 }
 
 static tileName nextEnabledTile(tileName current) {
-  const uint8_t currentScreen = deviceScreenForTile(current);
-  uint8_t currentIndex = 0;
-  for (uint8_t index = 0; index < DEVICE_SCREEN_COUNT; index++) {
-    if (DEVICE_SCREEN_CYCLE_ORDER[index] == currentScreen) {
-      currentIndex = index;
-      break;
-    }
-  }
-  for (uint8_t offset = 1; offset <= DEVICE_SCREEN_COUNT; offset++) {
-    const uint8_t screen = DEVICE_SCREEN_CYCLE_ORDER[
-        (currentIndex + offset) % DEVICE_SCREEN_COUNT];
-    tileName candidate = tileForDeviceScreen(screen);
-    if (isScreenEnabled(candidate)) {
-      return candidate;
-    }
-  }
-  return configuredDefaultTile();
+  return main_screen_registry::nextEnabled(current,
+                                           normalizedEnabledScreensMask());
+}
+
+static tileName previousEnabledTile(tileName current) {
+  return main_screen_registry::previousEnabled(
+      current, normalizedEnabledScreensMask());
 }
 
 static bool nextEnabledMapBackedTile(tileName current, tileName &next) {
-  const uint8_t currentScreen = deviceScreenForTile(current);
-  uint8_t currentIndex = 0;
-  for (uint8_t index = 0; index < DEVICE_SCREEN_COUNT; index++) {
-    if (DEVICE_SCREEN_CYCLE_ORDER[index] == currentScreen) {
-      currentIndex = index;
-      break;
-    }
-  }
-
-  for (uint8_t offset = 1; offset <= DEVICE_SCREEN_COUNT; offset++) {
-    const uint8_t screen = DEVICE_SCREEN_CYCLE_ORDER[
-        (currentIndex + offset) % DEVICE_SCREEN_COUNT];
-    const tileName candidate = tileForDeviceScreen(screen);
-    if (isScreenEnabled(candidate) && isMapBackedTile(candidate)) {
-      next = candidate;
-      return true;
-    }
-  }
-  return false;
+  return main_screen_registry::nextEnabledMapBacked(
+      current, normalizedEnabledScreensMask(), next);
 }
+
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::Map) ==
+                  DEVICE_SCREEN_MAP);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::Navigation) ==
+                  DEVICE_SCREEN_NAVIGATION);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::RideStats) ==
+                  DEVICE_SCREEN_RIDE_STATS);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::MapPlusNavigation) ==
+                  DEVICE_SCREEN_MAP_PLUS_NAVIGATION);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::BatteryStatus) ==
+                  DEVICE_SCREEN_BATTERY_STATUS);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::WorldRadio) ==
+                  DEVICE_SCREEN_WORLD_RADIO);
+static_assert(main_screen_registry::SUPPORTED_MASK ==
+                  DEVICE_SCREEN_SUPPORTED_MASK);
+static bool configuredInstance(uint8_t index,
+                               const screen_configuration_protocol::ScreenInstance *&instance) {
+  if (!screen_configuration::isReady())
+    return false;
+  const auto &document = screen_configuration::activeSnapshot().document;
+  if (index >= document.instanceCount)
+    return false;
+  instance = &document.instances[index];
+  return true;
+}
+
+static void showScreenInstance(uint8_t index);
 
 static bool isGuidanceNavigating() {
   return routeOverlay.hasRoute() || hasCurrentNavigationData();
@@ -756,7 +809,9 @@ static void setNavigationDistanceLabel(lv_obj_t *label,
 static void applyMapRotationForTile(tileName tile) {
   if (tile == MAP_GUIDANCE) {
     const Maps::RotationMode desiredMode =
-        isGuidanceNavigating() ? Maps::ROT_COURSE_UP : Maps::ROT_NORTH_UP;
+        map_profile_protocol::guidanceCourseUp(
+            isGuidanceNavigating(), mapRenderSettings.mapNavigationRotationMode)
+            ? Maps::ROT_COURSE_UP : Maps::ROT_NORTH_UP;
     if (mapView.rotationMode != desiredMode) {
       mapView.rotationMode = desiredMode;
       if (desiredMode == Maps::ROT_NORTH_UP) {
@@ -798,11 +853,31 @@ static void prepareNextMapScreenRenderAhead(tileName current) {
   }
 
   tileName target = MAP;
-  if (!nextEnabledMapBackedTile(current, target)) {
+  uint32_t targetInstanceID = 0;
+  uint32_t targetProfileSignature = 0;
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    const uint8_t targetIndex =
+        screen_configuration::nextEnabledInstanceOfType(
+            document, activeScreenInstanceIndex,
+            screen_configuration_protocol::ScreenType::Map,
+            screen_configuration_protocol::ScreenType::MapNavigation);
+    if (targetIndex == screen_configuration::kInvalidInstanceIndex) {
+      mapRenderAheadPending = false;
+      return;
+    }
+    const auto &targetInstance = document.instances[targetIndex];
+    target = main_screen_registry::tileForDeviceScreen(static_cast<uint8_t>(targetInstance.type));
+    targetInstanceID = targetInstance.id;
+    applyMapInstanceProfile(targetInstance);
+    targetProfileSignature = mapRenderProfileSignature;
+  } else if (!nextEnabledMapBackedTile(current, target)) {
     mapRenderAheadPending = false;
     return;
   }
-  if (mapRenderAheadPending && mapRenderAheadTile == target) {
+  if (mapRenderAheadPending && mapRenderAheadTile == target &&
+      mapRenderAheadInstanceID == targetInstanceID &&
+      mapRenderAheadProfileSignature == targetProfileSignature) {
     return;
   }
 
@@ -825,8 +900,12 @@ static void prepareNextMapScreenRenderAhead(tileName current) {
   mapRenderScheduler.markSubmitted(nowMs, currentMapFix());
   mapRenderAheadPending = true;
   mapRenderAheadTile = target;
-  log_i("UI: render-ahead requested for %s screen",
-        target == MAP_GUIDANCE ? "map guidance" : "map");
+  mapRenderAheadInstanceID = targetInstanceID;
+  mapRenderAheadProfileSignature = targetProfileSignature;
+  log_i("UI: render-ahead requested instance=%lu type=%s profile=%lu",
+        static_cast<unsigned long>(targetInstanceID),
+        target == MAP_GUIDANCE ? "map guidance" : "map",
+        static_cast<unsigned long>(mapRenderProfileSignature));
 }
 
 static uint16_t mapGuidanceOverlayHeight() {
@@ -1307,6 +1386,12 @@ void updateMainScreen(lv_timer_t *t) {
       }
       break;
     }
+
+    case WORLD_RADIO:
+      if constexpr (world_radio_config::ENABLED) {
+        updateWorldRadioScr();
+      }
+      break;
 
     case SATTRACK:
       if (uiChangeTracker.take(ui_update_policy::Source::Gps)) {
@@ -1911,6 +1996,7 @@ static void createMapGuidanceOverlay() {
 
 static void showMainTile(tileName tile) {
   if (!mapTile || !navTile || !rideStatsTile || !batteryStatusTile ||
+      (world_radio_config::ENABLED && !worldRadioTile) ||
       !mapGuidanceOverlay) {
     return;
   }
@@ -1932,7 +2018,10 @@ static void showMainTile(tileName tile) {
     mapTileTransition.begin();
     mapTileTransitionStartedMs = millis();
     mapTileTransitionUsedRenderAhead =
-        mapRenderAheadPending && mapRenderAheadTile == tile;
+        mapRenderAheadPending && mapRenderAheadTile == tile &&
+        (!screen_configuration::isReady() ||
+         (mapRenderAheadInstanceID == activeScreenInstanceID &&
+          mapRenderAheadProfileSignature == mapRenderProfileSignature));
     zoom = currentMapStyleSettings().zoomLevel;
     if (tile == MAP_GUIDANCE) {
       mapView.followGps = true;
@@ -1941,7 +2030,10 @@ static void showMainTile(tileName tile) {
 
     bool framePublished = false;
     bool renderPending = false;
-    if (mapRenderAheadPending && mapRenderAheadTile == tile) {
+    if (mapRenderAheadPending && mapRenderAheadTile == tile &&
+        (!screen_configuration::isReady() ||
+         (mapRenderAheadInstanceID == activeScreenInstanceID &&
+          mapRenderAheadProfileSignature == mapRenderProfileSignature))) {
       const uint32_t nowMs = millis();
       framePublished = mapView.serviceRenderPipeline(nowMs);
       if (framePublished) {
@@ -1973,6 +2065,9 @@ static void showMainTile(tileName tile) {
     lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+    if (worldRadioTile != nullptr) {
+      lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   }
 
@@ -2014,6 +2109,13 @@ static void showMainTile(tileName tile) {
             ui_update_policy::Source::DeviceBattery));
     log_i("UI: switched to battery status screen");
     break;
+  case WORLD_RADIO:
+    if constexpr (world_radio_config::ENABLED) {
+      lv_obj_clear_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+      activateWorldRadioScr();
+      log_i("UI: switched to world radio screen");
+    }
+    break;
   case MAP:
   default:
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
@@ -2026,6 +2128,25 @@ static void showMainTile(tileName tile) {
   }
 }
 
+static void showScreenInstance(uint8_t index) {
+  const screen_configuration_protocol::ScreenInstance *instance = nullptr;
+  if (!configuredInstance(index, instance) || instance == nullptr ||
+      !instance->enabled) {
+    return;
+  }
+  activeScreenInstanceIndex = index;
+  activeScreenInstanceID = instance->id;
+  activeScreenPayloadSignature =
+      screen_configuration::screenPayloadSignature(*instance);
+  applyMapInstanceProfile(*instance);
+  const tileName tile =
+      main_screen_registry::tileForDeviceScreen(static_cast<uint8_t>(instance->type));
+  log_i("UI: switching screen instance=%lu type=%u index=%u",
+        static_cast<unsigned long>(instance->id),
+        static_cast<unsigned>(instance->type), index);
+  showMainTile(tile);
+}
+
 static void revealPendingMapTileIfReady() {
   if (!mapView.hasPublishedMapFrame() ||
       !mapTileTransition.canReveal(mapView.isPosMoved, mapView.redrawMap)) {
@@ -2034,6 +2155,9 @@ static void revealPendingMapTileIfReady() {
 
   lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+  if (worldRadioTile != nullptr) {
+    lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+  }
   lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
 
@@ -2056,21 +2180,77 @@ static void revealPendingMapTileIfReady() {
 }
 
 void showNextMainScreen() {
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    showScreenInstance(screen_configuration::nextEnabledInstanceIndex(
+        document, activeScreenInstanceIndex));
+    return;
+  }
   showMainTile(nextEnabledTile((tileName)activeTile));
 }
 
-void showConfiguredDefaultMainScreen() { showMainTile(configuredDefaultTile()); }
+void showPreviousMainScreen() {
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    showScreenInstance(screen_configuration::previousEnabledInstanceIndex(
+        document, activeScreenInstanceIndex));
+    return;
+  }
+  showMainTile(previousEnabledTile((tileName)activeTile));
+}
+
+void showConfiguredDefaultMainScreen() {
+  if (screen_configuration::isReady()) {
+    showScreenInstance(screen_configuration::defaultInstanceIndex(
+        screen_configuration::activeSnapshot().document));
+    return;
+  }
+  showMainTile(configuredDefaultTile());
+}
 
 void applyDeviceScreenSettings() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
-      !batteryStatusTile || !mapGuidanceOverlay) {
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
     return;
   }
 
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    const uint8_t matchingIndex = screen_configuration::findInstanceIndex(
+        document, activeScreenInstanceID);
+    if (matchingIndex == screen_configuration::kInvalidInstanceIndex ||
+        !document.instances[matchingIndex].enabled) {
+      showScreenInstance(screen_configuration::defaultInstanceIndex(document));
+    } else {
+      const auto &matching = document.instances[matchingIndex];
+      activeScreenInstanceIndex = matchingIndex;
+      // Reordering, renaming, or changing only the default screen must not
+      // interrupt the screen currently being ridden. Rebind only when its
+      // render-affecting payload changed.
+      if (activeScreenPayloadSignature !=
+          screen_configuration::screenPayloadSignature(matching)) {
+        showScreenInstance(matchingIndex);
+      } else if (isMapBackedTile(static_cast<tileName>(activeTile))) {
+        // Legacy scalar handling temporarily uses the shared settings. Restore
+        // the visible instance even when only a different instance changed.
+        applyMapInstanceProfile(matching);
+        zoom = currentMapStyleSettings().zoomLevel;
+        applyMapRotationForTile(static_cast<tileName>(activeTile));
+      } else if (!isMapBackedTile(static_cast<tileName>(activeTile))) {
+        // The visible payload is unchanged, but reordering/enabling another
+        // instance can change which map should be rendered ahead.
+        prepareNextMapScreenRenderAhead(static_cast<tileName>(activeTile));
+      }
+    }
+    return;
+  }
   if (!isScreenEnabled((tileName)activeTile)) {
     showMainTile(configuredDefaultTile());
   }
 }
+
+void applyDeviceScreenConfiguration() { applyDeviceScreenSettings(); }
 
 static void tapCycleScreenEvent(lv_event_t *event) {
   if (!mapRenderSettings.tapToSwitchScreens) {
@@ -2091,11 +2271,22 @@ static void mapGuidanceOverlayTapEvent(lv_event_t *event) {
 
 void toggleNavigationScreen() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
-      !batteryStatusTile || !mapGuidanceOverlay) {
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
     return;
   }
 
   showNextMainScreen();
+}
+
+void togglePreviousNavigationScreen() {
+  if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
+    return;
+  }
+
+  showPreviousMainScreen();
 }
 
 /**
@@ -2162,6 +2353,21 @@ void createMainScr() {
   lv_obj_add_event_cb(rideStatsTile, tapCycleScreenEvent, LV_EVENT_CLICKED,
                       NULL);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+
+  if constexpr (world_radio_config::ENABLED) {
+    worldRadioTile = lv_obj_create(mainScreen);
+    lv_obj_remove_style_all(worldRadioTile);
+    lv_obj_set_size(worldRadioTile, TFT_WIDTH, TFT_HEIGHT);
+    lv_obj_set_pos(worldRadioTile, 0, 0);
+    lv_obj_clear_flag(worldRadioTile, LV_OBJ_FLAG_SCROLLABLE);
+    WorldRadioScreenCallbacks worldRadioCallbacks{};
+    worldRadioCallbacks.sendRequest = sendWorldRadioRequest;
+    worldRadioCallbacks.cycleScreen = cycleFromWorldRadio;
+    worldRadioCallbacks.tapToSwitchScreens = worldRadioTapCyclesScreens;
+    worldRadioCallbacks.phoneReady = worldRadioPhoneReady;
+    worldRadioScr(worldRadioTile, worldRadioCallbacks);
+    lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+  }
 
   batteryStatusTile = lv_obj_create(mainScreen);
   lv_obj_remove_style_all(batteryStatusTile);

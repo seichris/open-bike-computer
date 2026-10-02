@@ -8,6 +8,7 @@
 import CoreLocation
 import Combine
 import Foundation
+import Darwin
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -23,6 +24,12 @@ private enum OfflineMapDefaults {
     nonisolated static let centerLatitudeKey = "offlineMap.centerLatitude"
     nonisolated static let centerLongitudeKey = "offlineMap.centerLongitude"
     nonisolated static let sideLengthKey = "offlineMap.sideLengthKm"
+    nonisolated static let topographicMapsEnabledKey =
+        "offlineMap.topographicMapsEnabled.v1"
+    nonisolated static let includeTopographyInNewMapsKey =
+        "offlineMap.includeTopographyInNewMaps.v1"
+    nonisolated static let activeTopographyAssociationKey =
+        "offlineMap.activeTopographyAssociation.v1"
     nonisolated static let packDisplayNamesKey = "offlineMap.packDisplayNames"
     nonisolated static let lastTransferMapIdKey = "offlineMap.lastTransfer.mapId"
     nonisolated static let lastTransferSessionIdKey = "offlineMap.lastTransfer.sessionId"
@@ -742,6 +749,21 @@ nonisolated enum OfflineMapServerIdentity {
     }
 }
 
+nonisolated enum SavedMapReaderRequirementsMigrationPolicy {
+    static func shouldDeriveFromSignedManifest(
+        generationServerURLString: String?,
+        isDevelopmentBuild: Bool
+    ) -> Bool {
+        guard isDevelopmentBuild, let generationServerURLString else {
+            return false
+        }
+        return OfflineMapServerIdentity.normalized(generationServerURLString) ==
+            OfflineMapServerIdentity.normalized(
+                OfflineMapServiceConfig.developmentServerURLString
+            )
+    }
+}
+
 nonisolated enum MapActivationDecision: Equatable {
     case pending(String)
     case installed
@@ -1074,6 +1096,7 @@ nonisolated enum OfflineMapPollingRetryPolicy {
 
 nonisolated enum OfflineMapOnboardingStep: Equatable {
     case welcome
+    case location
     case download
 }
 
@@ -1085,13 +1108,41 @@ nonisolated enum OfflineMapOnboardingPresentation: Equatable {
 nonisolated enum OfflineMapOnboardingPolicy {
     static func presentation(
         hasCompletedFirstRun: Bool,
+        hasCompletedLocationStep: Bool,
+        needsLocationAuthorization: Bool,
         confirmedDeviceMapMissing: Bool
     ) -> OfflineMapOnboardingPresentation {
         if !hasCompletedFirstRun {
             return .step(.welcome)
         }
 
+        if !hasCompletedLocationStep && needsLocationAuthorization {
+            return .step(.location)
+        }
+
         return confirmedDeviceMapMissing ? .step(.download) : .hidden
+    }
+
+    static func visibleStep(
+        presentation: OfflineMapOnboardingPresentation,
+        isStatePrepared: Bool,
+        isDismissed: Bool,
+        isMapAreaSelectionActive: Bool,
+        isOfflineMapOperationBlocking: Bool
+    ) -> OfflineMapOnboardingStep? {
+        guard isStatePrepared,
+              !isDismissed,
+              !isMapAreaSelectionActive,
+              case .step(let step) = presentation else {
+            return nil
+        }
+
+        switch step {
+        case .welcome, .location:
+            return step
+        case .download:
+            return isOfflineMapOperationBlocking ? nil : step
+        }
     }
 
     static func shouldOfferDownload(
@@ -1099,13 +1150,18 @@ nonisolated enum OfflineMapOnboardingPolicy {
         isNavigationReady: Bool,
         hasSDCard: Bool?,
         activeMapId: String,
+        mapStateKnown: Bool,
         mapFoundForCurrentLocation: Bool?
     ) -> Bool {
-        isLocationAuthorized &&
-            isNavigationReady &&
-            hasSDCard == true &&
-            activeMapId.isEmpty &&
-            mapFoundForCurrentLocation == false
+        guard isLocationAuthorized,
+              isNavigationReady,
+              hasSDCard == true else {
+            return false
+        }
+        if activeMapId.isEmpty {
+            return true
+        }
+        return mapStateKnown && mapFoundForCurrentLocation == false
     }
 }
 
@@ -1539,13 +1595,16 @@ nonisolated struct SavedMapArtifactMetadata: Codable, Equatable {
     var sourceShareID: String? = nil
     var catalogSyncState: String? = nil
     var readerRequirements: OfflineMapReaderRequirements? = nil
+    var catalogContentReceipt: String? = nil
+    var topography: VerifiedBikeMapTopography? = nil
 }
 
 nonisolated enum SavedMapRendererCompatibilityPolicy {
     static func isCompatible(
         rendererFormatVersion: Int?,
         supportsStreetLabels: Bool,
-        supports3DBuildings: Bool
+        supports3DBuildings: Bool,
+        supportsTopographicContours: Bool
     ) -> Bool {
         switch rendererFormatVersion {
         case nil, 1:
@@ -1554,6 +1613,9 @@ nonisolated enum SavedMapRendererCompatibilityPolicy {
             return supportsStreetLabels
         case 3:
             return supports3DBuildings
+        case 4:
+            return supportsStreetLabels && supports3DBuildings &&
+                supportsTopographicContours
         default:
             return false
         }
@@ -1599,6 +1661,171 @@ typealias SavedMapArtifactMetadataSaveOperation = @MainActor (
     SavedMapArtifactMetadata,
     URL
 ) throws -> Void
+
+// A replacement is a two-file transaction. Catch-based rollback alone cannot
+// survive process termination between the artifact and metadata renames.
+nonisolated enum SavedMapStorageDirectory {
+    static func prepare(directory: URL, legacy: URL) throws -> URL {
+        let manager = FileManager.default
+        if manager.fileExists(atPath: legacy.path) {
+            try SavedMapReplacementJournal.recover(in: legacy)
+            if !manager.fileExists(atPath: directory.path) {
+                try manager.moveItem(at: legacy, to: directory)
+            } else {
+                // An older app may have populated Caches after a downgrade.
+                // Merge missing pairs; never overwrite a current saved artifact.
+                try mergeMissingPairs(from: legacy, to: directory)
+                let recovery = directory.deletingLastPathComponent()
+                    .appendingPathComponent("OfflineMapLegacyRecovery", isDirectory: true)
+                try manager.createDirectory(at: recovery, withIntermediateDirectories: true)
+                try manager.moveItem(at: legacy, to: recovery.appendingPathComponent(UUID().uuidString))
+                var recoveryURL = recovery
+                var excluded = URLResourceValues()
+                excluded.isExcludedFromBackup = true
+                try recoveryURL.setResourceValues(excluded)
+            }
+        }
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        var directory = directory
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try directory.setResourceValues(values)
+        try SavedMapReplacementJournal.recover(in: directory)
+        return directory
+    }
+
+    private static func mergeMissingPairs(from legacy: URL, to directory: URL) throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+        for artifact in try manager.contentsOfDirectory(at: legacy, includingPropertiesForKeys: nil) {
+            let destination = directory.appendingPathComponent(artifact.lastPathComponent)
+            if artifact.lastPathComponent == "Compatibility" {
+                try mergeMissingPairs(from: artifact, to: destination)
+            } else if ["zip", "bmap"].contains(artifact.pathExtension),
+                      !manager.fileExists(atPath: destination.path) {
+                let metadata = SavedMapArtifactMetadataStore.metadataURL(for: artifact)
+                let newMetadata = SavedMapArtifactMetadataStore.metadataURL(for: destination)
+                if manager.fileExists(atPath: metadata.path) {
+                    if manager.fileExists(atPath: newMetadata.path) { try manager.removeItem(at: newMetadata) }
+                    try manager.moveItem(at: metadata, to: newMetadata)
+                    try SavedMapReplacementJournal.sync(directory)
+                }
+                try manager.moveItem(at: artifact, to: destination)
+                try SavedMapReplacementJournal.sync(directory)
+                try SavedMapReplacementJournal.sync(legacy)
+            }
+        }
+    }
+}
+
+nonisolated struct SavedMapReplacementJournal: Codable {
+    let filename: String
+    let id: UUID
+    let hadArtifact: Bool
+    let hadMetadata: Bool
+    var committed: Bool
+
+    func artifact(in directory: URL) -> URL { directory.appendingPathComponent(filename) }
+    func backup(in directory: URL) -> URL {
+        directory.appendingPathComponent(".\(filename).\(id.uuidString).backup")
+    }
+    func url(in directory: URL) -> URL {
+        directory.appendingPathComponent(".\(filename).replacement.json")
+    }
+
+    static func sync(_ url: URL) throws {
+        let descriptor = Darwin.open(url.path, O_RDONLY)
+        guard descriptor >= 0 else { throw POSIXError(.EIO) }
+        defer { Darwin.close(descriptor) }
+        guard Darwin.fsync(descriptor) == 0 else { throw POSIXError(.EIO) }
+    }
+
+    func save(in directory: URL) throws {
+        try JSONEncoder().encode(self).write(to: url(in: directory), options: .atomic)
+        try Self.sync(url(in: directory))
+        try Self.sync(directory)
+    }
+
+    static func begin(at destination: URL) throws -> Self {
+        let manager = FileManager.default
+        let value = Self(
+            filename: destination.lastPathComponent, id: UUID(),
+            hadArtifact: manager.fileExists(atPath: destination.path),
+            hadMetadata: manager.fileExists(atPath: SavedMapArtifactMetadataStore.metadataURL(for: destination).path),
+            committed: false
+        )
+        try value.save(in: destination.deletingLastPathComponent())
+        return value
+    }
+
+    func finish(in directory: URL) throws {
+        let manager = FileManager.default
+        let destination = artifact(in: directory)
+        let old = backup(in: directory)
+        let pairs = [
+            (destination, old, hadArtifact),
+            (SavedMapArtifactMetadataStore.metadataURL(for: destination),
+             SavedMapArtifactMetadataStore.metadataURL(for: old), hadMetadata)
+        ]
+        for (current, previous, existed) in pairs {
+            if manager.fileExists(atPath: previous.path) {
+                if committed {
+                    try manager.removeItem(at: previous)
+                } else {
+                    if manager.fileExists(atPath: current.path) { try manager.removeItem(at: current) }
+                    try manager.moveItem(at: previous, to: current)
+                }
+            } else if !committed && !existed && manager.fileExists(atPath: current.path) {
+                try manager.removeItem(at: current)
+            }
+        }
+        try Self.sync(directory)
+        try manager.removeItem(at: url(in: directory))
+        try Self.sync(directory)
+    }
+
+    static func recover(in directory: URL) throws {
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        )
+        for file in files where file.lastPathComponent.hasSuffix(".replacement.json") {
+            let attributes = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            guard attributes.isRegularFile == true, attributes.isSymbolicLink != true,
+                  (attributes.fileSize ?? Int.max) <= 4096 else { throw POSIXError(.EINVAL) }
+            let value = try JSONDecoder().decode(Self.self, from: Data(contentsOf: file))
+            guard !value.filename.isEmpty, !value.filename.hasPrefix("."),
+                  !value.filename.contains("/"), !value.filename.contains("\\"),
+                  ["zip", "bmap"].contains(URL(fileURLWithPath: value.filename).pathExtension),
+                  value.url(in: directory).standardizedFileURL == file.standardizedFileURL else {
+                throw POSIXError(.EINVAL)
+            }
+            try value.finish(in: directory)
+        }
+        // Older releases left UUID backups without a journal. Recover only an
+        // unambiguous missing artifact; preserve conflicting copies for repair.
+        let backups = files.filter { $0.lastPathComponent.hasSuffix(".backup") }
+        for old in backups {
+            let name = old.lastPathComponent
+            guard name.hasPrefix("."), name.count > 45 else { continue }
+            let suffix = String(name.dropLast(7).suffix(36))
+            guard UUID(uuidString: suffix) != nil else { continue }
+            let filename = String(name.dropFirst().dropLast(44))
+            let destination = directory.appendingPathComponent(filename)
+            guard ["zip", "bmap"].contains(destination.pathExtension),
+                  !FileManager.default.fileExists(atPath: destination.path),
+                  backups.filter({ $0.lastPathComponent.hasPrefix(".\(filename).") }).count == 1 else { continue }
+            // Publish metadata first so a restart can safely repeat artifact recovery.
+            let oldMetadata = SavedMapArtifactMetadataStore.metadataURL(for: old)
+            let metadata = SavedMapArtifactMetadataStore.metadataURL(for: destination)
+            if FileManager.default.fileExists(atPath: oldMetadata.path) {
+                if FileManager.default.fileExists(atPath: metadata.path) { try FileManager.default.removeItem(at: metadata) }
+                try FileManager.default.moveItem(at: oldMetadata, to: metadata)
+            }
+            try FileManager.default.moveItem(at: old, to: destination)
+            try Self.sync(directory)
+        }
+    }
+}
 
 nonisolated enum SavedMapStreamMigrationFallback {
     static func shouldUseLegacyArtifact(
@@ -1800,7 +2027,12 @@ final class OfflineMapManager: ObservableObject {
     ) async throws -> URL
 
     @Published var serverURLString: String {
-        didSet { defaults.set(serverURLString, forKey: OfflineMapDefaults.serverURLKey) }
+        didSet {
+            defaults.set(serverURLString, forKey: OfflineMapDefaults.serverURLKey)
+            if !canRequestTopographicMap {
+                includeTopographyInNewMaps = false
+            }
+        }
     }
     @Published var centerLatitude: String {
         didSet { defaults.set(centerLatitude, forKey: OfflineMapDefaults.centerLatitudeKey) }
@@ -1810,6 +2042,29 @@ final class OfflineMapManager: ObservableObject {
     }
     @Published var sideLengthKm: String {
         didSet { defaults.set(sideLengthKm, forKey: OfflineMapDefaults.sideLengthKey) }
+    }
+    @Published var topographicMapsEnabled: Bool {
+        didSet {
+            defaults.set(
+                topographicMapsEnabled,
+                forKey: OfflineMapDefaults.topographicMapsEnabledKey
+            )
+#if canImport(UIKit) && canImport(MapKit)
+            reloadTopographyOverlay()
+#endif
+        }
+    }
+    @Published var includeTopographyInNewMaps: Bool {
+        didSet {
+            defaults.set(
+                includeTopographyInNewMaps,
+                forKey: OfflineMapDefaults.includeTopographyInNewMapsKey
+            )
+        }
+    }
+    var canRequestTopographicMap: Bool {
+        serverURLString == OfflineMapServiceConfig.developmentServerURLString ||
+            serverURLString == OfflineMapServiceConfig.productionServerURLString
     }
     @Published private(set) var currentJob: OfflineMapJob?
     @Published private(set) var downloadURL: URL?
@@ -1831,11 +2086,17 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var activationProgress: MapActivationProgressPresentation?
     @Published private(set) var lastTransferMapId: String
     @Published private(set) var lastTransferOutcome: String
+    @Published private(set) var lastTransferObservedIdleOnAnotherMap = false
     @Published private(set) var catalogMaps: [OfflineMapCatalogMap] = []
     @Published private(set) var catalogShares: [OfflineMapCatalogShare] = []
     @Published private(set) var libraryLinkCode: OfflineMapLibraryLinkCode?
     @Published private(set) var pendingSharePreview: OfflineMapSharePreview?
     @Published private(set) var createdShareURL: URL?
+#if canImport(UIKit) && canImport(MapKit)
+    @Published private(set) var topographyOverlay: MKTileOverlay?
+    @Published private(set) var topographyOverlayStatus =
+        "Download a topographic map to show offline contours."
+#endif
     @Published private var pendingCatalogAliases: [
         String: OfflineMapCatalogPendingAlias
     ]
@@ -1855,6 +2116,10 @@ final class OfflineMapManager: ObservableObject {
             isServerRecoveryCheckPending
     }
 
+    var hasTerminalMapJobFailure: Bool {
+        ["failed", "expired", "cancelled"].contains(currentJob?.status ?? "")
+    }
+
     var hasPendingDeviceActivation: Bool {
         lastTransferOutcome == "unconfirmed"
     }
@@ -1867,9 +2132,13 @@ final class OfflineMapManager: ObservableObject {
     }
 
     var hasDownloadedPendingDeviceInstall: Bool {
-        guard OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults),
-              let activeJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults),
-              OfflineMapJobPersistence.downloadedJobId(defaults: defaults) == activeJobId,
+        OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults) &&
+            hasLocallySavedPendingMap
+    }
+
+    var hasLocallySavedPendingMap: Bool {
+        guard let jobId = OfflineMapJobPersistence.activeJobId(defaults: defaults),
+              OfflineMapJobPersistence.downloadedJobId(defaults: defaults) == jobId,
               let mapId = OfflineMapJobPersistence.downloadedMapId(defaults: defaults),
               let cachedURL = try? cachedPackURL(mapId: mapId) else {
             return false
@@ -1905,6 +2174,10 @@ final class OfflineMapManager: ObservableObject {
     private var activationReconciliationTask: Task<Void, Never>?
     private var backgroundUploadObserver: AnyCancellable?
     private var activityCounter = OfflineMapActivityCounter()
+#if canImport(UIKit) && canImport(MapKit)
+    private var topographyOverlayTask: Task<Void, Never>?
+    private var topographyOverlayGeneration = UUID()
+#endif
 #if canImport(UIKit)
     @Published private var packPreviewImages: [String: UIImage] = [:]
     @Published private var detailPreviewImages: [String: UIImage] = [:]
@@ -1928,7 +2201,7 @@ final class OfflineMapManager: ObservableObject {
         catalogHost: String? = OfflineMapCatalogConfig.catalogHost,
         catalogClient: OfflineMapCatalogClient? = nil,
         packDownload: @escaping PackDownloadOperation = { url, constraints, onProgress, onByteProgress in
-            try await OfflineMapPackDownloader.download(
+            try await DurableMapDownloadCoordinator.shared.download(
                 from: url,
                 constraints: constraints,
                 onProgress: onProgress,
@@ -2011,6 +2284,14 @@ final class OfflineMapManager: ObservableObject {
         self.centerLatitude = defaults.string(forKey: OfflineMapDefaults.centerLatitudeKey) ?? "35.16755"
         self.centerLongitude = defaults.string(forKey: OfflineMapDefaults.centerLongitudeKey) ?? "136.89451"
         self.sideLengthKm = defaults.string(forKey: OfflineMapDefaults.sideLengthKey) ?? "25"
+        self.topographicMapsEnabled = defaults.object(
+            forKey: OfflineMapDefaults.topographicMapsEnabledKey
+        ) as? Bool ?? false
+        self.includeTopographyInNewMaps = (defaults.object(
+            forKey: OfflineMapDefaults.includeTopographyInNewMapsKey
+        ) as? Bool ?? false) &&
+            (resolvedServerURL == OfflineMapServiceConfig.developmentServerURLString ||
+             resolvedServerURL == OfflineMapServiceConfig.productionServerURLString)
         self.lastTransferMapId = defaults.string(forKey: OfflineMapDefaults.lastTransferMapIdKey) ?? ""
         let restoredTransferOutcome = defaults.string(
             forKey: OfflineMapDefaults.lastTransferOutcomeKey
@@ -2065,14 +2346,28 @@ final class OfflineMapManager: ObservableObject {
         selectedMapBounds = bounds
     }
 
-    func createJobFromSelectedMapArea() {
+    func createJobFromSelectedMapArea(bleManager: BLEManager) {
         guard canStartNewMapJob() else { return }
+        guard !includeTopographyInNewMaps || canRequestTopographicMap else {
+            errorMessage = "This map server does not support topographic map creation."
+            return
+        }
+        guard !includeTopographyInNewMaps ||
+                !bleManager.hasReceivedDeviceCapabilities ||
+                bleManager.supportsTopographicContours else {
+            errorMessage = "Update the Bike Computer firmware before creating a topographic map."
+            return
+        }
         guard let selectedMapBounds else {
             errorMessage = OfflineMapPlatformError.invalidResponse.localizedDescription
             return
         }
         isMapAreaSelectionActive = false
-        createJobAndDownload(request: .customBBox(selectedMapBounds))
+        createJobAndDownload(
+            request: OfflineMapJobRequest
+                .customBBox(selectedMapBounds)
+                .withTopography(includeTopographyInNewMaps)
+        )
     }
 
     func installCurrentLocationMap(location: CLLocation, bleManager: BLEManager) {
@@ -2118,6 +2413,17 @@ final class OfflineMapManager: ObservableObject {
         bleManager: BLEManager
     ) {
         guard canStartNewMapJob() else { return }
+        guard !includeTopographyInNewMaps || canRequestTopographicMap else {
+            errorMessage = "This map server does not support topographic map creation."
+            return
+        }
+        guard !includeTopographyInNewMaps ||
+                bleManager.supportsTopographicContours else {
+            errorMessage = bleManager.hasReceivedDeviceCapabilities
+                ? "Update the Bike Computer firmware to install topographic maps."
+                : "Connect to the Bike Computer to check topographic map support."
+            return
+        }
 
         startMapJobTask { manager in
             var client = try manager.makeClient()
@@ -2130,6 +2436,7 @@ final class OfflineMapManager: ObservableObject {
             }
             let request = OfflineMapJobRequest
                 .customBBox(bounds)
+                .withTopography(manager.includeTopographyInNewMaps)
                 .forDevice(
                     firmwareVersion: bleManager.firmwareVersion
                 )
@@ -2164,73 +2471,56 @@ final class OfflineMapManager: ObservableObject {
         guard mapJobTask == nil, !isBusy else {
             return
         }
-        let persistedJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults)
-        let persistedInstallIntent = OfflineMapJobPersistence.shouldInstallOnDevice(defaults: defaults)
-        let persistedServerURL = OfflineMapJobPersistence.serverURLString(defaults: defaults)
-        if persistedJobId == nil {
+        if OfflineMapJobPersistence.activeJobId(defaults: defaults) == nil {
             isServerRecoveryCheckPending = true
         }
-
         startMapJobTask { manager in
-            if let persistedJobId,
-               try await manager.finishDownloadedRecoveredJobIfAvailable(
-                    jobId: persistedJobId,
-                    installOnDevice: persistedInstallIntent,
-                    bleManager: bleManager
-               ) {
-                return
-            }
-            let recoveryServerURL = manager.recoveryServerURL(
-                persistedServerURL: persistedServerURL
-            )
-            var client = try manager.makeClient(serverURLString: recoveryServerURL)
-            client = try await manager.ensureRegisteredInstallationWithRetry(
-                client: client
-            )
-            var jobId = persistedJobId
-            var shouldInstallOnDevice = persistedInstallIntent
+            try await manager.recoverPendingMapJob(bleManager: bleManager)
+        }
+    }
 
-            if jobId == nil {
-                manager.statusMessage = "checking for server maps"
-                let jobs = try await manager.listJobsWithRetry(client: client)
-                if manager.consumeForgottenDiscovery(
-                    jobs: jobs,
-                    serverURLString: recoveryServerURL,
-                    clientInstallationId: client.clientInstallationId
-                ) {
-                    manager.isServerRecoveryCheckPending = false
-                    manager.statusMessage = ""
-                    return
-                }
-                guard let recovered = manager.selectOwnedRecoverableJob(
-                    from: jobs,
-                    clientInstallationId: client.clientInstallationId
-                ) else {
-                    manager.isServerRecoveryCheckPending = false
-                    manager.statusMessage = ""
-                    return
-                }
-                manager.adoptRecoveredJob(recovered)
-                jobId = recovered.jobId
-                shouldInstallOnDevice = recovered.installOnDevice == true
-                manager.persistCurrentJob(installOnDevice: shouldInstallOnDevice)
-                manager.isServerRecoveryCheckPending = false
-            }
+    func retryPendingMapJob(bleManager: BLEManager? = nil) {
+        guard hasPendingMapJob, !hasTerminalMapJobFailure else { return }
+        guard mapJobTask != nil || !isBusy else { return }
+        syncDownloadedMapInventoryIfNeeded()
+        syncCatalogLibraryIfNeeded()
 
-            guard let jobId else { return }
-            try await manager.finishRecoveredJob(
-                jobId: jobId,
-                installOnDevice: shouldInstallOnDevice,
-                client: client,
-                bleManager: bleManager
-            )
+        let previousTask = mapJobTask
+        previousTask?.cancel()
+        let taskID = UUID()
+        mapJobTaskID = taskID
+        isMapJobProcessing = true
+        mapJobTask = Task { [weak self] in
+            if let previousTask {
+                await previousTask.value
+            }
+            guard let self, mapJobTaskID == taskID else { return }
+
+            downloadURL = nil
+            downloadProgress = 0
+            downloadByteProgress = nil
+            errorMessage = nil
+            statusMessage = currentJob?.mapId == nil
+                ? "resuming map preparation"
+                : "retrying map download"
+
+            await runBusy {
+                try await self.recoverPendingMapJob(bleManager: bleManager)
+            }
+            if mapJobTaskID == taskID {
+                mapJobTask = nil
+                mapJobTaskID = nil
+                isMapJobProcessing = false
+            }
         }
     }
 
     func pausePendingMapJob() {
         guard mapJobTask != nil else { return }
         mapJobTask?.cancel()
-        statusMessage = "map preparation paused"
+        statusMessage = currentJob?.mapId == nil
+            ? "map preparation paused"
+            : "map download paused"
     }
 
     func forgetPendingMapJob() {
@@ -2254,6 +2544,11 @@ final class OfflineMapManager: ObservableObject {
         transferProgress = 0
         statusMessage = "pending map forgotten"
         errorMessage = nil
+    }
+
+    func discardPendingMapAndBeginSelection() {
+        forgetPendingMapJob()
+        beginMapAreaSelection()
     }
 
     func refreshJob() {
@@ -2356,11 +2651,13 @@ final class OfflineMapManager: ObservableObject {
             candidateArtifactFilename: packURL.lastPathComponent,
             lastDeviceState: metadata?.lastDeviceState,
             backgroundUploadSucceeded: backgroundUploadSucceeded,
+            observedIdleOnAnotherMap: lastTransferObservedIdleOnAnotherMap,
             statusMessage: statusMessage
         )
     }
 
     func isAwaitingMapActivationConfirmation(_ packURL: URL) -> Bool {
+        guard !isPausedMapUpload(packURL) else { return false }
         let candidateMapID = savedMapID(for: packURL)
         guard lastTransferOutcome == "unconfirmed",
               lastTransferMapId == candidateMapID,
@@ -2408,6 +2705,7 @@ final class OfflineMapManager: ObservableObject {
     func deleteCachedPack(at packURL: URL) {
         do {
             let mapID = savedMapID(for: packURL)
+            let metadata = SavedMapArtifactMetadataStore.load(for: packURL)
             let deletesLastTransferArtifact = defaults.string(
                 forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey
             ) == packURL.lastPathComponent
@@ -2419,6 +2717,7 @@ final class OfflineMapManager: ObservableObject {
             }
             invalidateCachedPreview(for: packURL)
             try SavedMapArtifactMetadataStore.delete(for: packURL)
+            try deleteTopographyCompanions(matching: metadata)
             try deleteCompatibilityArtifacts(mapID: mapID)
             packDisplayNames.removeValue(forKey: packURL.lastPathComponent)
             persistPackDisplayNames()
@@ -2462,7 +2761,8 @@ final class OfflineMapManager: ObservableObject {
     }
 
     func savedMapListItems(
-        activeDeviceMap: DeviceActiveMapDescriptor?
+        activeDeviceMap: DeviceActiveMapDescriptor?,
+        scope: SavedMapListScope = .savedMaps
     ) -> [SavedMapListItem] {
         var remainingRecords = cachedMapRecords
         var remainingCatalogMaps = catalogMaps
@@ -2559,7 +2859,10 @@ final class OfflineMapManager: ObservableObject {
                 catalogMap: map
             )
         })
-        return items
+        let channel = OfflineMapCatalogConfig.channel(
+            generationServerURLString: serverURLString
+        )
+        return items.filter { scope.includes($0.catalogMap, channel: channel) }
     }
 
 #if canImport(UIKit)
@@ -3153,6 +3456,7 @@ final class OfflineMapManager: ObservableObject {
         })
         return OfflineMapCatalogAvailabilityPolicy.localArtifactNeedsRefresh(
             localArtifactSHA256s: localArtifactSHA256s,
+            localPrimaryArtifact: metadata?.primaryArtifact,
             map: map,
             channel: OfflineMapCatalogConfig.channel(
                 generationServerURLString: serverURLString
@@ -3433,6 +3737,23 @@ final class OfflineMapManager: ObservableObject {
               ) else {
             throw OfflineMapCatalogError.missingCompatibleArtifact
         }
+        let expectedCompanion = OfflineMapTopographyCompanionPolicy
+            .compatibleCompanion(
+                for: map,
+                deliveryTier: grant.artifact.deliveryTier
+            )
+        if map.rendererFormatVersion == 4 {
+            guard let expectedCompanion,
+                  let grantedCompanion = grant.companion,
+                  grantedCompanion.artifact.artifactId ==
+                    expectedCompanion.artifactId,
+                  grantedCompanion.artifact.companionRequirements ==
+                    expectedCompanion.companionRequirements else {
+                throw OfflineMapCatalogError.missingCompatibleArtifact
+            }
+        } else if grant.companion != nil {
+            throw OfflineMapCatalogError.invalidResponse
+        }
         downloadURL = grant.downloadURL
         statusMessage = "downloading shared map"
         downloadProgress = 0
@@ -3453,6 +3774,11 @@ final class OfflineMapManager: ObservableObject {
             { [weak self] byteProgress in self?.downloadByteProgress = byteProgress }
         )
         let verifiedReaderRequirements: OfflineMapReaderRequirements
+        var verifiedTopography: VerifiedBikeMapTopography?
+        var topographyDownload: (
+            temporaryURL: URL,
+            association: SavedTopographyCompanionAssociation
+        )?
         do {
             let trustStore = mapStreamTrustStore
             let mapID = map.mapId
@@ -3469,6 +3795,25 @@ final class OfflineMapManager: ObservableObject {
                 throw OfflineMapCatalogError.missingCompatibleArtifact
             }
             verifiedReaderRequirements = requirements
+            verifiedTopography = verified.topography
+            if let companionGrant = grant.companion {
+                try validateTopographyCompanionBinding(
+                    companionGrant.artifact.platformArtifact,
+                    signedTopography: verified.topography
+                )
+                topographyDownload = try await
+                    downloadAndValidateTopographyCompanion(
+                        from: companionGrant.downloadURL,
+                        artifact: companionGrant.artifact.platformArtifact,
+                        associationID: map.mapEntryId,
+                        mapID: map.mapId,
+                        streamArtifactSHA256: artifact.sha256,
+                        allowedDownloadHosts: [
+                            catalogHost.lowercased(),
+                            r2DownloadHost.lowercased(),
+                        ]
+                    )
+            }
         } catch {
             try? FileManager.default.removeItem(at: temporaryURL)
             downloadURL = nil
@@ -3514,16 +3859,41 @@ final class OfflineMapManager: ObservableObject {
             catalogAliasRevision: map.aliasRevision,
             sourceShareID: sourceShareID,
             catalogSyncState: "synced",
-            readerRequirements: verifiedReaderRequirements
+            readerRequirements: verifiedReaderRequirements,
+            catalogContentReceipt: map.contentReceipt,
+            topography: verifiedTopography
         )
-        try replaceDownloadedArtifact(
-            at: temporaryURL,
-            destination: destination,
-            metadata: metadata,
-            mapID: map.mapId,
-            fileExtension: "bmap",
-            obsoleteDestination: obsoleteDestination
-        )
+        do {
+            if let topographyDownload {
+                let companionDestination = try cachedTopographyCompanionURL(
+                    associationID: map.mapEntryId
+                )
+                try replaceTopographyCompanion(
+                    at: topographyDownload.temporaryURL,
+                    destination: companionDestination,
+                    association: topographyDownload.association
+                )
+                defaults.set(
+                    map.mapEntryId,
+                    forKey: OfflineMapDefaults.activeTopographyAssociationKey
+                )
+            }
+            try replaceDownloadedArtifact(
+                at: temporaryURL,
+                destination: destination,
+                metadata: metadata,
+                mapID: map.mapId,
+                fileExtension: "bmap",
+                obsoleteDestination: obsoleteDestination
+            )
+        } catch {
+            if let topographyDownload {
+                try? FileManager.default.removeItem(
+                    at: topographyDownload.temporaryURL
+                )
+            }
+            throw error
+        }
         upsertCatalogMap(map)
         packDisplayNames[destination.lastPathComponent] = map.alias
         persistPackDisplayNames()
@@ -3592,6 +3962,7 @@ final class OfflineMapManager: ObservableObject {
                 forKey: OfflineMapDefaults.lastTransferSessionIdKey
               ),
               !sessionId.isEmpty else {
+            lastTransferObservedIdleOnAnotherMap = false
             return
         }
 
@@ -3636,10 +4007,12 @@ final class OfflineMapManager: ObservableObject {
         )
         switch evaluation.decision {
         case .installed:
+            lastTransferObservedIdleOnAnotherMap = false
             updateLastTransferOutcome("installed")
             statusMessage = "map installed: \(displayName(forMapId: lastTransferMapId))"
             errorMessage = nil
         case .failed(let message):
+            lastTransferObservedIdleOnAnotherMap = false
             updateLastTransferOutcome("failed")
             statusMessage = ""
             errorMessage = OfflineMapPlatformError
@@ -3647,8 +4020,18 @@ final class OfflineMapManager: ObservableObject {
                 .localizedDescription
         case .pending:
             let deviceIsIdleOnAnotherMap =
+                bleManager.hasFreshMapTransferStatus &&
                 bleManager.mapTransferActivationStatus == "idle" &&
                 bleManager.mapTransferActiveSessionId != sessionId
+            if deviceIsIdleOnAnotherMap &&
+                !lastTransferObservedIdleOnAnotherMap {
+                diagnosticsRecorder?.record(
+                    category: .map,
+                    event: "activation_retry_available",
+                    fields: ["mapId": lastTransferMapId, "state": "idle"]
+                )
+            }
+            lastTransferObservedIdleOnAnotherMap = deviceIsIdleOnAnotherMap
             switch bleManager.mapTransferActivationStatus {
             case "receiving":
                 statusMessage = "Map upload continues on device"
@@ -3676,7 +4059,9 @@ final class OfflineMapManager: ObservableObject {
             center: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
             sideLengthKm: sizeKm
         )
-        return .customBBox(bounds)
+        return OfflineMapJobRequest
+            .customBBox(bounds)
+            .withTopography(includeTopographyInNewMaps)
     }
 
     private func createJobAndDownload(request: OfflineMapJobRequest) {
@@ -3736,17 +4121,89 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
+    private func recoverPendingMapJob(bleManager: BLEManager?) async throws {
+        let persistedJobId = OfflineMapJobPersistence.activeJobId(defaults: defaults)
+        let persistedInstallIntent = OfflineMapJobPersistence.shouldInstallOnDevice(
+            defaults: defaults
+        )
+        let persistedServerURL = OfflineMapJobPersistence.serverURLString(
+            defaults: defaults
+        )
+        if let persistedJobId,
+           try await finishDownloadedRecoveredJobIfAvailable(
+                jobId: persistedJobId,
+                installOnDevice: persistedInstallIntent,
+                bleManager: bleManager
+           ) {
+            return
+        }
+        let recoveryServerURL = recoveryServerURL(
+            persistedServerURL: persistedServerURL
+        )
+        var client = try makeClient(serverURLString: recoveryServerURL)
+        client = try await ensureRegisteredInstallationWithRetry(client: client)
+        var jobId = persistedJobId
+        var shouldInstallOnDevice = persistedInstallIntent
+
+        if jobId == nil {
+            statusMessage = "checking for server maps"
+            let jobs = try await listJobsWithRetry(client: client)
+            if consumeForgottenDiscovery(
+                jobs: jobs,
+                serverURLString: recoveryServerURL,
+                clientInstallationId: client.clientInstallationId
+            ) {
+                isServerRecoveryCheckPending = false
+                statusMessage = ""
+                return
+            }
+            guard let recovered = selectOwnedRecoverableJob(
+                from: jobs,
+                clientInstallationId: client.clientInstallationId
+            ) else {
+                isServerRecoveryCheckPending = false
+                statusMessage = ""
+                return
+            }
+            adoptRecoveredJob(recovered)
+            jobId = recovered.jobId
+            shouldInstallOnDevice = recovered.installOnDevice == true
+            persistCurrentJob(installOnDevice: shouldInstallOnDevice)
+            isServerRecoveryCheckPending = false
+        }
+
+        guard let jobId else { return }
+        try await finishRecoveredJob(
+            jobId: jobId,
+            installOnDevice: shouldInstallOnDevice,
+            client: client,
+            bleManager: bleManager
+        )
+    }
+
     private func createJob(
         _ request: OfflineMapJobRequest,
         client: OfflineMapPlatformClient
     ) async throws -> OfflineMapJob {
-        try await OfflineMapJobCreator.create(
+        var activeClient = client
+        var recoveredUnavailableKey = false
+        return try await OfflineMapJobCreator.create(
             request: request,
             create: { identifiedRequest in
-                try await client.createJob(identifiedRequest)
+                do {
+                    return try await activeClient.createJob(identifiedRequest)
+                } catch ManagedAppAttestError.keyUnavailable
+                    where !recoveredUnavailableKey {
+                    recoveredUnavailableKey = true
+                    activeClient = try await self.ensureRegisteredInstallation(
+                        client: activeClient,
+                        honorRefreshBackoff: false
+                    )
+                    return try await activeClient.createJob(identifiedRequest)
+                }
             },
             list: {
-                try await client.jobs()
+                try await activeClient.jobs()
             },
             sleep: { nanoseconds in
                 try await Task.sleep(nanoseconds: nanoseconds)
@@ -4247,7 +4704,8 @@ final class OfflineMapManager: ObservableObject {
     ) throws -> OfflineMapPlatformClient {
         let value = serverURLString ?? self.serverURLString
         return try bicinoServiceSession.makeOfflineMapClient(
-            serverURLString: value
+            serverURLString: value,
+            mapStreamTrustCapabilities: mapStreamTrustStore.capabilityHeaderValue
         )
     }
 
@@ -4295,6 +4753,11 @@ final class OfflineMapManager: ObservableObject {
         }
         currentJob = job
         downloadURL = nil
+        diagnosticsRecorder?.record(
+            category: .map,
+            event: "job_recovered",
+            fields: ["mapId": job.mapId ?? ""]
+        )
     }
 
     nonisolated static func resolvedServerURL(defaults: UserDefaults) -> String {
@@ -4335,10 +4798,100 @@ final class OfflineMapManager: ObservableObject {
                 }
             )
         } catch {
-            if currentJob?.isTerminal == true || shouldForgetPersistedJob(after: error) {
+            // Keep terminal jobs until the user discards them. Recovery can then
+            // show the server's failure after an app relaunch instead of making
+            // the pending map silently disappear from Saved Maps.
+            if shouldForgetPersistedJob(after: error) {
                 clearPersistedJob()
             }
             throw error
+        }
+    }
+
+    private func downloadAndValidateTopographyCompanion(
+        from url: URL,
+        artifact: OfflineMapArtifact,
+        associationID: String,
+        mapID: String,
+        streamArtifactSHA256: String,
+        allowedDownloadHosts: Set<String>? = nil
+    ) async throws -> (
+        temporaryURL: URL,
+        association: SavedTopographyCompanionAssociation
+    ) {
+        guard artifact.filename == "\(mapID).btopo",
+              let mapContentReceipt = artifact.mapContentReceipt,
+              let intermediateSha256 = artifact.intermediateSha256,
+              let sourcePolicySha256 = artifact.sourcePolicySha256,
+              let attributionSha256 = artifact.attributionSha256,
+              SavedTopographyCompanionStorage.filename(
+                mapEntryID: associationID
+              ) != nil else {
+            throw OfflineMapCatalogError.invalidResponse
+        }
+        let constraints = try OfflineMapDownloadConstraints
+            .topographyCompanion(
+                artifact,
+                allowedDownloadHosts: allowedDownloadHosts
+            )
+        statusMessage = "downloading topographic contours"
+        let temporaryURL = try await packDownload(
+            url,
+            constraints,
+            { [weak self] progress in self?.downloadProgress = progress },
+            { [weak self] byteProgress in
+                self?.downloadByteProgress = byteProgress
+            }
+        )
+        let receipt = TopographyCompanionReceipt(
+            mapEntryID: associationID,
+            mapContentReceipt: mapContentReceipt,
+            mapID: mapID,
+            sha256: artifact.sha256,
+            bytes: artifact.bytes,
+            intermediateSha256: intermediateSha256,
+            sourcePolicySha256: sourcePolicySha256,
+            attributionSha256: attributionSha256
+        )
+        let association = SavedTopographyCompanionAssociation(
+            schemaVersion:
+                SavedTopographyCompanionAssociation.currentSchemaVersion,
+            localArtifactFilename:
+                SavedTopographyCompanionStorage.filename(
+                    mapEntryID: associationID
+                )!,
+            streamArtifactSHA256: streamArtifactSHA256,
+            receipt: receipt
+        )
+        do {
+            try association.validate()
+            let store = TopographyCompanionStore(
+                url: temporaryURL,
+                receipt: receipt
+            )
+            _ = try await store.validate()
+            await store.close()
+            try Task.checkCancellation()
+            return (temporaryURL, association)
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            throw error
+        }
+    }
+
+    private func validateTopographyCompanionBinding(
+        _ artifact: OfflineMapArtifact,
+        signedTopography: VerifiedBikeMapTopography?
+    ) throws {
+        guard let signedTopography,
+              signedTopography.profileVersion == 1,
+              artifact.intermediateSha256 ==
+                signedTopography.intermediateSHA256,
+              artifact.sourcePolicySha256 ==
+                signedTopography.sourcePolicySHA256,
+              artifact.attributionSha256 ==
+                signedTopography.attributionSHA256 else {
+            throw OfflineMapCatalogError.invalidResponse
         }
     }
 
@@ -4378,8 +4931,13 @@ final class OfflineMapManager: ObservableObject {
         downloadProgress = 0
         downloadByteProgress = nil
         var temporaryURL: URL?
+        var topographyDownload: (
+            temporaryURL: URL,
+            association: SavedTopographyCompanionAssociation
+        )?
         var artifactDisplayName: String?
         var rendererFormatVersion: Int?
+        var verifiedTopography: VerifiedBikeMapTopography?
         let trustStore = mapStreamTrustStore
         do {
             let constraints = try OfflineMapDownloadConstraints.mapArtifact(primaryArtifact)
@@ -4390,7 +4948,7 @@ final class OfflineMapManager: ObservableObject {
             })
             temporaryURL = downloadedURL
             let validationTask = Task.detached(priority: .userInitiated) {
-                () throws -> (String?, Int?) in
+                () throws -> (String?, Int?, VerifiedBikeMapTopography?) in
                 switch choice {
                 case .bikeMapStream(let artifact, _):
                     let verified = try BikeMapStreamArtifactValidator.validate(
@@ -4399,7 +4957,11 @@ final class OfflineMapManager: ObservableObject {
                         expectedMapID: mapId,
                         trustStore: trustStore
                     )
-                    return (verified.displayName, verified.rendererFormatVersion)
+                    return (
+                        verified.displayName,
+                        verified.rendererFormatVersion,
+                        verified.topography
+                    )
                 case .legacyZip(let artifact):
                     if let artifact {
                         try OfflineMapArtifactFileValidator.validate(
@@ -4410,7 +4972,11 @@ final class OfflineMapManager: ObservableObject {
                     let archive = try OfflineMapPackArchive(url: downloadedURL)
                     try archive.validate(expectedMapId: mapId)
                     let manifest = try archive.manifest()
-                    return (manifest.displayName, manifest.target?.formatVersion)
+                    return (
+                        manifest.displayName,
+                        manifest.target?.formatVersion,
+                        nil
+                    )
                 }
             }
             let validation = try await withTaskCancellationHandler {
@@ -4420,6 +4986,7 @@ final class OfflineMapManager: ObservableObject {
             }
             artifactDisplayName = validation.0
             rendererFormatVersion = validation.1
+            verifiedTopography = validation.2
             try Task.checkCancellation()
         } catch {
             if let temporaryURL {
@@ -4431,6 +4998,50 @@ final class OfflineMapManager: ObservableObject {
         guard let temporaryURL else {
             downloadURL = nil
             throw OfflineMapPlatformError.missingDownloadURL
+        }
+        if rendererFormatVersion == 4 {
+            guard let streamArtifact = primaryArtifact,
+                  streamArtifact.isBikeMapStream else {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                downloadURL = nil
+                throw OfflineMapCatalogError.missingCompatibleArtifact
+            }
+            let companions = (job.artifacts ?? []).filter(
+                \.isTopographyCompanion
+            )
+            guard companions.count == 1 else {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                downloadURL = nil
+                throw OfflineMapCatalogError.missingCompatibleArtifact
+            }
+            let companion = companions[0]
+            let associationID = job.catalogMapEntryId.flatMap {
+                SavedTopographyCompanionStorage.filename(mapEntryID: $0) == nil
+                    ? nil : $0
+            } ?? "job_v1_\(job.jobId)"
+            do {
+                try validateTopographyCompanionBinding(
+                    companion,
+                    signedTopography: verifiedTopography
+                )
+                let companionURL = try await client.artifactDownloadURL(
+                    mapId: mapId,
+                    jobId: job.jobId,
+                    artifact: companion
+                )
+                topographyDownload = try await
+                    downloadAndValidateTopographyCompanion(
+                        from: companionURL,
+                        artifact: companion,
+                        associationID: associationID,
+                        mapID: mapId,
+                        streamArtifactSHA256: streamArtifact.sha256
+                    )
+            } catch {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                downloadURL = nil
+                throw error
+            }
         }
         let destination = try cachedPackURL(mapId: mapId, fileExtension: fileExtension)
         let existingMetadata = ["bmap", "zip"]
@@ -4483,9 +5094,27 @@ final class OfflineMapManager: ObservableObject {
             expectedActiveSessionID: nil,
             lastTransferOutcome: nil,
             userDefinedDisplayName: userDefinedDisplayName,
-            downloadReceiptID: downloadReceiptID
+            downloadReceiptID: downloadReceiptID,
+            catalogContentReceipt:
+                topographyDownload?.association.receipt.mapContentReceipt,
+            topography: verifiedTopography
         )
         do {
+            if let topographyDownload {
+                let companionDestination = try cachedTopographyCompanionURL(
+                    associationID:
+                        topographyDownload.association.receipt.mapEntryID
+                )
+                try replaceTopographyCompanion(
+                    at: topographyDownload.temporaryURL,
+                    destination: companionDestination,
+                    association: topographyDownload.association
+                )
+                defaults.set(
+                    topographyDownload.association.receipt.mapEntryID,
+                    forKey: OfflineMapDefaults.activeTopographyAssociationKey
+                )
+            }
             try replaceDownloadedArtifact(
                 at: temporaryURL,
                 destination: destination,
@@ -4494,6 +5123,11 @@ final class OfflineMapManager: ObservableObject {
                 fileExtension: fileExtension
             )
         } catch {
+            if let topographyDownload {
+                try? FileManager.default.removeItem(
+                    at: topographyDownload.temporaryURL
+                )
+            }
             downloadURL = nil
             throw error
         }
@@ -4543,24 +5177,30 @@ final class OfflineMapManager: ObservableObject {
         obsoleteDestination: URL? = nil
     ) throws {
         defer { invalidateCachedPreview(for: destination) }
-        let backup = destination
-            .deletingLastPathComponent()
-            .appendingPathComponent(".\(destination.lastPathComponent).\(UUID().uuidString).backup")
+        let directory = destination.deletingLastPathComponent()
+        var journal = try SavedMapReplacementJournal.begin(at: destination)
+        let backup = journal.backup(in: directory)
         let metadataURL = SavedMapArtifactMetadataStore.metadataURL(for: destination)
         let metadataBackup = SavedMapArtifactMetadataStore.metadataURL(for: backup)
-        var backedUpArtifact = false
-        var backedUpMetadata = false
         do {
             if FileManager.default.fileExists(atPath: destination.path) {
                 try FileManager.default.moveItem(at: destination, to: backup)
-                backedUpArtifact = true
+                try SavedMapReplacementJournal.sync(directory)
             }
             if FileManager.default.fileExists(atPath: metadataURL.path) {
                 try FileManager.default.moveItem(at: metadataURL, to: metadataBackup)
-                backedUpMetadata = true
+                try SavedMapReplacementJournal.sync(directory)
             }
             try FileManager.default.moveItem(at: temporaryURL, to: destination)
             try metadataSave(metadata, destination)
+            try SavedMapReplacementJournal.sync(destination)
+            try SavedMapReplacementJournal.sync(metadataURL)
+            try SavedMapReplacementJournal.sync(directory)
+            journal.committed = true
+            try journal.save(in: directory)
+            // Once committed, recovery must keep the new coherent pair. Cleanup
+            // failure is retried at launch, never treated as installation failure.
+            try? journal.finish(in: directory)
             let obsoleteExtension = fileExtension == "bmap" ? "zip" : "bmap"
             let obsolete = try obsoleteDestination ?? cachedPackURL(
                 mapId: mapID,
@@ -4572,18 +5212,11 @@ final class OfflineMapManager: ObservableObject {
                 packDisplayNames.removeValue(forKey: obsolete.lastPathComponent)
                 invalidateCachedPreview(for: obsolete)
             }
-            if backedUpArtifact { try? FileManager.default.removeItem(at: backup) }
-            if backedUpMetadata { try? FileManager.default.removeItem(at: metadataBackup) }
         } catch {
             try? FileManager.default.removeItem(at: temporaryURL)
-            try? FileManager.default.removeItem(at: destination)
-            try? SavedMapArtifactMetadataStore.delete(for: destination)
-            if backedUpArtifact {
-                try? FileManager.default.moveItem(at: backup, to: destination)
-            }
-            if backedUpMetadata {
-                try? FileManager.default.moveItem(at: metadataBackup, to: metadataURL)
-            }
+            // Read the persisted commit decision, not an in-memory flag whose
+            // journal write may have failed. Preserve the journal on repair error.
+            try? SavedMapReplacementJournal.recover(in: directory)
             throw error
         }
     }
@@ -4652,6 +5285,11 @@ final class OfflineMapManager: ObservableObject {
         installOnDevice: Bool,
         bleManager: BLEManager?
     ) async throws -> Bool {
+        if !installOnDevice, restoreDownloadedPackIfAvailable(jobId: jobId) {
+            clearPersistedJob(markHandled: true)
+            statusMessage = "map downloaded"
+            return true
+        }
         if installOnDevice, restoreDownloadedPackIfAvailable(jobId: jobId) {
             guard let bleManager,
                   bleManager.isConnected,
@@ -4755,9 +5393,25 @@ final class OfflineMapManager: ObservableObject {
             serverURLString: serverURLString,
             defaults: defaults
         )
+        diagnosticsRecorder?.record(
+            category: .map,
+            event: "job_persisted",
+            fields: [
+                "mapId": currentJob?.mapId ?? "",
+                "outcome": installOnDevice ? "device" : "iphone",
+            ]
+        )
     }
 
     private func clearPersistedJob(markHandled: Bool = false) {
+        diagnosticsRecorder?.record(
+            category: .map,
+            event: "job_cleared",
+            fields: [
+                "mapId": currentJob?.mapId ?? "",
+                "outcome": markHandled ? "handled" : "cleared",
+            ]
+        )
         if markHandled,
            let jobId = OfflineMapJobPersistence.activeJobId(defaults: defaults) {
             OfflineMapRecoveryHistory.markHandled(jobId: jobId, defaults: defaults)
@@ -4828,7 +5482,9 @@ final class OfflineMapManager: ObservableObject {
            !SavedMapRendererCompatibilityPolicy.isCompatible(
                rendererFormatVersion: metadata.rendererFormatVersion,
                supportsStreetLabels: bleManager.supportsStreetLabels,
-               supports3DBuildings: bleManager.supports3DBuildings
+               supports3DBuildings: bleManager.supports3DBuildings,
+               supportsTopographicContours:
+                   bleManager.supportsTopographicContours
            ) {
             throw OfflineMapPlatformError.invalidPack(
                 "This saved map is not compatible with the connected device. Regenerate it for this firmware."
@@ -4858,12 +5514,24 @@ final class OfflineMapManager: ObservableObject {
                         "signed map metadata is missing or does not match"
                     )
                 }
+#if DEBUG
+                let deriveReaderRequirementsFromSignedManifest =
+                    SavedMapReaderRequirementsMigrationPolicy
+                        .shouldDeriveFromSignedManifest(
+                            generationServerURLString: metadata.serverURLString,
+                            isDevelopmentBuild: true
+                        )
+#else
+                let deriveReaderRequirementsFromSignedManifest = false
+#endif
                 let verified = try BikeMapStreamArtifactValidator.validate(
                     url: packURL,
                     artifact: artifact,
                     expectedMapID: metadata.mapID,
                     trustStore: trustStore,
-                    readerRequirements: metadata.readerRequirements
+                    readerRequirements: metadata.readerRequirements,
+                    deriveReaderRequirementsFromSignedManifest:
+                        deriveReaderRequirementsFromSignedManifest
                 )
                 return PreparedMapTransfer(artifact: verified)
             }
@@ -4878,7 +5546,9 @@ final class OfflineMapManager: ObservableObject {
         if !SavedMapRendererCompatibilityPolicy.isCompatible(
                rendererFormatVersion: prepared.artifact.rendererFormatVersion,
                supportsStreetLabels: bleManager.supportsStreetLabels,
-               supports3DBuildings: bleManager.supports3DBuildings
+               supports3DBuildings: bleManager.supports3DBuildings,
+               supportsTopographicContours:
+                   bleManager.supportsTopographicContours
            ) {
             throw OfflineMapPlatformError.invalidPack(
                 "This saved map is not compatible with the connected device. Regenerate it for this firmware."
@@ -5016,7 +5686,7 @@ final class OfflineMapManager: ObservableObject {
                     )
                 }
                 let artifact = prepared.artifact
-                if MapInstallProtocolSelector.select(
+                let protocolEvaluation = MapInstallProtocolSelector.evaluate(
                        isBikeMapStream: true,
                        signatureTrustCapability:
                            "\(artifact.signatureKeyID)=\(artifact.signatureKeySHA256)",
@@ -5035,8 +5705,11 @@ final class OfflineMapManager: ObservableObject {
                        requiredFirmwareBuild: artifact.requiredFirmwareBuild,
                        requiredFirmwareGitSha: artifact.requiredFirmwareGitSHA,
                        deviceStatus: initialDeviceStatus
-                   ) == .legacyArtifactRequired {
-                    throw OfflineMapPlatformError.firmwareMapStreamUnsupported
+                   )
+                if let rejection = protocolEvaluation.rejection {
+                    throw OfflineMapPlatformError.mapStreamCompatibilityRejected(
+                        rejection
+                    )
                 }
                 let disposition = ExistingMapStreamAttemptDisposition.evaluate(
                     expectedSessionID: sessionId,
@@ -5317,14 +5990,18 @@ final class OfflineMapManager: ObservableObject {
                              client: MapTransferDeviceClient,
                              bleManager: BLEManager,
                              timeout: TimeInterval = OfflineMapDefaults.activationConfirmationTimeout,
-                             pollIntervalNanoseconds: UInt64 = OfflineMapDefaults.activationPollIntervalNanoseconds) async throws -> MapActivationConfirmationResult {
-        let startedAt = Date()
+                             pollIntervalNanoseconds: UInt64 = OfflineMapDefaults.activationPollIntervalNanoseconds,
+                             now: () -> Date = Date.init,
+                             sleep: (UInt64) async throws -> Void = {
+                                 try await Task.sleep(nanoseconds: $0)
+                             }) async throws -> MapActivationConfirmationResult {
+        let startedAt = now()
         var deadline = startedAt.addingTimeInterval(timeout)
         var lastObservedState = "activation request accepted"
         var observedCurrentAttempt = false
         var lastProgress: MapActivationProgressPresentation?
 
-        while Date() < deadline {
+        while now() < deadline {
             var receivedHTTPStatus = false
             do {
                 let status = try await client.status()
@@ -5348,7 +6025,7 @@ final class OfflineMapManager: ObservableObject {
                 if let activationProgress,
                    activationProgress != lastProgress {
                     lastProgress = activationProgress
-                    deadline = Date().addingTimeInterval(timeout)
+                    deadline = now().addingTimeInterval(timeout)
                 }
                 let evaluation = MapActivationReconciler.evaluate(
                     expectedMapId: expectedMapId,
@@ -5405,7 +6082,7 @@ final class OfflineMapManager: ObservableObject {
                 if let activationProgress,
                    activationProgress != lastProgress {
                     lastProgress = activationProgress
-                    deadline = Date().addingTimeInterval(timeout)
+                    deadline = now().addingTimeInterval(timeout)
                 }
                 let evaluation = MapActivationReconciler.evaluate(
                     expectedMapId: expectedMapId,
@@ -5437,9 +6114,7 @@ final class OfflineMapManager: ObservableObject {
 
             statusMessage = activationProgress?.label ??
                 "activating \(displayName(forMapId: expectedMapId))"
-            try await Task.sleep(
-                nanoseconds: pollIntervalNanoseconds
-            )
+            try await sleep(pollIntervalNanoseconds)
         }
 
         return .continuesOnDevice(
@@ -5556,6 +6231,7 @@ final class OfflineMapManager: ObservableObject {
                                 protocolVersion: Int = 1,
                                 streamFormatVersion: Int? = nil,
                                 artifactURL: URL? = nil) {
+        lastTransferObservedIdleOnAnotherMap = false
         lastTransferMapId = mapId
         defaults.set(mapId, forKey: OfflineMapDefaults.lastTransferMapIdKey)
         defaults.set(sessionId, forKey: OfflineMapDefaults.lastTransferSessionIdKey)
@@ -5596,8 +6272,21 @@ final class OfflineMapManager: ObservableObject {
     }
 
     private func updateLastTransferOutcome(_ outcome: String) {
+        let changed = lastTransferOutcome != outcome
         lastTransferOutcome = outcome
         defaults.set(outcome, forKey: OfflineMapDefaults.lastTransferOutcomeKey)
+        if changed {
+            diagnosticsRecorder?.record(
+                category: .map,
+                event: "transfer_outcome",
+                fields: ["mapId": lastTransferMapId, "outcome": outcome]
+            )
+        }
+        if MapActivationProgressPresentation.shouldClear(
+            forTransferOutcome: outcome
+        ) {
+            activationProgress = nil
+        }
         if !lastTransferMapId.isEmpty {
             let protocolVersion = defaults.object(
                 forKey: OfflineMapDefaults.lastTransferProtocolKey
@@ -5617,6 +6306,7 @@ final class OfflineMapManager: ObservableObject {
             )
         }
         if outcome != "unconfirmed" {
+            lastTransferObservedIdleOnAnotherMap = false
             activationReconciliationTask?.cancel()
             activationReconciliationTask = nil
         }
@@ -5642,6 +6332,7 @@ final class OfflineMapManager: ObservableObject {
         }
         lastTransferMapId = ""
         lastTransferOutcome = ""
+        lastTransferObservedIdleOnAnotherMap = false
         transferProgress = 0
         activationProgress = nil
         statusMessage = ""
@@ -5738,6 +6429,192 @@ final class OfflineMapManager: ObservableObject {
         defaults.set(packDisplayNames, forKey: OfflineMapDefaults.packDisplayNamesKey)
     }
 
+    private func topographyAssociationID(
+        for metadata: SavedMapArtifactMetadata
+    ) -> String? {
+        if let mapEntryID = metadata.catalogMapEntryID,
+           SavedTopographyCompanionStorage.filename(
+            mapEntryID: mapEntryID
+           ) != nil {
+            return mapEntryID
+        }
+        guard let jobID = metadata.jobID else { return nil }
+        let identifier = "job_v1_\(jobID)"
+        return SavedTopographyCompanionStorage.filename(
+            mapEntryID: identifier
+        ) == nil ? nil : identifier
+    }
+
+    private func cachedTopographyCompanionURL(
+        associationID: String
+    ) throws -> URL {
+        guard let filename = SavedTopographyCompanionStorage.filename(
+            mapEntryID: associationID
+        ) else {
+            throw OfflineMapCatalogError.invalidResponse
+        }
+        return try cachedPackDirectory().appendingPathComponent(filename)
+    }
+
+    private func replaceTopographyCompanion(
+        at temporaryURL: URL,
+        destination: URL,
+        association: SavedTopographyCompanionAssociation
+    ) throws {
+        let directory = destination.deletingLastPathComponent()
+        var journal = try SavedTopographyCompanionReplacementJournal.begin(
+            at: destination
+        )
+        let backup = journal.backup(in: directory)
+        let associationURL = SavedTopographyCompanionStorage.associationURL(
+            for: destination
+        )
+        let associationBackup = SavedTopographyCompanionStorage.associationURL(
+            for: backup
+        )
+        do {
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.moveItem(at: destination, to: backup)
+                try SavedTopographyCompanionReplacementJournal.sync(directory)
+            }
+            if FileManager.default.fileExists(atPath: associationURL.path) {
+                try FileManager.default.moveItem(
+                    at: associationURL,
+                    to: associationBackup
+                )
+                try SavedTopographyCompanionReplacementJournal.sync(directory)
+            }
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+            try SavedTopographyCompanionStorage.save(
+                association,
+                for: destination
+            )
+            try SavedTopographyCompanionReplacementJournal.sync(destination)
+            try SavedTopographyCompanionReplacementJournal.sync(associationURL)
+            try SavedTopographyCompanionReplacementJournal.sync(directory)
+            journal.committed = true
+            try journal.save(in: directory)
+            try? journal.finish(in: directory)
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryURL)
+            try? SavedTopographyCompanionReplacementJournal.recover(
+                in: directory
+            )
+            throw error
+        }
+    }
+
+    private func deleteTopographyCompanions(
+        matching metadata: SavedMapArtifactMetadata?
+    ) throws {
+        guard let metadata,
+              let directory = try? cachedPackDirectory() else { return }
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        for companionURL in files
+        where companionURL.pathExtension.lowercased() == "btopo" {
+            let associationURL = SavedTopographyCompanionStorage
+                .associationURL(for: companionURL)
+            guard let data = try? Data(contentsOf: associationURL),
+                  let association = try? JSONDecoder().decode(
+                    SavedTopographyCompanionAssociation.self,
+                    from: data
+                  ),
+                  association.receipt.mapID == metadata.mapID,
+                  association.streamArtifactSHA256 ==
+                    metadata.primaryArtifact?.sha256 else {
+                continue
+            }
+            try SavedTopographyCompanionStorage.delete(for: companionURL)
+        }
+    }
+
+#if canImport(UIKit) && canImport(MapKit)
+    private func reloadTopographyOverlay() {
+        topographyOverlayGeneration = UUID()
+        let generation = topographyOverlayGeneration
+        topographyOverlayTask?.cancel()
+        topographyOverlayTask = nil
+        guard topographicMapsEnabled else {
+            topographyOverlay = nil
+            topographyOverlayStatus = "Topographic contours are turned off."
+            return
+        }
+        guard let directory = try? cachedPackDirectory() else {
+            topographyOverlay = nil
+            topographyOverlayStatus = "Topographic map storage is unavailable."
+            return
+        }
+        let preferredID = defaults.string(
+            forKey: OfflineMapDefaults.activeTopographyAssociationKey
+        )
+        let candidates = cachedMapRecords.compactMap {
+            record -> (
+                String,
+                URL,
+                SavedTopographyCompanionAssociation
+            )? in
+            guard let metadata = SavedMapArtifactMetadataStore.load(
+                for: record.packURL
+            ),
+            let associationID = topographyAssociationID(for: metadata),
+            let contentReceipt = metadata.catalogContentReceipt,
+            let streamSHA256 = metadata.primaryArtifact?.sha256,
+            let filename = SavedTopographyCompanionStorage.filename(
+                mapEntryID: associationID
+            ) else { return nil }
+            let companionURL = directory.appendingPathComponent(filename)
+            guard let association = SavedTopographyCompanionStorage.load(
+                for: companionURL,
+                expectedMapEntryID: associationID,
+                expectedMapContentReceipt: contentReceipt,
+                expectedStreamArtifactSHA256: streamSHA256
+            ) else { return nil }
+            return (associationID, companionURL, association)
+        }.sorted { lhs, rhs in
+            if lhs.0 == preferredID { return true }
+            if rhs.0 == preferredID { return false }
+            return lhs.0 < rhs.0
+        }
+        guard let selected = candidates.first else {
+            topographyOverlay = nil
+            topographyOverlayStatus =
+                "Download a topographic map to show offline contours."
+            return
+        }
+        topographyOverlayStatus = "Verifying topographic contours…"
+        topographyOverlayTask = Task { [weak self] in
+            do {
+                let overlay = try await BicinoTopographyTileOverlay.open(
+                    url: selected.1,
+                    receipt: selected.2.receipt
+                )
+                try Task.checkCancellation()
+                guard let self,
+                      self.topographyOverlayGeneration == generation else {
+                    return
+                }
+                self.topographyOverlay = overlay
+                self.topographyOverlayStatus =
+                    "Offline contours are shown for the selected saved map."
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self,
+                      self.topographyOverlayGeneration == generation else {
+                    return
+                }
+                self.topographyOverlay = nil
+                self.topographyOverlayStatus =
+                    "The saved contour companion could not be verified."
+            }
+        }
+    }
+#endif
+
     private func cachedPackURL(mapId: String) throws -> URL {
         let bmap = try cachedPackURL(mapId: mapId, fileExtension: "bmap")
         if FileManager.default.fileExists(atPath: bmap.path) {
@@ -5813,16 +6690,27 @@ final class OfflineMapManager: ObservableObject {
                 at: cacheDirectoryOverride,
                 withIntermediateDirectories: true
             )
+            try SavedMapReplacementJournal.recover(in: cacheDirectoryOverride)
+            try SavedTopographyCompanionReplacementJournal.recover(
+                in: cacheDirectoryOverride
+            )
             return cacheDirectoryOverride
         }
         let directory = try FileManager.default.url(
-            for: .cachesDirectory,
+            for: .applicationSupportDirectory,
             in: .userDomainMask,
             appropriateFor: nil,
             create: true
         ).appendingPathComponent("OfflineMapPacks", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory
+        let legacy = try FileManager.default.url(
+            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: false
+        ).appendingPathComponent("OfflineMapPacks", isDirectory: true)
+        let prepared = try SavedMapStorageDirectory.prepare(
+            directory: directory,
+            legacy: legacy
+        )
+        try SavedTopographyCompanionReplacementJournal.recover(in: prepared)
+        return prepared
     }
 
     private func deleteCompatibilityArtifacts(mapID: String) throws {
@@ -5882,6 +6770,9 @@ final class OfflineMapManager: ObservableObject {
             cacheDefaultDisplayNames(for: packURLs)
             cachedMapRecords = packURLs.map(cachedMapRecord)
             cachedPackURLs = packURLs
+#if canImport(UIKit) && canImport(MapKit)
+            reloadTopographyOverlay()
+#endif
         } catch {
 #if canImport(UIKit)
             for task in previewLoadTasks.values {
@@ -5899,6 +6790,9 @@ final class OfflineMapManager: ObservableObject {
 #endif
             cachedPackURLs = []
             cachedMapRecords = []
+#if canImport(UIKit) && canImport(MapKit)
+            reloadTopographyOverlay()
+#endif
         }
     }
 
@@ -6112,19 +7006,22 @@ struct OfflineMapByteProgress: Equatable {
     }
 }
 
-nonisolated struct OfflineMapDownloadConstraints: Equatable {
+nonisolated struct OfflineMapDownloadConstraints: Codable, Equatable {
     let exactBytes: Int64?
     let maximumBytes: Int64
     let allowedDownloadHosts: Set<String>?
+    let artifactSHA256: String?
 
     init(
         exactBytes: Int64?,
         maximumBytes: Int64,
-        allowedDownloadHosts: Set<String>? = nil
+        allowedDownloadHosts: Set<String>? = nil,
+        artifactSHA256: String? = nil
     ) {
         self.exactBytes = exactBytes
         self.maximumBytes = maximumBytes
         self.allowedDownloadHosts = allowedDownloadHosts
+        self.artifactSHA256 = artifactSHA256
     }
 
     static let defaultMap = Self(
@@ -6149,7 +7046,8 @@ nonisolated struct OfflineMapDownloadConstraints: Equatable {
         return Self(
             exactBytes: exactBytes,
             maximumBytes: maximumBytes,
-            allowedDownloadHosts: nil
+            allowedDownloadHosts: nil,
+            artifactSHA256: artifact?.sha256
         )
     }
 
@@ -6165,10 +7063,47 @@ nonisolated struct OfflineMapDownloadConstraints: Equatable {
         return Self(
             exactBytes: base.exactBytes,
             maximumBytes: base.maximumBytes,
-            allowedDownloadHosts: [catalogHost.lowercased(), r2DownloadHost.lowercased()]
+            allowedDownloadHosts: [catalogHost.lowercased(), r2DownloadHost.lowercased()],
+            artifactSHA256: base.artifactSHA256
+        )
+    }
+
+    static func topographyCompanion(
+        _ artifact: OfflineMapArtifact,
+        allowedDownloadHosts: Set<String>? = nil
+    ) throws -> Self {
+        guard artifact.isTopographyCompanion,
+              artifact.mediaType ==
+                OfflineMapTopographyCompanionPolicy.mediaType,
+              artifact.filename.hasSuffix(".btopo"),
+              (512...Int64(256 * 1024 * 1024)).contains(artifact.bytes),
+              TopographyCompanionReceipt.isDigest(artifact.sha256),
+              artifact.mapContentReceipt.map(
+                TopographyCompanionReceipt.isDigest
+              ) == true,
+              artifact.intermediateSha256.map(
+                TopographyCompanionReceipt.isDigest
+              ) == true,
+              artifact.sourcePolicySha256.map(
+                TopographyCompanionReceipt.isDigest
+              ) == true,
+              artifact.attributionSha256.map(
+                TopographyCompanionReceipt.isDigest
+              ) == true else {
+            throw OfflineMapCatalogError.invalidResponse
+        }
+        return Self(
+            exactBytes: artifact.bytes,
+            maximumBytes: 256 * 1024 * 1024,
+            allowedDownloadHosts: allowedDownloadHosts,
+            artifactSHA256: artifact.sha256
         )
     }
 }
+
+// One background session serves catalog and job downloads. Tasks are identified
+// by immutable digest/length, not a short-lived grant URL. Completed bytes and
+// opaque URLSession resume data remain private, excluded-from-backup app data.
 
 final class OfflineMapPackDownloader: NSObject, URLSessionDownloadDelegate {
     private static let maximumErrorBodyBytes = 4 * 1024

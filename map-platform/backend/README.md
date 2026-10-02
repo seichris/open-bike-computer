@@ -7,6 +7,8 @@ contract and operating procedure.
 
 ## What is implemented
 
+- Operator-only [free global elevation acquisition and contour evidence](../../docs/topography-pipeline.md)
+  via `map-topography`; topographic user jobs and app/device artifacts remain disabled.
 - `POST /v1/map-jobs` for curated, custom bbox, custom polygon, and route
   corridor requests, with installation-scoped idempotency metadata.
 - Installation-authenticated creation, job/list reads, map-pack reads, and
@@ -66,6 +68,17 @@ adds `X-App-Attest-Challenge-Id`, `X-App-Attest-Key-Id`,
 installation credential and do not consume a second assertion. There is no
 runtime test-verifier or disable switch; backend tests inject their verifier
 directly through `create_app`.
+
+Normal App Store updates keep the same App Attest key. If iOS reports that the
+bound key is no longer available, the app authenticates an `attestation`
+challenge with the existing installation token and submits a fresh Apple
+attestation plus `previousKeyId`. The backend atomically replaces only that
+exact binding, retains the installation ID and owned maps, resets the assertion
+counter, and records the retired key so it cannot be reused. A plain server
+mismatch or transient DeviceCheck failure never authorizes rotation.
+If a database restore removes the server binding entirely, the same owner token
+can request a scoped challenge with no previous key and re-establish the binding
+without changing the installation ID or abandoning owned maps.
 
 ### Strava route import
 
@@ -181,6 +194,15 @@ will download it into the configured data root through the source cache.
 Static sources are stored in the source index; other areas are resolved from
 the cached Geofabrik catalog at job creation time and persisted with the job
 before the worker downloads the matching PBF.
+`config/geofabrik-source-fallbacks.json` selects a larger, containing source
+for known incomplete regional extracts. Sichuan currently uses China's PBF:
+the regional extract has missing relation references, while the China source
+index has passed validation. This fallback is enabled only when
+`MAP_PLATFORM_DEPLOYMENT_CHANNEL=development` while the larger map is being
+qualified on a physical device. The fallback is applied when the job is created;
+it never changes the source of an existing job. Resolution fails if the named
+parent source does not cover the requested bounds. Remove the entry only after
+a refreshed regional extract passes source-index validation.
 
 Checksum-pinned sources are immutable. Mutable sources without a checksum are
 revalidated at most once per `MAP_PLATFORM_SOURCE_CACHE_REVALIDATE_SECONDS`
@@ -191,6 +213,12 @@ and snapshot SHA after a newer PBF replaces the active file. An existing file
 without that provenance falls back to its modification time and is replaced
 atomically once it becomes due. Jobs continue to bind their work to the
 verified file SHA-256.
+
+When an HTTP source declares `Content-Length`, the cache publishes it only
+after receiving exactly that many bytes. A premature EOF is resumed from the
+resolved source URL with `Range` plus a stable `ETag` or `Last-Modified`
+validator. Conflicting range, size, URL, or validator responses fail closed and
+leave the previous stable snapshot untouched.
 
 ## Coolify
 
@@ -209,7 +237,8 @@ The local compose shape defaults `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE` to
 `shadow` and passes the estimator settings to API, worker, and maintenance so
 local development records calibration revisions without exposing them to
 clients. The digest-pinned development lock also defaults to `shadow`; the
-production lock defaults to `off`.
+production lock now defaults to `shadow` so it records bounded estimate
+revisions and accuracy evidence without exposing unvalidated ranges to clients.
 
 Configure each Coolify resource with repository base directory `/` and only its
 own Compose location/watch path: `/map-platform/deploy/compose.yaml` for
@@ -247,6 +276,8 @@ conservative and can be tuned with:
 
 - `MAP_PLATFORM_PUBLIC_REQUEST_LIMIT_PER_MINUTE` (default `240` per IP)
 - `MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY` (default `3` per IP)
+- `MAP_PLATFORM_APP_ATTEST_ROTATION_IP_LIMIT_PER_DAY` (default `12` per IP)
+- `MAP_PLATFORM_APP_ATTEST_ROTATION_LIMIT_PER_DAY` (default `3` per installation)
 - `MAP_PLATFORM_APP_ATTEST_CHALLENGE_TTL_SECONDS` (default `300`; allowed
   range `30` through `900`)
 - `MAP_PLATFORM_MAP_CREATE_LIMIT_PER_HOUR` (default `4` per installation)
@@ -255,14 +286,15 @@ conservative and can be tuned with:
 - `MAP_PLATFORM_DOWNLOAD_URL_IP_LIMIT_PER_HOUR` (default `60` per IP)
 - `MAP_PLATFORM_MAX_REQUEST_BODY_BYTES` (default `2097152` for every non-GET request; large enough for the maximum supported route corridor)
 
-Every accepted map also receives a durable `map-cost-v1` reservation derived
-from its area, geometry complexity, source count, and renderer version. The API
-atomically enforces the per-installation rolling budget and global queued-cost
-ceiling with idempotent creation; workers independently enforce the running-cost
-ceiling before claiming work. Terminal and cancelled jobs release global
-capacity, while their recent cost remains in the installation window. Public
-work cannot consume the operator reserve. Admission-state corruption fails
-closed instead of silently undercounting work.
+The API atomically places valid requests in a durable queue. Development allows
+20 waiting jobs without a per-installation or rolling cost budget. Production
+allows ten public waiting jobs, with two additional operator places, and at
+most two waiting jobs per installation. Each stack starts one build at a time.
+Accepted jobs remain queued while the worker is busy; only new requests are
+rejected when the queue is full. Source and geometry limits, persistent request
+rate limits, idempotent creation, and worker resource gates still apply.
+Historical job records may contain `map-cost-v1` or `map-cost-v2` metadata;
+those fields remain readable but do not affect the queue.
 
 Production Compose requires `MAP_PLATFORM_TRUSTED_PROXY_CIDRS` to contain the
 comma-separated CIDRs of the
@@ -388,17 +420,22 @@ Useful production environment variables:
   source-cache, maintenance, and downloaded-map inventory API routes. If unset,
   those routes are disabled; the normal worker loop and CLI maintenance remain
   available.
-- `MAP_PLATFORM_MAX_ACTIVE_JOBS`: maximum queued/running jobs accepted by the
-  API, default `25`.
-- `MAP_PLATFORM_MAX_QUEUED_COST` and `MAP_PLATFORM_MAX_RUNNING_COST`: global
-  durable cost ceilings, defaults `4000` and `800`.
-- `MAP_PLATFORM_OPERATOR_RESERVED_QUEUED_COST` and
-  `MAP_PLATFORM_OPERATOR_RESERVED_RUNNING_COST`: capacity unavailable to public
-  requests but usable by the local operator create command, defaults `400` and
-  `100`.
-- `MAP_PLATFORM_INSTALLATION_COST_LIMIT` and
-  `MAP_PLATFORM_INSTALLATION_COST_WINDOW_SECONDS`: rolling per-installation
-  cost budget and window, defaults `1200` units per `86400` seconds.
+- `MAP_PLATFORM_MAX_PENDING_JOBS`: maximum waiting jobs. Production defaults to
+  `12` (10 public places plus two reserved for operators). Development defaults
+  to `20` waiting jobs, with no rolling cost budget.
+- `MAP_PLATFORM_MAX_PENDING_PER_INSTALLATION`: maximum waiting public jobs for
+  one installation, default `2` in production and unlimited in development.
+- `MAP_PLATFORM_OPERATOR_RESERVED_PENDING_JOBS`: production waiting places
+  held for operator jobs, default `2`; development defaults to `0`.
+- `MAP_PLATFORM_MAX_RUNNING_JOBS`: jobs a stack may actively build at once,
+  default `1`. Development and production have separate workers and queues.
+  An accepted waiting job reports a one-based estimated `queuePosition` in
+  public job responses. It changes as jobs start, finish, or are cancelled;
+  the worker may skip a yielded job that cannot currently resume.
+  A full queue rejects a *new* request with `map_queue_full` or
+  `installation_queue_full`; it does not fail an accepted job.
+- `MAP_PLATFORM_MAX_ACTIVE_JOBS` and the former cost-budget variables are
+  legacy settings and do not apply to the queue policy.
 - `MAP_PLATFORM_JOB_RETENTION_DAYS`: days to retain ready job artifacts from
   their immutable completion time, default `30`; later downloads and label
   changes do not extend it. Must be between `1` and `3650`.
@@ -410,8 +447,8 @@ Useful production environment variables:
   in-window timing samples loaded for an aggregate summary, default `50000`,
   maximum `1000000`. Responses report the matching count, sampled count, limit,
   and whether the summary was truncated.
-- `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE`: `off` (default for the pinned
-  Coolify compose; local development defaults to `shadow`), `shadow`, or
+- `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE`: `off`, `shadow` (default for the
+  pinned Coolify compose and local development), or
   `public`. `off` omits generation and the public field; `shadow` stores
   revisions for accuracy review but omits the public field; `public` returns
   the latest validated revision on the existing installation-scoped job API.
@@ -438,6 +475,14 @@ Useful production environment variables:
   profile. The default is the checked-in
   `config/preparation-estimate-profile-v1.json`; model/profile changes do not
   enter map IDs, cache keys, manifests, signatures, or artifact bytes.
+  Renderer format 4 has a low-confidence shadow baseline that includes the
+  paired topography-generation stage. Its initial range was checked against
+  the only two successful development format-4 builds recorded by 2026-09-25:
+  3.79 km2 in 25 seconds and 420.12 km2 in 1,287 seconds. These observations
+  set the baseline; they are not independent validation. Keep format-4 ranges
+  private until additional small, medium, dense, and sparse builds establish
+  coverage and range width under the shadow-validation gates in
+  [the historical implementation plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/offline-map-preparation-time-estimates-implementation-plan.md).
 - `MAP_PLATFORM_MAINTENANCE_INTERVAL_SECONDS`: maintenance-service cleanup interval,
   default `3600`.
 - `MAP_PLATFORM_MAINTENANCE_MAX_GC_ITEMS`: maximum content objects attempted
@@ -466,6 +511,86 @@ Useful production environment variables:
   `metadata-only`. Prove the selected R2 mode with
   `tools/check_r2_compatibility.py` before rollout; prefer SHA-256 and use MD5
   only when the endpoint rejects SDK SHA-256 checksum headers.
+- `MAP_PLATFORM_PREPARATION_STORE=contabo-s3` enables a separate worker-only
+  Contabo object cache for pinned topography indexes and DEM tiles. Configure
+  `MAP_PLATFORM_PREPARATION_S3_ENDPOINT_URL`,
+  `MAP_PLATFORM_PREPARATION_S3_BUCKET`,
+  `MAP_PLATFORM_PREPARATION_S3_ACCESS_KEY_ID`, and
+  `MAP_PLATFORM_PREPARATION_S3_SECRET_ACCESS_KEY` with a dedicated Contabo user
+  restricted to the preparation bucket by bucket policy. The worker writes
+  below the `map-preparation-v1` prefix. The default is `disabled`; final map
+  artifacts remain in their existing store. Run the isolated compatibility check below
+  against the selected Contabo bucket before enabling the worker. It writes and
+  deletes only random disposable objects. Both local and restored tiles are
+  rehashed against immutable receipts before use. OSM source shards are a
+  separate later rollout and are not claimed by this setting.
+
+  ```sh
+  MAP_PLATFORM_PREPARATION_SPIKE_CONFIRM=delete-disposable-object \
+    python tools/check_contabo_preparation_compatibility.py
+  ```
+- Prepared OSM source snapshots use the same worker-only Contabo store. Run the
+  offline preparer against one **pinned, checksum-verified** source PBF on a host
+  with measured scratch capacity and the intended shared cache root. It builds
+  and validates the complete source index and calibration generation. On the
+  existing VPS, omit `--publish-contabo` to use its local `/data/building-cache`
+  without purchasing Object Storage. Add the flag only after a separate
+  preparation bucket is configured; it publishes chunked immutable files for
+  cross-host restore:
+
+  ```sh
+  python tools/OSM_Extract/scripts/precompute_building_source.py \
+    --source-pbf /path/to/pinned-source.osm.pbf \
+    --source-sha256 EXACT_64_HEX_SHA256 \
+    --rules tools/OSM_Extract/conf/building_height_rules.yaml \
+    --cache-root /data/building-cache \
+    --publish-contabo
+  ```
+
+  The ready-only index and calibration readers do not reread the source PBF;
+  they bind the requested source SHA-256 to the sealed cache manifests. The
+  existing source/calibration readers validate restored artifacts before
+  use. Set `MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS` to comma-separated exact
+  PBF SHA-256 values to require ready preparation for those snapshots only;
+  a missing or corrupt generation fails closed without starting a full-source
+  scan in a user job. `MAP_PLATFORM_SOURCE_PREPARATION_MODE=prepared-only`
+  applies the rule to every snapshot; its default is `demand`. The restore
+  admission limit is `MAP_PLATFORM_SOURCE_PREPARATION_MAX_RESTORE_BYTES`
+  (default 64 GiB per file) plus a 2 GiB free-space reserve. Do not enable a
+  snapshot until its cold restore, source-index validation, calibration
+  validation and regional output comparison have passed. This path reuses
+  one complete regional snapshot. For selected ready snapshots, building
+  closure is exported from the verified index and merged with the clipped PBF
+  without `osmium getid` over the country source. To avoid the initial country
+  `osmium extract` for a measured region, prepare a complete one-degree grid
+  from the same pinned PBF before enabling the separate shard gate:
+
+  ```sh
+  python -m map_platform.source_shards \
+    --source-pbf /path/to/pinned-source.osm.pbf \
+    --source-sha256 EXACT_64_HEX_SHA256 \
+    --cache-root /data/building-cache \
+    --west INTEGER --south INTEGER --east INTEGER --north INTEGER
+  ```
+
+  The bounds are integer longitude/latitude edges, with east and north
+  exclusive; choose a grid that covers the full source rectangles of pilot
+  jobs, including their building buffer. One generation is capped at 256
+  cells and one request at 64 cells or 8 GiB of shard input. Preparation runs
+  one `osmium extract` multi-output scan, verifies each shard and publishes
+  the complete generation atomically. After an equivalent-output and disk
+  comparison, set `MAP_PLATFORM_SOURCE_SHARD_MODE=prefer-prepared` on the worker.
+  Extraction for standard and topo maps uses verified local shards wherever a
+  sealed generation covers the complete request. Outside prepared coverage it
+  reads the pinned source PBF, so map creation remains available in every
+  supported area. A corrupt shard or manifest fails closed; only absent coverage
+  uses the source PBF. `prepared-only` remains available for a deliberately
+  restricted region and rejects missing coverage for snapshots in
+  `MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS`. The preferred regional path does not yet avoid the
+  source-cache validation of the original PBF or establish a planet generation;
+  global capacity, incremental publication and cross-region seams remain
+  separate gates. Preparation and request assembly retain at least 16 GiB
+  of free local disk in addition to their estimated shard input.
 - `MAP_PLATFORM_S3_API_ACCESS_KEY_ID`,
   `MAP_PLATFORM_S3_API_SECRET_ACCESS_KEY`, and optional
   `MAP_PLATFORM_S3_API_SESSION_TOKEN`: separate short-lived API credentials
@@ -491,6 +616,8 @@ Useful production environment variables:
   `https://download.geofabrik.de/index-v1.json`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_CACHE`: catalog cache path, default
   `$MAP_PLATFORM_DATA_ROOT/source-catalogs/geofabrik-index-v1.json`.
+- `MAP_PLATFORM_GEOFABRIK_SOURCE_FALLBACKS`: tracked source-fallback policy
+  path, default `config/geofabrik-source-fallbacks.json`.
 - `MAP_PLATFORM_GEOFABRIK_INDEX_TTL_SECONDS`: catalog cache TTL, default
   `86400`.
 - `MAP_PLATFORM_GEOFABRIK_FAILURE_COOLDOWN_SECONDS`: fail-fast interval shared

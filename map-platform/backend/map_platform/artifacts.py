@@ -4,6 +4,7 @@ import base64
 import hashlib
 import os
 import re
+import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -15,6 +16,8 @@ BIKE_MAP_STREAM_FORMAT = "bike-map-stream-v1"
 BIKE_MAP_STREAM_MEDIA_TYPE = "application/vnd.openbikecomputer.map-stream"
 ZIP_STORED_FORMAT = "zip-stored-v1"
 ZIP_MEDIA_TYPE = "application/zip"
+TOPOGRAPHY_COMPANION_FORMAT = "topography-ios-v1"
+TOPOGRAPHY_COMPANION_MEDIA_TYPE = "application/vnd.bicino.topography+sqlite3"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 OCI_DIGEST_PATTERN = re.compile(r"sha256:([0-9a-f]{64})")
 MAXIMUM_ARTIFACT_BYTES = (1 << 63) - 1
@@ -24,6 +27,7 @@ MAXIMUM_STREAM_ARTIFACT_BYTES = (
     + 4 + 64 + 64  # signature prefix, maximum key ID, and raw signature
     + 512 * 1024 * 1024  # payload
 )
+MAXIMUM_TOPOGRAPHY_COMPANION_BYTES = 256 * 1024 * 1024
 
 
 class ArtifactStoreError(RuntimeError):
@@ -44,6 +48,10 @@ class ArtifactRecord:
     signature_key_sha256: str | None = None
     producer_build_sha256: str | None = None
     producer_image_digest: str | None = None
+    map_content_receipt: str | None = None
+    intermediate_sha256: str | None = None
+    source_policy_sha256: str | None = None
+    attribution_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _validate_object_key(self.object_key)
@@ -121,6 +129,33 @@ class ArtifactRecord:
             )
             if self.object_key != expected_key:
                 raise ValueError("map stream artifact object key does not match its identity")
+        companion_fields = (
+            self.map_content_receipt,
+            self.intermediate_sha256,
+            self.source_policy_sha256,
+            self.attribution_sha256,
+        )
+        if self.format == TOPOGRAPHY_COMPANION_FORMAT:
+            if self.media_type != TOPOGRAPHY_COMPANION_MEDIA_TYPE:
+                raise ValueError("topography companion media type is invalid")
+            if not self.filename.endswith(".btopo") or self.bytes > MAXIMUM_TOPOGRAPHY_COMPANION_BYTES:
+                raise ValueError("topography companion file identity is invalid")
+            map_id = self.filename.removesuffix(".btopo")
+            _validate_map_id(map_id)
+            if not all(field is not None and SHA256_PATTERN.fullmatch(field) for field in companion_fields):
+                raise ValueError("topography companion association identity is incomplete")
+            expected_key = (
+                f"maps/{map_id}/{TOPOGRAPHY_COMPANION_FORMAT}/"
+                f"{self.map_content_receipt}/{self.sha256}.btopo"
+            )
+            production_key = (
+                f"maps/{map_id}/{TOPOGRAPHY_COMPANION_FORMAT}/production/"
+                f"{self.map_content_receipt}/{self.sha256}.btopo"
+            )
+            if self.object_key not in (expected_key, production_key):
+                raise ValueError("topography companion object key does not match its identity")
+        elif any(companion_fields):
+            raise ValueError("topography association identity requires a companion artifact")
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -143,6 +178,14 @@ class ArtifactRecord:
             result["producerBuildSha256"] = self.producer_build_sha256
         if self.producer_image_digest is not None:
             result["producerImageDigest"] = self.producer_image_digest
+        for key, value in (
+            ("mapContentReceipt", self.map_content_receipt),
+            ("intermediateSha256", self.intermediate_sha256),
+            ("sourcePolicySha256", self.source_policy_sha256),
+            ("attributionSha256", self.attribution_sha256),
+        ):
+            if value is not None:
+                result[key] = value
         return result
 
     @classmethod
@@ -168,6 +211,10 @@ class ArtifactRecord:
             "signatureKeySha256",
             "producerBuildSha256",
             "producerImageDigest",
+            "mapContentReceipt",
+            "intermediateSha256",
+            "sourcePolicySha256",
+            "attributionSha256",
         }
         if set(value) - required_fields - optional_fields or not required_fields.issubset(value):
             raise ValueError("artifact metadata has invalid fields")
@@ -191,6 +238,10 @@ class ArtifactRecord:
                 "producerBuildSha256"
             ),
             producer_image_digest=optional_string("producerImageDigest"),
+            map_content_receipt=optional_string("mapContentReceipt"),
+            intermediate_sha256=optional_string("intermediateSha256"),
+            source_policy_sha256=optional_string("sourcePolicySha256"),
+            attribution_sha256=optional_string("attributionSha256"),
         )
 
 
@@ -260,6 +311,22 @@ class FileSystemArtifactStore:
             and path.stat().st_size == expected_bytes
             and sha256_file(path) == sha256
         )
+
+    def fetch_to(self, object_key: str, destination: Path, *, sha256: str, expected_bytes: int) -> None:
+        source = self.local_path(object_key)
+        if source is None or not self.verify(object_key, sha256=sha256, expected_bytes=expected_bytes):
+            raise ArtifactStoreError("immutable artifact is missing or corrupt")
+        if destination.exists():
+            raise ArtifactStoreError("artifact materialization destination already exists")
+        try:
+            with source.open("rb") as input_file, destination.open("xb") as output_file:
+                shutil.copyfileobj(input_file, output_file, 1024 * 1024)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            _verify_file(destination, sha256, expected_bytes)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
 
     def absent(self, object_key: str) -> bool:
         return self.local_path(object_key) is None
@@ -400,6 +467,39 @@ class S3ArtifactStore:
             return False
         return True
 
+    def fetch_to(self, object_key: str, destination: Path, *, sha256: str, expected_bytes: int) -> None:
+        _validate_object_key(object_key)
+        if destination.exists() or not self.verify(object_key, sha256=sha256, expected_bytes=expected_bytes):
+            raise ArtifactStoreError("immutable artifact is missing or destination exists")
+        if type(expected_bytes) is not int or not 0 < expected_bytes <= MAXIMUM_ARTIFACT_BYTES:
+            raise ValueError("artifact materialization size is invalid")
+        response = None
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=self._key(object_key))
+            body = response["Body"]
+            digest, copied = hashlib.sha256(), 0
+            with destination.open("xb") as output_file:
+                while chunk := body.read(min(1024 * 1024, expected_bytes - copied + 1)):
+                    copied += len(chunk)
+                    if copied > expected_bytes:
+                        raise ArtifactStoreError("immutable artifact exceeds its receipt")
+                    digest.update(chunk)
+                    output_file.write(chunk)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            if copied != expected_bytes or digest.hexdigest() != sha256:
+                raise ArtifactStoreError("immutable artifact bytes differ from its receipt")
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            if isinstance(exc, ArtifactStoreError):
+                raise
+            raise ArtifactStoreError(f"failed to materialize artifact: {exc}") from exc
+        finally:
+            if response is not None:
+                close = getattr(response.get("Body"), "close", None)
+                if close is not None:
+                    close()
+
     def absent(self, object_key: str) -> bool:
         _validate_object_key(object_key)
         return self._head(self._key(object_key)) is None
@@ -528,6 +628,11 @@ class MirroredArtifactStore:
             sha256=sha256,
             expected_bytes=expected_bytes,
         )
+
+    def fetch_to(self, object_key: str, destination: Path, *, sha256: str, expected_bytes: int) -> None:
+        if not self.verify(object_key, sha256=sha256, expected_bytes=expected_bytes):
+            raise ArtifactStoreError("immutable mirrored artifact is missing or corrupt")
+        self.primary.fetch_to(object_key, destination, sha256=sha256, expected_bytes=expected_bytes)
 
     def absent(self, object_key: str) -> bool:
         return self.primary.absent(object_key) and self.mirror.absent(object_key)
@@ -693,6 +798,23 @@ def zip_object_key(map_id: str, sha256: str) -> str:
     if not SHA256_PATTERN.fullmatch(sha256):
         raise ValueError("artifact SHA-256 is invalid")
     return f"maps/{map_id}/{ZIP_STORED_FORMAT}/{sha256}.zip"
+
+
+def topography_companion_object_key(
+    map_id: str,
+    map_content_receipt: str,
+    sha256: str,
+    *,
+    production: bool = False,
+) -> str:
+    _validate_map_id(map_id)
+    if not SHA256_PATTERN.fullmatch(map_content_receipt) or not SHA256_PATTERN.fullmatch(sha256):
+        raise ValueError("topography companion identity is invalid")
+    return (
+        f"maps/{map_id}/{TOPOGRAPHY_COMPANION_FORMAT}/"
+        + ("production/" if production else "")
+        + f"{map_content_receipt}/{sha256}.btopo"
+    )
 
 
 def map_stream_object_key(

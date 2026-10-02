@@ -41,6 +41,8 @@ struct Context {
   bool automaticDisplayOffEnabled = true;
   bool transferActive = false;
   bool attentionActive = false;
+  uint32_t dimAfterMs = kDimAfterMs;
+  uint32_t displayOffAfterMs = kDisplayOffAfterMs;
 };
 
 struct Update {
@@ -58,8 +60,13 @@ constexpr bool transferInactivityElapsed(uint32_t nowMs,
                                          uint32_t lastUsefulTrafficMs,
                                          uint32_t timeoutMs,
                                          bool authorizedRequestInProgress) {
+  const uint32_t elapsed = elapsedMs(nowMs, lastUsefulTrafficMs);
+  // The UI task samples nowMs before the HTTPS worker can publish newer
+  // authenticated traffic. Treat a modular delta in the upper half-range as
+  // a slightly future timestamp, not as nearly 2^32 ms of inactivity. Real
+  // timer wrap remains a small forward delta and is still accepted.
   return timeoutMs > 0 && !authorizedRequestInProgress &&
-         elapsedMs(nowMs, lastUsefulTrafficMs) >= timeoutMs;
+         elapsed < 0x8000'0000U && elapsed >= timeoutMs;
 }
 
 constexpr bool maneuverDataBecameActive(uint16_t previousDistanceMeters,
@@ -126,6 +133,13 @@ public:
       lastMeaningfulActivityMs_ = nowMs;
     }
 
+    if (dimAfterMs_ != context.dimAfterMs ||
+        displayOffAfterMs_ != context.displayOffAfterMs) {
+      dimAfterMs_ = context.dimAfterMs;
+      displayOffAfterMs_ = context.displayOffAfterMs;
+      lastMeaningfulActivityMs_ = nowMs;
+    }
+
     const bool heldAwake =
         context.navigating || context.workoutActive || context.transferActive ||
         context.attentionActive;
@@ -147,9 +161,9 @@ public:
       requested = Mode::Active;
     } else {
       const uint32_t idleMs = elapsedMs(nowMs, lastMeaningfulActivityMs_);
-      if (idleMs >= kDisplayOffAfterMs) {
+      if (idleMs >= displayOffAfterMs_) {
         requested = Mode::DisplayOff;
-      } else if (idleMs >= kDimAfterMs) {
+      } else if (idleMs >= dimAfterMs_) {
         requested = Mode::Dimmed;
       }
     }
@@ -174,6 +188,8 @@ private:
   bool heldAwake_ = false;
   bool automaticDisplayOffEnabled_ = true;
   uint32_t lastMeaningfulActivityMs_ = 0;
+  uint32_t dimAfterMs_ = kDimAfterMs;
+  uint32_t displayOffAfterMs_ = kDisplayOffAfterMs;
   Mode mode_ = Mode::Active;
 };
 

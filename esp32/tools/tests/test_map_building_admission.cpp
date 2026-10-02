@@ -61,8 +61,36 @@ static void testBoundedNearestRetentionIsOrderIndependent() {
   }
 }
 
+static void testProjectionPrepassUsesExactBaseQuotaAccounting() {
+  using namespace map_building_admission;
+  Quotas quotas;
+  quotas.maximumRecords = 2;
+  quotas.maximumPoints = 25;
+  quotas.maximumProjectedPixels = 250;
+
+  const Candidate first{{1.0, 0, 0, 0}, 20, 100, true, 0};
+  const Candidate pointOverflow{{2.0, 0, 0, 1}, 10, 100, true, 1};
+  const Candidate second{{3.0, 0, 0, 2}, 5, 150, true, 2};
+
+  BaseQuotaUsage usage;
+  assert(!usage.full(quotas));
+  assert(usage.fit(first, quotas).accepted());
+  usage.admit(first);
+  const BaseQuotaFit rejected = usage.fit(pointOverflow, quotas);
+  assert(rejected.records);
+  assert(!rejected.points);
+  assert(rejected.pixels);
+  assert(usage.fit(second, quotas).accepted());
+  usage.admit(second);
+  assert(usage.full(quotas));
+  assert(usage.records == 2);
+  assert(usage.points == 25);
+  assert(usage.pixels == 250);
+}
+
 int main() {
   testBoundedNearestRetentionIsOrderIndependent();
+  testProjectionPrepassUsesExactBaseQuotaAccounting();
   using namespace map_building_admission;
   Quotas quotas;
   quotas.maximumRecords = 3;

@@ -1,5 +1,6 @@
 #include "map_transfer_http.hpp"
 #include "../power_management/power_management.hpp"
+#include "../firmware_update/device_operation_owner.hpp"
 
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "map_stream_compiled_trust.hpp"
@@ -149,7 +150,8 @@ void MapTransferHttpServer::configure(
   installer_ = MapTransferInstaller(storageRoot_);
   streamTrustStore_ = compiledMapStreamTrustStore();
   if (stateMutex_ == nullptr)
-    stateMutex_ = xSemaphoreCreateMutex();
+    stateMutex_ = xSemaphoreCreateMutexStatic(&stateMutexStorage_);
+  configASSERT(stateMutex_ != nullptr);
   transferServer_ = sharedServer == nullptr ? &ownedTransferServer_ : sharedServer;
   if (sharedServer == nullptr)
     transferServer_->configure(port, "BikeComputer-Transfer");
@@ -238,6 +240,11 @@ bool MapTransferHttpServer::streamInstallSupported() const {
 }
 
 bool MapTransferHttpServer::setEnabled(bool enabled) {
+  lockState();
+  const bool rollbackBusy = rollbackKind_ != RollbackKind::None;
+  unlockState();
+  if (enabled && rollbackBusy)
+    return false;
   return transferServer_->setEnabled(enabled, enabled ? "map" : "");
 }
 
@@ -246,7 +253,18 @@ void MapTransferHttpServer::setLastError(const std::string &code,
   transferServer_->setLastError(code, message);
 }
 
-void MapTransferHttpServer::process() { transferServer_->process(); }
+void MapTransferHttpServer::process() {
+  transferServer_->process();
+  submitPendingRollback();
+}
+
+void MapTransferHttpServer::submitPendingRollback() {
+  lockState();
+  if (rollbackKind_ != RollbackKind::None && !rollbackSubmitted_ &&
+      storageControlSubmit_ != nullptr)
+    rollbackSubmitted_ = storageControlSubmit_(rollbackTask, this);
+  unlockState();
+}
 
 HttpTransferStatus MapTransferHttpServer::status() const {
   return transferServer_->status();
@@ -319,6 +337,29 @@ void MapTransferHttpServer::responseDidComplete(
   beginDeferredActivation(deferred, peerClosedCleanly);
 }
 
+void MapTransferHttpServer::responseDidAbort(
+    const device_transfer::HttpRequest &request) {
+  DeferredActivation deferred;
+  lockState();
+  if (deferredActivation_.pending() &&
+      deferredActivation_.response.matches(
+          request.transferGeneration, request.method, request.path)) {
+    deferred = std::move(deferredActivation_);
+    deferredActivation_ = {};
+  }
+  unlockState();
+  if (!deferred.pending())
+    return;
+  const InstallStatus discarded =
+      installer_.discardUnselectedStreamMap(deferred.sessionId);
+  updateStreamInstallState(MapStreamInstallSnapshot(), false);
+  setLastError(discarded.ok ? "response_incomplete" : discarded.code,
+               discarded.ok
+                   ? "map activation was cancelled because the HTTP response "
+                     "did not complete"
+                   : discarded.message);
+}
+
 bool MapTransferHttpServer::handleInstallStream(
     const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   std::string sessionId;
@@ -351,7 +392,8 @@ bool MapTransferHttpServer::handleInstallStream(
     return true;
   }
   lockState();
-  const bool acceptsUploads = activationState_.acceptsUploads();
+  const bool acceptsUploads = activationState_.acceptsUploads() &&
+                              rollbackKind_ == RollbackKind::None;
   MapStreamTrustStore trustStore = streamTrustStore_;
   unlockState();
   if (!acceptsUploads) {
@@ -473,6 +515,10 @@ bool MapTransferHttpServer::handleInstallStream(
   const MapStreamInstallSnapshot completed = receiver->snapshot();
   const uint32_t minimumActivationSequence =
       completed.sequence == UINT32_MAX ? UINT32_MAX : completed.sequence + 1;
+  // Activation starts in responseDidComplete after the verified response has
+  // unwound. A reusable HTTPS connection skips that callback while the client
+  // polls status, leaving this ready map unselected until the session expires.
+  client.requestHttpResponseClose();
   const bool responseQueued =
       sendJson(client, 200,
                std::string("{\"ok\":true,\"status\":\"ready\",\"sessionId\":\"") +
@@ -661,8 +707,8 @@ void MapTransferHttpServer::acknowledgeActivatedMapRoot(
     unlockState();
     return;
   }
-  const std::string sessionId = pendingMapSessionId_;
-  const std::string mapId = pendingMapId_;
+  std::string sessionId = std::move(pendingMapSessionId_);
+  const std::string mapId = std::move(pendingMapId_);
   const bool automaticExit = pendingRendererAutomaticExit_;
   pendingMapRoot_.clear();
   pendingMapSessionId_.clear();
@@ -674,18 +720,91 @@ void MapTransferHttpServer::acknowledgeActivatedMapRoot(
 
   if (loaded) {
     finishActivation("installed", mapId, "", "");
+    if (automaticExit)
+      requestAutomaticExit();
   } else {
-    const InstallStatus rollback = installer_.rollbackActiveMap(sessionId);
-    const std::string message =
-        rollback.ok
-            ? std::string("renderer rejected the new map root; ") +
-                  rollback.message
-            : std::string("renderer rejected the new map root; rollback failed: ") +
-                  rollback.message;
-    finishActivation("failed", mapId, "renderer_reload", message);
+    lockState();
+    rollbackKind_ = RollbackKind::Transfer;
+    rollbackSession_ = std::move(sessionId);
+    rollbackAutomaticExit_ = automaticExit;
+    rollbackSubmitted_ = false;
+    unlockState();
+    // process() retries command admission; no filesystem work on the UI.
   }
-  if (automaticExit)
+}
+
+bool MapTransferHttpServer::requestRuntimeRollback() {
+  // UI owns mode changes; do not race a live upload or an enabled listener.
+  if (transferServer_->status().enabled)
+    return false;
+  lockState();
+  if (rollbackKind_ != RollbackKind::None ||
+      !activationState_.acceptsUploads() || streamStatusActive_) {
+    unlockState();
+    return false;
+  }
+  rollbackKind_ = RollbackKind::Runtime;
+  rollbackSubmitted_ = false;
+  rollbackComplete_ = false;
+  rollbackSession_.clear();
+  unlockState();
+  return true;
+}
+
+bool MapTransferHttpServer::takeRuntimeRollback(ActiveMapSelection &restored,
+                                               bool &succeeded) {
+  lockState();
+  if (rollbackKind_ != RollbackKind::Runtime || !rollbackComplete_) {
+    unlockState();
+    return false;
+  }
+  restored = std::move(rollbackRestored_);
+  succeeded = rollbackSucceeded_;
+  rollbackKind_ = RollbackKind::None;
+  rollbackComplete_ = false;
+  unlockState();
+  return true;
+}
+
+void MapTransferHttpServer::rollbackTask(void *context) {
+  static_cast<MapTransferHttpServer *>(context)->executeRollback();
+}
+
+void MapTransferHttpServer::executeRollback() {
+  // A single admitted command owns these fields until completion. Admission
+  // blocks uploads and the UI only polls the completion under stateMutex_.
+  bool succeeded = false;
+  ActiveMapSelection restored;
+  try {
+    std::string session = rollbackSession_;
+    if (session.empty()) {
+      ActiveMapSelection failed;
+      if (installer_.readActiveMap(failed).ok)
+        session = std::move(failed.sessionId);
+    }
+    succeeded = !session.empty() && installer_.rollbackActiveMap(session).ok;
+    if (rollbackKind_ == RollbackKind::Runtime)
+      succeeded = succeeded && installer_.readActiveMap(restored).ok;
+  } catch (const std::bad_alloc &) {
+    succeeded = false;
+    Serial.println("MAP_RESOURCE_REJECTED: rollback");
+  }
+  lockState();
+  const bool transfer = rollbackKind_ == RollbackKind::Transfer;
+  const bool automaticExit = rollbackAutomaticExit_;
+  rollbackSucceeded_ = succeeded;
+  rollbackRestored_ = std::move(restored);
+  rollbackComplete_ = true;
+  if (transfer) {
+    // Short fixed error text stays within string small-buffer storage.
+    activationState_.finish("failed", "", "renderer_reload", "");
+    rollbackKind_ = RollbackKind::None;
+  }
+  unlockState();
+  Serial.printf("MAP_ROLLBACK completed=1 restored=%u\n", succeeded ? 1U : 0U);
+  if (transfer && automaticExit)
     requestAutomaticExit();
+  ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
 }
 
 bool MapTransferHttpServer::takeAutomaticExitRequest() {
@@ -770,12 +889,15 @@ void MapTransferHttpServer::requestAutomaticExit() {
   ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
 }
 
-void MapTransferHttpServer::finishActivation(const std::string &status,
-                                             const std::string &mapId,
-                                             const std::string &errorCode,
-                                             const std::string &errorMessage) {
+void MapTransferHttpServer::finishActivation(std::string status, std::string mapId,
+              std::string errorCode, std::string errorMessage) {
+  // Reserve report copies before entering the state mutex. Moving the
+  // prepared fields into the state is allocation-free.
+  std::string stateCode = errorCode;
+  std::string stateMessage = errorMessage;
   lockState();
-  activationState_.finish(status, mapId, errorCode, errorMessage);
+  activationState_.finish(std::move(status), std::move(mapId),
+                          std::move(stateCode), std::move(stateMessage));
   unlockState();
   if (!errorCode.empty()) {
     transferServer_->setLastError(errorCode, errorMessage);
@@ -795,7 +917,7 @@ void MapTransferHttpServer::updateActivationProgress(
 }
 
 bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
-                                                bool automaticExit) {
+                                                bool automaticExit) try {
   auto *context =
       new ActivationTaskContext{this, sessionId, automaticExit};
   BaseType_t created = xTaskCreate(activationTaskThunk, "map_activate", 16384,
@@ -812,6 +934,11 @@ bool MapTransferHttpServer::startActivationTask(const std::string &sessionId,
                 "automatic=%d protocol=2\n",
                 sessionId.c_str(), automaticExit);
   return true;
+}
+
+catch (const std::bad_alloc &) {
+  finishActivation("failed", "", "out_of_memory", "");
+  return false;
 }
 
 bool MapTransferHttpServer::deferActivationUntilResponse(
@@ -842,20 +969,38 @@ void MapTransferHttpServer::beginDeferredActivation(
   unlockState();
 
   if (beginResult == ActivationBeginResult::Started) {
-    // responseDidComplete runs on the existing 16 KiB transfer worker after
-    // the upload handler and stream parser have unwound. Activation needs the
-    // same stack budget, so execute it here instead of allocating a second
-    // 16 KiB task at the firmware's peak map-transfer memory watermark.
-    executeActivation(activation.sessionId, peerClosedCleanly);
+    // The HTTP response and stream parser have unwound. Only the internal
+    // operation owner may now run the durable activation/rollback transaction;
+    // the TLS worker's stack is in PSRAM and must never be the flash caller.
+    transferServer_->sampleResources("before_map_activation");
+    const esp_err_t dispatch = operationOwner_ == nullptr
+        ? ESP_ERR_INVALID_STATE
+        : operationOwner_->runMapActivation(ownedActivation, this,
+                                            activation.sessionId,
+                                            peerClosedCleanly);
+    if (dispatch == ESP_ERR_TIMEOUT) {
+      // The internal task may still be committing the journal. Keep its
+      // activation state live and poison the owner; a late completion must
+      // never be reported as a cancelled or safely retryable map switch.
+      setLastError("activation_owner_timeout",
+                   "map activation is still resolving on the device");
+    } else if (dispatch != ESP_OK) {
+      finishActivation("failed", "", "activation_owner",
+                       "internal map activation owner is unavailable");
+    }
+    transferServer_->sampleResources("after_map_activation");
     return;
   }
   if (beginResult == ActivationBeginResult::AlreadyInstalled) {
-    const InstallStatus cleaned =
-        installer_.activateReadyStreamMap(activation.sessionId);
-    if (!cleaned.ok)
-      setLastError(cleaned.code, cleaned.message);
-    if (peerClosedCleanly)
-      requestAutomaticExit();
+    const esp_err_t dispatch = operationOwner_ == nullptr
+        ? ESP_ERR_INVALID_STATE
+        : operationOwner_->runMapActivation(ownedInstalledCleanup, this,
+                                            activation.sessionId,
+                                            peerClosedCleanly);
+    if (dispatch != ESP_OK)
+      setLastError(dispatch == ESP_ERR_TIMEOUT ? "activation_cleanup_timeout"
+                                               : "activation_cleanup_owner",
+                   "installed map cleanup could not complete safely");
     return;
   }
   if (beginResult == ActivationBeginResult::Busy) {
@@ -864,14 +1009,38 @@ void MapTransferHttpServer::beginDeferredActivation(
   }
 }
 
+void MapTransferHttpServer::ownedActivation(void *context,
+                                            const char *sessionId,
+                                            bool automaticExit) {
+  static_cast<MapTransferHttpServer *>(context)->executeActivation(
+      sessionId, automaticExit);
+}
+
+void MapTransferHttpServer::ownedInstalledCleanup(void *context,
+                                                  const char *sessionId,
+                                                  bool automaticExit) {
+  auto *server = static_cast<MapTransferHttpServer *>(context);
+  const InstallStatus cleaned = server->installer_.activateReadyStreamMap(sessionId);
+  if (!cleaned.ok)
+    server->setLastError(cleaned.code, cleaned.message);
+  if (automaticExit)
+    server->requestAutomaticExit();
+}
+
 void MapTransferHttpServer::executeActivation(const std::string &sessionId,
-                                              bool automaticExit) {
+                                              bool automaticExit) try {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Transfer);
   const bool waitingForRenderer =
       runStreamActivationTask(sessionId, automaticExit);
   if (waitingForRenderer)
     return;
+  if (automaticExit)
+    requestAutomaticExit();
+}
+
+catch (const std::bad_alloc &) {
+  finishActivation("failed", "", "out_of_memory", "");
   if (automaticExit)
     requestAutomaticExit();
 }
@@ -896,9 +1065,9 @@ bool MapTransferHttpServer::runStreamActivationTask(
     return false;
   }
   lockState();
-  pendingMapRoot_ = selected.root;
-  pendingMapSessionId_ = selected.sessionId;
-  pendingMapId_ = selected.mapId;
+  pendingMapRoot_ = std::move(selected.root);
+  pendingMapSessionId_ = std::move(selected.sessionId);
+  pendingMapId_ = std::move(selected.mapId);
   pendingMapRootTaken_ = false;
   pendingRendererAcknowledgement_ = true;
   pendingRendererAutomaticExit_ = automaticExit;
@@ -912,7 +1081,7 @@ void MapTransferHttpServer::activationTaskThunk(void *arg) {
   auto *context = static_cast<ActivationTaskContext *>(arg);
   if (context != nullptr && context->server != nullptr) {
     MapTransferHttpServer *server = context->server;
-    std::string sessionId = context->sessionId;
+    std::string sessionId = std::move(context->sessionId);
     const bool automaticExit = context->automaticExit;
     delete context;
     server->executeActivation(sessionId, automaticExit);

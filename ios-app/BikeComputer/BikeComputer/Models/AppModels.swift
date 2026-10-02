@@ -42,16 +42,21 @@ struct SavedDestination: Codable, Identifiable, Equatable {
     let name: String
     let latitude: CLLocationDegrees?
     let longitude: CLLocationDegrees?
+    /// The local route chosen when this destination became a favorite.
+    /// Optional so favorites created by older app versions remain readable.
+    let savedRouteID: UUID?
 
     init(
         id: UUID = UUID(),
         name: String,
-        coordinate: CLLocationCoordinate2D? = nil
+        coordinate: CLLocationCoordinate2D? = nil,
+        savedRouteID: UUID? = nil
     ) {
         self.id = id
         self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         self.latitude = coordinate?.latitude
         self.longitude = coordinate?.longitude
+        self.savedRouteID = savedRouteID
     }
 
     var coordinate: CLLocationCoordinate2D? {
@@ -153,6 +158,42 @@ final class SavedDestinationStore: ObservableObject {
         favoriteDestinations.contains { $0.matches(destination) }
     }
 
+    func favorite(savedRouteID: UUID) -> SavedDestination? {
+        favoriteDestinations.first { $0.savedRouteID == savedRouteID }
+    }
+
+    @discardableResult
+    func addFavorite(
+        _ destination: SavedDestination,
+        savedRouteID: UUID? = nil
+    ) -> SavedDestination? {
+        guard let cleaned = cleaned(destination, savedRouteID: savedRouteID) else {
+            return nil
+        }
+        favoriteDestinations.removeAll { $0.matches(cleaned) }
+        favoriteDestinations.insert(cleaned, at: 0)
+        persist()
+        return cleaned
+    }
+
+    @discardableResult
+    func removeFavorite(_ destination: SavedDestination) -> Bool {
+        let previousCount = favoriteDestinations.count
+        favoriteDestinations.removeAll { $0.matches(destination) }
+        guard favoriteDestinations.count != previousCount else { return false }
+        persist()
+        return true
+    }
+
+    @discardableResult
+    func removeFavorite(savedRouteID: UUID) -> Bool {
+        let previousCount = favoriteDestinations.count
+        favoriteDestinations.removeAll { $0.savedRouteID == savedRouteID }
+        guard favoriteDestinations.count != previousCount else { return false }
+        persist()
+        return true
+    }
+
     @discardableResult
     func toggleFavorite(_ destination: SavedDestination) -> Bool {
         guard let destination = cleaned(destination) else { return false }
@@ -163,15 +204,21 @@ final class SavedDestinationStore: ObservableObject {
             return false
         }
 
-        favoriteDestinations.insert(destination, at: 0)
-        persist()
-        return true
+        return addFavorite(destination) != nil
     }
 
-    private func cleaned(_ destination: SavedDestination) -> SavedDestination? {
+    private func cleaned(
+        _ destination: SavedDestination,
+        savedRouteID: UUID? = nil
+    ) -> SavedDestination? {
         let name = destination.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return nil }
-        return SavedDestination(id: destination.id, name: name, coordinate: destination.coordinate)
+        return SavedDestination(
+            id: destination.id,
+            name: name,
+            coordinate: destination.coordinate,
+            savedRouteID: savedRouteID ?? destination.savedRouteID
+        )
     }
 
     private func persist() {

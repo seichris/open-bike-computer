@@ -40,8 +40,18 @@ struct MapManifest {
   std::vector<std::string> labelLanguages;
   std::string internationalFallback;
   uint32_t buildingProfileVersion = 0;
+  uint32_t topographyProfileVersion = 0;
   uint32_t buildingRecordCount = 0;
   uint32_t buildingProvenanceCounts[5] = {0, 0, 0, 0, 0};
+  uint32_t contourRecordCount = 0;
+  uint32_t contourPointCount = 0;
+  uint32_t contourMinorIntervalM = 0;
+  uint32_t contourIndexIntervalM = 0;
+  uint32_t contourNoDataMillionths = 0;
+  std::string contourQualityMode;
+  std::string topographySourcePolicySha256;
+  std::string topographyIntermediateSha256;
+  std::string topographyAttributionSha256;
   std::string minimumFirmwareVersion;
   std::vector<ManifestFile> files;
 };
@@ -69,6 +79,13 @@ struct MapTargetMetadata {
   std::vector<std::string> labelLanguages;
   std::string internationalFallback;
   uint32_t buildingProfileVersion = 0;
+  uint32_t topographyProfileVersion = 0;
+  std::string topographyQualityMode;
+  uint32_t contourMinorIntervalM = 0;
+  uint32_t contourIndexIntervalM = 0;
+  uint32_t contourRecordCount = 0;
+  uint32_t contourNoDataMillionths = 0;
+  std::string topographySourcePolicySha256;
 };
 
 struct ActiveMapSelection {
@@ -137,8 +154,8 @@ public:
                               uint8_t totalSteps = 5,
                               uint32_t minimumSequence = 0);
   void updateProgress(const ActivationProgress &progress);
-  void finish(const std::string &status, const std::string &mapId,
-              const std::string &errorCode, const std::string &errorMessage);
+  void finish(std::string status, std::string mapId,
+              std::string errorCode, std::string errorMessage);
   bool acceptsUploads() const;
   MapActivationSnapshot snapshot() const;
   std::string json(bool compact = false) const;
@@ -219,7 +236,12 @@ protected:
 private:
   std::string storageRoot_;
 
-  InstallStatus fail(const std::string &code, const std::string &message) const;
+  // Share error-result construction across the many validation exits. Owning
+  // parameters move into the result rather than allocating a second copy.
+  __attribute__((noinline)) InstallStatus fail(const char *code,
+                                              std::string message) const;
+  __attribute__((noinline)) InstallStatus fail(const char *code,
+                                              const char *message) const;
   bool safeId(const std::string &value) const;
   bool safeMapId(const std::string &value) const;
   bool safeActiveRoot(const std::string &value) const;

@@ -65,7 +65,10 @@ public:
    * @param data Pointer to compressed route data
    * @param len Length of data in bytes
    */
-  void parseRouteData(const uint8_t *data, size_t len);
+  bool parseRouteData(const uint8_t *data, size_t len);
+
+  /** Exact, allocation-free comparison against the accepted route. */
+  bool matchesRouteData(const uint8_t *data, size_t len) const;
 
   /**
    * @brief Draw route overlay on LVGL canvas

@@ -50,6 +50,11 @@ static_assert(!ShadowRuntime::kCanControlRide,
 
 namespace ride_automation_runtime {
 
+// Deadline applies even when no transport acknowledgement ever arrives.
+inline bool decisionTransportExpired(uint32_t nowMs, uint32_t beganAtMs) {
+  return nowMs - beganAtMs >= 30'000U;
+}
+
 inline bool shouldEndDetailedCapture(
     ride_automation::ConfirmedLifecycle previous,
     ride_automation::ConfirmedLifecycle current) {

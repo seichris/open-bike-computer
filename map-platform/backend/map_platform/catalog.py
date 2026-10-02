@@ -14,7 +14,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
-from .artifacts import BIKE_MAP_STREAM_FORMAT, ZIP_STORED_FORMAT, ArtifactRecord
+from .artifacts import (
+    BIKE_MAP_STREAM_FORMAT,
+    TOPOGRAPHY_COMPANION_FORMAT,
+    ZIP_STORED_FORMAT,
+    ArtifactRecord,
+)
 from .generation_profiles import configured_deployment_channel
 from .models import JobStatus, MapJob, utc_now_iso
 
@@ -70,6 +75,7 @@ def renderer_features(job: MapJob) -> tuple[str, int, list[str]]:
         1: [],
         2: ["street-labels"],
         3: ["3d-buildings", "street-labels"],
+        4: ["3d-buildings", "contours", "street-labels"],
     }
     try:
         features = features_by_format[format_version]
@@ -245,7 +251,27 @@ def publication_payload(job: MapJob, channel: str) -> dict[str, Any]:
                 "requiredFeatures": features,
             }
             value.update(delivery_requirements)
+        elif artifact.format == TOPOGRAPHY_COMPANION_FORMAT:
+            value["companionRequirements"] = {
+                "schemaVersion": 1,
+                "role": TOPOGRAPHY_COMPANION_FORMAT,
+                "mapContentReceipt": artifact.map_content_receipt,
+                "mapId": job.map_id,
+                "profileVersion": 1,
+                "intermediateSha256": artifact.intermediate_sha256,
+                "sourcePolicySha256": artifact.source_policy_sha256,
+                "attributionSha256": artifact.attribution_sha256,
+            }
         artifact_values.append(value)
+    companions = [
+        artifact for artifact in artifact_values
+        if artifact["format"] == TOPOGRAPHY_COMPANION_FORMAT
+    ]
+    if format_version == 4:
+        if len(companions) != 1 or companions[0]["companionRequirements"]["mapContentReceipt"] != content_receipt:
+            raise CatalogPublicationError("topographic map requires one exact companion artifact")
+    elif companions:
+        raise CatalogPublicationError("non-topographic map contains a companion artifact")
     return {
         "publicationId": publication_id(job, channel),
         "mapEntryId": entry_id,
@@ -344,14 +370,22 @@ class CatalogClient:
         payload: dict[str, Any] = {"libraryCredential": library_credential}
         if alias is not None:
             payload["alias"] = alias
+        # The catalog accepts at most 128 characters in a service request key.
+        # Hash the full attachment identity: a publication ID plus a credential
+        # hash already exceeds that bound for normal generated publications.
+        attachment_identity = _canonical_sha256(
+            {
+                "publicationId": publication_id_value,
+                "libraryCredentialSha256": hashlib.sha256(
+                    library_credential.encode("utf-8")
+                ).hexdigest(),
+            }
+        )
         return self._request(
             "/v1/internal/publications/"
             f"{quote(publication_id_value, safe='')}/attach-library",
             payload,
-            idempotency_key=(
-                f"attach:{publication_id_value}:"
-                f"{hashlib.sha256(library_credential.encode('utf-8')).hexdigest()}"
-            ),
+            idempotency_key=f"attach:{attachment_identity}",
         )
 
     def promotion_grant(self, entry_id: str) -> dict[str, Any]:

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import io
 import json
@@ -19,17 +18,19 @@ from qrcode.constants import ERROR_CORRECT_M
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
 OUTPUT = ROOT / "lib" / "images" / "src"
-SOURCE_B64 = TOOLS / "preconnection-logo-source.png.b64"
+SOURCE_SVG = TOOLS / "preconnection-bicino-wordmark.svg"
+SOURCE_PNG = TOOLS / "preconnection-bicino-wordmark.png"
 MANIFEST = TOOLS / "preconnection-assets-manifest.json"
 
-LOGO_SOURCE_REPOSITORY = "https://github.com/seichris/bicino"
-LOGO_SOURCE_COMMIT = "a7b0bc0cdbf4e01b8afee9d614c8c8ffab884a9e"
-LOGO_SOURCE_PATH = "public/images/bicino-logo.png"
-LOGO_SOURCE_SHA256 = (
-    "c37377cca05d4a9120a23c92ee5f19750b64ff206a8beb1f7863fc2ca1016612"
+LOGO_SOURCE_SVG_SHA256 = (
+    "7af224b30f3499510b898f11866f0972457498e5a6cfc1b709875548a297a4b9"
 )
-LOGO_SIZE = 36
-BRAND_RED = (0xFF, 0x37, 0x2E)
+LOGO_SOURCE_PNG_SHA256 = (
+    "158cefe0f67f2060af8c4b6d9ee2378ad52b3b063241dcfdbaefe21f8f8647c3"
+)
+LOGO_WIDTH = 128
+LOGO_HEIGHT = 37
+LOGO_COLOR = (0xF5, 0xF5, 0xF5)
 
 QR_PAYLOAD = "https://bicino.com/app"
 QR_VERSION = 2
@@ -100,38 +101,40 @@ const lv_image_dsc_t {symbol} = {{
 
 
 def generate_logo() -> tuple[bytes, bytes, dict[str, object]]:
-    source = base64.b64decode(SOURCE_B64.read_text())
-    if sha256(source) != LOGO_SOURCE_SHA256:
-        raise RuntimeError("canonical Bicino logo source checksum changed")
+    source_svg = SOURCE_SVG.read_bytes()
+    if sha256(source_svg) != LOGO_SOURCE_SVG_SHA256:
+        raise RuntimeError("canonical Bicino wordmark SVG checksum changed")
 
-    original = Image.open(io.BytesIO(source)).convert("RGBA")
-    alpha_box = original.getchannel("A").getbbox()
-    if alpha_box is None:
-        raise RuntimeError("canonical Bicino logo contains no visible pixels")
-    mark = original.crop(alpha_box)
-    mark.thumbnail((LOGO_SIZE, LOGO_SIZE), Image.Resampling.LANCZOS)
-    alpha = Image.new("L", (LOGO_SIZE, LOGO_SIZE), 0)
-    alpha.paste(mark.getchannel("A"),
-                ((LOGO_SIZE - mark.width) // 2,
-                 (LOGO_SIZE - mark.height) // 2))
+    source_png = SOURCE_PNG.read_bytes()
+    if sha256(source_png) != LOGO_SOURCE_PNG_SHA256:
+        raise RuntimeError("canonical Bicino wordmark raster checksum changed")
 
-    rgb565 = ((BRAND_RED[0] >> 3) << 11) | ((BRAND_RED[1] >> 2) << 5) | (
-        BRAND_RED[2] >> 3
+    original = Image.open(io.BytesIO(source_png)).convert("RGBA")
+    if original.size != (LOGO_WIDTH, LOGO_HEIGHT):
+        raise RuntimeError("canonical Bicino wordmark raster dimensions changed")
+    alpha = original.getchannel("A")
+    if alpha.getbbox() is None:
+        raise RuntimeError("canonical Bicino wordmark contains no visible pixels")
+
+    rgb565 = ((LOGO_COLOR[0] >> 3) << 11) | ((LOGO_COLOR[1] >> 2) << 5) | (
+        LOGO_COLOR[2] >> 3
     )
-    color_plane = bytes((rgb565 & 0xFF, rgb565 >> 8)) * (LOGO_SIZE * LOGO_SIZE)
+    color_plane = bytes((rgb565 & 0xFF, rgb565 >> 8)) * (
+        LOGO_WIDTH * LOGO_HEIGHT
+    )
     data = color_plane + alpha.tobytes()
     header = asset_header("bicino_logo")
     source_file = asset_source(
-        "bicino_logo", "LV_COLOR_FORMAT_RGB565A8", LOGO_SIZE, LOGO_SIZE,
-        LOGO_SIZE * 2, data
+        "bicino_logo", "LV_COLOR_FORMAT_RGB565A8", LOGO_WIDTH, LOGO_HEIGHT,
+        LOGO_WIDTH * 2, data
     )
     metadata = {
-        "source_repository": LOGO_SOURCE_REPOSITORY,
-        "source_commit": LOGO_SOURCE_COMMIT,
-        "source_path": LOGO_SOURCE_PATH,
-        "source_sha256": LOGO_SOURCE_SHA256,
-        "output_dimensions": [LOGO_SIZE, LOGO_SIZE],
-        "color_rgb888": "#FF372E",
+        "source_svg_path": str(SOURCE_SVG.relative_to(ROOT)),
+        "source_svg_sha256": LOGO_SOURCE_SVG_SHA256,
+        "source_png_path": str(SOURCE_PNG.relative_to(ROOT)),
+        "source_png_sha256": LOGO_SOURCE_PNG_SHA256,
+        "output_dimensions": [LOGO_WIDTH, LOGO_HEIGHT],
+        "color_rgb888": "#F5F5F5",
         "data_sha256": sha256(data),
     }
     return header, source_file, metadata

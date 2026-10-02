@@ -25,6 +25,17 @@ int main() {
   assert(!budget.acceptDelimiterByte());
   assert(device_transfer::HttpHeaderBudget::timedOut(
       device_transfer::HTTP_REQUEST_HEADER_TIMEOUT_MS));
+  assert(device_transfer::HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS <
+         device_transfer::HTTP_REQUEST_HEADER_TIMEOUT_MS);
+  assert(device_transfer::HTTP_INITIAL_REQUEST_IDLE_TIMEOUT_MS <
+         device_transfer::HTTP_REQUEST_HEADER_TIMEOUT_MS);
+  assert(device_transfer::httpRequestLineTimeoutMs(0) ==
+         device_transfer::HTTP_INITIAL_REQUEST_IDLE_TIMEOUT_MS);
+  assert(device_transfer::httpRequestLineTimeoutMs(1) ==
+         device_transfer::HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS);
+  assert(device_transfer::httpRequestLineTimeoutMs(
+             device_transfer::HTTP_MAX_REQUESTS_PER_TLS_CONNECTION - 1) ==
+         device_transfer::HTTP_PERSISTENT_REQUEST_IDLE_TIMEOUT_MS);
 
   uint32_t generation = device_transfer::nextHttpTransferGeneration(0);
   assert(generation == 1);
@@ -36,6 +47,18 @@ int main() {
   assert(!device_transfer::isHttpTransferGenerationCurrent(false, generation,
                                                             generation));
   assert(device_transfer::nextHttpTransferGeneration(UINT32_MAX) == 1);
+  assert(device_transfer::shouldReuseAuthenticatedHttpConnection(
+      true, true, false, true, true));
+  assert(!device_transfer::shouldReuseAuthenticatedHttpConnection(
+      false, true, false, true, true));
+  assert(!device_transfer::shouldReuseAuthenticatedHttpConnection(
+      true, false, false, true, true));
+  assert(!device_transfer::shouldReuseAuthenticatedHttpConnection(
+      true, true, true, true, true));
+  assert(!device_transfer::shouldReuseAuthenticatedHttpConnection(
+      true, true, false, false, true));
+  assert(!device_transfer::shouldReuseAuthenticatedHttpConnection(
+      true, true, false, true, false));
   const device_transfer::HttpResponseCompletionToken responseToken{
       generation, "PUT", "/map-transfer/sessions/session-1/install-stream"};
   assert(responseToken.matches(
@@ -74,6 +97,29 @@ int main() {
   assert(headers.transferToken.empty());
   headers.accept("transfer-encoding", "chunked");
   assert(headers.hasAmbiguousFraming());
+
+  device_transfer::HttpSecurityHeaders persistentHeaders;
+  assert(!persistentHeaders.connectionClose);
+  persistentHeaders.accept("connection", "Keep-Alive, upgrade");
+  assert(!persistentHeaders.connectionClose);
+  device_transfer::HttpSecurityHeaders closeHeaders;
+  closeHeaders.accept("connection", "keep-alive, CLOSE");
+  assert(closeHeaders.connectionClose);
+  device_transfer::HttpSecurityHeaders duplicateConnectionHeaders;
+  duplicateConnectionHeaders.accept("connection", "keep-alive");
+  duplicateConnectionHeaders.accept("connection", "keep-alive");
+  assert(duplicateConnectionHeaders.connectionClose);
+  device_transfer::HttpSecurityHeaders reuseHeaders;
+  reuseHeaders.accept("x-bikecomputer-connection-reuse", "1");
+  assert(reuseHeaders.connectionReuseRequested);
+  device_transfer::HttpSecurityHeaders invalidReuseHeaders;
+  invalidReuseHeaders.accept("x-bikecomputer-connection-reuse", "true");
+  assert(!invalidReuseHeaders.connectionReuseRequested);
+  device_transfer::HttpSecurityHeaders duplicateReuseHeaders;
+  duplicateReuseHeaders.accept("x-bikecomputer-connection-reuse", "1");
+  duplicateReuseHeaders.accept("x-bikecomputer-connection-reuse", "1");
+  assert(!duplicateReuseHeaders.connectionReuseRequested);
+  assert(device_transfer::HTTP_MAX_REQUESTS_PER_TLS_CONNECTION >= 512);
 
   std::cout << "device transfer HTTP limit tests passed\n";
   return 0;

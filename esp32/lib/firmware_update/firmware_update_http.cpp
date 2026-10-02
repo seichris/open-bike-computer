@@ -1,6 +1,10 @@
 #include "firmware_update_http.hpp"
+#include "firmware_update_policy.hpp"
 
+#include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_metadata/firmware_metadata.hpp"
+#include "../ride_diagnostics/ride_diagnostics.hpp"
+#include "../status_json/status_json.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -28,24 +32,6 @@ static constexpr const char *kManifestSigningPublicKeyPem =
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEtohCWc591a7u6+lRHZX82FuT3ab3\n"
     "kEv4w/ai84IAaR/g3R4OEw0fhxOIPyDqqbQiACLb/F7Sw04y8IwZjA+UKw==\n"
     "-----END PUBLIC KEY-----\n";
-
-static std::string jsonEscape(const std::string &value) {
-  std::string out;
-  out.reserve(value.size() + 8);
-  for (char c : value) {
-    if (c == '"' || c == '\\') {
-      out.push_back('\\');
-      out.push_back(c);
-    } else if (c == '\n') {
-      out += "\\n";
-    } else if (c == '\r') {
-      out += "\\r";
-    } else {
-      out.push_back(c);
-    }
-  }
-  return out;
-}
 
 static bool startsWith(const std::string &value, const std::string &prefix) {
   return value.size() >= prefix.size() &&
@@ -151,12 +137,28 @@ static std::string partitionLabel(const esp_partition_t *partition) {
   return partition == nullptr ? "" : std::string(partition->label);
 }
 
-static std::string otaStateName(const esp_partition_t *partition) {
+static bool otaPartitionEligible(const esp_partition_t *running,
+                                 const esp_partition_t *inactive,
+                                 std::string &reason) {
+  const bool inactiveIsOtaApplication =
+      inactive != nullptr && inactive->type == ESP_PARTITION_TYPE_APP &&
+      inactive->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MIN &&
+      inactive->subtype <= ESP_PARTITION_SUBTYPE_APP_OTA_MAX;
+  const policy::Eligibility eligibility = policy::otaEligibility(
+      running != nullptr, inactive != nullptr, inactive != running,
+      inactiveIsOtaApplication, inactive == nullptr ? 0 : inactive->size);
+  reason = policy::eligibilityCode(eligibility);
+  return eligibility == policy::Eligibility::Eligible;
+}
+
+static std::string otaStateName(const esp_partition_t *partition,
+                                esp_err_t stateResult,
+                                esp_ota_img_states_t state) {
   if (partition == nullptr)
     return "unknown";
-  esp_ota_img_states_t state;
-  esp_err_t result = esp_ota_get_state_partition(partition, &state);
-  if (result != ESP_OK)
+  if (stateResult == ESP_ERR_NOT_FOUND)
+    return "untracked"; // USB/factory image with no OTA state entry
+  if (stateResult != ESP_OK)
     return "unknown";
   switch (state) {
   case ESP_OTA_IMG_NEW:
@@ -259,18 +261,44 @@ static bool verifyManifestSignature(const std::string &payload,
 void FirmwareUpdateHttpServer::configure(
     device_transfer::HttpTransferServer *sharedServer, uint16_t port) {
   if (stateMutex_ == nullptr)
-    stateMutex_ = xSemaphoreCreateMutex();
+    stateMutex_ = xSemaphoreCreateMutexStatic(&stateMutexStorage_);
+  configASSERT(stateMutex_ != nullptr);
   transferServer_ = sharedServer == nullptr ? &ownedTransferServer_ : sharedServer;
+  operationOwner_.configure();
+  transferServer_->setNetworkOperationOwner(&operationOwner_);
   if (sharedServer == nullptr)
     transferServer_->configure(port, "BikeComputer-Transfer");
   transferServer_->registerHandler("/firmware-update", this);
 }
 
 bool FirmwareUpdateHttpServer::setEnabled(bool enabled) {
-  if (!enabled)
-    resetUploadState();
-  return transferServer_->setEnabled(enabled, enabled ? "firmware" : "");
+  // UI/callback callers revoke admission only. The HTTP owner aborts after
+  // the last begin/write/end call has unwound, including idle uploads.
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (enabled && !firmware_maintenance::active()) {
+    setLastError("firmware_maintenance_required",
+                 "reboot into firmware maintenance before starting OTA");
+    return false;
+  }
+#endif
+  if (enabled) {
+    const auto activeMode = transferServer_->status().mode;
+    if (!activeMode.empty() && activeMode != "firmware")
+      return transferServer_->setEnabled(true, "firmware");
+  }
+  const bool ownerWasStarted = operationOwner_.started();
+  if (enabled && !operationOwner_.start()) {
+    setLastError("ota_flash_worker",
+                 "could not start the internal firmware flash owner");
+    return false;
+  }
+  const bool changed = transferServer_->setEnabled(enabled, enabled ? "firmware" : "");
+  if (enabled && !changed && !ownerWasStarted)
+    (void)operationOwner_.release();
+  return changed;
 }
+
+void FirmwareUpdateHttpServer::workerWillStop() { resetUploadState(); }
 
 void FirmwareUpdateHttpServer::setLastError(const std::string &code,
                                             const std::string &message) {
@@ -283,8 +311,19 @@ void FirmwareUpdateHttpServer::setLastError(const std::string &code,
 void FirmwareUpdateHttpServer::process() { transferServer_->process(); }
 
 FirmwareUpdateStatus FirmwareUpdateHttpServer::status() const {
-  const esp_partition_t *running = esp_ota_get_running_partition();
-  const esp_partition_t *inactive = esp_ota_get_next_update_partition(nullptr);
+  FirmwarePartitionSnapshot partitions;
+  if (firmware_maintenance::active() && operationOwner_.started()) {
+    partitions = operationOwner_.partitionSnapshot();
+  } else {
+    partitions.running = esp_ota_get_running_partition();
+    partitions.inactive = esp_ota_get_next_update_partition(nullptr);
+    if (partitions.running != nullptr) {
+      partitions.runningStateResult = esp_ota_get_state_partition(
+          partitions.running, &partitions.runningState);
+    }
+  }
+  const esp_partition_t *running = partitions.running;
+  const esp_partition_t *inactive = partitions.inactive;
 
   lockState();
   FirmwareUpdateStatus snapshot;
@@ -293,11 +332,18 @@ FirmwareUpdateStatus FirmwareUpdateHttpServer::status() const {
   snapshot.runningVersion = firmware_metadata::version();
   snapshot.runningBuild = firmware_metadata::build();
   snapshot.runningGitSha = firmware_metadata::gitSha();
+  snapshot.runningProfile = firmware_metadata::buildProfile();
   snapshot.runningPartition = partitionLabel(running);
   snapshot.inactivePartition = partitionLabel(inactive);
+  snapshot.otaState = otaStateName(
+      running, partitions.runningStateResult, partitions.runningState);
+  snapshot.otaEligible =
+      otaPartitionEligible(running, inactive, snapshot.eligibilityCode);
   snapshot.maxImageBytes = inactive == nullptr ? 0 : inactive->size;
   snapshot.receivedBytes = receivedBytes_;
   snapshot.totalBytes = totalBytes_;
+  snapshot.flashOwnerStackHighWaterBytes =
+      operationOwner_.stackHighWaterBytes();
   snapshot.sha256 = actualSha256_.empty() ? expectedSha256_ : actualSha256_;
   snapshot.errorCode = errorCode_;
   snapshot.errorMessage = errorMessage_;
@@ -307,35 +353,47 @@ FirmwareUpdateStatus FirmwareUpdateHttpServer::status() const {
 
 std::string FirmwareUpdateHttpServer::statusJson() const {
   FirmwareUpdateStatus snapshot = status();
-  const esp_partition_t *running = esp_ota_get_running_partition();
-  std::string body = std::string("{\"status\":\"") +
-                     jsonEscape(snapshot.status) + "\",\"target\":\"" +
-                     jsonEscape(snapshot.target) + "\",\"runningVersion\":\"" +
-                     jsonEscape(snapshot.runningVersion) +
-                     "\",\"runningBuild\":" +
-                     std::to_string(snapshot.runningBuild) +
-                     ",\"runningGitSha\":\"" +
-                     jsonEscape(snapshot.runningGitSha) +
-                     "\"" +
-                     ",\"runningPartition\":\"" +
-                     jsonEscape(snapshot.runningPartition) +
-                     "\",\"inactivePartition\":\"" +
-                     jsonEscape(snapshot.inactivePartition) +
-                     "\",\"otaState\":\"" + jsonEscape(otaStateName(running)) +
-                     "\",\"maxImageBytes\":" +
-                     std::to_string(snapshot.maxImageBytes) +
-                     ",\"receivedBytes\":" +
-                     std::to_string(snapshot.receivedBytes) +
-                     ",\"totalBytes\":" +
-                     std::to_string(snapshot.totalBytes);
+  std::string body;
+  body.reserve(768);
+  body = "{\"status\":\"";
+  body += status_json::escape(snapshot.status);
+  body += "\"";
+  status_json::appendStringField(body, "target", snapshot.target);
+  status_json::appendStringField(body, "runningVersion",
+                                 snapshot.runningVersion);
+  status_json::appendUnsignedField(body, "runningBuild",
+                                   snapshot.runningBuild);
+  status_json::appendStringField(body, "runningGitSha",
+                                 snapshot.runningGitSha);
+  status_json::appendStringField(body, "runningPartition",
+                                 snapshot.runningPartition);
+  status_json::appendStringField(body, "inactivePartition",
+                                 snapshot.inactivePartition);
+  status_json::appendBoolField(body, "otaEligible", snapshot.otaEligible);
+  status_json::appendStringField(body, "eligibilityCode",
+                                 snapshot.eligibilityCode);
+  status_json::appendStringField(body, "runningProfile",
+                                 snapshot.runningProfile);
+  status_json::appendStringField(body, "otaState", snapshot.otaState);
+  status_json::appendUnsignedField(body, "maxImageBytes",
+                                   snapshot.maxImageBytes);
+  status_json::appendUnsignedField(body, "receivedBytes",
+                                   snapshot.receivedBytes);
+  status_json::appendUnsignedField(body, "totalBytes", snapshot.totalBytes);
+  status_json::appendUnsignedField(body, "flashOwnerStackHighWaterBytes",
+                                   snapshot.flashOwnerStackHighWaterBytes);
   if (!snapshot.sha256.empty()) {
-    body += ",\"sha256\":\"" + jsonEscape(snapshot.sha256) + "\"";
+    status_json::appendStringField(body, "sha256", snapshot.sha256);
   } else {
     body += ",\"sha256\":null";
   }
   if (!snapshot.errorCode.empty()) {
-    body += ",\"lastError\":{\"code\":\"" + jsonEscape(snapshot.errorCode) +
-            "\",\"message\":\"" + jsonEscape(snapshot.errorMessage) + "\"}";
+    status_json::appendFieldPrefix(body, "lastError");
+    body += "{\"code\":\"";
+    body += status_json::escape(snapshot.errorCode);
+    body += "\"";
+    status_json::appendStringField(body, "message", snapshot.errorMessage);
+    body += "}";
   } else {
     body += ",\"lastError\":null";
   }
@@ -343,15 +401,48 @@ std::string FirmwareUpdateHttpServer::statusJson() const {
   return body;
 }
 
-void FirmwareUpdateHttpServer::markRunningAppValid() {
+std::string FirmwareUpdateHttpServer::bootAcceptanceJson(bool ready) const {
+  esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_err_t stateResult = running == nullptr
+                                    ? ESP_FAIL
+                                    : esp_ota_get_state_partition(running,
+                                                                  &state);
+  return firmware_metadata::bootAcceptanceJson(
+      ready, otaStateName(running, stateResult, state).c_str());
+}
+
+bool FirmwareUpdateHttpServer::markRunningAppValid() {
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  if (running == nullptr)
+    return false;
+  esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+  const esp_err_t query = esp_ota_get_state_partition(running, &state);
+  // USB/factory provisioning has no pending OTA record. It still needs the
+  // application's readiness checks, but there is nothing to confirm.
+  if (query == ESP_ERR_NOT_FOUND ||
+      (query == ESP_OK && (state == ESP_OTA_IMG_VALID ||
+                           state == ESP_OTA_IMG_UNDEFINED)))
+    return true;
+  if (query != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY)
+    return false;
+  const esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
+  if (result != ESP_OK)
+    return false;
+  return esp_ota_get_state_partition(running, &state) == ESP_OK &&
+         state == ESP_OTA_IMG_VALID;
+}
+
+void FirmwareUpdateHttpServer::rejectRunningApp() {
   const esp_partition_t *running = esp_ota_get_running_partition();
   esp_ota_img_states_t state;
   if (running != nullptr &&
       esp_ota_get_state_partition(running, &state) == ESP_OK &&
       state == ESP_OTA_IMG_PENDING_VERIFY) {
-    esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
-    Serial.printf("FIRMWARE_UPDATE: mark running app valid result=%s\n",
-                  esp_err_to_name(result));
+    // Returns only on failure (e.g. no eligible previous slot). Never proceed
+    // to readiness; restarting leaves bootloader rollback in control.
+    (void)esp_ota_mark_app_invalid_rollback_and_reboot();
+    ESP.restart();
   }
 }
 
@@ -468,10 +559,15 @@ void FirmwareUpdateHttpServer::handleBegin(
     return;
   }
 
-  const esp_partition_t *updatePartition =
-      esp_ota_get_next_update_partition(nullptr);
-  if (updatePartition == nullptr) {
-    fail(client, 500, "ota_partition_missing", "inactive OTA partition missing");
+  const FirmwarePartitionSnapshot partitions =
+      operationOwner_.partitionSnapshot();
+  const esp_partition_t *updatePartition = partitions.inactive;
+  const esp_partition_t *runningPartition = partitions.running;
+  std::string eligibilityCode;
+  if (!otaPartitionEligible(runningPartition, updatePartition,
+                            eligibilityCode)) {
+    fail(client, 409, eligibilityCode,
+         "a distinct inactive OTA partition is required");
     return;
   }
   if (size == 0 || size > updatePartition->size) {
@@ -481,9 +577,15 @@ void FirmwareUpdateHttpServer::handleBegin(
 
   resetUploadState();
   esp_ota_handle_t handle = 0;
-  esp_err_t result = esp_ota_begin(updatePartition, size, &handle);
+  esp_err_t result = operationOwner_.begin(updatePartition, size, handle);
   if (result != ESP_OK) {
     fail(client, 500, "ota_begin_failed", esp_err_to_name(result));
+    return;
+  }
+  if (!transaction_.begin()) {
+    (void)operationOwner_.abort(handle);
+    fail(client, 409, "ota_owner_busy",
+         "another firmware transaction owns the OTA lifecycle");
     return;
   }
 
@@ -500,6 +602,9 @@ void FirmwareUpdateHttpServer::handleBegin(
   errorCode_.clear();
   errorMessage_.clear();
   unlockState();
+
+  firmware_maintenance::setStage(firmware_maintenance::Stage::Receiving);
+  transferServer_->noteStatusChanged("ota_begin");
 
   device_transfer::sendHttpJson(client, 200, statusJson());
 }
@@ -548,7 +653,7 @@ void FirmwareUpdateHttpServer::handleImage(
       delay(1);
       continue;
     }
-    esp_err_t result = esp_ota_write(handle, buffer, bytesRead);
+    esp_err_t result = operationOwner_.write(handle, buffer, bytesRead);
     if (result != ESP_OK) {
       mbedtls_sha256_free(&sha);
       resetUploadState();
@@ -561,7 +666,12 @@ void FirmwareUpdateHttpServer::handleImage(
 
     lockState();
     receivedBytes_ += static_cast<uint32_t>(bytesRead);
+    const uint32_t receivedBytes = receivedBytes_;
     unlockState();
+    if ((receivedBytes & ((256U * 1024U) - 1U)) <
+        static_cast<uint32_t>(bytesRead)) {
+      transferServer_->sampleResources("ota_write");
+    }
   }
 
   if (!transferServer_->isRequestAuthorized(request)) {
@@ -592,18 +702,26 @@ void FirmwareUpdateHttpServer::handleImage(
     fail(client, 400, "sha256_mismatch", "firmware image hash mismatch");
     return;
   }
+  if (!transaction_.verify()) {
+    resetUploadState();
+    fail(client, 409, "ota_state_invalid",
+         "firmware transaction did not reach the verified state");
+    return;
+  }
 
   lockState();
   actualSha256_ = actualSha256;
-  status_ = "received";
+  status_ = "verified";
   unlockState();
+  firmware_maintenance::setStage(firmware_maintenance::Stage::Verifying);
+  transferServer_->noteStatusChanged("image_verified");
   device_transfer::sendHttpJson(client, 200, statusJson());
 }
 
 void FirmwareUpdateHttpServer::handleFinalize(
     const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
   lockState();
-  const bool ready = status_ == "received" && otaOpen_;
+  const bool ready = status_ == "verified" && otaOpen_;
   const esp_ota_handle_t handle = otaHandle_;
   const esp_partition_t *updatePartition = updatePartition_;
   const std::string expectedSha256 = expectedSha256_;
@@ -629,7 +747,7 @@ void FirmwareUpdateHttpServer::handleFinalize(
     return;
   }
 
-  esp_err_t result = esp_ota_end(handle);
+  esp_err_t result = operationOwner_.end(handle);
   lockState();
   otaOpen_ = false;
   otaHandle_ = 0;
@@ -647,30 +765,44 @@ void FirmwareUpdateHttpServer::handleFinalize(
   }
 
   esp_app_desc_t appDescription;
-  result = esp_ota_get_partition_description(updatePartition, &appDescription);
+  result = operationOwner_.description(updatePartition, appDescription);
   if (result != ESP_OK) {
     resetUploadState();
     fail(client, 400, "image_description_failed", esp_err_to_name(result));
     return;
   }
 
-  if (!transferServer_->isRequestAuthorized(request)) {
+  if (!transferServer_->beginAuthorizedCommit(request)) {
     resetUploadState();
     fail(client, 409, "transfer_cancelled",
          "firmware transfer authorization was revoked before activation");
     return;
   }
+  if (!transaction_.beginCommit()) {
+    transferServer_->endAuthorizedCommit();
+    resetUploadState();
+    fail(client, 409, "ota_commit_state_invalid",
+         "firmware transaction could not enter the commit boundary");
+    return;
+  }
 
-  result = esp_ota_set_boot_partition(updatePartition);
+  firmware_maintenance::setStage(firmware_maintenance::Stage::Committing);
+  transferServer_->noteStatusChanged("commit_boundary");
+  result = operationOwner_.selectBootPartition(updatePartition);
   if (result != ESP_OK) {
+    transferServer_->endAuthorizedCommit();
     resetUploadState();
     fail(client, 500, "set_boot_partition_failed", esp_err_to_name(result));
     return;
   }
+  const bool rebootSelected = transaction_.selectReboot();
+  configASSERT(rebootSelected);
 
   lockState();
-  status_ = "finalizing";
+  status_ = "rebooting";
   unlockState();
+  firmware_maintenance::setStage(firmware_maintenance::Stage::Rebooting);
+  transferServer_->noteStatusChanged("boot_selected");
   device_transfer::sendHttpJson(client, 202, statusJson());
   Serial.printf("FIRMWARE_UPDATE: boot partition set to %s manifest=%s(%u) "
                 "app=%s project=%s; rebooting\n",
@@ -683,6 +815,17 @@ void FirmwareUpdateHttpServer::handleFinalize(
 
 void FirmwareUpdateHttpServer::handleCancel(device_transfer::TransferClient &client) {
   resetUploadState();
+  (void)transaction_.cancel();
+  lockState();
+  status_ = "cancelled";
+  unlockState();
+  if (firmware_maintenance::active() &&
+      !firmware_maintenance::exitRequested()) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_http_cancel", "{}");
+    firmware_maintenance::requestExit();
+  }
+  transferServer_->noteStatusChanged("cancelled");
   device_transfer::sendHttpJson(client, 200, statusJson());
 }
 
@@ -701,9 +844,10 @@ void FirmwareUpdateHttpServer::resetUploadState() {
   pendingBuild_ = 0;
   allowDowngrade_ = false;
   updatePartition_ = nullptr;
+  transaction_.reset();
   unlockState();
   if (otaOpen) {
-    esp_ota_abort(handle);
+    (void)operationOwner_.abort(handle);
   }
 }
 
@@ -717,10 +861,12 @@ void FirmwareUpdateHttpServer::reject(device_transfer::TransferClient &client, i
 void FirmwareUpdateHttpServer::fail(device_transfer::TransferClient &client, int httpStatus,
                                     const std::string &code,
                                     const std::string &message) {
-  setLastError(code, message);
+  transaction_.fail();
   lockState();
   status_ = "failed";
   unlockState();
+  firmware_maintenance::setStage(firmware_maintenance::Stage::Failed);
+  setLastError(code, message);
   device_transfer::sendHttpError(client, httpStatus, code, message);
 }
 

@@ -52,6 +52,11 @@ passes, following
   production HMAC service principals; request signatures bind the method,
   path, timestamp, idempotency key, and body SHA-256. A principal has the shape
   `{"channel":"development|production","secret":"..."}`.
+- Service idempotency keys normally remain limited to 128 characters. For
+  older map backends, the exact legacy `attach:<publicationId>:<credentialSha256>`
+  format is also accepted, only on the matching encoded publication's POST
+  `attach-library` route. This compatibility exception does not bypass HMAC,
+  timestamp, channel, or library-credential authorization.
 - `R2_DEVELOPMENT_*` and `R2_PRODUCTION_*` are read-only credentials and must
   never be reused by a map publisher.
 - Share previews contain bounded metadata and never reveal an R2 key or a

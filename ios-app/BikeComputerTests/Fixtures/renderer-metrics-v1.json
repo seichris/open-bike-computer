@@ -1,0 +1,235 @@
+{
+  "ok": true,
+  "schema": 1,
+  "sequence": 42,
+  "timestampMs": 42000,
+  "window": {
+    "id": 17,
+    "startedAtMs": 1000,
+    "runId": "rb-contract-r-m-1",
+    "repeat": 1
+  },
+  "identity": {
+    "deviceId": "0123456789abcdef",
+    "firmwareCommit": "1111111111111111111111111111111111111111",
+    "board": "WAVESHARE_AMOLED_175",
+    "buildProfile": "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
+    "bootId": 7,
+    "resetReason": 1,
+    "mapFixture": {
+      "id": "shanghai-renderer-v1",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "routeFixture": {
+      "id": "shanghai-jingan-renderer-v1",
+      "sha256": "0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64",
+      "mode": "ios-fixture-1hz"
+    }
+  },
+  "tuning": {
+    "profile": "medium",
+    "fingerprint": 12673537785575117931,
+    "minimumExtrusionAreaPx2": 6,
+    "total": {
+      "records": 96,
+      "points": 8192,
+      "projectedPixels": 220000
+    },
+    "extrusion": {
+      "records": 40,
+      "points": 3840,
+      "projectedPixels": 112500
+    }
+  },
+  "memory": {
+    "internalHeap": {
+      "free": 50000,
+      "minimumEverFree": 45000,
+      "largestBlock": 30000,
+      "windowMinimumFree": 45000,
+      "windowMinimumLargestBlock": 25000
+    },
+    "psram": {
+      "free": 2500000,
+      "largestBlock": 1500000,
+      "windowMinimumFree": 2400000,
+      "windowMinimumLargestBlock": 1400000
+    },
+    "dmaHeap": {
+      "free": 24000,
+      "minimumEverFree": 20000,
+      "largestBlock": 12000,
+      "windowMinimumFree": 20000,
+      "windowMinimumLargestBlock": 10000,
+      "cryptoCountersScope": "window",
+      "cryptoHeadroomRejections": 0,
+      "cryptoOperationFailures": 0,
+      "windowMinimumFreeAttribution": {
+        "phase": "periodic",
+        "observedAtMs": 1000,
+        "value": 20000,
+        "frameTransferActive": true
+      }
+    }
+  },
+  "render": {
+    "timings": {
+      "total": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      },
+      "blockLoad": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      },
+      "draw": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      },
+      "buildingProjection": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      },
+      "buildingDraw": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      },
+      "buildingTotal": {
+        "count": 30,
+        "lastMs": 100,
+        "p50Ms": 100,
+        "p95Ms": 200,
+        "maximumMs": 250
+      }
+    },
+    "buildings": {
+      "candidates": 70,
+      "selected": 60,
+      "extruded": 40,
+      "flat": 20,
+      "deferred": 10,
+      "oversized": 0,
+      "rendered": 60,
+      "allocationFallback": false,
+      "extrudedP90DistancePx": 80,
+      "extrudedFarthestDistancePx": 100,
+      "limiterFlags": 0,
+      "limiterPasses": {
+        "records": 0,
+        "points": 0,
+        "projectedPixels": 0,
+        "extrudedRecords": 0,
+        "extrudedPoints": 0,
+        "extrudedPixels": 0
+      }
+    },
+    "jobs": {
+      "requested": 30,
+      "started": 30,
+      "completed": 30,
+      "published": 30,
+      "stale": 0,
+      "cancelled": 0,
+      "interrupted": 0,
+      "coverageRejected": 0,
+      "invariantFailed": 0
+    }
+  },
+  "ui": {
+    "maximumGapMs": 100
+  },
+  "displayFlush": {
+    "count": 30,
+    "lastMs": 80,
+    "p50Ms": 80,
+    "p95Ms": 100,
+    "maximumMs": 120
+  },
+  "gps": {
+    "packets": 42,
+    "latestPacketGapMs": 1000,
+    "maximumPacketGapMs": 1000,
+    "predictionGraceEntries": 10,
+    "predictionExhaustionEntries": 0
+  },
+  "routeReplay": {
+    "valid": true,
+    "fixtureSha256": "0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64",
+    "fixtureMatches": true,
+    "sampleIndex": 42,
+    "sampleCount": 120,
+    "loop": 0,
+    "receivedAtMs": 42000,
+    "accepted": 42,
+    "rejected": 0
+  },
+  "remoteDebug": {
+    "active": true,
+    "snapshotBytes": 434312,
+    "captured": 4,
+    "skippedCadence": 0,
+    "skippedLocked": 0,
+    "captureErrors": 0,
+    "lastCopyUs": 1000,
+    "maximumCopyUs": 1200,
+    "lastHttpResponseMs": 20,
+    "maximumHttpResponseMs": 30,
+    "lastFrameSnapshotWaitUs": 110,
+    "maximumFrameSnapshotWaitUs": 220,
+    "lastFrameCrcUs": 330,
+    "maximumFrameCrcUs": 440,
+    "lastHttpExpectedBytes": 434344,
+    "lastHttpActualBytes": 434344,
+    "lastHttpWriteCalls": 215,
+    "lastHttpZeroWriteCalls": 4,
+    "lastHttpShortWriteCalls": 3,
+    "lastHttpActiveTlsWriteUs": 500000,
+    "lastHttpNoProgressWaitMs": 1200,
+    "lastHttpIntentionalDelayMs": 212,
+    "freeBefore": 2500000,
+    "largestBefore": 1500000,
+    "freeAfterAllocate": 2000000,
+    "largestAfterAllocate": 1400000
+  },
+  "replayTransport": {
+    "gpsAuthenticationAccepted": 0,
+    "gpsAuthenticationRejected": 0,
+    "rbs1Detected": 0,
+    "rbs1Decoded": 0,
+    "rbs1Malformed": 0,
+    "rbs1Unnegotiated": 0,
+    "gpsMailboxAccepted": 0,
+    "gpsMailboxRejected": 0,
+    "markerAccepted": 0,
+    "markerRejectedInvalid": 0,
+    "markerRejectedNoActiveWindow": 221,
+    "markerRejectedActiveFixtureUnavailable": 0,
+    "markerRejectedFixtureMismatch": 0,
+    "lastTransportEventAtMs": 0,
+    "lastMarkerAtMs": 0,
+    "lastActiveWindowId": 0,
+    "lastSampleIndex": 0,
+    "lastSampleCount": 0,
+    "lastLoop": 0,
+    "lastCandidateFixtureTag": 0,
+    "lastExpectedFixtureTag": 0,
+    "lastCandidateFixtureTagValid": true,
+    "lastExpectedFixtureTagValid": false,
+    "lastMarkerResult": "no_active_window"
+  }
+}

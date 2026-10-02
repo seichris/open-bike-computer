@@ -163,6 +163,17 @@ nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
         identity == WatchRouteIdentityV1(archive: archive)
     }
 
+    static func isInstallTransfer(
+        _ propertyList: [String: Any]?,
+        matching identity: WatchRouteIdentityV1
+    ) -> Bool {
+        guard let propertyList,
+              let message = Self(propertyList: propertyList) else {
+            return false
+        }
+        return message.operation == .install && message.identity == identity
+    }
+
     private enum Keys {
         static let schema = "bicino.route.schema"
         static let operation = "bicino.route.operation"

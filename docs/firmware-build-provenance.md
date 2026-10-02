@@ -57,6 +57,32 @@ printed line.
 Schema-1 consumers must not silently parse schema 2. Historical evidence stays
 historical; a new producer never rewrites or relabels it.
 
+## Stable Python state during cache reuse
+
+Verified Waveshare builds also exclude the final ELF link target from SCons
+artifact caching. SCons does not restore the linker's `firmware.map` side output
+alongside a cached ELF. Re-running the link preserves the required dynamic-TLS
+link evidence and link timing while keeping objects and libraries cacheable.
+The wrapper still rejects a missing or invalid map; it never substitutes a map
+from another build.
+
+The sanitized build environment forces `PYTHONDONTWRITEBYTECODE=1` for
+compilation, recursive custom-core subprocesses, and upload. Runtime startup's
+inherited setting is not sufficient: environment sanitization must explicitly
+restore this policy. The caller's original environment is restored afterward,
+including when a build or upload fails.
+
+Core archives preserve Python bytecode as attested executable state, but
+hydration recreates source files with different filesystem timestamps. Python
+may recompile a stale timestamp-based cache in memory; it must not rewrite or
+add `.pyc` files inside the inventoried toolchain. Bytecode remains included in
+the existing content attestation. This policy does not excuse missing files,
+directories, changed executable state, or a failed post-build comparison.
+
+Cache-reuse qualification requires a real clean build followed by a same-head
+cache-hit rebuild, with unchanged core attestation and image/flash-plan hashes.
+Unit tests of environment propagation alone are not that qualification.
+
 ## Runtime and factory timing records
 
 `FIRMWARE_RUNTIME_CHECK schema=1` is a separate, no-build performance record.
@@ -73,3 +99,12 @@ developer build latency.
 The JSON build-manifest schema, runtime-lock schema, core-cache schema,
 flash-plan schema, factory-bundle schema, and factory-release schema remain the
 authoritative structured contracts for their respective boundaries.
+
+## Shared dependency caches
+
+See [firmware build caching](firmware-build-caching.md) for shared core transport,
+source-only compiler reuse, CI cache boundaries, and the required native-host
+relocation qualification. `FIRMWARE_SHARED_CORE_CACHE schema=1` records a miss,
+publication, or verified restore (`status=hit` with `restoreMs`). A restore is
+never firmware/upload acceptance; the normal exact-source build provenance
+remains authoritative.

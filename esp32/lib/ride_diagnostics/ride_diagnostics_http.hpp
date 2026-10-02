@@ -13,6 +13,8 @@ public:
                      device_transfer::TransferClient &client) override;
   void responseDidComplete(const device_transfer::HttpRequest &request,
                            bool peerClosedCleanly) override;
+  void responseDidAbort(
+      const device_transfer::HttpRequest &request) override;
 
 private:
   device_transfer::HttpTransferServer *server_ = nullptr;

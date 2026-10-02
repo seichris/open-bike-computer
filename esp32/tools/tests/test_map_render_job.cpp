@@ -14,6 +14,23 @@ int main() {
   assert(!shouldCancelWorkerOperation(false, true, 7, 8));
   assert(shouldCancelWorkerOperation(true, true, 7, 7));
 
+  // A diagnostics-window transition is an evidence boundary even when the
+  // visible map semantics are otherwise identical. Work from the old window
+  // cannot complete or publish into the new window's counters.
+  LatestWins windowJobs;
+  Version windowOne{1, 10, 20, 30, 40, 50, 41};
+  Version windowTwo{2, 10, 20, 30, 40, 50, 42};
+  windowJobs.submit(windowOne);
+  assert(windowJobs.beginLatest());
+  windowJobs.submit(windowTwo);
+  assert(windowJobs.checkpoint() == StopReason::Superseded);
+  windowJobs.cancelActive();
+  assert(windowJobs.beginLatest());
+  assert(windowJobs.completeActive());
+  Version windowPublished;
+  assert(windowJobs.takeReady(windowPublished));
+  assert(windowPublished == windowTwo);
+
   LatestWins jobs;
   Version first{1, 10, 20, 30, 40, 50};
   assert(jobs.submit(first) == first);

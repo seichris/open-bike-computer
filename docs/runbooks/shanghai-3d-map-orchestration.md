@@ -64,6 +64,14 @@ receipt-complete assembly is admitted only after the assembly pool is free. An
 expired parent-phase lease is removed by the normal recovery pass; do not add a
 second worker or manually delete the reservation.
 
+The source-wide building calibration precompute has a six-hour command wall
+limit because it scans the complete immutable source snapshot and publishes a
+generation reused by later jobs. This is separate from the 30-minute hard
+deadline for an individual workload scan or building chunk. A calibration that
+continues to emit progress and refresh its parent-phase lease is long-running,
+not a pathological chunk; preserve its source/checksum identity and let it
+finish.
+
 The worker executes at most one child task for a claimed parent before yielding
 the parent job. The next global claim is selected across eligible parents using
 admission priority, weighted virtual finish, last-claim ordering, and the

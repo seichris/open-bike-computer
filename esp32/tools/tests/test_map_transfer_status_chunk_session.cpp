@@ -87,7 +87,7 @@ int main() {
       "\"protocols\":[1,2],\"streamFormatVersions\":[1],"
       "\"streamTrust\":[\"production-key=" +
       std::string(64, 'a') +
-      "\"],\"sdPresent\":true,\"mapFound\":true,"
+      "\"],\"sdPresent\":true,\"mapStateKnown\":true,\"mapFound\":true,"
       "\"mapBlocks\":4294967295,"
       "\"baseUrl\":\"http://255.255.255.255:65535\","
       "\"apSsid\":\"BikeComputer-Transfer-123456789\","
@@ -173,6 +173,32 @@ int main() {
   transmission.advance();
   assert(!transmission.active());
   assert(transmission.nextFrame().empty());
+
+  assert(transmission.begin(chunkBody, initial, 8));
+  frame = transmission.nextFrame("RDMC");
+  assert(frame.size() == 15);
+  assert(frame.substr(0, 4) == "RDMC");
+  assert(static_cast<uint8_t>(frame[4]) == initial);
+  assert(frame.substr(7) == "abcdefgh");
+  assert(transmission.nextFrame("bad").empty());
+  transmission.reset();
+
+  const std::string rendererSnapshot(3'100, 'r');
+  assert(transmission.begin(rendererSnapshot, initial, 128));
+  assert(transmission.chunkCount() == 25);
+  size_t rendererFrames = 0;
+  while (transmission.active()) {
+    for (size_t slot = 0; slot < 8 && transmission.active(); ++slot) {
+      frame = transmission.nextFrame("RDMC");
+      assert(frame.substr(0, 4) == "RDMC");
+      assert(static_cast<uint8_t>(frame[5]) == rendererFrames);
+      assert(static_cast<uint8_t>(frame[6]) == 25);
+      transmission.advance();
+      ++rendererFrames;
+    }
+  }
+  assert(rendererFrames == 25);
+  transmission.reset();
 
   const std::string oversizedQueueBody = "0123456789ABCDEFGHIJ";
   assert(transmission.begin(oversizedQueueBody, activating, 1));

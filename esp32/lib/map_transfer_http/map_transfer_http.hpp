@@ -11,6 +11,8 @@
 #include "map_transfer.hpp"
 #include "map_stream_receiver.hpp"
 
+namespace firmware_update { class DeviceOperationOwner; }
+
 namespace map_transfer {
 
 using HttpTransferStatus = device_transfer::HttpTransferStatus;
@@ -41,6 +43,14 @@ public:
   void acknowledgeActivatedMapRoot(const std::string &root, bool loaded);
   bool takeAutomaticExitRequest();
   void resumePendingActivations();
+  using StorageControlSubmit = bool (*)(void (*)(void *), void *);
+  void setStorageControlSubmit(StorageControlSubmit submit) { storageControlSubmit_ = submit; }
+  void setOperationOwner(firmware_update::DeviceOperationOwner *owner) {
+    operationOwner_ = owner;
+  }
+  bool requestRuntimeRollback();
+  void submitPendingRollback();
+  bool takeRuntimeRollback(ActiveMapSelection &restored, bool &succeeded);
 
 private:
   std::string storageRoot_ = "/sdcard";
@@ -49,6 +59,7 @@ private:
       &ownedTransferServer_;
   MapTransferInstaller installer_{"/sdcard"};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
+  StaticSemaphore_t stateMutexStorage_{};
   MapActivationState activationState_;
   MapStreamTrustStore streamTrustStore_;
   MapStreamInstallSnapshot streamInstallState_;
@@ -70,11 +81,25 @@ private:
     bool pending() const { return !sessionId.empty(); }
   };
   DeferredActivation deferredActivation_;
+  enum class RollbackKind { None, Transfer, Runtime };
+  StorageControlSubmit storageControlSubmit_ = nullptr;
+  firmware_update::DeviceOperationOwner *operationOwner_ = nullptr;
+  RollbackKind rollbackKind_ = RollbackKind::None;
+  bool rollbackSubmitted_ = false;
+  bool rollbackComplete_ = false;
+  bool rollbackSucceeded_ = false;
+  bool rollbackAutomaticExit_ = false;
+  std::string rollbackSession_;
+  ActiveMapSelection rollbackRestored_;
+  static void rollbackTask(void *context);
+  void executeRollback();
 
   bool handleRequest(const device_transfer::HttpRequest &request,
                      device_transfer::TransferClient &client) override;
   void responseDidComplete(const device_transfer::HttpRequest &request,
                            bool peerClosedCleanly) override;
+  void responseDidAbort(
+      const device_transfer::HttpRequest &request) override;
   bool handleInstallStream(const device_transfer::HttpRequest &request,
                            device_transfer::TransferClient &client);
   void handleStatus(device_transfer::TransferClient &client);
@@ -83,9 +108,8 @@ private:
                  const std::string &message);
   void lockState() const;
   void unlockState() const;
-  void finishActivation(const std::string &status, const std::string &mapId,
-                        const std::string &errorCode,
-                        const std::string &errorMessage);
+  void finishActivation(std::string status, std::string mapId,
+              std::string errorCode, std::string errorMessage);
   void updateActivationProgress(const ActivationProgress &progress);
   bool startActivationTask(const std::string &sessionId, bool automaticExit);
   bool deferActivationUntilResponse(
@@ -95,6 +119,10 @@ private:
                                bool peerClosedCleanly);
   void requestAutomaticExit();
   void executeActivation(const std::string &sessionId, bool automaticExit);
+  static void ownedActivation(void *context, const char *sessionId,
+                              bool automaticExit);
+  static void ownedInstalledCleanup(void *context, const char *sessionId,
+                                    bool automaticExit);
   bool runStreamActivationTask(const std::string &sessionId,
                                bool automaticExit);
   void updateStreamInstallState(const MapStreamInstallSnapshot &snapshot,

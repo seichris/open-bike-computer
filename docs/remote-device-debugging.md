@@ -68,6 +68,29 @@ the display is off;
 **Wake display** requests the same policy-level activity and full refresh used
 by local wake handling.
 
+The remote-debug HTTP worker keeps its session-long stack in PSRAM so the
+diagnostic service does not consume BLE/TLS internal-DMA headroom. Map and
+firmware transfer workers retain internal stacks because activation and flash
+paths have stricter memory-access requirements; the optimization is therefore
+debug-mode-only and does not change release or update behavior.
+
+The app's serial secure-sweep client may explicitly opt into one bounded
+pinned-TLS connection; every request still carries and independently validates
+the in-memory transfer token and current session generation. Browser console
+requests close after each response because WebKit may create parallel or
+speculative sockets that cannot share the single HTTP worker. This preserves
+handshake reuse during renderer sweeps without letting the console retain the
+worker. Token-free, malformed, revoked, and explicit `Connection: close`
+requests also close after one response, as does session exit so its TLS
+close-notify remains the teardown boundary. A BLE disconnect or mode revocation
+interrupts the active socket immediately. An opted-in connection that becomes
+idle after a response is released after two seconds, and a TLS client that
+sends no first-request bytes is released after one second, both before the
+app's request deadline. Zero-byte idle sockets and clean peer disconnects are
+closed silently rather than reported as device-transfer errors.
+Map installation, diagnostics delivery, and firmware update modes retain their
+one-request close-and-commit semantics.
+
 **BOOT (short press)** queues one debounced short press through the same
 firmware path as the physical GPIO0 button. It advances screens normally and,
 if an ownership comparison is active, obeys the same fresh-input gate before
@@ -97,7 +120,7 @@ same-origin page. All versioned API routes require the existing
 | `GET` | `/device-debug/v1/info` | Target, identity, dimensions, display/network state, sequence, and counters. |
 | `GET` | `/device-debug/v1/metrics` | One bounded schema-1 renderer/RAM snapshot; responses are limited to four per second. |
 | `POST` | `/device-debug/v1/metrics/window` | Queue one validated renderer profile and fixture identity for the UI task, at most once per second; the active map ID and manifest receipt must match before it is applied. |
-| `GET` | `/device-debug/v1/frame?after=N` | `204` if unchanged; otherwise one `BCF1` header and RGB565 payload. |
+| `GET` | `/device-debug/v1/frame?after=N` | `204` if unchanged; otherwise one `BCF1` header and RGB565 payload. Benchmark clients may add `capturedAtOrAfter=M`; a buffered frame older than that wrap-safe device-uptime timestamp produces `204` and arms a fresh capture instead of transferring stale pixels. |
 | `POST` | `/device-debug/v1/pointer` | Queue one schema-1 down/move/up/cancel event. |
 | `POST` | `/device-debug/v1/display/wake` | Queue a UI-task display wake and full refresh. |
 | `POST` | `/device-debug/v1/button/boot` | Queue one debounced BOOT/GPIO0 short press through the normal firmware path. |
@@ -113,6 +136,14 @@ The flush producer never waits for the HTTP worker. It copies at most five
 complete frames per second into one session-scoped PSRAM snapshot. If the
 browser holds that snapshot for transmission, the physical display completes
 normally and the capture is counted as skipped.
+
+Persistent authenticated connections are reusable only after the complete
+declared response boundary is written. A short write, exhausted no-progress
+deadline, disconnect, or handler-side revocation marks the response aborted,
+forces the TLS connection closed, and suppresses any fallback status on that
+stream. Frame handling releases its snapshot on every outcome. The renderer
+metrics expose only bounded timing and byte/write counters for this path; they
+never include the token, certificate, Wi-Fi identity, or protected payload.
 
 ## Automation CLI
 

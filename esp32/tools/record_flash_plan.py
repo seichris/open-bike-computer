@@ -49,6 +49,19 @@ def _normalize_flash_parameters(command: list[str]) -> dict[str, str]:
     return resolved
 
 
+def require_fresh_final_link(environment) -> None:
+    """Retain linker side evidence after the platform resolves PROGNAME."""
+    if os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD") != "1":
+        return
+    if not environment.subst("$PIOENV").startswith("WAVESHARE_AMOLED_"):
+        return
+    # In pre: scripts PROGNAME is still "program", not "firmware". Unlike
+    # PlatformIO's action hooks, NoCache resolves its target immediately.
+    # Run in this post: script so the actual ELF always links and produces
+    # firmware.map; object and library nodes remain cacheable.
+    environment.NoCache(environment.subst("$BUILD_DIR/${PROGNAME}.elf"))
+
+
 def record_flash_plan(environment) -> None:
     """Persist the exact command after PlatformIO has loaded the framework."""
     profile = environment.subst("$PIOENV")
@@ -151,4 +164,5 @@ try:
 except NameError:
     pass
 else:
+    require_fresh_final_link(env)  # type: ignore[name-defined]  # noqa: F821
     record_flash_plan(env)  # type: ignore[name-defined]  # noqa: F821

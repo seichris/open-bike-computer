@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 
 import hashlib
+import configparser
 import io
 import json
 import os
+import py_compile
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import types
@@ -23,6 +26,7 @@ from build_firmware import (
     _resolved_device_port,
     _custom_core_project_text,
     _consume_link_timing,
+    _deterministic_build_environment,
     _require_dynamic_tls_link,
     _verified_platformio_project_config,
     _seed_pinned_scons_package,
@@ -41,6 +45,8 @@ from generated_sdkconfig import (
     FLASH_PLAN_PORT_PLACEHOLDER,
     FLASH_PLAN_SCHEMA,
     GeneratedSdkconfigError,
+    PRODUCTION_APPLICATION_RESERVE_BYTES,
+    _execution_tree_sha256,
     WAVESHARE_PLATFORM_ARCHIVE_SHA256,
     WAVESHARE_PLATFORM_PACKAGES,
     WAVESHARE_PLATFORM_PACKAGES_SHA256,
@@ -130,6 +136,9 @@ class DynamicTlsLinkProofTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.project_dir = Path(self.temp_dir.name)
+        cache_patch = patch.dict(os.environ, {"OPEN_BIKE_FIRMWARE_BUILD_CACHE": str(self.project_dir.resolve() / ".pio/shared-cache")})
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
 
     def write_sdkconfig(self, dynamic: bool) -> None:
         value = "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y\n" if dynamic else ""
@@ -233,6 +242,9 @@ class FirmwareBuildTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.project_dir = Path(self.temp_dir.name)
+        cache_patch = patch.dict(os.environ, {"OPEN_BIKE_FIRMWARE_BUILD_CACHE": str(self.project_dir.resolve() / ".pio/shared-cache")})
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
         self.runtime_patch = patch.dict(
             os.environ,
             {
@@ -254,6 +266,8 @@ class FirmwareBuildTests(unittest.TestCase):
             "tools/generated_sdkconfig.py",
             "tools/pioarduino_custom_core.py",
             "tools/firmware_runtime.py",
+            "tools/firmware_compile_cache.py",
+            "tools/shared_firmware_cache.py",
         ):
             path = self.project_dir / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -557,6 +571,7 @@ class FirmwareBuildTests(unittest.TestCase):
                 "git", "add", "platformio.ini", ".gitignore", "prebuild.py",
                 "tools/build_firmware.py", "tools/generated_sdkconfig.py",
                 "tools/pioarduino_custom_core.py", "tools/firmware_runtime.py",
+                "tools/firmware_compile_cache.py", "tools/shared_firmware_cache.py",
             ],
             cwd=self.project_dir,
             check=True,
@@ -947,6 +962,67 @@ build_src_filter =
         self.assertTrue(firmware.is_file())
         self.assertIn("uploadEligible=0", output.getvalue())
 
+    def test_build_subprocesses_preserve_hydrated_bytecode(self):
+        # Hydration gives source files new mtimes but retains attested .pyc
+        # contents. Real recursive Python imports must not rewrite that tree.
+        root = self.project_dir / ".pio/hydrated-python"
+        root.mkdir()
+        module = root / "cached_probe.py"
+        module.write_text("VALUE = 7\n", encoding="utf-8")
+        uncached = root / "uncached_probe.py"
+        uncached.write_text("VALUE = 9\n", encoding="utf-8")
+        bytecode = Path(py_compile.compile(str(module), doraise=True))
+        original = bytecode.read_bytes()
+        os.utime(module, (1, 1))
+        before = _execution_tree_sha256(root)
+        identity = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=self.project_dir, text=True
+        ).strip()
+        probe = (
+            "import sys; "
+            f"sys.path.insert(0, {str(root)!r}); "
+            "import cached_probe, uncached_probe; "
+            "assert cached_probe.VALUE == 7 and uncached_probe.VALUE == 9"
+        )
+        recursive_probe = (
+            "import subprocess, sys; assert sys.dont_write_bytecode; "
+            f"subprocess.run([sys.executable, '-c', {probe!r}], check=True)"
+        )
+        with patch.dict(os.environ, {"PYTHONDONTWRITEBYTECODE": ""}):
+            with _deterministic_build_environment(
+                self.project_dir, self.environment, identity,
+                self.platform_archive, self.project_dir / "platformio.ini"
+            ):
+                self.assertEqual(os.environ.get("PYTHONDONTWRITEBYTECODE"), "1")
+                subprocess.run([sys.executable, "-c", recursive_probe], check=True)
+            self.assertEqual(os.environ["PYTHONDONTWRITEBYTECODE"], "")
+        self.assertEqual(bytecode.read_bytes(), original)
+        self.assertEqual(_execution_tree_sha256(root), before)
+
+        # Positive control: the stale timestamp really would rewrite bytecode
+        # without the build policy, and a source-only import would add a file.
+        unprotected_environment = dict(os.environ)
+        unprotected_environment.pop("PYTHONDONTWRITEBYTECODE", None)
+        subprocess.run([sys.executable, "-c", probe], env=unprotected_environment,
+                       check=True)
+        self.assertNotEqual(bytecode.read_bytes(), original)
+        self.assertNotEqual(_execution_tree_sha256(root), before)
+
+    def test_build_bytecode_policy_restores_environment_after_exception(self):
+        identity = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=self.project_dir, text=True
+        ).strip()
+        with patch.dict(os.environ):
+            os.environ.pop("PYTHONDONTWRITEBYTECODE", None)
+            with self.assertRaisesRegex(RuntimeError, "test failure"):
+                with _deterministic_build_environment(
+                    self.project_dir, self.environment, identity,
+                    self.platform_archive, self.project_dir / "platformio.ini"
+                ):
+                    self.assertEqual(os.environ.get("PYTHONDONTWRITEBYTECODE"), "1")
+                    raise RuntimeError("test failure")
+            self.assertNotIn("PYTHONDONTWRITEBYTECODE", os.environ)
+
     def test_removes_a_stale_target_artifact_before_building(self):
         self.write_firmware()
         stale_firmware = (
@@ -983,6 +1059,7 @@ build_src_filter =
             nonlocal calls
             calls += 1
             self.assertEqual(os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD"), "1")
+            self.assertEqual(os.environ.get("PYTHONDONTWRITEBYTECODE"), "1")
             isolated_git_config = Path(os.environ["GIT_CONFIG_GLOBAL"])
             self.assertEqual(isolated_git_config.read_text(encoding="utf-8"), "")
             self.assertEqual(os.environ.get("GIT_CONFIG_NOSYSTEM"), "1")
@@ -1360,6 +1437,54 @@ build_src_filter =
             record_generated_sdkconfig_defaults(
                 self.project_dir, self.environment
             )
+
+    def test_attestation_rejects_production_firmware_without_size_reserve(self):
+        production = f"{self.environment}_PRODUCTION"
+        with (self.project_dir / "platformio.ini").open(
+            "a", encoding="utf-8"
+        ) as config:
+            config.write(f"[env:{production}]\nplatform = test\n")
+        self.initialize_git_repo()
+        core = self.write_core_attestation(production)
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware(production)
+        firmware = (
+            self.project_dir / ".pio" / "build" / production / "firmware.bin"
+        )
+        firmware.write_bytes(
+            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
+        )
+
+        with patch.dict(
+            os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+        ), self.assertRaisesRegex(
+            GeneratedSdkconfigError,
+            f"required {PRODUCTION_APPLICATION_RESERVE_BYTES}-byte "
+            "application reserve",
+        ):
+            record_generated_sdkconfig_defaults(self.project_dir, production)
+
+    def test_attestation_accepts_exact_production_firmware_size_reserve(self):
+        production = f"{self.environment}_PRODUCTION"
+        with (self.project_dir / "platformio.ini").open(
+            "a", encoding="utf-8"
+        ) as config:
+            config.write(f"[env:{production}]\nplatform = test\n")
+        self.initialize_git_repo()
+        core = self.write_core_attestation(production)
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware(production)
+        firmware = (
+            self.project_dir / ".pio" / "build" / production / "firmware.bin"
+        )
+        firmware.write_bytes(
+            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES)
+        )
+
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+            record_generated_sdkconfig_defaults(self.project_dir, production)
 
     def test_upload_replays_and_attests_additional_platformio_images(self):
         core = self.write_core_attestation().resolve()
@@ -2254,6 +2379,7 @@ build_src_filter =
                 "build_firmware.record_generated_sdkconfig_defaults",
                 return_value=fake_manifest,
             ),
+            patch("build_firmware.publish_shared_core"),
         ):
             build_firmware(self.project_dir, self.environment, runner=runner)
 
@@ -2327,6 +2453,32 @@ build_src_filter =
             },
             fields,
         )
+
+    def test_verified_config_preserves_local_file_paths_through_ini_interpolation(self):
+        self.platform_config_patch.stop()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                project = Path(directory).resolve() / "consumer with 100% space's#tag"
+                project.mkdir()
+                (project / "platformio.ini").write_text(
+                    f"[env:{self.environment}]\nplatform = {WAVESHARE_PLATFORM_URL}\n"
+                )
+                staged = project / ".pio/staged platform"
+                with (
+                    patch("build_firmware._stage_verified_platform", return_value=staged),
+                    patch("build_firmware._download_verified_archive", side_effect=lambda downloads, **kwargs: downloads / kwargs["filename"]),
+                    patch("build_firmware.WAVESHARE_PLATFORM_PACKAGES", (("tool-test", "https://example.invalid/tool.zip", "a" * 64, 1),)),
+                ):
+                    config, _ = _verified_platformio_project_config(project)
+                for name in ("platformio-verified.ini", "platformio-bootstrap.ini", "platformio-custom-core.ini"):
+                    parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
+                    parser.read(config.with_name(name))
+                    section = parser[f"env:{self.environment}"]
+                    self.assertEqual(section["platform"], "file://" + str(staged))
+                    expected = project / ".pio/open-bike-build/downloads/platform-packages" / ("tool-test-" + "a" * 64 + ".zip")
+                    self.assertEqual(section["platform_packages"].strip(), "tool-test @ file://" + str(expected))
+        finally:
+            self.platform_config_patch.start()
 
     def test_downloads_and_content_pins_platform_project_config(self):
         self.platform_config_patch.stop()

@@ -640,14 +640,6 @@ polygons = process_features(
     conf['polygons'],
     geometry_diagnostics=geometry_diagnostics,
 ) # extracted_polygons
-print(
-    "GEOMETRY_DIAGNOSTICS:"
-    + json.dumps(
-        geometry_diagnostics,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-)
 normalization_seconds = time.perf_counter() - normalization_started
 print("Applying styles")
 # apply styles
@@ -731,7 +723,11 @@ for init_x, init_y in progress.track(block_positions):
             label_diagnostics=label_diagnostics if font_builder is not None else None,
         )
         try:
-            clipped_polygons = clip_polygons(polygons, mapblock_bbox)
+            clipped_polygons = clip_polygons(
+                polygons,
+                mapblock_bbox,
+                geometry_diagnostics=geometry_diagnostics,
+            )
         except GenericGeometryError as exc:
             fail_generic_geometry(exc)
         clipped_buildings = []
@@ -887,6 +883,15 @@ building_block_encoding_seconds = (
     else 0.0
 )
 
+print(
+    "GEOMETRY_DIAGNOSTICS:"
+    + json.dumps(
+        geometry_diagnostics,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+)
+
 if font_builder is not None:
     label_phase_timings["labelShaping"] = font_builder.shaping_seconds
     label_phase_timings["labelFmbWriting"] = max(
@@ -905,6 +910,7 @@ if font_builder is not None:
     print("LABEL_STATS:" + json.dumps(label_totals, sort_keys=True, separators=(",", ":")))
 
 if args.renderer_format == 3:
+    building_totals["geometryDiagnostics"] = geometry_diagnostics
     for key, value in building_report.items():
         if key not in building_totals:
             building_totals[key] = value

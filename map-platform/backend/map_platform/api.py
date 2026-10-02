@@ -21,7 +21,7 @@ else:
     _FASTAPI_IMPORT_ERROR = None
 
 from .admin_inventory import map_inventory
-from .admission import AdmissionCapacityError, AdmissionPolicy
+from .admission import AdmissionCapacityError, QueueAdmissionPolicy
 from .app_attest import (
     APP_ATTEST_ATTESTATION_PURPOSE,
     APP_ATTEST_MAP_CREATE_PURPOSE,
@@ -98,6 +98,7 @@ from .source_cache import (
     default_backend_data_root,
 )
 from .sources import SourceIndex
+from .topography_sources import load_topography_source_policy, require_production_topography_approval
 from .strava_client import StravaTransport
 from .strava_integrations import (
     StravaIntegrationError,
@@ -237,6 +238,16 @@ def create_app(
         int(os.environ.get("MAP_PLATFORM_INSTALLATION_ISSUE_LIMIT_PER_DAY", "3")),
         86_400,
     )
+    app_attest_rotation_ip_policy = RateLimitPolicy(
+        "app-attest-rotation-ip",
+        int(os.environ.get("MAP_PLATFORM_APP_ATTEST_ROTATION_IP_LIMIT_PER_DAY", "12")),
+        86_400,
+    )
+    app_attest_rotation_installation_policy = RateLimitPolicy(
+        "app-attest-rotation-installation",
+        int(os.environ.get("MAP_PLATFORM_APP_ATTEST_ROTATION_LIMIT_PER_DAY", "3")),
+        86_400,
+    )
     map_create_ip_policy = RateLimitPolicy(
         "map-create-ip",
         int(os.environ.get("MAP_PLATFORM_MAP_CREATE_IP_LIMIT_PER_DAY", "20")),
@@ -346,7 +357,7 @@ def create_app(
         "0",
     ).strip().lower() in {"1", "true", "yes"}
     limits = JobLimits(max_active_jobs=int(os.environ.get("MAP_PLATFORM_MAX_ACTIVE_JOBS", "25")))
-    admission_policy = AdmissionPolicy.from_environment()
+    admission_policy = QueueAdmissionPolicy.from_environment(deployment_channel)
     source_provider = GeofabrikSourceProvider.from_environment(data_root)
     job_store = JobStore(
         data_root / "jobs",
@@ -362,6 +373,10 @@ def create_app(
         preprocessing_mode=preprocessing_scope_mode,
     )
     generation_profile_policy = load_generation_profile_policy(repo_root)
+    topography_source_policy = load_topography_source_policy(repo_root)
+    require_production_topography_approval(
+        generation_profile_policy, topography_source_policy, deployment_channel,
+    )
     service = MapJobService(
         SourceIndex.from_json(source_index_path, fallback_provider=source_provider),
         job_store,
@@ -384,6 +399,7 @@ def create_app(
             else None
         ),
         building_task_store=building_task_store,
+        deployment_channel=deployment_channel,
     )
 
     app = FastAPI(title="Open Bike Computer Offline Map Platform", version="0.1.0")
@@ -511,6 +527,8 @@ def create_app(
         client_app_build_sha256: str | None,
     ) -> dict[str, Any]:
         result = job.to_dict()
+        if job.status == JobStatus.QUEUED or job.scheduler_yielded:
+            result["queuePosition"] = job_store.queue_position(job.job_id)
         _project_building_progress(
             result,
             building_task_store.progress(job.job_id),
@@ -610,6 +628,7 @@ def create_app(
             "status": "ok",
             "deploymentChannel": deployment_channel,
             "generationProfilePolicySha256": generation_profile_policy.sha256,
+            "topography": topography_source_policy.public_summary(),
             "mapStreamRollout": map_stream_rollout.public_summary(),
             "preparationEstimates": estimate_coordinator.mode.value,
             "admissionPolicyVersion": admission_policy.policy_version,
@@ -750,7 +769,26 @@ def create_app(
         purpose = payload.get("purpose")
         installation_id = payload.get("clientInstallationId")
         if purpose == APP_ATTEST_ATTESTATION_PURPOSE:
-            if installation_id is not None or x_installation_token is not None:
+            if installation_id is None and x_installation_token is None:
+                enforce_rate_limits((installation_issue_policy, client_ip(request)))
+                challenge = app_attest_store.issue_challenge(purpose=purpose)
+            elif installation_id is not None and x_installation_token is not None:
+                registered_installation_id = verify_registered_installation(
+                    installation_id,
+                    x_installation_token,
+                )
+                enforce_rate_limits(
+                    (app_attest_rotation_ip_policy, client_ip(request)),
+                    (
+                        app_attest_rotation_installation_policy,
+                        registered_installation_id,
+                    ),
+                )
+                challenge = app_attest_store.issue_challenge(
+                    purpose=purpose,
+                    installation_id=registered_installation_id,
+                )
+            else:
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -758,8 +796,6 @@ def create_app(
                         "message": "App Attest enrollment challenge is invalid",
                     },
                 )
-            enforce_rate_limits((installation_issue_policy, client_ip(request)))
-            challenge = app_attest_store.issue_challenge(purpose=purpose)
         elif purpose == APP_ATTEST_MAP_CREATE_PURPOSE:
             registered_installation_id = verify_registered_installation(
                 installation_id,
@@ -791,7 +827,16 @@ def create_app(
             alias="X-Installation-Token",
         ),
     ) -> dict[str, Any]:
-        if clientInstallationId is None:
+        installation_id = token = None
+        authenticated_existing_installation = clientInstallationId is not None
+        if clientInstallationId is not None:
+            try:
+                installation_id, token = installation_store.refresh(
+                    clientInstallationId, x_installation_token,
+                )
+            except InstallationCredentialError as exc:
+                raise HTTPException(status_code=401, detail=str(exc)) from exc
+        if clientInstallationId is None or (isinstance(payload, dict) and set(payload) == {"appAttest"}):
             del request
             if not isinstance(payload, dict) or set(payload) != {"appAttest"}:
                 raise AppAttestError(
@@ -799,12 +844,16 @@ def create_app(
                     "installation App Attest enrollment is required",
                 )
             attestation = payload["appAttest"]
-            if not isinstance(attestation, dict) or set(attestation) != {
+            required_attestation_fields = {
                 "challengeId",
                 "keyId",
                 "attestationObject",
                 "appBuild",
-            }:
+            }
+            if not isinstance(attestation, dict) or not (
+                required_attestation_fields <= set(attestation)
+                and set(attestation) <= required_attestation_fields | {"previousKeyId"}
+            ):
                 raise AppAttestError(
                     "app_attest_invalid_attestation",
                     "App Attest enrollment is invalid",
@@ -812,11 +861,15 @@ def create_app(
             challenge_id = attestation["challengeId"]
             key_id = attestation["keyId"]
             app_build = attestation["appBuild"]
+            previous_key_id = attestation.get("previousKeyId")
             if not all(isinstance(value, str) for value in (
                 challenge_id,
                 key_id,
                 app_build,
-            )):
+            )) or (
+                previous_key_id is not None
+                and not isinstance(previous_key_id, str)
+            ):
                 raise AppAttestError(
                     "app_attest_invalid_attestation",
                     "App Attest enrollment is invalid",
@@ -826,24 +879,52 @@ def create_app(
                 field="App Attest object",
                 maximum_bytes=APP_ATTEST_MAX_OBJECT_BYTES,
             )
-            installation_id, token = installation_store.issue()
+            current_key_id: str | None = None
+            if installation_id is None:
+                if previous_key_id is not None:
+                    raise AppAttestError(
+                        "app_attest_invalid_attestation",
+                        "App Attest enrollment is invalid",
+                    )
+                installation_id, token = installation_store.issue()
+            else:
+                current_key_id = app_attest_store.key_id_for_installation(
+                    installation_id
+                )
+                if current_key_id is None and previous_key_id is not None:
+                    raise AppAttestError(
+                        "app_attest_key_mismatch",
+                        "installation App Attest key changed",
+                    )
+                if current_key_id is not None and previous_key_id != current_key_id:
+                    raise AppAttestError(
+                        "app_attest_key_mismatch",
+                        "installation App Attest key changed",
+                    )
             app_attest_store.enroll(
                 installation_id=installation_id,
                 challenge_id=challenge_id,
                 key_id=key_id,
                 attestation_object=attestation_object,
                 app_build=app_build,
+                replacing_key_id=previous_key_id,
+                challenge_installation_id=(
+                    installation_id
+                    if authenticated_existing_installation
+                    else None
+                ),
+                # Released clients used an anonymous attestation challenge for
+                # the one-time migration of an authenticated installation.
+                # Continue accepting that shape only while the server has no
+                # binding; updated clients use the scoped challenge instead.
+                allow_unbound_challenge=(
+                    authenticated_existing_installation
+                    and current_key_id is None
+                ),
             )
         else:
             if payload is not None and payload != {}:
                 raise HTTPException(status_code=400, detail="refresh body is not allowed")
-            try:
-                installation_id, token = installation_store.refresh(
-                    clientInstallationId,
-                    x_installation_token,
-                )
-            except InstallationCredentialError as exc:
-                raise HTTPException(status_code=401, detail=str(exc)) from exc
             key_id = app_attest_store.key_id_for_installation(installation_id)
             if key_id is None:
                 raise AppAttestError(

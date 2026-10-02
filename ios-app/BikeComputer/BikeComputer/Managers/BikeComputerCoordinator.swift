@@ -49,6 +49,17 @@ final class MapKitNavigationDirectionsTask: NavigationDirectionsTask {
 
 typealias NavigationDirectionsFactory = @MainActor (MKDirections.Request) -> any NavigationDirectionsTask
 
+enum OfflineNavigationStartError: LocalizedError {
+    case navigationActive
+    case alreadyAtDestination
+    var errorDescription: String? {
+        switch self {
+        case .navigationActive: "Stop the current navigation before starting an offline route."
+        case .alreadyAtDestination: "You are already at the end of this saved route."
+        }
+    }
+}
+
 enum NavigationStartOutcome: Equatable {
     case started
     case failed(String)
@@ -57,10 +68,17 @@ enum NavigationStartOutcome: Equatable {
 struct NavigationRouteAlternativeV1: Identifiable {
     let id: UUID
     let route: MKRoute
+    let canonicalRoute: NavigationRouteV1
+    let calculatedAt: Date
     let title: String
     let distanceMeters: CLLocationDistance
     let expectedTravelTime: TimeInterval
     let advisoryNotices: [String]
+
+    var canSaveOffline: Bool {
+        canonicalRoute.provider == RouteProviderPolicyV1.mapKit &&
+            RouteProviderPolicyV1.allowsDurableStorage(RouteProviderPolicyV1.mapKitSavedOnPhone)
+    }
 }
 
 /// Main coordinator for the Bike Computer app
@@ -75,12 +93,13 @@ class BikeComputerCoordinator: ObservableObject {
     let destinationStore: SavedDestinationStore
     let workoutMetricsStore: WorkoutMetricsStore
     private let rideDetectionSettingsStore: RideDetectionSettingsStore?
-    private let navEngine = NavigationEngine()
+    private let navEngine: NavigationEngine
     private let locationManager: CurrentLocationManager
     private let directionsFactory: NavigationDirectionsFactory
     private let startServices: Bool
     private let now: () -> Date
     private var workoutDeviceRelay: WorkoutDeviceRelay?
+    private var worldRadioService: WorldRadioService?
 
     weak var diagnosticsRecorder: (any RideDiagnosticsEventSink)?
 
@@ -98,6 +117,25 @@ class BikeComputerCoordinator: ObservableObject {
     @Published var distanceToManeuver: Int = 0
     @Published var currentIconID: Int = NavigationIconID.straight
     @Published var currentRoute: MKRoute?
+    @Published private(set) var offlineRouteSummary: PlannedRouteSummaryV1?
+    @Published private(set) var offlineRoutePolyline: MKPolyline?
+
+    var selectedRouteCanSaveOffline: Bool {
+        !isNavigating && !routeCalculation.isCalculating && selectedRouteAlternative?.canSaveOffline == true
+    }
+
+    private var selectedRouteAlternative: NavigationRouteAlternativeV1? {
+        guard let id = selectedRouteAlternativeID else { return nil }
+        return pendingRoutePlan?.alternatives.first { $0.id == id }
+    }
+
+    func selectedRouteOfflineDraft() throws -> OfflineRouteSaveDraft {
+        guard selectedRouteCanSaveOffline, let selected = selectedRouteAlternative else {
+            throw OfflineRouteSaveError.noSelection
+        }
+        return try .plannedMapKit(selected.canonicalRoute, createdAt: selected.calculatedAt)
+    }
+
     @Published private(set) var routePreview: MKRoute?
     @Published private(set) var routeAlternatives:
         [NavigationRouteAlternativeV1] = []
@@ -131,6 +169,7 @@ class BikeComputerCoordinator: ObservableObject {
     private var latestRerouteLocation: CLLocation?
     private var navigationDestination: MKMapItem?
     private var routeDeviationDetector = RouteDeviationDetector()
+    private var lastRerouteObservationAt: Date?
     private var lastRerouteRequestDate = Date.distantPast
     private let rerouteCooldown: TimeInterval = 15
     private var transportType: MKDirectionsTransportType = RouteTransportTypes.cycling
@@ -187,6 +226,7 @@ class BikeComputerCoordinator: ObservableObject {
         self.directionsFactory = directionsFactory
         self.startServices = startServices
         self.now = now
+        self.navEngine = NavigationEngine(now: now)
         self.workoutDeviceRelay = WorkoutDeviceRelay(
             store: self.workoutMetricsStore,
             bleManager: bleManager,
@@ -199,6 +239,13 @@ class BikeComputerCoordinator: ObservableObject {
     // MARK: - Setup
 
     private func setupManagerBindings() {
+        bleManager.onWorldRadioRequest = { [weak self] request in
+            guard let self,
+                  self.enabledWorldRadioScreen
+            else { return }
+            self.ensureWorldRadioService().handle(request)
+        }
+
         // Bind BLE manager state
         bleManager.$isConnected
             .assign(to: &$isConnected)
@@ -234,6 +281,8 @@ class BikeComputerCoordinator: ObservableObject {
                 let didStopNavigation = self.wasNavigating && !navigating
                 self.wasNavigating = navigating
                 if didStopNavigation {
+                    self.offlineRouteSummary = nil
+                    self.offlineRoutePolyline = nil
                     self.synchronizeDestinationCatalog(force: true)
                 }
             }
@@ -251,15 +300,11 @@ class BikeComputerCoordinator: ObservableObject {
                 bleManager.$supportsGPSPositionQualityV1,
                 rideDetectionSettingsStore.$settings
             )
-            .combineLatest(
-                rideDetectionSettingsStore.$hasAcknowledgedLocationUse
-            )
-            .map { runtime, locationUseAcknowledged in
+            .map { runtime in
                 let (navigationReady, supportsRideAutomation,
                      supportsGPSQuality, settings) = runtime
                 return navigationReady && supportsRideAutomation &&
-                    supportsGPSQuality && settings.startMode != .off &&
-                    locationUseAcknowledged
+                    supportsGPSQuality && settings.startMode != .off
             }
             .removeDuplicates()
             .sink { [weak self] armed in
@@ -362,6 +407,48 @@ class BikeComputerCoordinator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        bleManager.$enabledDeviceScreensMask
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                // @Published emits from willSet. Reconcile after the saved
+                // mask has committed so disabling World Radio releases its
+                // player, directory actor, task, and candidate cache.
+                DispatchQueue.main.async { [weak self] in
+                    self?.reconcileWorldRadioLifecycle()
+                }
+            }
+            .store(in: &cancellables)
+
+        bleManager.deviceScreenConfigurationController.$acknowledgedDocument
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { [weak self] in
+                    self?.reconcileWorldRadioLifecycle()
+                }
+            }
+            .store(in: &cancellables)
+
+        Publishers.CombineLatest(
+            bleManager.$isNavigationReady,
+            bleManager.$supportsWorldRadio
+        )
+        .map { isReady, supportsWorldRadio in
+            isReady && supportsWorldRadio
+        }
+        .removeDuplicates()
+        .sink { [weak self] ready in
+            guard ready else { return }
+            // Reconnect must restore the phone's current snapshot on the
+            // device without issuing a new search or restarting playback.
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.enabledWorldRadioScreen
+                else { return }
+                self.worldRadioService?.resendCurrentStatus()
+            }
+        }
+        .store(in: &cancellables)
+
         bleManager.$connectedDeviceID
             .removeDuplicates()
             .sink { [weak self] _ in
@@ -387,6 +474,9 @@ class BikeComputerCoordinator: ObservableObject {
                         .reconcileStorageMigrationStatus(
                             bleManager: self.bleManager
                         )
+                    self.firmwareUpdateManager.reconcilePendingUpdate(
+                        bleManager: self.bleManager
+                    )
                 }
             }
             .store(in: &cancellables)
@@ -460,6 +550,35 @@ class BikeComputerCoordinator: ObservableObject {
         // Current firmware exposes only the navigation packet characteristic.
     }
 
+    private func ensureWorldRadioService() -> WorldRadioService {
+        if let worldRadioService {
+            return worldRadioService
+        }
+        let service = WorldRadioService { [weak bleManager] status in
+            _ = bleManager?.sendWorldRadioStatus(status)
+        }
+        worldRadioService = service
+        return service
+    }
+
+    private func reconcileWorldRadioLifecycle() {
+        guard !enabledWorldRadioScreen else { return }
+        stopWorldRadioServiceIfDisabled()
+    }
+
+    private var enabledWorldRadioScreen: Bool {
+        if let document = bleManager.deviceScreenConfigurationController.acknowledgedDocument {
+            return document.instances.contains { $0.type == .worldRadio && $0.enabled }
+        }
+        return bleManager.enabledDeviceScreensMask & DeviceScreen.worldRadio.bit != 0
+    }
+
+    private func stopWorldRadioServiceIfDisabled() {
+        guard !enabledWorldRadioScreen, let worldRadioService else { return }
+        worldRadioService.stop()
+        self.worldRadioService = nil
+    }
+
     private func setupManagers(startServices: Bool) {
         // Wire up inter-manager dependencies
         navEngine.setBLEManager(bleManager)
@@ -480,19 +599,37 @@ class BikeComputerCoordinator: ObservableObject {
     }
 
     private func processNavigationLocation(_ location: CLLocation) {
-        let acceptedForNavigation = navEngine.processExternalLocation(location)
-        if acceptedForNavigation {
-            if ongoingRerouteDirections != nil,
-               routeDeviationDetector.isEligible(
-                   horizontalAccuracy: location.horizontalAccuracy
-               ) {
-                let routeLocation = CoordinateConverter.mapKitRouteLocation(
-                    fromGPSLocation: location
-                )
-                latestRerouteLocation = routeLocation
-            }
-            evaluateRerouting(for: location)
+        _ = navEngine.processExternalLocation(location)
+        guard navEngine.isNavigating, !navEngine.isSimulationMode else {
+            return
         }
+
+        // Progress matching may reject a valid far-away fix. Rerouting uses
+        // its own observation gate, without counting cached/replayed fixes.
+        let age = now().timeIntervalSince(location.timestamp)
+        guard age.isFinite, (-1...10).contains(age),
+              CLLocationCoordinate2DIsValid(location.coordinate) else {
+            routeDeviationDetector.reset()
+            return
+        }
+        if let previous = lastRerouteObservationAt {
+            guard location.timestamp > previous else { return }
+            if location.timestamp.timeIntervalSince(previous) > 5 {
+                routeDeviationDetector.reset()
+            }
+        }
+        lastRerouteObservationAt = location.timestamp
+
+        if ongoingRerouteDirections != nil,
+           routeDeviationDetector.isEligible(
+               horizontalAccuracy: location.horizontalAccuracy
+           ) {
+            let routeLocation = CoordinateConverter.mapKitRouteLocation(
+                fromGPSLocation: location
+            )
+            latestRerouteLocation = routeLocation
+        }
+        evaluateRerouting(for: location)
     }
 
     private static func workoutFallbackLocation(
@@ -624,6 +761,66 @@ class BikeComputerCoordinator: ObservableObject {
         routePreview = nil
     }
 
+    /// Archive loading is owned by PhoneRouteLibrary. This boundary revalidates
+    /// it immediately before use and never recalculates or fetches directions.
+    func startOfflineNavigation(_ archive: NavigationRouteArchiveV1) throws {
+        guard !isNavigating else { throw OfflineNavigationStartError.navigationActive }
+        try archive.validate(purpose: .offlineNavigation, now: now())
+        let coordinates = archive.route.points.map {
+            CoordinateConverter.wgs84ToGCJ02(coordinate: CLLocationCoordinate2D(
+                latitude: $0.latitude, longitude: $0.longitude
+            ))
+        }
+        guard coordinates.allSatisfy({ CLLocationCoordinate2DIsValid($0) }) else {
+            throw NavigationRouteValidationError.invalidBounds
+        }
+        let polyline = MKPolyline(coordinates: coordinates, count: coordinates.count)
+        // No live GPS fix is needed to load a route. Navigation waits for a valid
+        // fix; do not fabricate the rider's position from the route's start.
+        let location = currentLocation.flatMap { location -> CLLocation? in
+            guard location.horizontalAccuracy >= 0,
+                  abs(now().timeIntervalSince(location.timestamp)) <= 30 else { return nil }
+            return location
+        }
+        try navEngine.startOfflineNavigation(archive: archive, initialLocation: location)
+        guard navEngine.isNavigating else { throw OfflineNavigationStartError.alreadyAtDestination }
+        ongoingSourceSearch?.cancel()
+        ongoingSourceSearch = nil
+        ongoingDestinationSearch?.cancel()
+        ongoingDestinationSearch = nil
+        ongoingDirections?.cancel()
+        ongoingDirections = nil
+        ongoingRerouteDirections?.cancel()
+        ongoingRerouteDirections = nil
+        routeCalculationGeneration &+= 1
+        let completion = pendingNavigationStart?.completion
+        pendingNavigationStart = nil
+        routeCalculation.isCalculating = false
+        routeCalculation.status = ""
+        cancelRoutePlan()
+        currentRoute = nil
+        navigationDestination = nil // Also prevents automatic online rerouting.
+        latestRerouteLocation = nil
+        routeDeviationDetector.reset()
+        offlineRouteSummary = PlannedRouteSummaryV1(archive: archive)
+        offlineRoutePolyline = polyline
+        completion?(.failed("Replaced by offline navigation"))
+    }
+
+    func reconcileOfflineNavigation(with routes: [PlannedRouteSummaryV1]) {
+        guard let active = offlineRouteSummary else { return }
+        guard active.deleteAfter.map({ now() < $0 }) ?? true,
+              routes.contains(where: {
+                  $0.id == active.id && $0.revision == active.revision &&
+                      $0.contentHash == active.contentHash
+              }) else {
+            stopNavigation()
+            alert.message = "The offline route was deleted, replaced, expired or could not be verified. Navigation stopped."
+            alert.isShowing = true
+            return
+        }
+    }
+
     func startNavigation(from source: String, to destination: String, transportType: MKDirectionsTransportType, isTestMode: Bool = false) {
         startNavigation(from: .query(source), to: .query(destination), transportType: transportType, isTestMode: isTestMode)
     }
@@ -633,10 +830,13 @@ class BikeComputerCoordinator: ObservableObject {
         ongoingRerouteDirections = nil
         latestRerouteLocation = nil
         navigationDestination = nil
+        lastRerouteObservationAt = nil
         routeDeviationDetector.reset()
         lastRerouteRequestDate = .distantPast
         navEngine.stopNavigation()
         currentRoute = nil
+        offlineRouteSummary = nil
+        offlineRoutePolyline = nil
         cancelRoutePlan()
         if startServices {
             locationManager.setNavigating(false)
@@ -1279,14 +1479,15 @@ extension BikeComputerCoordinator {
                 }
 
                 if presentsAlternatives {
-                    let alternatives = routes.compactMap { candidate ->
-                        NavigationRouteAlternativeV1? in
+                    let alternatives = routes.enumerated().compactMap {
+                        index, candidate -> (index: Int, candidate: MKRoute, name: String, canonical: NavigationRouteV1)? in
+                        let canonical: NavigationRouteV1
                         do {
                             let normalizedInitialLocation =
                                 MapKitRouteAdapter.normalizedLocation(
                                     initialLocation
                                 )
-                            _ = try MapKitRouteAdapter.route(
+                            canonical = try MapKitRouteAdapter.route(
                                 from: candidate,
                                 fallbackSource: RouteCoordinateV1(
                                     latitude: normalizedInitialLocation.coordinate.latitude,
@@ -1300,15 +1501,37 @@ extension BikeComputerCoordinator {
                             print("Ignoring invalid route alternative: \(error)")
                             return nil
                         }
-                        return NavigationRouteAlternativeV1(
-                            id: UUID(),
-                            route: candidate,
-                            title: candidate.name.isEmpty
-                                ? "Route \(routes.firstIndex(where: { $0 === candidate }).map { $0 + 1 } ?? 1)"
-                                : candidate.name,
-                            distanceMeters: candidate.distance,
-                            expectedTravelTime: candidate.expectedTravelTime,
-                            advisoryNotices: candidate.advisoryNotices
+                        return (
+                            index: index,
+                            candidate: candidate,
+                            name: candidate.name,
+                            canonical: canonical
+                        )
+                    }
+                    .sorted { lhs, rhs in
+                        if lhs.candidate.expectedTravelTime !=
+                            rhs.candidate.expectedTravelTime {
+                            return lhs.candidate.expectedTravelTime <
+                                rhs.candidate.expectedTravelTime
+                        }
+                        if lhs.candidate.distance != rhs.candidate.distance {
+                            return lhs.candidate.distance < rhs.candidate.distance
+                        }
+                        return lhs.index < rhs.index
+                    }
+                    .enumerated()
+                    .map { displayIndex, entry in
+                        NavigationRouteAlternativeV1(
+                            id: entry.canonical.id,
+                            route: entry.candidate,
+                            canonicalRoute: entry.canonical,
+                            calculatedAt: self.now(),
+                            title: entry.name.isEmpty
+                                ? "Route \(displayIndex + 1)"
+                                : entry.name,
+                            distanceMeters: entry.candidate.distance,
+                            expectedTravelTime: entry.candidate.expectedTravelTime,
+                            advisoryNotices: entry.candidate.advisoryNotices
                         )
                     }
                     guard let selected = alternatives.first else {
@@ -1318,6 +1541,7 @@ extension BikeComputerCoordinator {
                         self.alert.isShowing = true
                         return
                     }
+
                     self.pendingRoutePlan = PendingRoutePlan(
                         alternatives: alternatives,
                         destination: destinationItem,
@@ -1365,8 +1589,11 @@ extension BikeComputerCoordinator {
         isTestMode: Bool,
         initialLocation: CLLocation
     ) {
+        offlineRouteSummary = nil
+        offlineRoutePolyline = nil
         currentRoute = route
         navigationDestination = destination
+        lastRerouteObservationAt = nil
         self.transportType = transportType
         routeDeviationDetector.reset()
         lastRerouteRequestDate = .distantPast

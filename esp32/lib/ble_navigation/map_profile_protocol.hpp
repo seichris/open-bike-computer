@@ -2,6 +2,11 @@
 
 #include <stdint.h>
 
+// Development qualification only. Production profiles deliberately omit this.
+#ifndef MAP_STABLE_CAMERA
+#define MAP_STABLE_CAMERA 0
+#endif
+
 namespace map_profile_protocol {
 
 constexpr uint8_t CAPABILITY_MASK = 1 << 3;
@@ -26,6 +31,16 @@ constexpr uint8_t MAP_NAVIGATION_LABEL_LANGUAGE_MODE_SETTING_ID = 32;
 constexpr uint8_t MAP_NAVIGATION_LABEL_TEXT_SIZE_SETTING_ID = 33;
 constexpr uint8_t MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID = 34;
 constexpr uint8_t MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID = 35;
+constexpr uint8_t MAP_NAVIGATION_ROTATION_SETTING_ID = 37;
+constexpr bool STABLE_CAMERA_ENABLED = MAP_STABLE_CAMERA != 0;
+
+inline uint8_t navigationRotation(int32_t value) {
+  return value == 0 ? 0 : 1;
+}
+
+inline bool guidanceCourseUp(bool navigating, uint8_t preference) {
+  return navigating && (!STABLE_CAMERA_ENABLED || preference != 0);
+}
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_BIRDS_EYE_PERSPECTIVE = 1;
 constexpr uint8_t DEFAULT_STREET_WIDTH = 4;
 constexpr uint8_t MAP_DEFAULT_DETAIL_LEVEL = 2;
@@ -52,10 +67,13 @@ constexpr uint32_t VISIBILITY_POSITION_MARKER = 1u << 9;
 constexpr uint32_t VISIBILITY_SERVICE_ROADS = 1u << 10;
 constexpr uint32_t VISIBILITY_TRACKS = 1u << 11;
 constexpr uint32_t VISIBILITY_EXTENDED_MARKER = 1u << 12;
+constexpr uint32_t VISIBILITY_CONTOURS = 1u << 13;
 constexpr uint32_t VISIBILITY_LEGACY_FEATURE_MASK = 0xFF;
 constexpr uint32_t VISIBILITY_EXTENDED_FEATURE_MASK =
     VISIBILITY_LEGACY_FEATURE_MASK | VISIBILITY_SERVICE_ROADS |
     VISIBILITY_TRACKS;
+constexpr uint32_t VISIBILITY_RENDER_FEATURE_MASK =
+    VISIBILITY_EXTENDED_FEATURE_MASK | VISIBILITY_CONTOURS;
 constexpr uint32_t VISIBILITY_OVERLAY_MASK =
     VISIBILITY_ROUTE_OVERLAY | VISIBILITY_POSITION_MARKER;
 constexpr uint8_t MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL = 0;
@@ -95,7 +113,7 @@ inline uint8_t extendedCapabilityFlagsForClient(uint8_t clientVersion) {
 }
 
 inline uint32_t normalizedFeatureVisibilityMask(uint32_t mask) {
-  uint32_t normalized = mask & VISIBILITY_LEGACY_FEATURE_MASK;
+  uint32_t normalized = mask & (VISIBILITY_LEGACY_FEATURE_MASK | VISIBILITY_CONTOURS);
   if ((mask & VISIBILITY_EXTENDED_MARKER) != 0) {
     normalized |= mask & (VISIBILITY_SERVICE_ROADS | VISIBILITY_TRACKS);
   } else {
@@ -109,6 +127,8 @@ inline uint32_t normalizedFeatureVisibilityMask(uint32_t mask) {
 
 inline uint32_t visibilityMaskForMapVersion(uint32_t mask,
                                             uint8_t mapVersion) {
+  if (mapVersion < 5)
+    mask &= ~VISIBILITY_CONTOURS;
   if (mapVersion >= 2)
     return mask;
 
@@ -142,7 +162,8 @@ inline bool isIndependentSetting(uint8_t settingId) {
   return (settingId >= 16 && settingId <= 22) ||
          (settingId >= MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID &&
           settingId <= MAP_NAVIGATION_LABEL_ORIENTATION_SETTING_ID) ||
-         settingId == MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID;
+         settingId == MAP_NAVIGATION_3D_BUILDINGS_SETTING_ID ||
+         settingId == MAP_NAVIGATION_ROTATION_SETTING_ID;
 }
 
 inline bool isLabelSetting(uint8_t settingId) {
@@ -170,6 +191,8 @@ inline int32_t clampValue(uint8_t settingId, int32_t value) {
   int32_t minimum = 0;
   int32_t maximum = 0;
   switch (settingId) {
+  case MAP_NAVIGATION_ROTATION_SETTING_ID:
+    return navigationRotation(value);
   case 1:
   case 16:
     maximum = 50;

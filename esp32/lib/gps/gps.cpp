@@ -136,6 +136,9 @@ void Gps::getGPSData()
   // reports are not spatial fixes and must never satisfy the detector's
   // 2D/3D-quality gate.
   ride.fixValid = fix.status >= gps_fix::STATUS_STD;
+  presentationSample = {ride.fixValid && static_cast<bool>(fix.valid.location),
+                        ride.fixValid && static_cast<bool>(fix.valid.speed),
+                        capturedAtMs, RidePositionSource::HardwareNmea};
 
   // GPS Fix
   if (fix.status != gps_fix::STATUS_NONE)

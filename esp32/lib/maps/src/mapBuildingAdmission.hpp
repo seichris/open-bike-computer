@@ -37,6 +37,44 @@ struct Candidate {
   size_t sourceIndex = 0;
 };
 
+struct BaseQuotaFit {
+  bool records = false;
+  bool points = false;
+  bool pixels = false;
+
+  constexpr bool accepted() const { return records && points && pixels; }
+};
+
+// Shared nearest-first accounting used by both the exact selector and the
+// renderer's projection short-circuit. Keeping the arithmetic here prevents a
+// fast prepass from stopping at a different record than final admission.
+struct BaseQuotaUsage {
+  size_t records = 0;
+  size_t points = 0;
+  uint64_t pixels = 0;
+
+  constexpr bool full(const Quotas &quotas) const {
+    return records >= quotas.maximumRecords;
+  }
+
+  constexpr BaseQuotaFit fit(const Candidate &candidate,
+                             const Quotas &quotas) const {
+    return {
+        records < quotas.maximumRecords,
+        points <= quotas.maximumPoints &&
+            candidate.pointCount <= quotas.maximumPoints - points,
+        pixels <= quotas.maximumProjectedPixels &&
+            candidate.projectedPixels <= quotas.maximumProjectedPixels - pixels,
+    };
+  }
+
+  constexpr void admit(const Candidate &candidate) {
+    ++records;
+    points += candidate.pointCount;
+    pixels += candidate.projectedPixels;
+  }
+};
+
 
 /**
  * Retain the globally nearest candidates in bounded memory. The heap root is
@@ -107,9 +145,7 @@ inline std::vector<Decision> select(CandidateVector candidates,
 
   std::vector<Decision> decisions;
   decisions.reserve(candidates.size());
-  size_t records = 0;
-  size_t points = 0;
-  uint64_t pixels = 0;
+  BaseQuotaUsage baseUsage;
   size_t extrudedRecords = 0;
   size_t extrudedPoints = 0;
   uint64_t extrudedPixels = 0;
@@ -118,19 +154,10 @@ inline std::vector<Decision> select(CandidateVector candidates,
 
   for (const Candidate &candidate : candidates) {
     Decision decision{candidate.sourceIndex, false, false};
-    const bool fitsRecords = records < quotas.maximumRecords;
-    const bool fitsPoints = points <= quotas.maximumPoints &&
-                            candidate.pointCount <=
-                                quotas.maximumPoints - points;
-    const bool fitsPixels = pixels <= quotas.maximumProjectedPixels &&
-                            candidate.projectedPixels <=
-                                quotas.maximumProjectedPixels - pixels;
-    const bool fitsBase = fitsRecords && fitsPoints && fitsPixels;
-    if (fitsBase) {
+    const BaseQuotaFit baseFit = baseUsage.fit(candidate, quotas);
+    if (baseFit.accepted()) {
       decision.admitted = true;
-      records++;
-      points += candidate.pointCount;
-      pixels += candidate.projectedPixels;
+      baseUsage.admit(candidate);
       const bool fitsExtrudedRecords =
           extrudedRecords < quotas.maximumExtrudedRecords;
       const bool fitsExtrudedPoints =
@@ -164,17 +191,17 @@ inline std::vector<Decision> select(CandidateVector candidates,
       local.selected++;
     } else {
       local.deferred++;
-      if (!fitsRecords)
+      if (!baseFit.records)
         local.limiterFlags |= LimiterRecords;
-      if (!fitsPoints)
+      if (!baseFit.points)
         local.limiterFlags |= LimiterPoints;
-      if (!fitsPixels)
+      if (!baseFit.pixels)
         local.limiterFlags |= LimiterProjectedPixels;
     }
     decisions.push_back(decision);
   }
-  local.selectedPoints = points;
-  local.selectedPixels = pixels;
+  local.selectedPoints = baseUsage.points;
+  local.selectedPixels = baseUsage.pixels;
   if (diagnostics != nullptr)
     *diagnostics = local;
   return decisions;

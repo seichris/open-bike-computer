@@ -12,10 +12,11 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable
 
-from .admission import AdmissionCapacityError, AdmissionPolicy
+from .admission import AdmissionCapacityError, QueueAdmissionPolicy, is_waiting
 from .artifacts import ArtifactRecord
 from .generation_profiles import GenerationProfilePolicy
 from .geometry import GeometryError, normalize_geometry
@@ -74,9 +75,18 @@ class UnsupportedRendererTargetError(ValueError):
         }
 
 
+def _serialized(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._queue_lock():
+            return method(self, *args, **kwargs)
+    return locked
+
+
 class JobStore:
     _local_queue_locks_guard = threading.Lock()
     _local_queue_locks: dict[str, threading.Lock] = {}
+    _held_queue_locks = threading.local()
     _local_client_request_locks_guard = threading.Lock()
     _local_client_request_locks: dict[str, threading.Lock] = {}
     _local_artifact_locks_guard = threading.Lock()
@@ -87,7 +97,7 @@ class JobStore:
         root: str | Path,
         *,
         lock_stale_seconds: float = 300.0,
-        admission_policy: AdmissionPolicy | None = None,
+        admission_policy: QueueAdmissionPolicy | None = None,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -102,23 +112,65 @@ class JobStore:
         self.map_id_index_root.mkdir(exist_ok=True)
         self.active_index_root = self.root / ".active-jobs"
         self.active_index_root.mkdir(exist_ok=True)
+        self.pending_write_root = self.root / ".pending-writes"
+        self.pending_write_root.mkdir(exist_ok=True)
         self.artifact_gc_cursor_path = self.root / ".artifact-gc-cursor"
         self.lock_stale_seconds = lock_stale_seconds
         self.admission_policy = admission_policy
         self._rebuild_lookup_indexes()
 
+    @_serialized
     def save(self, job: MapJob) -> None:
+        # Persist intent before changing canonical data. Every process repairs
+        # incomplete publication before consulting any derived lookup index.
+        intent = self.pending_write_root / self._path(job.job_id).name
+        self._durable_write(intent, json.dumps(job.to_dict(include_internal=True)))
+        self._publish_job(job)
+        intent.unlink()
+        self._sync_directory(self.pending_write_root)
+
+    @staticmethod
+    def _sync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _durable_write(cls, path: Path, contents: str) -> None:
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w") as stream:
+            stream.write(contents + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+        cls._sync_directory(path.parent)
+
+    def _publish_job(self, job: MapJob) -> None:
         path = self._path(job.job_id)
-        tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(
-            json.dumps(job.to_dict(include_internal=True), indent=2, sort_keys=True) + "\n"
-        )
-        tmp_path.replace(path)
+        self._durable_write(path, json.dumps(job.to_dict(include_internal=True), indent=2, sort_keys=True))
         self._index_job_ownership(job)
         self._index_map_id(job)
         self._index_client_request(job)
         self._index_active_status(job)
 
+    def _recover_pending_writes(self) -> None:
+        # Bounded by incomplete writes, never by the historical job count.
+        intents = []
+        for path in self.pending_write_root.glob("*.json"):
+            intents.append(path)
+            if len(intents) > 256:
+                raise RuntimeError("too many incomplete job writes; repair required")
+        for path in intents:
+            job = MapJob.from_dict(json.loads(path.read_text()))
+            if path.name != self._path(job.job_id).name:
+                raise ValueError("invalid pending job identity")
+            self._publish_job(job)
+            path.unlink()
+            self._sync_directory(self.pending_write_root)
+
+    @_serialized
     def get(self, job_id: str) -> MapJob:
         path = self._path(job_id)
         if not path.exists():
@@ -129,6 +181,7 @@ class JobStore:
         jobs, _ = self.list_with_failures()
         return jobs
 
+    @_serialized
     def list_with_failures(
         self,
     ) -> tuple[list[MapJob], list[tuple[Path, Exception]]]:
@@ -148,6 +201,7 @@ class JobStore:
             raise JobRecordEnumerationError(failures)
         return jobs
 
+    @_serialized
     def list_for_installation(self, client_installation_id: str) -> list[MapJob]:
         """Read only records named by the per-installation lookup index."""
         matches: list[MapJob] = []
@@ -164,6 +218,7 @@ class JobStore:
                 matches.append(job)
         return matches
 
+    @_serialized
     def list_for_map_id(self, map_id: str) -> list[MapJob]:
         matches: list[MapJob] = []
         index_root = self._map_id_index_path(map_id)
@@ -179,6 +234,7 @@ class JobStore:
                 matches.append(job)
         return matches
 
+    @_serialized
     def list_active(self) -> list[MapJob]:
         active: list[MapJob] = []
         for path in sorted(self.active_index_root.glob("*.idx")):
@@ -222,6 +278,7 @@ class JobStore:
             self.save(job)
             return job
 
+    @_serialized
     def get_by_client_request(
         self,
         client_installation_id: str,
@@ -290,9 +347,9 @@ class JobStore:
             return
         root = self._installation_index_path(job.client_installation_id)
         root.mkdir(exist_ok=True)
+        self._sync_directory(root.parent)
         path = root / f"{job.job_id}.idx"
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(
+        self._durable_write(path,
             json.dumps(
                 {
                     "clientInstallationId": job.client_installation_id,
@@ -302,32 +359,29 @@ class JobStore:
             )
             + "\n"
         )
-        tmp_path.replace(path)
 
     def _index_map_id(self, job: MapJob) -> None:
         if not job.map_id:
             return
         root = self._map_id_index_path(job.map_id)
         root.mkdir(exist_ok=True)
+        self._sync_directory(root.parent)
         path = root / f"{job.job_id}.idx"
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(
+        self._durable_write(path,
             json.dumps(
                 {"mapId": job.map_id, "jobId": job.job_id},
                 separators=(",", ":"),
             )
             + "\n"
         )
-        tmp_path.replace(path)
 
     def _index_active_status(self, job: MapJob) -> None:
         path = self.active_index_root / f"{job.job_id}.idx"
         if job.status not in ACTIVE_STATUSES:
             path.unlink(missing_ok=True)
+            self._sync_directory(path.parent)
             return
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(job.job_id + "\n")
-        tmp_path.replace(path)
+        self._durable_write(path, job.job_id)
 
     def _index_client_request(self, job: MapJob) -> None:
         if not job.client_installation_id or not job.client_request_id:
@@ -336,9 +390,7 @@ class JobStore:
             job.client_installation_id,
             job.client_request_id,
         )
-        tmp_path = path.with_suffix(".tmp")
-        tmp_path.write_text(job.job_id + "\n")
-        tmp_path.replace(path)
+        self._durable_write(path, job.job_id)
 
     def _client_request_index_path(
         self,
@@ -1004,8 +1056,10 @@ class JobStore:
                     or build_cache_key in job.build_cache_aliases
                 )
                 and job.map_id
-                and job.pack_path
-                and Path(job.pack_path).is_file()
+                and (
+                    (job.pack_path and Path(job.pack_path).is_file())
+                    or any(artifact.format == "zip-stored-v1" for artifact in job.artifacts)
+                )
             ]
             return max(candidates, key=lambda value: value.created_at) if candidates else None
 
@@ -1058,8 +1112,10 @@ class JobStore:
                 )
                 or source.build_compatibility_key != build_compatibility_key
                 or not source.map_id
-                or not source.pack_path
-                or not Path(source.pack_path).is_file()
+                or not (
+                    (source.pack_path and Path(source.pack_path).is_file())
+                    or any(artifact.format == "zip-stored-v1" for artifact in source.artifacts)
+                )
             ):
                 return None
             immediate_source_metrics = deepcopy(source.artifact_metrics or {})
@@ -1124,7 +1180,7 @@ class JobStore:
                 job_id,
                 JobStatus.READY,
                 map_id=source.map_id,
-                pack_path=source.pack_path,
+                pack_path=(source.pack_path if source.pack_path and Path(source.pack_path).is_file() else None),
                 pack_bytes=source.pack_bytes,
                 artifacts=source.artifacts,
                 artifact_metrics=artifact_metrics,
@@ -1444,6 +1500,33 @@ class JobStore:
                     return claimed
             return None
 
+    def queue_position(self, job_id: str) -> int | None:
+        """Estimate a one-based position among durable waiting jobs.
+
+        A yielded parent can be temporarily ineligible for worker resources,
+        so the next actual claim may skip ahead of this waiting order.
+        """
+        with self._queue_lock():
+            jobs = self._admission_jobs_unlocked()
+            waiting = [job for job in jobs if is_waiting(job)]
+            # Initial requests and yielded chunked jobs take turns by their
+            # durable wait timestamp; retries follow those two classes.
+            first_pass = sorted(
+                (job for job in waiting if job.scheduler_yielded or job.attempts == 0),
+                key=lambda job: (
+                    job.updated_at if job.scheduler_yielded else job.created_at,
+                    job.job_id,
+                ),
+            )
+            retries = sorted(
+                (job for job in waiting if not job.scheduler_yielded and job.attempts > 0),
+                key=lambda job: (job.updated_at, job.job_id),
+            )
+            for position, job in enumerate((*first_pass, *retries), start=1):
+                if job.job_id == job_id:
+                    return position
+            return None
+
     def yield_chunked_job(self, job_id: str, *, worker_id: str) -> MapJob:
         """Release one active public parent without consuming a retry."""
 
@@ -1612,6 +1695,12 @@ class JobStore:
     @contextmanager
     def _queue_lock(self):
         local_key = str(self.lock_path.resolve())
+        held = getattr(self._held_queue_locks, "paths", None)
+        if held is None:
+            held = self._held_queue_locks.paths = set()
+        if local_key in held:
+            yield
+            return
         with self._local_queue_locks_guard:
             local_lock = self._local_queue_locks.setdefault(
                 local_key,
@@ -1621,8 +1710,11 @@ class JobStore:
             descriptor = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o600)
             try:
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
+                held.add(local_key)
+                self._recover_pending_writes()
                 yield
             finally:
+                held.discard(local_key)
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
 
@@ -1684,7 +1776,7 @@ class MapJobService:
         if self.generation_profile_policy is not None:
             canary_profiles = frozenset()
             if client_installation_id in self.building_target3_allowlist:
-                canary_profiles = frozenset({
+                canary_profiles = canary_profiles | frozenset({
                     self.generation_profile_policy.profile_id_for_renderer_format(3)
                 })
             return [
@@ -1711,7 +1803,7 @@ class MapJobService:
             raise RuntimeError("generation profile policy is not configured")
         canary_profiles = frozenset()
         if client_installation_id in self.building_target3_allowlist:
-            canary_profiles = frozenset({
+            canary_profiles = canary_profiles | frozenset({
                 self.generation_profile_policy.profile_id_for_renderer_format(3)
             })
         profiles = self.generation_profile_policy.available_profiles(
@@ -1758,14 +1850,6 @@ class MapJobService:
             install_on_device=install_on_device,
         )
         if self.store.admission_policy is not None:
-            admission = self.store.admission_policy.estimate(
-                request,
-                geometry,
-                source,
-            )
-            job.admission_cost = admission.units
-            job.admission_policy_version = admission.policy_version
-            job.admission_cost_inputs = admission.inputs
             job.admission_partition = admission_partition
         with self.store.lock_job_creation():
             if client_installation_id and client_request_id:
@@ -1786,18 +1870,13 @@ class MapJobService:
                         )
                     return existing
             if self.store.admission_policy is not None:
-                jobs = self.store._admission_jobs_unlocked(
-                    installation_id=job.client_installation_id,
-                )
+                jobs = self.store._admission_jobs_unlocked()
                 self.store.admission_policy.validate_create(job, jobs)
-                active_jobs = [
-                    existing_job
-                    for existing_job in jobs
-                    if existing_job.status in ACTIVE_STATUSES
-                ]
+                active_jobs = [existing_job for existing_job in jobs if existing_job.status in ACTIVE_STATUSES]
             else:
                 active_jobs = self.store.list_active()
-            self.limits.validate_active_jobs(active_jobs)
+            if self.store.admission_policy is None:
+                self.limits.validate_active_jobs(active_jobs)
             if self.estimate_coordinator is not None:
                 try:
                     self.estimate_coordinator.prepare_initial(job, active_jobs)
@@ -2064,6 +2143,7 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
         MAX_PREFERRED_LANGUAGES,
         normalize_language_tag,
     )
+    from .topography_artifacts import TOPOGRAPHY_RENDERER_FORMAT_VERSION
 
     unexpected = sorted(set(request) - _MAP_JOB_REQUEST_FIELDS)
     if unexpected:
@@ -2094,9 +2174,10 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
                     1,
                     LABEL_RENDERER_FORMAT_VERSION,
                     BUILDING_RENDERER_FORMAT_VERSION,
+                    TOPOGRAPHY_RENDERER_FORMAT_VERSION,
                 }
             ):
-                raise ValueError("target rendererFormatVersion must be 1, 2, or 3")
+                raise ValueError("target rendererFormatVersion must be 1, 2, 3, or 4")
             normalized_target["rendererFormatVersion"] = renderer_format_version
         if "firmwareVersion" in target:
             firmware_version = target["firmwareVersion"]
@@ -2111,6 +2192,7 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
     if renderer_format_version in {
         LABEL_RENDERER_FORMAT_VERSION,
         BUILDING_RENDERER_FORMAT_VERSION,
+        TOPOGRAPHY_RENDERER_FORMAT_VERSION,
     } and request.get("target", {}).get("renderer") != "esp32-fmb":
         raise ValueError(
             f"renderer format {renderer_format_version} requires explicit esp32-fmb target"
@@ -2147,13 +2229,14 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
     if renderer_format_version in {
         LABEL_RENDERER_FORMAT_VERSION,
         BUILDING_RENDERER_FORMAT_VERSION,
+        TOPOGRAPHY_RENDERER_FORMAT_VERSION,
     }:
         if "labels" not in request:
             raise ValueError(
                 f"renderer format {renderer_format_version} requires labels"
             )
     elif "labels" in request:
-        raise ValueError("labels require renderer format 2 or 3")
+        raise ValueError("labels require renderer format 2, 3, or 4")
 
 
 def _validate_identifier(value: str, key: str) -> str:

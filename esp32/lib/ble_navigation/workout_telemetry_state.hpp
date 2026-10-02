@@ -1,6 +1,7 @@
 #pragma once
 
 #include "workout_telemetry_protocol.hpp"
+#include "workout_zone_protocol.hpp"
 
 #include <array>
 #include <cstddef>
@@ -12,6 +13,32 @@ template <typename T> struct OptionalMetric {
   bool available = false;
   T value = 0;
 };
+
+struct WatchMotionEvidence {
+  bool available = false;
+  uint16_t sessionToken = 0;
+  uint16_t sampleEpoch = 0;
+  uint32_t sampleSequence = 0;
+  uint16_t speedCentimetersPerSecond = 0;
+  uint16_t horizontalAccuracyDecimeters = 0;
+  uint32_t capturedAtMs = 0;
+  uint32_t lastReceivedAtMs = 0;
+  bool automaticallyPaused = false;
+};
+
+inline bool operator==(const WatchMotionEvidence &lhs,
+                       const WatchMotionEvidence &rhs) {
+  return lhs.available == rhs.available &&
+         lhs.sessionToken == rhs.sessionToken &&
+         lhs.sampleEpoch == rhs.sampleEpoch &&
+         lhs.sampleSequence == rhs.sampleSequence &&
+         lhs.speedCentimetersPerSecond == rhs.speedCentimetersPerSecond &&
+         lhs.horizontalAccuracyDecimeters ==
+             rhs.horizontalAccuracyDecimeters &&
+         lhs.capturedAtMs == rhs.capturedAtMs &&
+         lhs.lastReceivedAtMs == rhs.lastReceivedAtMs &&
+         lhs.automaticallyPaused == rhs.automaticallyPaused;
+}
 
 struct State {
   workout_telemetry_protocol::SessionState sessionState =
@@ -36,6 +63,7 @@ struct State {
   OptionalMetric<uint16_t> currentHeartRateBpm{};
 
   uint8_t sourceFlags = 0;
+  uint8_t committedPairGeneration = 0;
   OptionalMetric<uint16_t> averageHeartRateBpm{};
   OptionalMetric<uint16_t> activeEnergyTenthsKilocalorie{};
   OptionalMetric<uint16_t> cyclingPowerWatts{};
@@ -51,6 +79,8 @@ struct State {
   workout_telemetry_protocol::PauseOrigin lastTransitionOrigin =
       workout_telemetry_protocol::PauseOrigin::None;
   uint32_t lastOriginReceivedAtMs = 0;
+  WatchMotionEvidence watchMotion{};
+  workout_zones::State zones{};
 };
 
 template <typename T>
@@ -78,6 +108,7 @@ inline bool operator==(const State &lhs, const State &rhs) {
              rhs.maximumSpeedCentimetersPerSecond &&
          lhs.currentHeartRateBpm == rhs.currentHeartRateBpm &&
          lhs.sourceFlags == rhs.sourceFlags &&
+         lhs.committedPairGeneration == rhs.committedPairGeneration &&
          lhs.averageHeartRateBpm == rhs.averageHeartRateBpm &&
          lhs.activeEnergyTenthsKilocalorie ==
              rhs.activeEnergyTenthsKilocalorie &&
@@ -91,7 +122,8 @@ inline bool operator==(const State &lhs, const State &rhs) {
          lhs.detectorProfileVersion == rhs.detectorProfileVersion &&
          lhs.pauseOrigin == rhs.pauseOrigin &&
          lhs.lastTransitionOrigin == rhs.lastTransitionOrigin &&
-         lhs.lastOriginReceivedAtMs == rhs.lastOriginReceivedAtMs;
+         lhs.lastOriginReceivedAtMs == rhs.lastOriginReceivedAtMs &&
+         lhs.watchMotion == rhs.watchMotion && lhs.zones == rhs.zones;
 }
 
 inline bool operator!=(const State &lhs, const State &rhs) {
@@ -116,6 +148,10 @@ enum class ApplyResult : uint8_t {
   IgnoredToken,
   IgnoredPair,
   IgnoredStateRegression,
+  IgnoredMotionEpoch,
+  IgnoredMotionSequence,
+  IgnoredLifecyclePhase,
+  IgnoredZoneSequence,
 };
 
 constexpr uint32_t STALE_AFTER_MS = 10000;
@@ -225,7 +261,11 @@ inline bool isStale(const State &state, uint32_t nowMs,
 
 inline Snapshot makeSnapshot(const State &state, uint32_t nowMs,
                              uint32_t staleAfterMs = STALE_AFTER_MS) {
-  return {state, isStale(state, nowMs, staleAfterMs)};
+  Snapshot result{state, isStale(state, nowMs, staleAfterMs)};
+  workout_zones::expire(result.state.zones,
+      state.sessionState == workout_telemetry_protocol::SessionState::Running,
+      result.stale || !state.originReceived, nowMs);
+  return result;
 }
 
 class Reducer {
@@ -249,6 +289,9 @@ public:
     if (!authenticated) {
       return ApplyResult::RejectedUnauthenticated;
     }
+    if (bytes != nullptr && length > 0 && bytes[0] == workout_zone_wire::FRAME_KIND) {
+      return applyZones(bytes, length, receivedAtMs);
+    }
     if (bytes == nullptr ||
         (length != workout_telemetry_protocol::FRAME_SIZE &&
          length != workout_telemetry_protocol::ORIGIN_FRAME_SIZE)) {
@@ -268,6 +311,11 @@ public:
       if (length != workout_telemetry_protocol::ORIGIN_FRAME_SIZE)
         return ApplyResult::RejectedLength;
       return applyOrigin(bytes, receivedAtMs);
+    case static_cast<uint8_t>(
+        workout_telemetry_protocol::FrameKind::WatchMotion):
+      if (length != workout_telemetry_protocol::FRAME_SIZE)
+        return ApplyResult::RejectedLength;
+      return applyWatchMotion(bytes, receivedAtMs);
     default:
       return ApplyResult::RejectedKind;
     }
@@ -346,6 +394,9 @@ private:
       next.pauseOrigin = PauseOrigin::None;
       next.lastTransitionOrigin = PauseOrigin::None;
       next.lastOriginReceivedAtMs = 0;
+      next.watchMotion = {};
+      next.zones.heartRate.current = 0;
+      next.zones.power.current = 0;
     }
     next.sessionState = incomingState;
     next.sessionToken = token;
@@ -530,6 +581,30 @@ private:
     return ApplyResult::Applied;
   }
 
+  ApplyResult applyZones(const uint8_t *bytes, std::size_t length, uint32_t receivedAtMs) {
+    workout_zones::Packet packet{};
+    if (!workout_zones::decode(bytes, length, packet)) return ApplyResult::RejectedMetric;
+    if (!state_.coreReceived || !state_.originReceived || packet.token != state_.sessionToken ||
+        packet.sessionID != state_.sessionID) return ApplyResult::IgnoredToken;
+    if (packet.state != static_cast<uint8_t>(state_.sessionState)) return ApplyResult::IgnoredLifecyclePhase;
+    if (packet.pairGeneration == 0 || packet.pairGeneration !=
+        state_.committedPairGeneration) return ApplyResult::IgnoredPair;
+    if (packet.value.durations() && (!state_.elapsedSeconds.available ||
+        workout_zones::totalMilliseconds(packet.value) >
+            (uint64_t(state_.elapsedSeconds.value) + 1) * 1000)) return ApplyResult::RejectedMetric;
+    auto &retained = packet.metric == workout_zone_wire::METRIC_HEART_RATE
+        ? state_.zones.heartRate : state_.zones.power;
+    // Retries, reordered packets and same-sequence replays cannot renew a
+    // sensor's expiry or replace a newer definition. Reconnect resets the
+    // sequence namespace only at the authenticated resynchronization boundary.
+    if (retained.received && packet.value.sequence <= retained.sequence)
+      return packet.value.sequence == retained.sequence ? ApplyResult::Applied : ApplyResult::IgnoredZoneSequence;
+    packet.value.receivedAtMs = receivedAtMs;
+    retained = packet.value;
+    state_.zones.sessionID = packet.sessionID;
+    return ApplyResult::Applied;
+  }
+
   ApplyResult applyOrigin(const uint8_t *bytes, uint32_t receivedAtMs) {
     using namespace workout_telemetry_protocol;
     const uint8_t rawPauseOrigin = bytes[1];
@@ -545,8 +620,8 @@ private:
       return ApplyResult::RejectedToken;
     if (!state_.coreReceived || state_.sessionToken != token)
       return ApplyResult::IgnoredToken;
-    if (rawPauseOrigin > static_cast<uint8_t>(PauseOrigin::Automatic) ||
-        rawLastOrigin > static_cast<uint8_t>(PauseOrigin::Automatic) ||
+    if (rawPauseOrigin > static_cast<uint8_t>(PauseOrigin::Unknown) ||
+        rawLastOrigin > static_cast<uint8_t>(PauseOrigin::Unknown) ||
         flags != 0 || !hasSessionID(sessionID))
       return ApplyResult::RejectedMetric;
     const bool paused = state_.sessionState == SessionState::Paused;
@@ -561,6 +636,7 @@ private:
         wallElapsed < state_.elapsedSeconds.value)
       return ApplyResult::RejectedMetric;
 
+    if (state_.zones.sessionID != sessionID) state_.zones = {};
     state_.originReceived = true;
     state_.lastOriginReceivedAtMs = receivedAtMs;
     state_.wallElapsedSeconds = wallElapsed == UNAVAILABLE_UINT32
@@ -572,11 +648,96 @@ private:
     state_.pauseOrigin = static_cast<PauseOrigin>(rawPauseOrigin);
     state_.lastTransitionOrigin =
         static_cast<PauseOrigin>(rawLastOrigin);
+    if (state_.sessionState == SessionState::Paused &&
+        state_.pauseOrigin != PauseOrigin::Automatic) {
+      state_.watchMotion = {};
+    }
+    return ApplyResult::Applied;
+  }
+
+  static bool serialNewer16(uint16_t incoming, uint16_t current) {
+    const uint16_t delta = static_cast<uint16_t>(incoming - current);
+    return delta != 0 && delta < 0x8000U;
+  }
+
+  static bool serialNewer32(uint32_t incoming, uint32_t current) {
+    const uint32_t delta = incoming - current;
+    return delta != 0 && delta < 0x80000000UL;
+  }
+
+  ApplyResult applyWatchMotion(const uint8_t *bytes, uint32_t receivedAtMs) {
+    using namespace workout_telemetry_protocol;
+
+    const uint8_t flags = bytes[1];
+    const uint16_t token = readUInt16LE(bytes, 2);
+    const uint32_t sequence = readUInt32LE(bytes, 4);
+    const uint16_t speed = readUInt16LE(bytes, 8);
+    const uint16_t accuracy = readUInt16LE(bytes, 10);
+    const uint16_t sampleAge = readUInt16LE(bytes, 12);
+    const uint16_t epoch = readUInt16LE(bytes, 14);
+    const bool fixValid = (flags & WATCH_MOTION_FIX_VALID) != 0;
+    const bool speedAvailable =
+        (flags & WATCH_MOTION_SPEED_AVAILABLE) != 0;
+    const bool accuracyAvailable =
+        (flags & WATCH_MOTION_ACCURACY_AVAILABLE) != 0;
+    const bool currentSample =
+        (flags & WATCH_MOTION_CURRENT_SAMPLE) != 0;
+    const bool automaticallyPaused =
+        (flags & WATCH_MOTION_AUTOMATICALLY_PAUSED) != 0;
+
+    if ((flags & ~WATCH_MOTION_KNOWN_FLAGS_MASK) != 0)
+      return ApplyResult::RejectedFlags;
+    if (token == 0 || epoch == 0 || sequence == 0)
+      return ApplyResult::RejectedToken;
+    if (speedAvailable != (speed != UNAVAILABLE_UINT16) ||
+        accuracyAvailable != (accuracy != UNAVAILABLE_UINT16) ||
+        fixValid != (speedAvailable && accuracyAvailable && currentSample &&
+                     sampleAge != UNAVAILABLE_UINT16)) {
+      return ApplyResult::RejectedFlags;
+    }
+    if (!fixValid)
+      return ApplyResult::RejectedMetric;
+    if (!state_.coreReceived || state_.sessionToken != token)
+      return ApplyResult::IgnoredToken;
+
+    const bool runningPhase =
+        state_.sessionState == SessionState::Running && !automaticallyPaused;
+    const bool automaticallyPausedPhase =
+        state_.sessionState == SessionState::Paused &&
+        state_.originReceived && state_.pauseOrigin == PauseOrigin::Automatic &&
+        automaticallyPaused;
+    if (!runningPhase && !automaticallyPausedPhase)
+      return ApplyResult::IgnoredLifecyclePhase;
+
+    const WatchMotionEvidence &current = state_.watchMotion;
+    if (current.available) {
+      if (epoch == current.sampleEpoch) {
+        if (sequence == current.sampleSequence)
+          return ApplyResult::IgnoredMotionSequence;
+        if (!serialNewer32(sequence, current.sampleSequence))
+          return ApplyResult::IgnoredMotionSequence;
+      } else if (!serialNewer16(epoch, current.sampleEpoch)) {
+        return ApplyResult::IgnoredMotionEpoch;
+      }
+    }
+
+    state_.watchMotion = {
+        true,
+        token,
+        epoch,
+        sequence,
+        speed,
+        accuracy,
+        receivedAtMs - static_cast<uint32_t>(sampleAge),
+        receivedAtMs,
+        automaticallyPaused,
+    };
     return ApplyResult::Applied;
   }
 
   void commitExtendedState(const State &next, uint8_t generation) {
     state_ = next;
+    state_.committedPairGeneration = generation;
     if (generation != 0) {
       transactionalState_ = State{};
       transactionalCorePending_ = false;
@@ -607,6 +768,9 @@ public:
   bool resynchronizationPending() const { return resynchronizationPending_; }
 
   void beginResynchronization() {
+    State cleared = active_.state();
+    cleared.zones = {};
+    active_ = Reducer(cleared);
     staged_.reset();
     stagedCoreAccepted_ = false;
     stagedRequiresCurrentCollisionReplacement_ = false;
@@ -709,6 +873,8 @@ private:
 
 inline const char *applyResultName(ApplyResult result) {
   switch (result) {
+  case ApplyResult::IgnoredZoneSequence:
+    return "old_zone_sequence";
   case ApplyResult::Applied:
     return "applied";
   case ApplyResult::Cleared:
@@ -733,6 +899,12 @@ inline const char *applyResultName(ApplyResult result) {
     return "pair_mismatch";
   case ApplyResult::IgnoredStateRegression:
     return "state_regression";
+  case ApplyResult::IgnoredMotionEpoch:
+    return "motion_epoch";
+  case ApplyResult::IgnoredMotionSequence:
+    return "motion_sequence";
+  case ApplyResult::IgnoredLifecyclePhase:
+    return "lifecycle_phase";
   }
   return "unknown";
 }

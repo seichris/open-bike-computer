@@ -8,6 +8,25 @@ namespace map_presentation {
 
 constexpr double kPi = 3.14159265358979323846;
 
+// A round panel can expose pixels outside a shorter centered map viewport.
+// Besides the ordinary safety gutter, each axis therefore needs half of the
+// viewport aspect-ratio difference. Round upward so odd-sized layouts remain
+// fail closed instead of losing the final physical pixel.
+constexpr uint16_t minimumRoundViewportOverscan(
+    uint16_t viewportWidth, uint16_t viewportHeight,
+    uint16_t safetyPixels, uint16_t baseMinimumPixels) {
+  const uint32_t difference = viewportWidth >= viewportHeight
+      ? static_cast<uint32_t>(viewportWidth - viewportHeight)
+      : static_cast<uint32_t>(viewportHeight - viewportWidth);
+  const uint32_t geometryMinimum =
+      static_cast<uint32_t>(safetyPixels) + (difference + 1U) / 2U;
+  const uint32_t required =
+      geometryMinimum > baseMinimumPixels ? geometryMinimum
+                                          : baseMinimumPixels;
+  return required > UINT16_MAX ? UINT16_MAX
+                               : static_cast<uint16_t>(required);
+}
+
 inline double normalizeDegrees(double degrees) {
   if (!std::isfinite(degrees))
     return 0.0;
@@ -74,13 +93,33 @@ inline bool frameCoversViewport(double renderWidth, double renderHeight,
                                 ScreenPoint projectedPivot,
                                 ScreenPoint screenAnchor,
                                 double rotationDeltaRad,
-                                double safetyPixels) {
+                                double safetyPixels,
+                                bool roundViewport = false) {
   if (!(renderWidth > 0.0 && renderHeight > 0.0 && viewportWidth > 0.0 &&
         viewportHeight > 0.0 && safetyPixels >= 0.0)) {
     return false;
   }
   const double cosine = std::cos(rotationDeltaRad);
   const double sine = std::sin(rotationDeltaRad);
+  if (roundViewport) {
+    // The 1.75-inch panel exposes a circular 466 px window. Its map viewport
+    // can be shorter when the toolbar is visible, but it remains centered in
+    // that physical circle. Prove a conservative full-screen circle so every
+    // physically visible pixel is covered without requiring the invisible
+    // square corners. A circle is rotation-invariant, which also prevents an
+    // ordinary course-up turn from rejecting an otherwise complete frame.
+    const double radius = std::max(viewportWidth, viewportHeight) * 0.5;
+    const double centerDx = viewportWidth * 0.5 - screenAnchor.x;
+    const double centerDy = viewportHeight * 0.5 - screenAnchor.y;
+    const double sourceCenterX =
+        projectedPivot.x + cosine * centerDx + sine * centerDy;
+    const double sourceCenterY =
+        projectedPivot.y - sine * centerDx + cosine * centerDy;
+    return sourceCenterX - radius >= safetyPixels &&
+           sourceCenterY - radius >= safetyPixels &&
+           sourceCenterX + radius <= renderWidth - safetyPixels &&
+           sourceCenterY + radius <= renderHeight - safetyPixels;
+  }
   const ScreenPoint corners[] = {{0.0, 0.0},
                                  {viewportWidth, 0.0},
                                  {viewportWidth, viewportHeight},
@@ -109,10 +148,10 @@ struct Fix {
   // the fix lets prediction remain bounded in real metres while producing a
   // position in the exact world-coordinate space used by the map renderer.
   double worldUnitsPerMeter = 1.0;
-  // Local monotonic time when the GPS packet was accepted. This deliberately
-  // remains separate from the later UI time at which heading convergence may
-  // re-observe the same physical fix.
+  // Estimated source capture time in the receiver's monotonic domain. Source
+  // age, transport arrival and UI processing time are separate contracts.
   uint32_t timestampMs = 0;
+  bool sourceTimeKnown = true;
 };
 
 struct PresentedPose {
@@ -261,6 +300,15 @@ public:
             ? fix.worldUnitsPerMeter
             : 1.0;
     normalized.headingDegrees = normalizeDegrees(fix.headingDegrees);
+    if (!normalized.sourceTimeKnown) normalized.speedMetersPerSecond = 0;
+    // Repeated expired/unknown snapshots at the same position cannot keep
+    // restarting positional convergence. Retain the already frozen endpoint.
+    if (hasFix_ && present(receivedAtMs).predictionExhausted &&
+        (!normalized.sourceTimeKnown || receivedAtMs - normalized.timestampMs >= config_.maximumPredictionMs) &&
+        normalized.position.x == current_.position.x && normalized.position.y == current_.position.y) {
+      updateHeading(normalized.headingDegrees, normalized.headingValid, receivedAtMs);
+      return;
+    }
     if (hasFix_) {
       previousPresented_ = present(receivedAtMs);
       positionConvergenceStartMs_ = receivedAtMs;
@@ -308,9 +356,7 @@ public:
     if (!hasFix_)
       return {};
 
-    // Fix::timestampMs is the accepted GPS-packet time. Keep freshness tied to
-    // that source while later route-bearing updates affect only display
-    // heading convergence.
+    // Capture time, never transport heartbeat time, bounds prediction.
     const uint32_t ageMs = nowMs - current_.timestampMs;
     const uint32_t predictionMs =
         std::min(ageMs, config_.maximumPredictionMs);
@@ -362,13 +408,13 @@ public:
       pose.headingDegrees = previousPresented_.headingDegrees;
     }
     pose.sourceTimestampMs = current_.timestampMs;
-    pose.observationAgeMs = ageMs;
+    pose.observationAgeMs = current_.sourceTimeKnown ? ageMs : UINT32_MAX;
     pose.predictionAgeMs = predictionMs;
     const bool timeExhausted = ageMs >= config_.maximumPredictionMs;
     const bool distanceExhausted =
         current_.speedMetersPerSecond > 0.0 &&
         uncappedDistanceMeters >= maximumPredictionMeters;
-    pose.predictionExhausted = timeExhausted || distanceExhausted;
+    pose.predictionExhausted = !current_.sourceTimeKnown || timeExhausted || distanceExhausted;
     pose.predictionGraceActive =
         !pose.predictionExhausted && ageMs > fullSpeedPredictionMs;
     return pose;

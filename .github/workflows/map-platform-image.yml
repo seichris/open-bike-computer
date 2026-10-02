@@ -15,6 +15,7 @@ on:
       - "map-platform/config/map-stream-rollout-approvals.json"
       - "map-platform/config/map-stream-trust.json"
       - "map-platform/config/generation-profile-policy-v1.json"
+      - "map-platform/config/generation-profile-policy-v2.json"
       - "map-platform/deploy/detect_worker_change.py"
       - "map-platform/deploy/export_pending_compose.py"
       - "map-platform/deploy/select_worker_promotion.py"
@@ -22,6 +23,15 @@ on:
       - "map-platform/deploy/verify_registry_images.py"
   workflow_dispatch:
     inputs:
+      release_profile:
+        description: Standard release or isolated production compatibility candidate
+        required: true
+        default: standard
+        type: choice
+        options:
+          - standard
+          - production-auth-compatibility
+          - production-map-promotion
       pending_worker:
         description: How to handle an open worker-moving promotion
         required: true
@@ -41,7 +51,7 @@ concurrency:
 
 jobs:
   publish:
-    name: Publish worker image
+    name: Publish candidate image
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -55,26 +65,47 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Validate authentication compatibility candidate
+        if: inputs.release_profile == 'production-auth-compatibility'
+        env:
+          SOURCE_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$SOURCE_REF" = "refs/heads/$DEFAULT_BRANCH"
+          docker build --platform linux/amd64 --target validation \
+            -f map-platform/deploy/compatibility/Dockerfile .
+
+      - name: Validate isolated production promotion candidate
+        if: inputs.release_profile == 'production-map-promotion'
+        env:
+          SOURCE_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$SOURCE_REF" = "refs/heads/$DEFAULT_BRANCH"
+          docker build --platform linux/amd64 --target validation \
+            -f map-platform/deploy/promotion/Dockerfile .
+
       - id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/open-bike-computer-map-platform
-          tags: type=raw,value=${{ github.sha }}
+          tags: type=raw,value=${{ github.sha }}${{ inputs.release_profile == 'production-auth-compatibility' && '-auth-compat' || inputs.release_profile == 'production-map-promotion' && '-map-promotion' || '' }}
 
       - id: image
         name: Build and publish image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: map-platform/backend/Dockerfile
+          file: ${{ inputs.release_profile == 'production-auth-compatibility' && 'map-platform/deploy/compatibility/Dockerfile' || inputs.release_profile == 'production-map-promotion' && 'map-platform/deploy/promotion/Dockerfile' || 'map-platform/backend/Dockerfile' }}
+          target: ${{ (inputs.release_profile == 'production-auth-compatibility' || inputs.release_profile == 'production-map-promotion') && 'runtime' || '' }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
@@ -82,14 +113,14 @@ jobs:
           sbom: true
 
       - name: Attest image provenance
-        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/open-bike-computer-map-platform
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
 
       - name: Move latest to the successful default-branch image
-        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.release_profile == '' || inputs.release_profile == 'standard')
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
@@ -120,7 +151,7 @@ jobs:
   propose-production:
     name: Propose production image
     needs: publish
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.release_profile == '' || inputs.release_profile == 'standard')
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -133,7 +164,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - id: base
         name: Reconcile with the live default branch
@@ -427,7 +458,7 @@ jobs:
   propose-development:
     name: Propose development image
     needs: publish
-    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && (inputs.release_profile == '' || inputs.release_profile == 'standard')
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -440,7 +471,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - id: base
         name: Reconcile with the live default branch

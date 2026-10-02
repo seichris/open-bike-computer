@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 import subprocess
+from pathlib import Path
 from collections.abc import Iterable, Sequence
 
 
@@ -28,9 +29,14 @@ FULL_CI_PATHS = {
     ".github/workflows/ci.yml",
 }
 FIRMWARE_HOST_ONLY_PATH_PREFIXES = ("esp32/tools/tests/",)
-FIRMWARE_HOST_PATH_PREFIXES = (".github/actions/require-immutable-releases/",)
+FIRMWARE_HOST_PATH_PREFIXES = (
+    ".github/actions/firmware-build-cache/",
+    ".github/actions/require-immutable-releases/",
+    ".github/actions/require-firmware-release-controls/",
+)
 FIRMWARE_WORKFLOW_PATHS = {
     ".github/workflows/firmware-diagnostics.yml",
+    ".github/workflows/firmware-cache-qualification.yml",
     ".github/workflows/firmware-release-candidate.yml",
     ".github/workflows/firmware-release.yml",
     ".github/workflows/firmware-runtime-performance.yml",
@@ -62,6 +68,10 @@ SHARED_RIDE_BLE_CONTRACT_PATHS = {
     "tools/generate_ride_ble_contract.py",
 }
 FIRMWARE_RELEASE_TOOL_PATHS = {
+    ".github/firmware-release-authority.json",
+    ".github/scripts/firmware_key_migration.py",
+    ".github/scripts/firmware_release_controls.py",
+    ".github/workflows/firmware-key-migration.yml",
     ".github/scripts/firmware_release_gate.py",
     "tools/factory_release_manifest.py",
     "tools/firmware_release_candidate.py",
@@ -80,8 +90,54 @@ SHARED_MAP_STREAM_FIXTURE_PATH = (
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 ZERO_SHA = "0" * 40
 
+CHECK_REGISTRY = "tools/development/checks.json"
+IOS_FAST_ONLY_PATHS = {
+    "tools/development/swift-sources.json", "tools/development/swift_compile.py",
+    "tools/replay_scenario.py", "ios-app/tests/scenario-replay/main.swift",
+    "ios-app/scripts/run-cycling-sensor-observation-tests.sh",
+}
+IOS_FAST_ONLY_PREFIXES = ("protocol/scenarios/", "ios-app/scripts/tests/", "ios-app/tests/scenario-replay/")
 
-def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
+
+def registry_affected_components(before, after):
+    """Scope recipe edits to their old and new consumers; unknown metadata is global."""
+    try:
+        old, new = json.loads(before), json.loads(after)
+        if {k:v for k,v in old.items() if k != "checks"} != {k:v for k,v in new.items() if k != "checks"}:
+            return None
+        def indexed(value):
+            checks = {c["id"]: c for c in value["checks"]}
+            if len(checks) != len(value["checks"]): raise ValueError("duplicate check")
+            if any(c["component"] not in {*COMPONENTS, "ios_native", "development"} for c in checks.values()):
+                raise ValueError("unknown consumer")
+            return checks
+        old_checks, new_checks = indexed(old), indexed(new)
+        result = set()
+        for identifier in old_checks.keys() | new_checks.keys():
+            if old_checks.get(identifier) != new_checks.get(identifier):
+                result.update(c["component"] for c in (old_checks.get(identifier), new_checks.get(identifier)) if c)
+        return result
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def registry_changed_components(base, head=None):
+    try:
+        before = subprocess.check_output(["git", "show", f"{base}:{CHECK_REGISTRY}"],stderr=subprocess.DEVNULL)
+        after = (subprocess.check_output(["git", "show", f"{head}:{CHECK_REGISTRY}"],stderr=subprocess.DEVNULL) if head
+                 else (Path(__file__).resolve().parents[2] / CHECK_REGISTRY).read_bytes())
+        return registry_affected_components(before, after)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def native_ios_required(paths, *, run_all=False, registry_components=None):
+    native_paths = [p for p in paths if p not in IOS_FAST_ONLY_PATHS and not p.startswith(IOS_FAST_ONLY_PREFIXES)
+                    and not (p == CHECK_REGISTRY and registry_components is not None and "ios_native" not in registry_components)]
+    return classify_paths(native_paths, run_all=run_all, registry_components=registry_components)["ios"]
+
+
+def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_components=None) -> dict[str, bool]:
     """Return the CI components affected by a collection of Git paths."""
 
     selected = {component: run_all for component in COMPONENTS}
@@ -93,8 +149,25 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
         if not path:
             continue
 
-        if path in FULL_CI_PATHS:
+        if path in FULL_CI_PATHS or path in {"tools/dev-check", "tools/dev_check.py"}:
             return {component: True for component in COMPONENTS}
+
+        if path == CHECK_REGISTRY:
+            if registry_components is None:
+                return {component: True for component in COMPONENTS}
+            for component in registry_components:
+                if component == "ios_native": component = "ios"
+                if component in selected: selected[component] = True
+        elif path in IOS_FAST_ONLY_PATHS or path in {"tools/development/simulator_session.py", "tools/development/ios_build.py"}:
+            selected["ios"] = True
+        elif path == "tools/development/requirements.txt":
+            selected["firmware_host"] = True
+        elif path.startswith("tools/development/") and not path.startswith("tools/development/tests/"):
+            return {component: True for component in COMPONENTS}
+
+        if path.startswith(".github/actions/firmware-build-cache/"):
+            selected["firmware_build"] = True
+            selected["firmware_host"] = True
 
         if path.startswith("esp32/"):
             selected["firmware_host"] = True
@@ -113,6 +186,17 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
             or path in RIDE_DIAGNOSTICS_TOOL_PATHS
         ):
             selected["firmware_host"] = True
+
+        if path in {"tools/build_evidence.py", "tools/build-and-record-firmware"}:
+            # Both native build jobs exercise evidence collection and retention.
+            selected["firmware_build"] = True
+            selected["firmware_host"] = True
+            if path == "tools/build_evidence.py": selected["ios"] = True
+        if path == "tools/incident_bundle.py":
+            selected["firmware_host"] = True
+        if path.startswith("protocol/scenarios/") or path == "tools/replay_scenario.py":
+            selected["firmware_host"] = True
+            selected["ios"] = True
 
         if path.startswith("ios-app/") or path in IOS_CONTRACT_PATHS:
             selected["ios"] = True
@@ -292,9 +376,12 @@ def main() -> int:
 
     try:
         selected = select_scope(args.scope)
+        native_ios = selected["ios"] if selected is not None else False
         if selected is None:
             paths = changed_paths(args.event, args.base, args.head)
-            selected = classify_paths(paths or (), run_all=paths is None)
+            affected = registry_changed_components(args.base, args.head) if paths and CHECK_REGISTRY in paths else None
+            selected = classify_paths(paths or (), run_all=paths is None, registry_components=affected)
+            native_ios = native_ios_required(paths or (), run_all=paths is None, registry_components=affected)
     except (subprocess.CalledProcessError, ValueError) as error:
         parser.error(str(error))
 
@@ -306,6 +393,7 @@ def main() -> int:
         separators=(",", ":"),
     )
     print(f"firmware_targets={firmware_targets}")
+    print(f"ios_native={'true' if native_ios else 'false'}")
     return 0
 
 

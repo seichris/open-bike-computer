@@ -123,6 +123,8 @@ nonisolated struct NavigationRouteStepV1: Codable, Equatable, Identifiable {
 nonisolated enum RouteStorageScopeV1: String, Codable, Equatable {
     case activeOnly
     case durable
+    /// A user-selected route stored on iPhone, not eligible for Watch transfer.
+    case phoneOnly
 }
 
 nonisolated struct RouteProviderMetadataV1: Codable, Equatable {

@@ -17,6 +17,7 @@ enum class Action : uint8_t {
   PrepareTlsIdentity = 8,
   CommitTlsIdentity = 9,
   CancelTlsIdentity = 10,
+  PrepareFirmwareMaintenance = 11,
 };
 
 enum Notification : uint8_t {

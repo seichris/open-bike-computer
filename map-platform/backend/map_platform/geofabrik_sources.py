@@ -6,7 +6,6 @@ import os
 import re
 import threading
 import time
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,10 +13,16 @@ from typing import Any
 from .geometry import bbox_area_km2
 from .models import Bounds, SourceRegion
 from .sources import SourceResolutionError, contains_bounds
+from .source_http import open_geofabrik_url, validate_geofabrik_url
 
 DEFAULT_GEOFABRIK_INDEX_URL = "https://download.geofabrik.de/index-v1.json"
 DEFAULT_CACHE_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_FAILURE_COOLDOWN_SECONDS = 30
+MAX_CATALOG_BYTES = 32 * 1024 * 1024
+MAX_CATALOG_FEATURES = 10000
+MAX_CATALOG_NODES = 2000000
+MAX_CATALOG_DEPTH = 16
+DEFAULT_SOURCE_FALLBACKS_PATH = Path(__file__).resolve().parents[1] / "config" / "geofabrik-source-fallbacks.json"
 
 
 @dataclass(frozen=True)
@@ -35,12 +40,14 @@ class GeofabrikSourceProvider:
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         request_timeout_seconds: int = 60,
         failure_cooldown_seconds: int = DEFAULT_FAILURE_COOLDOWN_SECONDS,
+        source_fallbacks: dict[str, str] | None = None,
     ):
         self.index_url = index_url
         self.cache_path = Path(cache_path)
         self.cache_ttl_seconds = cache_ttl_seconds
         self.request_timeout_seconds = request_timeout_seconds
         self.failure_cooldown_seconds = max(1, failure_cooldown_seconds)
+        self.source_fallbacks = dict(source_fallbacks or {})
         self._regions: list[GeofabrikCatalogRegion] | None = None
         self._regions_lock = threading.Lock()
         self._regions_error: SourceResolutionError | None = None
@@ -58,6 +65,21 @@ class GeofabrikSourceProvider:
                 data_root_path / "source-catalogs" / "geofabrik-index-v1.json",
             )
         )
+        fallback_path = Path(
+            os.environ.get("MAP_PLATFORM_GEOFABRIK_SOURCE_FALLBACKS", DEFAULT_SOURCE_FALLBACKS_PATH)
+        )
+        fallback_config = json.loads(fallback_path.read_text())
+        if fallback_config.get("schemaVersion") != 1 or not isinstance(fallback_config.get("fallbacks"), dict):
+            raise ValueError("Geofabrik source fallback configuration is invalid")
+        source_fallbacks = {}
+        for child_id, parent_id in fallback_config["fallbacks"].items():
+            if not isinstance(child_id, str) or not isinstance(parent_id, str) or child_id == parent_id:
+                raise ValueError("Geofabrik source fallback entry is invalid")
+            source_fallbacks[child_id] = parent_id
+        # Qualify the larger source on the development stack before changing
+        # production source selection for maps installed on physical devices.
+        if os.environ.get("MAP_PLATFORM_DEPLOYMENT_CHANNEL") != "development":
+            source_fallbacks = {}
         return cls(
             os.environ.get("MAP_PLATFORM_GEOFABRIK_INDEX_URL", DEFAULT_GEOFABRIK_INDEX_URL),
             cache_path=cache_path,
@@ -69,6 +91,7 @@ class GeofabrikSourceProvider:
                     DEFAULT_FAILURE_COOLDOWN_SECONDS,
                 )
             ),
+            source_fallbacks=source_fallbacks,
         )
 
     def source_regions(self) -> list[SourceRegion]:
@@ -81,7 +104,19 @@ class GeofabrikSourceProvider:
             if contains_bounds(region.source_region.bounds, bounds) and _geometry_contains_bounds(region.geometry, bounds)
         ]
         if containing:
-            return sorted(containing, key=lambda region: bbox_area_km2(region.source_region.bounds))[0].source_region
+            containing.sort(key=lambda region: bbox_area_km2(region.source_region.bounds))
+            selected = containing[0]
+            fallback_id = self.source_fallbacks.get(selected.source_region.id)
+            if fallback_id is not None:
+                selected = next(
+                    (region for region in containing if region.source_region.id == fallback_id),
+                    None,
+                )
+                if selected is None:
+                    raise SourceResolutionError(
+                        f"configured fallback for {containing[0].source_region.id} does not cover the requested area"
+                    )
+            return selected.source_region
         raise SourceResolutionError("no Geofabrik source region covers the requested area")
 
     def preview_geometry_for_source(self, source: SourceRegion) -> dict[str, Any] | None:
@@ -140,20 +175,22 @@ class GeofabrikSourceProvider:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             if self._cache_is_fresh():
-                return json.loads(self.cache_path.read_text())
+                with self.cache_path.open("rb") as cached:
+                    return self._read_catalog(cached)
             try:
-                with urllib.request.urlopen(
+                with open_geofabrik_url(
                     self.index_url,
                     timeout=self.request_timeout_seconds,
                 ) as response:
-                    catalog = json.loads(response.read().decode("utf-8"))
+                    catalog = self._read_catalog(response)
             except Exception:
                 if self.cache_path.exists():
-                    return json.loads(self.cache_path.read_text())
+                    with self.cache_path.open("rb") as cached:
+                        return self._read_catalog(cached)
                 raise
 
             tmp_path = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
-            tmp_path.write_text(json.dumps(catalog, indent=2, sort_keys=True) + "\n")
+            tmp_path.write_text(json.dumps(catalog, separators=(",", ":"), ensure_ascii=False) + "\n")
             tmp_path.replace(self.cache_path)
             return catalog
         finally:
@@ -167,9 +204,31 @@ class GeofabrikSourceProvider:
             return False
         return time.time() - self.cache_path.stat().st_mtime < self.cache_ttl_seconds
 
+    def _read_catalog(self, response) -> dict[str, Any]:
+        payload = response.read(MAX_CATALOG_BYTES + 1)
+        if len(payload) > MAX_CATALOG_BYTES:
+            raise SourceResolutionError("Geofabrik catalog exceeds byte limit")
+        catalog = json.loads(payload)
+        # Validate BEFORE replacing the last known-good cache. Bound both tree
+        # depth and total nodes, including unused properties and coordinates.
+        pending = [(catalog, 0)]
+        count = 0
+        while pending:
+            node, depth = pending.pop()
+            count += 1
+            if depth > MAX_CATALOG_DEPTH or count + len(pending) > MAX_CATALOG_NODES:
+                raise SourceResolutionError("Geofabrik catalog exceeds structural limits")
+            children = node.values() if isinstance(node, dict) else node if isinstance(node, list) else ()
+            for child in children:
+                pending.append((child, depth + 1))
+                if count + len(pending) > MAX_CATALOG_NODES:
+                    raise SourceResolutionError("Geofabrik catalog exceeds structural limits")
+        self._parse_regions(catalog)
+        return catalog
+
     def _parse_regions(self, catalog: dict[str, Any]) -> list[GeofabrikCatalogRegion]:
-        features = catalog.get("features")
-        if not isinstance(features, list):
+        features = catalog.get("features") if isinstance(catalog, dict) else None
+        if not isinstance(features, list) or len(features) > MAX_CATALOG_FEATURES:
             raise SourceResolutionError("Geofabrik catalog has no features")
         regions: list[GeofabrikCatalogRegion] = []
         for feature in features:
@@ -192,15 +251,19 @@ class GeofabrikSourceProvider:
             return None
         source_id = str(properties.get("id", "")).strip()
         pbf_url = (properties.get("urls") or {}).get("pbf") if isinstance(properties.get("urls"), dict) else None
-        if not source_id or not pbf_url:
+        if not source_id or len(source_id) > 180 or not pbf_url:
             return None
+        try:
+            validate_geofabrik_url(pbf_url)
+        except ValueError as exc:
+            raise SourceResolutionError(str(exc)) from exc
         bounds = _bounds_for_geojson_geometry(geometry)
         safe_id = _safe_id(source_id)
         return GeofabrikCatalogRegion(
             source_region=SourceRegion(
                 id=f"geofabrik-{safe_id}",
                 provider="geofabrik",
-                name=str(properties.get("name") or source_id),
+                name=str(properties.get("name") or source_id)[:256],
                 url=str(pbf_url),
                 bounds=bounds,
                 local_path=f"backend/data/source-pbf/geofabrik/{safe_id}-latest.osm.pbf",

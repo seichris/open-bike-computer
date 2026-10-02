@@ -12,7 +12,8 @@ private struct CyclingSensorPromptDismissalEnvelope: Codable {
 @MainActor
 final class CyclingSensorDetectionCoordinator: ObservableObject {
     nonisolated static let candidateGracePeriod: TimeInterval = 30 * 60
-    nonisolated static let reportingFreshness: TimeInterval = 10
+    nonisolated static let reportingFreshness =
+        WatchCyclingSensorObservationV1.reportingFreshness
     nonisolated static let defaultDismissalStorageKey =
         "cyclingSensors.promptDismissal.v1"
 
@@ -29,6 +30,8 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
     private let candidateGracePeriod: TimeInterval
     private let dismissalDefaults: UserDefaults
     private let dismissalStorageKey: String
+    private var observationReducer = CyclingSensorObservationReducer()
+    private var watchObservationCancellable: AnyCancellable?
     private var presentationCancellable: AnyCancellable?
     private var profileCancellable: AnyCancellable?
     private var candidateExpiryTask: Task<Void, Never>?
@@ -62,18 +65,32 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
         candidateExpiryTask?.cancel()
     }
 
-    func bind(to workoutStore: WorkoutMetricsStore) {
-        guard presentationCancellable == nil else { return }
-        presentationCancellable = workoutStore.$presentation.sink {
-            [weak self] presentation in
-            self?.ingest(presentation, at: self?.now() ?? Date())
+    func bind(
+        to workoutStore: WorkoutMetricsStore,
+        watchObservations:
+            AnyPublisher<WatchCyclingSensorObservationV1?, Never>? = nil
+    ) {
+        if presentationCancellable == nil {
+            presentationCancellable = workoutStore.$presentation.sink {
+                [weak self] presentation in
+                guard let self else { return }
+                self.ingest(presentation, at: self.now())
+            }
         }
-        ingest(workoutStore.presentation, at: now())
+        if watchObservationCancellable == nil, let watchObservations {
+            // Published/CurrentValueSubject replays the latest received
+            // context on binding, including a cold-start cached observation.
+            watchObservationCancellable = watchObservations.sink {
+                [weak self] observation in
+                guard let self else { return }
+                self.ingestWatchObservation(observation, at: self.now())
+            }
+        }
     }
 
     func beginLooking() {
         isLooking = true
-        pruneCandidates(at: now())
+        refresh(at: now())
     }
 
     func stopLooking() {
@@ -126,7 +143,8 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
         capabilities: CyclingSensorCapabilities,
         at date: Date = Date()
     ) -> Bool {
-        guard let lastObservedAt = lastObservedAt(for: capabilities) else {
+        guard hasActiveWorkout,
+              let lastObservedAt = lastObservedAt(for: capabilities) else {
             return false
         }
         let age = date.timeIntervalSince(lastObservedAt)
@@ -137,37 +155,81 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
         _ presentation: WorkoutMirrorPresentationV1,
         at date: Date
     ) {
-        hasActiveWorkout = presentation.isWorkoutActive
-
-        guard presentation.isWorkoutActive,
-              presentation.connectionState == .connected,
-              let sessionID = presentation.sessionID else {
-            if !presentation.isWorkoutActive {
-                currentSessionID = nil
-                dismissedCapabilities = []
-            }
-            pruneCandidates(at: date)
-            reconcileCandidatesAndPrompt(at: date)
-            return
+        // snapshot.state comes from the Watch envelope. sessionState can
+        // instead reflect a local mirror failure and must not retire Watch.
+        let isTerminal = presentation.snapshot.state == .ended ||
+            presentation.snapshot.state == .failed
+        let accepted: Bool
+        let hasActiveMirror = presentation.connectionState == .connected &&
+            presentation.isWorkoutActive &&
+            presentation.snapshot.state.isActive
+        if (hasActiveMirror || isTerminal),
+           let sessionID = presentation.sessionID,
+           let capturedAt = presentation.capturedAt,
+           let observation = WatchCyclingSensorObservationV1(
+               sessionID: sessionID,
+               snapshot: presentation.snapshot,
+               capturedAt: capturedAt
+           ) {
+            accepted = observationReducer.ingest(
+                observation, from: .mirror, at: date
+            )
+        } else {
+            // Idle/stale/disconnected describes the mirror, not the Watch
+            // workout. It must not clear Watch evidence or prompt dismissal.
+            observationReducer.setUnavailable(.mirror)
+            accepted = false
         }
+        refresh(at: date, admittingCandidates: accepted)
+    }
 
-        if currentSessionID != sessionID {
+    func ingestWatchObservation(
+        _ observation: WatchCyclingSensorObservationV1?,
+        at date: Date
+    ) {
+        let accepted: Bool
+        if let observation {
+            accepted = observationReducer.ingest(
+                observation, from: .watch, at: date
+            )
+        } else {
+            observationReducer.setUnavailable(.watch)
+            accepted = false
+        }
+        refresh(at: date, admittingCandidates: accepted)
+    }
+
+    /// Refreshes time-dependent presentation without manufacturing another
+    /// observation. Expiry must work even with no further mirror/WC callbacks.
+    func refresh(
+        at date: Date,
+        admittingCandidates: Bool = false
+    ) {
+        if let sessionID = observationReducer.sessionID,
+           sessionID != currentSessionID {
             currentSessionID = sessionID
             dismissedCapabilities = restoredDismissedCapabilities(
                 for: sessionID
             )
             candidates.removeAll()
-            lastObservedAtByCapability = [:]
         }
-
-        let snapshot = presentation.snapshot
-        if isFresh(snapshot.cyclingCadence, at: date) {
-            observe(.cadence, at: date)
+        hasActiveWorkout = observationReducer.hasActiveWorkout(at: date)
+        var observed: [CyclingSensorCapabilities: Date] = [:]
+        observed[.cadence] = observationReducer.cadenceObservedAt(at: date)
+        observed[.power] = observationReducer.powerObservedAt(at: date)
+        lastObservedAtByCapability = observed
+        if admittingCandidates {
+            for capability in CyclingSensorCapabilities.supported
+                .individualCapabilities {
+                guard let sampleDate = observed[capability],
+                      WatchCyclingSensorObservationV1.isFresh(
+                          sampleDate, at: date,
+                          maximumAge:
+                            WatchCyclingSensorObservationV1.discoveryFreshness
+                      ) else { continue }
+                observe(capability, at: sampleDate)
+            }
         }
-        if isFresh(snapshot.cyclingPower, at: date) {
-            observe(.power, at: date)
-        }
-
         pruneCandidates(at: date)
         reconcileCandidatesAndPrompt(at: date)
     }
@@ -186,7 +248,9 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
         if let index = candidates.firstIndex(where: {
             $0.capabilities == capability
         }) {
-            candidates[index].lastObservedAt = date
+            candidates[index].lastObservedAt = max(
+                candidates[index].lastObservedAt, date
+            )
         } else {
             candidates.append(
                 CyclingSensorCandidate(
@@ -198,19 +262,6 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
             )
         }
         scheduleCandidateExpiry()
-    }
-
-    private func isFresh(
-        _ metric: WorkoutMetricV1?,
-        at date: Date
-    ) -> Bool {
-        guard let metric else { return false }
-        return WorkoutMetricFreshness.isFresh(
-            capturedAt: metric.capturedAt,
-            now: date,
-            maximumAge:
-                WorkoutMetricFreshness.pairedCyclingSensorMaximumAge
-        )
     }
 
     private func pruneCandidates(at date: Date) {
@@ -293,13 +344,15 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
     private func scheduleCandidateExpiry() {
         candidateExpiryTask?.cancel()
         candidateExpiryTask = nil
-        guard let nextExpiry = candidates.map({
+        let referenceDate = now()
+        let deadlines = candidates.map {
             $0.lastObservedAt.addingTimeInterval(candidateGracePeriod)
-        }).min() else {
+        } + [observationReducer.nextExpiry(after: referenceDate)].compactMap { $0 }
+        guard let nextExpiry = deadlines.min() else {
             return
         }
 
-        let delay = max(0, nextExpiry.timeIntervalSince(now()))
+        let delay = max(0, nextExpiry.timeIntervalSince(referenceDate))
         let nanoseconds = UInt64(
             min(delay, Double(UInt64.max) / 1_000_000_000)
                 * 1_000_000_000
@@ -312,9 +365,7 @@ final class CyclingSensorDetectionCoordinator: ObservableObject {
             }
             guard !Task.isCancelled, let self else { return }
             self.candidateExpiryTask = nil
-            let date = self.now()
-            self.pruneCandidates(at: date)
-            self.reconcileCandidatesAndPrompt(at: date)
+            self.refresh(at: self.now())
         }
     }
 

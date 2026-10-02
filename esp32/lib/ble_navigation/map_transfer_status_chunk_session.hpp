@@ -152,15 +152,16 @@ public:
   size_t chunkCount() const { return chunkCount_; }
   size_t nextIndex() const { return nextIndex_; }
 
-  std::string nextFrame() const {
-    if (!active_ || nextIndex_ >= chunkCount_) {
+  std::string nextFrame(const char *prefix = "MSTC") const {
+    if (!active_ || nextIndex_ >= chunkCount_ || prefix == nullptr ||
+        std::char_traits<char>::length(prefix) != 4) {
       return {};
     }
     const size_t offset = nextIndex_ * chunkPayloadBytes_;
     const size_t remaining = body_.size() - offset;
     const size_t length =
         remaining < chunkPayloadBytes_ ? remaining : chunkPayloadBytes_;
-    std::string frame = "MSTC";
+    std::string frame(prefix, 4);
     frame.push_back(static_cast<char>(transferId_));
     frame.push_back(static_cast<char>(nextIndex_));
     frame.push_back(static_cast<char>(chunkCount_));

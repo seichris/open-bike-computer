@@ -12,6 +12,7 @@ enum WatchDeviceLinkState: Equatable {
     case discovering
     case authenticating
     case claimingLease
+    case stopping
     case ready(deviceID: String)
     case busy
     case failed(String)
@@ -42,6 +43,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     private let credentialStore: WatchControllerCredentialStore
     private let defaults: UserDefaults
+    private let sleep: @Sendable (Duration) async throws -> Void
     private let serviceUUID = CBUUID(
         string: WatchDirectBLEProtocolV1.serviceUUID
     )
@@ -121,13 +123,25 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var operationTimeoutTask: Task<Void, Never>?
     private var reconnectAttempt = 0
     private var disconnectingForBusyLease = false
-    private var gracefulStopPending = false
+    // The reducer owns shutdown progress. This is only the immutable identity
+    // of the handoff being retired, not another lifecycle/readiness flag.
+    private var stoppingPhonePreparation: (deviceID: String, preparationID: UUID)?
+    private var gracefulStopPending: Bool {
+        transportStateMachine.phase == .stopping
+    }
+    private var recoveryCancellationTask: Task<Void, Never>?
     private var leaseReleaseAckTask: Task<Void, Never>?
     private var latestWorkoutFrames: WorkoutDeviceFrames?
+    private var workoutZoneSequence: UInt32 = 0
+    private var navigationGPSClock = RideGPSSampleClockCache()
+    private var workoutGPSClock = RideGPSSampleClockCache()
+    private var lastDispatchedRouteWindow: Data?
     private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
+    private var latestWorkoutMotion: WorkoutDeviceMotionUpdate?
     private var workoutPairGeneration: UInt8 = 0
     private var latestLocation: NavigationLocationSampleV1?
     private var latestNavigationSnapshot: NavigationSnapshotV1?
+    private var lastDispatchedNavigationSnapshot: NavigationSnapshotV1?
     private var latestRouteWindow = Data()
     private var preparedPhoneDeviceID: String?
     private var preparedPhonePreparationID: UUID?
@@ -141,6 +155,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         WatchDirectRidePreparationRestorationGateV1(
             restoredOperation: nil
         )
+    private var initialDemandRestorationCompleted = false
+    private var pendingPhonePreparationReconciliation:
+        WatchDirectRideReconciliationRequestV1?
+    private let pendingPhonePreparationReconciliationKey =
+        "watchBLE.pendingPhonePreparationReconciliation.v1"
 
     private let peripheralMapKey =
         "watchDeviceLink.peripheralByDeviceID.v1"
@@ -151,10 +170,14 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     init(
         credentialStore: WatchControllerCredentialStore,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        sleep: @escaping @Sendable (Duration) async throws -> Void = {
+            try await Task.sleep(for: $0)
+        }
     ) {
         self.credentialStore = credentialStore
         self.defaults = defaults
+        self.sleep = sleep
         if let data = defaults.data(forKey: selectedBikeComputerKey) {
             selectedBikeComputerEnvelope = try?
                 WatchSelectedBikeComputerV1.decode(data)
@@ -168,6 +191,12 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             phonePreparationRestorationGate = .init(
                 restoredOperation: intent.operation
             )
+        }
+        if let data = defaults.data(
+            forKey: pendingPhonePreparationReconciliationKey
+        ) {
+            pendingPhonePreparationReconciliation = try?
+                WatchDirectRideReconciliationRequestV1.decode(data)
         }
         super.init()
     }
@@ -203,7 +232,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
         releasePhonePreparationIfNeeded()
 
-        let canRetainReadySession = state.isReady &&
+        let canRetainReadySession = transportStateMachine.isReady &&
             credential?.deviceID == incoming.deviceID
         if !canRetainReadySession {
             reconnectTask?.cancel()
@@ -212,7 +241,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             operationTimeoutTask = nil
             heartbeatTimer?.invalidate()
             heartbeatTimer = nil
-            if state.isReady {
+            if transportStateMachine.isReady {
                 writeProtectedAuth("LEASE_RELEASE")
             }
             if let peripheral {
@@ -298,7 +327,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             operationTimeoutTask = nil
             heartbeatTimer?.invalidate()
             heartbeatTimer = nil
-            if state.isReady {
+            if transportStateMachine.isReady {
                 writeProtectedAuth("LEASE_RELEASE")
             }
             if let peripheral {
@@ -314,12 +343,13 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         guard hasDemand else { return }
         if credentials.isEmpty {
             state = .notEnrolled
-        } else if !state.isReady {
+        } else if !transportStateMachine.isReady {
             beginIfNeeded()
         }
     }
 
     private func reconcileDemand() {
+        guard !gracefulStopPending else { return }
         guard hasDemand else {
             stop()
             return
@@ -332,7 +362,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         request: WatchDirectRidePreparationRequestV1,
         response: WatchDirectRidePreparationResponseV1
     ) {
-        guard request.operation == .prepare,
+        guard !gracefulStopPending, !phonePreparationReleasePending,
+              request.operation == .prepare,
               request.deviceID == preparedPhoneDeviceID,
               request.preparationID == preparedPhonePreparationID,
               request.deviceID == selectedBikeComputerEnvelope?.deviceID,
@@ -348,7 +379,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             return
         }
         phonePreparationAccepted = false
-        guard !state.isReady else { return }
+        guard !transportStateMachine.isReady else { return }
         if state == .scanning {
             central.stopScan()
         }
@@ -375,7 +406,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     func directRidePreparationSubmissionDidFail(
         request: WatchDirectRidePreparationRequestV1
     ) {
-        guard request.operation == .prepare,
+        guard !gracefulStopPending, !phonePreparationReleasePending,
+              request.operation == .prepare,
               request.deviceID == preparedPhoneDeviceID,
               request.preparationID == preparedPhonePreparationID,
               hasDemand else { return }
@@ -387,21 +419,18 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     func directRidePreparationAvailabilityDidChange() {
+        guard !gracefulStopPending else { return }
+        reconcilePendingPhonePreparationRequest()
         if hasDemand {
-            if phonePreparationReleasePending,
-               preparedPhoneDeviceID ==
-                selectedBikeComputerEnvelope?.deviceID {
-                phonePreparationReleasePending = false
-                preparedPhonePreparationID = UUID()
-                persistPhonePreparationIntent(operation: .prepare)
-            }
-            requestPhonePreparationIfNeeded()
+            reconcileDemand()
         } else if phonePreparationReleasePending {
             releasePhonePreparationIfNeeded()
         }
     }
 
     func completeInitialDemandRestoration() {
+        guard !gracefulStopPending else { return }
+        initialDemandRestorationCompleted = true
         switch phonePreparationRestorationGate.complete(
             hasRecoveredDemand: hasDemand
         ) {
@@ -412,29 +441,47 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         case .none:
             break
         }
+        reconcilePendingPhonePreparationRequest()
+    }
+
+    func requestPhonePreparationReconciliation(
+        _ request: WatchDirectRideReconciliationRequestV1
+    ) {
+        guard (try? request.validated()) != nil else { return }
+        pendingPhonePreparationReconciliation = request
+        if let data = try? request.encoded() {
+            defaults.set(
+                data,
+                forKey: pendingPhonePreparationReconciliationKey
+            )
+        }
+        reconcilePendingPhonePreparationRequest()
     }
 
     func updateNavigation(
         location: NavigationLocationSampleV1,
         snapshot: NavigationSnapshotV1
     ) {
-        let previousSnapshot = latestNavigationSnapshot
         latestLocation = location
+        _ = navigationGPSClock.sample(location.timestamp)
         latestNavigationSnapshot = snapshot
         latestRouteWindow = snapshot.routeWindow
-        guard state.isReady else { return }
+        guard transportStateMachine.isReady else { return }
         enqueueLiveNavigation(
             location: location,
-            snapshot: snapshot,
-            previousSnapshot: previousSnapshot
+            snapshot: snapshot
         )
     }
 
     func clearNavigation() {
         latestLocation = nil
         latestNavigationSnapshot = nil
+        lastDispatchedNavigationSnapshot = nil
         latestRouteWindow = Data()
-        guard state.isReady else { return }
+        guard transportStateMachine.isReady else { return }
+        // These snapshots predate the clear. Leave an already dispatched
+        // group to finish, but never replay queued navigation after the clear.
+        queue.removeReplaceableGroups(coalescingKeys: ["route", "maneuver", "gps"])
         _ = enqueueGroup(
             priority: .control,
             disposition: .critical,
@@ -461,12 +508,16 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     func updateWorkout(
         _ frames: WorkoutDeviceFrames,
-        gps: WorkoutDeviceGPSUpdate?
+        gps: WorkoutDeviceGPSUpdate?,
+        motion: WorkoutDeviceMotionUpdate?
     ) {
         latestWorkoutFrames = frames
         latestWorkoutGPS = gps
-        guard state.isReady else { return }
+        if let gps { _ = workoutGPSClock.sample(gps.capturedAt) }
+        latestWorkoutMotion = motion
+        guard transportStateMachine.isReady else { return }
         enqueueWorkoutFrames(frames)
+        enqueueWorkoutMotionIfNeeded()
         enqueueWorkoutGPSIfNeeded()
         drainQueue()
     }
@@ -474,14 +525,15 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     func clearWorkout(_ frames: WorkoutDeviceFrames) {
         latestWorkoutFrames = frames
         latestWorkoutGPS = nil
-        guard state.isReady else { return }
+        latestWorkoutMotion = nil
+        guard transportStateMachine.isReady else { return }
         enqueueWorkoutFrames(frames)
         drainQueue()
     }
 
     @discardableResult
     func sendRideAutomationFrame(_ frame: RideAutomationFrame) -> Bool {
-        guard state.isReady,
+        guard transportStateMachine.isReady,
               capabilities?.supportsRideAutomation == true,
               let payload = frame.encoded(),
               let transport = WatchRideAutomationTransportV1.outbound(
@@ -525,11 +577,19 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func beginIfNeeded() {
-        guard hasDemand, !state.isReady else { return }
+        guard hasDemand, !transportStateMachine.isReady,
+              !gracefulStopPending,
+              transportStateMachine.phase != .recovering else { return }
         if state == .busy {
             requestPhonePreparationIfNeeded(force: true)
         } else {
             requestPhonePreparationIfNeeded()
+        }
+        guard !phonePreparationReleasePending else {
+            let message = "Previous iPhone handoff is pending. Open Bicino on iPhone and Watch."
+            lastError = message
+            state = .failed(message)
+            return
         }
         switch state {
         case .scanning, .connecting, .discovering, .authenticating,
@@ -591,9 +651,20 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func requestPhonePreparationIfNeeded(force: Bool = false) {
-        guard hasDemand,
+        guard !gracefulStopPending, hasDemand,
               let deviceID = selectedBikeComputerEnvelope?.deviceID else {
             return
+        }
+        if phonePreparationReleasePending {
+            // Never overwrite an unsent old release: a crash could otherwise
+            // leave the phone suppressing its old identity while the Watch
+            // only remembers the successor. Submitted also covers the existing
+            // durable local release outbox; phone reachability is not required.
+            guard releasePhonePreparationIfNeeded() else {
+                phonePreparationAttempt = min(phonePreparationAttempt + 1, 6)
+                schedulePhonePreparationRetry()
+                return
+            }
         }
         if preparedPhoneDeviceID != deviceID {
             guard releasePhonePreparationIfNeeded() else { return }
@@ -603,14 +674,6 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             phonePreparationSubmissionOutstanding = false
             phonePreparationReleasePending = false
             phonePreparationAttempt = 0
-            persistPhonePreparationIntent(operation: .prepare)
-        } else if phonePreparationReleasePending {
-            // A release that never left the Watch can be superseded when the
-            // same ride regains demand before connectivity recovers. Give the
-            // new prepare a fresh identity so a release already handed to
-            // WatchConnectivity just before a crash cannot clear it later.
-            phonePreparationReleasePending = false
-            preparedPhonePreparationID = UUID()
             persistPhonePreparationIntent(operation: .prepare)
         }
         guard let preparationID = preparedPhonePreparationID,
@@ -656,12 +719,59 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             preparationID
         ) ?? .transportUnavailable
         guard disposition == .submitted else { return false }
+        clearPendingPhonePreparationReconciliation(
+            deviceID: deviceID,
+            preparationID: preparationID
+        )
         preparedPhoneDeviceID = nil
         preparedPhonePreparationID = nil
         phonePreparationReleasePending = false
         phonePreparationAttempt = 0
         defaults.removeObject(forKey: directRidePreparationIntentKey)
         return true
+    }
+
+    private func reconcilePendingPhonePreparationRequest() {
+        guard initialDemandRestorationCompleted,
+              let request = pendingPhonePreparationReconciliation else {
+            return
+        }
+        let matchesCurrentPreparation =
+            preparedPhoneDeviceID == request.deviceID &&
+            preparedPhonePreparationID == request.preparationID
+        guard matchesCurrentPreparation else {
+            let disposition = onDirectRidePreparationChange?(
+                .release,
+                request.deviceID,
+                request.preparationID
+            ) ?? .transportUnavailable
+            if disposition == .submitted {
+                clearPendingPhonePreparationReconciliation(
+                    deviceID: request.deviceID,
+                    preparationID: request.preparationID
+                )
+            }
+            return
+        }
+        guard !hasDemand else { return }
+        if transportStateMachine.phase == .idle {
+            _ = releasePhonePreparationIfNeeded()
+        } else {
+            reconcileDemand()
+        }
+    }
+
+    private func clearPendingPhonePreparationReconciliation(
+        deviceID: String,
+        preparationID: UUID
+    ) {
+        guard pendingPhonePreparationReconciliation?.deviceID == deviceID,
+              pendingPhonePreparationReconciliation?.preparationID ==
+                preparationID else { return }
+        pendingPhonePreparationReconciliation = nil
+        defaults.removeObject(
+            forKey: pendingPhonePreparationReconciliationKey
+        )
     }
 
     private func persistPhonePreparationIntent(
@@ -681,8 +791,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         phonePreparationResponseTimeoutTask?.cancel()
         let deviceID = preparedPhoneDeviceID
         let preparationID = preparedPhonePreparationID
-        phonePreparationResponseTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(
+        phonePreparationResponseTimeoutTask = Task { [weak self, sleep] in
+            try? await sleep(.seconds(
                 WatchDirectRidePreparationRetryPolicyV1
                     .responseTimeoutSeconds
             ))
@@ -698,17 +808,16 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func schedulePhonePreparationRetry() {
-        guard hasDemand,
-              !phonePreparationAccepted,
-              !phonePreparationReleasePending,
+        guard hasDemand, !gracefulStopPending,
+              !phonePreparationAccepted || phonePreparationReleasePending,
               phonePreparationRetryTask == nil else { return }
         let deviceID = preparedPhoneDeviceID
         let preparationID = preparedPhonePreparationID
         let delay = WatchDirectRidePreparationRetryPolicyV1.delaySeconds(
             afterAttempt: phonePreparationAttempt
         )
-        phonePreparationRetryTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(delay))
+        phonePreparationRetryTask = Task { [weak self, sleep] in
+            try? await sleep(.seconds(delay))
             guard !Task.isCancelled, let self else { return }
             self.phonePreparationRetryTask = nil
             guard self.hasDemand,
@@ -716,7 +825,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                   self.preparedPhonePreparationID == preparationID else {
                 return
             }
-            self.requestPhonePreparationIfNeeded()
+            self.reconcileDemand()
         }
     }
 
@@ -729,7 +838,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         if state == .scanning { central.stopScan() }
-        if state.isReady {
+        if transportStateMachine.isReady {
             writeProtectedAuth("LEASE_RELEASE")
         }
         if let peripheral {
@@ -756,6 +865,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         _ candidate: CBPeripheral,
         credential: WatchControllerCredentialV1
     ) {
+        guard hasDemand, !phonePreparationReleasePending,
+              transportStateMachine.phase == .idle else { return }
         central.stopScan()
         resetTransport(keepingPeripheral: false)
         connectionGeneration &+= 1
@@ -771,7 +882,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func stop() {
-        if gracefulStopPending { return }
+        guard !gracefulStopPending else { return }
         reconnectTask?.cancel()
         reconnectTask = nil
         operationTimeoutTask?.cancel()
@@ -779,48 +890,121 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
         disconnectingForBusyLease = false
-        demand.reset()
-        if state.isReady, protectedSession != nil, !gracefulStopPending {
-            _ = reduceTransport(.stopRequested(
-                generation: transportStateMachine.generation
-            ))
-            gracefulStopPending = true
-            writeProtectedAuth("LEASE_RELEASE")
-            leaseReleaseAckTask?.cancel()
-            let generation = connectionGeneration
-            leaseReleaseAckTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(5))
-                guard !Task.isCancelled, let self,
-                      self.gracefulStopPending,
-                      self.connectionGeneration == generation else { return }
-                self.leaseReleaseAckTask = nil
-                self.completeStop()
-            }
+        // Demand is orthogonal to the transport: never erase a successor ride.
+        if let deviceID = preparedPhoneDeviceID,
+           let preparationID = preparedPhonePreparationID {
+            stoppingPhonePreparation = (deviceID, preparationID)
+        }
+        let canReleaseLease = transportStateMachine.isReady &&
+            protectedSession != nil
+        if transportStateMachine.phase == .idle {
+            central.stopScan()
+            releaseStoppingPhonePreparation()
+            state = .idle
+            lastError = nil
             return
         }
-        completeStop()
+        _ = reduceTransport(.stopRequested(
+            generation: transportStateMachine.generation
+        ))
+        state = .stopping
+        central.stopScan()
+        if canReleaseLease {
+            // Existing groups, including their application ACK, precede release.
+            // New snapshots stay in retained logical state until the next link.
+            drainQueue()
+        } else {
+            completeStop()
+        }
     }
 
-    private func completeStop() {
-        gracefulStopPending = false
+    private func beginLeaseReleaseAfterDraining() {
+        guard gracefulStopPending,
+              transportStateMachine.shutdownPhase == .draining,
+              queue.isEmpty, activeWriteGroup == nil,
+              pendingApplicationAckGroup == nil,
+              !writeWithResponseInFlight else { return }
+        _ = reduceTransport(.stopWritesDrained(
+            generation: transportStateMachine.generation
+        ))
+        armStopDeadline(waitingForDisconnect: false)
+        writeProtectedAuth("LEASE_RELEASE")
+    }
+
+    private func armStopDeadline(waitingForDisconnect: Bool) {
         leaseReleaseAckTask?.cancel()
-        leaseReleaseAckTask = nil
-        if let peripheral {
-            central.cancelPeripheralConnection(peripheral)
+        let generation = connectionGeneration
+        leaseReleaseAckTask = Task { [weak self, sleep] in
+            try? await sleep(.seconds(5))
+            guard !Task.isCancelled, let self,
+                  self.gracefulStopPending,
+                  self.connectionGeneration == generation else { return }
+            self.leaseReleaseAckTask = nil
+            if waitingForDisconnect {
+                _ = self.reduceTransport(.stopDisconnectTimedOut(
+                    generation: self.transportStateMachine.generation
+                ))
+                self.releaseStoppingPhonePreparation()
+                // A same-peripheral reconnect before cancellation completes can
+                // misattribute the old callback to the new link. Fail visibly
+                // instead; disconnect or a radio boundary can still complete it.
+                let message = "Bicino disconnect did not complete. Toggle Bluetooth to reconnect."
+                self.lastError = message
+                self.state = .failed(message)
+            } else {
+                self.completeStop()
+            }
         }
-        if transportStateMachine.phase != .idle {
-            _ = reduceTransport(.disconnected(
+    }
+
+    /// The only shutdown finalizer. ACK/deadline/failure request cancellation;
+    /// disconnect/radio loss finish it. Both stages release the captured handoff
+    /// through the existing persisted intent and durable WC submission path.
+    private func completeStop(linkEnded: Bool = false) {
+        guard gracefulStopPending else { return }
+        releaseStoppingPhonePreparation()
+        if !linkEnded, let peripheral {
+            guard transportStateMachine.shutdownPhase != .disconnecting,
+                  transportStateMachine.shutdownPhase != .disconnectTimedOut else {
+                return
+            }
+            _ = reduceTransport(.stopDisconnectRequested(
                 generation: transportStateMachine.generation
             ))
+            armStopDeadline(waitingForDisconnect: true)
+            central.cancelPeripheralConnection(peripheral)
+            return
         }
+        leaseReleaseAckTask?.cancel()
+        leaseReleaseAckTask = nil
+        stoppingPhonePreparation = nil
         connectionGeneration &+= 1
         resetTransport(keepingPeripheral: false)
-        releasePhonePreparationIfNeeded()
         state = .idle
         lastError = nil
+        // No subsequent navigation location callback is needed to make progress.
+        // An old release remains persisted until the existing WC/outbox path
+        // admits it. Only then may the successor persist a fresh preparation.
+        if hasDemand { reconcileDemand() }
+    }
+
+    private func releaseStoppingPhonePreparation() {
+        guard let stopping = stoppingPhonePreparation else { return }
+        guard preparedPhoneDeviceID == stopping.deviceID,
+              preparedPhonePreparationID == stopping.preparationID else {
+            stoppingPhonePreparation = nil
+            return
+        }
+        if releasePhonePreparationIfNeeded() {
+            stoppingPhonePreparation = nil
+        }
     }
 
     private func resetTransport(keepingPeripheral: Bool) {
+        if gracefulStopPending {
+            releaseStoppingPhonePreparation()
+            stoppingPhonePreparation = nil
+        }
         if transportStateMachine.phase != .idle {
             _ = reduceTransport(.disconnected(
                 generation: transportStateMachine.generation
@@ -830,13 +1014,15 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         heartbeatTimer = nil
         leaseReleaseAckTask?.cancel()
         leaseReleaseAckTask = nil
-        gracefulStopPending = false
         operationTimeoutTask?.cancel()
         operationTimeoutTask = nil
         authentication = nil
         challenge = nil
         protectedSession = nil
         capabilities = nil
+        lastDispatchedNavigationSnapshot = nil
+        lastDispatchedRouteWindow = nil
+        workoutZoneSequence = 0
         authCharacteristic = nil
         navigationCharacteristic = nil
         routeCharacteristic = nil
@@ -865,8 +1051,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func beginAuthentication() {
-        guard authentication == nil,
-              let credential,
+        guard transportStateMachine.phase == .authenticating,
+              authentication == nil else { return }
+        guard let credential,
               let nonce = Self.randomNonce() else {
             fail("Could not begin Watch authentication")
             return
@@ -886,6 +1073,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func handleAuthNotification(_ raw: Data) {
+        guard transportStateMachine.phase != .idle,
+              transportStateMachine.phase != .recovering else { return }
         if raw.prefix(2) == Data([0x52, 0x32]) {
             guard let protectedSession,
                   let payload = protectedSession.notificationPayload(
@@ -899,6 +1088,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             handleProtectedAuthMessage(message)
             return
         }
+        guard transportStateMachine.phase == .authenticating else { return }
         guard let message = String(
             data: raw.trimmingTrailingTransportBytes(),
             encoding: .utf8
@@ -914,13 +1104,14 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 self.challenge = challenge
                 writeRawAuth(challenge.proofCommand)
             } else if message.hasPrefix("WOK2|"), let challenge {
-                protectedSession = try authentication.finish(
+                let session = try authentication.finish(
                     message,
                     challenge: challenge
                 )
-                _ = reduceTransport(.authenticated(
+                guard reduceTransport(.authenticated(
                     generation: transportStateMachine.generation
-                ))
+                )) == .applied else { return }
+                protectedSession = session
                 state = .claimingLease
                 writeProtectedAuth("LEASE_CLAIM")
             } else if message.hasPrefix("DENIED|") {
@@ -934,21 +1125,27 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func handleProtectedAuthMessage(_ message: String) {
+        if gracefulStopPending {
+            if message == "LEASE_RELEASED",
+               reduceTransport(.leaseReleased(
+                    generation: transportStateMachine.generation
+               )) == .applied {
+                completeStop()
+            } else if message.hasPrefix("ERROR|lease_") {
+                completeStop()
+            }
+            return
+        }
+        guard transportStateMachine.phase == .negotiating ||
+                transportStateMachine.phase == .ready else { return }
         switch message {
         case "LEASE_OK":
             if state == .claimingLease {
-                _ = reduceTransport(.leaseAccepted(
+                guard reduceTransport(.leaseAccepted(
                     generation: transportStateMachine.generation,
                     leaseGeneration: 1
-                ))
+                )) == .applied else { return }
                 requestCapabilities()
-            }
-        case "LEASE_RELEASED":
-            if gracefulStopPending {
-                _ = reduceTransport(.leaseReleased(
-                    generation: transportStateMachine.generation
-                ))
-                completeStop()
             }
         case "ERROR|lease_busy":
             _ = reduceTransport(.failed(
@@ -984,6 +1181,12 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func handleNavigationNotification(_ raw: Data) {
+        // During stop, only ACKs for already admitted groups may advance the
+        // drain. Late CAP2/automation must not restart heartbeat or replay.
+        guard transportStateMachine.phase == .negotiating ||
+                transportStateMachine.phase == .ready ||
+                (gracefulStopPending &&
+                 transportStateMachine.shutdownPhase == .draining) else { return }
         guard let protectedSession,
               let payload = protectedSession.notificationPayload(
                 from: raw,
@@ -1004,8 +1207,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             handleApplicationAcknowledgement(acknowledgement)
             return
         }
+        guard !gracefulStopPending else { return }
         if payload.starts(with: WatchRideAutomationTransportV1.fallbackPrefix) {
-            guard state.isReady,
+            guard transportStateMachine.isReady,
                   capabilities?.supportsRideAutomation == true,
                   let framePayload = WatchRideAutomationTransportV1
                     .decodeNavigationFallback(payload),
@@ -1037,20 +1241,16 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 return
             }
         }
-        self.capabilities = capabilities
         let transportTransition = reduceTransport(.capabilitiesAccepted(
             generation: transportStateMachine.generation,
             schemaVersion: 1
         ))
         guard transportTransition == .becameReady ||
                 (transportTransition == .applied &&
-                 transportStateMachine.isReady) else {
-            fail(
-                "Watch transport could not establish authoritative readiness",
-                reason: .capabilityRejected
-            )
-            return
-        }
+                 transportStateMachine.isReady) else { return }
+        self.capabilities = capabilities
+        // A supported refresh is idempotent; do not clear pending deliveries.
+        guard transportTransition == .becameReady else { return }
         reconnectAttempt = 0
         lastError = nil
         state = .ready(deviceID: credential?.deviceID ?? "")
@@ -1063,8 +1263,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func handleRideAutomationNotification(_ raw: Data) {
-        guard state.isReady,
-              capabilities?.supportsRideAutomation == true,
+        guard transportStateMachine.isReady else { return }
+        guard capabilities?.supportsRideAutomation == true,
               let protectedSession,
               let payload = protectedSession.notificationPayload(
                 from: raw,
@@ -1082,6 +1282,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         if let latestWorkoutFrames {
             enqueueWorkoutFrames(latestWorkoutFrames)
         }
+        enqueueWorkoutMotionIfNeeded()
         if let latestLocation {
             _ = enqueueGroup(
                 priority: .livePosition,
@@ -1095,7 +1296,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                         includeRideDetectionQuality:
                             capabilities?.supportsGPSPositionQualityV1 == true
                     ),
-                    gpsSampleTimestamp: latestLocation.timestamp
+                    gpsSampleClock: navigationGPSClock.sample(latestLocation.timestamp)
                 )]
             )
         } else {
@@ -1130,7 +1331,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     target: .navigation,
                     payload: WatchRidePacketEncoderV1.maneuver(
                         latestNavigationSnapshot
-                    )
+                    ),
+                    navigationSnapshot: latestNavigationSnapshot
                 )]
             )
         }
@@ -1138,8 +1340,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     private func enqueueLiveNavigation(
         location: NavigationLocationSampleV1,
-        snapshot: NavigationSnapshotV1,
-        previousSnapshot: NavigationSnapshotV1?
+        snapshot: NavigationSnapshotV1
     ) {
         _ = enqueueGroup(
             priority: .livePosition,
@@ -1153,7 +1354,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     includeRideDetectionQuality:
                         capabilities?.supportsGPSPositionQualityV1 == true
                 ),
-                gpsSampleTimestamp: location.timestamp
+                gpsSampleClock: navigationGPSClock.sample(location.timestamp)
             )]
         )
         _ = enqueueGroup(
@@ -1164,7 +1365,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         )
         if Self.shouldSendManeuver(
             snapshot,
-            after: previousSnapshot
+            after: lastDispatchedNavigationSnapshot
         ) {
             _ = enqueueGroup(
                 priority: .navigationBoundary,
@@ -1172,7 +1373,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 coalescingKey: "maneuver",
                 writes: [.init(
                     target: .navigation,
-                    payload: WatchRidePacketEncoderV1.maneuver(snapshot)
+                    payload: WatchRidePacketEncoderV1.maneuver(snapshot),
+                    navigationSnapshot: snapshot
                 )]
             )
         }
@@ -1201,10 +1403,21 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         workoutPairGeneration = workoutPairGeneration == 3
             ? 1
             : workoutPairGeneration + 1
+        let zonesSupported = capabilities?.supportsWorkoutZonesV1 == true
+            && (peripheral?.maximumWriteValueLength(for: .withResponse) ?? 0) >=
+                RideBLEGeneratedProtocolV1.workoutZoneMaximumFrameBytes +
+                RideBLEGeneratedProtocolV1.protectedFrameOverhead +
+                RideBLEGeneratedProtocolV1.applicationCommandHeaderBytes
+        var zoneSequence: UInt32 = 0
+        if zonesSupported && workoutZoneSequence < UInt32.max {
+            workoutZoneSequence += 1
+            zoneSequence = workoutZoneSequence
+        }
         let payloads = WorkoutDeviceFrameBuilder.transportFrames(
             for: frames,
             generation: workoutPairGeneration,
-            includeOrigin: capabilities?.supportsRideAutomation == true
+            includeOrigin: capabilities?.supportsRideAutomation == true,
+            zoneSequence: zoneSequence
         )
         let isCritical = [
             WorkoutDeviceSessionState.ending,
@@ -1218,7 +1431,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             applicationCommandType: isCritical ? .workoutState : nil,
             coalescingKey: "workout",
             writes: payloads.map {
-                .init(target: .workout, payload: $0)
+                .init(target: .workout, payload: $0,
+                      zoneDispatch: $0.first == 5 ? RideBLEZoneDispatch(frame: $0) : nil)
             }
         )
     }
@@ -1254,7 +1468,27 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 includeRideDetectionQuality:
                     capabilities?.supportsGPSPositionQualityV1 == true
               ),
-              gpsSampleTimestamp: latestWorkoutGPS.capturedAt
+              gpsSampleClock: workoutGPSClock.sample(latestWorkoutGPS.capturedAt)
+            )]
+        )
+    }
+
+    private func enqueueWorkoutMotionIfNeeded() {
+        guard demand.workoutActive,
+              capabilities?.supportsWatchGPSMotionEvidenceV1 == true,
+              let latestWorkoutMotion,
+              let frame = WorkoutDeviceFrameBuilder.watchMotionFrame(
+                for: latestWorkoutMotion,
+                sentAt: Date()
+              ) else { return }
+        _ = enqueueGroup(
+            priority: .liveWorkout,
+            disposition: .replaceable,
+            coalescingKey: "workout-motion",
+            writes: [.init(
+                target: .workout,
+                payload: frame,
+                motionDispatch: RideBLEMotionDispatch(frame: frame)
             )]
         )
     }
@@ -1267,6 +1501,16 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         coalescingKey: String? = nil,
         writes: [WatchBLEOutboundWriteV1]
     ) -> Bool {
+        if gracefulStopPending {
+            guard transportStateMachine.shutdownPhase == .releasingLease,
+                  writes.count == 1,
+                  writes[0].target == .auth,
+                  writes[0].protection == .protected,
+                  writes[0].payload == Data("LEASE_RELEASE".utf8) else {
+                return false
+            }
+        }
+        guard transportStateMachine.phase != .recovering else { return false }
         nextOutboundStateGeneration &+= 1
         if nextOutboundStateGeneration == 0 {
             nextOutboundStateGeneration = 1
@@ -1295,8 +1539,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     private func drainQueue() {
         guard let peripheral,
-              transportStateMachine.phase != .idle,
-              transportStateMachine.phase != .recovering,
+              transportStateMachine.acceptsWriterCallbacks,
               !writeWithResponseInFlight,
               pendingApplicationAckGroup == nil else { return }
         while true {
@@ -1305,6 +1548,10 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 activeWriteIndex = 0
             }
             guard let group = activeWriteGroup else {
+                if gracefulStopPending {
+                    beginLeaseReleaseAfterDraining()
+                    return
+                }
                 finishPendingReleasesIfPossible()
                 return
             }
@@ -1320,16 +1567,46 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             }
             let write = group.writes[activeWriteIndex]
             let memberIndex = activeWriteIndex
+            if write.target == .route, group.applicationCommandType == nil,
+               write.payload == lastDispatchedRouteWindow {
+                // Compare against submission, not an earlier coalesced sample.
+                // Critical clears always reach firmware and retain their ACK.
+                activeWriteIndex += 1
+                continue
+            }
             guard let characteristic = characteristic(for: write.target) else {
                 fail("Bike Computer characteristic disappeared")
                 return
             }
-            var payload = write.gpsSampleTimestamp.map {
-                WatchRidePacketEncoderV1.refreshingQualityAge(
-                    in: write.payload,
-                    sampleTimestamp: $0
-                )
-            } ?? write.payload
+            let writeType: CBCharacteristicWriteType
+            if characteristic.properties.contains(.write) {
+                writeType = .withResponse
+            } else if characteristic.properties.contains(
+                .writeWithoutResponse
+            ) {
+                guard peripheral.canSendWriteWithoutResponse else {
+                    startWithoutResponseWatchdog(
+                        peripheralID: peripheral.identifier,
+                        generation: connectionGeneration
+                    )
+                    return
+                }
+                withoutResponseWatchdogTask?.cancel()
+                withoutResponseWatchdogTask = nil
+                writeType = .withoutResponse
+            } else {
+                fail("Bike Computer characteristic is not writable")
+                return
+            }
+            var payload = write.gpsDispatch?.payload() ?? write.payload
+            if let motion = write.motionDispatch {
+                guard let freshPayload = motion.payload() else {
+                    activeWriteIndex += 1
+                    continue
+                }
+                payload = freshPayload
+            }
+            if let zone = write.zoneDispatch { payload = zone.payload() }
             if shouldUseApplicationAcknowledgement(for: group) {
                 guard let commandType = group.applicationCommandType,
                       let wrapped = RideBLEApplicationCommandEnvelopeV1(
@@ -1364,26 +1641,6 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     return
                 }
             }
-            let writeType: CBCharacteristicWriteType
-            if characteristic.properties.contains(.write) {
-                writeType = .withResponse
-            } else if characteristic.properties.contains(
-                .writeWithoutResponse
-            ) {
-                guard peripheral.canSendWriteWithoutResponse else {
-                    startWithoutResponseWatchdog(
-                        peripheralID: peripheral.identifier,
-                        generation: connectionGeneration
-                    )
-                    return
-                }
-                withoutResponseWatchdogTask?.cancel()
-                withoutResponseWatchdogTask = nil
-                writeType = .withoutResponse
-            } else {
-                fail("Bike Computer characteristic is not writable")
-                return
-            }
             let maximum = peripheral.maximumWriteValueLength(for: writeType)
             guard frame.count <= maximum else {
                 fail("Watch ride packet exceeds the BLE write limit")
@@ -1397,6 +1654,12 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     characteristicID: characteristic.uuid
                 )
             }
+            if let snapshot = write.navigationSnapshot {
+                // Compare movement with the value submitted to the transport,
+                // not with the preceding GPS sample or an evicted queue entry.
+                lastDispatchedNavigationSnapshot = snapshot
+            }
+            if write.target == .route { lastDispatchedRouteWindow = write.payload }
             peripheral.writeValue(
                 frame,
                 for: characteristic,
@@ -1458,8 +1721,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         let watchdogTimeout = RideBLEATTWatchdogPolicyV1.timeoutSeconds(
             for: watchdogClass
         )
-        writerWatchdogTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(watchdogTimeout))
+        writerWatchdogTask = Task { [weak self, sleep] in
+            try? await sleep(.seconds(watchdogTimeout))
             guard !Task.isCancelled, let self,
                   let current = self.pendingATTWrite,
                   current.writeID == pending.writeID,
@@ -1495,8 +1758,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             generation: transportStateMachine.generation,
             state: .waitingForWithoutResponseReadiness
         ))
-        withoutResponseWatchdogTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(5))
+        withoutResponseWatchdogTask = Task { [weak self, sleep] in
+            try? await sleep(.seconds(5))
             guard !Task.isCancelled, let self,
                   self.peripheral?.identifier == peripheralID,
                   self.connectionGeneration == generation,
@@ -1523,8 +1786,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 commandID: group.commandID
             )
         ))
-        applicationAckWatchdogTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(5))
+        applicationAckWatchdogTask = Task { [weak self, sleep] in
+            try? await sleep(.seconds(5))
             guard !Task.isCancelled, let self,
                   self.pendingApplicationAckGroup?.commandID ==
                     group.commandID,
@@ -1617,7 +1880,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 generation: transportStateMachine.generation,
                 state: .idle
             ))
-            finishPendingReleasesIfPossible()
+            if !gracefulStopPending { finishPendingReleasesIfPossible() }
             drainQueue()
         case .rejected(let result):
             switch result {
@@ -1648,7 +1911,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     }
 
     private func finishPendingReleasesIfPossible() {
-        guard state.isReady,
+        guard transportStateMachine.isReady,
               demand.hasPendingRelease,
               queue.isEmpty,
               activeWriteGroup == nil,
@@ -1713,7 +1976,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             repeats: true
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard self?.state.isReady == true else { return }
+                guard self?.transportStateMachine.isReady == true else { return }
                 self?.writeProtectedAuth("LEASE_HEARTBEAT")
             }
         }
@@ -1724,8 +1987,15 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         _ event: RideBLETransportEventV1
     ) -> RideBLETransportTransitionV1 {
         let transition = transportStateMachine.reduce(event)
+        if transportStateMachine.phase != .recovering {
+            recoveryCancellationTask?.cancel()
+            recoveryCancellationTask = nil
+        }
         transportPhase = transportStateMachine.phase
         transportFailureReason = transportStateMachine.lastFailure
+        if state.isReady && !transportStateMachine.isReady {
+            state = gracefulStopPending ? .stopping : .idle
+        }
         recordTransportDiagnostic(kind: .transportTransition)
         return transition
     }
@@ -1779,6 +2049,10 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         _ message: String,
         reason: RideBLETransportFailureReasonV1 = .connectionFailed
     ) {
+        if gracefulStopPending {
+            completeStop()
+            return
+        }
         guard transportStateMachine.phase != .recovering else { return }
         let wasScanning = state == .scanning
         lastError = message
@@ -1798,9 +2072,31 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         applicationAckWatchdogTask = nil
         if wasScanning { central.stopScan() }
         if let peripheral {
+            armRecoveryCancellationDeadline()
             central.cancelPeripheralConnection(peripheral)
         } else {
             scheduleReconnect()
+        }
+    }
+
+    private func armRecoveryCancellationDeadline() {
+        if transportStateMachine.recoveryPhase == .cancellationTimedOut {
+            lastError = RideBLERecoveryPolicyV1.blockedMessage
+            state = .failed(RideBLERecoveryPolicyV1.blockedMessage)
+            return
+        }
+        let generation = transportStateMachine.generation
+        guard reduceTransport(.recoveryCancellationRequested(generation: generation)) == .applied else { return }
+        recoveryCancellationTask = Task { [weak self, sleep] in
+            try? await sleep(.seconds(RideBLERecoveryPolicyV1.cancellationTimeoutSeconds))
+            guard !Task.isCancelled, let self,
+                  self.reduceTransport(.recoveryCancellationTimedOut(generation: generation)) == .applied else { return }
+            self.recoveryCancellationTask = nil
+            let message = RideBLERecoveryPolicyV1.blockedMessage
+            self.lastError = message
+            self.state = .failed(message)
+            // Time passing does not fence CoreBluetooth callbacks. Retain the
+            // active demand and exact handoff until a real boundary or stop.
         }
     }
 
@@ -1815,25 +2111,24 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     private func startOperationTimeout(generation: UInt64) {
         operationTimeoutTask?.cancel()
-        operationTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(20))
+        operationTimeoutTask = Task { [weak self, sleep] in
+            try? await sleep(.seconds(20))
             guard !Task.isCancelled, let self,
                   self.connectionGeneration == generation,
-                  !self.state.isReady else { return }
+                  !self.transportStateMachine.isReady else { return }
             self.operationTimeoutTask = nil
             self.fail("Bike Computer connection timed out")
         }
     }
 
     private func scheduleReconnect() {
-        guard hasDemand, reconnectTask == nil else { return }
+        guard hasDemand, !gracefulStopPending,
+              reconnectTask == nil else { return }
         reconnectAttempt = min(reconnectAttempt + 1, 6)
         let delay = min(pow(2, Double(reconnectAttempt - 1)), 30)
         let generation = connectionGeneration
-        reconnectTask = Task { [weak self] in
-            try? await Task.sleep(
-                for: .seconds(delay)
-            )
+        reconnectTask = Task { [weak self, sleep] in
+            try? await sleep(.seconds(delay))
             guard !Task.isCancelled, let self else { return }
             self.reconnectTask = nil
             guard self.hasDemand,
@@ -1883,6 +2178,10 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
 extension WatchDeviceLink: @preconcurrency CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        if gracefulStopPending {
+            if central.state != .poweredOn { completeStop(linkEnded: true) }
+            return
+        }
         guard hasDemand else { return }
         if central.state == .poweredOn {
             beginIfNeeded()
@@ -1945,9 +2244,9 @@ extension WatchDeviceLink: @preconcurrency CBCentralManagerDelegate {
             central.cancelPeripheralConnection(connected)
             return
         }
-        _ = reduceTransport(.linkConnected(
+        guard reduceTransport(.linkConnected(
             generation: transportStateMachine.generation
-        ))
+        )) == .applied else { return }
         state = .discovering
         connected.discoverServices([serviceUUID])
     }
@@ -1958,6 +2257,10 @@ extension WatchDeviceLink: @preconcurrency CBCentralManagerDelegate {
         error: Error?
     ) {
         guard peripheral?.identifier == failed.identifier else { return }
+        if gracefulStopPending {
+            completeStop(linkEnded: true)
+            return
+        }
         _ = reduceTransport(.failed(
             generation: transportStateMachine.generation,
             reason: .connectionFailed
@@ -1978,6 +2281,10 @@ extension WatchDeviceLink: @preconcurrency CBCentralManagerDelegate {
         error: Error?
     ) {
         guard peripheral?.identifier == disconnected.identifier else { return }
+        if gracefulStopPending {
+            completeStop(linkEnded: true)
+            return
+        }
         if transportStateMachine.phase != .idle {
             _ = reduceTransport(.disconnected(
                 generation: transportStateMachine.generation
@@ -2006,7 +2313,8 @@ extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
         didDiscoverServices error: Error?
     ) {
         guard self.peripheral?.identifier == peripheral.identifier,
-              error == nil,
+              transportStateMachine.phase == .authenticating else { return }
+        guard error == nil,
               let service = peripheral.services?.first(where: {
                   $0.uuid == serviceUUID
               }) else {
@@ -2032,7 +2340,8 @@ extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
         error: Error?
     ) {
         guard self.peripheral?.identifier == peripheral.identifier,
-              error == nil else {
+              transportStateMachine.phase == .authenticating else { return }
+        guard error == nil else {
             fail("Bike Computer characteristics are unavailable")
             return
         }
@@ -2067,9 +2376,8 @@ extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
         didUpdateNotificationStateFor characteristic: CBCharacteristic,
         error: Error?
     ) {
-        guard self.peripheral?.identifier == peripheral.identifier else {
-            return
-        }
+        guard self.peripheral?.identifier == peripheral.identifier,
+              transportStateMachine.phase == .authenticating else { return }
         guard error == nil, characteristic.isNotifying else {
             fail("Bike Computer notifications could not be enabled")
             return
@@ -2105,6 +2413,7 @@ extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
         error: Error?
     ) {
         guard self.peripheral?.identifier == peripheral.identifier,
+              transportStateMachine.acceptsWriterCallbacks,
               let pending = pendingATTWrite,
               pending.peripheralID == peripheral.identifier,
               pending.connectionGeneration == connectionGeneration,
@@ -2136,9 +2445,8 @@ extension WatchDeviceLink: @preconcurrency CBPeripheralDelegate {
     func peripheralIsReady(
         toSendWriteWithoutResponse peripheral: CBPeripheral
     ) {
-        guard self.peripheral?.identifier == peripheral.identifier else {
-            return
-        }
+        guard self.peripheral?.identifier == peripheral.identifier,
+              transportStateMachine.acceptsWriterCallbacks else { return }
         withoutResponseWatchdogTask?.cancel()
         withoutResponseWatchdogTask = nil
         _ = reduceTransport(.writerChanged(

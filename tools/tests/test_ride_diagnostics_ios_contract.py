@@ -1,5 +1,6 @@
 from pathlib import Path
 import unittest
+import json
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -45,8 +46,14 @@ class RideDiagnosticsIOSContractTests(unittest.TestCase):
         self.assertIn("removeJoinedAccessPointIfNeeded()", exit_flow)
 
     def test_navigation_host_harness_compiles_the_transfer_managers(self):
-        self.assertIn("Managers/DeviceTransferManager.swift", NAV_SCRIPT)
-        self.assertIn("Managers/DeviceDiagnosticsTransferManager.swift", NAV_SCRIPT)
+        registry = json.loads((REPO_ROOT / "tools/development/swift-sources.json").read_text())
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("swift_sources", REPO_ROOT / "tools/development/swift_compile.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        files = module.sources("navigation-5", registry["groups"])
+        self.assertIn("ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift", files)
+        self.assertIn("ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift", files)
 
 
 if __name__ == "__main__":

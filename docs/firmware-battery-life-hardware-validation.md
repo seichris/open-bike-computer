@@ -25,10 +25,12 @@ gate.
 The firmware now uses four connected operating modes:
 
 - `active`: saved user brightness and the normal LVGL cadence;
-- `dimmed`: at most 20% brightness after 15 seconds without meaningful input,
+- `dimmed`: at most 20% brightness after the configured delay (15 seconds by
+  default) without meaningful input,
   with the main UI timer reduced from 30 ms to 250 ms and LVGL serviced at most
   every 100 ms;
-- `off`: after 45 seconds idle, the panel is turned off, the main UI timer is
+- `off`: after the configured later delay (45 seconds by default), the panel is
+  turned off, the main UI timer is
   paused, LVGL servicing stops, and any already-queued flush is acknowledged
   without QSPI traffic; and
 - `transfer`: the panel remains active while the map/firmware transfer service
@@ -294,8 +296,9 @@ automatic light sleep can be considered for production enablement.
 ## BLE, PMU, and SD characterization harness
 
 Production defaults remain unchanged: BLE TX power is P9, NimBLE owns its
-default advertising and connection policy, the SD bus remains at 4 MHz,
-runtime power paths do not switch PMU outputs, and the AXP2101 button status
+default advertising and connection policy. Native one-bit SDMMC defaults to
+20 MHz; only legacy SPI recovery uses 4 MHz. Record the effective backend and
+`freqKHz` from the `SDIO` boot marker for each run. Runtime power paths do not switch PMU outputs, and the AXP2101 button status
 remains on the 250 ms housekeeping deadline. No lower-power radio, rail, or SD
 setting is selected without physical evidence. The 2.06-inch boot-only
 display-enable compatibility operation is not a power-saving setting.

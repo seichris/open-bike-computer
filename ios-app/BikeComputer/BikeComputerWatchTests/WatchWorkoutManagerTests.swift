@@ -197,7 +197,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
             rideGeneration: 7,
             decisionSequence: 11,
             profileVersion: 1,
-            sessionID: identity.sessionID
+            sessionID: identity.sessionID,
+            sourceHealthMask: RideAutomationSourceHealth.watchGpsFresh
         )
 
         XCTAssertEqual(
@@ -1656,7 +1657,9 @@ final class WatchWorkoutManagerTests: XCTestCase {
         try await waitUntil { probe.sentData.count == 2 }
         let newest = try WorkoutContractCodec.decode(probe.sentData[1])
         XCTAssertGreaterThan(newest.sequence, first.sequence)
-        XCTAssertEqual(newest, runtime.manager.latestEnvelope)
+        XCTAssertEqual(newest, try runtime.manager.latestEnvelope.map {
+            try WorkoutContractCodec.decode(WorkoutContractCodec.encodeForPhone($0, peerVersion: nil))
+        })
 
         runtime.manager.workoutSession(
             runtime.session,
@@ -2814,6 +2817,106 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertEqual(WatchRouteRecorder.mapAuthorization(.restricted), .denied)
         XCTAssertEqual(WatchRouteRecorder.mapAuthorization(.notDetermined), .notDetermined)
         XCTAssertEqual(WatchRouteRecorder.mapAuthorization(.authorizedWhenInUse), .authorized)
+    }
+
+    func testPausedRecorderPublishesStationaryMotionSamples() {
+        let recorder = WatchRouteRecorder()
+        let start = Date().addingTimeInterval(-2)
+        var publicationCount = 0
+        recorder.begin(
+            routeBuilder: nil,
+            startDate: start,
+            motionSampleEpoch: 7
+        ) {
+            publicationCount += 1
+        }
+        recorder.setPaused(true, at: start.addingTimeInterval(0.5))
+        let stationary = CLLocation(
+            coordinate: CLLocationCoordinate2D(
+                latitude: 31.2304,
+                longitude: 121.4737
+            ),
+            altitude: 5,
+            horizontalAccuracy: 5,
+            verticalAccuracy: 5,
+            course: -1,
+            speed: 0.1,
+            timestamp: start.addingTimeInterval(1)
+        )
+
+        recorder.receiveLocationsForTesting([stationary])
+
+        XCTAssertEqual(recorder.motionSampleEpoch, 7)
+        XCTAssertEqual(recorder.motionSampleSequence, 1)
+        XCTAssertEqual(recorder.latestLocation, stationary)
+        XCTAssertEqual(publicationCount, 1)
+        XCTAssertNil(
+            recorder.routeDistanceMeters,
+            "stationary paused drift remains excluded from route distance"
+        )
+        recorder.discardRoute()
+    }
+
+    func testDelayedLocationsUseCaptureLifecycleAndBoundContinuity() {
+        let recorder = WatchRouteRecorder()
+        let start = Date().addingTimeInterval(-28)
+        recorder.begin(routeBuilder: nil, startDate: start, motionSampleEpoch: 7) {}
+        recorder.setPaused(true, at: start.addingTimeInterval(2))
+        recorder.setPaused(false, at: start.addingTimeInterval(8))
+        func point(_ second: Double, _ longitude: Double, _ speed: Double) -> CLLocation {
+            CLLocation(coordinate: .init(latitude: 0, longitude: longitude),
+                altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5,
+                course: -1, speed: speed, timestamp: start.addingTimeInterval(second))
+        }
+        let running = point(1, 0, 3)
+        let pausedMovement = point(3, 0.00005, 3)
+        let pausedDrift = point(5, 0.0001, 0)
+        recorder.receiveLocationsForTesting([pausedMovement, running])
+        XCTAssertGreaterThan(recorder.routeDistanceMeters ?? 0, 5,
+                             "late coasting during pause is preserved")
+        let beforeDrift = recorder.routeDistanceMeters
+        recorder.receiveLocationsForTesting([pausedDrift])
+        XCTAssertEqual(recorder.routeDistanceMeters, beforeDrift,
+                       "late paused drift cannot become running distance")
+        recorder.receiveLocationsForTesting([point(9, 0.0002, 3)])
+        XCTAssertEqual(recorder.routeDistanceMeters, beforeDrift,
+                       "stationary gap is not bridged on resume")
+        recorder.receiveLocationsForTesting([point(10, 0.00025, 3)])
+        let beforeGap = recorder.routeDistanceMeters
+        recorder.receiveLocationsForTesting([point(25, 0.0005, 3)])
+        XCTAssertEqual(recorder.routeDistanceMeters, beforeGap,
+                       "long missing-GPS gap does not create distance")
+        let sequence = recorder.motionSampleSequence
+        recorder.receiveLocationsForTesting([pausedMovement, point(25, 0.0005, 3)])
+        XCTAssertEqual(recorder.motionSampleSequence, sequence,
+                       "replayed and out-of-order callbacks cannot mint identities")
+        recorder.setPaused(true, at: start.addingTimeInterval(25.1))
+        recorder.receiveLocationsForTesting([point(26, 0.0005, 0)])
+        recorder.receiveLocationsForTesting([point(27, 0.0007, -1)])
+        recorder.receiveLocationsForTesting([point(28, 0.0009, -1)])
+        XCTAssertGreaterThan(recorder.routeDistanceMeters ?? 0, (beforeGap ?? 0) + 20,
+                             "displacement requalifies movement without reported speed")
+        recorder.discardRoute()
+    }
+
+    func testUnavailableMotionEpochPreservesOrdinaryLocation() throws {
+        let persistence = ToggleRecoveryPersistence()
+        let store = WatchWorkoutRecoveryStore(persistence: persistence)
+        _ = try store.begin(startDate: Date().addingTimeInterval(-2))
+        persistence.failsSave = true
+        let epoch = try? store.beginMotionSampleProducer()
+        XCTAssertNil(epoch, "failed durable reservation must not mint epoch zero")
+        let recorder = WatchRouteRecorder()
+        let start = Date().addingTimeInterval(-2)
+        recorder.begin(routeBuilder: nil, startDate: start, motionSampleEpoch: epoch) {}
+        let location = CLLocation(coordinate: .init(latitude: 1, longitude: 2),
+            altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5,
+            course: -1, speed: 3, timestamp: start.addingTimeInterval(1))
+        recorder.receiveLocationsForTesting([location])
+        XCTAssertNil(recorder.motionSampleEpoch)
+        XCTAssertEqual(recorder.motionSampleSequence, 0)
+        XCTAssertEqual(recorder.latestLocation, location)
+        recorder.discardRoute()
     }
 
     func testWorkoutIdentityMetadataUsesStableHealthKitIdentifiers() {
@@ -6249,7 +6352,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
                 try WorkoutContractCodec.decode(
                     recoverySnapshotProbe.sentData[0]
                 ),
-                recoverySnapshot
+                try WorkoutContractCodec.decode(WorkoutContractCodec.encodeForPhone(
+                    recoverySnapshot, peerVersion: nil))
             )
 
             persistence.failsSave = true
@@ -7188,7 +7292,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
         }
     }
 
-    func testTerminalCleanupRetryStopsAtBoundAndLeavesManualRecovery()
+    func testSavedTerminalCleanupRetryStopsAtBoundAndLeavesManualRecovery()
         async throws
     {
         let persistence = ToggleRecoveryPersistence()
@@ -7196,9 +7300,12 @@ final class WatchWorkoutManagerTests: XCTestCase {
         let identity = try recoveryStore.begin(startDate: Date())
         let endedAt = identity.startDate.addingTimeInterval(30)
         try recoveryStore.markFinishing(
-            disposition: .discard,
+            disposition: .save,
             requestedAt: endedAt
         )
+        try recoveryStore.markCollectionEnded()
+        try recoveryStore.markFinishAttempted()
+        try recoveryStore.markWorkoutSaved()
         let manager = WatchWorkoutManager(
             healthStore: HKHealthStore(),
             routeRecorder: WatchRouteRecorder(),
@@ -7213,9 +7320,9 @@ final class WatchWorkoutManagerTests: XCTestCase {
         )
 
         persistence.failsSave = true
-        manager.completeConfirmedDiscard(
+        manager.completeConfirmedSave(
             summary: WatchWorkoutSummary(
-                outcome: .discarded,
+                outcome: .saved,
                 endedAt: endedAt,
                 duration: 30,
                 distanceMeters: nil,
@@ -7223,7 +7330,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
                 averageHeartRate: nil,
                 routeStatus: .unavailable
             ),
-            discardedAt: endedAt
+            savedAt: endedAt
         )
         try await waitUntil {
             manager.terminalCleanupState == .retryRequired
@@ -7236,6 +7343,142 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertFalse(manager.isTerminalPublicationPending)
         XCTAssertNil(recoveryStore.recoveredIdentity)
         XCTAssertEqual(manager.terminalCleanupState, .none)
+    }
+
+    func testDiscardTerminalDoesNotReadBuilderOrPublishInvalidMetrics() throws {
+        for errorCode in [nil, WorkoutSafeErrorCodeV1.anotherWorkoutActive] {
+            let persistence = ToggleRecoveryPersistence()
+            let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+            let identity = try recoveryStore.begin(startDate: Date().addingTimeInterval(-30))
+            let endedAt = identity.startDate.addingTimeInterval(30)
+            try recoveryStore.markFinishing(
+                disposition: .discard, requestedAt: endedAt, terminalErrorCode: errorCode
+            )
+            var elapsedReads = 0
+            let manager = WatchWorkoutManager(
+                healthStore: HKHealthStore(),
+                routeRecorder: WatchRouteRecorder(),
+                recoveryStore: recoveryStore,
+                builderElapsedTime: { _ in elapsedReads += 1; return .nan },
+                initializeOnLaunch: false
+            )
+            XCTAssertTrue(manager.restoreDetachedFinalizationLifecycle(
+                from: try XCTUnwrap(recoveryStore.recoveredIdentity)
+            ))
+            // Reproduces the old invalid terminal packet: moving duration
+            // sampled later than the fixed stop date exceeds 30s wall time.
+            manager.completeConfirmedDiscard(
+                summary: WatchWorkoutSummary(
+                    outcome: .discarded, endedAt: endedAt, duration: 31,
+                    distanceMeters: .infinity, activeEnergyKilocalories: .nan,
+                    averageHeartRate: -1, routeStatus: .unavailable,
+                    terminalErrorCode: errorCode
+                ),
+                discardedAt: endedAt
+            )
+            let envelope = try XCTUnwrap(manager.latestEnvelope)
+            XCTAssertNoThrow(try WorkoutContractCodec.validate(envelope))
+            XCTAssertEqual(envelope.snapshot?.terminalOutcome, .discarded)
+            XCTAssertEqual(envelope.snapshot?.errorCode, errorCode)
+            XCTAssertEqual(envelope.snapshot?.availability, [])
+            XCTAssertNil(envelope.snapshot?.elapsedTime)
+            XCTAssertNil(envelope.snapshot?.wallElapsedTime)
+            XCTAssertNil(envelope.snapshot?.location)
+            XCTAssertNil(envelope.snapshot?.heartRateZoneDurations)
+            XCTAssertEqual(elapsedReads, 0, "never consult a discarded builder")
+            XCTAssertFalse(manager.isTerminalPublicationPending)
+            XCTAssertNil(manager.finishRequestError)
+            XCTAssertNil(recoveryStore.recoveredIdentity)
+            XCTAssertTrue(manager.canDismissDiscardedSummary)
+            XCTAssertEqual(recoveryStore.terminalTombstone(
+                externalUUID: identity.sessionID.uuidString
+            )?.disposition, .discard)
+        }
+    }
+
+    func testDiscardMetadataRetryIsAutomaticBeforeTerminalCompletion() async throws {
+        enum MetadataFailure: Error { case transient }
+        let store = WatchWorkoutRecoveryStore(persistence: ToggleRecoveryPersistence())
+        let identity = try store.begin(startDate: Date().addingTimeInterval(-30))
+        try store.markFinishing(disposition: .discard, requestedAt: Date())
+        var attempts = 0
+        var resumes = 0
+        var shouldFail = true
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(), routeRecorder: WatchRouteRecorder(),
+            recoveryStore: store,
+            identityMetadataRetryAdapter: WatchWorkoutIdentityMetadataRetryAdapter(
+                attachMetadata: {
+                    attempts += 1
+                    if shouldFail { throw MetadataFailure.transient }
+                },
+                isContextCurrent: { true },
+                resumeFinalization: { resumes += 1 }
+            ),
+            terminalCleanupRetryDelay: 0.001,
+            initializeOnLaunch: false
+        )
+        XCTAssertTrue(manager.restoreDetachedFinalizationLifecycle(
+            from: try XCTUnwrap(store.recoveredIdentity)
+        ))
+        XCTAssertTrue(manager.retainCollectedFinishForIdentityMetadataRetry(
+            MetadataFailure.transient
+        ))
+        try await waitUntil { attempts >= 4 }
+        XCTAssertEqual(resumes, 0)
+        XCTAssertEqual(store.recoveredIdentity?.sessionID, identity.sessionID)
+        XCTAssertEqual(store.recoveredIdentity?.finishRequest?.disposition, .discard)
+        shouldFail = false
+        try await waitUntil { resumes == 1 }
+        XCTAssertNil(manager.finishRequestError)
+        let completedAttempts = attempts
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(attempts, completedAttempts)
+        XCTAssertEqual(resumes, 1, "retry must not resume finalization twice")
+    }
+
+    func testDiscardAutomaticallyRecoversBeyondOldThreeAttemptLimit() async throws {
+        let persistence = ToggleRecoveryPersistence()
+        let recoveryStore = WatchWorkoutRecoveryStore(persistence: persistence)
+        let identity = try recoveryStore.begin(startDate: Date().addingTimeInterval(-30))
+        let endedAt = identity.startDate.addingTimeInterval(30)
+        try recoveryStore.markFinishing(disposition: .discard, requestedAt: endedAt)
+        let manager = WatchWorkoutManager(
+            healthStore: HKHealthStore(), routeRecorder: WatchRouteRecorder(),
+            recoveryStore: recoveryStore, terminalCleanupRetryDelay: 0.001,
+            initializeOnLaunch: false
+        )
+        XCTAssertTrue(manager.restoreDetachedFinalizationLifecycle(
+            from: try XCTUnwrap(recoveryStore.recoveredIdentity)
+        ))
+        let retainedBytes = persistence.data
+        let savesBeforeFailure = persistence.saveCallCount
+        persistence.failsSave = true
+        manager.completeConfirmedDiscard(
+            summary: WatchWorkoutSummary(
+                outcome: .discarded, endedAt: endedAt, duration: nil,
+                distanceMeters: nil, activeEnergyKilocalories: nil,
+                averageHeartRate: nil, routeStatus: .unavailable
+            ), discardedAt: endedAt
+        )
+        try await waitUntil { persistence.saveCallCount >= savesBeforeFailure + 6 }
+        XCTAssertEqual(persistence.data, retainedBytes)
+        XCTAssertNotNil(recoveryStore.recoveredIdentity, "do not erase discard proof")
+        XCTAssertFalse(manager.canDismissDiscardedSummary)
+        XCTAssertEqual(manager.terminalCleanupState, .retrying)
+        XCTAssertFalse(manager.isTerminalCleanupRetryRequired)
+
+        persistence.failsSave = false // No Retry Recovery call or other rider action.
+        try await waitUntil { manager.canDismissDiscardedSummary }
+        XCTAssertNil(recoveryStore.recoveredIdentity)
+        XCTAssertEqual(manager.terminalCleanupState, .none)
+        XCTAssertEqual(recoveryStore.terminalTombstone(
+            externalUUID: identity.sessionID.uuidString
+        )?.disposition, .discard)
+        manager.dismissSummary()
+        XCTAssertEqual(manager.state, .idle)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(manager.state, .idle, "old retries cannot restore the ended screen")
     }
 
     func testTerminalEnvelopeFailureBlocksArchiveUntilPublicationRetry() throws {

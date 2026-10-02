@@ -202,6 +202,14 @@ int main() {
   assert(map_profile_persistence::loadBirdsEyePerspective(independentStore) ==
          4);
 
+  assert(map_profile_persistence::loadNavigationRotation(independentStore) == 1);
+  independentStore.putUChar("mapRotMode", 1);
+  map_profile_persistence::persistNavigationRotation(independentStore, 0);
+  assert(map_profile_persistence::loadNavigationRotation(independentStore) == 0);
+  assert(independentStore.getUChar("mapRotMode", 0) == 1);
+  independentStore.putUChar("navRotMode", 255);
+  assert(map_profile_persistence::loadNavigationRotation(independentStore) == 1);
+
   std::cout << "Map profile persistence tests passed\n";
   return 0;
 }

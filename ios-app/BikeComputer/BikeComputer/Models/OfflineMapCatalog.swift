@@ -149,6 +149,23 @@ nonisolated struct OfflineMapCatalogCredential: Codable, Equatable {
     let credential: String
 }
 
+nonisolated enum SavedMapListScope: Equatable, Sendable {
+    case savedMaps
+    case developerMaps
+
+    func includes(_ map: OfflineMapCatalogMap?, channel: String) -> Bool {
+        // Filter after local/catalog reconciliation so a map cannot reappear
+        // as a duplicate local row. Unknown legacy provenance stays visible.
+        let isDeveloperOnly = channel == "production" &&
+            map?.originChannel == "development" &&
+            map?.deliveryState != "production"
+        switch self {
+        case .savedMaps: return !isDeveloperOnly
+        case .developerMaps: return isDeveloperOnly
+        }
+    }
+}
+
 nonisolated enum OfflineMapCatalogAvailability: Equatable, Sendable {
     case available
     case awaitingProductionPromotion
@@ -162,7 +179,7 @@ nonisolated enum OfflineMapCatalogAvailability: Equatable, Sendable {
         case .available:
             return nil
         case .awaitingProductionPromotion:
-            return "Awaiting production promotion"
+            return "Development map — not published for production"
         case .incompatible:
             return "Not compatible with this app build"
         case .unavailable:
@@ -225,6 +242,7 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
 
     static func localArtifactNeedsRefresh(
         localArtifactSHA256s: Set<String>,
+        localPrimaryArtifact: OfflineMapArtifact? = nil,
         map: OfflineMapCatalogMap,
         channel: String,
         trustStore: BikeMapStreamTrustStore,
@@ -241,6 +259,21 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
             readerCapabilities: readerCapabilities
         )
         guard !preferredArtifacts.isEmpty else { return false }
+        // ZIP and BMAP are different containers, not different map content.
+        // Only accept the actual local primary ZIP when the catalog still lists
+        // its exact hash as a live head in the preferred delivery tier. A legacy
+        // fallback must not mask a stale/untrusted primary BMAP. This freshness
+        // check does not change download eligibility or device validation.
+        if let primary = localPrimaryArtifact, primary.isStoredZip, !primary.sha256.isEmpty,
+           map.artifacts.contains(where: { artifact in
+               artifact.platformArtifact.isStoredZip &&
+                   artifact.sha256.lowercased() == primary.sha256.lowercased() &&
+                   preferredArtifacts.contains {
+                       $0.deliveryTier.lowercased() == artifact.deliveryTier.lowercased()
+                   }
+           }) {
+            return false
+        }
         let localSHA256s = Set(localArtifactSHA256s.map { $0.lowercased() })
         return preferredArtifacts.allSatisfy {
             !localSHA256s.contains($0.sha256.lowercased())
@@ -312,6 +345,13 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
               ) else {
             return false
         }
+        if map.rendererFormatVersion == 4,
+           OfflineMapTopographyCompanionPolicy.compatibleCompanion(
+            for: map,
+            deliveryTier: artifact.deliveryTier
+           ) == nil {
+            return false
+        }
         return true
     }
 }
@@ -372,8 +412,8 @@ nonisolated struct OfflineMapReaderCapabilities: Codable, Equatable, Sendable {
         renderers: [
             Renderer(
                 renderer: "esp32-fmb",
-                formatVersions: [1, 2, 3],
-                features: ["3d-buildings", "street-labels"]
+                formatVersions: [1, 2, 3, 4],
+                features: ["3d-buildings", "contours", "street-labels"]
             ),
         ]
     )
@@ -386,6 +426,17 @@ nonisolated struct OfflineMapReaderRequirements: Codable, Equatable, Sendable {
     let renderer: String
     let rendererFormatVersion: Int
     let requiredFeatures: [String]
+}
+
+nonisolated struct OfflineMapTopographyCompanionRequirements: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let role: String
+    let mapContentReceipt: String
+    let mapId: String
+    let profileVersion: Int
+    let intermediateSha256: String
+    let sourcePolicySha256: String
+    let attributionSha256: String
 }
 
 nonisolated enum OfflineMapReaderCompatibilityPolicy {
@@ -437,6 +488,52 @@ nonisolated enum OfflineMapReaderCompatibilityPolicy {
         (allowsEmpty || !values.isEmpty) &&
             values.count <= 32 &&
             Set(values).count == values.count
+    }
+}
+
+nonisolated enum OfflineMapTopographyCompanionPolicy {
+    static let format = "topography-ios-v1"
+    static let mediaType = "application/vnd.bicino.topography+sqlite3"
+
+    static func compatibleCompanion(
+        for map: OfflineMapCatalogMap,
+        deliveryTier: String
+    ) -> OfflineMapCatalogArtifact? {
+        guard map.rendererFormatVersion == 4,
+              map.features == ["3d-buildings", "contours", "street-labels"],
+              let contentReceipt = map.contentReceipt,
+              isSHA256(contentReceipt) else {
+            return nil
+        }
+        let preferredTier = deliveryTier.lowercased()
+        guard ["development", "production"].contains(preferredTier) else {
+            return nil
+        }
+        let candidates = map.artifacts.filter { artifact in
+            guard artifact.format == format,
+                  artifact.mediaType == mediaType,
+                  artifact.filename.hasSuffix(".btopo"),
+                  artifact.bytes > 0,
+                  artifact.bytes <= 256 * 1024 * 1024,
+                  isSHA256(artifact.sha256),
+                  artifact.deliveryTier.lowercased() == preferredTier,
+                  let requirements = artifact.companionRequirements else {
+                return false
+            }
+            return requirements.schemaVersion == 1 &&
+                requirements.role == format &&
+                requirements.profileVersion == 1 &&
+                requirements.mapContentReceipt == contentReceipt &&
+                requirements.mapId == map.mapId &&
+                isSHA256(requirements.intermediateSha256) &&
+                isSHA256(requirements.sourcePolicySha256) &&
+                isSHA256(requirements.attributionSha256)
+        }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
     }
 }
 
@@ -644,6 +741,7 @@ nonisolated struct OfflineMapCatalogArtifact: Codable, Equatable, Sendable {
     let requiredFirmwareGitSha: String?
     let deliveryTier: String
     var readerRequirements: OfflineMapReaderRequirements? = nil
+    var companionRequirements: OfflineMapTopographyCompanionRequirements? = nil
 
     var platformArtifact: OfflineMapArtifact {
         OfflineMapArtifact(
@@ -664,7 +762,11 @@ nonisolated struct OfflineMapCatalogArtifact: Codable, Equatable, Sendable {
             requiredIosBuildSha256: requiredIosBuildSha256,
             requiredFirmwareVersion: requiredFirmwareVersion,
             requiredFirmwareBuild: requiredFirmwareBuild,
-            requiredFirmwareGitSha: requiredFirmwareGitSha
+            requiredFirmwareGitSha: requiredFirmwareGitSha,
+            mapContentReceipt: companionRequirements?.mapContentReceipt,
+            intermediateSha256: companionRequirements?.intermediateSha256,
+            sourcePolicySha256: companionRequirements?.sourcePolicySha256,
+            attributionSha256: companionRequirements?.attributionSha256
         )
     }
 }
@@ -673,6 +775,7 @@ nonisolated struct OfflineMapCatalogMap: Codable, Equatable, Sendable, Identifia
     var id: String { mapEntryId }
     let mapEntryId: String
     let mapId: String
+    var contentReceipt: String? = nil
     var alias: String
     let aliasSource: String
     let aliasRevision: Int
@@ -740,6 +843,13 @@ nonisolated struct OfflineMapLibraryLinkCode: Codable, Equatable, Sendable {
 }
 
 nonisolated struct OfflineMapCatalogDownloadGrant: Codable, Equatable, Sendable {
+    let downloadURL: URL
+    let expiresAt: String
+    let artifact: OfflineMapCatalogArtifact
+    let companion: OfflineMapCatalogCompanionDownloadGrant?
+}
+
+nonisolated struct OfflineMapCatalogCompanionDownloadGrant: Codable, Equatable, Sendable {
     let downloadURL: URL
     let expiresAt: String
     let artifact: OfflineMapCatalogArtifact

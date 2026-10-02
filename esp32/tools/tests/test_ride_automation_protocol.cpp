@@ -144,7 +144,7 @@ int main() {
   assert(!encode(cancellation, bytes, sizeof(bytes)));
 
   cancellation.result = Result::Stale;
-  cancellation.sourceHealthMask = 0x0010;
+  cancellation.sourceHealthMask = 0x0020;
   assert(!encode(cancellation, bytes, sizeof(bytes)));
   cancellation.sourceHealthMask = 0x000F;
   assert(encode(cancellation, bytes, sizeof(bytes)));

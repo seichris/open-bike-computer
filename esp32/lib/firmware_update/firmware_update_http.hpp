@@ -7,6 +7,8 @@
 #include <freertos/semphr.h>
 
 #include "../device_transfer/device_transfer_http.hpp"
+#include "device_operation_owner.hpp"
+#include "firmware_update_policy.hpp"
 
 #include <string>
 
@@ -18,11 +20,16 @@ struct FirmwareUpdateStatus {
   std::string runningVersion;
   uint32_t runningBuild = 0;
   std::string runningGitSha;
+  std::string runningProfile;
   std::string runningPartition;
   std::string inactivePartition;
+  std::string otaState;
+  bool otaEligible = false;
+  std::string eligibilityCode;
   uint32_t maxImageBytes = 0;
   uint32_t receivedBytes = 0;
   uint32_t totalBytes = 0;
+  uint32_t flashOwnerStackHighWaterBytes = 0;
   std::string sha256;
   std::string errorCode;
   std::string errorMessage;
@@ -37,7 +44,10 @@ public:
   void process();
   FirmwareUpdateStatus status() const;
   std::string statusJson() const;
-  void markRunningAppValid();
+  bool markRunningAppValid();
+  void rejectRunningApp();
+  std::string bootAcceptanceJson(bool ready) const;
+  DeviceOperationOwner *operationOwner() { return &operationOwner_; }
 
 private:
   device_transfer::HttpTransferServer ownedTransferServer_;
@@ -57,9 +67,13 @@ private:
   const esp_partition_t *updatePartition_ = nullptr;
   esp_ota_handle_t otaHandle_ = 0;
   bool otaOpen_ = false;
+  policy::Transaction transaction_;
+  mutable DeviceOperationOwner operationOwner_;
 
   bool handleRequest(const device_transfer::HttpRequest &request,
                      device_transfer::TransferClient &client) override;
+  void workerWillStop() override;
+  StaticSemaphore_t stateMutexStorage_{};
   void handleStatus(device_transfer::TransferClient &client);
   void handleBegin(const device_transfer::HttpRequest &request,
                    device_transfer::TransferClient &client);

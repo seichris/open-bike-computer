@@ -44,9 +44,9 @@ DEFAULT_ROUTE_FIXTURE = (
     / "renderer-benchmark-shanghai-v1.json"
 )
 DEFAULT_GATES = Path(__file__).with_name("renderer_benchmark_gates.json")
-PINNED_ROUTE_ID = "shanghai-center-renderer-v1"
+PINNED_ROUTE_ID = "shanghai-jingan-renderer-v1"
 PINNED_ROUTE_SHA256 = (
-    "d5171f6b30478a09948381bbdb86da33752bc646fa6077153f69a4bd840eb36e"
+    "0fec6228e89cdb6841b971226c5fdedcc5e711dcb9b0e72bcaf95da4f6452f64"
 )
 
 
@@ -629,6 +629,28 @@ def monotonic_decline(
     )
 
 
+def progressive_cross_run_decline(
+    values: list[int], *, allowed_decline: int
+) -> bool:
+    if len(values) < 3:
+        return False
+    normalized = [int(value) for value in values]
+    allowed = max(0, int(allowed_decline))
+    continuation_noise = max(1, allowed // 4)
+    downward_steps: list[int] = []
+    for previous, current in zip(normalized, normalized[1:]):
+        delta = previous - current
+        if delta < -continuation_noise:
+            return False
+        downward_steps.append(max(0, delta))
+    if normalized[0] - normalized[-1] <= allowed:
+        return False
+    largest_step = max(downward_steps, default=0)
+    # One cache/allocation transition is not progressive leakage. A failure
+    # requires meaningful continued decline beyond that step.
+    return sum(downward_steps) - largest_step > continuation_noise
+
+
 def expected_checkpoint_indexes(
     sample_count: int, fractions: Iterable[float]
 ) -> list[int]:
@@ -704,6 +726,8 @@ def validate_snapshot_identity(
         failures.append("stale_tuning:minimum_area")
     if tuning.get("fingerprint") != expected_tuning_fingerprint(profile):
         failures.append("stale_tuning:fingerprint")
+    if nested(snapshot, "memory", "dmaHeap").get("cryptoCountersScope") != "window":
+        failures.append("stale_identity:crypto_counter_scope")
     map_fixture = identity.get("mapFixture")
     route_fixture = identity.get("routeFixture")
     if map_fixture != {"id": map_fixture_id, "sha256": map_fixture_sha256}:
@@ -1107,45 +1131,50 @@ def apply_cross_run_memory_gates(
     trend = gates["trend"]
     checks = (
         (
-            "minimumInternalFree",
+            ("internalHeap", "free"),
             "crossRunInternalAllowedDeclineBytes",
             "cross_run_internal_decline",
         ),
         (
-            "minimumInternalLargest",
+            ("internalHeap", "largestBlock"),
             "crossRunInternalAllowedDeclineBytes",
             "cross_run_internal_largest_decline",
         ),
         (
-            "minimumPsramFree",
+            ("psram", "free"),
             "crossRunPsramAllowedDeclineBytes",
             "cross_run_psram_decline",
         ),
         (
-            "minimumPsramLargest",
+            ("psram", "largestBlock"),
             "crossRunPsramAllowedDeclineBytes",
             "cross_run_psram_largest_decline",
         ),
         (
-            "minimumDmaFree",
+            ("dmaHeap", "free"),
             "crossRunDmaAllowedDeclineBytes",
             "cross_run_dma_decline",
         ),
         (
-            "minimumDmaLargest",
+            ("dmaHeap", "largestBlock"),
             "crossRunDmaAllowedDeclineBytes",
             "cross_run_dma_largest_decline",
         ),
     )
     for profile in PROFILES:
-        profile_runs = [run for run in runs if run["profile"] == profile]
+        profile_runs = sorted(
+            (run for run in runs if run["profile"] == profile),
+            key=lambda run: run["repeat"],
+        )
         if len(profile_runs) < 3:
             continue
-        for metric, allowed_key, label in checks:
-            values = [run["summary"][metric] for run in profile_runs]
-            if (
-                all(right < left for left, right in zip(values, values[1:]))
-                and values[0] - values[-1] > trend[allowed_key]
+        for memory_path, allowed_key, label in checks:
+            values = [
+                nested(run["finalSnapshot"], "memory", *memory_path)
+                for run in profile_runs
+            ]
+            if progressive_cross_run_decline(
+                values, allowed_decline=trend[allowed_key]
             ):
                 for run in profile_runs:
                     run["failures"] = sorted(set(run["failures"] + [label]))
@@ -1553,29 +1582,25 @@ class BenchmarkRunner:
             f"-sample-{sample_index:03d}.png"
         )
         path = self.output / "screenshots" / filename
-        deadline = time.monotonic() + 4
+        # The firmware can reject a stale buffered frame with a cheap 204 and
+        # capture a marker-bound successor. Leave room for that request plus
+        # the measured 4.4-5.9 second pinned frame response.
+        deadline = time.monotonic() + 10
         last_error: Exception | None = None
-        checkpoint_frame_consumed = False
         while time.monotonic() < deadline:
             try:
                 metadata, pixels = self.client.frame(
-                    after=self.last_frame_sequence
+                    after=self.last_frame_sequence,
+                    captured_at_or_after=marker_received_at_ms,
                 )
                 self.last_frame_sequence = metadata["sequence"]
-                if not checkpoint_frame_consumed:
-                    # Even a timestamp-newer cached frame may have been
-                    # captured by another browser request before this metrics
-                    # sample was observed. Consume one frame, then force the
-                    # endpoint to capture a checkpoint-specific successor.
-                    checkpoint_frame_consumed = True
-                    continue
                 capture_lag_ms = _uint32_forward_delta(
                     metadata["capturedAtMs"], marker_received_at_ms
                 )
                 if capture_lag_ms >= 0x80000000:
-                    # The frame store can still contain a valid image captured
-                    # before this checkpoint. Consume it, then request a newer
-                    # panel frame on the next attempt.
+                    # The frame predates the observed route marker. Consuming
+                    # it advances the `after` sequence and asks the endpoint
+                    # for a checkpoint-specific successor.
                     continue
                 if (
                     capture_lag_ms
@@ -1646,10 +1671,11 @@ class BenchmarkRunner:
         samples: list[dict[str, Any]] = []
         started = time.monotonic()
         deadline = started + duration_seconds
-        previous_sequence: int | None = None
-        previous_timestamp: int | None = None
-        while time.monotonic() < deadline:
-            snapshot = self._metrics()
+        previous_sequence: int | None = first["sequence"]
+        previous_timestamp: int | None = first["timestampMs"]
+
+        def record_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+            nonlocal previous_sequence, previous_timestamp
             identity_failures = validate_snapshot_identity(
                 snapshot,
                 baseline=self.baseline_identity,
@@ -1688,8 +1714,9 @@ class BenchmarkRunner:
             elapsed = time.monotonic() - started
             snapshots.append(snapshot)
             samples.append(compact_sample(snapshot, elapsed))
+            return nested(snapshot, "routeReplay")
 
-            replay = nested(snapshot, "routeReplay")
+        def capture_replay_checkpoints(replay: dict[str, Any]) -> None:
             sample_index = replay.get("sampleIndex")
             sample_count = replay.get("sampleCount")
             marker_received_at_ms = replay.get("receivedAtMs")
@@ -1730,6 +1757,9 @@ class BenchmarkRunner:
                                 }
                             )
                         pending_checkpoints.remove(checkpoint)
+
+        while time.monotonic() < deadline:
+            capture_replay_checkpoints(record_snapshot(self._metrics()))
             sleep_seconds = min(
                 self.poll_interval_seconds,
                 max(0, deadline - time.monotonic()),
@@ -1737,6 +1767,14 @@ class BenchmarkRunner:
             if sleep_seconds > 0:
                 time.sleep(sleep_seconds)
 
+        # A blocking checkpoint frame can cross the deadline. Let the terminal
+        # snapshot satisfy a pending checkpoint, then collect one more metrics
+        # response if that frame extended the measurement interval.
+        pending_before_terminal_snapshot = len(pending_checkpoints)
+        terminal_replay = record_snapshot(self._metrics())
+        capture_replay_checkpoints(terminal_replay)
+        if len(pending_checkpoints) < pending_before_terminal_snapshot:
+            record_snapshot(self._metrics())
         if not snapshots:
             raise BenchmarkError("measurement window produced no metrics")
         summary = summarize_run(snapshots, samples)

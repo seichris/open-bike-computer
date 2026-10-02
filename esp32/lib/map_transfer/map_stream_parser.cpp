@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <new>
 #include <utility>
 
@@ -18,6 +19,14 @@ namespace {
 bool endsWith(std::string_view value, std::string_view suffix) {
   return value.size() >= suffix.size() &&
          value.substr(value.size() - suffix.size()) == suffix;
+}
+
+bool lowercaseSha256(const std::string &value) {
+  return value.size() == 64 &&
+         std::all_of(value.begin(), value.end(), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
 }
 
 void *allocateStreamMemory(size_t bytes) {
@@ -52,6 +61,7 @@ public:
     bool haveFiles = false;
     bool haveTarget = false;
     bool haveBuildings = false;
+    bool haveTopography = false;
     uint64_t schema = 0;
     skipWhitespace();
     if (!consume('{'))
@@ -82,6 +92,10 @@ public:
         if (haveBuildings || !parseBuildings(manifest))
           return false;
         haveBuildings = true;
+      } else if (key == "topography") {
+        if (haveTopography || !parseTopography(manifest))
+          return false;
+        haveTopography = true;
       } else if (key == "target") {
         if (haveTarget || !parseTarget(manifest))
           return false;
@@ -101,8 +115,10 @@ public:
         !haveFiles || !haveTarget || schema != 1 ||
         manifest.renderer != "esp32-fmb" ||
         (manifest.formatVersion != 1 && manifest.formatVersion != 2 &&
-         manifest.formatVersion != 3) ||
-        (manifest.formatVersion == 3) != haveBuildings) {
+         manifest.formatVersion != 3 && manifest.formatVersion != 4) ||
+        ((manifest.formatVersion == 3 || manifest.formatVersion == 4) !=
+         haveBuildings) ||
+        ((manifest.formatVersion == 4) != haveTopography)) {
       return false;
     }
     manifest.schemaVersion = static_cast<uint32_t>(schema);
@@ -375,6 +391,125 @@ private:
     return total == manifest.buildingRecordCount;
   }
 
+  bool parseBoundedNonEmptyObjectArray(size_t maximum, size_t &count) {
+    count = 0;
+    skipWhitespace();
+    if (!consume('['))
+      return false;
+    skipWhitespace();
+    if (consume(']'))
+      return false;
+    while (true) {
+      skipWhitespace();
+      if (count >= maximum || position_ >= text_.size() ||
+          text_[position_] != '{' || !skipValue(0))
+        return false;
+      count++;
+      skipWhitespace();
+      if (consume(']'))
+        return true;
+      if (!consume(','))
+        return false;
+      skipWhitespace();
+    }
+  }
+
+  bool parseTopography(MapManifest &manifest) {
+    skipWhitespace();
+    if (!consume('{'))
+      return false;
+    bool seen[11] = {};
+    std::string qualityMode;
+    std::string previousKey;
+    skipWhitespace();
+    while (true) {
+      std::string key;
+      if (!parseString(key) || (!previousKey.empty() && key <= previousKey) ||
+          !consumeAfterWhitespace(':'))
+        return false;
+      previousKey = key;
+      size_t index = 11;
+      if (key == "attributionSha256") index = 0;
+      else if (key == "indexIntervalM") index = 1;
+      else if (key == "intermediateSha256") index = 2;
+      else if (key == "minorIntervalM") index = 3;
+      else if (key == "noDataMillionths") index = 4;
+      else if (key == "pointCount") index = 5;
+      else if (key == "profileVersion") index = 6;
+      else if (key == "qualityMode") index = 7;
+      else if (key == "recordCount") index = 8;
+      else if (key == "sourcePolicySha256") index = 9;
+      else if (key == "sources") index = 10;
+      if (index == 11 || seen[index])
+        return false;
+      seen[index] = true;
+      uint64_t value = 0;
+      size_t sourceCount = 0;
+      switch (index) {
+      case 0:
+        if (!parseString(manifest.topographyAttributionSha256)) return false;
+        break;
+      case 1:
+        if (!parseUnsigned(value) || value > UINT32_MAX) return false;
+        manifest.contourIndexIntervalM = static_cast<uint32_t>(value);
+        break;
+      case 2:
+        if (!parseString(manifest.topographyIntermediateSha256)) return false;
+        break;
+      case 3:
+        if (!parseUnsigned(value) || value > UINT32_MAX) return false;
+        manifest.contourMinorIntervalM = static_cast<uint32_t>(value);
+        break;
+      case 4:
+        if (!parseUnsigned(value) || value > 1000000) return false;
+        manifest.contourNoDataMillionths = static_cast<uint32_t>(value);
+        break;
+      case 5:
+        if (!parseUnsigned(value) || value > 16777216) return false;
+        manifest.contourPointCount = static_cast<uint32_t>(value);
+        break;
+      case 6:
+        if (!parseUnsigned(value) || value != 1) return false;
+        break;
+      case 7:
+        if (!parseString(qualityMode)) return false;
+        break;
+      case 8:
+        if (!parseUnsigned(value) || value > 1048576) return false;
+        manifest.contourRecordCount = static_cast<uint32_t>(value);
+        break;
+      case 9:
+        if (!parseString(manifest.topographySourcePolicySha256)) return false;
+        break;
+      case 10:
+        if (!parseBoundedNonEmptyObjectArray(32, sourceCount)) return false;
+        break;
+      }
+      skipWhitespace();
+      if (consume('}'))
+        break;
+      if (!consume(','))
+        return false;
+      skipWhitespace();
+    }
+    if (!std::all_of(std::begin(seen), std::end(seen), [](bool value) {
+          return value;
+        }))
+      return false;
+    const bool intervals =
+        (manifest.contourMinorIntervalM == 20 &&
+         manifest.contourIndexIntervalM == 100) ||
+        (manifest.contourMinorIntervalM == 50 &&
+         manifest.contourIndexIntervalM == 250);
+    manifest.contourQualityMode = qualityMode;
+    return intervals &&
+           (qualityMode == "standard-20m-v1" ||
+            qualityMode == "coarse-50m-v1") &&
+           lowercaseSha256(manifest.topographyAttributionSha256) &&
+           lowercaseSha256(manifest.topographyIntermediateSha256) &&
+           lowercaseSha256(manifest.topographySourcePolicySha256);
+  }
+
   bool parseFiles(MapStreamFileTable &files) {
     skipWhitespace();
     if (!consume('['))
@@ -449,6 +584,7 @@ private:
     bool haveFormat = false;
     bool haveMinimumFirmware = false;
     bool haveBuildingProfile = false;
+    bool haveTopographyProfile = false;
     bool haveLabelProfile = false;
     bool haveLanguages = false;
     bool haveFallback = false;
@@ -485,6 +621,12 @@ private:
           return false;
         manifest.labelProfileVersion = static_cast<uint32_t>(value);
         haveLabelProfile = true;
+      } else if (key == "topographyProfileVersion") {
+        uint64_t value = 0;
+        if (haveTopographyProfile || !parseUnsigned(value) || value > UINT32_MAX)
+          return false;
+        manifest.topographyProfileVersion = static_cast<uint32_t>(value);
+        haveTopographyProfile = true;
       } else if (key == "labelLanguages") {
         if (haveLanguages || !parseStringArray(manifest.labelLanguages, 3))
           return false;
@@ -509,10 +651,15 @@ private:
                        !haveLanguages && !haveFallback)
                     : (haveLabelProfile && haveLanguages && haveFallback &&
                        manifest.labelProfileVersion == 1 &&
-                       (manifest.formatVersion == 3
+                       ((manifest.formatVersion == 3 ||
+                         manifest.formatVersion == 4)
                             ? haveBuildingProfile &&
                                   manifest.buildingProfileVersion == 1
-                            : !haveBuildingProfile)));
+                            : !haveBuildingProfile) &&
+                       (manifest.formatVersion == 4
+                            ? haveTopographyProfile &&
+                                  manifest.topographyProfileVersion == 1
+                            : !haveTopographyProfile)));
       if (!consume(','))
         return false;
       skipWhitespace();
@@ -670,14 +817,6 @@ bool safeMapPath(std::string_view path, const std::string &mapId,
   filenameOffset = thirdSlash + 1;
   filenameBytes = filename.size();
   return true;
-}
-
-bool lowercaseSha256(const std::string &value) {
-  return value.size() == 64 &&
-         std::all_of(value.begin(), value.end(), [](char character) {
-           return (character >= '0' && character <= '9') ||
-                  (character >= 'a' && character <= 'f');
-         });
 }
 
 bool decodeLowercaseSha256(const std::string &value,
@@ -966,7 +1105,8 @@ bool parseMapStreamManifest(std::string_view manifestText,
     previousPath = path;
   }
   if (((parsed.metadata.formatVersion == 2 ||
-        parsed.metadata.formatVersion == 3) &&
+        parsed.metadata.formatVersion == 3 ||
+        parsed.metadata.formatVersion == 4) &&
        (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
       (parsed.metadata.formatVersion == 1 && fontAssetCount != 0)) {
     return false;

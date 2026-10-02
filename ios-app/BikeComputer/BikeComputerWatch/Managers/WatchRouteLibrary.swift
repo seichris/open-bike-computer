@@ -41,7 +41,8 @@ final class WatchRouteLibrary: ObservableObject {
                     "WatchRoutes",
                     isDirectory: true
                 ),
-                limits: .watch
+                limits: .watch,
+                destination: .watch
             )
         )
     }
@@ -69,7 +70,7 @@ final class WatchRouteLibrary: ObservableObject {
     ) throws -> WatchRouteInstallResultV1 {
         let archive = try NavigationRouteArchiveV1.decode(
             data,
-            purpose: .offlineNavigation,
+            purpose: .watchTransfer,
             now: now()
         )
         guard WatchRouteIdentityV1(archive: archive) == expectedIdentity else {

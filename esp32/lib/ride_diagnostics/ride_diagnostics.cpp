@@ -27,9 +27,14 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <esp_heap_caps.h>
 
 #ifndef PERSISTENT_RIDE_DIAGNOSTICS
 #define PERSISTENT_RIDE_DIAGNOSTICS 0
+#endif
+
+#ifndef DETAILED_RIDE_DIAGNOSTICS
+#define DETAILED_RIDE_DIAGNOSTICS 1
 #endif
 
 namespace ride_diagnostics {
@@ -91,7 +96,32 @@ constexpr std::size_t kFilePruneBatch = 16;
 Storage *storage = nullptr;
 QueueHandle_t normalQueue = nullptr;
 QueueHandle_t criticalQueue = nullptr;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+// Queue control remains in internal RAM. Only task-owned event payloads live
+// in PSRAM; no ISR or flash-cache-disabled path accesses these queues.
+StaticQueue_t normalQueueControl{};
+StaticQueue_t criticalQueueControl{};
+uint8_t *normalQueueEvents = nullptr;
+uint8_t *criticalQueueEvents = nullptr;
+
+QueueHandle_t createEventQueue(UBaseType_t capacity, uint8_t *&events,
+                               StaticQueue_t &control) {
+  events = static_cast<uint8_t *>(heap_caps_malloc(
+      capacity * sizeof(QueuedEvent), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (events == nullptr)
+    return nullptr;
+  QueueHandle_t queue =
+      xQueueCreateStatic(capacity, sizeof(QueuedEvent), events, &control);
+  if (queue == nullptr) {
+    heap_caps_free(events);
+    events = nullptr;
+  }
+  return queue;
+}
+#endif
 TaskHandle_t writerTaskHandle = nullptr;
+std::atomic<bool> recorderResourcesReady{false};
+std::atomic<bool> recorderWriterReady{false};
 SemaphoreHandle_t producerMutex = nullptr;
 SemaphoreHandle_t queueMutationMutex = nullptr;
 SemaphoreHandle_t sealComplete = nullptr;
@@ -121,8 +151,10 @@ std::atomic<uint16_t> maxQueueDepth{0};
 std::atomic<uint16_t> normalQueueCriticalCount{0};
 char activeCapture[48] = {};
 portMUX_TYPE captureMux = portMUX_INITIALIZER_UNLOCKED;
+#if DETAILED_RIDE_DIAGNOSTICS
 std::atomic<bool> detailedCapture{false};
 std::atomic<uint32_t> detailedCaptureDeadlineMs{0};
+#endif
 std::atomic<bool> captureBoundaryPending{false};
 std::atomic<uint32_t> lastMarkerSequence{0};
 char activePath[192] = {};
@@ -669,6 +701,9 @@ void pruneRetention() {
   const uint32_t oldestAllowedBoot =
       newestBoot >= kRetentionBoots - 1 ? newestBoot - (kRetentionBoots - 1) : 0;
   uint64_t totalBytes = 0;
+  uint64_t freeBytes = storage->diagnosticsSdFreeBytes();
+  const storage_policy::Budget budget = storage_policy::budgetForBackend(
+      storage->storageBackend() == StorageBackend::InternalFFat);
   const time_t now = time(nullptr);
   for (std::size_t index = 0; index < count; ++index)
     totalBytes += retentionFiles[index].bytes;
@@ -683,10 +718,14 @@ void pruneRetention() {
         static_cast<uint64_t>(std::max<time_t>(file.modifiedAt, 0)),
         kRetentionDays);
     const bool tooOld = tooOldByBoot || tooOldByDate;
-    if (isActive || (!tooOld && totalBytes <= kRetentionBytes))
+    const bool overBudget = storage_policy::constraintsExceeded(
+        totalBytes, freeBytes, kChunkBytes, budget);
+    if (isActive || (!tooOld && !overBudget))
       continue;
-    if (removeChunkFile(file))
+    if (removeChunkFile(file)) {
       totalBytes -= std::min<uint64_t>(totalBytes, file.bytes);
+      freeBytes = storage->diagnosticsSdFreeBytes();
+    }
   }
   removeEmptyBootDirectories();
 }
@@ -695,8 +734,9 @@ bool hasChunkWriteReserve() {
   if (storage == nullptr || !storage->getDiagnosticsSdLoaded())
     return false;
   const uint64_t freeBytes = storage->diagnosticsSdFreeBytes();
-  return freeBytes == UINT64_MAX ||
-         freeBytes >= kMinimumFreeSpaceBytes + kChunkBytes;
+  const storage_policy::Budget budget = storage_policy::budgetForBackend(
+      storage->storageBackend() == StorageBackend::InternalFFat);
+  return storage_policy::hasWriteReserve(freeBytes, kChunkBytes, budget);
 }
 
 bool prepareChunkWriteReserve() {
@@ -1051,14 +1091,20 @@ void writerTask(void *) {
 
 void startWriterTask() {
 #if PERSISTENT_RIDE_DIAGNOSTICS
-  if (normalQueue != nullptr && criticalQueue != nullptr &&
+  if (recorderResourcesReady.load(std::memory_order_acquire) &&
       writerTaskHandle == nullptr) {
     // Arduino's SPI FatFs backend can busy-wait for up to its card-response
     // timeout inside fopen()/fflush(). Keep that lowest-priority I/O task off
     // CPU0, whose idle task is covered by the production task watchdog, and
     // let the UI/setup task preempt it on CPU1 while a card is recovering.
-    xTaskCreatePinnedToCore(writerTask, "ride_diag_writer", 6144, nullptr, 0,
-                            &writerTaskHandle, 1);
+    const BaseType_t created = xTaskCreatePinnedToCore(
+        writerTask, "ride_diag_writer", 6144, nullptr, 0, &writerTaskHandle, 1);
+    recorderWriterReady.store(created == pdPASS, std::memory_order_release);
+    if (created != pdPASS) {
+      writerTaskHandle = nullptr;
+      Serial.println("RIDE_DIAGNOSTICS: recorder_ready=0 reason=writer_task");
+      updateFaultCapsule(Level::Error, "logger", "writer_unavailable", false);
+    }
   }
 #endif
 }
@@ -1198,7 +1244,9 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   normalQueueCriticalCount.store(0, std::memory_order_release);
   clockAnchorEmitted.store(false);
   checkpointRequested.store(false);
+#if DETAILED_RIDE_DIAGNOSTICS
   detailedCapture.store(false);
+#endif
   lastMarkerSequence.store(0);
 #if PERSISTENT_RIDE_DIAGNOSTICS
   faultCapsuleGeneration.store(0, std::memory_order_release);
@@ -1208,10 +1256,22 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   initializeFaultCapsules();
   lastStorageAvailable.store(storage->getDiagnosticsSdLoaded(),
                              std::memory_order_release);
-  if (normalQueue == nullptr)
+  if (normalQueue == nullptr) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+    normalQueue = createEventQueue(kNormalQueueCapacity, normalQueueEvents,
+                                   normalQueueControl);
+#else
     normalQueue = xQueueCreate(kNormalQueueCapacity, sizeof(QueuedEvent));
-  if (criticalQueue == nullptr)
+#endif
+  }
+  if (criticalQueue == nullptr) {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+    criticalQueue = createEventQueue(kCriticalQueueCapacity,
+                                     criticalQueueEvents, criticalQueueControl);
+#else
     criticalQueue = xQueueCreate(kCriticalQueueCapacity, sizeof(QueuedEvent));
+#endif
+  }
   if (producerMutex == nullptr)
     producerMutex = xSemaphoreCreateMutex();
   if (queueMutationMutex == nullptr)
@@ -1222,6 +1282,16 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
     sealComplete = xSemaphoreCreateBinary();
   if (retentionMutex == nullptr)
     retentionMutex = xSemaphoreCreateMutex();
+  const bool resourcesReady = normalQueue != nullptr && criticalQueue != nullptr &&
+      producerMutex != nullptr && queueMutationMutex != nullptr &&
+      faultCapsuleFlushMutex != nullptr && sealComplete != nullptr &&
+      retentionMutex != nullptr;
+  recorderResourcesReady.store(resourcesReady, std::memory_order_release);
+  if (!resourcesReady) {
+    Serial.println("RIDE_DIAGNOSTICS: recorder_ready=0 reason=resources");
+    updateFaultCapsule(Level::Error, "logger", "resources_unavailable", false);
+    return;
+  }
   char fields[320] = {};
   snprintf(fields, sizeof(fields),
            "{\"runtimeBootSequence\":%lu,\"firmwareTarget\":\"%s\",\"firmwareBuild\":%lu}",
@@ -1243,12 +1313,17 @@ void startWriter() {
 #endif
 }
 
+bool recorderReady() {
+  return recorderResourcesReady.load(std::memory_order_acquire) &&
+         recorderWriterReady.load(std::memory_order_acquire);
+}
+
 void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe) {
   storageRecoveryAllowedProbe = probe;
 }
 
 void process(uint32_t nowMs) {
-#if PERSISTENT_RIDE_DIAGNOSTICS
+#if PERSISTENT_RIDE_DIAGNOSTICS && DETAILED_RIDE_DIAGNOSTICS
   // The writer task owns file handles. This hook is intentionally tiny so it
   // can be called from the LVGL loop without adding storage latency there.
   const DetailedCaptureLease lease = detailedCaptureLease();
@@ -1381,19 +1456,20 @@ bool recordHealth(const char *reason) {
   if (reason == nullptr || !validToken(reason, 32))
     return false;
   const Stats snapshot = stats();
-  char fields[256] = {};
+  char fields[288] = {};
   snprintf(fields, sizeof(fields),
            "{\"reason\":\"%s\",\"enqueuedCount\":%lu,"
            "\"writtenCount\":%lu,\"droppedCount\":%lu,"
            "\"storageErrorCount\":%lu,\"queueDepth\":%u,"
-           "\"maxQueueDepth\":%u,\"available\":%s}",
+           "\"maxQueueDepth\":%u,\"available\":%s,\"recorderReady\":%s}",
            reason, static_cast<unsigned long>(snapshot.enqueued),
            static_cast<unsigned long>(snapshot.written),
            static_cast<unsigned long>(snapshot.dropped),
            static_cast<unsigned long>(snapshot.storageErrors),
            static_cast<unsigned>(snapshot.queueDepth),
            static_cast<unsigned>(snapshot.maxQueueDepth),
-           snapshot.storageAvailable ? "true" : "false");
+           snapshot.storageAvailable ? "true" : "false",
+           snapshot.recorderReady ? "true" : "false");
   return record(Level::Info, "logger", "health", fields);
 }
 
@@ -1424,15 +1500,19 @@ bool markIssue(const char *code, uint32_t markerSequence) {
 bool bindCapture(const char *captureID, bool detailed) {
   if (!validCaptureID(captureID))
     return false;
-#if !defined(RIDE_AUTOMATION_SHADOW)
+#if !defined(RIDE_AUTOMATION_SHADOW) || !DETAILED_RIDE_DIAGNOSTICS
   if (detailed)
     return false;
+#endif
+#if !DETAILED_RIDE_DIAGNOSTICS
+  detailed = false;
 #endif
   char previousCapture[48] = {};
   // The desired capture/mode is session state, not a storage operation. Apply
   // it even while the SD writer is busy or the card is temporarily absent;
   // the first successfully queued record will enforce the pending boundary.
   portENTER_CRITICAL(&captureMux);
+#if DETAILED_RIDE_DIAGNOSTICS
   const bool previousDetailed =
       detailedCapture.load(std::memory_order_relaxed);
   strncpy(previousCapture, activeCapture, sizeof(previousCapture) - 1);
@@ -1443,6 +1523,11 @@ bool bindCapture(const char *captureID, bool detailed) {
       captureID,
       detailed ? control::CaptureMode::Detailed
                : control::CaptureMode::Standard);
+#else
+  strncpy(previousCapture, activeCapture, sizeof(previousCapture) - 1);
+  const bool requiresBoundary =
+      std::strcmp(previousCapture, captureID) != 0;
+#endif
   if (requiresBoundary)
     captureBoundaryPending.store(true, std::memory_order_relaxed);
   strncpy(activeCapture, captureID, sizeof(activeCapture) - 1);
@@ -1450,6 +1535,7 @@ bool bindCapture(const char *captureID, bool detailed) {
   ++captureGeneration;
   if (captureGeneration == 0)
     captureGeneration = 1;
+#if DETAILED_RIDE_DIAGNOSTICS
   const uint32_t nextDetailedDeadline =
       capture_policy::detailedCaptureDeadlineAfterBinding(
           millis(),
@@ -1458,6 +1544,7 @@ bool bindCapture(const char *captureID, bool detailed) {
   detailedCaptureDeadlineMs.store(nextDetailedDeadline,
                                   std::memory_order_relaxed);
   detailedCapture.store(detailed, std::memory_order_relaxed);
+#endif
   const uint32_t previousMarkerSequence = lastMarkerSequence.load();
   lastMarkerSequence.store(control::markerSequenceAfterBinding(
       previousCapture, captureID, previousMarkerSequence));
@@ -1468,8 +1555,12 @@ bool bindCapture(const char *captureID, bool detailed) {
     const bool ready = initializePersistentBootSequenceIfNeeded();
     const bool enqueued = ready && enqueueEventWithProducerLockHeld(
         Level::Info, "transfer", "capture_bound",
-        detailed ? "{\"active\":true}" : "{\"active\":false}", false,
-        0, 0, captureID);
+#if DETAILED_RIDE_DIAGNOSTICS
+        detailed ? "{\"active\":true}" : "{\"active\":false}",
+#else
+        "{\"active\":false}",
+#endif
+        false, 0, 0, captureID);
     xSemaphoreGive(producerMutex);
     if (!enqueued)
       updateFaultCapsule(Level::Warning, "transfer", "capture_bound", false);
@@ -1487,6 +1578,7 @@ bool clearCaptureInternal(const DetailedCaptureLease *expected) {
   // Boundary evidence is durable best-effort, but a contended queue must
   // never leave the matching detailed telemetry active.
   portENTER_CRITICAL(&captureMux);
+#if DETAILED_RIDE_DIAGNOSTICS
   if (expected != nullptr &&
       !capture_policy::detailedCaptureLeaseMatches(
           activeCapture, captureGeneration,
@@ -1496,10 +1588,15 @@ bool clearCaptureInternal(const DetailedCaptureLease *expected) {
     portEXIT_CRITICAL(&captureMux);
     return false;
   }
+#else
+  (void)expected;
+#endif
   strncpy(previousCapture, activeCapture, sizeof(previousCapture) - 1);
   activeCapture[0] = '\0';
+#if DETAILED_RIDE_DIAGNOSTICS
   detailedCaptureDeadlineMs.store(0, std::memory_order_relaxed);
   detailedCapture.store(false, std::memory_order_relaxed);
+#endif
   lastMarkerSequence.store(0, std::memory_order_relaxed);
   ++captureGeneration;
   if (captureGeneration == 0)
@@ -1530,6 +1627,9 @@ bool clearCaptureInternal(const DetailedCaptureLease *expected) {
 void clearCapture() { (void)clearCaptureInternal(nullptr); }
 
 DetailedCaptureLease detailedCaptureLease() {
+#if !DETAILED_RIDE_DIAGNOSTICS
+  return {};
+#else
   DetailedCaptureLease lease;
   portENTER_CRITICAL(&captureMux);
   lease.active = detailedCapture.load(std::memory_order_relaxed);
@@ -1539,17 +1639,26 @@ DetailedCaptureLease detailedCaptureLease() {
   lease.captureId[sizeof(lease.captureId) - 1] = '\0';
   portEXIT_CRITICAL(&captureMux);
   return lease;
+#endif
 }
 
 bool clearCaptureIfMatches(const DetailedCaptureLease &lease) {
+#if !DETAILED_RIDE_DIAGNOSTICS
+  (void)lease;
+  return false;
+#else
   if (!lease.active)
     return false;
   return clearCaptureInternal(&lease);
+#endif
 }
 
 const char *captureId() { return activeCapture; }
 
 bool detailedCaptureEnabled() {
+#if !DETAILED_RIDE_DIAGNOSTICS
+  return false;
+#else
   portENTER_CRITICAL(&captureMux);
   const bool detailed = detailedCapture.load(std::memory_order_relaxed);
   const uint32_t deadline =
@@ -1558,6 +1667,7 @@ bool detailedCaptureEnabled() {
   if (!detailed)
     return false;
   return !capture_policy::detailedCaptureExpired(millis(), deadline);
+#endif
 }
 
 transfer_policy::SealPreparation
@@ -1697,14 +1807,28 @@ bool prepareForShutdown(uint32_t timeoutMs) {
 #endif
 }
 
-void beginTransferSnapshotLease(uint32_t durationMs) {
-  SemaphoreGuard retentionGuard(retentionMutex);
+void armTransferSnapshotLease(uint32_t durationMs) {
   const uint32_t bounded = std::min<uint32_t>(
       std::max<uint32_t>(durationMs, 30U * 1000U), 15U * 60U * 1000U);
   uint32_t deadline = millis() + bounded;
   if (deadline == 0)
     deadline = 1;
+  // Publish the lease without waiting behind a retention scan. The writer is
+  // the sole pruning owner, and a transfer seal cannot complete until any
+  // scan that started before this store has returned to the writer loop.
+  // Every later prune observes the lease before touching closed chunks. This
+  // lets diagnostics acquire the snapshot boundary before requesting its
+  // seal, rather than putting a full retained-directory scan inside the
+  // bounded seal deadline.
   retentionLeaseDeadlineMs.store(deadline, std::memory_order_release);
+}
+
+void beginTransferSnapshotLease(uint32_t durationMs) {
+  // Index creation has no writer-owned seal to serve as its synchronization
+  // point, so wait for any pre-existing prune before refreshing the lease and
+  // enumerating closed chunks.
+  SemaphoreGuard retentionGuard(retentionMutex);
+  armTransferSnapshotLease(durationMs);
 }
 
 void refreshTransferSnapshotLease(uint32_t durationMs) {
@@ -1712,7 +1836,6 @@ void refreshTransferSnapshotLease(uint32_t durationMs) {
 }
 
 void endTransferSnapshotLease() {
-  SemaphoreGuard retentionGuard(retentionMutex);
   retentionLeaseDeadlineMs.store(0, std::memory_order_release);
 }
 
@@ -1725,6 +1848,7 @@ Stats stats() {
       queuedDepth(),
       maxQueueDepth.load(),
       storage != nullptr && storage->getDiagnosticsSdLoaded(),
+      recorderReady(),
   };
 }
 

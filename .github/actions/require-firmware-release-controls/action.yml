@@ -1,0 +1,32 @@
+name: Require firmware release authority
+description: Fail before signing unless the explicit review policy, environment key scopes, branch and tag controls match
+inputs:
+  app-id:
+    required: true
+    description: Repository-scoped preflight App ID (Administration write is required for ruleset actor read-back)
+  private-key:
+    required: true
+    description: Environment-scoped preflight App private key
+runs:
+  using: composite
+  steps:
+    - id: preflight-token
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ github.event.repository.name }}
+        # GitHub redacts ruleset bypass_actors unless the caller has write
+        # access to the ruleset. The script only reads metadata and has no
+        # mutation endpoint; this is the minimum permission that exposes the
+        # configured actor for the fail-closed check.
+        permission-administration: write
+        permission-environments: read
+        permission-secrets: read
+        permission-contents: read
+        permission-actions: read
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ steps.preflight-token.outputs.token }}
+      run: python3 .github/scripts/firmware_release_controls.py --repository "${GITHUB_REPOSITORY}"

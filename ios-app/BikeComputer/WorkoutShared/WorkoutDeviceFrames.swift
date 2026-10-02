@@ -56,6 +56,7 @@ nonisolated struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
     let sessionID: UUID?
     let detectorProfileVersion: UInt16?
     let lastTransitionOrigin: WorkoutTransitionOrigin?
+    let zoneContext: WorkoutZoneDeviceContextV1?
 
     init(
         state: WorkoutDeviceSessionState,
@@ -78,7 +79,8 @@ nonisolated struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
         wallElapsedSeconds: Double? = nil,
         sessionID: UUID? = nil,
         detectorProfileVersion: UInt16? = nil,
-        lastTransitionOrigin: WorkoutTransitionOrigin? = nil
+        lastTransitionOrigin: WorkoutTransitionOrigin? = nil,
+        zoneContext: WorkoutZoneDeviceContextV1? = nil
     ) {
         self.state = state
         self.sessionToken = sessionToken
@@ -101,11 +103,12 @@ nonisolated struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
         self.sessionID = sessionID
         self.detectorProfileVersion = detectorProfileVersion
         self.lastTransitionOrigin = lastTransitionOrigin
+        self.zoneContext = zoneContext
     }
 }
 
 /// Canonical, platform-neutral translation from a validated workout snapshot
-/// to the three device telemetry frames. Callers decide whether the snapshot
+/// to the legacy device telemetry frames plus an optional versioned zone context. Callers decide whether the snapshot
 /// is current and whether its numerics remain live; metric validation, source
 /// attribution, and terminal-value preservation live here for both iPhone and
 /// Watch direct-BLE paths.
@@ -136,11 +139,18 @@ nonisolated enum WorkoutDeviceTelemetrySampleMapperV1 {
         isCurrentSnapshot: Bool
     ) -> WorkoutDeviceTelemetrySample? {
         guard state != .idle, sessionToken != 0 else { return nil }
+        let zoneContext = snapshot.flatMap { snapshot in
+            sessionID.map { WorkoutZoneDeviceContextV1(
+                snapshot: snapshot, sessionID: $0, sessionToken: sessionToken,
+                state: state, isCurrent: isCurrentSnapshot && hasLiveNumerics
+            ) }
+        }
         guard hasLiveNumerics else {
             return emptySample(
                 state: state,
                 sessionToken: sessionToken,
-                isCurrentSnapshot: isCurrentSnapshot
+                isCurrentSnapshot: isCurrentSnapshot,
+                zoneContext: zoneContext
             )
         }
         guard let snapshot else { return nil }
@@ -211,14 +221,16 @@ nonisolated enum WorkoutDeviceTelemetrySampleMapperV1 {
             ),
             sessionID: sessionID,
             detectorProfileVersion: snapshot.detectorProfileVersion,
-            lastTransitionOrigin: snapshot.lastTransitionOrigin
+            lastTransitionOrigin: snapshot.lastTransitionOrigin,
+            zoneContext: zoneContext
         )
     }
 
     static func emptySample(
         state: WorkoutDeviceSessionState,
         sessionToken: UInt16,
-        isCurrentSnapshot: Bool = false
+        isCurrentSnapshot: Bool = false,
+        zoneContext: WorkoutZoneDeviceContextV1? = nil
     ) -> WorkoutDeviceTelemetrySample {
         WorkoutDeviceTelemetrySample(
             state: state,
@@ -241,7 +253,8 @@ nonisolated enum WorkoutDeviceTelemetrySampleMapperV1 {
             wallElapsedSeconds: nil,
             sessionID: nil,
             detectorProfileVersion: nil,
-            lastTransitionOrigin: nil
+            lastTransitionOrigin: nil,
+            zoneContext: zoneContext
         )
     }
 
@@ -266,6 +279,16 @@ nonisolated struct WorkoutDeviceGPSUpdate: Equatable, Sendable {
     let elapsedSeconds: TimeInterval?
 }
 
+nonisolated struct WorkoutDeviceMotionUpdate: Equatable, Sendable {
+    let sessionToken: UInt16
+    let capturedAt: Date
+    let speedMetersPerSecond: Double
+    let horizontalAccuracyMeters: Double
+    let sampleEpoch: UInt16
+    let sampleSequence: UInt32
+    let automaticallyPaused: Bool
+}
+
 nonisolated struct WorkoutDeviceFrames: Equatable, Sendable {
     struct Identity: Equatable, Sendable {
         let state: WorkoutDeviceSessionState
@@ -278,6 +301,7 @@ nonisolated struct WorkoutDeviceFrames: Equatable, Sendable {
     let extended: Data
     let origin: Data
     let originAvailable: Bool
+    let zoneContext: WorkoutZoneDeviceContextV1?
     let identity: Identity
 }
 
@@ -327,6 +351,11 @@ nonisolated enum WorkoutDeviceFrameBuilder {
     static let unavailableUInt16 = UInt16.max
     static let unavailableUInt32 = UInt32.max
     static let unavailableAltitude = Int16.min
+    private static let watchMotionFixValid: UInt8 = 1 << 0
+    private static let watchMotionSpeedAvailable: UInt8 = 1 << 1
+    private static let watchMotionAccuracyAvailable: UInt8 = 1 << 2
+    private static let watchMotionCurrentSample: UInt8 = 1 << 3
+    private static let watchMotionAutomaticallyPaused: UInt8 = 1 << 4
     private static let metricSourceFlagsMask: UInt8 = 0x1F
 
     static func frames(
@@ -421,6 +450,7 @@ nonisolated enum WorkoutDeviceFrameBuilder {
             extended: extended,
             origin: origin ?? Data(),
             originAvailable: origin != nil,
+            zoneContext: sample.zoneContext,
             identity: .init(
                 state: sample.state,
                 sessionToken: sample.sessionToken,
@@ -468,6 +498,89 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         )
     }
 
+    /// Dedicated raw Watch-location evidence for device ride automation.
+    /// This intentionally does not use the source-selected workout speed.
+    static func watchMotionFrame(
+        for snapshot: WorkoutSnapshotV1,
+        sessionToken: UInt16,
+        sentAt: Date
+    ) -> Data? {
+        guard let update = watchMotionUpdate(
+            for: snapshot,
+            sessionToken: sessionToken
+        ) else {
+            return nil
+        }
+        return watchMotionFrame(for: update, sentAt: sentAt)
+    }
+
+    static func watchMotionUpdate(
+        for snapshot: WorkoutSnapshotV1,
+        sessionToken: UInt16
+    ) -> WorkoutDeviceMotionUpdate? {
+        guard sessionToken != 0,
+              snapshot.state == .running || snapshot.state == .paused,
+              let location = snapshot.location,
+              let epoch = location.motionSampleEpoch,
+              epoch != 0,
+              let sequence = location.motionSampleSequence,
+              sequence != 0,
+              let speed = finiteValue(
+                location.speed,
+                acceptedBy: { $0 >= 0 }
+              ),
+              location.horizontalAccuracy.isFinite,
+              location.horizontalAccuracy >= 0 else {
+            return nil
+        }
+        return WorkoutDeviceMotionUpdate(
+            sessionToken: sessionToken,
+            capturedAt: location.capturedAt,
+            speedMetersPerSecond: speed,
+            horizontalAccuracyMeters: location.horizontalAccuracy,
+            sampleEpoch: epoch,
+            sampleSequence: sequence,
+            automaticallyPaused: snapshot.state == .paused &&
+                snapshot.pauseOrigin == .automatic
+        )
+    }
+
+    static func watchMotionFrame(
+        for update: WorkoutDeviceMotionUpdate,
+        sentAt: Date
+    ) -> Data? {
+        let sampleAge = sentAt.timeIntervalSince(update.capturedAt)
+        let sampleAgeMilliseconds = (sampleAge * 1_000).rounded()
+        guard sampleAgeMilliseconds.isFinite,
+              sampleAgeMilliseconds >= 0,
+              sampleAgeMilliseconds <= Double(unavailableUInt16 - 1) else {
+            return nil
+        }
+        var flags = watchMotionFixValid
+            | watchMotionSpeedAvailable
+            | watchMotionAccuracyAvailable
+            | watchMotionCurrentSample
+        if update.automaticallyPaused {
+            flags |= watchMotionAutomaticallyPaused
+        }
+        var frame = Data(capacity: frameLength)
+        frame.append(4)
+        frame.append(flags)
+        frame.appendUInt16LE(update.sessionToken)
+        frame.appendUInt32LE(update.sampleSequence)
+        frame.appendUInt16LE(encodeUInt16(
+            update.speedMetersPerSecond,
+            scale: 100
+        ))
+        frame.appendUInt16LE(encodeUInt16(
+            update.horizontalAccuracyMeters,
+            scale: 10
+        ))
+        frame.appendUInt16LE(UInt16(sampleAgeMilliseconds))
+        frame.appendUInt16LE(update.sampleEpoch)
+        return frame.count == frameLength ? frame : nil
+    }
+
     static func stampedPair(
         core: Data,
         extended: Data,
@@ -491,7 +604,9 @@ nonisolated enum WorkoutDeviceFrameBuilder {
     static func transportFrames(
         for frames: WorkoutDeviceFrames,
         generation: UInt8,
-        includeOrigin: Bool = false
+        includeOrigin: Bool = false,
+        zoneSequence: UInt32 = 0,
+        at now: Date = Date()
     ) -> [Data] {
         if frames.identity.state == .idle {
             return [frames.core]
@@ -504,6 +619,9 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         var result = [stamped.core, stamped.extended]
         if includeOrigin, frames.originAvailable {
             result.append(frames.origin)
+        }
+        if includeOrigin && frames.originAvailable && zoneSequence != 0 {
+            result += WorkoutZoneDeviceCodecV1.packets(for: frames.zoneContext, sequence: zoneSequence, pairGeneration: generation, at: now)
         }
         return result
     }
@@ -518,14 +636,13 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         }
         let pauseOrigin: UInt8
         if sample.state == .paused {
-            pauseOrigin = sample.pauseOrigin?.rawValue ?? 0
+            pauseOrigin = encodedOrigin(sample.pauseOrigin)
         } else {
             pauseOrigin = 0
         }
         let profileVersion = sample.detectorProfileVersion ?? 0
-        let lastOrigin = sample.lastTransitionOrigin?.rawValue ?? 0
-        if (pauseOrigin == WorkoutTransitionOrigin.automatic.rawValue
-                || lastOrigin == WorkoutTransitionOrigin.automatic.rawValue),
+        let lastOrigin = encodedOrigin(sample.lastTransitionOrigin)
+        if (pauseOrigin == 2 || lastOrigin == 2),
            profileVersion == 0 {
             return nil
         }
@@ -541,6 +658,20 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         origin.append(0)
         guard origin.count == originFrameLength else { return nil }
         return origin
+    }
+
+    /// Wire zero means absent/pending, so the canonical `.unknown` case needs
+    /// its own value instead of being collapsed with nil.
+    private static func encodedOrigin(
+        _ origin: WorkoutTransitionOrigin?
+    ) -> UInt8 {
+        switch origin {
+        case nil: 0
+        case .manual: 1
+        case .automatic: 2
+        case .system: 3
+        case .unknown: 4
+        }
     }
 
     private static func encodeUInt16(

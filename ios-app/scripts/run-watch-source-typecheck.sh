@@ -15,6 +15,16 @@ case "${ARCH}" in
     ;;
 esac
 
+SDK_VERSION="$(xcrun --sdk watchsimulator --show-sdk-version)"
+NATIVE_ZONE_FLAG=""
+case "${SDK_VERSION}" in
+  27|27.*) NATIVE_ZONE_FLAG="-DBICINO_HEALTHKIT_WORKOUT_ZONES" ;;
+  *)
+    echo "Native HealthKit zone adapter NOT checked: watchOS SDK ${SDK_VERSION} is not 27."
+    if [[ "${REQUIRE_NATIVE_HEALTHKIT_ZONES:-0}" == 1 ]]; then exit 69; fi
+    ;;
+esac
+
 cd "${REPO_DIR}"
 find \
   ios-app/BikeComputer/BikeComputerWatch \
@@ -24,6 +34,7 @@ find \
   xargs -0 xcrun swiftc \
     -typecheck \
     -parse-as-library \
+    ${NATIVE_ZONE_FLAG:+"${NATIVE_ZONE_FLAG}"} \
     -target "${ARCH}-apple-watchos11.0-simulator" \
     -sdk "${WATCH_SDK_PATH}"
 

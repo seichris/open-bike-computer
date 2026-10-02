@@ -15,5 +15,7 @@ const char *gitSha();
 bool hasImmutableGitIdentity();
 const char *buildTimestamp();
 std::string json();
+// Small enough for the existing persistent diagnostics fields budget.
+std::string bootAcceptanceJson(bool ready, const char *otaState);
 
 } // namespace firmware_metadata

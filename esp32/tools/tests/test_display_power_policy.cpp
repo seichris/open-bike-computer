@@ -12,6 +12,8 @@
 struct FakePreferences {
   bool hasValue = false;
   bool value = false;
+  bool hasTimeoutsValue = false;
+  uint32_t timeoutsValue = 0;
   bool opened = false;
   bool readOnly = true;
   const char *lastKey = nullptr;
@@ -27,10 +29,14 @@ struct FakePreferences {
 
   bool isKey(const char *key) {
     lastKey = key;
-    assert(std::strcmp(key,
-                       display_power::kAutomaticDisplayOffPreferencesKey) ==
-           0);
-    return hasValue;
+    if (std::strcmp(key,
+                    display_power::kAutomaticDisplayOffPreferencesKey) == 0) {
+      return hasValue;
+    }
+    assert(std::strcmp(
+               key,
+               display_power::kDisplayInactivityTimeoutsPreferencesKey) == 0);
+    return hasTimeoutsValue;
   }
   bool getBool(const char *key, bool fallback) {
     lastKey = key;
@@ -48,15 +54,42 @@ struct FakePreferences {
     value = nextValue;
     return 1;
   }
+  uint32_t getUInt(const char *key, uint32_t fallback) {
+    lastKey = key;
+    assert(std::strcmp(
+               key,
+               display_power::kDisplayInactivityTimeoutsPreferencesKey) == 0);
+    return hasTimeoutsValue ? timeoutsValue : fallback;
+  }
+  size_t putUInt(const char *key, uint32_t nextValue) {
+    lastKey = key;
+    assert(std::strcmp(
+               key,
+               display_power::kDisplayInactivityTimeoutsPreferencesKey) == 0);
+    hasTimeoutsValue = true;
+    timeoutsValue = nextValue;
+    return 4;
+  }
 };
 
 struct FakeDisplayPowerManager {
   int requestCount = 0;
+  int timeoutRequestCount = 0;
   bool enabled = true;
+  uint16_t dimAfterSeconds = 0;
+  uint16_t displayOffAfterSeconds = 0;
 
   bool requestAutomaticDisplayOff(bool nextEnabled) {
     ++requestCount;
     enabled = nextEnabled;
+    return true;
+  }
+
+  bool requestDisplayInactivityTimeouts(uint16_t nextDimAfterSeconds,
+                                        uint16_t nextDisplayOffAfterSeconds) {
+    ++timeoutRequestCount;
+    dimAfterSeconds = nextDimAfterSeconds;
+    displayOffAfterSeconds = nextDisplayOffAfterSeconds;
     return true;
   }
 };
@@ -67,9 +100,13 @@ int main() {
   using display_power::State;
 
   static_assert(display_power::kAutomaticDisplayOffSettingID == 36);
+  static_assert(display_power::kDisplayInactivityTimeoutsSettingID == 38);
   static_assert(display_power::kDefaultAutomaticDisplayOffEnabled);
   static_assert(sizeof(display_power::kAutomaticDisplayOffPreferencesKey) - 1 <=
                 15);
+  static_assert(
+      sizeof(display_power::kDisplayInactivityTimeoutsPreferencesKey) - 1 <=
+      15);
   static_assert(sizeof(display_power::kDeviceSettingsPreferencesNamespace) - 1 <=
                 15);
   static_assert(display_power::isBooleanSettingValue(0));
@@ -91,12 +128,52 @@ int main() {
       preferences, hasSavedAutomaticDisplayOff));
   assert(hasSavedAutomaticDisplayOff);
 
+  static_assert(display_power::areInactivityTimeoutsValid(15, 45));
+  static_assert(display_power::areInactivityTimeoutsValid(600, 3'600));
+  static_assert(!display_power::areInactivityTimeoutsValid(4, 45));
+  static_assert(!display_power::areInactivityTimeoutsValid(15, 19));
+  static_assert(!display_power::areInactivityTimeoutsValid(15, 3'601));
+  constexpr uint32_t defaultTimeouts =
+      display_power::encodeInactivityTimeouts(15, 45);
+  static_assert(defaultTimeouts == 0x002D000FU);
+  display_power::InactivityTimeouts decodedTimeouts;
+  assert(display_power::decodeInactivityTimeouts(
+      static_cast<int32_t>(defaultTimeouts), decodedTimeouts));
+  assert(decodedTimeouts.dimAfterSeconds == 15);
+  assert(decodedTimeouts.displayOffAfterSeconds == 45);
+  assert(!display_power::decodeInactivityTimeouts(
+      static_cast<int32_t>(display_power::encodeInactivityTimeouts(45, 45)),
+      decodedTimeouts));
+
+  bool hasSavedDisplayInactivityTimeouts = false;
+  const auto firstBootTimeouts = display_power::loadDisplayInactivityTimeouts(
+      preferences, hasSavedDisplayInactivityTimeouts);
+  assert(!hasSavedDisplayInactivityTimeouts);
+  assert(firstBootTimeouts.dimAfterSeconds == 15);
+  assert(firstBootTimeouts.displayOffAfterSeconds == 45);
+  assert(display_power::persistDisplayInactivityTimeouts(preferences, 30, 120));
+  const auto restoredTimeouts = display_power::loadDisplayInactivityTimeouts(
+      preferences, hasSavedDisplayInactivityTimeouts);
+  assert(hasSavedDisplayInactivityTimeouts);
+  assert(restoredTimeouts.dimAfterSeconds == 30);
+  assert(restoredTimeouts.displayOffAfterSeconds == 120);
+
   FakeDisplayPowerManager manager;
   assert(!display_power::applyAutomaticDisplayOffSetting(manager, 2));
   assert(manager.requestCount == 0);
   assert(display_power::applyAutomaticDisplayOffSetting(manager, 0));
   assert(manager.requestCount == 1);
   assert(!manager.enabled);
+  assert(!display_power::applyInactivityTimeoutsSetting(
+      manager, static_cast<int32_t>(
+                   display_power::encodeInactivityTimeouts(60, 45))));
+  assert(manager.timeoutRequestCount == 0);
+  assert(display_power::applyInactivityTimeoutsSetting(
+      manager, static_cast<int32_t>(
+                   display_power::encodeInactivityTimeouts(30, 120))));
+  assert(manager.timeoutRequestCount == 1);
+  assert(manager.dimAfterSeconds == 30);
+  assert(manager.displayOffAfterSeconds == 120);
 
   static_assert(!display_power::isBrightnessPercentInRange(4));
   static_assert(display_power::isBrightnessPercentInRange(5));
