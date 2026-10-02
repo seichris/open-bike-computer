@@ -42,6 +42,8 @@ bool DisplayPowerManager::begin() {
   bool hasSavedAutomaticDisplayOff = false;
   bool automaticDisplayOff =
       display_power::kDefaultAutomaticDisplayOffEnabled;
+  bool hasSavedDisplayInactivityTimeouts = false;
+  display_power::InactivityTimeouts displayInactivityTimeouts;
   if (display_power::beginDeviceSettingsPreferences(preferences)) {
     hasSavedValue = preferences.isKey(kBrightnessKey);
     if (hasSavedValue) {
@@ -50,6 +52,8 @@ bool DisplayPowerManager::begin() {
     }
     automaticDisplayOff = display_power::loadAutomaticDisplayOff(
         preferences, hasSavedAutomaticDisplayOff);
+    displayInactivityTimeouts = display_power::loadDisplayInactivityTimeouts(
+        preferences, hasSavedDisplayInactivityTimeouts);
     preferences.end();
   } else {
     Serial.println("DisplayPower: failed to open device settings NVS");
@@ -60,6 +64,10 @@ bool DisplayPowerManager::begin() {
       hasSavedValue && display_power::isBrightnessPercentInRange(savedValue);
   automaticDisplayOffEnabled_ = automaticDisplayOff;
   automaticDisplayOffPersisted_ = hasSavedAutomaticDisplayOff;
+  dimAfterSeconds_ = displayInactivityTimeouts.dimAfterSeconds;
+  displayOffAfterSeconds_ =
+      displayInactivityTimeouts.displayOffAfterSeconds;
+  displayInactivityTimeoutsPersisted_ = hasSavedDisplayInactivityTimeouts;
   initialized_ = true;
   return true;
 }
@@ -138,6 +146,50 @@ bool DisplayPowerManager::requestAutomaticDisplayOff(bool enabled) {
   return persisted;
 }
 
+bool DisplayPowerManager::requestDisplayInactivityTimeouts(
+    uint16_t dimAfterSeconds, uint16_t displayOffAfterSeconds) {
+  if (!display_power::areInactivityTimeoutsValid(dimAfterSeconds,
+                                                 displayOffAfterSeconds)) {
+    return false;
+  }
+  if (!initialized_ && !begin()) {
+    return false;
+  }
+  if (!lock()) {
+    return false;
+  }
+
+  if (displayInactivityTimeoutsPersisted_ &&
+      dimAfterSeconds_ == dimAfterSeconds &&
+      displayOffAfterSeconds_ == displayOffAfterSeconds) {
+    unlock();
+    return true;
+  }
+
+  Preferences preferences;
+  const bool opened =
+      display_power::beginDeviceSettingsPreferences(preferences);
+  const bool persisted =
+      opened && display_power::persistDisplayInactivityTimeouts(
+                    preferences, dimAfterSeconds, displayOffAfterSeconds);
+  if (opened) {
+    preferences.end();
+  }
+  if (persisted) {
+    dimAfterSeconds_ = dimAfterSeconds;
+    displayOffAfterSeconds_ = displayOffAfterSeconds;
+    displayInactivityTimeoutsPersisted_ = true;
+  }
+  unlock();
+
+  if (!persisted) {
+    Serial.println("DisplayPower: failed to persist inactivity timeouts");
+  } else {
+    ui_scheduler::notify(ui_scheduler::WakeReason::Display);
+  }
+  return persisted;
+}
+
 void DisplayPowerManager::requestState(display_power::State state) {
   if (!initialized_ && !begin()) {
     return;
@@ -185,6 +237,17 @@ bool DisplayPowerManager::automaticDisplayOffEnabled() const {
     return display_power::kDefaultAutomaticDisplayOffEnabled;
   }
   const bool value = automaticDisplayOffEnabled_;
+  unlock();
+  return value;
+}
+
+display_power::InactivityTimeouts
+DisplayPowerManager::displayInactivityTimeouts() const {
+  if (!lock()) {
+    return {};
+  }
+  const display_power::InactivityTimeouts value{dimAfterSeconds_,
+                                                displayOffAfterSeconds_};
   unlock();
   return value;
 }

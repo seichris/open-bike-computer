@@ -1,0 +1,56 @@
+name: Firmware cache qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualification:
+        description: Cache qualification coverage
+        type: choice
+        default: full
+        options:
+          - full
+          - macos
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-cache-qualification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    name: Cache (${{ matrix.runner }}, ${{ matrix.environment }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.qualification == 'macos' && '["macos-15"]' || '["ubuntu-24.04", "macos-15"]') }}
+        environment: ${{ fromJSON(inputs.qualification == 'macos' && '["WAVESHARE_AMOLED_175"]' || '["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_175_PRODUCTION", "WAVESHARE_AMOLED_206", "WAVESHARE_AMOLED_206_PRODUCTION"]') }}
+    runs-on: ${{ matrix.runner }}
+    # Native macOS runs need about 45 minutes before the relocated application
+    # compilation. Leave room for that final build and evidence cleanup.
+    timeout-minutes: 90
+    steps:
+      - name: Validate qualification coverage
+        env:
+          QUALIFICATION: ${{ inputs.qualification }}
+        run: |
+          case "$QUALIFICATION" in
+            macos|full) ;;
+            *) echo "::error::Unsupported cache qualification: $QUALIFICATION"; exit 1 ;;
+          esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Qualify cold, warm, source-only and relocated builds
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.environment }}
+        run: |
+          env -u LD_LIBRARY_PATH python3 esp32/tools/benchmark_firmware_cache.py \
+            "$BUILD_ENVIRONMENT" --output "$RUNNER_TEMP/cache-evidence/results.json"
+      - name: Retain timing and identity evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: firmware-cache-${{ matrix.runner }}-${{ matrix.environment }}
+          path: ${{ runner.temp }}/cache-evidence/
+          if-no-files-found: error
+          retention-days: 30

@@ -32,11 +32,24 @@ def method_body(name: str) -> str:
 
 
 class MapActivationHandoffTests(unittest.TestCase):
-    def test_response_completion_reuses_transfer_worker(self):
+    def test_response_completion_uses_internal_operation_owner(self):
         body = method_body("beginDeferredActivation")
-        self.assertIn("executeActivation(", body)
+        self.assertIn("runMapActivation(ownedActivation", body)
+        self.assertNotIn("executeActivation(", body)
         self.assertNotIn("startActivationTask(", body)
         self.assertNotIn("xTaskCreate(", body)
+
+    def test_verified_stream_response_closes_before_activation_handoff(self):
+        body = method_body("handleInstallStream")
+        close = body.index("client.requestHttpResponseClose();")
+        success = body.index("sendJson(client, 200,", close)
+        defer = body.index("deferActivationUntilResponse(", success)
+        self.assertLess(close, success)
+        self.assertLess(success, defer)
+        completion = DEVICE_TRANSFER_SOURCE.index(
+            "handler->responseDidComplete(request, peerClosedCleanly);"
+        )
+        self.assertIn("if (keepAlive)", DEVICE_TRANSFER_SOURCE[:completion])
 
     def test_unsigned_archive_routes_are_rejected(self):
         body = method_body("handleRequest")
@@ -52,33 +65,37 @@ class MapActivationHandoffTests(unittest.TestCase):
             method_body("resumePendingStreamActivation"),
         )
 
-    def test_inline_and_recovery_paths_share_activation_execution(self):
+    def test_owned_and_recovery_paths_share_activation_execution(self):
         self.assertIn(
-            "executeActivation(", method_body("beginDeferredActivation")
+            "executeActivation(", method_body("ownedActivation")
         )
         self.assertIn("executeActivation(", method_body("activationTaskThunk"))
 
-    def test_transfer_worker_retains_activation_stack_budget(self):
+    def test_transfer_worker_retains_tls_stack_budget(self):
         self.assertIn(
             "constexpr uint32_t kTransferHttpWorkerStackBytes = 16384;",
             DEVICE_TRANSFER_SOURCE,
         )
 
-    def test_remote_debug_worker_retains_network_setup_stack_budget(self):
+    def test_psram_workers_retain_network_setup_stack_budget(self):
         self.assertIn(
-            "constexpr uint32_t kDebugHttpWorkerStackBytes = 16384;",
+            "constexpr uint32_t kPsramHttpWorkerStackBytes = 16384;",
             DEVICE_TRANSFER_SOURCE,
         )
         self.assertIn(
-            'requestedMode == "debug" ? kDebugHttpWorkerStackBytes',
+            "workerStackInPsram ? kPsramHttpWorkerStackBytes",
             DEVICE_TRANSFER_SOURCE,
         )
 
-    def test_remote_debug_worker_stack_preserves_internal_crypto_headroom(self):
+    def test_map_worker_uses_psram_and_capability_aware_teardown(self):
         self.assertIn("xTaskCreateWithCaps(", DEVICE_TRANSFER_SOURCE)
+        self.assertIn('requestedMode == "debug"', DEVICE_TRANSFER_SOURCE)
+        self.assertIn('requestedMode == "diagnostics"', DEVICE_TRANSFER_SOURCE)
+        self.assertIn('requestedMode == "map"', DEVICE_TRANSFER_SOURCE)
+        self.assertIn('requestedMode == "firmware"', DEVICE_TRANSFER_SOURCE)
+        self.assertIn("workerStackInPsram", DEVICE_TRANSFER_SOURCE)
         self.assertIn(
-            'requestedMode == "debug"\n'
-            "            ? static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)",
+            "static_cast<UBaseType_t>(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)",
             DEVICE_TRANSFER_SOURCE,
         )
         self.assertIn(

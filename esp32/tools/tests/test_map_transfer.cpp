@@ -1,5 +1,6 @@
 #include "../../lib/map_transfer/map_transfer.hpp"
 #include "../../lib/maps/src/mapBlockFormat.hpp"
+#include "../../lib/maps/src/mapNearbyStorage.hpp"
 
 #include <cassert>
 #include <cstdlib>
@@ -114,7 +115,8 @@ static uint32_t crc32(const std::vector<uint8_t> &data) {
   return crc ^ 0xFFFFFFFFU;
 }
 
-static std::string emptyLabelFmb(uint32_t fingerprint, uint8_t version = 3) {
+static std::string emptyLabelFmb(uint32_t fingerprint, uint8_t version = 3,
+                                 bool withPoi = false) {
   std::vector<uint8_t> data = {
       'F', 'M', 'B', version, 0, 0, 0, 0, 'E', 'X', 'T',
       static_cast<uint8_t>('0' + version), version, 0, 0, 0};
@@ -122,8 +124,21 @@ static std::string emptyLabelFmb(uint32_t fingerprint, uint8_t version = 3) {
   appendLe32(labels, fingerprint);
   appendLe16(labels, 0);
   std::vector<std::vector<uint8_t>> sections = {{0, 0}, {0, 0}, labels};
-  if (version == 4)
+  if (version >= 4)
     sections.push_back({0, 0, 0, 0, 0, 0, 0, 0});
+  if (version >= 5)
+    sections.push_back({1, 0, 20, 0, 100, 0, 0, 0, 0, 0, 0, 0});
+  if (version >= 6) {
+    std::vector<uint8_t> pois = {static_cast<uint8_t>(withPoi ? 1 : 0),
+                                 0, 8, 0};
+    appendLe32(pois, withPoi ? 1 : 0);
+    if (withPoi) {
+      appendLe16(pois, 120);
+      appendLe16(pois, 80);
+      pois.insert(pois.end(), {1, 2, 0, 0});
+    }
+    sections.push_back(std::move(pois));
+  }
   uint32_t offset =
       static_cast<uint32_t>(data.size() + sections.size() * 16U);
   for (uint8_t index = 0; index < sections.size(); ++index) {
@@ -156,6 +171,120 @@ static std::string emptyFontAsset(uint32_t fingerprint) {
   data.insert(data.end(), language.begin(), language.end());
   data.insert(data.end(), face.begin(), face.end());
   return std::string(reinterpret_cast<const char *>(data.data()), data.size());
+}
+
+static std::string poiIndexOneBlock(int32_t x, int32_t y,
+                                    uint32_t sectionOffset,
+                                    uint32_t sectionBytes) {
+  std::vector<uint8_t> body;
+  appendLe32(body, static_cast<uint32_t>(x));
+  appendLe32(body, static_cast<uint32_t>(y));
+  appendLe32(body, 1);
+  appendLe16(body, 1);
+  for (int category = 1; category < 5; ++category)
+    appendLe16(body, 0);
+  appendLe32(body, sectionOffset);
+  appendLe32(body, sectionBytes);
+  appendLe16(body, 0);
+  assert(body.size() == 32);
+  std::vector<uint8_t> data = {'F', 'P', 'I', '1'};
+  appendLe16(data, 32);
+  appendLe16(data, 0);
+  appendLe32(data, 1);
+  appendLe32(data, crc32(body));
+  data.insert(data.end(), body.begin(), body.end());
+  return std::string(reinterpret_cast<const char *>(data.data()), data.size());
+}
+
+static void testTargetFiveIndexMatchesSignedBlocks() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  const std::string mapId = "map-pois";
+  const std::string blockPath = "VECTMAP/map-pois/+000+000/0_0.fmb";
+  const std::string indexPath = "VECTMAP/map-pois/assets/nearby-pois.fpi";
+  const std::string fontPath = "VECTMAP/map-pois/assets/street-labels.fma";
+  const std::string block = emptyLabelFmb(0x12345678, 6, true);
+  const std::string font = emptyFontAsset(0x12345678);
+  const std::string index = poiIndexOneBlock(0, 0, 142, 16);
+  const auto manifestText = [&](const std::string &indexBytes) {
+    return "{\"schemaVersion\":1,\"mapId\":\"" + mapId +
+           "\",\"target\":{\"renderer\":\"esp32-fmb\","
+           "\"formatVersion\":5,\"labelProfileVersion\":1,"
+           "\"labelLanguages\":[\"en\"],\"internationalFallback\":\"en\","
+           "\"buildingProfileVersion\":1,\"poiProfileVersion\":1,"
+           "\"poiIndexProfileVersion\":1,\"requestedFeatures\":["
+           "\"3d-buildings\",\"map-pois\",\"street-labels\"]},"
+           "\"layers\":{\"contours\":\"not-included\"},"
+           "\"buildings\":{\"recordCount\":0,\"explicitHeightCount\":0,"
+           "\"levelsHeightCount\":0,\"inheritedHeightCount\":0,"
+           "\"localMedianHeightCount\":0,\"classDefaultHeightCount\":0},"
+           "\"pois\":{\"recordCount\":1,\"shopsCount\":1,"
+           "\"restaurantsAndCafesCount\":0,\"publicToiletsCount\":0,"
+           "\"gasStationsCount\":0,\"bicycleServicesCount\":0},"
+           "\"files\":[{\"path\":\"" + blockPath + "\",\"bytes\":" +
+           std::to_string(block.size()) + ",\"sha256\":\"" + sha(block) +
+           "\"},{\"path\":\"" + indexPath + "\",\"bytes\":" +
+           std::to_string(indexBytes.size()) + ",\"sha256\":\"" +
+           sha(indexBytes) + "\"},{\"path\":\"" + fontPath +
+           "\",\"bytes\":" + std::to_string(font.size()) +
+           ",\"sha256\":\"" + sha(font) + "\"}]}\n";
+  };
+  const auto stage = [&](const std::string &session,
+                         const std::string &indexBytes) {
+    const std::string directory = installer.stagingRoot(session);
+    assert(::system((std::string("mkdir -p ") + directory +
+                     "/VECTMAP/map-pois/+000+000 " + directory +
+                     "/VECTMAP/map-pois/assets").c_str()) == 0);
+    writeFile(directory + "/" + blockPath, block);
+    writeFile(directory + "/" + fontPath, font);
+    writeFile(directory + "/" + indexPath, indexBytes);
+    writeFile(directory + "/manifest.json", manifestText(indexBytes));
+  };
+
+  stage("session-pois", index);
+  MapManifest parsed;
+  const auto valid = installer.validateStagedMap("session-pois", parsed);
+  if (!valid.ok) std::cerr << valid.code << ": " << valid.message << "\n";
+  assert(valid.ok);
+  assert(installer.activateStagedMap("session-pois", parsed).ok);
+  ActiveMapSelection active;
+  assert(installer.readActiveMap(active).ok);
+  assert(active.target.formatVersion == 5);
+  assert(active.target.poiProfileVersion == 1);
+  assert(active.target.poiIndexProfileVersion == 1);
+  assert(active.target.poiRecordCount == 1);
+  assert(!active.target.contoursIncluded);
+  assert(active.target.poiIndexSha256 == sha(index));
+
+  const std::string installedRoot = root + active.root;
+  const auto nearby = map_nearby_storage::search(
+      installedRoot, {0.0, 0.0}, 1U, 10000.0);
+  assert(nearby.status == map_nearby_storage::Status::Ok);
+  assert(nearby.count == 1 && nearby.searchedBlocks == 1);
+  assert(nearby.places[0].category == 1);
+  assert(nearby.places[0].directDistanceM > 100.0 &&
+         nearby.places[0].directDistanceM < 200.0);
+  const auto noRestaurants = map_nearby_storage::search(
+      installedRoot, {0.0, 0.0}, 2U, 10000.0);
+  assert(noRestaurants.status == map_nearby_storage::Status::Ok &&
+         noRestaurants.count == 0);
+  auto cancel = [](void *) { return true; };
+  const auto cancelled = map_nearby_storage::search(
+      installedRoot, {0.0, 0.0}, 1U, 10000.0, cancel);
+  assert(cancelled.status == map_nearby_storage::Status::Cancelled);
+
+  std::string damagedBlock = block;
+  damagedBlock.back() ^= 1;
+  writeFile(installedRoot + "/+000+000/0_0.fmb", damagedBlock);
+  const auto damaged = map_nearby_storage::search(
+      installedRoot, {0.0, 0.0}, 1U, 10000.0);
+  assert(damaged.status == map_nearby_storage::Status::Corrupt &&
+         damaged.count == 0);
+
+  const std::string mismatched = poiIndexOneBlock(1, 0, 142, 16);
+  stage("session-pois-mismatch", mismatched);
+  const auto rejected = installer.validateStagedMap("session-pois-mismatch", parsed);
+  assert(!rejected.ok && rejected.code == "poi_index_contract");
 }
 
 static void writeLe16(std::ofstream &out, uint16_t value) {
@@ -495,14 +624,16 @@ static void testRejectsUnsafeManifestPath() {
   }
 }
 
-static void testTargetFourRequiresCompletePoiSummary() {
+static void testTargetFiveRequiresCompletePoiSummary() {
   MapTransferInstaller installer("/tmp/root");
   MapManifest manifest;
   const std::string target =
-      "\"target\":{\"renderer\":\"esp32-fmb\",\"formatVersion\":4,"
+      "\"target\":{\"renderer\":\"esp32-fmb\",\"formatVersion\":5,"
       "\"labelProfileVersion\":1,\"labelLanguages\":[\"en\"],"
       "\"internationalFallback\":\"en\",\"buildingProfileVersion\":1,"
-      "\"poiProfileVersion\":1},"
+      "\"poiProfileVersion\":1,\"poiIndexProfileVersion\":1,"
+      "\"requestedFeatures\":[\"3d-buildings\",\"map-pois\",\"street-labels\"]},"
+      "\"layers\":{\"contours\":\"not-included\"},"
       "\"buildings\":{\"recordCount\":0,\"explicitHeightCount\":0,"
       "\"levelsHeightCount\":0,\"inheritedHeightCount\":0,"
       "\"localMedianHeightCount\":0,\"classDefaultHeightCount\":0},"
@@ -512,6 +643,8 @@ static void testTargetFourRequiresCompletePoiSummary() {
   const std::string files =
       "\"files\":[{\"path\":\"VECTMAP/map-4/+0000+0000/1.fmb\","
       "\"bytes\":1,\"sha256\":\"" + std::string(64, '0') +
+      "\"},{\"path\":\"VECTMAP/map-4/assets/nearby-pois.fpi\","
+      "\"bytes\":16,\"sha256\":\"" + std::string(64, '2') +
       "\"},{\"path\":\"VECTMAP/map-4/assets/street-labels.fma\","
       "\"bytes\":1,\"sha256\":\"" + std::string(64, '1') + "\"}]}";
   const std::string valid =
@@ -1518,7 +1651,8 @@ int main() {
   testTargetThreeBuildingContractValidation();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
-  testTargetFourRequiresCompletePoiSummary();
+  testTargetFiveRequiresCompletePoiSummary();
+  testTargetFiveIndexMatchesSignedBlocks();
   testParsesOptionalActiveMapPresentationMetadata();
   testIgnoresInvalidOptionalActiveMapPresentationMetadata();
   testBindsActivePresentationToManifestReceipt();

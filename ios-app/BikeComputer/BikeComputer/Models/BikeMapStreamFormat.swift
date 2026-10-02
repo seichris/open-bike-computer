@@ -101,6 +101,41 @@ nonisolated struct BikeMapStreamTrustStore: Equatable {
 
 }
 
+nonisolated struct VerifiedBikeMapTopographySource: Codable, Equatable, Sendable {
+    let id: String
+    let release: String
+    let coverageMillionths: Int
+    let surfaceModel: String
+    let horizontalCRS: String
+    let verticalDatum: String
+    let datasetReceiptSHA256: String
+    let termsURL: String
+    let attributionURL: String
+    let accessReviewedAt: String
+}
+
+nonisolated struct VerifiedBikeMapTopography: Codable, Equatable, Sendable {
+    let profileVersion: Int
+    let qualityMode: String
+    let minorIntervalM: Int
+    let indexIntervalM: Int
+    let recordCount: Int
+    let pointCount: Int
+    let noDataMillionths: Int
+    let sourcePolicySHA256: String
+    let intermediateSHA256: String
+    let attributionSHA256: String
+    let sources: [VerifiedBikeMapTopographySource]
+
+    var qualityLabel: String {
+        switch qualityMode {
+        case "standard-20m-v1": return "Standard 20 m contours"
+        case "coarse-50m-v1": return "Coarse 50 m contours"
+        default: return qualityMode
+        }
+    }
+}
+
 nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let url: URL
     let mapID: String
@@ -123,6 +158,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let fileCount: Int
     let payloadBytes: Int64
     let rendererFormatVersion: Int
+    let topography: VerifiedBikeMapTopography?
 
     fileprivate init(
         url: URL,
@@ -145,7 +181,8 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         readerRequirements: OfflineMapReaderRequirements?,
         fileCount: Int,
         payloadBytes: Int64,
-        rendererFormatVersion: Int
+        rendererFormatVersion: Int,
+        topography: VerifiedBikeMapTopography?
     ) {
         self.url = url
         self.mapID = mapID
@@ -168,6 +205,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         self.fileCount = fileCount
         self.payloadBytes = payloadBytes
         self.rendererFormatVersion = rendererFormatVersion
+        self.topography = topography
     }
 }
 
@@ -353,6 +391,221 @@ nonisolated enum BikeMapStreamFormat {
     }
 }
 
+nonisolated enum BikeMapPOIIndexValidator {
+    static let maximumEntries = 16_384
+    static let maximumBlockBytes = 2 * 1024 * 1024
+
+    struct Entry: Equatable {
+        let blockX: Int32
+        let blockY: Int32
+        let categoryMask: UInt32
+        let categoryCounts: [Int]
+        let sectionOffset: Int
+        let sectionBytes: Int
+
+        var recordCount: Int { categoryCounts.reduce(0, +) }
+    }
+
+    private static func uint16(_ bytes: Data, at offset: Int) -> Int? {
+        guard offset >= 0, offset <= bytes.count - 2 else { return nil }
+        return Int(bytes[offset]) | (Int(bytes[offset + 1]) << 8)
+    }
+
+    private static func uint32(_ bytes: Data, at offset: Int) -> UInt32? {
+        guard offset >= 0, offset <= bytes.count - 4 else { return nil }
+        return UInt32(bytes[offset]) |
+            (UInt32(bytes[offset + 1]) << 8) |
+            (UInt32(bytes[offset + 2]) << 16) |
+            (UInt32(bytes[offset + 3]) << 24)
+    }
+
+    private static func crc32<S: Sequence>(_ bytes: S) -> UInt32
+        where S.Element == UInt8 {
+        var crc = UInt32.max
+        for byte in bytes {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                crc = (crc >> 1) ^ (crc & 1 == 1 ? 0xedb8_8320 : 0)
+            }
+        }
+        return ~crc
+    }
+
+    static func decode(_ data: Data) throws -> [Entry] {
+        guard data.count >= 16,
+              data.prefix(4) == Data("FPI1".utf8),
+              uint16(data, at: 4) == 32,
+              uint16(data, at: 6) == 0,
+              let declaredCount = uint32(data, at: 8),
+              declaredCount <= maximumEntries,
+              data.count == 16 + Int(declaredCount) * 32,
+              uint32(data, at: 12) == crc32(data.dropFirst(16)) else {
+            throw BikeMapStreamFormatError.invalidManifest("Nearby POI index header or CRC is invalid")
+        }
+        var entries: [Entry] = []
+        entries.reserveCapacity(Int(declaredCount))
+        for index in 0..<Int(declaredCount) {
+            let offset = 16 + index * 32
+            guard let rawX = uint32(data, at: offset),
+                  let rawY = uint32(data, at: offset + 4),
+                  let categoryMask = uint32(data, at: offset + 8),
+                  let sectionOffset = uint32(data, at: offset + 22),
+                  let sectionBytes = uint32(data, at: offset + 26),
+                  uint16(data, at: offset + 30) == 0 else {
+                throw BikeMapStreamFormatError.invalidManifest("Nearby POI index entry is truncated")
+            }
+            let counts = (0..<5).compactMap { category in
+                uint16(data, at: offset + 12 + category * 2)
+            }
+            guard counts.count == 5 else {
+                throw BikeMapStreamFormatError.invalidManifest("Nearby POI index category counts are truncated")
+            }
+            let count = counts.reduce(0, +)
+            let actualMask = counts.enumerated().reduce(UInt32(0)) { mask, pair in
+                mask | (pair.element == 0 ? 0 : UInt32(1) << pair.offset)
+            }
+            let entry = Entry(
+                blockX: Int32(bitPattern: rawX),
+                blockY: Int32(bitPattern: rawY),
+                categoryMask: categoryMask,
+                categoryCounts: counts,
+                sectionOffset: Int(sectionOffset),
+                sectionBytes: Int(sectionBytes)
+            )
+            guard (1...16_384).contains(count),
+                  categoryMask == actualMask,
+                  entry.sectionOffset >= 112,
+                  entry.sectionBytes == 8 + count * 8,
+                  entry.sectionOffset <= maximumBlockBytes - entry.sectionBytes,
+                  entries.last.map({ ($0.blockX, $0.blockY) < (entry.blockX, entry.blockY) }) ?? true else {
+                throw BikeMapStreamFormatError.invalidManifest("Nearby POI index entry is noncanonical")
+            }
+            entries.append(entry)
+        }
+        return entries
+    }
+
+    static func blockPath(mapID: String, x: Int32, y: Int32) -> String {
+        func folderAndLocal(_ coordinate: Int32) -> (Int64, Int64) {
+            let widened = Int64(coordinate)
+            let folder = widened >= 0 ? widened / 16 : -((-widened + 15) / 16)
+            return (folder, widened - folder * 16)
+        }
+        let (folderX, localX) = folderAndLocal(x)
+        let (folderY, localY) = folderAndLocal(y)
+        let folder = String(format: "%+04lld%+04lld", folderX, folderY)
+        return "VECTMAP/\(mapID)/\(folder)/\(localX)_\(localY).fmb"
+    }
+
+    // Read section 6 independently from the writer. The signed per-file hash
+    // is checked by the enclosing stream verifier before this result is used.
+    static func blockEntry(_ data: Data) throws -> Entry? {
+        guard data.count <= maximumBlockBytes,
+              data.count >= 6,
+              data.prefix(4) == Data([70, 77, 66, 6]),
+              let polygonCount = uint16(data, at: 4) else {
+            throw BikeMapStreamFormatError.invalidManifest("Nearby POI block header is invalid")
+        }
+        var cursor = 6
+        for _ in 0..<polygonCount {
+            guard let pointCount = uint16(data, at: cursor + 12),
+                  cursor <= data.count - 14 - pointCount * 4 else {
+                throw BikeMapStreamFormatError.invalidManifest("Nearby POI block geometry is truncated")
+            }
+            cursor += 14 + pointCount * 4
+        }
+        guard let lineCount = uint16(data, at: cursor) else {
+            throw BikeMapStreamFormatError.invalidManifest("Nearby POI block line count is missing")
+        }
+        cursor += 2
+        for _ in 0..<lineCount {
+            guard let pointCount = uint16(data, at: cursor + 13),
+                  cursor <= data.count - 15 - pointCount * 4 else {
+                throw BikeMapStreamFormatError.invalidManifest("Nearby POI block lines are truncated")
+            }
+            cursor += 15 + pointCount * 4
+        }
+        guard cursor <= data.count - 104,
+              data[cursor..<(cursor + 8)] == Data([69, 88, 84, 54, 6, 0, 0, 0]) else {
+            throw BikeMapStreamFormatError.invalidManifest("Nearby POI block directory is invalid")
+        }
+        let directoryEntry = cursor + 8 + 5 * 16
+        guard data[directoryEntry] == 6,
+              data[directoryEntry + 1] == 1,
+              data[directoryEntry + 2] == 0,
+              data[directoryEntry + 3] == 0,
+              let sectionOffset = uint32(data, at: directoryEntry + 4),
+              let sectionBytes = uint32(data, at: directoryEntry + 8),
+              let sectionCRC = uint32(data, at: directoryEntry + 12),
+              Int(sectionOffset) <= maximumBlockBytes,
+              Int(sectionBytes) <= maximumBlockBytes - Int(sectionOffset),
+              Int(sectionOffset) + Int(sectionBytes) <= data.count,
+              sectionBytes >= 8 else {
+            throw BikeMapStreamFormatError.invalidManifest("Nearby POI section bounds are invalid")
+        }
+        let start = Int(sectionOffset)
+        let length = Int(sectionBytes)
+        guard crc32(data[start..<(start + length)]) == sectionCRC,
+              let count = uint16(data, at: start),
+              uint16(data, at: start + 2) == 8,
+              let declaredMask = uint32(data, at: start + 4),
+              count <= 16_384,
+              length == 8 + count * 8 else {
+            throw BikeMapStreamFormatError.invalidManifest("Nearby POI section CRC or length is invalid")
+        }
+        var counts = Array(repeating: 0, count: 5)
+        for record in 0..<count {
+            let offset = start + 8 + record * 8
+            guard let rawX = uint16(data, at: offset),
+                  let rawY = uint16(data, at: offset + 2),
+                  rawX <= 4_095, rawY <= 4_095,
+                  (1...5).contains(Int(data[offset + 4])),
+                  data[offset + 5] <= 5,
+                  data[offset + 6] <= 3,
+                  data[offset + 7] == 0 else {
+                throw BikeMapStreamFormatError.invalidManifest("Nearby POI record is invalid")
+            }
+            counts[Int(data[offset + 4]) - 1] += 1
+        }
+        let actualMask = counts.enumerated().reduce(UInt32(0)) { mask, pair in
+            mask | (pair.element == 0 ? 0 : UInt32(1) << pair.offset)
+        }
+        guard declaredMask == actualMask else {
+            throw BikeMapStreamFormatError.invalidManifest("Nearby POI category summary is invalid")
+        }
+        guard count > 0 else { return nil }
+        return Entry(blockX: 0, blockY: 0, categoryMask: actualMask,
+                     categoryCounts: counts, sectionOffset: start,
+                     sectionBytes: length)
+    }
+
+    static func matches(_ indexData: Data, mapID: String,
+                        blocksByPath: [String: Entry],
+                        expectedCategories: [Int]) throws {
+        let entries = try decode(indexData)
+        guard entries.count == blocksByPath.count else {
+            throw BikeMapStreamFormatError.invalidManifest("Nearby POI index omits a nonempty block")
+        }
+        var categoryTotals = Array(repeating: 0, count: 5)
+        for entry in entries {
+            let path = blockPath(mapID: mapID, x: entry.blockX, y: entry.blockY)
+            guard let block = blocksByPath[path],
+                  block.categoryMask == entry.categoryMask,
+                  block.categoryCounts == entry.categoryCounts,
+                  block.sectionOffset == entry.sectionOffset,
+                  block.sectionBytes == entry.sectionBytes else {
+                throw BikeMapStreamFormatError.invalidManifest("Nearby POI index disagrees with a signed block")
+            }
+            for category in 0..<5 {
+                categoryTotals[category] += entry.categoryCounts[category]
+            }
+        }
+        guard categoryTotals == expectedCategories else {
+            throw BikeMapStreamFormatError.invalidManifest("Nearby POI index disagrees with the signed manifest")
+        }
+    }
+}
+
 nonisolated enum BikeMapStreamArtifactValidator {
     private static let mediaType = "application/vnd.openbikecomputer.map-stream"
     private static let renderer = "esp32-fmb"
@@ -361,11 +614,12 @@ nonisolated enum BikeMapStreamArtifactValidator {
     private static let maximumRelativePathBytes = 202
     private static let maximumBlockBytes = 2 * 1024 * 1024
     private static let maximumFontAssetBytes = 16 * 1024 * 1024
+    private static let maximumPOIIndexBytes = 16 + 32 * 16_384
     private static let ioChunkBytes = 64 * 1024
     private static let lowercaseSHA256Pattern = "^[0-9a-f]{64}$"
     private static let safeMapIDPattern = "^[A-Za-z0-9._-]+$"
     private static let mapPathPattern =
-        "^VECTMAP/[A-Za-z0-9._-]+/(?:[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\\.fm[bp]|assets/street-labels\\.fma)$"
+        "^VECTMAP/[A-Za-z0-9._-]+/(?:[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\\.fm[bp]|assets/(?:street-labels\\.fma|nearby-pois\\.fpi))$"
 
     struct Manifest: Decodable {
         struct Producer: Decodable {
@@ -380,7 +634,10 @@ nonisolated enum BikeMapStreamArtifactValidator {
             let labelLanguages: [String]?
             let internationalFallback: String?
             let buildingProfileVersion: Int?
+            let topographyProfileVersion: Int?
             let poiProfileVersion: Int?
+            let poiIndexProfileVersion: Int?
+            let requestedFeatures: [String]?
         }
 
         struct Buildings: Decodable {
@@ -392,13 +649,44 @@ nonisolated enum BikeMapStreamArtifactValidator {
             let classDefaultHeightCount: Int
         }
 
-        struct Pois: Decodable {
+        struct Topography: Decodable {
+            struct Source: Decodable {
+                let id: String
+                let release: String
+                let coverageMillionths: Int
+                let surfaceModel: String
+                let horizontalCrs: String
+                let verticalDatum: String
+                let datasetReceiptSha256: String
+                let termsUrl: String
+                let attributionUrl: String
+                let accessReviewedAt: String
+            }
+
+            let profileVersion: Int
+            let qualityMode: String
+            let minorIntervalM: Int
+            let indexIntervalM: Int
+            let recordCount: Int
+            let pointCount: Int
+            let noDataMillionths: Int
+            let sourcePolicySha256: String
+            let intermediateSha256: String
+            let attributionSha256: String
+            let sources: [Source]
+        }
+
+        struct POIs: Decodable {
             let recordCount: Int
             let shopsCount: Int
             let restaurantsAndCafesCount: Int
             let publicToiletsCount: Int
             let gasStationsCount: Int
             let bicycleServicesCount: Int
+        }
+
+        struct Layers: Decodable {
+            let contours: String
         }
 
         struct File: Decodable {
@@ -414,7 +702,9 @@ nonisolated enum BikeMapStreamArtifactValidator {
         let target: Target
         let files: [File]
         let buildings: Buildings?
-        let pois: Pois?
+        let topography: Topography?
+        let pois: POIs?
+        let layers: Layers?
     }
 
     static func validate(
@@ -613,7 +903,9 @@ nonisolated enum BikeMapStreamArtifactValidator {
         case 3:
             manifestFeatures = ["3d-buildings", "street-labels"]
         case 4:
-            manifestFeatures = ["3d-buildings", "map-pois", "street-labels"]
+            manifestFeatures = ["3d-buildings", "contours", "street-labels"]
+        case 5:
+            manifestFeatures = Set(manifest.target.requestedFeatures ?? [])
         default:
             manifestFeatures = []
         }
@@ -649,10 +941,18 @@ nonisolated enum BikeMapStreamArtifactValidator {
         } else {
             verifiedReaderRequirements = nil
         }
+        var poiBlocksByPath: [String: BikeMapPOIIndexValidator.Entry] = [:]
+        var poiIndexData: Data?
         for file in manifest.files {
             var fileHasher = SHA256()
             var remaining = file.bytes
             var filePrefix = Data()
+            let isPOIBlock = manifest.target.formatVersion == 5 &&
+                file.path.hasSuffix(".fmb")
+            let isPOIIndex = manifest.target.formatVersion == 5 &&
+                file.path.hasSuffix(".fpi")
+            var poiValidationData: Data? =
+                (isPOIBlock || isPOIIndex) ? Data() : nil
             while remaining > 0 {
                 let chunkBytes = Int(min(Int64(ioChunkBytes), remaining))
                 let chunk = try readExactly(chunkBytes)
@@ -660,6 +960,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
                     filePrefix.append(chunk.prefix(4 - filePrefix.count))
                 }
                 fileHasher.update(data: chunk)
+                poiValidationData?.append(chunk)
                 remaining -= Int64(chunk.count)
             }
             guard hex(fileHasher.finalize()) == file.sha256 else {
@@ -669,6 +970,32 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 filePrefix,
                 path: file.path,
                 rendererFormatVersion: manifest.target.formatVersion
+            )
+            if isPOIBlock, let poiValidationData,
+               let block = try BikeMapPOIIndexValidator.blockEntry(poiValidationData) {
+                guard poiBlocksByPath.count < BikeMapPOIIndexValidator.maximumEntries,
+                      poiBlocksByPath.updateValue(block, forKey: file.path) == nil else {
+                    throw BikeMapStreamFormatError.invalidManifest(
+                        "Nearby POI block inventory exceeds its signed index limit"
+                    )
+                }
+            } else if isPOIIndex {
+                poiIndexData = poiValidationData
+            }
+        }
+        if manifest.target.formatVersion == 5 {
+            guard let poiIndexData, let pois = manifest.pois else {
+                throw BikeMapStreamFormatError.invalidManifest(
+                    "Nearby POI index or manifest summary is missing"
+                )
+            }
+            try BikeMapPOIIndexValidator.matches(
+                poiIndexData,
+                mapID: manifest.mapId,
+                blocksByPath: poiBlocksByPath,
+                expectedCategories: [pois.shopsCount, pois.restaurantsAndCafesCount,
+                                     pois.publicToiletsCount, pois.gasStationsCount,
+                                     pois.bicycleServicesCount]
             )
         }
         guard consumedBytes == artifact.bytes else {
@@ -702,7 +1029,36 @@ nonisolated enum BikeMapStreamArtifactValidator {
             readerRequirements: verifiedReaderRequirements,
             fileCount: manifest.files.count,
             payloadBytes: Int64(header.payloadBytes),
-            rendererFormatVersion: manifest.target.formatVersion
+            rendererFormatVersion: manifest.target.formatVersion,
+            topography: manifest.topography.map { topography in
+                VerifiedBikeMapTopography(
+                    profileVersion: topography.profileVersion,
+                    qualityMode: topography.qualityMode,
+                    minorIntervalM: topography.minorIntervalM,
+                    indexIntervalM: topography.indexIntervalM,
+                    recordCount: topography.recordCount,
+                    pointCount: topography.pointCount,
+                    noDataMillionths: topography.noDataMillionths,
+                    sourcePolicySHA256: topography.sourcePolicySha256,
+                    intermediateSHA256: topography.intermediateSha256,
+                    attributionSHA256: topography.attributionSha256,
+                    sources: topography.sources.map { source in
+                        VerifiedBikeMapTopographySource(
+                            id: source.id,
+                            release: source.release,
+                            coverageMillionths: source.coverageMillionths,
+                            surfaceModel: source.surfaceModel,
+                            horizontalCRS: source.horizontalCrs,
+                            verticalDatum: source.verticalDatum,
+                            datasetReceiptSHA256:
+                                source.datasetReceiptSha256,
+                            termsURL: source.termsUrl,
+                            attributionURL: source.attributionUrl,
+                            accessReviewedAt: source.accessReviewedAt
+                        )
+                    }
+                )
+            }
         )
     }
 
@@ -752,7 +1108,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
             throw BikeMapStreamFormatError.invalidManifest("map ID does not match")
         }
         guard manifest.target.renderer == renderer,
-              [1, 2, 3, 4].contains(manifest.target.formatVersion) else {
+              [1, 2, 3, 4, 5].contains(manifest.target.formatVersion) else {
             throw BikeMapStreamFormatError.invalidManifest("renderer target is unsupported")
         }
         guard !manifest.files.isEmpty,
@@ -762,6 +1118,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
 
         var payloadBytes: Int64 = 0
         var fontAssetCount = 0
+        var poiIndexCount = 0
         var legacyTextBlockCount = 0
         var previousPath: String?
         for file in manifest.files {
@@ -774,11 +1131,15 @@ nonisolated enum BikeMapStreamArtifactValidator {
             previousPath = file.path
             let isFontAsset = file.path ==
                 "VECTMAP/\(manifest.mapId)/assets/street-labels.fma"
+            let isPOIIndex = file.path ==
+                "VECTMAP/\(manifest.mapId)/assets/nearby-pois.fpi"
             guard file.bytes > 0,
-                  file.bytes <= Int64(isFontAsset ? maximumFontAssetBytes : maximumBlockBytes) else {
+                  file.bytes <= Int64(isFontAsset ? maximumFontAssetBytes :
+                    (isPOIIndex ? maximumPOIIndexBytes : maximumBlockBytes)) else {
                 throw BikeMapStreamFormatError.invalidManifest("map file size is invalid")
             }
             if isFontAsset { fontAssetCount += 1 }
+            if isPOIIndex { poiIndexCount += 1 }
             if file.path.hasSuffix(".fmp") { legacyTextBlockCount += 1 }
             let (sum, overflow) = payloadBytes.addingReportingOverflow(file.bytes)
             guard !overflow, sum <= Int64(BikeMapStreamFormat.maximumPayloadBytes) else {
@@ -789,7 +1150,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 throw BikeMapStreamFormatError.invalidManifest("map file SHA-256 is invalid")
             }
         }
-        if [2, 3, 4].contains(manifest.target.formatVersion) {
+        if [2, 3, 4, 5].contains(manifest.target.formatVersion) {
             guard fontAssetCount == 1, legacyTextBlockCount == 0,
                   manifest.target.labelProfileVersion == 1,
                   let languages = manifest.target.labelLanguages,
@@ -818,14 +1179,68 @@ nonisolated enum BikeMapStreamArtifactValidator {
                         "building-aware renderer metadata is invalid"
                     )
                 }
+                if manifest.target.formatVersion == 4 ||
+                    (manifest.target.formatVersion == 5 && manifest.layers?.contours == "included") {
+                    guard manifest.target.topographyProfileVersion == 1,
+                          let topography = manifest.topography,
+                          topography.profileVersion == 1,
+                          ["standard-20m-v1", "coarse-50m-v1"].contains(topography.qualityMode),
+                          [(20, 100), (50, 250)].contains(where: {
+                              $0.0 == topography.minorIntervalM &&
+                                $0.1 == topography.indexIntervalM
+                          }),
+                          topography.recordCount >= 0,
+                          topography.recordCount <= 1_048_576,
+                          topography.pointCount >= 0,
+                          topography.pointCount <= 16_777_216,
+                          (0...1_000_000).contains(topography.noDataMillionths),
+                          isLowercaseSHA256(topography.sourcePolicySha256),
+                          isLowercaseSHA256(topography.intermediateSha256),
+                          isLowercaseSHA256(topography.attributionSha256),
+                          !topography.sources.isEmpty,
+                          topography.sources.count <= 32,
+                          Set(topography.sources.map(\.id)).count == topography.sources.count,
+                          topography.sources.allSatisfy({ source in
+                              source.coverageMillionths > 0 &&
+                                source.coverageMillionths <= 1_000_000 &&
+                                source.surfaceModel == "dsm" &&
+                                source.horizontalCrs == "EPSG:4326" &&
+                                source.verticalDatum == "EPSG:3855" &&
+                                isLowercaseSHA256(source.datasetReceiptSha256) &&
+                                URL(string: source.termsUrl)?.scheme == "https" &&
+                                URL(string: source.attributionUrl)?.scheme == "https"
+                          }),
+                          abs(topography.sources.map(\.coverageMillionths).reduce(0, +) - 1_000_000)
+                            <= topography.sources.count else {
+                        throw BikeMapStreamFormatError.invalidManifest(
+                            "renderer target 4 topography metadata is invalid"
+                        )
+                    }
+                } else if manifest.target.topographyProfileVersion != nil ||
+                            manifest.topography != nil {
+                    throw BikeMapStreamFormatError.invalidManifest(
+                        "renderer target 3 contains topography data"
+                    )
+                }
             } else if manifest.target.buildingProfileVersion != nil ||
-                        manifest.buildings != nil {
+                        manifest.target.topographyProfileVersion != nil ||
+                        manifest.buildings != nil ||
+                        manifest.topography != nil {
                 throw BikeMapStreamFormatError.invalidManifest(
                     "renderer target 2 contains building data"
                 )
             }
-            if manifest.target.formatVersion == 4 {
+            if manifest.target.formatVersion == 5 {
+                let required = Set(["3d-buildings", "map-pois", "street-labels"])
+                let requested = manifest.target.requestedFeatures ?? []
                 guard manifest.target.poiProfileVersion == 1,
+                      manifest.target.poiIndexProfileVersion == 1,
+                      poiIndexCount == 1,
+                      requested == requested.sorted(),
+                      Set(requested).count == requested.count,
+                      (Set(requested) == required ||
+                        Set(requested) == required.union(["contours"])),
+                      manifest.layers?.contours == (requested.contains("contours") ? "included" : "not-included"),
                       let pois = manifest.pois,
                       pois.recordCount >= 0,
                       pois.shopsCount >= 0,
@@ -837,10 +1252,13 @@ nonisolated enum BikeMapStreamArtifactValidator {
                         pois.publicToiletsCount + pois.gasStationsCount +
                         pois.bicycleServicesCount == pois.recordCount else {
                     throw BikeMapStreamFormatError.invalidManifest(
-                        "renderer target 4 POI metadata is invalid"
+                        "renderer target 5 POI metadata is invalid"
                     )
                 }
-            } else if manifest.target.poiProfileVersion != nil || manifest.pois != nil {
+            } else if manifest.target.poiProfileVersion != nil ||
+                        manifest.target.poiIndexProfileVersion != nil ||
+                        manifest.target.requestedFeatures != nil ||
+                        manifest.pois != nil || manifest.layers != nil || poiIndexCount != 0 {
                 throw BikeMapStreamFormatError.invalidManifest(
                     "legacy renderer target contains POI data"
                 )
@@ -850,9 +1268,13 @@ nonisolated enum BikeMapStreamArtifactValidator {
                     manifest.target.labelLanguages != nil ||
                     manifest.target.internationalFallback != nil ||
                     manifest.target.buildingProfileVersion != nil ||
-                    manifest.buildings != nil ||
+                    manifest.target.topographyProfileVersion != nil ||
                     manifest.target.poiProfileVersion != nil ||
-                    manifest.pois != nil {
+                    manifest.target.poiIndexProfileVersion != nil ||
+                    manifest.target.requestedFeatures != nil ||
+                    manifest.buildings != nil ||
+                    manifest.topography != nil || manifest.pois != nil ||
+                    manifest.layers != nil || poiIndexCount != 0 {
             throw BikeMapStreamFormatError.invalidManifest(
                 "renderer target 1 contains label data"
             )
@@ -899,13 +1321,14 @@ nonisolated enum BikeMapStreamArtifactValidator {
                     "binary map block header does not match its target"
                 )
             }
-            let expectedVersions: Set<UInt8>
-            switch rendererFormatVersion {
-            case 4: expectedVersions = [5]
-            case 3: expectedVersions = [4]
-            case 2: expectedVersions = [3]
-            default: expectedVersions = [1, 2]
-            }
+            let expectedVersions: Set<UInt8> =
+                rendererFormatVersion == 5
+                    ? [6]
+                    : (rendererFormatVersion == 4
+                    ? [5]
+                    : (rendererFormatVersion == 3
+                        ? [4]
+                        : (rendererFormatVersion == 2 ? [3] : [1, 2])))
             guard expectedVersions.contains(prefix[3]) else {
                 throw BikeMapStreamFormatError.invalidManifest(
                     "binary map block version does not match its target"
@@ -914,6 +1337,10 @@ nonisolated enum BikeMapStreamArtifactValidator {
         } else if path.hasSuffix(".fma") && prefix != Data("FMA1".utf8) {
             throw BikeMapStreamFormatError.invalidManifest(
                 "street-label font asset header is invalid"
+            )
+        } else if path.hasSuffix(".fpi") && prefix != Data("FPI1".utf8) {
+            throw BikeMapStreamFormatError.invalidManifest(
+                "nearby POI index header is invalid"
             )
         }
     }

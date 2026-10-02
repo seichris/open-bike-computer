@@ -50,6 +50,7 @@ struct WatchWorkoutSummary: Equatable {
     let averageHeartRate: Double?
     let routeStatus: WorkoutRouteSaveStatus
     let terminalErrorCode: WorkoutSafeErrorCodeV1?
+    let nativeZones: WorkoutNativeZonesV1?
 
     init(
         outcome: Outcome,
@@ -59,7 +60,8 @@ struct WatchWorkoutSummary: Equatable {
         activeEnergyKilocalories: Double?,
         averageHeartRate: Double?,
         routeStatus: WorkoutRouteSaveStatus,
-        terminalErrorCode: WorkoutSafeErrorCodeV1? = nil
+        terminalErrorCode: WorkoutSafeErrorCodeV1? = nil,
+        nativeZones: WorkoutNativeZonesV1? = nil
     ) {
         self.outcome = outcome
         self.endedAt = endedAt
@@ -69,6 +71,7 @@ struct WatchWorkoutSummary: Equatable {
         self.averageHeartRate = averageHeartRate
         self.routeStatus = routeStatus
         self.terminalErrorCode = terminalErrorCode
+        self.nativeZones = outcome == .saved ? nativeZones : nil
     }
 }
 
@@ -385,7 +388,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     @Published private(set) var summary: WatchWorkoutSummary?
     @Published private(set) var locationAuthorizationState: WatchRouteRecorder.AuthorizationState
     @Published private(set) var isRecovering = true
-    @Published private(set) var finishRequestError: WatchWorkoutFinishRequestError? = nil
+    @Published private(set) var finishRequestError: WatchWorkoutFinishRequestError? = nil {
+        didSet {
+            if finishRequestError != nil {
+                scheduleDiscardFinalizationRetryIfNeeded()
+            }
+        }
+    }
     @Published private(set) var isTerminalArchivePending = false
     @Published private(set) var isTerminalPublicationPending = false
     @Published private(set) var isTerminalMirrorDeliveryPending = false
@@ -530,6 +539,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var lastProcessedSystemTransitionAt = Date.distantPast
     private var remoteSegmentControlContext: RemoteSegmentControlContext?
     private var terminalCleanupRetryTask: Task<Void, Never>?
+    private var discardFinalizationRetryTask: Task<Void, Never>?
+    private var discardFinalizationRetryAttemptCount = 0
     private var terminalCleanupRetryAttemptCount = 0
     private var shutdownMirrorFailureRetryCount = 0
     private var pendingWorkoutConfiguration: HKWorkoutConfiguration?
@@ -559,6 +570,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         WorkoutHeartRateZoneCheckpointPersistenceGate()
     private var heartRateZoneRuntimeSessionID: UUID?
     private var heartRateZoneRuntimeMaximumHeartRateBPM: Int?
+    private var nativeZoneLiveState = WorkoutNativeZoneLiveState()
+    private var finishedWorkoutNativeZones: WorkoutNativeZonesV1?
 
     override convenience init() {
         self.init(locationService: WatchLocationService())
@@ -789,6 +802,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         mirrorRetryTask?.cancel()
         mirrorShutdownWatchdogTask?.cancel()
         terminalCleanupRetryTask?.cancel()
+        discardFinalizationRetryTask?.cancel()
         complicationStartTask?.cancel()
         workoutLaunchRequestExpiryTask?.cancel()
         authorizationRefreshTask?.cancel()
@@ -872,6 +886,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
     var isDiscarding: Bool {
         lifecycle.state == .ending && lifecycle.finishDisposition == .discard
+    }
+    var canDismissDiscardedSummary: Bool {
+        summary?.outcome == .discarded && lifecycle.state == .ended
+            && session == nil && !isAwaitingDetachedSessionCleanup
     }
     var hasCorruptRecoveryState: Bool {
         recoveryStore.loadState == .corrupt
@@ -1523,16 +1541,14 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         guard hasDurableTerminalCleanupRetry,
               !isTerminalCleanupRetrying,
               terminalCleanupRetryTask == nil,
-              terminalCleanupRetryAttemptCount
-                < Self.maxTerminalCleanupRetryAttempts else {
+              let delay = WorkoutTerminalCleanupRetryPolicy.delay(
+                disposition: recoveryStore.recoveredIdentity?.finishRequest?.disposition,
+                completedAttempts: terminalCleanupRetryAttemptCount,
+                baseDelay: terminalCleanupRetryDelay,
+                saveAttemptLimit: Self.maxTerminalCleanupRetryAttempts
+              ) else {
             return
         }
-        let nextAttempt = terminalCleanupRetryAttemptCount + 1
-        let delay = min(
-            terminalCleanupRetryDelay
-                * pow(2, Double(max(0, nextAttempt - 1))),
-            30
-        )
         isTerminalCleanupRetrying = true
         terminalCleanupRetryTask = Task { @MainActor [weak self] in
             do {
@@ -1555,7 +1571,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             terminalCleanupRetryAttemptCount = 0
             return
         }
-        terminalCleanupRetryAttemptCount += 1
+        terminalCleanupRetryAttemptCount = min(15, terminalCleanupRetryAttemptCount + 1)
         isTerminalCleanupRetrying = true
         performTerminalCleanupRetry()
         isTerminalCleanupRetrying = false
@@ -1563,6 +1579,41 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             scheduleTerminalCleanupRetryIfNeeded()
         } else {
             terminalCleanupRetryAttemptCount = 0
+        }
+    }
+
+    private func scheduleDiscardFinalizationRetryIfNeeded() {
+        guard isDiscarding,
+              let retainedIdentity = recoveryStore.recoveredIdentity,
+              retainedIdentity.finishRequest?.disposition == .discard,
+              discardFinalizationRetryTask == nil else { return }
+        let sessionID = retainedIdentity.sessionID
+        let delay = WorkoutTerminalCleanupRetryPolicy.delay(
+            disposition: .discard,
+            completedAttempts: discardFinalizationRetryAttemptCount,
+            baseDelay: terminalCleanupRetryDelay,
+            saveAttemptLimit: Self.maxTerminalCleanupRetryAttempts
+        ) ?? 30
+        discardFinalizationRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch { return }
+            guard let self else { return }
+            self.discardFinalizationRetryTask = nil
+            guard self.isDiscarding,
+                  self.recoveryStore.recoveredIdentity?.sessionID == sessionID,
+                  self.recoveryStore.recoveredIdentity?.finishRequest?.disposition == .discard,
+                  self.finishRequestError != nil else { return }
+            self.discardFinalizationRetryAttemptCount = min(
+                15, self.discardFinalizationRetryAttemptCount + 1
+            )
+            guard self.finalizationTask == nil, !self.isRecovering else {
+                self.scheduleDiscardFinalizationRetryIfNeeded()
+                return
+            }
+            // Uses the existing identity-fenced finalization/recovery path.
+            // No new save call, forced reset, or early readiness is introduced.
+            self.retryFinalization()
         }
     }
 
@@ -3498,7 +3549,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             activeEnergyKilocalories: summary.activeEnergyKilocalories,
             averageHeartRate: summary.averageHeartRate,
             routeStatus: summary.routeStatus,
-            terminalErrorCode: durableErrorCode
+            terminalErrorCode: durableErrorCode,
+            nativeZones: summary.nativeZones
         )
         finishRequestError = nil
         pendingTerminalErrorPersistence = nil
@@ -3508,6 +3560,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         confirmedTerminalSummarySessionID = (
             recoveryStore.recoveredIdentity ?? identity
         )?.sessionID
+        discardFinalizationRetryTask?.cancel()
+        discardFinalizationRetryTask = nil
+        discardFinalizationRetryAttemptCount = 0
         self.summary = terminalSummary
         _ = lifecycle.apply(.sessionEnded)
         let terminalCapturedAt = max(Date(), terminalSummary.endedAt)
@@ -3536,6 +3591,13 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         summary: WatchWorkoutSummary,
         capturedAt: Date
     ) -> WorkoutSnapshotV1 {
+        if summary.outcome == .discarded {
+            return WorkoutDiscardCompletionPolicy.terminalSnapshot(
+                startDate: (recoveryStore.recoveredIdentity ?? identity)?.startDate
+                    ?? snapshot.startDate,
+                errorCode: summary.terminalErrorCode
+            )
+        }
         if session == nil,
            !heartRateZoneDurationAccumulator.hasCompleteTerminalDurations(
              elapsedTime: summary.duration
@@ -3620,6 +3682,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             currentHeartRateZone: base.currentHeartRateZone,
             heartRateZoneCount: base.heartRateZoneCount,
             heartRateZoneDurations: base.heartRateZoneDurations,
+            nativeZones: summary.nativeZones,
             location: base.location,
             lastCompletedSegment: base.lastCompletedSegment,
             availability: availability,
@@ -3743,6 +3806,9 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
 
     private func clearActiveObjects() {
         cancelTerminalCleanupRetry(resetAttemptCount: true)
+        discardFinalizationRetryTask?.cancel()
+        discardFinalizationRetryTask = nil
+        discardFinalizationRetryAttemptCount = 0
         resetMirrorTransport()
         session = nil
         builder = nil
@@ -5156,6 +5222,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     ) {
         identity = recoveredIdentity
         if heartRateZoneRuntimeSessionID != recoveredIdentity.sessionID {
+            nativeZoneLiveState.reset()
+            finishedWorkoutNativeZones = nil
             heartRateZoneRuntimeSessionID = recoveredIdentity.sessionID
             heartRateZoneRuntimeMaximumHeartRateBPM =
                 recoveredIdentity.heartRateZoneMaximumHeartRateBPM
@@ -6679,6 +6747,10 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                 ? nil
                 : WorkoutHeartRateZoneProfile.zoneCount,
             heartRateZoneDurations: heartRateZoneDurations,
+            nativeZones: nativeZones(
+                capturedAt: capturedAt, elapsedTime: elapsedTime?.value,
+                heartRate: currentHeartRate, power: cyclingPower
+            ),
             location: location,
             lastCompletedSegment: segmentAccumulator.lastCompletedSegment,
             availability: availability,
@@ -6742,12 +6814,60 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         )
     }
 
+    private func nativeZones(
+        capturedAt: Date, elapsedTime: TimeInterval?,
+        heartRate: WorkoutMetricV1?, power: WorkoutMetricV1?
+    ) -> WorkoutNativeZonesV1? {
+#if BICINO_HEALTHKIT_WORKOUT_ZONES
+        if #available(watchOS 27.0, *), let builder,
+           lifecycle.state.isActive, let elapsedTime, let startDate = identity?.startDate {
+            func read(_ metric: WorkoutNativeZoneMetricV1, sample: WorkoutMetricV1?) -> WorkoutNativeZoneSnapshotV1? {
+                let type = HKQuantityType(metric == .heartRate ? .heartRate : .cyclingPower)
+                guard let group = HealthKitWorkoutZoneAdapter.group(
+                    builder.zoneGroup(for: type), observedAt: capturedAt,
+                    isFinal: false, maximumDuration: elapsedTime
+                ), capturedAt >= startDate else { return nil }
+                return nativeZoneLiveState.applyingCurrentZone(
+                    to: group, metric: sample, state: lifecycle.state, now: capturedAt
+                )
+            }
+            let value = WorkoutNativeZonesV1(
+                heartRate: read(.heartRate, sample: heartRate),
+                cyclingPower: read(.cyclingPower, sample: power)
+            )
+            return value.isValid ? value : nil
+        }
+#endif
+        return nil
+    }
+
+    private func nativeZones(from workout: HKWorkout) -> WorkoutNativeZonesV1? {
+#if BICINO_HEALTHKIT_WORKOUT_ZONES
+        if #available(watchOS 27.0, *) {
+            return HealthKitWorkoutZoneAdapter.saved(workout)
+        }
+#endif
+        return nil
+    }
+
     private func makeSummary(
         outcome: WatchWorkoutSummary.Outcome,
         endDate: Date,
         routeDistanceMeters: Double?,
         routeStatus: WorkoutRouteSaveStatus
     ) -> WatchWorkoutSummary {
+        if outcome == .discarded {
+            return WatchWorkoutSummary(
+                outcome: .discarded,
+                endedAt: endDate,
+                duration: nil,
+                distanceMeters: nil,
+                activeEnergyKilocalories: nil,
+                averageHeartRate: nil,
+                routeStatus: .unavailable,
+                terminalErrorCode: durableTerminalErrorCode
+            )
+        }
         let routeDistance = routeDistanceMeters.map { value in
             WorkoutMetricCandidate(
                 value: value,
@@ -6766,7 +6886,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             activeEnergyKilocalories: activeEnergy?.value,
             averageHeartRate: averageHeartRate?.value,
             routeStatus: routeStatus,
-            terminalErrorCode: durableTerminalErrorCode
+            terminalErrorCode: durableTerminalErrorCode,
+            nativeZones: finishedWorkoutNativeZones
         )
     }
 
@@ -6796,7 +6917,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             activeEnergyKilocalories: energy,
             averageHeartRate: averageHeartRate,
             routeStatus: routeStatus,
-            terminalErrorCode: durableTerminalErrorCode
+            terminalErrorCode: durableTerminalErrorCode,
+            nativeZones: nativeZones(from: workout)
         )
     }
 
@@ -6863,6 +6985,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     }
 
     private func clearMetrics() {
+        nativeZoneLiveState.reset()
+        finishedWorkoutNativeZones = nil
         currentHeartRate = nil
         averageHeartRate = nil
         activeEnergy = nil
@@ -7015,14 +7139,18 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
             try await injectedFinishWorkoutOperation(builder)
             return
         }
-        try await withCheckedThrowingContinuation { continuation in
+        let workout: HKWorkout = try await withCheckedThrowingContinuation { continuation in
             builder.finishWorkout { workout, error in
                 switch WorkoutFinishCallbackPolicy.outcome(
                     workoutReturned: workout != nil,
                     errorReturned: error != nil
                 ) {
                 case .saved:
-                    continuation.resume(returning: ())
+                    guard let workout else {
+                        continuation.resume(throwing: WorkoutFinalizationError.finishWorkoutFailed)
+                        return
+                    }
+                    continuation.resume(returning: workout)
                 case .failed:
                     guard let error else {
                         continuation.resume(
@@ -7033,6 +7161,11 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
                     continuation.resume(throwing: error)
                 }
             }
+        }
+        // The continuation resumes on MainActor. An old builder must never
+        // populate a later ride's final zone summary.
+        if self.builder === builder {
+            finishedWorkoutNativeZones = nativeZones(from: workout)
         }
     }
 
@@ -7376,6 +7509,24 @@ extension WatchWorkoutManager: HKWorkoutSessionDelegate {
 }
 
 extension WatchWorkoutManager: HKLiveWorkoutBuilderDelegate {
+#if BICINO_HEALTHKIT_WORKOUT_ZONES
+    @available(watchOS 27.0, *)
+    nonisolated func workoutBuilder(
+        _ workoutBuilder: HKLiveWorkoutBuilder,
+        didUpdateWorkoutZone zoneUpdate: HKLiveWorkoutZoneUpdate
+    ) {
+        // Copy the framework payload before crossing the actor boundary.
+        guard let event = HealthKitWorkoutZoneAdapter.event(zoneUpdate) else { return }
+        Task { @MainActor [weak self] in
+            guard let self, workoutBuilder === builder, lifecycle.state.isActive,
+                  let startDate = identity?.startDate else { return }
+            nativeZoneLiveState.record(event, startDate: startDate, now: Date())
+            // Do not touch raw sample timestamps, recovery checkpoints or save state.
+            scheduleCoalescedSnapshot()
+        }
+    }
+#endif
+
     nonisolated func workoutBuilder(
         _ workoutBuilder: HKLiveWorkoutBuilder,
         didCollectDataOf collectedTypes: Set<HKSampleType>

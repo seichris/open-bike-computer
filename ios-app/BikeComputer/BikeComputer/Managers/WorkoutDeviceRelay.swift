@@ -105,6 +105,8 @@ struct WorkoutDeviceRelayScheduler: Sendable {
     private var pendingOriginFrame: Data?
     private var pendingPairIdentity: WorkoutDeviceFrames.Identity?
     private var nextPairGeneration: UInt8 = 1
+    private var lastZoneContext: WorkoutZoneDeviceContextV1?
+    private var pendingZoneContext: WorkoutZoneDeviceContextV1?
 
     init(
         coalescingInterval: TimeInterval = 1,
@@ -120,6 +122,7 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         frames: WorkoutDeviceFrames?,
         transportReady: Bool,
         originTransportReady: Bool = true,
+        zonesTransportReady: Bool = false,
         at date: Date
     ) -> WorkoutDeviceRelaySchedule {
         guard transportReady, let frames else {
@@ -206,10 +209,12 @@ struct WorkoutDeviceRelayScheduler: Sendable {
             $0.sessionToken != frames.identity.sessionToken
                 || $0.hasLiveNumerics != frames.identity.hasLiveNumerics
         } ?? true
-        let originDue = originReady
-            && (becameReady || originChangedDue || originIdentityBoundary)
+        let zonesChangedDue = zonesTransportReady && lastZoneContext != frames.zoneContext
+            && isDue(lastCoreSentAt, interval: coalescingInterval, at: date)
         let pairDue = urgent || coreChangedDue || coreHeartbeatDue
-            || extendedChangedDue || extendedHeartbeatDue
+            || extendedChangedDue || extendedHeartbeatDue || zonesChangedDue
+        let originDue = originReady
+            && (becameReady || originChangedDue || originIdentityBoundary || (zonesTransportReady && pairDue))
         guard pairDue || originDue else {
             return WorkoutDeviceRelaySchedule(
                 transmissions: [],
@@ -246,6 +251,7 @@ struct WorkoutDeviceRelayScheduler: Sendable {
             pendingOriginFrame = frames.origin
         }
         pendingPairIdentity = frames.identity
+        pendingZoneContext = frames.zoneContext
 
         var transmissions = [
             WorkoutDeviceTransmission(
@@ -297,6 +303,7 @@ struct WorkoutDeviceRelayScheduler: Sendable {
         if pendingCoreFrame == nil, pendingExtendedFrame == nil,
            pendingOriginFrame == nil {
             pendingPairIdentity = nil
+            lastZoneContext = pendingZoneContext
         }
     }
 
@@ -513,6 +520,18 @@ final class WorkoutDeviceRelay {
             }
             .store(in: &cancellables)
 
+        bleManager.$supportsWorkoutZonesV1
+            .removeDuplicates()
+            // The initial capability value is not a transport transition.
+            // In particular, initial false must not reprioritize legacy data
+            // or erase an already primed scheduler under queue backpressure.
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.scheduler.transportDidBecomeUnavailable()
+                self?.requestEvaluation()
+            }
+            .store(in: &cancellables)
+
         bleManager.$supportsWatchGPSMotionEvidenceV1
             .removeDuplicates()
             .sink { [weak self] supported in
@@ -545,6 +564,7 @@ final class WorkoutDeviceRelay {
             frames: frames,
             transportReady: ready,
             originTransportReady: bleManager.supportsRideAutomation,
+            zonesTransportReady: bleManager.supportsWorkoutZonesV1,
             at: date
         )
 
@@ -568,6 +588,7 @@ final class WorkoutDeviceRelay {
                 origin: schedule.transmissions.first(where: {
                     $0.kind == .origin
                 })?.data,
+                zoneContext: frames?.zoneContext,
                 prioritized: core.prioritized || extended.prioritized,
                 onWrite: { [weak self] data in
                     guard let transmission = transmissionsByData[data] else {

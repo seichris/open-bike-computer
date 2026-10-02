@@ -131,7 +131,7 @@ def one_building_fmb4(
     return bytes(data)
 
 
-def fmb5_with_pois(
+def fmb6_with_pois(
     poi_records: tuple[tuple[int, int, int, int, int, int], ...] = (
         (12, 34, 2, 3, 2, 0),
         (100, 200, 5, 3, 0, 0),
@@ -142,7 +142,7 @@ def fmb5_with_pois(
     source = bytearray(one_building_fmb4(profile_fingerprint))
     directory = _base_geometry_end(source)
     base = bytearray(source[:directory])
-    base[3] = 5
+    base[3] = 6
     sections = []
     for section_type in range(1, 5):
         _entry, offset, length = _section_span(source, section_type)
@@ -153,10 +153,11 @@ def fmb5_with_pois(
     poi_section = bytearray(struct.pack("<HHI", len(poi_records), 8, category_mask))
     for record in poi_records:
         poi_section.extend(struct.pack("<hhBBBB", *record))
+    sections.append(struct.pack("<BBHHHI", 1, 0, 20, 100, 0, 0))
     sections.append(bytes(poi_section))
 
     data = base
-    data.extend(b"EXT5\x05\0\0\0")
+    data.extend(b"EXT6\x06\0\0\0")
     offset = len(data) + len(sections) * 16
     for section_type, section in enumerate(sections, 1):
         data.extend(

@@ -141,7 +141,7 @@ class BinaryMapFormatTests(unittest.TestCase):
     def test_shared_golden_blocks_match_producer_bytes(self):
         fixtures = golden_fmb_blocks()
         self.assertEqual(
-            set(fixtures), {"fmb_v1", "fmb_v2", "fmb_v3", "fmb_v4", "fmb_v5"}
+            set(fixtures), {"fmb_v1", "fmb_v2", "fmb_v3", "fmb_v4", "fmb_v6"}
         )
         self.assertEqual(fixtures["fmb_v1"][:4], b"FMB\x01")
 
@@ -171,13 +171,13 @@ class BinaryMapFormatTests(unittest.TestCase):
                     font_builder=GoldenFontBuilder(),
                     building_records=[building],
                 ),
-                "fmb_v5": write_fmb(
-                    root / "v5.fmb",
+                "fmb_v6": write_fmb(
+                    root / "v6.fmb",
                     [polygon],
                     [road],
                     0,
                     0,
-                    renderer_target=4,
+                    renderer_target=5,
                     font_builder=GoldenFontBuilder(),
                     building_records=[building],
                     poi_records=[
@@ -204,14 +204,14 @@ class BinaryMapFormatTests(unittest.TestCase):
                 "fmb_v2": (root / "v2.fmb").read_bytes(),
                 "fmb_v3": (root / "v3.fmb").read_bytes(),
                 "fmb_v4": (root / "v4.fmb").read_bytes(),
-                "fmb_v5": (root / "v5.fmb").read_bytes(),
+                "fmb_v6": (root / "v6.fmb").read_bytes(),
             }
 
         for name, version in (
             ("fmb_v2", 2),
             ("fmb_v3", 3),
             ("fmb_v4", 4),
-            ("fmb_v5", 5),
+            ("fmb_v6", 6),
         ):
             self.assertEqual(expected_versions[name]["version"], version)
             self.assertEqual(generated[name], fixtures[name])
@@ -509,7 +509,7 @@ class BinaryMapFormatTests(unittest.TestCase):
             encode_building_section([building] * (MAX_BLOCK_BUILDINGS + 1))
         self.assertEqual(raised.exception.code, "building_artifact_too_large")
 
-    def test_fmb_v5_retains_prior_sections_and_requires_canonical_pois(self):
+    def test_fmb_v6_retains_prior_sections_and_requires_canonical_pois(self):
         polygon, road, building = golden_features()
         pois = [
             {
@@ -531,47 +531,47 @@ class BinaryMapFormatTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            path = root / "v5.fmb"
+            path = root / "v6.fmb"
             metadata = write_fmb(
                 path,
                 [polygon],
                 [road],
                 0,
                 0,
-                renderer_target=4,
+                renderer_target=5,
                 font_builder=GoldenFontBuilder(),
                 building_records=[building],
                 poi_records=pois,
             )
             data = path.read_bytes()
-            empty_path = root / "empty-v5.fmb"
+            empty_path = root / "empty-v6.fmb"
             empty_metadata = write_fmb(
                 empty_path,
                 [polygon],
                 [road],
                 0,
                 0,
-                renderer_target=4,
+                renderer_target=5,
                 font_builder=GoldenFontBuilder(),
                 building_records=[],
                 poi_records=[],
             )
 
-        self.assertEqual(data[:4], b"FMB\x05")
-        self.assertEqual(metadata["version"], 5)
+        self.assertEqual(data[:4], b"FMB\x06")
+        self.assertEqual(metadata["version"], 6)
         self.assertEqual(metadata["pois"], 2)
         self.assertEqual(metadata["restaurantsAndCafesCount"], 1)
         self.assertEqual(metadata["bicycleServicesCount"], 1)
         directory_offset = skip_coordinates(
             data, skip_coordinates(data, 18) + 2 + 13
         )
-        self.assertEqual(data[directory_offset:directory_offset + 4], b"EXT5")
-        self.assertEqual(data[directory_offset + 4], 5)
-        poi_entry = directory_offset + 8 + 4 * 16
+        self.assertEqual(data[directory_offset:directory_offset + 4], b"EXT6")
+        self.assertEqual(data[directory_offset + 4], 6)
+        poi_entry = directory_offset + 8 + 5 * 16
         section_type, flags, reserved, offset, length, crc = struct.unpack_from(
             "<BBHIII", data, poi_entry
         )
-        self.assertEqual((section_type, flags, reserved), (5, 1, 0))
+        self.assertEqual((section_type, flags, reserved), (6, 1, 0))
         section = data[offset:offset + length]
         self.assertEqual(zlib.crc32(section) & 0xFFFFFFFF, crc)
         self.assertEqual(struct.unpack_from("<HHI", section), (2, 8, 0b10010))
@@ -591,7 +591,7 @@ class BinaryMapFormatTests(unittest.TestCase):
                     [road],
                     0,
                     0,
-                    renderer_target=4,
+                    renderer_target=5,
                     font_builder=GoldenFontBuilder(),
                     building_records=[building],
                 )

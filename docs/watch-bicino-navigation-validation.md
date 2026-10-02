@@ -1,7 +1,7 @@
 # Watch + Bicino navigation validation record
 
 This record tracks evidence for the implementation plan in
-`docs/plans/watch-bicino-online-offline-navigation-implementation-plan.md`.
+[historical implementation plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/watch-bicino-online-offline-navigation-implementation-plan.md).
 It is intentionally fail-closed: a software build or simulator result does not
 satisfy a physical or route-provider compliance gate.
 

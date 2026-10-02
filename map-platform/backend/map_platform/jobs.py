@@ -16,7 +16,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable
 
-from .admission import AdmissionCapacityError, AdmissionPolicy
+from .admission import AdmissionCapacityError, QueueAdmissionPolicy, is_waiting
 from .artifacts import ArtifactRecord
 from .generation_profiles import GenerationProfilePolicy
 from .geometry import GeometryError, normalize_geometry
@@ -75,6 +75,20 @@ class UnsupportedRendererTargetError(ValueError):
         }
 
 
+class UnsupportedRendererFeaturesError(UnsupportedRendererTargetError):
+    code = "unsupported_renderer_features"
+
+    def __init__(self, supported: list[int], requested: tuple[str, ...], available: tuple[str, ...]):
+        super().__init__(5, supported)
+        self.requested_features = requested
+        self.available_features = available
+        self.args = ("requested map layers are not available for this installation",)
+
+    def response_detail(self) -> dict[str, Any]:
+        return {**super().response_detail(), "requestedFeatures": list(self.requested_features),
+                "availableFeatures": list(self.available_features)}
+
+
 def _serialized(method):
     @wraps(method)
     def locked(self, *args, **kwargs):
@@ -97,7 +111,7 @@ class JobStore:
         root: str | Path,
         *,
         lock_stale_seconds: float = 300.0,
-        admission_policy: AdmissionPolicy | None = None,
+        admission_policy: QueueAdmissionPolicy | None = None,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -1056,8 +1070,10 @@ class JobStore:
                     or build_cache_key in job.build_cache_aliases
                 )
                 and job.map_id
-                and job.pack_path
-                and Path(job.pack_path).is_file()
+                and (
+                    (job.pack_path and Path(job.pack_path).is_file())
+                    or any(artifact.format == "zip-stored-v1" for artifact in job.artifacts)
+                )
             ]
             return max(candidates, key=lambda value: value.created_at) if candidates else None
 
@@ -1110,8 +1126,10 @@ class JobStore:
                 )
                 or source.build_compatibility_key != build_compatibility_key
                 or not source.map_id
-                or not source.pack_path
-                or not Path(source.pack_path).is_file()
+                or not (
+                    (source.pack_path and Path(source.pack_path).is_file())
+                    or any(artifact.format == "zip-stored-v1" for artifact in source.artifacts)
+                )
             ):
                 return None
             immediate_source_metrics = deepcopy(source.artifact_metrics or {})
@@ -1176,7 +1194,7 @@ class JobStore:
                 job_id,
                 JobStatus.READY,
                 map_id=source.map_id,
-                pack_path=source.pack_path,
+                pack_path=(source.pack_path if source.pack_path and Path(source.pack_path).is_file() else None),
                 pack_bytes=source.pack_bytes,
                 artifacts=source.artifacts,
                 artifact_metrics=artifact_metrics,
@@ -1496,6 +1514,33 @@ class JobStore:
                     return claimed
             return None
 
+    def queue_position(self, job_id: str) -> int | None:
+        """Estimate a one-based position among durable waiting jobs.
+
+        A yielded parent can be temporarily ineligible for worker resources,
+        so the next actual claim may skip ahead of this waiting order.
+        """
+        with self._queue_lock():
+            jobs = self._admission_jobs_unlocked()
+            waiting = [job for job in jobs if is_waiting(job)]
+            # Initial requests and yielded chunked jobs take turns by their
+            # durable wait timestamp; retries follow those two classes.
+            first_pass = sorted(
+                (job for job in waiting if job.scheduler_yielded or job.attempts == 0),
+                key=lambda job: (
+                    job.updated_at if job.scheduler_yielded else job.created_at,
+                    job.job_id,
+                ),
+            )
+            retries = sorted(
+                (job for job in waiting if not job.scheduler_yielded and job.attempts > 0),
+                key=lambda job: (job.updated_at, job.job_id),
+            )
+            for position, job in enumerate((*first_pass, *retries), start=1):
+                if job.job_id == job_id:
+                    return position
+            return None
+
     def yield_chunked_job(self, job_id: str, *, worker_id: str) -> MapJob:
         """Release one active public parent without consuming a retry."""
 
@@ -1722,8 +1767,9 @@ class MapJobService:
         label_target2_enabled: bool = False,
         building_target3_enabled: bool = False,
         building_target3_allowlist: frozenset[str] = frozenset(),
-        poi_target4_enabled: bool = False,
-        poi_target4_allowlist: frozenset[str] = frozenset(),
+        poi_target5_enabled: bool = False,
+        poi_target5_allowlist: frozenset[str] = frozenset(),
+        poi_contours_allowlist: frozenset[str] = frozenset(),
         generation_profile_policy: GenerationProfilePolicy | None = None,
         deployment_channel: str = "production",
         estimate_coordinator=None,
@@ -1735,8 +1781,9 @@ class MapJobService:
         self.label_target2_enabled = label_target2_enabled
         self.building_target3_enabled = building_target3_enabled
         self.building_target3_allowlist = building_target3_allowlist
-        self.poi_target4_enabled = poi_target4_enabled
-        self.poi_target4_allowlist = poi_target4_allowlist
+        self.poi_target5_enabled = poi_target5_enabled
+        self.poi_target5_allowlist = poi_target5_allowlist
+        self.poi_contours_allowlist = poi_contours_allowlist
         self.generation_profile_policy = generation_profile_policy
         self.deployment_channel = deployment_channel
         self.estimate_coordinator = estimate_coordinator
@@ -1752,9 +1799,10 @@ class MapJobService:
                 canary_profiles.add(
                     self.generation_profile_policy.profile_id_for_renderer_format(3)
                 )
-            if client_installation_id in self.poi_target4_allowlist:
+            if (client_installation_id in self.poi_target5_allowlist
+                    and "map-pois-v1" in self.generation_profile_policy.profiles_by_id):
                 canary_profiles.add(
-                    self.generation_profile_policy.profile_id_for_renderer_format(4)
+                    self.generation_profile_policy.profile_id_for_renderer_format(5)
                 )
             return [
                 profile.renderer_format_version
@@ -1771,9 +1819,9 @@ class MapJobService:
         ) or client_installation_id in self.building_target3_allowlist:
             supported.insert(0, 3)
         if (
-            self.poi_target4_enabled and not self.poi_target4_allowlist
-        ) or client_installation_id in self.poi_target4_allowlist:
-            supported.insert(0, 4)
+            self.poi_target5_enabled and not self.poi_target5_allowlist
+        ) or client_installation_id in self.poi_target5_allowlist:
+            supported.insert(0, 5)
         return supported
 
     def generation_capabilities(
@@ -1787,20 +1835,34 @@ class MapJobService:
             canary_profiles.add(
                 self.generation_profile_policy.profile_id_for_renderer_format(3)
             )
-        if client_installation_id in self.poi_target4_allowlist:
+        if (client_installation_id in self.poi_target5_allowlist
+                and "map-pois-v1" in self.generation_profile_policy.profiles_by_id):
             canary_profiles.add(
-                self.generation_profile_policy.profile_id_for_renderer_format(4)
+                self.generation_profile_policy.profile_id_for_renderer_format(5)
             )
         profiles = self.generation_profile_policy.available_profiles(
             self.deployment_channel,
             canary_profile_ids=frozenset(canary_profiles),
         )
+        public_profiles = []
+        for profile in profiles:
+            value = profile.public_dict()
+            if profile.renderer_format_version == 5:
+                value["optionalFeatures"] = list(self._poi_optional_features(client_installation_id))
+            public_profiles.append(value)
         return {
             "schemaVersion": 1,
             "deploymentChannel": self.deployment_channel,
             "policySha256": self.generation_profile_policy.sha256,
-            "generationProfiles": [profile.public_dict() for profile in profiles],
+            "generationProfiles": public_profiles,
         }
+
+    def _poi_optional_features(self, installation: str | None) -> tuple[str, ...]:
+        if self.generation_profile_policy is None:
+            return ()
+        return self.generation_profile_policy.available_optional_features(
+            self.deployment_channel, canary=installation in self.poi_contours_allowlist,
+        )
 
     def create_job(
         self,
@@ -1835,14 +1897,6 @@ class MapJobService:
             install_on_device=install_on_device,
         )
         if self.store.admission_policy is not None:
-            admission = self.store.admission_policy.estimate(
-                request,
-                geometry,
-                source,
-            )
-            job.admission_cost = admission.units
-            job.admission_policy_version = admission.policy_version
-            job.admission_cost_inputs = admission.inputs
             job.admission_partition = admission_partition
         with self.store.lock_job_creation():
             if client_installation_id and client_request_id:
@@ -1863,18 +1917,13 @@ class MapJobService:
                         )
                     return existing
             if self.store.admission_policy is not None:
-                jobs = self.store._admission_jobs_unlocked(
-                    installation_id=job.client_installation_id,
-                )
+                jobs = self.store._admission_jobs_unlocked()
                 self.store.admission_policy.validate_create(job, jobs)
-                active_jobs = [
-                    existing_job
-                    for existing_job in jobs
-                    if existing_job.status in ACTIVE_STATUSES
-                ]
+                active_jobs = [existing_job for existing_job in jobs if existing_job.status in ACTIVE_STATUSES]
             else:
                 active_jobs = self.store.list_active()
-            self.limits.validate_active_jobs(active_jobs)
+            if self.store.admission_policy is None:
+                self.limits.validate_active_jobs(active_jobs)
             if self.estimate_coordinator is not None:
                 try:
                     self.estimate_coordinator.prepare_initial(job, active_jobs)
@@ -1947,6 +1996,12 @@ class MapJobService:
                 requested_format,
                 supported_formats,
             )
+        if requested_format == 5:
+            from .map_pois import POI_REQUIRED_FEATURES, requested_poi_features
+            requested = requested_poi_features(request)
+            available = POI_REQUIRED_FEATURES + self._poi_optional_features(client_installation_id)
+            if not set(requested).issubset(available):
+                raise UnsupportedRendererFeaturesError(supported_formats, requested, tuple(sorted(available)))
         if not client_installation_id or not client_request_id:
             return client_installation_id, client_request_id, None
         if existing is not None:
@@ -2142,6 +2197,7 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
         normalize_language_tag,
     )
     from .map_pois import POI_RENDERER_FORMAT_VERSION
+    from .topography_artifacts import TOPOGRAPHY_RENDERER_FORMAT_VERSION
 
     unexpected = sorted(set(request) - _MAP_JOB_REQUEST_FIELDS)
     if unexpected:
@@ -2153,7 +2209,7 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
         if not isinstance(target, dict):
             raise ValueError("target must be an object")
         unexpected_target = sorted(
-            set(target) - {"renderer", "rendererFormatVersion", "firmwareVersion"}
+            set(target) - {"renderer", "rendererFormatVersion", "firmwareVersion", "requestedFeatures"}
         )
         if unexpected_target:
             raise ValueError(
@@ -2167,15 +2223,16 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
         if "rendererFormatVersion" in target:
             renderer_format_version = target["rendererFormatVersion"]
             if (
-                isinstance(renderer_format_version, bool)
+                type(renderer_format_version) is not int
                 or renderer_format_version not in {
                     1,
                     LABEL_RENDERER_FORMAT_VERSION,
                     BUILDING_RENDERER_FORMAT_VERSION,
                     POI_RENDERER_FORMAT_VERSION,
+                    TOPOGRAPHY_RENDERER_FORMAT_VERSION,
                 }
             ):
-                raise ValueError("target rendererFormatVersion must be 1, 2, 3, or 4")
+                raise ValueError("target rendererFormatVersion must be 1, 2, 3, 4, or 5")
             normalized_target["rendererFormatVersion"] = renderer_format_version
         if "firmwareVersion" in target:
             firmware_version = target["firmwareVersion"]
@@ -2185,12 +2242,18 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}", firmware_version):
                 raise ValueError("target firmwareVersion is invalid")
             normalized_target["firmwareVersion"] = firmware_version
+        if normalized_target.get("rendererFormatVersion") == POI_RENDERER_FORMAT_VERSION:
+            from .map_pois import requested_poi_features
+            normalized_target["requestedFeatures"] = list(requested_poi_features(request))
+        elif "requestedFeatures" in target:
+            raise ValueError("requestedFeatures requires renderer target 5")
         request["target"] = normalized_target
     renderer_format_version = request.get("target", {}).get("rendererFormatVersion", 1)
     if renderer_format_version in {
         LABEL_RENDERER_FORMAT_VERSION,
         BUILDING_RENDERER_FORMAT_VERSION,
         POI_RENDERER_FORMAT_VERSION,
+        TOPOGRAPHY_RENDERER_FORMAT_VERSION,
     } and request.get("target", {}).get("renderer") != "esp32-fmb":
         raise ValueError(
             f"renderer format {renderer_format_version} requires explicit esp32-fmb target"
@@ -2228,6 +2291,7 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
         LABEL_RENDERER_FORMAT_VERSION,
         BUILDING_RENDERER_FORMAT_VERSION,
         POI_RENDERER_FORMAT_VERSION,
+        TOPOGRAPHY_RENDERER_FORMAT_VERSION,
     }:
         if "labels" not in request:
             raise ValueError(

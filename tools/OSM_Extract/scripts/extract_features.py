@@ -53,7 +53,7 @@ parser.add_argument("max_lon")
 parser.add_argument("max_lat")
 parser.add_argument("geojson_prefix")
 parser.add_argument("map_folder", nargs="?", default="../maps/shanghai_v2")
-parser.add_argument("--renderer-format", type=int, choices=(1, 2, 3, 4), default=1)
+parser.add_argument("--renderer-format", type=int, choices=(1, 2, 3, 5), default=1)
 parser.add_argument("--preferred-language", action="append", default=[])
 parser.add_argument("--international-fallback", default="en")
 parser.add_argument("--selection-geometry")
@@ -121,7 +121,7 @@ BUILDING_SCOPE_POLICY_VERSION = 5
 mapblock_mask  = pow( 2, MAPBLOCK_SIZE_BITS) - 1     # ...00000000111111111111
 mapfolder_mask = pow( 2, MAPFOLDER_SIZE_BITS) - 1    # ...00001111
 includes_buildings = args.renderer_format >= 3
-includes_pois = args.renderer_format == 4
+includes_pois = args.renderer_format == 5
 
 
 def fail_building_preprocess(code, message):

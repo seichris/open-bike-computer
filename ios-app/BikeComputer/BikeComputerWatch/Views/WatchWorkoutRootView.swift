@@ -61,6 +61,12 @@ struct WatchWorkoutRootView: View {
                 }
             }
         }
+        .task(id: manager.canDismissDiscardedSummary) {
+            guard manager.canDismissDiscardedSummary else { return }
+            // The durable tombstone and bounded mirror shutdown have completed.
+            // Discard needs no summary acknowledgement or recovery button.
+            manager.dismissSummary()
+        }
         .onAppear {
             routeLibrary.reload()
             manager.retryPendingTerminalCleanupIfPossible()

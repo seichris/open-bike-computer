@@ -16,6 +16,7 @@ INPUT = (ROOT / "lib/device_debug/device_debug_input.cpp").read_text(
     encoding="utf-8"
 )
 MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
+MAIN_SCREEN = (ROOT / "lib/gui/src/mainScr.cpp").read_text(encoding="utf-8")
 RENDERER_DIAGNOSTICS = (
     ROOT / "lib/renderer_diagnostics/renderer_diagnostics.cpp"
 ).read_text(encoding="utf-8")
@@ -262,8 +263,8 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("kFrameResponseInterChunkDelayMs = 1", HTTP)
         self.assertIn("kFrameResponseChunkBytes,", frame)
         self.assertIn("kFrameResponseInterChunkDelayMs", frame)
-        self.assertIn("std::min(maximumChunkBytes, length - offset)", writer)
-        self.assertIn("vTaskDelay(pdMS_TO_TICKS(interChunkDelayMs))", writer)
+        self.assertIn("response_write_policy::budget(", writer)
+        self.assertIn("vTaskDelay(pdMS_TO_TICKS(budget.delayMs))", writer)
 
     def test_non_secret_benchmark_state_uses_forced_psram(self):
         self.assertIn("State *diagnosticsState = nullptr;", RENDERER_DIAGNOSTICS)
@@ -327,14 +328,29 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         transfer = (ROOT / "lib/device_transfer/device_transfer_http.cpp").read_text(
             encoding="utf-8"
         )
+        flash_owner = (
+            ROOT / "lib/firmware_update/device_operation_owner.cpp"
+        ).read_text(encoding="utf-8")
         self.assertIn(
             "apPassphrase_ = generateSessionToken().substr(0, 24);",
             transfer,
         )
         self.assertIn(
-            "WiFi.softAP(apSsid.c_str(), apPassphrase.c_str())", transfer
+            "networkOwner->startAccessPointDetailed(apSsid, apPassphrase)", transfer
         )
-        self.assertNotIn("WiFi.softAP(apSsid.c_str());", transfer)
+        owner_call = flash_owner[
+            flash_owner.index("bool DeviceOperationOwner::startAccessPoint") :
+            flash_owner.index("bool DeviceOperationOwner::stopAccessPoint")
+        ]
+        self.assertIn("startAccessPointDetailed(ssid, passphrase).ok()", owner_call)
+        ap_operation = flash_owner[
+            flash_owner.index("case Operation::StartAccessPoint:") :
+            flash_owner.index("case Operation::StopAccessPoint:")
+        ]
+        self.assertIn("WiFi.persistent(false);", ap_operation)
+        self.assertIn("esp_wifi_set_storage(WIFI_STORAGE_RAM)", ap_operation)
+        self.assertIn("WiFi.softAP(networkSsid_, networkPassword_)", ap_operation)
+        self.assertNotIn("WiFi.softAP(networkSsid_)", ap_operation)
         info = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleInfo") :
             HTTP.index("bool DeviceDebugHttp::handleFrame")
@@ -454,6 +470,22 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertLess(worker_stopped, final_cancel)
         self.assertLess(final_cancel, finish)
 
+    def test_diagnostics_exit_waits_for_worker_before_hotspot_reentry(self):
+        stop = MAIN[
+            MAIN.index("bool stopActiveDeviceTransfer()") :
+            MAIN.index("void appRemoteDebugPointerActivity()")
+        ]
+        diagnostics = stop[
+            stop.index('if (status.mode == "diagnostics")') :
+            stop.index('if (status.mode == "map")')
+        ]
+        self.assertIn("deviceTransferHttp.setEnabled(false)", diagnostics)
+        self.assertIn("deviceTransferHttp.waitUntilStopped(5500)", diagnostics)
+        self.assertLess(
+            diagnostics.index("deviceTransferHttp.setEnabled(false)"),
+            diagnostics.index("deviceTransferHttp.waitUntilStopped(5500)"),
+        )
+
     def test_remote_boot_uses_existing_waveshare_button_path(self):
         button = MAIN[
             MAIN.index("static bool processWaveshareBootButton") :
@@ -464,6 +496,18 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("const bool latchedPress =", button)
         self.assertIn("toggleNavigationScreen();", button)
         self.assertIn("confirmOwnershipPairing();", button)
+
+    def test_power_button_reverse_navigation_uses_main_screen_guard(self):
+        button = MAIN[
+            MAIN.index("static bool processWavesharePowerButton") :
+            MAIN.index("static void armOwnershipPairingAfterRenderedComparison")
+        ]
+        self.assertIn("togglePreviousNavigationScreen();", button)
+
+        toggle_start = MAIN_SCREEN.index("void togglePreviousNavigationScreen()")
+        toggle = MAIN_SCREEN[toggle_start : MAIN_SCREEN.index("/**", toggle_start)]
+        self.assertIn("!isMainScreen", toggle)
+        self.assertIn("showPreviousMainScreen();", toggle)
 
     def test_shell_security_headers_are_present(self):
         for header in (

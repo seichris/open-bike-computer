@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+DEV_SWIFT_COMPILER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/development/swift_compile.py"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saved-route-map-tests.XXXXXX")"
@@ -13,9 +15,8 @@ else
   SWIFTC=(swiftc)
 fi
 
-"${SWIFTC[@]}" -parse-as-library -o "${OUT_DIR}/policy" \
-  ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
-  ios-app/BikeComputerTests/SavedRouteMapPolicyTests.swift
+python3 "${DEV_SWIFT_COMPILER}" saved-route-map-1 -- \
+  -parse-as-library -o "${OUT_DIR}/policy"
 "${OUT_DIR}/policy"
 
 if [[ "$(uname -s)" != Darwin ]]; then
@@ -25,39 +26,12 @@ fi
 
 MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"
 IOS_SUPPORT="${MACOS_SDK}/System/iOSSupport"
-xcrun swiftc -D HOST_TESTING -parse-as-library \
+python3 "${DEV_SWIFT_COMPILER}" saved-route-map-2 -- \
+  -D HOST_TESTING -parse-as-library \
   -target "$(uname -m)-apple-ios16.4-macabi" \
   -sdk "${MACOS_SDK}" \
   -F "${IOS_SUPPORT}/System/Library/Frameworks" \
   -I "${IOS_SUPPORT}/usr/lib/swift" \
   -L "${IOS_SUPPORT}/usr/lib/swift" \
-  -o "${OUT_DIR}/integration" \
-  ios-app/BikeComputer/RideShared/NavigationRouteContract.swift \
-  ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift \
-  ios-app/BikeComputer/RideShared/SavedDestinationContract.swift \
-  ios-app/BikeComputer/RideShared/RouteProviderContract.swift \
-  ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift \
-  ios-app/BikeComputer/RideShared/StravaRouteURL.swift \
-  ios-app/BikeComputer/RideShared/StravaRouteReloadBookmark.swift \
-  ios-app/BikeComputer/RideShared/NavigationRouteArchive.swift \
-  ios-app/BikeComputer/RideShared/NavigationGeometry.swift \
-  ios-app/BikeComputer/RideShared/NavigationRuntime.swift \
-  ios-app/BikeComputer/RideShared/WatchRouteSyncContract.swift \
-  ios-app/BikeComputer/RideShared/WatchControllerContract.swift \
-  ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift \
-  ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift \
-  ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift \
-  ios-app/BikeComputer/RideShared/NavigationRouteFileStore.swift \
-  ios-app/BikeComputer/RideShared/GPXRouteImporter.swift \
-  ios-app/BikeComputer/BikeComputer/Models/AppModels.swift \
-  ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift \
-  ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift \
-  ios-app/BikeComputer/BikeComputer/Models/SavedRouteMapSelection.swift \
-  ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift \
-  ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift \
-  ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift \
-  ios-app/BikeComputer/BikeComputer/Managers/PhoneRouteLibrary.swift \
-  ios-app/BikeComputer/BikeComputer/Views/MapView.swift \
-  ios-app/BikeComputer/BikeComputer/Views/SavedRouteMapPreview.swift \
-  ios-app/BikeComputerTests/SavedRouteMapPreviewTests.swift
+  -o "${OUT_DIR}/integration"
 "${OUT_DIR}/integration"

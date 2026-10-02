@@ -1,3 +1,5 @@
+#include "HealthKitZones.xcconfig"
+
 // Development builds install beside the App Store release and keep their
 // application data, permissions, and Keychain credentials isolated.
 BICINO_IOS_BUNDLE_IDENTIFIER = LetItRide.BikeComputer.dev

@@ -64,6 +64,10 @@ from pioarduino_custom_core import (
     pioarduino_transform_source_sha256,
 )
 from package_factory_firmware import BundleError, package_factory_bundle
+from shared_firmware_cache import (
+    restore_shared_core, publish_shared_core,
+    restore_shared_download, publish_shared_download,
+)
 
 
 ENVIRONMENT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -136,6 +140,8 @@ BUILD_ENVIRONMENT_PASSTHROUGH = {
     "LOGNAME",
     "NO_PROXY",
     "OPEN_BIKE_FIRMWARE_RUNTIME_PROVENANCE",
+    "OPEN_BIKE_FIRMWARE_BUILD_CACHE",
+    "XDG_CACHE_HOME",
     "OPEN_BIKE_FIRMWARE_RUNTIME_BOOTSTRAP_MS",
     "OPEN_BIKE_FIRMWARE_WHEELHOUSE",
     "OPEN_BIKE_FIRMWARE_UV",
@@ -499,6 +505,10 @@ def _download_verified_archive(
             archive.unlink()
 
     if archive.exists():
+        publish_shared_download(archive, sha256, size)
+        return archive
+
+    if restore_shared_download(archive, sha256, size):
         return archive
 
     temporary_name: str | None = None
@@ -537,6 +547,7 @@ def _download_verified_archive(
                 Path(temporary_name).unlink()
             except OSError:
                 pass
+    publish_shared_download(archive, sha256, size)
     return archive
 
 
@@ -794,19 +805,24 @@ def _verified_platformio_project_config(project_dir: Path) -> tuple[Path, Path]:
     configs = _ensure_private_directory(
         project_dir, Path(".pio/open-bike-build/config")
     )
+    def file_uri_for_config(path: Path) -> str:
+        # Pinned PlatformIO consumes file:// paths verbatim, without URL
+        # decoding. Preserve spaces and escape literal % for INI interpolation.
+        return ("file://" + str(path)).replace("%", "%%")
+
     def write_verified_config(
         path: Path,
         excluded: set[str],
         project_text: str,
     ) -> None:
         package_override = "\nplatform_packages =\n" + "".join(
-            f"  {name} @ {package.as_uri()}\n"
+            f"  {name} @ {file_uri_for_config(package)}\n"
             for name, package in verified_packages
             if name not in excluded
         )
         verified_text = project_text.replace(
             f"platform = {WAVESHARE_PLATFORM_URL}",
-            f"platform = {staged_platform.as_uri()}{package_override.rstrip()}",
+            f"platform = {file_uri_for_config(staged_platform)}{package_override.rstrip()}",
         )
         if WAVESHARE_PLATFORM_URL in verified_text:
             raise BuildError(
@@ -1201,7 +1217,10 @@ def _application_build_cache_identity(
         raise BuildError(
             "cannot select the application compiler cache without an exact core input key"
         )
-    return f"{source_identity}:{core_key}"
+    # SCons fingerprints the source, included headers and effective command.
+    # Git metadata is scoped to firmware_metadata.cpp by prebuild.py.
+    # A source-only commit must not discard unrelated library objects.
+    return f"application-v2:{core_key}"
 
 
 def _bootstrap_build_cache_identity(
@@ -1661,11 +1680,13 @@ def build_firmware(
             _remove_pioarduino_dummy(project_dir)
             _remove_environment_build(project_dir, environment)
             _reset_profile_override_inputs(project_dir, environment)
-            selected_core_key = core_input_key(project_dir, environment)
             try:
                 preserved_sdkconfigs = prepare_generated_sdkconfigs(
                     project_dir, environment
                 )
+                if not preserved_sdkconfigs and restore_shared_core(project_dir, environment):
+                    preserved_sdkconfigs = prepare_generated_sdkconfigs(project_dir, environment)
+                selected_core_key = core_input_key(project_dir, environment)
             except GeneratedSdkconfigError as error:
                 raise BuildError(str(error)) from error
             if not preserved_sdkconfigs:
@@ -1865,6 +1886,7 @@ def build_firmware(
                 )
                 manifest = None
                 if manifest_path is not None:
+                    publish_shared_core(project_dir, environment)
                     manifest = _record_build_phase_timings(
                         manifest_path,
                         {
@@ -2188,7 +2210,7 @@ def main(
                 args.upload_port,
                 **upload_options,
             )
-    except BuildError as error:
+    except (BuildError, GeneratedSdkconfigError, FirmwareRuntimeError, OSError) as error:
         print(f"Firmware build failed: {error}", file=sys.stderr)
         return 1
     return 0

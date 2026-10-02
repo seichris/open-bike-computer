@@ -86,6 +86,13 @@ static lv_color_t *disp_draw_buf = NULL;
 static lv_color_t *disp_rotation_buf = NULL;
 static bool full_screen_rgb565_buffer_ready = false;
 static uint8_t displayRotation = waveshare_board::display::DEFAULT_ROTATION;
+static uint8_t touchCoordinateRotation() {
+#ifdef WAVESHARE_AMOLED_175
+  return waveshare_board::touch::cst9217CalibratedRotation(displayRotation);
+#else
+  return displayRotation;
+#endif
+}
 volatile uint32_t displayFlushCount = 0;
 volatile uint32_t lastDisplayFlushMs = 0;
 volatile uint32_t lastDisplayFlushDurationUs = 0;
@@ -357,7 +364,7 @@ static void publishTouchFrame(
   for (uint8_t index = 0; index < latestTouchFrame.count; ++index) {
     latestTouchFrame.contacts[index] =
         waveshare_board::touch::rotateTouchContact(
-            rawFrame.contacts[index], displayRotation,
+            rawFrame.contacts[index], touchCoordinateRotation(),
             waveshare_board::touch::MAX_X, waveshare_board::touch::MAX_Y);
   }
   if (latestTouchFrame.count >= 2 && multiTouchSuppressionPolicy != nullptr &&
@@ -1060,7 +1067,7 @@ void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data) {
     data->state = LV_INDEV_STATE_PRESSED;
     const device_debug::TargetGeometry physicalGeometry{
         waveshare_board::display::ACTIVE_WIDTH,
-        waveshare_board::display::ACTIVE_HEIGHT, displayRotation};
+        waveshare_board::display::ACTIVE_HEIGHT, touchCoordinateRotation()};
     const device_debug::Point rotated =
         device_debug::panelToLvgl(physicalGeometry, {touchX, touchY});
     data->point.x = rotated.x;

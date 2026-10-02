@@ -8,7 +8,12 @@ import UIKit
 // preview factory, and MapView coordinator in this executable.
 @MainActor
 final class PhoneWatchConnectivityCoordinator: ObservableObject {
-    struct State { var isReachable = false }
+    struct State {
+        var isActivated = false
+        var isPaired = false
+        var isWatchAppInstalled = false
+        var isReachable = false
+    }
     @Published var state = State()
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
     private(set) var sideEffects = 0
@@ -107,6 +112,11 @@ private final class PreviewRecordingMap: MKMapView {
         items.append(overlay)
         levels.append(level)
     }
+    override func insertOverlay(_ overlay: MKOverlay, at index: Int, level: MKOverlayLevel) {
+        additions += 1
+        items.insert(overlay, at: index)
+        levels.append(level)
+    }
     override func addOverlays(_ overlays: [MKOverlay], level: MKOverlayLevel) {
         for overlay in overlays { addOverlay(overlay, level: level) }
     }
@@ -162,6 +172,8 @@ struct SavedRouteMapPreviewTests {
         try testFactoryAndCoordinateBoundary()
         try testOverlayOwnershipAndCamera()
         try testSettingsAction()
+        try testSavedMapKitPreview()
+        try testOfflineNavigationOverlayOwnership()
         print("Saved route map integration: \(checks) checks passed")
     }
 
@@ -377,6 +389,25 @@ struct SavedRouteMapPreviewTests {
     }
 
     private static func testOverlayOwnershipAndCamera() throws {
+        let topoMap = PreviewRecordingMap()
+        let initialCameraUpdates = topoMap.cameraUpdates
+        let initialRegionUpdates = topoMap.regionUpdates
+        let topoCoordinator = MapViewContainer.Coordinator()
+        let routeOverlay = MKPolyline()
+        topoMap.addOverlay(routeOverlay, level: .aboveRoads)
+        let firstTopo = MKTileOverlay(urlTemplate: nil)
+        let secondTopo = MKTileOverlay(urlTemplate: nil)
+        topoCoordinator.updateTopographyOverlay(firstTopo, on: topoMap)
+        check(topoMap.overlays.first === firstTopo && topoMap.overlays.last === routeOverlay, "Contours are below an existing route")
+        let additions = topoMap.additions
+        topoCoordinator.updateTopographyOverlay(firstTopo, on: topoMap)
+        check(topoMap.additions == additions, "An unchanged companion does not churn overlays")
+        topoCoordinator.updateTopographyOverlay(secondTopo, on: topoMap)
+        check(topoMap.overlays.first === secondTopo && topoMap.overlays.last === routeOverlay, "Replacing contours preserves route painter order")
+        topoCoordinator.updateTopographyOverlay(nil, on: topoMap)
+        check(topoMap.overlays.count == 1 && topoMap.overlays.first === routeOverlay, "Contour removal owns only the contour layer")
+        check(topoMap.fits.isEmpty && topoMap.cameraUpdates == initialCameraUpdates && topoMap.regionUpdates == initialRegionUpdates, "Contour selection cannot move the route camera")
+        check(topoCoordinator.mapView(topoMap, rendererFor: firstTopo) is MKTileOverlayRenderer, "Contour content never uses the blue route renderer")
         let saved = try archive(route())
         let preview = try SavedRouteMapPreviewFactory.make(selection(saved), now: { timestamp })
         let map = PreviewRecordingMap(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
@@ -446,6 +477,62 @@ struct SavedRouteMapPreviewTests {
         update(coordinator, map: map, preview: preview.overlay, calculating: true)
         check(coordinator.displayedSavedRouteOverlay == nil, "In-flight directions calculations suppress stale saved previews")
         check(map.overlays.contains(where: { $0 === unrelated }), "All transitions preserve unrelated overlays")
+    }
+
+    private static func testOfflineNavigationOverlayOwnership() throws {
+        let saved = try archive(route())
+        let preview = try SavedRouteMapPreviewFactory.make(selection(saved), now: { timestamp })
+        let map = PreviewRecordingMap(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let coordinator = MapViewContainer.Coordinator()
+        let foreign = MKPolyline(coordinates: [CLLocationCoordinate2D(latitude: 1, longitude: 1),
+            CLLocationCoordinate2D(latitude: 1.001, longitude: 1.001)], count: 2)
+        map.addOverlay(foreign, level: .aboveLabels)
+        update(coordinator, map: map, preview: preview.overlay)
+        func navigate(_ polyline: MKPolyline?, active: Bool) {
+            coordinator.updateRouteOverlays(on: map, route: nil, alternatives: [],
+                selectedAlternativeID: nil, routePlanningBottomPadding: 300,
+                location: nil, simulatedPosition: nil, isSimulationMode: false,
+                isNavigating: active, isUserLocationAuthorized: true, isFreePanActive: false,
+                savedRoutePreview: preview.overlay, offlineNavigationPolyline: polyline)
+        }
+        navigate(preview.overlay.polyline, active: true)
+        check(coordinator.displayedSavedRouteOverlay == nil && coordinator.displayedSavedRouteFinishAnnotation == nil,
+            "Offline navigation removes the display-only saved layer")
+        check(coordinator.lastOfflineNavigationPolyline === preview.overlay.polyline && map.overlays.count == 2,
+            "Offline navigation installs only its active polyline and preserves foreign overlays")
+        let additions = map.additions
+        navigate(preview.overlay.polyline, active: true)
+        check(map.additions == additions, "GPS/UI updates reuse the active offline polyline")
+        let renderer = coordinator.mapView(map, rendererFor: preview.overlay.polyline) as! MKPolylineRenderer
+        check(renderer.lineWidth == 6, "Offline navigation is styled as active navigation, not a saved preview")
+        navigate(nil, active: false)
+        check(coordinator.lastOfflineNavigationPolyline == nil && map.overlays.contains { $0 === foreign },
+            "Stopping offline navigation releases only its owned geometry")
+        check(coordinator.displayedSavedRouteOverlay != nil,
+            "Ordinary GPX/Strava previews still work after offline navigation stops")
+    }
+
+    private static func testSavedMapKitPreview() throws {
+        let fixture = LibraryFixture()
+        defer { fixture.cleanup() }
+        let saved = try archive(route(provider: RouteProviderPolicyV1.mapKitSavedOnPhone))
+        let summary = try fixture.install(saved)
+        let selection = try fixture.library.mapSelection(for: summary)
+        let preview = try SavedRouteMapPreviewFactory.make(selection, now: { timestamp })
+        check(preview.providerID == "apple.mapkit" && preview.attribution == "Apple Maps",
+            "Saved MapKit previews retain Apple attribution, not GPX branding")
+        check(preview.identity == WatchRouteIdentityV1(archive: saved) &&
+            preview.overlay.polyline.pointCount == saved.route.points.count,
+            "Saved MapKit preview uses the existing exact-identity overlay pipeline")
+        let map = PreviewRecordingMap(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let coordinator = MapViewContainer.Coordinator()
+        update(coordinator, map: map, preview: preview.overlay)
+        update(coordinator, map: map, preview: preview.overlay)
+        check(map.additions == 1 && map.fits.count == 1,
+            "Saved MapKit overlays are reused, not repeatedly rebuilt or refitted")
+        let effects = fixture.connectivity.sideEffects
+        failure { try fixture.library.sendToWatch(summary) }
+        check(fixture.connectivity.sideEffects == effects, "MapKit phone storage does not enable Watch transfer")
     }
 
     private static func testSettingsAction() throws {

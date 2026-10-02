@@ -34,6 +34,8 @@ struct Record {
 struct Stats {
   uint32_t records = 0;
   std::array<uint32_t, 5> categories = {};
+  uint32_t sectionOffset = 0;
+  uint32_t sectionBytes = 0;
 };
 
 struct Block {
@@ -47,7 +49,7 @@ struct Block {
   size_t decodedBytes() const { return records.capacity() * sizeof(Record); }
 };
 
-// Decodes required FMB v5 section type 5 after strict whole-block validation.
+// Decodes required FMB v6 section type 6 after strict whole-block validation.
 // Older valid FMB blocks produce an empty POI block.
 bool decode(const uint8_t *data, size_t size, Block &output,
             std::string *error = nullptr);

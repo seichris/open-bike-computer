@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <new>
 #include <utility>
 
@@ -18,6 +19,14 @@ namespace {
 bool endsWith(std::string_view value, std::string_view suffix) {
   return value.size() >= suffix.size() &&
          value.substr(value.size() - suffix.size()) == suffix;
+}
+
+bool lowercaseSha256(const std::string &value) {
+  return value.size() == 64 &&
+         std::all_of(value.begin(), value.end(), [](char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f');
+         });
 }
 
 void *allocateStreamMemory(size_t bytes) {
@@ -52,7 +61,9 @@ public:
     bool haveFiles = false;
     bool haveTarget = false;
     bool haveBuildings = false;
+    bool haveTopography = false;
     bool havePois = false;
+    bool haveLayers = false;
     uint64_t schema = 0;
     skipWhitespace();
     if (!consume('{'))
@@ -83,10 +94,18 @@ public:
         if (haveBuildings || !parseBuildings(manifest))
           return false;
         haveBuildings = true;
+      } else if (key == "topography") {
+        if (haveTopography || !parseTopography(manifest))
+          return false;
+        haveTopography = true;
       } else if (key == "pois") {
         if (havePois || !parsePois(manifest))
           return false;
         havePois = true;
+      } else if (key == "layers") {
+        if (haveLayers || !parseLayers(manifest))
+          return false;
+        haveLayers = true;
       } else if (key == "target") {
         if (haveTarget || !parseTarget(manifest))
           return false;
@@ -106,9 +125,15 @@ public:
         !haveFiles || !haveTarget || schema != 1 ||
         manifest.renderer != "esp32-fmb" ||
         (manifest.formatVersion != 1 && manifest.formatVersion != 2 &&
-         manifest.formatVersion != 3 && manifest.formatVersion != 4) ||
-        (manifest.formatVersion >= 3) != haveBuildings ||
-        (manifest.formatVersion == 4) != havePois) {
+         manifest.formatVersion != 3 && manifest.formatVersion != 4 &&
+         manifest.formatVersion != 5) ||
+        ((manifest.formatVersion >= 3) !=
+         haveBuildings) ||
+        ((manifest.formatVersion == 4 ||
+          (manifest.formatVersion == 5 && manifest.contoursIncluded)) !=
+         haveTopography) ||
+        ((manifest.formatVersion == 5) != havePois) ||
+        ((manifest.formatVersion == 5) != haveLayers)) {
       return false;
     }
     manifest.schemaVersion = static_cast<uint32_t>(schema);
@@ -385,12 +410,10 @@ private:
     skipWhitespace();
     if (!consume('{'))
       return false;
-    bool seen[6] = {false, false, false, false, false, false};
     static constexpr const char *keys[6] = {
         "bicycleServicesCount", "gasStationsCount", "publicToiletsCount",
         "recordCount", "restaurantsAndCafesCount", "shopsCount"};
-    static constexpr uint8_t categoryIndex[6] = {4, 3, 2, 255, 1, 0};
-    skipWhitespace();
+    bool seen[6] = {};
     std::string previousKey;
     while (true) {
       std::string key;
@@ -406,11 +429,13 @@ private:
       if (index == 6 || seen[index])
         return false;
       seen[index] = true;
-      if (categoryIndex[index] == 255)
+      if (index == 3)
         manifest.poiRecordCount = static_cast<uint32_t>(value);
-      else
+      else {
+        static constexpr uint8_t categoryIndex[6] = {4, 3, 2, 0, 1, 0};
         manifest.poiCategoryCounts[categoryIndex[index]] =
             static_cast<uint32_t>(value);
+      }
       skipWhitespace();
       if (consume('}'))
         break;
@@ -425,6 +450,138 @@ private:
     for (uint32_t count : manifest.poiCategoryCounts)
       total += count;
     return total == manifest.poiRecordCount;
+  }
+
+  bool parseLayers(MapManifest &manifest) {
+    skipWhitespace();
+    std::string key;
+    std::string value;
+    if (!consume('{') || !parseString(key) || key != "contours" ||
+        !consumeAfterWhitespace(':') || !parseString(value) ||
+        !consumeAfterWhitespace('}') ||
+        (value != "included" && value != "not-included"))
+      return false;
+    manifest.contoursIncluded = value == "included";
+    return true;
+  }
+
+  bool parseBoundedNonEmptyObjectArray(size_t maximum, size_t &count) {
+    count = 0;
+    skipWhitespace();
+    if (!consume('['))
+      return false;
+    skipWhitespace();
+    if (consume(']'))
+      return false;
+    while (true) {
+      skipWhitespace();
+      if (count >= maximum || position_ >= text_.size() ||
+          text_[position_] != '{' || !skipValue(0))
+        return false;
+      count++;
+      skipWhitespace();
+      if (consume(']'))
+        return true;
+      if (!consume(','))
+        return false;
+      skipWhitespace();
+    }
+  }
+
+  bool parseTopography(MapManifest &manifest) {
+    skipWhitespace();
+    if (!consume('{'))
+      return false;
+    bool seen[11] = {};
+    std::string qualityMode;
+    std::string previousKey;
+    skipWhitespace();
+    while (true) {
+      std::string key;
+      if (!parseString(key) || (!previousKey.empty() && key <= previousKey) ||
+          !consumeAfterWhitespace(':'))
+        return false;
+      previousKey = key;
+      size_t index = 11;
+      if (key == "attributionSha256") index = 0;
+      else if (key == "indexIntervalM") index = 1;
+      else if (key == "intermediateSha256") index = 2;
+      else if (key == "minorIntervalM") index = 3;
+      else if (key == "noDataMillionths") index = 4;
+      else if (key == "pointCount") index = 5;
+      else if (key == "profileVersion") index = 6;
+      else if (key == "qualityMode") index = 7;
+      else if (key == "recordCount") index = 8;
+      else if (key == "sourcePolicySha256") index = 9;
+      else if (key == "sources") index = 10;
+      if (index == 11 || seen[index])
+        return false;
+      seen[index] = true;
+      uint64_t value = 0;
+      size_t sourceCount = 0;
+      switch (index) {
+      case 0:
+        if (!parseString(manifest.topographyAttributionSha256)) return false;
+        break;
+      case 1:
+        if (!parseUnsigned(value) || value > UINT32_MAX) return false;
+        manifest.contourIndexIntervalM = static_cast<uint32_t>(value);
+        break;
+      case 2:
+        if (!parseString(manifest.topographyIntermediateSha256)) return false;
+        break;
+      case 3:
+        if (!parseUnsigned(value) || value > UINT32_MAX) return false;
+        manifest.contourMinorIntervalM = static_cast<uint32_t>(value);
+        break;
+      case 4:
+        if (!parseUnsigned(value) || value > 1000000) return false;
+        manifest.contourNoDataMillionths = static_cast<uint32_t>(value);
+        break;
+      case 5:
+        if (!parseUnsigned(value) || value > 16777216) return false;
+        manifest.contourPointCount = static_cast<uint32_t>(value);
+        break;
+      case 6:
+        if (!parseUnsigned(value) || value != 1) return false;
+        break;
+      case 7:
+        if (!parseString(qualityMode)) return false;
+        break;
+      case 8:
+        if (!parseUnsigned(value) || value > 1048576) return false;
+        manifest.contourRecordCount = static_cast<uint32_t>(value);
+        break;
+      case 9:
+        if (!parseString(manifest.topographySourcePolicySha256)) return false;
+        break;
+      case 10:
+        if (!parseBoundedNonEmptyObjectArray(32, sourceCount)) return false;
+        break;
+      }
+      skipWhitespace();
+      if (consume('}'))
+        break;
+      if (!consume(','))
+        return false;
+      skipWhitespace();
+    }
+    if (!std::all_of(std::begin(seen), std::end(seen), [](bool value) {
+          return value;
+        }))
+      return false;
+    const bool intervals =
+        (manifest.contourMinorIntervalM == 20 &&
+         manifest.contourIndexIntervalM == 100) ||
+        (manifest.contourMinorIntervalM == 50 &&
+         manifest.contourIndexIntervalM == 250);
+    manifest.contourQualityMode = qualityMode;
+    return intervals &&
+           (qualityMode == "standard-20m-v1" ||
+            qualityMode == "coarse-50m-v1") &&
+           lowercaseSha256(manifest.topographyAttributionSha256) &&
+           lowercaseSha256(manifest.topographyIntermediateSha256) &&
+           lowercaseSha256(manifest.topographySourcePolicySha256);
   }
 
   bool parseFiles(MapStreamFileTable &files) {
@@ -501,10 +658,13 @@ private:
     bool haveFormat = false;
     bool haveMinimumFirmware = false;
     bool haveBuildingProfile = false;
+    bool haveTopographyProfile = false;
     bool haveLabelProfile = false;
     bool haveLanguages = false;
     bool haveFallback = false;
     bool havePoiProfile = false;
+    bool havePoiIndexProfile = false;
+    bool haveRequestedFeatures = false;
     skipWhitespace();
     if (consume('}'))
       return false;
@@ -538,6 +698,12 @@ private:
           return false;
         manifest.labelProfileVersion = static_cast<uint32_t>(value);
         haveLabelProfile = true;
+      } else if (key == "topographyProfileVersion") {
+        uint64_t value = 0;
+        if (haveTopographyProfile || !parseUnsigned(value) || value > UINT32_MAX)
+          return false;
+        manifest.topographyProfileVersion = static_cast<uint32_t>(value);
+        haveTopographyProfile = true;
       } else if (key == "labelLanguages") {
         if (haveLanguages || !parseStringArray(manifest.labelLanguages, 3))
           return false;
@@ -557,6 +723,17 @@ private:
           return false;
         manifest.poiProfileVersion = static_cast<uint32_t>(value);
         havePoiProfile = true;
+      } else if (key == "poiIndexProfileVersion") {
+        uint64_t value = 0;
+        if (havePoiIndexProfile || !parseUnsigned(value) || value != 1)
+          return false;
+        manifest.poiIndexProfileVersion = static_cast<uint32_t>(value);
+        havePoiIndexProfile = true;
+      } else if (key == "requestedFeatures") {
+        if (haveRequestedFeatures ||
+            !parseStringArray(manifest.requestedFeatures, 4))
+          return false;
+        haveRequestedFeatures = true;
       } else if (!skipValue(0)) {
         return false;
       }
@@ -565,16 +742,32 @@ private:
         return haveRenderer && haveFormat && haveMinimumFirmware &&
                (manifest.formatVersion == 1
                     ? (!haveBuildingProfile && !haveLabelProfile &&
-                       !haveLanguages && !haveFallback && !havePoiProfile)
+                       !haveLanguages && !haveFallback && !havePoiProfile &&
+                       !havePoiIndexProfile && !haveRequestedFeatures)
                     : (haveLabelProfile && haveLanguages && haveFallback &&
                        manifest.labelProfileVersion == 1 &&
-                       (manifest.formatVersion >= 3
+                       ((manifest.formatVersion >= 3)
                             ? haveBuildingProfile &&
                                   manifest.buildingProfileVersion == 1
                             : !haveBuildingProfile) &&
-                       (manifest.formatVersion == 4
-                            ? havePoiProfile && manifest.poiProfileVersion == 1
-                            : !havePoiProfile)));
+                       (manifest.formatVersion == 4 ||
+                        (manifest.formatVersion == 5 &&
+                         manifest.contoursIncluded)
+                            ? haveTopographyProfile &&
+                                  manifest.topographyProfileVersion == 1
+                            : !haveTopographyProfile) &&
+                       (manifest.formatVersion == 5
+                            ? havePoiProfile && manifest.poiProfileVersion == 1 &&
+                                  havePoiIndexProfile && haveRequestedFeatures &&
+                                  (manifest.requestedFeatures == std::vector<std::string>{
+                                      "3d-buildings", "map-pois", "street-labels"} ||
+                                   manifest.requestedFeatures == std::vector<std::string>{
+                                      "3d-buildings", "contours", "map-pois",
+                                      "street-labels"}) &&
+                                  (manifest.contoursIncluded ==
+                                   (manifest.requestedFeatures.size() == 4))
+                            : !havePoiProfile && !havePoiIndexProfile &&
+                                  !haveRequestedFeatures)));
       if (!consume(','))
         return false;
       skipWhitespace();
@@ -721,7 +914,8 @@ bool safeMapPath(std::string_view path, const std::string &mapId,
     return false;
   }
   const bool fontAsset = tile == "assets" && filename == "street-labels.fma";
-  if (!fontAsset &&
+  const bool poiIndexAsset = tile == "assets" && filename == "nearby-pois.fpi";
+  if (!fontAsset && !poiIndexAsset &&
       (filename.size() < 5 ||
        !(filename.substr(filename.size() - 4) == ".fmb" ||
          filename.substr(filename.size() - 4) == ".fmp"))) {
@@ -732,14 +926,6 @@ bool safeMapPath(std::string_view path, const std::string &mapId,
   filenameOffset = thirdSlash + 1;
   filenameBytes = filename.size();
   return true;
-}
-
-bool lowercaseSha256(const std::string &value) {
-  return value.size() == 64 &&
-         std::all_of(value.begin(), value.end(), [](char character) {
-           return (character >= '0' && character <= '9') ||
-                  (character >= 'a' && character <= 'f');
-         });
 }
 
 bool decodeLowercaseSha256(const std::string &value,
@@ -990,6 +1176,7 @@ bool parseMapStreamManifest(std::string_view manifestText,
   }
   uint64_t payloadBytes = 0;
   uint32_t fontAssetCount = 0;
+  uint32_t poiIndexCount = 0;
   uint32_t legacyTextBlockCount = 0;
   std::string_view previousPath;
   for (size_t fileIndex = 0; fileIndex < parsed.files.size(); fileIndex++) {
@@ -1010,7 +1197,9 @@ bool parseMapStreamManifest(std::string_view manifestText,
         file.bytes >
             (endsWith(path, "/assets/street-labels.fma")
                  ? map_font_asset_format::kMaximumFontAssetBytes
-                 : map_block_format::kMaximumBlockBytes) ||
+                 : (endsWith(path, "/assets/nearby-pois.fpi")
+                        ? 16u + 32u * 16384u
+                        : map_block_format::kMaximumBlockBytes)) ||
         (!previousPath.empty() && path <= previousPath) ||
         payloadBytes > MAP_STREAM_MAX_PAYLOAD_BYTES - file.bytes) {
       return false;
@@ -1023,15 +1212,20 @@ bool parseMapStreamManifest(std::string_view manifestText,
     payloadBytes += file.bytes;
     if (endsWith(path, "/assets/street-labels.fma"))
       fontAssetCount++;
+    if (endsWith(path, "/assets/nearby-pois.fpi"))
+      poiIndexCount++;
     if (endsWith(path, ".fmp"))
       legacyTextBlockCount++;
     previousPath = path;
   }
   if (((parsed.metadata.formatVersion == 2 ||
         parsed.metadata.formatVersion == 3 ||
-        parsed.metadata.formatVersion == 4) &&
+        parsed.metadata.formatVersion == 4 ||
+        parsed.metadata.formatVersion == 5) &&
        (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
-      (parsed.metadata.formatVersion == 1 && fontAssetCount != 0)) {
+      (parsed.metadata.formatVersion == 1 && fontAssetCount != 0) ||
+      ((parsed.metadata.formatVersion == 5) != (poiIndexCount == 1)) ||
+      poiIndexCount > 1) {
     return false;
   }
   parsed.payloadBytes = payloadBytes;

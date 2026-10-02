@@ -733,18 +733,25 @@ int main() {
         "\"levelsHeightCount\":0,\"localMedianHeightCount\":0," +
         "\"recordCount\":1},\"files\":[{\"bytes\":1,\"path\":\"" +
         first + "\",\"sha256\":\"" + sha +
+        "\"},{\"bytes\":16,\"path\":\"VECTMAP/map/assets/nearby-pois.fpi\","
+        "\"sha256\":\"" + sha +
         "\"},{\"bytes\":2,\"path\":\"VECTMAP/map/assets/street-labels.fma\"," +
         "\"sha256\":\"" + sha +
-        "\"}],\"mapId\":\"map\",\"pois\":{\"bicycleServicesCount\":1," +
+        "\"}],\"layers\":{\"contours\":\"not-included\"},"
+        "\"mapId\":\"map\",\"pois\":{\"bicycleServicesCount\":1," +
         "\"gasStationsCount\":0,\"publicToiletsCount\":0,\"recordCount\":2," +
         "\"restaurantsAndCafesCount\":1,\"shopsCount\":0}," +
         "\"schemaVersion\":1,\"target\":{\"buildingProfileVersion\":1," +
-        "\"formatVersion\":4,\"internationalFallback\":\"en\"," +
+        "\"formatVersion\":5,\"internationalFallback\":\"en\"," +
         "\"labelLanguages\":[\"en\"],\"labelProfileVersion\":1," +
-        "\"minFirmwareVersion\":\"0.0.0\",\"poiProfileVersion\":1," +
-        "\"renderer\":\"esp32-fmb\"}}";
-    assert(parseMapStreamManifest(poiManifest, manifestHeader, parsed));
-    assert(parsed.metadata.formatVersion == 4);
+        "\"minFirmwareVersion\":\"0.0.0\",\"poiIndexProfileVersion\":1," +
+        "\"poiProfileVersion\":1,\"renderer\":\"esp32-fmb\"," +
+        "\"requestedFeatures\":[\"3d-buildings\",\"map-pois\",\"street-labels\"]}}";
+    MapStreamHeader poiHeader = manifestHeader;
+    poiHeader.fileCount = 3;
+    poiHeader.payloadBytes = 19;
+    assert(parseMapStreamManifest(poiManifest, poiHeader, parsed));
+    assert(parsed.metadata.formatVersion == 5);
     assert(parsed.metadata.poiProfileVersion == 1);
     assert(parsed.metadata.poiRecordCount == 2);
     assert(parsed.metadata.poiCategoryCounts[1] == 1);
@@ -755,7 +762,7 @@ int main() {
     assert(bicycleCount != std::string::npos);
     mismatchedPoiSummary[
         mismatchedPoiSummary.find(':', bicycleCount) + 1U] = '0';
-    assert(!parseMapStreamManifest(mismatchedPoiSummary, manifestHeader,
+    assert(!parseMapStreamManifest(mismatchedPoiSummary, poiHeader,
                                    parsed));
     auto mismatchedBuildingSummary = buildingManifest;
     const size_t explicitCount =

@@ -17,6 +17,7 @@ from build_building_calibration import (  # noqa: E402
     source_cell_domain,
 )
 from build_building_source_index import scan_source  # noqa: E402
+from precompute_building_source import precompute  # noqa: E402
 from building_pipeline import (  # noqa: E402
     _calibration_cell,
     load_rules,
@@ -47,6 +48,66 @@ class BuildingSourceScannerTests(unittest.TestCase):
             source_cell_domain(self.source, 8192, 1),
             tuple((x, y) for x in range(-1, 2) for y in range(-1, 2)),
         )
+
+    def test_offline_precompute_makes_both_builders_ready_without_rescan(self):
+        sha = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        rules_path = ROOT / "conf" / "building_height_rules.yaml"
+        with tempfile.TemporaryDirectory() as temporary:
+            cache_root = Path(temporary) / "cache"
+            first = precompute(self.source, sha, rules_path, cache_root)
+            with patch("precompute_building_source.scan_source", side_effect=AssertionError("index rescan")), \
+                    patch("precompute_building_source.scan_full_pbf", side_effect=AssertionError("calibration rescan")):
+                self.assertEqual(precompute(self.source, sha, rules_path, cache_root), first)
+            index = BuildingSourceIndex(cache_root, sha)
+            self.assertEqual(index.validate_ready()["manifestSha256"], first["sourceIndexManifestSha256"])
+            index_command = [
+                sys.executable, str(ROOT / "scripts" / "build_building_source_index.py"),
+                "--source-sha256", sha, "--cache-root", str(cache_root), "--require-ready",
+            ]
+            ready_index = subprocess.run(index_command, capture_output=True, text=True)
+            self.assertEqual(ready_index.returncode, 0, ready_index.stderr)
+            self.assertIn('BUILDING_SOURCE_INDEX_STATS:', ready_index.stdout)
+
+    def test_ready_only_source_index_rejects_missing_cache_without_scanning(self):
+        sha = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            index = BuildingSourceIndex(Path(temporary), sha)
+            with patch.object(index, "build_with_scanner", side_effect=AssertionError("rescan")):
+                with self.assertRaises(BuildingSourceIndexError):
+                    index.validate_ready()
+
+    def test_ready_only_calibration_rejects_missing_generation(self):
+        sha = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        body = {
+            "schemaVersion": 1,
+            "calibration": {
+                "cellSizeMeters": self.rules.cell_size_meters,
+                "haloCells": self.rules.halo_cells,
+                "minimumSamples": self.rules.minimum_samples,
+            },
+        }
+        digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"),
+                                           ensure_ascii=False).encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scope = root / "scope.json"
+            scope.write_text(json.dumps({**body, "scopePlanSha256": digest}))
+            command = [
+                sys.executable, str(ROOT / "scripts" / "build_building_calibration.py"),
+                "--source-pbf", str(self.source), "--source-sha256", sha,
+                "--rules", str(ROOT / "conf" / "building_height_rules.yaml"),
+                "--scope-plan", str(scope), "--cache-root", str(root / "cache"),
+                "--full-precompute", "--require-ready",
+            ]
+            missing = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(missing.returncode, 2)
+            self.assertIn("complete calibration generation is not ready", missing.stderr)
+            precompute(self.source, sha, ROOT / "conf" / "building_height_rules.yaml", root / "cache")
+            no_source_command = command[:]
+            no_source_command[2:4] = []
+            ready = subprocess.run(no_source_command, capture_output=True, text=True)
+            self.assertEqual(ready.returncode, 0, ready.stderr)
+            self.assertIn('"cellsHits":9', ready.stdout)
 
     def test_calibration_scope_loader_accepts_global_plan_identity_alias(self):
         body = {
@@ -227,6 +288,47 @@ class BuildingSourceScannerTests(unittest.TestCase):
                 index.build_with_scanner(lambda path: scan_source(source, path))
             self.assertEqual(raised.exception.code, "building_relation_incomplete")
             self.assertFalse(index.database_path.exists())
+
+    def test_nonbuilding_multipolygon_with_missing_way_does_not_poison_building_index(self):
+        source_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6">
+  <node id="1" lat="31.0" lon="104.0"/>
+  <node id="2" lat="31.0" lon="104.001"/>
+  <node id="3" lat="31.001" lon="104.001"/>
+  <way id="10">
+    <nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="1"/>
+    <tag k="building" v="yes"/>
+  </way>
+  <relation id="20">
+    <member type="way" ref="10" role="outer"/>
+    <member type="way" ref="999" role="outer"/>
+    <tag k="type" v="multipolygon"/>
+    <tag k="power" v="plant"/>
+  </relation>
+</osm>
+"""
+        with tempfile.TemporaryDirectory() as root:
+            source = Path(root) / "plant.osm"
+            source.write_text(source_xml)
+            index = BuildingSourceIndex(Path(root) / "index", "1" * 64)
+            index.build_with_scanner(lambda path: scan_source(source, path))
+            closure = index.closure_for_bounds(
+                [(1_039_999_000, 309_999_000, 1_040_020_000, 310_020_000)],
+                maximum_objects=100,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+            )
+            self.assertEqual(closure["requiredWayKeys"], ["w10"])
+            self.assertEqual(closure["requiredRelationKeys"], [])
+            self.assertEqual(index.validate()["relationCount"], 0)
+
+            source.write_text(source_xml.replace(
+                '<tag k="power" v="plant"/>', '<tag k="building" v="yes"/>'
+            ))
+            incomplete = BuildingSourceIndex(Path(root) / "strict", "2" * 64)
+            with self.assertRaises(BuildingSourceIndexError) as raised:
+                incomplete.build_with_scanner(lambda path: scan_source(source, path))
+            self.assertEqual(raised.exception.code, "building_relation_incomplete")
 
     def test_scanner_and_runtime_geometry_share_boundary_anchor_cell(self):
         source = Path(__file__).parent / "fixtures" / "calibration_anchor_boundary.osm"

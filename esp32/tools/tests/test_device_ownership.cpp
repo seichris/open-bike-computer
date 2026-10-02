@@ -590,6 +590,8 @@ int main() {
   assert(watchDevice.authorizeRideWrite(
       AuthenticatedChannel::RideAutomation, 65));
   assert(!watchDevice.authorizeRideWrite(AuthenticatedChannel::Settings, 66));
+  assert(!watchDevice.authorizeRideWrite(
+      AuthenticatedChannel::ScreenConfiguration, 66));
   assert(watchDevice.handle("NAME|5761746368", 66).response ==
          "ERROR|rename_rejected");
   assert(watchDevice.handle("UNPAIR", 67).response ==

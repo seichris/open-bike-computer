@@ -16,10 +16,13 @@
 #include <Arduino.h>
 #include <atomic>
 #include "ble_radio_policy.hpp"
+#include "gps_input_freshness.hpp"
 #include "destination_picker_protocol.hpp"
 #include "map_profile_protocol.hpp"
 #include "renderer_diagnostics_ble_protocol.hpp"
 #include "ride_ble_protocol.generated.hpp"
+#include "../world_radio/world_radio_protocol.hpp"
+#include "../world_radio/world_radio_config.hpp"
 
 // Forward declarations - actual NimBLE includes only in .cpp
 class NimBLEServer;
@@ -49,22 +52,33 @@ enum class WorkoutStartRequestPresentation : uint8_t {
  * state. IDs 25-26 control the Map + Navigation bird's-eye projection and
  * perspective. IDs 27-34 configure street labels for Map and Map + Navigation,
  * and ID 35 controls OSM 3D buildings in bird's-eye navigation. ID 36
- * controls automatic connected-display inactivity.
+ * controls automatic connected-display inactivity, and ID 38 configures its
+ * dim and panel-off delays as one atomic value.
  * Legacy ID 4 is ignored because display rotation is selected by the hardware
  * target.
  */
 enum DeviceScreenSetting : uint8_t {
-  DEVICE_SCREEN_MAP = 0,
-  DEVICE_SCREEN_NAVIGATION = 1,
-  DEVICE_SCREEN_RIDE_STATS = 2,
-  DEVICE_SCREEN_MAP_PLUS_NAVIGATION = 3,
-  DEVICE_SCREEN_BATTERY_STATUS = 4,
+  DEVICE_SCREEN_MAP =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::Map),
+  DEVICE_SCREEN_NAVIGATION =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::Navigation),
+  DEVICE_SCREEN_RIDE_STATS =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::RideStats),
+  DEVICE_SCREEN_MAP_PLUS_NAVIGATION =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::MapPlusNavigation),
+  DEVICE_SCREEN_BATTERY_STATUS =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::BatteryStatus),
+  DEVICE_SCREEN_WORLD_RADIO =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::WorldRadio),
 };
 
 static constexpr uint8_t DEVICE_SCREEN_SUPPORTED_MASK =
     (1 << DEVICE_SCREEN_MAP) | (1 << DEVICE_SCREEN_NAVIGATION) |
     (1 << DEVICE_SCREEN_RIDE_STATS) | (1 << DEVICE_SCREEN_MAP_PLUS_NAVIGATION) |
-    (1 << DEVICE_SCREEN_BATTERY_STATUS);
+    (1 << DEVICE_SCREEN_BATTERY_STATUS) |
+    (world_radio_config::ENABLED ? (1 << DEVICE_SCREEN_WORLD_RADIO) : 0);
+static constexpr uint8_t DEVICE_SCREEN_DEFAULT_MASK =
+    DEVICE_SCREEN_SUPPORTED_MASK & ~(1 << DEVICE_SCREEN_WORLD_RADIO);
 
 static constexpr uint32_t MAP_VISIBILITY_BUILDINGS =
     map_profile_protocol::VISIBILITY_BUILDINGS;
@@ -144,7 +158,7 @@ struct MapRenderSettings {
   uint8_t mapNavigationRotationMode = 1;
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
   uint8_t enabledScreensMask =
-      DEVICE_SCREEN_SUPPORTED_MASK; // Bits follow DeviceScreenSetting
+      DEVICE_SCREEN_DEFAULT_MASK; // Bits follow DeviceScreenSetting
   uint8_t defaultScreen =
       DEVICE_SCREEN_MAP_PLUS_NAVIGATION; // DeviceScreenSetting value
   uint32_t disconnectedSleepTimeoutSeconds =
@@ -210,6 +224,7 @@ struct BLEDebugStats {
   uint32_t navPacketCount = 0;
   uint32_t routePacketCount = 0;
   uint32_t gpsPacketCount = 0;
+  gps_input_freshness::SourceSample gpsSource{};
   uint32_t settingsPacketCount = 0;
   uint32_t rejectedUnauthenticatedCount = 0;
   uint32_t lastConnectMs = 0;
@@ -251,10 +266,20 @@ public:
    */
   bool isConnected() const { return connected; }
 
+  /** True when the current BLE connection completed owner authentication. */
+  bool isAuthenticated() const;
+
   /**
    * @brief Process any pending BLE events (call from main loop)
    */
   void process();
+
+  /** Queue a fresh map-status snapshot after the renderer learns whether the
+   * current location is covered by the active map. */
+  void noteMapAvailabilityChanged();
+
+  /** Queue a fresh owner-authenticated device-transfer status snapshot. */
+  void requestDeviceTransferStatusNotification();
 
   /** Record physical input that should reopen the fast-advertising window. */
   void noteUserWake();
@@ -277,6 +302,8 @@ public:
   bool requestWorkoutStart();
   bool canRequestWorkoutStart() const;
   WorkoutStartRequestPresentation workoutStartRequestPresentation() const;
+  bool requestWorldRadio(const world_radio_protocol::Request &request);
+  bool canRequestWorldRadio() const;
   bool notifyRideAutomationFrame(const uint8_t *data, size_t length);
 
   BLEDebugStats getDebugStats() const;
@@ -312,6 +339,8 @@ private:
       ride_ble_protocol_generated::WORKOUT_UUID;
   static constexpr const char *RIDE_AUTOMATION_CHAR_UUID =
       ride_ble_protocol_generated::RIDE_AUTOMATION_UUID;
+  static constexpr const char *SCREEN_CONFIGURATION_CHAR_UUID =
+      ride_ble_protocol_generated::SCREEN_CONFIGURATION_UUID;
 
   NimBLEServer *pServer = nullptr;
   NimBLECharacteristic *pNavCharacteristic = nullptr;
@@ -319,12 +348,14 @@ private:
   NimBLECharacteristic *pAuthCharacteristic = nullptr;
   NimBLECharacteristic *pWorkoutTelemetryCharacteristic = nullptr;
   NimBLECharacteristic *pRideAutomationCharacteristic = nullptr;
+  NimBLECharacteristic *pScreenConfigurationCharacteristic = nullptr;
 
   friend class MyBLEServerCallbacks;
   friend class MyNavCharacteristicCallbacks;
   friend class MyRouteCharacteristicCallbacks;
   friend class MyWorkoutTelemetryCharacteristicCallbacks;
   friend class MyRideAutomationCharacteristicCallbacks;
+  friend class MyScreenConfigurationCharacteristicCallbacks;
   friend class MyAuthCharacteristicCallbacks;
 };
 

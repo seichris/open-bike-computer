@@ -868,87 +868,15 @@ enum DeviceGPSPacketBuilder {
         includeRideDetectionQuality: Bool = false,
         now: Date = Date()
     ) -> Data {
-        var data = Data()
-        let latInt = Int32(lat * 1_000_000)
-        let lonInt = Int32(lon * 1_000_000)
-        let headingDeg: UInt16 = {
-            guard let normalized = NavigationHeading.normalized(heading) else {
-                return invalidHeadingDegrees
-            }
-            return UInt16(normalized.rounded()) % 360
-        }()
-        let speedCmps: UInt16 = {
-            guard let speedMetersPerSecond, speedMetersPerSecond >= 0 else {
-                return invalidSpeedCmps
-            }
-            return UInt16(min((speedMetersPerSecond * 100).rounded(), Double(UInt16.max - 1)))
-        }()
-        let altitudeInt = Int16(max(min((altitudeMeters ?? 0).rounded(), Double(Int16.max)), Double(Int16.min)))
-        let distanceInt = UInt32(max(min((distanceTraveledMeters ?? 0).rounded(), Double(UInt32.max)), 0))
-        let elapsedInt = UInt32(max(min((elapsedSeconds ?? 0).rounded(), Double(UInt32.max)), 0))
-        let routeRemainingInt: UInt32 = {
-            guard let routeRemainingMeters, routeRemainingMeters >= 0 else {
-                return invalidRouteRemainingMeters
-            }
-            return UInt32(max(min(routeRemainingMeters.rounded(), Double(UInt32.max - 1)), 0))
-        }()
-
-        withUnsafeBytes(of: latInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: lonInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: headingDeg.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: unixTime.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: speedCmps.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: altitudeInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: distanceInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: elapsedInt.littleEndian) { data.append(contentsOf: $0) }
-        withUnsafeBytes(of: routeRemainingInt.littleEndian) { data.append(contentsOf: $0) }
-
-        if includeRideDetectionQuality {
-            let validCoordinate = lat.isFinite && lon.isFinite &&
-                (-90...90).contains(lat) && (-180...180).contains(lon)
-            let accuracyAvailable = horizontalAccuracyMeters.map {
-                $0.isFinite && $0 >= 0
-            } ?? false
-            let ageSeconds = locationTimestamp.map {
-                now.timeIntervalSince($0)
-            }
-            let timestampAvailable = ageSeconds?.isFinite == true &&
-                (ageSeconds ?? 0) >= -futureTimestampTolerance
-            let speedAvailable = speedMetersPerSecond?.isFinite == true &&
-                (speedMetersPerSecond ?? -1) >= 0
-            let fixValid = validCoordinate && accuracyAvailable &&
-                timestampAvailable && speedAvailable
-            var flags: UInt8 = 0
-            if fixValid { flags |= qualityFixValid }
-            if accuracyAvailable { flags |= qualityAccuracyAvailable }
-            let accuracyDecimeters: UInt16 = {
-                guard let horizontalAccuracyMeters, accuracyAvailable else {
-                    return unavailableQualityValue
-                }
-                return UInt16(min(
-                    (horizontalAccuracyMeters * 10).rounded(),
-                    Double(UInt16.max - 1)
-                ))
-            }()
-            let sampleAgeMs: UInt16 = {
-                guard timestampAvailable, let ageSeconds else {
-                    return unavailableQualityValue
-                }
-                return UInt16(min(
-                    max((ageSeconds * 1_000).rounded(), 0),
-                    Double(UInt16.max - 1)
-                ))
-            }()
-            data.append(qualityV1Schema)
-            data.append(flags)
-            withUnsafeBytes(of: accuracyDecimeters.littleEndian) {
-                data.append(contentsOf: $0)
-            }
-            withUnsafeBytes(of: sampleAgeMs.littleEndian) {
-                data.append(contentsOf: $0)
-            }
-        }
-        return data
+        let sampleClock = RideGPSSampleClock(timestamp: locationTimestamp, now: now, uptime: 0)
+        return RideGPSPacketEncoder.data(
+            lat: lat, lon: lon, heading: heading, unixTime: unixTime,
+            speed: speedMetersPerSecond, altitude: altitudeMeters,
+            distance: distanceTraveledMeters, elapsed: elapsedSeconds,
+            remaining: routeRemainingMeters, accuracy: horizontalAccuracyMeters,
+            sampleAgeMs: sampleClock.ageMilliseconds(at: 0),
+            includeQuality: includeRideDetectionQuality
+        )
     }
 }
 

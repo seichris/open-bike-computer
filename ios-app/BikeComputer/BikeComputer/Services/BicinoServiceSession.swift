@@ -274,17 +274,15 @@ final class BicinoServiceSession {
         client: OfflineMapPlatformClient,
         honorRefreshBackoff: Bool
     ) async throws -> OfflineMapPlatformClient {
-        let hasUsableCredential =
-            client.clientInstallationToken?.isEmpty == false &&
-            managedAppAttestClient.hasKey(
-                client.clientAppAttestKeyId,
-                serverURLString: client.baseURL.absoluteString
-            )
         guard client.clientInstallationToken?.isEmpty == false else {
             return try await enrollManagedInstallation(replacing: client)
         }
+        let localKeyState = try managedAppAttestClient.reconcile(
+            serverKeyID: client.clientAppAttestKeyId,
+            serverURLString: client.baseURL.absoluteString
+        )
 
-        if hasUsableCredential, honorRefreshBackoff,
+        if localKeyState == .usable, honorRefreshBackoff,
            OfflineMapInstallationRefreshBackoff.shouldDefer(
                 serverURLString: client.baseURL.absoluteString,
                 defaults: defaults
@@ -308,22 +306,48 @@ final class BicinoServiceSession {
 
         do {
             let credential = try await client.registerInstallation()
-            guard credential.clientInstallationId == client.clientInstallationId,
-                  managedAppAttestClient.hasKey(
-                    credential.appAttestKeyId,
-                    serverURLString: client.baseURL.absoluteString
-                  ) else {
-                throw ManagedAppAttestError.invalidCredential
+            guard credential.clientInstallationId == client.clientInstallationId else {
+                throw ManagedAppAttestError.keyMismatch
             }
-            OfflineMapInstallationRefreshBackoff.clear(
-                serverURLString: client.baseURL.absoluteString,
-                defaults: defaults
-            )
-            return try registeredClient(credential, replacing: client)
+            switch try managedAppAttestClient.reconcile(
+                serverKeyID: credential.appAttestKeyId,
+                serverURLString: client.baseURL.absoluteString
+            ) {
+            case .usable:
+                OfflineMapInstallationRefreshBackoff.clear(
+                    serverURLString: client.baseURL.absoluteString,
+                    defaults: defaults
+                )
+                return try registeredClient(credential, replacing: client)
+            case .pendingAccepted:
+                let registered = try registeredClient(
+                    credential,
+                    replacing: client
+                )
+                try managedAppAttestClient.finalizeEnrollment(
+                    credential,
+                    serverURLString: client.baseURL.absoluteString
+                )
+                OfflineMapInstallationRefreshBackoff.clear(
+                    serverURLString: client.baseURL.absoluteString,
+                    defaults: defaults
+                )
+                return registered
+            case .rotationRequired:
+                let refreshed = try registeredClient(
+                    credential,
+                    replacing: client
+                )
+                return try await enrollManagedInstallation(
+                    replacing: refreshed,
+                    preservingCredential: true
+                )
+            case .mismatch:
+                throw ManagedAppAttestError.keyMismatch
+            }
         } catch let error as OfflineMapPlatformError {
             guard case .serverStatus(let status, let body) = error,
                   status == 401,
-                  client.clientAppAttestKeyId == nil,
                   let data = body.data(using: .utf8),
                   let envelope = try? JSONDecoder().decode(InstallationMigrationError.self, from: data),
                   envelope.detail.code == "installation_attestation_required" else {
@@ -354,7 +378,12 @@ final class BicinoServiceSession {
             serverURLString: client.baseURL.absoluteString,
             defaults: defaults
         )
-        return try registeredClient(credential, replacing: client)
+        let registered = try registeredClient(credential, replacing: client)
+        try managedAppAttestClient.finalizeEnrollment(
+            credential,
+            serverURLString: client.baseURL.absoluteString
+        )
+        return registered
     }
 
     private func registeredClient(

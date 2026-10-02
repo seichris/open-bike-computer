@@ -1,0 +1,68 @@
+name: Workout Zone Contracts
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/workout-zone-contracts.yml'
+      - 'protocol/**'
+      - 'tools/generate_ride_ble_contract.py'
+      - 'esp32/lib/ble_navigation/**'
+      - 'esp32/lib/gui/**'
+      - 'esp32/tools/tests/**'
+      - 'ios-app/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/workout-zone-contracts.yml'
+      - 'protocol/**'
+      - 'tools/generate_ride_ble_contract.py'
+      - 'esp32/lib/ble_navigation/**'
+      - 'esp32/lib/gui/**'
+      - 'esp32/tools/tests/**'
+      - 'ios-app/**'
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workout-zones-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Zone wire and display contracts (${{ matrix.board }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [WAVESHARE_AMOLED_175, WAVESHARE_AMOLED_206]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Verify generated wire constants and append-only widget IDs
+        run: python3 tools/generate_ride_ble_contract.py --check
+      - name: Independent wire fixtures, decoder lifecycle and display geometry
+        env:
+          BOARD: ${{ matrix.board }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test in test_workout_zone_protocol test_workout_telemetry_protocol test_workout_telemetry_state test_gui_layout test_ride_stats_widget test_screen_configuration_protocol test_screen_configuration_policy test_device_capabilities_protocol test_ride_delivery_protocol test_scoped_watch_payload_policy test_ride_controller_lease; do
+            g++ -std=c++17 -Wall -Wextra -Werror -O1 -D"$BOARD" \
+              "esp32/tools/tests/$test.cpp" -o "$RUNNER_TEMP/$test"
+            "$RUNNER_TEMP/$test"
+            echo "PASS $test ($BOARD)"
+          done
+          g++ -std=c++17 -Wall -Wextra -Werror -D"$BOARD" \
+            -DFIRMWARE_DIAGNOSTICS=1 \
+            esp32/tools/tests/test_screen_configuration_protocol.cpp \
+            -o "$RUNNER_TEMP/zone-widget-capabilities"
+          "$RUNNER_TEMP/zone-widget-capabilities"
+
+# Swift byte-for-byte fixture checks run via run-native-workout-zone-tests.sh
+# from the existing CI / iOS Fast Tests helper suite. No SDK 27 dependency is
+# introduced for the transport, fallback mapper or firmware contract checks.

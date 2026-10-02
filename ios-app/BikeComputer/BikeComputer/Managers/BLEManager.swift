@@ -317,6 +317,8 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.workoutUUID
     static let rideAutomationCharacteristicUUIDString =
         RideBLEGeneratedProtocolV1.rideAutomationUUID
+    static let screenConfigurationCharacteristicUUIDString =
+        RideBLEGeneratedProtocolV1.screenConfigurationUUID
     static let deviceInformationServiceUUIDString = "180A"
     static let modelNumberCharacteristicUUIDString = "2A24"
     static let firmwareRevisionCharacteristicUUIDString = "2A26"
@@ -352,6 +354,10 @@ enum DeviceBLEProtocol {
     static let destinationRequestPrefix =
         RideBLEGeneratedProtocolV1.destinationRequestMagic
     static let destinationStatusPrefix = "DNST"
+    static let worldRadioRequestPrefix =
+        RideBLEGeneratedProtocolV1.worldRadioRequestMagic
+    static let worldRadioStatusPrefix =
+        RideBLEGeneratedProtocolV1.worldRadioStatusMagic
     static let workoutStartRequestPrefix =
         RideBLEGeneratedProtocolV1.workoutStartRequestMagic
     static let rideDeliveryCommandPrefix =
@@ -411,16 +417,24 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.rendererDiagnosticsFeature
     static let automaticDisplayOffCapabilityMask =
         RideBLEGeneratedProtocolV1.automaticDisplayOffFeature
+    static let displayInactivityTimeoutsCapabilityMask =
+        RideBLEGeneratedProtocolV1.displayInactivityTimeoutsFeature
     static let rideDiagnosticsCapabilityMask =
         RideBLEGeneratedProtocolV1.rideDiagnosticsFeature
     static let detailedRideDiagnosticsCapabilityMask =
         RideBLEGeneratedProtocolV1.detailedRideDiagnosticsFeature
     static let rideDeliveryAcknowledgementCapabilityMask =
         RideBLEGeneratedProtocolV1.rideDeliveryAckFeature
+    static let worldRadioCapabilityMask =
+        RideBLEGeneratedProtocolV1.worldRadioFeature
+    static let screenConfigurationCapabilityMask =
+        RideBLEGeneratedProtocolV1.screenConfigurationV1Feature
     static let rendererBenchmarkSampleCapabilityMask =
         RideBLEGeneratedProtocolV1.rendererBenchmarkSampleFeature
     static let watchGPSMotionEvidenceV1CapabilityMask =
         RideBLEGeneratedProtocolV1.watchGpsMotionEvidenceV1Feature
+    static let topographicContoursCapabilityMask =
+        RideBLEGeneratedProtocolV1.topographicContoursFeature
     static let deviceCapabilitiesVersion =
         RideBLEGeneratedProtocolV1.currentClientVersion
     static let workoutTelemetryFrameLength = 16
@@ -436,6 +450,9 @@ enum DeviceBLEProtocol {
     static let gpsPositionCoalescingKey = "gps-position"
     static let automaticDisplayOffSettingCoalescingKey =
         "automatic-display-off-setting"
+    static let displayInactivityTimeoutsSettingCoalescingKey =
+        "display-inactivity-timeouts-setting"
+    static let worldRadioStatusCoalescingKey = "world-radio-status"
     // Large enough for the worst schema-v1 three-favorite catalog at the
     // minimum BLE write length, without retaining a long stale GPS backlog.
     static let fallbackWriteQueueCapacity = 64
@@ -443,11 +460,12 @@ enum DeviceBLEProtocol {
     static let serviceRoadsVisibilityMask: Int32 = 1 << 10
     static let tracksVisibilityMask: Int32 = 1 << 11
     static let extendedVisibilityMarker: Int32 = 1 << 12
-    static let poiShopsVisibilityMask: Int32 = 1 << 13
-    static let poiRestaurantsAndCafesVisibilityMask: Int32 = 1 << 14
-    static let poiPublicToiletsVisibilityMask: Int32 = 1 << 15
-    static let poiGasStationsVisibilityMask: Int32 = 1 << 16
-    static let poiBicycleServicesVisibilityMask: Int32 = 1 << 17
+    static let contoursVisibilityMask: Int32 = 1 << 13
+    static let poiShopsVisibilityMask: Int32 = 1 << 14
+    static let poiRestaurantsAndCafesVisibilityMask: Int32 = 1 << 15
+    static let poiPublicToiletsVisibilityMask: Int32 = 1 << 16
+    static let poiGasStationsVisibilityMask: Int32 = 1 << 17
+    static let poiBicycleServicesVisibilityMask: Int32 = 1 << 18
     static let defaultStreetWidth: Int32 = 4
 
     static let brightnessSettingID: UInt8 = 12
@@ -476,6 +494,7 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigation3DBuildingsSettingID: UInt8 = 35
     static let mapPlusNavigationRotationSettingID: UInt8 = 37
     static let automaticDisplayOffSettingID: UInt8 = 36
+    static let displayInactivityTimeoutsSettingID: UInt8 = 38
     static let currentScreenMaskMarker: Int32 = 1 << 30
     static let defaultMapStreetLabelsEnabled = true
     static let defaultMapPlusNavigationStreetLabelsEnabled = false
@@ -483,6 +502,37 @@ enum DeviceBLEProtocol {
     static let defaultStreetLabelLanguageMode = 2
     static let defaultStreetLabelTextSize = 0
     static let defaultStreetLabelOrientation = 1
+    static let defaultDisplayDimAfterSeconds = 15
+    static let defaultDisplayOffAfterSeconds = 45
+
+    static func displayInactivityTimeoutsSettingValue(
+        dimAfterSeconds: Int,
+        displayOffAfterSeconds: Int
+    ) -> Int32? {
+        guard (5...600).contains(dimAfterSeconds),
+              (10...3_600).contains(displayOffAfterSeconds),
+              displayOffAfterSeconds >= dimAfterSeconds + 5,
+              let dim = UInt16(exactly: dimAfterSeconds),
+              let off = UInt16(exactly: displayOffAfterSeconds) else {
+            return nil
+        }
+        return Int32(bitPattern: UInt32(dim) | (UInt32(off) << 16))
+    }
+
+    static func displayInactivityTimeouts(
+        fromSettingValue value: Int32
+    ) -> (dimAfterSeconds: Int, displayOffAfterSeconds: Int)? {
+        let packed = UInt32(bitPattern: value)
+        let dim = Int(UInt16(truncatingIfNeeded: packed))
+        let off = Int(UInt16(truncatingIfNeeded: packed >> 16))
+        guard displayInactivityTimeoutsSettingValue(
+            dimAfterSeconds: dim,
+            displayOffAfterSeconds: off
+        ) != nil else {
+            return nil
+        }
+        return (dim, off)
+    }
 
     static var serviceUUID: CBUUID { CBUUID(string: serviceUUIDString) }
     static var navigationCharacteristicUUID: CBUUID { CBUUID(string: navigationCharacteristicUUIDString) }
@@ -495,6 +545,9 @@ enum DeviceBLEProtocol {
     }
     static var rideAutomationCharacteristicUUID: CBUUID {
         CBUUID(string: rideAutomationCharacteristicUUIDString)
+    }
+    static var screenConfigurationCharacteristicUUID: CBUUID {
+        CBUUID(string: screenConfigurationCharacteristicUUIDString)
     }
     static var deviceInformationServiceUUID: CBUUID { CBUUID(string: deviceInformationServiceUUIDString) }
     static var modelNumberCharacteristicUUID: CBUUID { CBUUID(string: modelNumberCharacteristicUUIDString) }
@@ -550,6 +603,14 @@ enum DeviceBLEProtocol {
     }
 }
 
+enum DeviceScreenSettingsTransportPolicy {
+    static func usesLegacySettings(
+        supportsScreenConfiguration: Bool
+    ) -> Bool {
+        !supportsScreenConfiguration
+    }
+}
+
 enum DevicePacketRouting {
     static func sendPreferredThenFallback(
         preferred: () -> Bool,
@@ -562,13 +623,30 @@ enum DevicePacketRouting {
     }
 }
 
+enum DeviceTransferPacketRoutingPolicy {
+    static func usesNavigationFallback(
+        firmwareMaintenanceActive: Bool,
+        maintenanceReconnect: Bool
+    ) -> Bool {
+        firmwareMaintenanceActive || maintenanceReconnect
+    }
+}
+
 enum DeviceSound: UInt8, CaseIterable, Identifiable {
     case bellDing = 1
     case plasticBicycleHorn = 2
+    // Decode legacy device state without offering the removed recording in
+    // the current picker. Firmware keeps raw value 3 reserved.
     case rotatingBicycleBell = 3
     case squeezeHorn = 5
 
     var id: UInt8 { rawValue }
+
+    static let allCases: [DeviceSound] = [
+        .bellDing,
+        .plasticBicycleHorn,
+        .squeezeHorn,
+    ]
 
     static let defaultSelection: DeviceSound = .plasticBicycleHorn
     static let defaultVolumePercent: Double = 70
@@ -612,7 +690,7 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
         case .plasticBicycleHorn:
             return "Bicycle Horn"
         case .rotatingBicycleBell:
-            return "Rotating Bicycle Bell"
+            return "Rotating Bicycle Bell (Legacy)"
         case .squeezeHorn:
             return "Squeeze Horn"
         }
@@ -632,41 +710,29 @@ enum DeviceSound: UInt8, CaseIterable, Identifiable {
     }
 }
 
-enum DeviceScreen: Int, CaseIterable, Identifiable {
-    case map = 0
-    case navigation = 1
-    case rideStats = 2
-    case mapPlusNavigation = 3
-    case batteryStatus = 4
+typealias DeviceScreen = RideBLELegacyScreenV1
 
+extension RideBLELegacyScreenV1: Identifiable {
     var id: Int { rawValue }
     var bit: Int { 1 << rawValue }
 
-    var title: String {
-        switch self {
-        case .map:
-            return "Map"
-        case .navigation:
-            return "Navigation"
-        case .rideStats:
-            return "Ride Stats"
-        case .mapPlusNavigation:
-            return "Map + Navigation"
-        case .batteryStatus:
-            return "Battery Status"
-        }
-    }
+    var title: String { wireType.title }
 
     static var allScreensMask: Int {
         allCases.reduce(0) { $0 | $1.bit }
     }
 
+    static var defaultScreensMask: Int {
+        allScreensMask & ~worldRadio.bit
+    }
+
     static var legacyScreensMask: Int {
-        allScreensMask & ~batteryStatus.bit
+        allScreensMask & ~(batteryStatus.bit | worldRadio.bit)
     }
 
     static var displayOrder: [DeviceScreen] {
-        [.mapPlusNavigation, .rideStats, .map, .navigation, .batteryStatus]
+        [.mapPlusNavigation, .rideStats, .map, .navigation, .worldRadio,
+         .batteryStatus]
     }
 
     static func normalizedMask(_ rawMask: Int) -> Int {
@@ -725,6 +791,43 @@ enum DisconnectedSleepTimeout: Int, CaseIterable, Identifiable {
 
     static func normalized(rawValue: Int) -> DisconnectedSleepTimeout {
         DisconnectedSleepTimeout(rawValue: rawValue) ?? .twoMinutes
+    }
+}
+
+enum DisplayDimTimeout: Int, CaseIterable, Identifiable {
+    case fiveSeconds = 5
+    case fifteenSeconds = 15
+    case thirtySeconds = 30
+    case oneMinute = 60
+    case twoMinutes = 120
+
+    var id: Int { rawValue }
+
+    var title: String {
+        rawValue < 60 ? "\(rawValue) sec" : "\(rawValue / 60) min"
+    }
+
+    static func normalized(rawValue: Int) -> DisplayDimTimeout {
+        DisplayDimTimeout(rawValue: rawValue) ?? .fifteenSeconds
+    }
+}
+
+enum DisplayOffTimeout: Int, CaseIterable, Identifiable {
+    case thirtySeconds = 30
+    case fortyFiveSeconds = 45
+    case oneMinute = 60
+    case twoMinutes = 120
+    case fiveMinutes = 300
+    case tenMinutes = 600
+
+    var id: Int { rawValue }
+
+    var title: String {
+        rawValue < 60 ? "\(rawValue) sec" : "\(rawValue / 60) min"
+    }
+
+    static func normalized(rawValue: Int) -> DisplayOffTimeout {
+        DisplayOffTimeout(rawValue: rawValue) ?? .fortyFiveSeconds
     }
 }
 
@@ -869,6 +972,7 @@ private enum MapPlusNavigationDefaults {
     static let showWater = true
     static let showRailways = false
     static let showOtherAreas = false
+    static let showContours = false
 }
 
 private final class WeakBLEManagerSendableBox: @unchecked Sendable {
@@ -877,6 +981,38 @@ private final class WeakBLEManagerSendableBox: @unchecked Sendable {
     init(_ value: BLEManager) {
         self.value = value
     }
+}
+
+struct DeviceTransferResourceSnapshot: Equatable {
+    let internalFree: UInt32
+    let internalLargest: UInt32
+    let dmaFree: UInt32
+    let dmaLargest: UInt32
+    let psramFree: UInt32
+    let psramLargest: UInt32
+    let minimumInternalFree: UInt32
+    let minimumInternalLargest: UInt32
+    let minimumDmaFree: UInt32
+    let minimumDmaLargest: UInt32
+    let minimumPsramFree: UInt32
+    let minimumPsramLargest: UInt32
+    let workerStackHighWaterBytes: UInt32
+    let internalOwnerStackHighWaterBytes: UInt32
+    let phase: String
+}
+
+struct DeviceTransferWiFiStartFailure: Equatable {
+    struct Memory: Equatable {
+        let internalFree: UInt32
+        let internalLargest: UInt32
+        let dmaFree: UInt32
+        let dmaLargest: UInt32
+    }
+
+    let step: String
+    let espError: Int32
+    let before: Memory
+    let after: Memory
 }
 
 #if HOST_TESTING
@@ -914,6 +1050,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isNavigationReady: Bool = false
     @Published var supportsDeviceSettings: Bool = false
     @Published private(set) var supportsAutomaticDisplayOff: Bool = false
+    @Published private(set) var supportsDisplayInactivityTimeouts: Bool = false
     @Published var supportsDeviceSounds: Bool = false
     @Published var supportsPowerButtonHonk: Bool = false
     @Published var supportsPowerButtonHonkAcknowledgement: Bool = false
@@ -930,6 +1067,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supports3DBuildings: Bool = false
     @Published private(set) var supportsMapPois: Bool = false
     @Published private(set) var supportsMapNavigationOrientation = false
+    @Published private(set) var supportsTopographicContours = false
     @Published private(set) var supportsExplicitInvalidGPSHeading: Bool = false
     @Published private(set) var supportsScopedWatchController: Bool = false
     @Published private(set) var watchControllerIDHex: String?
@@ -944,9 +1082,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRideDiagnostics: Bool = false
     @Published private(set) var supportsDetailedRideDiagnostics: Bool = false
     @Published private(set) var supportsRideDeliveryAcknowledgement: Bool = false
+    @Published private(set) var supportsWorldRadio: Bool = false
+    @Published private(set) var supportsScreenConfiguration: Bool = false
     @Published private(set) var supportsWatchGPSMotionEvidenceV1: Bool = false
+    @Published private(set) var supportsWorkoutZonesV1: Bool = false
+    private var workoutZoneSequence: UInt32 = 0
     @Published private(set) var rideTransportPhase:
         RideBLETransportPhaseV1 = .idle
+    @Published private(set) var rideRecoveryMessage: String?
     @Published private(set) var rideTransportFailureReason:
         RideBLETransportFailureReasonV1?
     @Published private(set) var rendererDiagnosticsSnapshotJSON: String?
@@ -960,12 +1103,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published var centralStateDescription: String = "unknown"
     @Published var trustedPeripheralDescription: String = "none"
     @Published private(set) var knownDevices: [KnownBikeComputerDevice] = []
+    @Published private(set) var hasEverConnectedBikeComputer = false
     @Published private(set) var discoveredDevices: [DiscoveredBikeComputerDevice] = []
     @Published private(set) var isDiscoveringDevices = false
     @Published private(set) var currentScanPurpose: BLEScanPurpose = .none
     @Published private(set) var nearbyBicinoCandidate: DiscoveredBikeComputerDevice?
     @Published private(set) var isApplicationActive = false
     @Published private(set) var isOpportunisticDiscoverySuppressed = false
+    private var isOpportunisticDiscoveryEnabled = true
     @Published private(set) var observedIdentityMismatchDeviceIDs: Set<String> = []
     @Published private(set) var activeDeviceID: String?
     @Published private(set) var connectedDeviceID: String?
@@ -977,6 +1122,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceOperationDeviceID: String?
     @Published private(set) var deviceFeedbackDeviceID: String?
     @Published var debugEvents: [String] = []
+    var isExplicitDiscoveryPending: Bool {
+        explicitDiscoveryRequested && currentScanPurpose != .explicitDiscovery
+    }
     weak var diagnosticsRecorder: RideDiagnosticsRecorder? {
         didSet {
             DispatchQueue.main.async { [weak self] in
@@ -997,7 +1145,25 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeMapLabelLanguages: [String] = []
     @Published private(set) var activeMapFontAssetHealthy: Bool = false
     @Published private(set) var activeMapPoiProfileVersion: Int?
-    @Published private(set) var activeMapPoiDataHealthy: Bool = false
+    @Published private(set) var activeMapPoiIndexProfileVersion: Int?
+    @Published private(set) var activeMapPoiDataHealthy = false
+    @Published private(set) var activeMapPoiIndexHealthy = false
+    @Published private(set) var activeMapTopographyProfileVersion: Int?
+    @Published private(set) var activeMapTopographySectionHealthy = false
+    @Published private(set) var activeMapContourLayerIncluded = false
+    @Published private(set) var activeMapTopographyQualityMode = ""
+    @Published private(set) var activeMapContourMinorIntervalM: Int?
+    @Published private(set) var activeMapContourIndexIntervalM: Int?
+    @Published private(set) var activeMapContourNoDataMillionths: Int?
+    @Published private(set) var activeMapContainsContours = false
+    @Published private(set) var activeMapTopographySourcePolicyReceiptPrefix = ""
+    var topographicContoursAvailable: Bool {
+        supportsTopographicContours &&
+            (activeMapRendererFormat == 4 ||
+             (activeMapRendererFormat == 5 && activeMapContourLayerIncluded)) &&
+            activeMapTopographyProfileVersion == 1 &&
+            activeMapTopographySectionHealthy
+    }
     @Published var mapTransferActivationStatus: String = "idle"
     @Published var mapTransferActivationSequence: UInt32?
     @Published var mapTransferActivationSessionId: String = ""
@@ -1008,6 +1174,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferActivationError: String?
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
+    @Published private(set) var hasFreshMapTransferStatus = false
     @Published var deviceTransferMode: String = ""
     @Published var deviceTransferBaseURL: URL?
     @Published var deviceTransferAccessPointSSID: String?
@@ -1022,13 +1189,23 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferPendingTLSCertificateSHA256: String?
     @Published private(set) var deviceTransferPendingTLSIdentityVersion: UInt32 = 0
     @Published private(set) var deviceTransferGeneration: UInt32 = 0
+    @Published private(set) var deviceTransferRemoteStatusRevision: UInt32 = 0
     @Published private(set) var supportsSecureDeviceTransferV1 = false
     @Published private(set) var supportsSignedMapStreamV1 = false
+    @Published private(set) var supportsFirmwareMaintenanceV1 = false
     @Published private(set) var deviceTransferLegacyArchivePolicy: String?
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferLastErrorSequence: UInt64?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
+    @Published private(set) var deviceTransferResourceSnapshot:
+        DeviceTransferResourceSnapshot?
+    @Published private(set) var deviceTransferWiFiStartFailure:
+        DeviceTransferWiFiStartFailure?
+    @Published private(set) var firmwareMaintenanceActive = false
+    @Published private(set) var firmwareMaintenanceStage = "normal"
+    @Published private(set) var firmwareMaintenanceCorrelation: UInt32 = 0
+    @Published private(set) var firmwareMaintenanceReconnectExpected = false
     @Published private(set) var deviceStorageBackend: String?
     @Published private(set) var deviceStoragePowerCycleRequired: Bool?
     @Published var firmwareTarget: String = ""
@@ -1036,10 +1213,23 @@ class BLEManager: NSObject, ObservableObject {
     @Published var firmwareBuild: Int = 0
     @Published var firmwareGitSha: String = ""
     @Published var firmwareUpdateStatus: String = "unknown"
+    @Published private(set) var firmwareOTAEligible: Bool?
+    @Published private(set) var firmwareOTAEligibilityCode: String?
+    @Published private(set) var firmwareInactivePartition: String?
+    @Published private(set) var firmwareMaximumImageBytes: Int?
+    @Published private(set) var firmwareRunningPartition: String?
+    @Published private(set) var firmwareBuildProfile: String?
+    @Published private(set) var firmwareOTAState: String?
+    @Published private(set) var firmwareBootSequence: UInt32?
+    @Published private(set) var firmwareBootFingerprint: UInt32?
+    @Published private(set) var firmwareBootNormalReady = false
+    @Published private(set) var firmwareBootMaintenance = false
     @Published var firmwareUpdateReceivedBytes: Int = 0
     @Published var firmwareUpdateTotalBytes: Int = 0
+    @Published private(set) var firmwareFlashOwnerStackHighWaterBytes: UInt32?
     @Published var firmwareUpdateLastError: String?
     @Published var deviceHasSDCard: Bool?
+    @Published var deviceMapStateKnown = false
     @Published var deviceMapFoundForCurrentLocation: Bool?
     @Published var deviceMapBlockCount: Int = 0
     
@@ -1073,10 +1263,12 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationLabelTextSize = DeviceBLEProtocol.defaultStreetLabelTextSize
     @Published var mapPlusNavigationLabelOrientation = DeviceBLEProtocol.defaultStreetLabelOrientation
     @Published var tapToSwitchScreens: Bool = false
-    @Published var enabledDeviceScreensMask: Int = DeviceScreen.allScreensMask
+    @Published var enabledDeviceScreensMask: Int = DeviceScreen.defaultScreensMask
     @Published var defaultDeviceScreen: DeviceScreen = .mapPlusNavigation
     @Published var deviceBrightnessPercent: Double = 100
     @Published var automaticDisplayOffEnabled: Bool = true
+    @Published var displayDimTimeout: DisplayDimTimeout = .fifteenSeconds
+    @Published var displayOffTimeout: DisplayOffTimeout = .fortyFiveSeconds
     @Published var disconnectedSleepTimeout: DisconnectedSleepTimeout = .twoMinutes
     @Published var deviceSoundsEnabled: Bool = false
     @Published var selectedDeviceSound: DeviceSound = .defaultSelection
@@ -1096,11 +1288,12 @@ class BLEManager: NSObject, ObservableObject {
     @Published var showWater: Bool = true
     @Published var showRailways: Bool = true
     @Published var showOtherAreas: Bool = true
-    @Published var showPOIShops: Bool = true
-    @Published var showPOIRestaurantsAndCafes: Bool = true
-    @Published var showPOIPublicToilets: Bool = true
-    @Published var showPOIGasStations: Bool = true
-    @Published var showPOIBicycleServices: Bool = true
+    @Published var showContours = false
+    @Published var showPOIShops = true
+    @Published var showPOIRestaurantsAndCafes = true
+    @Published var showPOIPublicToilets = true
+    @Published var showPOIGasStations = true
+    @Published var showPOIBicycleServices = true
     @Published var mapPlusNavigationShowBuildings = MapPlusNavigationDefaults.showBuildings {
         didSet {
             if !isLoadingSettings && oldValue != mapPlusNavigationShowBuildings {
@@ -1125,6 +1318,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationShowWater = MapPlusNavigationDefaults.showWater
     @Published var mapPlusNavigationShowRailways = MapPlusNavigationDefaults.showRailways
     @Published var mapPlusNavigationShowOtherAreas = MapPlusNavigationDefaults.showOtherAreas
+    @Published var mapPlusNavigationShowContours = MapPlusNavigationDefaults.showContours
     @Published var mapPlusNavigationShowPOIShops = false
     @Published var mapPlusNavigationShowPOIRestaurantsAndCafes = false
     @Published var mapPlusNavigationShowPOIPublicToilets = false
@@ -1144,6 +1338,8 @@ class BLEManager: NSObject, ObservableObject {
         DeviceBLEProtocol.workoutTelemetryCharacteristicUUID
     private let rideAutomationCharacteristicUUID =
         DeviceBLEProtocol.rideAutomationCharacteristicUUID
+    private let screenConfigurationCharacteristicUUID =
+        DeviceBLEProtocol.screenConfigurationCharacteristicUUID
     private let deviceInformationServiceUUID = DeviceBLEProtocol.deviceInformationServiceUUID
     private let modelNumberCharacteristicUUID = DeviceBLEProtocol.modelNumberCharacteristicUUID
     private let firmwareRevisionCharacteristicUUID = DeviceBLEProtocol.firmwareRevisionCharacteristicUUID
@@ -1160,6 +1356,9 @@ class BLEManager: NSObject, ObservableObject {
     private var settingsCharacteristic: CBCharacteristic?
     private var workoutTelemetryCharacteristic: CBCharacteristic?
     private var rideAutomationCharacteristic: CBCharacteristic?
+    private var screenConfigurationCharacteristic: CBCharacteristic?
+    let deviceScreenConfigurationController =
+        DeviceScreenConfigurationController()
     private var workoutTelemetryWriteEndpointForTesting: WorkoutTelemetryWriteEndpoint?
     var workoutMotionUptime = { ProcessInfo.processInfo.systemUptime }
     private var deviceInformation: [CBUUID: String] = [:]
@@ -1229,6 +1428,8 @@ class BLEManager: NSObject, ObservableObject {
         BLEUnknownScanObservationGate()
 #if HOST_TESTING
     private var scanDriverForTesting: BLEScanDriverForTesting?
+    private(set) var watchDirectRideReconciliationRequestForTesting:
+        WatchDirectRideReconciliationRequestV1?
 #endif
     private var opportunisticSelectionTimer: Timer?
     private var opportunisticCandidateExpiryTimer: Timer?
@@ -1248,6 +1449,7 @@ class BLEManager: NSObject, ObservableObject {
     private var watchDirectRidePreparationID: UUID?
     private var watchDirectRidePreviousAutoReconnect: Bool?
     private var watchDirectRidePreparationExpiryTimer: Timer?
+    private var watchDirectRideReconciliationTimeoutTimer: Timer?
     private var watchDirectRideReleaseTombstones:
         [WatchDirectRideReleaseTombstone] = []
     private var lastConnectedPeripheralIdentifier: UUID?
@@ -1265,6 +1467,7 @@ class BLEManager: NSObject, ObservableObject {
     private var deviceTransferStatusChunkTransferID: UInt8?
     private var deviceTransferStatusChunkCount: UInt8 = 0
     private var deviceTransferStatusChunks: [UInt8: Data] = [:]
+    private var lastLoggedTransferFailureKey: String?
     private var rendererDiagnosticsChunks =
         RendererDiagnosticsChunkReassembler()
     private var deviceGPSOverrideToken: UUID?
@@ -1331,6 +1534,8 @@ class BLEManager: NSObject, ObservableObject {
     // carry no application write ID.
     private var navigationWriteResponseTimeout: TimeInterval = 5
 #endif
+    private var rideRecoveryCancellationTimer: Timer?
+    private var rideRecoveryCancellationTimeout = RideBLERecoveryPolicyV1.cancellationTimeoutSeconds
     private var navigationWriteStallRecoveryForTesting: (() -> Void)?
     private var connectionTimeoutTimer: Timer?
     private var pendingScannedConnectionTimeoutTimer: Timer?
@@ -1354,6 +1559,7 @@ class BLEManager: NSObject, ObservableObject {
     private var hasSentMapNavigationProfileForConnection = false
     private var hasSentScreenSettingsForConnection = false
     private var hasSentAutomaticDisplayOffForConnection = false
+    private var hasSentDisplayInactivityTimeoutsForConnection = false
     private var isSendingNegotiatedMapProfiles = false
     private var lastSentPhoneBatteryPercent: Int32?
     private var lastSentPhoneBatteryCharging: Bool?
@@ -1365,6 +1571,7 @@ class BLEManager: NSObject, ObservableObject {
     var hasActiveTransportSession: Bool { hasActiveBLESession }
 
     var onDestinationRequest: ((DeviceDestinationRequest) -> Void)?
+    var onWorldRadioRequest: ((WorldRadioRequest) -> Void)?
     var onWorkoutStartRequest: (() -> Void)?
     var onRideAutomationFrame: ((RideAutomationFrame) -> Void)?
     var onDestinationCatalogWriteFailure: (() -> Void)?
@@ -1414,6 +1621,7 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationShowWater = "mapPlusNavigationSettings.showWater"
         static let mapPlusNavigationShowRailways = "mapPlusNavigationSettings.showRailways"
         static let mapPlusNavigationShowOtherAreas = "mapPlusNavigationSettings.showOtherAreas"
+        static let mapPlusNavigationShowContours = "mapPlusNavigationSettings.showContours"
         static let mapPlusNavigationShowPOIShops = "mapPlusNavigationSettings.showPOIShops"
         static let mapPlusNavigationShowPOIRestaurantsAndCafes =
             "mapPlusNavigationSettings.showPOIRestaurantsAndCafes"
@@ -1433,6 +1641,10 @@ class BLEManager: NSObject, ObservableObject {
         static let batteryStatusScreenMigrated = "deviceSettings.enabledScreensMask.batteryStatus.v1"
         static let deviceBrightnessPercent = "deviceSettings.brightnessPercent"
         static let automaticDisplayOffEnabled = "deviceSettings.automaticDisplayOffEnabled"
+        static let displayDimTimeoutSeconds =
+            "deviceSettings.displayDimTimeoutSeconds"
+        static let displayOffTimeoutSeconds =
+            "deviceSettings.displayOffTimeoutSeconds"
         static let disconnectedSleepTimeoutSeconds = "deviceSettings.disconnectedSleepTimeoutSeconds"
         static let deviceSoundsEnabled = "deviceSettings.deviceSoundsEnabled"
         static let watchControllerIDsByDevice =
@@ -1450,6 +1662,7 @@ class BLEManager: NSObject, ObservableObject {
         static let showWater = "mapSettings.showWater"
         static let showRailways = "mapSettings.showRailways"
         static let showOtherAreas = "mapSettings.showOtherAreas"
+        static let showContours = "mapSettings.showContours"
         static let showPOIShops = "mapSettings.showPOIShops"
         static let showPOIRestaurantsAndCafes = "mapSettings.showPOIRestaurantsAndCafes"
         static let showPOIPublicToilets = "mapSettings.showPOIPublicToilets"
@@ -1531,6 +1744,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     deinit {
+        rideRecoveryCancellationTimer?.invalidate()
 #if DEBUG
         navigationQueueMetricsTimer?.invalidate()
 #endif
@@ -1646,7 +1860,7 @@ class BLEManager: NSObject, ObservableObject {
         }
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
         var storedScreensMask = defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int
-            ?? DeviceScreen.allScreensMask
+            ?? DeviceScreen.defaultScreensMask
         if !defaults.bool(forKey: SettingsKeys.batteryStatusScreenMigrated) {
             storedScreensMask |= DeviceScreen.batteryStatus.bit
             defaults.set(storedScreensMask, forKey: SettingsKeys.enabledDeviceScreensMask)
@@ -1672,6 +1886,20 @@ class BLEManager: NSObject, ObservableObject {
         automaticDisplayOffEnabled = defaults.object(
             forKey: SettingsKeys.automaticDisplayOffEnabled
         ) as? Bool ?? true
+        displayDimTimeout = DisplayDimTimeout.normalized(
+            rawValue: defaults.object(
+                forKey: SettingsKeys.displayDimTimeoutSeconds
+            ) as? Int ?? DeviceBLEProtocol.defaultDisplayDimAfterSeconds
+        )
+        displayOffTimeout = DisplayOffTimeout.normalized(
+            rawValue: defaults.object(
+                forKey: SettingsKeys.displayOffTimeoutSeconds
+            ) as? Int ?? DeviceBLEProtocol.defaultDisplayOffAfterSeconds
+        )
+        if displayOffTimeout.rawValue < displayDimTimeout.rawValue + 5 {
+            displayDimTimeout = .fifteenSeconds
+            displayOffTimeout = .fortyFiveSeconds
+        }
         disconnectedSleepTimeout = DisconnectedSleepTimeout.normalized(
             rawValue: defaults.object(forKey: SettingsKeys.disconnectedSleepTimeoutSeconds) as? Int ?? DisconnectedSleepTimeout.twoMinutes.rawValue
         )
@@ -1680,9 +1908,12 @@ class BLEManager: NSObject, ObservableObject {
         ) as? Bool ?? false
         let storedSoundID = defaults.object(forKey: SettingsKeys.selectedDeviceSound) as? Int
             ?? Int(DeviceSound.defaultSelection.rawValue)
-        selectedDeviceSound = UInt8(exactly: storedSoundID)
+        let restoredSound = UInt8(exactly: storedSoundID)
             .flatMap(DeviceSound.init(rawValue:))
             ?? .defaultSelection
+        selectedDeviceSound = restoredSound == .rotatingBicycleBell
+            ? .defaultSelection
+            : restoredSound
         let storedSoundVolume = defaults.object(forKey: SettingsKeys.deviceSoundVolumePercent) as? Double
             ?? DeviceSound.defaultVolumePercent
         deviceSoundVolumePercent = DeviceSound.normalizedVolumePercent(storedSoundVolume)
@@ -1701,6 +1932,7 @@ class BLEManager: NSObject, ObservableObject {
         showWater = defaults.object(forKey: SettingsKeys.showWater) as? Bool ?? legacyNature
         showRailways = defaults.object(forKey: SettingsKeys.showRailways) as? Bool ?? true
         showOtherAreas = defaults.object(forKey: SettingsKeys.showOtherAreas) as? Bool ?? true
+        showContours = defaults.object(forKey: SettingsKeys.showContours) as? Bool ?? false
         showPOIShops = defaults.object(forKey: SettingsKeys.showPOIShops) as? Bool ?? true
         showPOIRestaurantsAndCafes = defaults.object(
             forKey: SettingsKeys.showPOIRestaurantsAndCafes
@@ -1771,6 +2003,7 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationShowWater = showWater
             mapPlusNavigationShowRailways = showRailways
             mapPlusNavigationShowOtherAreas = showOtherAreas
+            mapPlusNavigationShowContours = showContours
         } else if !shouldMigrateMapPlusNavigationProfile {
             mapPlusNavigationMinPolygonSize = defaults.double(
                 forKey: SettingsKeys.mapPlusNavigationMinPolygonSize
@@ -1832,6 +2065,9 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationShowOtherAreas = defaults.object(
                 forKey: SettingsKeys.mapPlusNavigationShowOtherAreas
             ) as? Bool ?? MapPlusNavigationDefaults.showOtherAreas
+            mapPlusNavigationShowContours = defaults.object(
+                forKey: SettingsKeys.mapPlusNavigationShowContours
+            ) as? Bool ?? MapPlusNavigationDefaults.showContours
         }
         mapPlusNavigationShowPOIShops = defaults.object(
             forKey: SettingsKeys.mapPlusNavigationShowPOIShops
@@ -1927,6 +2163,8 @@ class BLEManager: NSObject, ObservableObject {
 
     private func refreshKnownDevices() {
         knownDevices = deviceRegistry.devices
+        hasEverConnectedBikeComputer =
+            deviceRegistry.hasEverConnectedBikeComputer
         observedIdentityMismatchDeviceIDs.formIntersection(
             Set(knownDevices.map(\.deviceID))
         )
@@ -1991,6 +2229,10 @@ class BLEManager: NSObject, ObservableObject {
         )
         defaults.set(deviceBrightnessPercent, forKey: SettingsKeys.deviceBrightnessPercent)
         defaults.set(automaticDisplayOffEnabled, forKey: SettingsKeys.automaticDisplayOffEnabled)
+        defaults.set(displayDimTimeout.rawValue,
+                     forKey: SettingsKeys.displayDimTimeoutSeconds)
+        defaults.set(displayOffTimeout.rawValue,
+                     forKey: SettingsKeys.displayOffTimeoutSeconds)
         defaults.set(disconnectedSleepTimeout.rawValue, forKey: SettingsKeys.disconnectedSleepTimeoutSeconds)
         defaults.set(deviceSoundsEnabled, forKey: SettingsKeys.deviceSoundsEnabled)
         defaults.set(Int(selectedDeviceSound.rawValue), forKey: SettingsKeys.selectedDeviceSound)
@@ -2007,6 +2249,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(showWater, forKey: SettingsKeys.showWater)
         defaults.set(showRailways, forKey: SettingsKeys.showRailways)
         defaults.set(showOtherAreas, forKey: SettingsKeys.showOtherAreas)
+        defaults.set(showContours, forKey: SettingsKeys.showContours)
         defaults.set(showPOIShops, forKey: SettingsKeys.showPOIShops)
         defaults.set(showPOIRestaurantsAndCafes,
                      forKey: SettingsKeys.showPOIRestaurantsAndCafes)
@@ -2025,6 +2268,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapPlusNavigationShowWater, forKey: SettingsKeys.mapPlusNavigationShowWater)
         defaults.set(mapPlusNavigationShowRailways, forKey: SettingsKeys.mapPlusNavigationShowRailways)
         defaults.set(mapPlusNavigationShowOtherAreas, forKey: SettingsKeys.mapPlusNavigationShowOtherAreas)
+        defaults.set(mapPlusNavigationShowContours, forKey: SettingsKeys.mapPlusNavigationShowContours)
         defaults.set(mapPlusNavigationShowPOIShops,
                      forKey: SettingsKeys.mapPlusNavigationShowPOIShops)
         defaults.set(mapPlusNavigationShowPOIRestaurantsAndCafes,
@@ -2111,6 +2355,9 @@ class BLEManager: NSObject, ObservableObject {
         watchDirectRidePreparedDeviceID = isExclusiveOperationActive
             ? knownDevices.first?.deviceID ?? "host-test-device"
             : nil
+        watchDirectRidePreparationID = isExclusiveOperationActive
+            ? UUID(uuidString: "DDDDDDDD-EEEE-FFFF-AAAA-BBBBBBBBBBBB")
+            : nil
         isApplicationActive = false
         isOpportunisticDiscoverySuppressed = false
         explicitDiscoveryRequested = false
@@ -2131,6 +2378,16 @@ class BLEManager: NSObject, ObservableObject {
         guard let scanDriverForTesting else { return }
         scanDriverForTesting.isPoweredOn = isPoweredOn
         handleCentralStateChange(isPoweredOn ? .poweredOn : .poweredOff)
+    }
+
+    func setFirmwareBootCheckpointForTesting(
+        normalReady: Bool,
+        maintenance: Bool = false,
+        otaState: String = "valid"
+    ) {
+        firmwareBootNormalReady = normalReady
+        firmwareBootMaintenance = maintenance
+        firmwareOTAState = otaState
     }
 
     func installNearbyCandidateForTesting(
@@ -2161,6 +2418,11 @@ class BLEManager: NSObject, ObservableObject {
         autoReconnect = false
         ownershipLifecycle.beginDiscovery()
         pairingStatusMessage = "Disconnecting before searching nearby…"
+    }
+
+    func installConnectionAttemptForTesting() {
+        stopPhysicalScan(reason: "test connection attempt starting")
+        isConnecting = true
     }
 
     func completeExplicitDisconnectHandoffForTesting() {
@@ -2208,6 +2470,11 @@ class BLEManager: NSObject, ObservableObject {
                 autoReconnect = false
                 refreshPureExplicitDiscoveryPresentation()
             }
+            if watchDirectRidePreparedDeviceID != nil {
+                _ = requestWatchDirectRideReconciliation(
+                    forExplicitDiscovery: false
+                )
+            }
         } else {
             let isSuspendingExplicitDiscovery =
                 explicitDiscoveryRequested && pendingPairingSession == nil
@@ -2241,6 +2508,19 @@ class BLEManager: NSObject, ObservableObject {
         reconcileScanning(
             reason: isActive ? "application became active" :
                 "application entered background"
+        )
+    }
+
+    func setOpportunisticDiscoveryEnabled(_ isEnabled: Bool) {
+        guard isOpportunisticDiscoveryEnabled != isEnabled else { return }
+        isOpportunisticDiscoveryEnabled = isEnabled
+        if !isEnabled {
+            clearUnknownDiscoveryState()
+        }
+        reconcileScanning(
+            reason: isEnabled
+                ? "opportunistic discovery enabled"
+                : "opportunistic discovery disabled"
         )
     }
 
@@ -2334,6 +2614,7 @@ class BLEManager: NSObject, ObservableObject {
                 selectedPeripheralIdentifier:
                     pendingScannedConnectionIdentifier,
                 isUnknownDiscoverySuppressed:
+                    !isOpportunisticDiscoveryEnabled ||
                     isOpportunisticDiscoverySuppressed ||
                     isUnknownDeviceDiscoverySuspended,
                 isExclusiveOperationActive:
@@ -2358,6 +2639,10 @@ class BLEManager: NSObject, ObservableObject {
         pairingStatusMessage = nil
         if !isApplicationActive || isUnknownDeviceDiscoverySuspended {
             pairingError = nil
+        } else if watchDirectRidePreparedDeviceID != nil {
+            pairingError = nil
+            pairingStatusMessage =
+                "Waiting for Apple Watch to release this Bike Computer…"
         } else if !isScanDriverPoweredOn {
             pairingError = "Turn on Bluetooth to add a Bike Computer."
         } else {
@@ -2606,6 +2891,8 @@ class BLEManager: NSObject, ObservableObject {
         }
         watchDirectRidePreparedDeviceID = deviceID
         watchDirectRidePreparationID = preparationID
+        watchDirectRideReconciliationTimeoutTimer?.invalidate()
+        watchDirectRideReconciliationTimeoutTimer = nil
         autoReconnect = false
         resetReconnectionState()
         pendingConnectionAfterDisconnect = nil
@@ -2634,10 +2921,18 @@ class BLEManager: NSObject, ObservableObject {
               watchDirectRidePreparationID == preparationID else { return }
         let shouldReconnect = watchDirectRidePreviousAutoReconnect ?? true
         clearWatchDirectRidePreparationPersistence()
+        watchDirectRideReconciliationTimeoutTimer?.invalidate()
+        watchDirectRideReconciliationTimeoutTimer = nil
         watchDirectRidePreparedDeviceID = nil
         watchDirectRidePreparationID = nil
         watchDirectRidePreviousAutoReconnect = nil
         autoReconnect = shouldReconnect
+        refreshPureExplicitDiscoveryPresentation()
+        if explicitDiscoveryRequested {
+            resetReconnectionState()
+            reconcileScanning(reason: "Apple Watch direct ride released")
+            return
+        }
         guard shouldReconnect else { return }
         resetReconnectionState()
         reconcileScanning(reason: "Apple Watch direct ride released")
@@ -2738,6 +3033,61 @@ class BLEManager: NSObject, ObservableObject {
         defaults.removeObject(
             forKey: SettingsKeys.watchDirectRidePreparationExpiresAt
         )
+    }
+
+    @discardableResult
+    private func requestWatchDirectRideReconciliation(
+        forExplicitDiscovery: Bool
+    ) -> Bool {
+        guard let deviceID = watchDirectRidePreparedDeviceID,
+              let preparationID = watchDirectRidePreparationID else {
+            return false
+        }
+        guard let request = try?
+                WatchDirectRideReconciliationRequestV1(
+                    preparationID: preparationID,
+                    deviceID: deviceID
+                ) else {
+            pairingStatusMessage = nil
+            pairingError =
+                "Apple Watch handoff state is invalid. Open Bicino on Apple Watch, then try again."
+            return true
+        }
+#if HOST_TESTING
+        watchDirectRideReconciliationRequestForTesting = request
+#endif
+        watchConnectivityCoordinator?
+            .queueWatchDirectRideReconciliation(request)
+        if forExplicitDiscovery {
+            watchDirectRideReconciliationTimeoutTimer?.invalidate()
+            watchDirectRideReconciliationTimeoutTimer =
+                Timer.scheduledOnMainActor(
+                    withTimeInterval:
+                        WatchDirectRideReconciliationPolicyV1
+                            .phoneWaitTimeoutSeconds,
+                    repeats: false
+                ) { [weak self] _ in
+                    guard let self,
+                          self.explicitDiscoveryRequested,
+                          self.watchDirectRidePreparedDeviceID ==
+                            request.deviceID,
+                          self.watchDirectRidePreparationID ==
+                            request.preparationID else { return }
+                    self.watchDirectRideReconciliationTimeoutTimer = nil
+                    self.pairingStatusMessage = nil
+                    self.pairingError =
+                        "Apple Watch still owns this Bike Computer. End any active ride, or open Bicino on Apple Watch, then try again."
+                    self.log(
+                        "Explicit discovery is waiting for Apple Watch direct ride release"
+                    )
+                }
+        }
+        log(
+            forExplicitDiscovery
+                ? "Requested Apple Watch direct ride reconciliation for discovery"
+                : "Requested Apple Watch direct ride reconciliation on foreground"
+        )
+        return true
     }
 
     private func rememberReleasedWatchDirectRidePreparation(
@@ -2860,6 +3210,10 @@ class BLEManager: NSObject, ObservableObject {
             pairingError = "Keep Bicino open to search for a Bike Computer."
             return
         }
+        if isConnecting {
+            cancelConnectionAttemptForDiscovery()
+            return
+        }
         guard !hasActiveBLESession else {
             pairingError = "Disconnect the current Bike Computer before searching for another."
             return
@@ -2875,6 +3229,14 @@ class BLEManager: NSObject, ObservableObject {
         clearUnknownDiscoveryState()
         isPairingMode = true
         refreshPureExplicitDiscoveryPresentation()
+        if requestWatchDirectRideReconciliation(
+            forExplicitDiscovery: true
+        ) {
+            reconcileScanning(
+                reason: "explicit discovery waiting for Apple Watch release"
+            )
+            return
+        }
         guard !isUnknownDeviceDiscoverySuspended else {
             reconcileScanning(
                 reason: "explicit discovery remains yielded to another enrollment"
@@ -2950,6 +3312,8 @@ class BLEManager: NSObject, ObservableObject {
         clearUnknownDiscoveryState()
         pairingStatusMessage = nil
         pairingError = nil
+        watchDirectRideReconciliationTimeoutTimer?.invalidate()
+        watchDirectRideReconciliationTimeoutTimer = nil
         if shouldResumeAutoReconnect {
             autoReconnect = true
             resumeAutoReconnectIfNeeded()
@@ -2958,13 +3322,16 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    /// Stop a stale or failed transport attempt so Settings can immediately
-    /// hand the radio to explicit nearby discovery. A board reboot during the
-    /// connection handshake can otherwise leave Core Bluetooth reporting
-    /// `isConnecting` until its delayed disconnect callback arrives, which
-    /// used to make the only add-device action permanently inert.
+    /// Replace a stale or failed transport attempt with explicit nearby
+    /// discovery. A board reset can change Core Bluetooth's peripheral
+    /// identity while an unbounded trusted reconnect remains pending for the
+    /// old identifier. Cancelling that attempt without retaining explicit
+    /// intent leaves Settings idle and requires a second user action.
     func cancelConnectionAttemptForDiscovery() {
-        guard isConnecting else { return }
+        guard isConnecting else {
+            startDeviceDiscovery()
+            return
+        }
 
         if pendingPairingSession != nil || pendingPairingMaterial != nil ||
             pairingPrompt != nil || isPairingMode {
@@ -2992,7 +3359,8 @@ class BLEManager: NSObject, ObservableObject {
         clearConnectionState()
         pairingStatusMessage = nil
         pairingError = nil
-        reconcileScanning(reason: "connection attempt cancelled for explicit discovery")
+        log("Connection attempt cancelled for explicit discovery")
+        startDeviceDiscovery()
     }
 
     func pair(with candidate: DiscoveredBikeComputerDevice, name: String) {
@@ -3551,6 +3919,7 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
         queueRememberedWatchControllerDeletion(deviceID: device.deviceID)
+        deviceScreenConfigurationController.clearCache(deviceID: device.deviceID)
 
         locallyForgottenPeripheralIdentifiers.insert(device.peripheralIdentifier)
         if pendingScannedConnectionIdentifier == device.peripheralIdentifier {
@@ -3909,6 +4278,8 @@ class BLEManager: NSObject, ObservableObject {
         deviceGPSOverrideToken == nil
     }
 
+    private var gpsSampleClockCache = RideGPSSampleClockCache()
+
     /// Send GPS position and optional ride telemetry to ESP32.
     /// Format: 30-byte legacy payload plus the negotiated 6-byte GPS-quality tail.
     @discardableResult
@@ -3924,6 +4295,7 @@ class BLEManager: NSObject, ObservableObject {
         horizontalAccuracyMeters: Double? = nil,
         locationTimestamp: Date? = nil
     ) -> Bool {
+        let sampleClock = gpsSampleClockCache.sample(locationTimestamp)
         guard isConnected,
               let endpoint = navigationWriteEndpoint,
               isNavigationReady else {
@@ -3936,8 +4308,7 @@ class BLEManager: NSObject, ObservableObject {
             supportsExplicitInvalidHeading: supportsExplicitInvalidGPSHeading
         )
         let includeRideDetectionQuality = supportsGPSPositionQualityV1
-        let buildData = {
-            DeviceGPSPacketBuilder.data(
+        let originalData = DeviceGPSPacketBuilder.data(
                 lat: lat,
                 lon: lon,
                 heading: wireHeading,
@@ -3950,7 +4321,8 @@ class BLEManager: NSObject, ObservableObject {
                 locationTimestamp: locationTimestamp,
                 includeRideDetectionQuality: includeRideDetectionQuality
             )
-        }
+        let dispatch = RideGPSDispatch(frame: originalData, sampleClock: sampleClock)
+        let buildData = { dispatch.payload() }
         let data = buildData()
 
         if let peripheral = connectedPeripheral,
@@ -4220,6 +4592,7 @@ class BLEManager: NSObject, ObservableObject {
         core: Data,
         extended: Data,
         origin: Data? = nil,
+        zoneContext: WorkoutZoneDeviceContextV1? = nil,
         prioritized: Bool,
         onWrite: @escaping (Data) -> Void,
         onDrop: @escaping (Data) -> Void,
@@ -4237,11 +4610,17 @@ class BLEManager: NSObject, ObservableObject {
             return false
         }
 
+        var zones: [Data] = []
+        if supportsWorkoutZonesV1, origin != nil, workoutZoneSequence < UInt32.max {
+            workoutZoneSequence += 1
+            zones = WorkoutZoneDeviceCodecV1.packets(for: zoneContext,
+                sequence: workoutZoneSequence, pairGeneration: core[1] >> 6, at: Date())
+        }
         if prioritized,
            supportsRideDeliveryAcknowledgement,
            workoutTelemetryCharacteristic != nil {
             return sendAcknowledgedWorkoutTelemetryGroup(
-                frames: [core, extended] + (origin.map { [$0] } ?? []),
+                frames: [core, extended] + (origin.map { [$0] } ?? []) + zones,
                 onWrite: onWrite,
                 onDrop: onDrop,
                 onWriteFailure: onWriteFailure
@@ -4290,6 +4669,14 @@ class BLEManager: NSObject, ObservableObject {
             }
             writes.append(originWrite)
         }
+        for zone in zones {
+            guard let write = workoutTelemetryWrite(zone,
+                navigationEndpoint: navigationEndpoint,
+                coalescingKey: "workout-zone-\(zone[2])",
+                onWrite: { onWrite(zone) }, onDrop: { onDrop(zone) },
+                onWriteFailure: { onWriteFailure(zone) }) else { return false }
+            writes.append(write)
+        }
         let didEnqueue = prioritized
             ? navigationWriteQueue.enqueuePrioritizedAtomically(writes)
             : navigationWriteQueue.enqueueAtomically(writes)
@@ -4334,9 +4721,14 @@ class BLEManager: NSObject, ObservableObject {
                     peripheral.maximumWriteValueLength(for: writeType) else {
                 return nil
             }
+            let zone = frames[index].first == WorkoutZoneDeviceCodecV1.frameKind
+                ? RideBLEZoneDispatch(frame: frames[index]) : nil
             return NavigationWrite(
                 data: payload,
                 label: "acknowledged workout telemetry \(index + 1)/\(frames.count)",
+                prepareData: zone.map { zone in {
+                    Data(payload.prefix(RideBLEGeneratedProtocolV1.applicationCommandHeaderBytes)) + zone.payload()
+                } },
                 transportWrite: { [weak self, weak peripheral, weak characteristic] data in
                     guard let self, let peripheral, let characteristic else {
                         return
@@ -4664,6 +5056,7 @@ class BLEManager: NSObject, ObservableObject {
         navigationFlushRetryTimer?.invalidate()
         navigationFlushRetryTimer = nil
         isNavigationReady = false
+        armRideRecoveryCancellationDeadline()
         if let navigationWriteStallRecoveryForTesting {
             navigationWriteStallRecoveryForTesting()
             return
@@ -4681,6 +5074,10 @@ class BLEManager: NSObject, ObservableObject {
         onDrop: (() -> Void)?,
         onWriteFailure: (() -> Void)?
     ) -> NavigationWrite? {
+        if frame.first == WorkoutZoneDeviceCodecV1.frameKind {
+            guard supportsWorkoutZonesV1, WorkoutZoneDeviceCodecV1.hasValidShape(frame),
+                  workoutTelemetryCharacteristic != nil else { return nil }
+        }
         let payload: Data
         let label: String
         let transportWrite: ((Data) -> Void)?
@@ -4783,18 +5180,18 @@ class BLEManager: NSObject, ObservableObject {
         let motionClock = workoutMotionUptime
         let motion = frame.first == 4
             ? RideBLEMotionDispatch(frame: frame, enqueuedUptime: motionClock()) : nil
+        let zone = frame.first == WorkoutZoneDeviceCodecV1.frameKind
+            ? RideBLEZoneDispatch(frame: frame, enqueuedUptime: motionClock()) : nil
         let isFallback = route == .navigationFallback
+        let prepare: (() -> Data?)? = zone.map { zone in { zone.payload(at: motionClock()) } }
+            ?? motion.map { motion in {
+                guard let frame = motion.payload(at: motionClock()) else { return nil }
+                return isFallback ? Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8) + frame : frame
+            } }
         return NavigationWrite(
             data: payload,
             label: label,
-            prepareData: motion.map { motion in
-                {
-                    guard let frame = motion.payload(at: motionClock()) else { return nil }
-                    return isFallback
-                        ? Data(DeviceBLEProtocol.workoutTelemetryFallbackPrefix.utf8) + frame
-                        : frame
-                }
-            },
+            prepareData: prepare,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,
@@ -4818,6 +5215,17 @@ class BLEManager: NSObject, ObservableObject {
             )
         } else if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
             automaticDisplayOffEnabled = value != 0
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            guard let timeouts = DeviceBLEProtocol.displayInactivityTimeouts(
+                    fromSettingValue: value
+                  ),
+                  let dim = DisplayDimTimeout(rawValue: timeouts.dimAfterSeconds),
+                  let off = DisplayOffTimeout(rawValue: timeouts.displayOffAfterSeconds) else {
+                log("Invalid display inactivity timeout setting value \(value)")
+                return false
+            }
+            displayDimTimeout = dim
+            displayOffTimeout = off
         } else if id == DeviceBLEProtocol.mapPlusNavigationRotationSettingID {
             mapPlusNavigationRotationMode = value == 0 ? 0 : 1
         }
@@ -4836,6 +5244,12 @@ class BLEManager: NSObject, ObservableObject {
         if id == DeviceBLEProtocol.automaticDisplayOffSettingID,
            (!hasReceivedDeviceCapabilities || !supportsAutomaticDisplayOff) {
             log("Automatic display-off setting not sent: connected firmware does not advertise support")
+            return false
+        }
+        if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID,
+           (!hasReceivedDeviceCapabilities ||
+            !supportsDisplayInactivityTimeouts) {
+            log("Display inactivity timeouts not sent: connected firmware does not advertise support")
             return false
         }
         if Self.isIndependentMapProfileSetting(id),
@@ -4888,6 +5302,8 @@ class BLEManager: NSObject, ObservableObject {
         }
         if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
             hasSentAutomaticDisplayOffForConnection = true
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            hasSentDisplayInactivityTimeoutsForConnection = true
         }
         return true
     }
@@ -4905,7 +5321,7 @@ class BLEManager: NSObject, ObservableObject {
             settingID = DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID
             enabled = mapPlusNavigationLabelsEnabled
             density = mapPlusNavigationLabelDensity
-        case .navigation, .rideStats, .batteryStatus:
+        case .navigation, .rideStats, .batteryStatus, .worldRadio:
             return
         }
         sendSetting(
@@ -4928,16 +5344,32 @@ class BLEManager: NSObject, ObservableObject {
         var fallback = Data(DeviceBLEProtocol.settingsFallbackPrefix.utf8)
         fallback.append(data)
 
-        let coalescingKey = id == DeviceBLEProtocol.automaticDisplayOffSettingID
-            ? DeviceBLEProtocol.automaticDisplayOffSettingCoalescingKey
-            : nil
-        let onDrop: (() -> Void)? = id == DeviceBLEProtocol.automaticDisplayOffSettingID
-            ? { [weak self] in
+        let coalescingKey: String?
+        if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            coalescingKey = DeviceBLEProtocol
+                .automaticDisplayOffSettingCoalescingKey
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            coalescingKey = DeviceBLEProtocol
+                .displayInactivityTimeoutsSettingCoalescingKey
+        } else {
+            coalescingKey = nil
+        }
+        let onDrop: (() -> Void)?
+        if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
+            onDrop = { [weak self] in
                 guard let self else { return }
                 self.hasSentAutomaticDisplayOffForConnection = false
                 self.log("Automatic display-off setting was dropped before transmission")
             }
-            : nil
+        } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
+            onDrop = { [weak self] in
+                guard let self else { return }
+                self.hasSentDisplayInactivityTimeoutsForConnection = false
+                self.log("Display inactivity timeouts were dropped before transmission")
+            }
+        } else {
+            onDrop = nil
+        }
 
         return DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
@@ -5038,6 +5470,7 @@ class BLEManager: NSObject, ObservableObject {
             mapPlusNavigationShowWater = showWater
             mapPlusNavigationShowRailways = showRailways
             mapPlusNavigationShowOtherAreas = showOtherAreas
+            mapPlusNavigationShowContours = showContours
         case 9:
             mapPlusNavigationStreetLineWidth = streetLineWidth
         case 10:
@@ -5051,6 +5484,18 @@ class BLEManager: NSObject, ObservableObject {
         guard isConnected,
               isNavigationReady,
               hasReceivedDeviceCapabilities else { return }
+
+        // Once the atomic screen document is negotiated it is the canonical
+        // source for every per-instance map profile. Replaying the app's old
+        // singleton values here would overwrite the primary Map and Map +
+        // Navigation instances through the firmware's legacy adapter.
+        guard DeviceScreenSettingsTransportPolicy.usesLegacySettings(
+            supportsScreenConfiguration: supportsScreenConfiguration
+        ) else {
+            hasSentMapProfileForConnection = true
+            hasSentMapNavigationProfileForConnection = true
+            return
+        }
 
         let shouldSendMap = !hasSentMapProfileForConnection
         let shouldSendMapNavigation = supportsIndependentMapProfiles &&
@@ -5112,6 +5557,7 @@ class BLEManager: NSObject, ObservableObject {
 
         if shouldSendMap {
             hasSentMapProfileForConnection = true
+            sendSetting(id: 6, value: Int32(mapRotationMode))
             sendVisibilityMask(for: .map)
             sendSetting(id: 1, value: Int32(minPolygonSize))
             sendSetting(id: 2, value: Int32(detailLevel))
@@ -5134,6 +5580,7 @@ class BLEManager: NSObject, ObservableObject {
     func useDeviceCapabilitiesFallback() {
         guard isConnected, isNavigationReady, !hasReceivedDeviceCapabilities else { return }
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         supportsIndependentMapProfiles = false
         supportsExtendedMapVisibility = false
         supportsBirdsEyeMapNavigation = false
@@ -5145,6 +5592,7 @@ class BLEManager: NSObject, ObservableObject {
         supports3DBuildings = false
         supportsMapPois = false
         supportsMapNavigationOrientation = false
+        supportsTopographicContours = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -5158,7 +5606,12 @@ class BLEManager: NSObject, ObservableObject {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWorldRadio = false
+        supportsScreenConfiguration = false
+        deviceScreenConfigurationController.markLegacyUnsupported()
         supportsWatchGPSMotionEvidenceV1 = false
+        supportsWorkoutZonesV1 = false
+        workoutZoneSequence = 0
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -5202,6 +5655,9 @@ class BLEManager: NSObject, ObservableObject {
                 if showTracks { mask |= DeviceBLEProtocol.tracksVisibilityMask }
                 mask |= DeviceBLEProtocol.extendedVisibilityMarker
             }
+            if topographicContoursAvailable && showContours {
+                mask |= DeviceBLEProtocol.contoursVisibilityMask
+            }
             if supportsMapPois {
                 if showPOIShops { mask |= DeviceBLEProtocol.poiShopsVisibilityMask }
                 if showPOIRestaurantsAndCafes {
@@ -5216,7 +5672,6 @@ class BLEManager: NSObject, ObservableObject {
                 if showPOIBicycleServices {
                     mask |= DeviceBLEProtocol.poiBicycleServicesVisibilityMask
                 }
-                mask |= DeviceBLEProtocol.extendedVisibilityMarker
             }
             settingID = 8
         case .mapPlusNavigation:
@@ -5232,6 +5687,9 @@ class BLEManager: NSObject, ObservableObject {
                 if mapPlusNavigationShowServiceRoads { mask |= DeviceBLEProtocol.serviceRoadsVisibilityMask }
                 if mapPlusNavigationShowTracks { mask |= DeviceBLEProtocol.tracksVisibilityMask }
                 mask |= DeviceBLEProtocol.extendedVisibilityMarker
+            }
+            if topographicContoursAvailable && mapPlusNavigationShowContours {
+                mask |= DeviceBLEProtocol.contoursVisibilityMask
             }
             if supportsMapPois {
                 if mapPlusNavigationShowPOIShops {
@@ -5249,10 +5707,9 @@ class BLEManager: NSObject, ObservableObject {
                 if mapPlusNavigationShowPOIBicycleServices {
                     mask |= DeviceBLEProtocol.poiBicycleServicesVisibilityMask
                 }
-                mask |= DeviceBLEProtocol.extendedVisibilityMarker
             }
             settingID = DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
-        case .navigation, .rideStats, .batteryStatus:
+        case .navigation, .rideStats, .batteryStatus, .worldRadio:
             return
         }
 
@@ -5275,6 +5732,9 @@ class BLEManager: NSObject, ObservableObject {
         var mask = effectiveEnabledDeviceScreensMask
         if !supportsBatteryStatusScreen {
             mask |= enabledDeviceScreensMask & DeviceScreen.batteryStatus.bit
+        }
+        if !supportsWorldRadio {
+            mask |= enabledDeviceScreensMask & DeviceScreen.worldRadio.bit
         }
         if enabled {
             mask |= screen.bit
@@ -5319,7 +5779,7 @@ class BLEManager: NSObject, ObservableObject {
             mask: enabledDeviceScreensMask
         )
         var outgoingMask = Int32(effectiveEnabledDeviceScreensMask)
-        if supportsBatteryStatusScreen {
+        if supportsBatteryStatusScreen || supportsWorldRadio {
             outgoingMask |= DeviceBLEProtocol.currentScreenMaskMarker
         }
         sendSetting(id: DeviceBLEProtocol.enabledScreensSettingID,
@@ -5337,9 +5797,14 @@ class BLEManager: NSObject, ObservableObject {
 
     private var supportedDeviceScreensMask: Int {
         guard hasReceivedDeviceCapabilities else { return DeviceScreen.allScreensMask }
-        return supportsBatteryStatusScreen
-            ? DeviceScreen.allScreensMask
-            : DeviceScreen.legacyScreensMask
+        var mask = DeviceScreen.legacyScreensMask
+        if supportsBatteryStatusScreen {
+            mask |= DeviceScreen.batteryStatus.bit
+        }
+        if supportsWorldRadio {
+            mask |= DeviceScreen.worldRadio.bit
+        }
+        return mask
     }
 
     private var effectiveEnabledDeviceScreensMask: Int {
@@ -5351,12 +5816,18 @@ class BLEManager: NSObject, ObservableObject {
 
     private func sendScreenSettingsAfterCapabilityNegotiation() {
         sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
+        sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
         guard supportsDeviceSettings,
               hasReceivedDeviceCapabilities,
               !hasSentScreenSettingsForConnection else {
             return
         }
         hasSentScreenSettingsForConnection = true
+        // Enabled/default state lives in the atomic document on new firmware.
+        // Keep IDs 13/14 only for older clients and older firmware.
+        guard DeviceScreenSettingsTransportPolicy.usesLegacySettings(
+            supportsScreenConfiguration: supportsScreenConfiguration
+        ) else { return }
         sendEnabledDeviceScreensMask()
         sendDefaultDeviceScreen()
         if supportsBatteryStatusScreen {
@@ -5374,6 +5845,36 @@ class BLEManager: NSObject, ObservableObject {
         _ = sendSetting(
             id: DeviceBLEProtocol.automaticDisplayOffSettingID,
             value: automaticDisplayOffEnabled ? 1 : 0
+        )
+    }
+
+    private func sendDisplayInactivityTimeoutsAfterCapabilityNegotiation() {
+        guard supportsDeviceSettings,
+              hasReceivedDeviceCapabilities,
+              supportsDisplayInactivityTimeouts,
+              !hasSentDisplayInactivityTimeoutsForConnection,
+              let value = DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+                  dimAfterSeconds: displayDimTimeout.rawValue,
+                  displayOffAfterSeconds: displayOffTimeout.rawValue
+              ) else {
+            return
+        }
+        _ = sendSetting(
+            id: DeviceBLEProtocol.displayInactivityTimeoutsSettingID,
+            value: value
+        )
+    }
+
+    func sendDisplayInactivityTimeouts() {
+        guard let value = DeviceBLEProtocol.displayInactivityTimeoutsSettingValue(
+            dimAfterSeconds: displayDimTimeout.rawValue,
+            displayOffAfterSeconds: displayOffTimeout.rawValue
+        ) else {
+            return
+        }
+        _ = sendSetting(
+            id: DeviceBLEProtocol.displayInactivityTimeoutsSettingID,
+            value: value
         )
     }
 
@@ -5535,6 +6036,10 @@ class BLEManager: NSObject, ObservableObject {
 
     @discardableResult
     func requestMapTransferMode(enabled: Bool) -> Bool {
+        guard !firmwareMaintenanceReconnectExpected else {
+            log("Suppressed map transfer control during firmware maintenance")
+            return false
+        }
         var packet = Data(DeviceBLEProtocol.mapTransferControlPrefix.utf8)
         packet.append(Data((enabled ? "enter" : "exit").utf8))
         let label = enabled ? "map transfer enter" : "map transfer exit"
@@ -5547,6 +6052,10 @@ class BLEManager: NSObject, ObservableObject {
 
     @discardableResult
     func requestMapTransferStatus() -> Bool {
+        guard !firmwareMaintenanceReconnectExpected else {
+            log("Suppressed map transfer status during firmware maintenance")
+            return false
+        }
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8)
         return sendTransferControlPacket(
             packet,
@@ -5599,6 +6108,40 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func requestFirmwareMaintenancePreparation() -> Bool {
+        var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
+        packet.append(Data("prepare|firmware".utf8))
+        return sendTransferControlPacket(
+            packet,
+            label: "firmware maintenance prepare",
+            coalescingKey: "transfer.device.control"
+        )
+    }
+
+    func beginFirmwareMaintenanceReconnect() {
+        guard !firmwareMaintenanceReconnectExpected else { return }
+        firmwareMaintenanceReconnectExpected = true
+        for writeClass in NavigationWriteClass.allCases
+            where writeClass != .transfer {
+            navigationWriteQueue.removePendingWrites(ofClass: writeClass)
+        }
+        log("Firmware maintenance reconnect armed; ordinary sync paused")
+    }
+
+    func endFirmwareMaintenanceReconnect() {
+        guard firmwareMaintenanceReconnectExpected else { return }
+        firmwareMaintenanceReconnectExpected = false
+        log("Firmware maintenance reconnect ended; ordinary sync resumed")
+
+        guard isNavigationReady, !firmwareMaintenanceActive else { return }
+        enqueueAuthMessage("GET_NAME")
+        requestDeviceCapabilities()
+        sendInitialDeviceSettingsAfterAuthentication()
+        requestDeviceTransferStatus()
+        requestMapTransferStatus()
+    }
+
+    @discardableResult
     func requestDeviceTransferExit() -> Bool {
         var packet = Data(DeviceBLEProtocol.deviceTransferControlPrefix.utf8)
         packet.append(Data("exit".utf8))
@@ -5610,12 +6153,15 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func requestDeviceTransferStatus() -> Bool {
+    func requestDeviceTransferStatus(
+        forMaintenanceReconnect: Bool = false
+    ) -> Bool {
         let packet = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8)
         return sendTransferControlPacket(
             packet,
             label: "device transfer status",
-            coalescingKey: "transfer.device.status"
+            coalescingKey: "transfer.device.status",
+            forMaintenanceReconnect: forMaintenanceReconnect
         )
     }
 
@@ -6166,11 +6712,13 @@ class BLEManager: NSObject, ObservableObject {
         settingsCharacteristic = nil
         workoutTelemetryCharacteristic = nil
         rideAutomationCharacteristic = nil
+        screenConfigurationCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
         deviceGPSOverrideToken = nil
         clearTransferState()
         deviceHasSDCard = nil
+        deviceMapStateKnown = false
         deviceMapFoundForCurrentLocation = nil
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
@@ -6223,6 +6771,10 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func clearConnectionState() {
+        deviceScreenConfigurationController.disconnect(
+            deviceID: connectedDeviceID,
+            generation: rideDeliveryConnectionGeneration
+        )
         if rideTransportStateMachine.phase != .idle {
             _ = reduceRideTransport(.disconnected(
                 generation: rideTransportStateMachine.generation
@@ -6232,6 +6784,7 @@ class BLEManager: NSObject, ObservableObject {
         isConnecting = false
         supportsDeviceSettings = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         connectedPeripheral = nil
         connectedDeviceID = nil
         navigationCharacteristic = nil
@@ -6241,6 +6794,7 @@ class BLEManager: NSObject, ObservableObject {
         settingsCharacteristic = nil
         workoutTelemetryCharacteristic = nil
         rideAutomationCharacteristic = nil
+        screenConfigurationCharacteristic = nil
         navigationWriteEndpoint = nil
         isNavigationReady = false
         deviceGPSOverrideToken = nil
@@ -6293,7 +6847,18 @@ class BLEManager: NSObject, ObservableObject {
         activeMapLabelLanguages = []
         activeMapFontAssetHealthy = false
         activeMapPoiProfileVersion = nil
+        activeMapPoiIndexProfileVersion = nil
         activeMapPoiDataHealthy = false
+        activeMapPoiIndexHealthy = false
+        activeMapContourLayerIncluded = false
+        activeMapTopographyProfileVersion = nil
+        activeMapTopographySectionHealthy = false
+        activeMapTopographyQualityMode = ""
+        activeMapContourMinorIntervalM = nil
+        activeMapContourIndexIntervalM = nil
+        activeMapContourNoDataMillionths = nil
+        activeMapContainsContours = false
+        activeMapTopographySourcePolicyReceiptPrefix = ""
         mapTransferActivationStatus = "idle"
         mapTransferActivationSequence = nil
         mapTransferActivationSessionId = ""
@@ -6304,6 +6869,7 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferActivationError = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
+        hasFreshMapTransferStatus = false
         mapTransferStatusChunkTransferID = nil
         mapTransferStatusChunkCount = 0
         mapTransferStatusChunks.removeAll()
@@ -6324,25 +6890,45 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferPendingTLSCertificateSHA256 = nil
         deviceTransferPendingTLSIdentityVersion = 0
         deviceTransferGeneration = 0
+        deviceTransferRemoteStatusRevision = 0
         supportsSecureDeviceTransferV1 = false
         supportsSignedMapStreamV1 = false
+        supportsFirmwareMaintenanceV1 = false
         deviceTransferLegacyArchivePolicy = nil
         deviceTransferLastErrorCode = nil
         deviceTransferLastErrorMessage = nil
         deviceTransferLastErrorSequence = nil
         deviceTransferStatusRevision = 0
+        deviceTransferResourceSnapshot = nil
+        deviceTransferWiFiStartFailure = nil
+        firmwareMaintenanceActive = false
+        firmwareMaintenanceStage = "normal"
+        firmwareMaintenanceCorrelation = 0
         deviceStorageBackend = nil
         deviceStoragePowerCycleRequired = nil
         firmwareUpdateStatus = "unknown"
+        firmwareOTAEligible = nil
+        firmwareOTAEligibilityCode = nil
+        firmwareInactivePartition = nil
+        firmwareMaximumImageBytes = nil
+        firmwareRunningPartition = nil
+        firmwareBuildProfile = nil
+        firmwareOTAState = nil
+        firmwareBootSequence = nil
+        firmwareBootFingerprint = nil
+        firmwareBootNormalReady = false
+        firmwareBootMaintenance = false
         firmwareTarget = ""
         firmwareVersion = ""
         firmwareBuild = 0
         firmwareGitSha = ""
         firmwareUpdateReceivedBytes = 0
         firmwareUpdateTotalBytes = 0
+        firmwareFlashOwnerStackHighWaterBytes = nil
         firmwareUpdateLastError = nil
         supportsDeviceSounds = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         supportsPowerButtonHonk = false
         supportsPowerButtonHonkAcknowledgement = false
         supportsIndependentMapProfiles = false
@@ -6356,6 +6942,7 @@ class BLEManager: NSObject, ObservableObject {
         supports3DBuildings = false
         supportsMapPois = false
         supportsMapNavigationOrientation = false
+        supportsTopographicContours = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -6371,7 +6958,11 @@ class BLEManager: NSObject, ObservableObject {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWorldRadio = false
+        supportsScreenConfiguration = false
         supportsWatchGPSMotionEvidenceV1 = false
+        supportsWorkoutZonesV1 = false
+        workoutZoneSequence = 0
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -6386,6 +6977,7 @@ class BLEManager: NSObject, ObservableObject {
         hasSentMapNavigationProfileForConnection = false
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
+        hasSentDisplayInactivityTimeoutsForConnection = false
         isSendingNegotiatedMapProfiles = false
         clearPendingPowerButtonHonkConfiguration()
     }
@@ -6418,6 +7010,11 @@ class BLEManager: NSObject, ObservableObject {
         _ event: RideBLETransportEventV1
     ) -> RideBLETransportTransitionV1 {
         let transition = rideTransportStateMachine.reduce(event)
+        if rideTransportStateMachine.phase != .recovering {
+            rideRecoveryCancellationTimer?.invalidate()
+            rideRecoveryCancellationTimer = nil
+            rideRecoveryMessage = nil
+        }
         rideTransportPhase = rideTransportStateMachine.phase
         rideTransportFailureReason = rideTransportStateMachine.lastFailure
         diagnosticsRecorder?.record(
@@ -6436,6 +7033,25 @@ class BLEManager: NSObject, ObservableObject {
             ]
         )
         return transition
+    }
+
+    private func armRideRecoveryCancellationDeadline() {
+        let generation = rideTransportStateMachine.generation
+        guard reduceRideTransport(.recoveryCancellationRequested(generation: generation)) == .applied else { return }
+        rideRecoveryCancellationTimer = Timer.scheduledOnMainActor(
+            withTimeInterval: rideRecoveryCancellationTimeout, repeats: false
+        ) { [weak self] _ in
+            self?.rideRecoveryCancellationExpired(generation: generation)
+        }
+    }
+
+    private func rideRecoveryCancellationExpired(generation: UInt64) {
+        guard reduceRideTransport(.recoveryCancellationTimedOut(generation: generation)) == .applied else { return }
+        rideRecoveryCancellationTimer = nil
+        rideRecoveryMessage = RideBLERecoveryPolicyV1.blockedMessage
+        log("Ride recovery cancellation timed out; waiting for a real disconnect or radio boundary")
+        // A timeout does not prove disconnection. Keep the current connection
+        // fenced and do not reuse its unidentified ATT callbacks.
     }
 
     private func clearDebugEvents() {
@@ -6519,6 +7135,22 @@ class BLEManager: NSObject, ObservableObject {
     ) {
         navigationWriteResponseTimeout = timeout
         navigationWriteStallRecoveryForTesting = recovery
+        _ = reduceRideTransport(.beginConnection)
+        let generation = rideTransportStateMachine.generation
+        _ = reduceRideTransport(.linkConnected(generation: generation))
+        _ = reduceRideTransport(.authenticated(generation: generation))
+        _ = reduceRideTransport(.leaseAccepted(generation: generation, leaseGeneration: 1))
+        _ = reduceRideTransport(.capabilitiesAccepted(generation: generation, schemaVersion: 1))
+    }
+
+    func installRideRecoveryDeadlineForTesting(timeout: TimeInterval) {
+        rideRecoveryCancellationTimeout = timeout
+    }
+
+    func retireRideRecoveryForTesting() -> () -> Void {
+        let generation = rideTransportStateMachine.generation
+        clearConnectionState()
+        return { [weak self] in self?.rideRecoveryCancellationExpired(generation: generation) }
     }
 
     @discardableResult
@@ -7283,6 +7915,7 @@ class BLEManager: NSObject, ObservableObject {
         pendingDeregistrationDeviceID = nil
         deviceOperationDeviceID = nil
         queueRememberedWatchControllerDeletion(deviceID: deviceID)
+        deviceScreenConfigurationController.clearCache(deviceID: deviceID)
         connectedDeviceID = nil
         explicitDiscoveryRequested = false
         isExplicitDiscoveryPausedForCandidate = false
@@ -7551,7 +8184,9 @@ class BLEManager: NSObject, ObservableObject {
         isPairingMode = false
         isConnected = true
         isNavigationReady = true
-        sendDiagnosticsCaptureBindingIfNeeded()
+        if !firmwareMaintenanceReconnectExpected {
+            sendDiagnosticsCaptureBindingIfNeeded()
+        }
         supportsDeviceSettings = true
         authRetryTimer?.invalidate()
         authRetryTimer = nil
@@ -7626,21 +8261,26 @@ class BLEManager: NSObject, ObservableObject {
             event: "authenticated",
             fields: ["authorized": "true"]
         )
-        enqueueAuthMessage("GET_NAME")
-        requestDeviceCapabilities()
-        sendInitialDeviceSettingsAfterAuthentication()
-        requestDeviceTransferStatus()
-        requestMapTransferStatus()
+        if firmwareMaintenanceReconnectExpected {
+            log("Maintenance reconnect authenticated; requesting transfer status only")
+            _ = requestDeviceTransferStatus(forMaintenanceReconnect: true)
+        } else {
+            enqueueAuthMessage("GET_NAME")
+            requestDeviceCapabilities()
+            sendInitialDeviceSettingsAfterAuthentication()
+            requestDeviceTransferStatus()
+            requestMapTransferStatus()
+        }
     }
 
     private func sendInitialDeviceSettingsAfterAuthentication() {
-        sendSetting(id: 6, value: Int32(mapRotationMode))
         sendSetting(id: 11, value: tapToSwitchScreens ? 1 : 0)
         sendSetting(
             id: DeviceBLEProtocol.brightnessSettingID,
             value: Int32(deviceBrightnessPercent)
         )
         sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
+        sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
         sendSetting(
             id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
             value: disconnectedSleepTimeout.settingValue
@@ -7665,6 +8305,12 @@ class BLEManager: NSObject, ObservableObject {
         onDrop: (() -> Void)? = nil,
         onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
+        if (firmwareMaintenanceActive ||
+            firmwareMaintenanceReconnectExpected) &&
+            writeClass != .transfer {
+            log("Suppressed \(writeClass.rawValue) write during firmware maintenance")
+            return false
+        }
         let write = NavigationWrite(
             data: data,
             label: label,
@@ -7781,6 +8427,65 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    private func enqueueScreenConfigurationFrames(
+        _ frames: [Data],
+        onSent: @escaping () -> Void,
+        onWriteFailure: @escaping () -> Void
+    ) -> Bool {
+        guard !frames.isEmpty,
+              isConnected,
+              isNavigationReady,
+              authenticatedWriteSession != nil,
+              let endpoint = navigationWriteEndpoint,
+              let peripheral = connectedPeripheral,
+              let characteristic = screenConfigurationCharacteristic,
+              characteristic.properties.contains(.write) else {
+            return false
+        }
+        let maximumPlaintext = peripheral.maximumWriteValueLength(
+            for: .withResponse
+        ) - AuthenticatedBLEWriteSession.frameOverhead
+        guard maximumPlaintext > 0,
+              frames.allSatisfy({ $0.count <= maximumPlaintext }) else {
+            return false
+        }
+        let writes = frames.enumerated().map { index, frame in
+            NavigationWrite(
+                data: frame,
+                label: "screen configuration \(index + 1)/\(frames.count)",
+                transportWrite: { [weak self, weak peripheral, weak characteristic] payload in
+                    guard let self, let peripheral, let characteristic else {
+                        return
+                    }
+                    self.writeDeviceData(
+                        payload,
+                        to: characteristic,
+                        on: peripheral,
+                        type: .withResponse
+                    )
+                },
+                onWrite: index == frames.count - 1 ? onSent : nil,
+                onWriteFailure: onWriteFailure,
+                transportCanSend: { [weak self] in
+                    self?.writeWithResponseInFlight == false
+                },
+                transportExpectsWriteResponse: true,
+                transportCharacteristicUUIDString:
+                    characteristic.uuid.uuidString,
+                writeClass: .settingsControl
+            )
+        }
+        guard navigationWriteQueue.enqueueAtomically(writes) else {
+            log("Screen configuration frames not queued: insufficient write queue capacity")
+            return false
+        }
+        flushPendingNavigationWrites(endpoint: endpoint)
+        scheduleNavigationFlushRetryIfNeeded()
+        log("Queued \(frames.count) screen configuration frame(s)")
+        return true
+    }
+
+    @discardableResult
     private func sendFallbackMapPacket(
         _ data: Data,
         label: String,
@@ -7832,9 +8537,23 @@ class BLEManager: NSObject, ObservableObject {
         _ data: Data,
         label: String,
         coalescingKey: String?,
+        forMaintenanceReconnect: Bool = false,
         onWriteFailure: (() -> Void)? = nil
     ) -> Bool {
-        DevicePacketRouting.sendPreferredThenFallback(
+        if DeviceTransferPacketRoutingPolicy.usesNavigationFallback(
+            firmwareMaintenanceActive: firmwareMaintenanceActive,
+            maintenanceReconnect: forMaintenanceReconnect
+        ) {
+            return sendFallbackMapPacket(
+                data,
+                label: label,
+                writeClass: .transfer,
+                coalescingKey: coalescingKey,
+                prioritized: true,
+                onWriteFailure: onWriteFailure
+            )
+        }
+        return DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
                 sendNativeMapTransferPacket(
                     data,
@@ -8006,10 +8725,13 @@ class BLEManager: NSObject, ObservableObject {
         if madeProgress,
            hasReceivedDeviceCapabilities,
            supportsDeviceSettings,
-           supportsAutomaticDisplayOff,
-           !hasSentAutomaticDisplayOffForConnection {
+           (supportsAutomaticDisplayOff &&
+                !hasSentAutomaticDisplayOffForConnection ||
+            supportsDisplayInactivityTimeouts &&
+                !hasSentDisplayInactivityTimeoutsForConnection) {
             DispatchQueue.main.async { [weak self] in
                 self?.sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
+                self?.sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
             }
         }
     }
@@ -8357,6 +9079,7 @@ class BLEManager: NSObject, ObservableObject {
         isNavigationReady = false
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
 
+        armRideRecoveryCancellationDeadline()
         if let navigationWriteStallRecoveryForTesting {
             navigationWriteStallRecoveryForTesting()
             return
@@ -8382,6 +9105,7 @@ class BLEManager: NSObject, ObservableObject {
         failureHandler?()
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
 
+        armRideRecoveryCancellationDeadline()
         if let navigationWriteStallRecoveryForTesting {
             navigationWriteStallRecoveryForTesting()
             return
@@ -8665,6 +9389,9 @@ class BLEManager: NSObject, ObservableObject {
         if uuid == settingsCharacteristicUUID { return .settings }
         if uuid == workoutTelemetryCharacteristicUUID { return .workout }
         if uuid == rideAutomationCharacteristicUUID { return .rideAutomation }
+        if uuid == screenConfigurationCharacteristicUUID {
+            return .screenConfiguration
+        }
         return nil
     }
 
@@ -9043,6 +9770,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         isConnecting = false
         supportsDeviceSettings = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         hardwareLabel = ""
         deviceInformation.removeAll()
         connectedPeripheral = nil
@@ -9058,6 +9786,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         deviceGPSOverrideToken = nil
         clearTransferState()
         deviceHasSDCard = nil
+        deviceMapStateKnown = false
         deviceMapFoundForCurrentLocation = nil
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
@@ -9335,6 +10064,16 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                     peripheral.setNotifyValue(true, for: characteristic)
                 }
             }
+
+            if characteristic.uuid == screenConfigurationCharacteristicUUID {
+                guard characteristic.properties.contains(.write),
+                      characteristic.properties.contains(.notify) else {
+                    log("Screen configuration characteristic requires acknowledged writes and notifications")
+                    continue
+                }
+                screenConfigurationCharacteristic = characteristic
+                peripheral.setNotifyValue(true, for: characteristic)
+            }
         }
     }
 
@@ -9492,6 +10231,26 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             return
         }
 
+        if characteristic.uuid == screenConfigurationCharacteristicUUID {
+            guard isNavigationReady,
+                  supportsScreenConfiguration,
+                  let deviceID = connectedDeviceID,
+                  let authenticatedWriteSession,
+                  let payload = authenticatedWriteSession.notificationPayload(
+                    from: data,
+                    channel: .screenConfiguration
+                  ) else {
+                log("Rejected invalid or unauthenticated screen configuration notification")
+                return
+            }
+            deviceScreenConfigurationController.receive(
+                payload,
+                deviceID: deviceID,
+                generation: rideDeliveryConnectionGeneration
+            )
+            return
+        }
+
         if [modelNumberCharacteristicUUID,
             firmwareRevisionCharacteristicUUID,
             hardwareRevisionCharacteristicUUID,
@@ -9536,6 +10295,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     private func rejectDeviceCapabilities(_ message: String) {
         supportsDeviceSounds = false
         supportsAutomaticDisplayOff = false
+        supportsDisplayInactivityTimeouts = false
         supportsPowerButtonHonk = false
         supportsPowerButtonHonkAcknowledgement = false
         supportsIndependentMapProfiles = false
@@ -9549,6 +10309,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supports3DBuildings = false
         supportsMapPois = false
         supportsMapNavigationOrientation = false
+        supportsTopographicContours = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -9562,7 +10323,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
         supportsRideDeliveryAcknowledgement = false
+        supportsWorldRadio = false
+        supportsScreenConfiguration = false
+        deviceScreenConfigurationController.markLegacyUnsupported()
         supportsWatchGPSMotionEvidenceV1 = false
+        supportsWorkoutZonesV1 = false
+        workoutZoneSequence = 0
         cancelPendingRideApplicationDeliveries(notifyFailure: true)
         rendererDiagnosticsChunks.reset()
         rendererDiagnosticsSnapshotJSON = nil
@@ -9571,6 +10337,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         hasReceivedDeviceCapabilities = false
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
+        hasSentDisplayInactivityTimeoutsForConnection = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
         clearPendingPowerButtonHonkConfiguration()
@@ -9593,6 +10360,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let flags: UInt32
         let legacyExtendedFlags: UInt8
         let powerButtonConfig: Data?
+        var screenConfigurationCapabilities:
+            DeviceScreenConfigurationCapabilities? = nil
         if prefix == DeviceBLEProtocol.deviceCapabilitiesPrefix {
             guard data.count == 5 || data.count == 6 ||
                     data.count == 8 || data.count == 9 else {
@@ -9638,6 +10407,15 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         break
                     }
                     parsedPowerConfig = data.subdata(in: offset..<(offset + length))
+                } else if type == RideBLEGeneratedProtocolV1
+                    .screenConfigurationCapabilityTLVType {
+                    guard let parsed = DeviceScreenConfigurationCapabilities(
+                        tlvValue: data.subdata(in: offset..<(offset + length))
+                    ) else {
+                        valid = false
+                        break
+                    }
+                    screenConfigurationCapabilities = parsed
                 }
                 offset += length
             }
@@ -9683,8 +10461,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.streetLabelsCapabilityMask != 0
         let has3DBuildings =
             flags & DeviceBLEProtocol.osm3DBuildingsCapabilityMask != 0
+        let hasTopographicContours =
+            flags & DeviceBLEProtocol.topographicContoursCapabilityMask != 0
         let hasMapPois =
-            flags & DeviceBLEProtocol.mapPoisCapabilityMask != 0
+            flags & DeviceBLEProtocol.mapPoisCapabilityMask != 0 &&
+            hasExtendedMapVisibility && hasStreetLabels && has3DBuildings &&
+            hasTopographicContours
         let hasRideAutomation =
             flags & DeviceBLEProtocol.rideAutomationCapabilityMask != 0
         let hasExplicitInvalidGPSHeading =
@@ -9699,6 +10481,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.rendererDiagnosticsCapabilityMask != 0
         let hasAutomaticDisplayOff =
             flags & DeviceBLEProtocol.automaticDisplayOffCapabilityMask != 0
+        let hasDisplayInactivityTimeouts = hasAutomaticDisplayOff &&
+            flags & DeviceBLEProtocol
+                .displayInactivityTimeoutsCapabilityMask != 0
         let hasRideDiagnostics =
             flags & DeviceBLEProtocol.rideDiagnosticsCapabilityMask != 0
         let hasDetailedRideDiagnostics = hasRideDiagnostics &&
@@ -9706,6 +10491,18 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let hasRideDeliveryAcknowledgement =
             flags & DeviceBLEProtocol
                 .rideDeliveryAcknowledgementCapabilityMask != 0
+        let hasWorldRadio =
+            flags & DeviceBLEProtocol.worldRadioCapabilityMask != 0
+        let advertisesScreenConfiguration =
+            flags & DeviceBLEProtocol.screenConfigurationCapabilityMask != 0
+        guard !advertisesScreenConfiguration ||
+                (prefix == DeviceBLEProtocol.deviceCapabilitiesV2Prefix &&
+                 screenConfigurationCapabilities != nil) else {
+            rejectDeviceCapabilities(
+                "Received incomplete screen configuration capabilities"
+            )
+            return true
+        }
         let hasWatchGPSMotionEvidenceV1 =
             flags & DeviceBLEProtocol
                 .watchGPSMotionEvidenceV1CapabilityMask != 0
@@ -9777,15 +10574,27 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             hasSentMapNavigationProfileForConnection = false
         }
         if hasReceivedDeviceCapabilities &&
-            supportsBatteryStatusScreen != hasBatteryStatusScreen {
+            supportsTopographicContours != hasTopographicContours {
+            hasSentMapProfileForConnection = false
+            hasSentMapNavigationProfileForConnection = false
+        }
+        if hasReceivedDeviceCapabilities &&
+            (supportsBatteryStatusScreen != hasBatteryStatusScreen ||
+             supportsWorldRadio != hasWorldRadio) {
             hasSentScreenSettingsForConnection = false
         }
         if hasReceivedDeviceCapabilities &&
             supportsAutomaticDisplayOff != hasAutomaticDisplayOff {
             hasSentAutomaticDisplayOffForConnection = false
         }
+        if hasReceivedDeviceCapabilities &&
+            supportsDisplayInactivityTimeouts !=
+                hasDisplayInactivityTimeouts {
+            hasSentDisplayInactivityTimeoutsForConnection = false
+        }
         supportsDeviceSounds = hasDeviceSounds
         supportsAutomaticDisplayOff = hasAutomaticDisplayOff
+        supportsDisplayInactivityTimeouts = hasDisplayInactivityTimeouts
         supportsPowerButtonHonk = hasPowerButtonHonk
         supportsPowerButtonHonkAcknowledgement = hasPowerButtonHonkAcknowledgement
         supportsIndependentMapProfiles = hasIndependentMapProfiles
@@ -9801,6 +10610,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsMapPois = hasMapPois
         supportsMapNavigationOrientation = flags &
             RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature != 0
+        supportsTopographicContours = hasTopographicContours
         supportsRideAutomation = hasRideAutomation
         supportsExplicitInvalidGPSHeading = hasExplicitInvalidGPSHeading
         supportsScopedWatchController = hasScopedWatchController
@@ -9811,12 +10621,50 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask != 0
         supportsRideDiagnostics = hasRideDiagnostics
         supportsDetailedRideDiagnostics = hasDetailedRideDiagnostics
+        supportsWorldRadio = hasWorldRadio
         if supportsRideDeliveryAcknowledgement &&
             !hasRideDeliveryAcknowledgement {
             cancelPendingRideApplicationDeliveries(notifyFailure: true)
         }
         supportsRideDeliveryAcknowledgement = hasRideDeliveryAcknowledgement
+        // Treat a complete advertised contract as authoritative even if the
+        // local characteristic is unexpectedly unavailable. Falling back to
+        // legacy writes in that state would mutate the primary instances in
+        // the device's new document. The controller instead fails closed when
+        // its enqueue closure cannot reach the characteristic.
+        supportsScreenConfiguration = advertisesScreenConfiguration
+        if advertisesScreenConfiguration,
+           let capabilities = screenConfigurationCapabilities,
+           let peripheral = connectedPeripheral,
+           let deviceID = connectedDeviceID {
+            let maximumPlaintextWriteBytes = max(
+                0,
+                peripheral.maximumWriteValueLength(for: .withResponse) -
+                    AuthenticatedBLEWriteSession.frameOverhead
+            )
+            deviceScreenConfigurationController.connect(
+                deviceID: deviceID,
+                generation: rideDeliveryConnectionGeneration,
+                capabilities: capabilities,
+                maximumPlaintextWriteBytes: maximumPlaintextWriteBytes,
+                sendFrames: { [weak self] frames, sent, failed in
+                    self?.enqueueScreenConfigurationFrames(
+                        frames,
+                        onSent: sent,
+                        onWriteFailure: failed
+                    ) ?? false
+                }
+            )
+        } else {
+            deviceScreenConfigurationController.markLegacyUnsupported()
+        }
         supportsWatchGPSMotionEvidenceV1 = hasWatchGPSMotionEvidenceV1
+        supportsWorkoutZonesV1 = hasWorkoutTelemetry && hasRideAutomation && hasRideDeliveryAcknowledgement
+            && flags & RideBLEGeneratedProtocolV1.workoutZonesV1Feature != 0
+            && workoutTelemetryCharacteristic != nil
+            && (connectedPeripheral?.maximumWriteValueLength(for: .withResponse) ?? 0) >=
+                WorkoutZoneDeviceCodecV1.maximumFrameBytes + AuthenticatedBLEWriteSession.frameOverhead
+                    + RideBLEGeneratedProtocolV1.applicationCommandHeaderBytes
         if hasRideDiagnostics {
             sendDiagnosticsCaptureBindingIfNeeded()
         }
@@ -9860,6 +10708,22 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     }
 
     @discardableResult
+    func sendWorldRadioStatus(_ status: WorldRadioStatus) -> Bool {
+        guard supportsWorldRadio, isNavigationReady,
+              let payload = status.encoded() else {
+            return false
+        }
+        return sendFallbackMapPacket(
+            payload,
+            label: "world radio status",
+            writeClass: .settingsControl,
+            coalescingKey: DeviceBLEProtocol.worldRadioStatusCoalescingKey,
+            prioritized: true,
+            atomically: true
+        )
+    }
+
+    @discardableResult
     func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
         if data.starts(with: RideBLEApplicationAcknowledgementV1.prefix) {
             guard supportsRideDeliveryAcknowledgement,
@@ -9884,6 +10748,19 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 return true
             }
             onRideAutomationFrame?(frame)
+            return true
+        }
+        if let request = WorldRadioRequest(data) {
+            guard isConnected, isNavigationReady, supportsWorldRadio else {
+                log("Ignored World Radio request before capability negotiation")
+                return true
+            }
+            log("Received World Radio request command=\(request.command.rawValue) id=\(request.requestID)")
+            onWorldRadioRequest?(request)
+            return true
+        }
+        if data.starts(with: Data(DeviceBLEProtocol.worldRadioRequestPrefix.utf8)) {
+            log("Rejected malformed World Radio request")
             return true
         }
         if DeviceWorkoutStartRequest.matches(data) {
@@ -10187,6 +11064,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         deviceTransferSessionToken = object["sessionToken"] as? String
         deviceTransferGeneration =
             (object["transferGeneration"] as? NSNumber)?.uint32Value ?? 0
+        deviceTransferRemoteStatusRevision =
+            (object["statusRevision"] as? NSNumber)?.uint32Value ?? 0
         if let tls = object["tls"] as? [String: Any] {
             deviceTransferTLSIdentityVersion =
                 (tls["identityVersion"] as? NSNumber)?.uint32Value ?? 0
@@ -10210,11 +11089,14 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 capabilities["secureTransferV1"] as? Bool ?? false
             supportsSignedMapStreamV1 =
                 capabilities["signedMapStreamV1"] as? Bool ?? false
+            supportsFirmwareMaintenanceV1 =
+                capabilities["firmwareMaintenanceV1"] as? Bool ?? false
             deviceTransferLegacyArchivePolicy =
                 capabilities["legacyArchivePolicy"] as? String
         } else {
             supportsSecureDeviceTransferV1 = false
             supportsSignedMapStreamV1 = false
+            supportsFirmwareMaintenanceV1 = false
             deviceTransferLegacyArchivePolicy = nil
         }
         if let lastError = object["lastError"] as? [String: Any] {
@@ -10227,6 +11109,27 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             deviceTransferLastErrorMessage = nil
             deviceTransferLastErrorSequence = nil
         }
+        if let failure = object["wifiStartFailure"] as? [String: Any],
+           let step = failure["step"] as? String,
+           let before = failure["before"] as? [String: Any],
+           let after = failure["after"] as? [String: Any] {
+            func memory(_ values: [String: Any]) -> DeviceTransferWiFiStartFailure.Memory {
+                DeviceTransferWiFiStartFailure.Memory(
+                    internalFree: (values["internalFree"] as? NSNumber)?.uint32Value ?? 0,
+                    internalLargest: (values["internalLargest"] as? NSNumber)?.uint32Value ?? 0,
+                    dmaFree: (values["dmaFree"] as? NSNumber)?.uint32Value ?? 0,
+                    dmaLargest: (values["dmaLargest"] as? NSNumber)?.uint32Value ?? 0
+                )
+            }
+            deviceTransferWiFiStartFailure = DeviceTransferWiFiStartFailure(
+                step: step,
+                espError: (failure["espError"] as? NSNumber)?.int32Value ?? 0,
+                before: memory(before), after: memory(after)
+            )
+        } else {
+            // Older firmware has no classified Wi-Fi startup telemetry.
+            deviceTransferWiFiStartFailure = nil
+        }
 #if DEBUG
         if let code = deviceTransferLastErrorCode, !code.isEmpty {
             // Firmware limits this authenticated status field to non-secret
@@ -10236,6 +11139,43 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             let message = deviceTransferLastErrorMessage
                 .flatMap { $0.isEmpty ? nil : $0 }
             log("Device transfer error: \(message.map { "\(code): \($0)" } ?? code)")
+        }
+        if let failure = object["firstTransferFailure"] as? [String: Any] {
+            let generation = (failure["generation"] as? NSNumber)?.uint32Value ?? 0
+            let atMs = (failure["atMs"] as? NSNumber)?.uint32Value ?? 0
+            let key = "\(generation):\(atMs)"
+            if key != lastLoggedTransferFailureKey {
+                lastLoggedTransferFailureKey = key
+                let reason = failure["reason"] as? String ?? "unknown"
+                let branch = failure["fileAbortBranch"] as? String ?? "none"
+                let numericKeys = [
+                    "headerBytes", "bodyBytes", "inputBytes", "offsetBytes",
+                    "attemptedBytes", "elapsedSinceProgressMs", "rawTlsResult",
+                    "immediateErrno", "firstFatalTlsResult", "firstFatalErrno",
+                    "pollResult", "pollFlags", "tlsWriteCalls", "wantReadCalls",
+                    "wantWriteCalls", "rawZeroCalls", "fatalWriteCalls",
+                    "positivePartialCalls", "lastWriteDurationUs", "fileRequested",
+                    "fileReturned", "fileErrno", "authorizationBits",
+                ]
+                let values = numericKeys.compactMap { field -> String? in
+                    guard let value = failure[field] as? NSNumber else { return nil }
+                    return "\(field)=\(value)"
+                }
+                let booleanKeys = ["firstFatalSeen", "fileError", "fileEof"]
+                let booleanValues = booleanKeys.compactMap { field -> String? in
+                    guard let value = failure[field] as? Bool else { return nil }
+                    return "\(field)=\(value)"
+                }
+                let memory = failure["memory"] as? [String: Any] ?? [:]
+                let memoryKeys = ["internalFree", "internalLargest", "dmaFree",
+                                  "dmaLargest", "psramFree", "psramLargest"]
+                let memoryValues = memoryKeys.compactMap { field -> String? in
+                    guard let value = memory[field] as? NSNumber else { return nil }
+                    return "\(field)=\(value)"
+                }
+                log("Device transfer first failure: reason=\(reason) branch=\(branch) "
+                    + (values + booleanValues + memoryValues).joined(separator: " "))
+            }
         }
 #endif
         if let storage = object["storage"] as? [String: Any] {
@@ -10248,16 +11188,87 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             deviceStorageBackend = nil
             deviceStoragePowerCycleRequired = nil
         }
+        if let resources = object["resources"] as? [String: Any] {
+            deviceTransferResourceSnapshot = DeviceTransferResourceSnapshot(
+                internalFree: (resources["internalFree"] as? NSNumber)?.uint32Value ?? 0,
+                internalLargest: (resources["internalLargest"] as? NSNumber)?.uint32Value ?? 0,
+                dmaFree: (resources["dmaFree"] as? NSNumber)?.uint32Value ?? 0,
+                dmaLargest: (resources["dmaLargest"] as? NSNumber)?.uint32Value ?? 0,
+                psramFree: (resources["psramFree"] as? NSNumber)?.uint32Value ?? 0,
+                psramLargest: (resources["psramLargest"] as? NSNumber)?.uint32Value ?? 0,
+                minimumInternalFree: (resources["minimumInternalFree"] as? NSNumber)?.uint32Value ?? 0,
+                minimumInternalLargest: (resources["minimumInternalLargest"] as? NSNumber)?.uint32Value ?? 0,
+                minimumDmaFree: (resources["minimumDmaFree"] as? NSNumber)?.uint32Value ?? 0,
+                minimumDmaLargest: (resources["minimumDmaLargest"] as? NSNumber)?.uint32Value ?? 0,
+                minimumPsramFree: (resources["minimumPsramFree"] as? NSNumber)?.uint32Value ?? 0,
+                minimumPsramLargest: (resources["minimumPsramLargest"] as? NSNumber)?.uint32Value ?? 0,
+                workerStackHighWaterBytes: (resources["workerStackHighWaterBytes"] as? NSNumber)?.uint32Value ?? 0,
+                internalOwnerStackHighWaterBytes: (resources["internalOwnerStackHighWaterBytes"] as? NSNumber)?.uint32Value ?? 0,
+                phase: resources["phase"] as? String ?? "unknown"
+            )
+        } else {
+            deviceTransferResourceSnapshot = nil
+        }
+        if let maintenance = object["maintenance"] as? [String: Any] {
+            firmwareMaintenanceActive =
+                maintenance["active"] as? Bool ?? false
+            firmwareMaintenanceStage =
+                maintenance["stage"] as? String ?? "normal"
+            firmwareMaintenanceCorrelation =
+                (maintenance["correlation"] as? NSNumber)?.uint32Value ?? 0
+            if firmwareMaintenanceActive {
+                for writeClass in NavigationWriteClass.allCases
+                    where writeClass != .transfer {
+                    navigationWriteQueue.removePendingWrites(
+                        ofClass: writeClass
+                    )
+                }
+            }
+        } else {
+            firmwareMaintenanceActive = false
+            firmwareMaintenanceStage = "normal"
+            firmwareMaintenanceCorrelation = 0
+        }
+        if let checkpoint = object["bootCheckpoint"] as? [String: Any] {
+            firmwareBootSequence =
+                (checkpoint["bootSequence"] as? NSNumber)?.uint32Value
+            firmwareBootFingerprint =
+                (checkpoint["bootFingerprint"] as? NSNumber)?.uint32Value
+            firmwareBootNormalReady =
+                checkpoint["normalReady"] as? Bool ?? false
+            firmwareBootMaintenance =
+                checkpoint["maintenance"] as? Bool ?? false
+            firmwareBuildProfile = checkpoint["profile"] as? String
+            firmwareOTAState = checkpoint["otaState"] as? String
+        } else {
+            firmwareBootSequence = nil
+            firmwareBootFingerprint = nil
+            firmwareBootNormalReady = false
+            firmwareBootMaintenance = false
+        }
         deviceTransferStatusRevision &+= 1
 
         if let firmware = object["firmware"] as? [String: Any] {
             firmwareUpdateStatus = firmware["status"] as? String ?? (enabled ? "unknown" : "idle")
+            firmwareOTAEligible = firmware["otaEligible"] as? Bool
+            firmwareOTAEligibilityCode =
+                firmware["eligibilityCode"] as? String
+            firmwareInactivePartition =
+                firmware["inactivePartition"] as? String
+            firmwareMaximumImageBytes = firmware["maxImageBytes"] as? Int
+            firmwareRunningPartition = firmware["runningPartition"] as? String
+            firmwareBuildProfile =
+                firmware["profile"] as? String ?? firmwareBuildProfile
+            firmwareOTAState =
+                firmware["otaState"] as? String ?? firmwareOTAState
             firmwareTarget = firmware["target"] as? String ?? firmwareTarget
             firmwareVersion = firmware["version"] as? String ?? firmwareVersion
             firmwareBuild = firmware["build"] as? Int ?? firmwareBuild
             firmwareGitSha = firmware["gitSha"] as? String ?? firmwareGitSha
             firmwareUpdateReceivedBytes = firmware["receivedBytes"] as? Int ?? 0
             firmwareUpdateTotalBytes = firmware["totalBytes"] as? Int ?? 0
+            firmwareFlashOwnerStackHighWaterBytes =
+                (firmware["flashOwnerStackHighWaterBytes"] as? NSNumber)?.uint32Value
             if let lastError = firmware["lastError"] as? [String: Any] {
                 let code = lastError["code"] as? String ?? "error"
                 let message = lastError["message"] as? String ?? ""
@@ -10268,6 +11279,21 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         }
 
         let modeDescription = deviceTransferMode.isEmpty ? "none" : deviceTransferMode
+        if let resources = deviceTransferResourceSnapshot {
+            let flashStack = firmwareFlashOwnerStackHighWaterBytes
+                .map(String.init) ?? "unknown"
+            log(
+                "Device transfer resources: phase=\(resources.phase) " +
+                "correlation=\(firmwareMaintenanceCorrelation) " +
+                "build=\(firmwareBuild) git=\(firmwareGitSha) " +
+                "internal=\(resources.internalFree)/\(resources.minimumInternalFree) " +
+                "dma=\(resources.dmaFree)/\(resources.minimumDmaFree) " +
+                "psram=\(resources.psramFree)/\(resources.minimumPsramFree) " +
+                "workerStack=\(resources.workerStackHighWaterBytes) " +
+                "internalOwnerStack=\(resources.internalOwnerStackHighWaterBytes) " +
+                "flashOwnerStack=\(flashStack)"
+            )
+        }
         if let code = deviceTransferLastErrorCode {
             let sequence = deviceTransferLastErrorSequence.map(String.init) ?? "unknown"
             let message = deviceTransferLastErrorMessage ?? "none"
@@ -10338,7 +11364,11 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         activeMapLabelLanguages = status.labelLanguages ?? []
         activeMapFontAssetHealthy = status.fontAssetHealthy ?? false
         activeMapPoiProfileVersion = status.poiProfileVersion
+        activeMapPoiIndexProfileVersion = status.poiIndexProfileVersion
         activeMapPoiDataHealthy = status.poiDataHealthy ?? false
+        activeMapPoiIndexHealthy = status.poiIndexHealthy ?? false
+        activeMapContourLayerIncluded = status.contourLayerIncluded ?? false
+        normalizeActiveMapPoiStatus()
         if let mapID = status.activeMapId {
             activeDeviceMap = DeviceActiveMapDescriptor(
                 mapID: mapID,
@@ -10378,16 +11408,19 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferActivationProgress = nil
             mapTransferActivationError = nil
         }
-        normalizeActiveMapPoiStatus()
+        hasFreshMapTransferStatus = true
     }
 
     private func normalizeActiveMapPoiStatus() {
         guard !mapTransferActiveMapId.isEmpty,
-              activeMapRendererFormat == 4,
+              activeMapRendererFormat == 5,
               activeMapPoiProfileVersion == 1,
-              mapTransferActivationStatus != "failed" else {
+              activeMapPoiIndexProfileVersion == 1 else {
             activeMapPoiProfileVersion = nil
+            activeMapPoiIndexProfileVersion = nil
             activeMapPoiDataHealthy = false
+            activeMapPoiIndexHealthy = false
+            activeMapContourLayerIncluded = false
             return
         }
     }
@@ -10418,7 +11451,26 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         activeMapFontAssetHealthy = object["fontAssetHealthy"] as? Bool ?? false
         activeMapPoiProfileVersion =
             (object["poiProfileVersion"] as? NSNumber)?.intValue
+        activeMapPoiIndexProfileVersion =
+            (object["poiIndexProfileVersion"] as? NSNumber)?.intValue
         activeMapPoiDataHealthy = object["poiDataHealthy"] as? Bool ?? false
+        activeMapPoiIndexHealthy = object["poiIndexHealthy"] as? Bool ?? false
+        activeMapContourLayerIncluded = object["contourLayerIncluded"] as? Bool ?? false
+        activeMapTopographyProfileVersion =
+            (object["topographyProfileVersion"] as? NSNumber)?.intValue
+        activeMapTopographySectionHealthy =
+            object["topographySectionHealthy"] as? Bool ?? false
+        activeMapTopographyQualityMode =
+            object["topographyQualityMode"] as? String ?? ""
+        activeMapContourMinorIntervalM =
+            (object["contourMinorIntervalM"] as? NSNumber)?.intValue
+        activeMapContourIndexIntervalM =
+            (object["contourIndexIntervalM"] as? NSNumber)?.intValue
+        activeMapContourNoDataMillionths =
+            (object["contourNoDataMillionths"] as? NSNumber)?.intValue
+        activeMapContainsContours = object["containsContours"] as? Bool ?? false
+        activeMapTopographySourcePolicyReceiptPrefix =
+            object["topographySourcePolicyReceiptPrefix"] as? String ?? ""
         if let activation = object["activation"] as? [String: Any] {
             mapTransferActivationStatus = activation["status"] as? String ?? "idle"
             mapTransferActivationSequence =
@@ -10447,6 +11499,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         }
         normalizeActiveMapPoiStatus()
         deviceHasSDCard = object["sdPresent"] as? Bool
+        deviceMapStateKnown = object["mapStateKnown"] as? Bool ?? false
         deviceMapFoundForCurrentLocation = object["mapFound"] as? Bool
         deviceMapBlockCount = object["mapBlocks"] as? Int ?? 0
 
@@ -10469,6 +11522,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferStatusDescription = "transfer mode disabled"
         }
 
+        hasFreshMapTransferStatus = true
         log("Map transfer status: \(mapTransferStatusDescription)")
         return true
     }

@@ -27,7 +27,9 @@ Successful publication is idempotent if its response is lost.
 The dedicated Dockerfile puts the scheduling module under `/opt/bicino-promotion`,
 outside the qualified converter's hashed `/app` source tree. Its validation stage
 requires every `/app` file to match the base, runs the real converter identity
-check, and runs both scheduler and existing promotion tests. The original
+check, and runs both scheduler and existing promotion tests. The new format-4
+companion test runs in the backend suite; it is skipped only in this pinned
+format-3 converter validation image. The original
 converter/signer producer identity remains accurate because that code is unchanged.
 No API or map-generation worker image is replaced by this candidate.
 

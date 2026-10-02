@@ -192,7 +192,7 @@ bool StreamValidator::feedBinary(uint8_t byte) {
       return true;
     if (std::memcmp(small_, "FMB", 3) != 0 ||
         (small_[3] != 1 && small_[3] != 2 && small_[3] != 3 &&
-         small_[3] != 4 && small_[3] != 5))
+         small_[3] != 4 && small_[3] != 5 && small_[3] != 6))
       return false;
     binaryVersion_ = small_[3];
     smallSize_ = 0;
@@ -377,10 +377,13 @@ bool StreamValidator::beginV3Section(uint8_t sectionIndex) {
     v4BuildingPointsSeen_ = 0;
     break;
   case 5:
+    contourValidator_ = map_contour_format::Validator{};
+    break;
+  case 6:
     v3ParseState_ = V3ParseState::PoiHeader;
-    v5DeclaredCategoryMask_ = 0;
-    v5ActualCategoryMask_ = 0;
-    v5HasPreviousPoi_ = false;
+    v6DeclaredCategoryMask_ = 0;
+    v6ActualCategoryMask_ = 0;
+    v6HasPreviousPoi_ = false;
     break;
   default:
     return false;
@@ -448,6 +451,8 @@ bool StreamValidator::feedV3Utf8(uint8_t byte) {
 }
 
 bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
+  if (v3Sections_[v3CurrentSection_].type == 5)
+    return contourValidator_.feed(byte);
   const auto collect = [&](size_t size) {
     if (size > sizeof(v3Record_) || v3RecordSize_ >= size)
       return false;
@@ -678,10 +683,10 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
     if (!collect(8) || v3RecordSize_ != 8)
       return true;
     v3RecordsRemaining_ = littleEndian16(v3Record_);
-    v5DeclaredCategoryMask_ = littleEndian32(v3Record_ + 4);
+    v6DeclaredCategoryMask_ = littleEndian32(v3Record_ + 4);
     if (littleEndian16(v3Record_ + 2) != 8 ||
         v3RecordsRemaining_ > kMaximumPois ||
-        (v5DeclaredCategoryMask_ & ~0x1FU) != 0)
+        (v6DeclaredCategoryMask_ & ~0x1FU) != 0)
       return false;
     v3RecordSize_ = 0;
     v3ParseState_ = v3RecordsRemaining_ == 0 ? V3ParseState::Complete
@@ -698,22 +703,22 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
       const uint8_t rank = v3Record_[6];
       const uint8_t flags = v3Record_[7];
       const bool outOfOrder =
-          v5HasPreviousPoi_ &&
+          v6HasPreviousPoi_ &&
           std::tie(localX, localY, category, rank, maximumZoom) <
-              std::tie(v5PreviousPoiX_, v5PreviousPoiY_,
-                       v5PreviousPoiCategory_, v5PreviousPoiRank_,
-                       v5PreviousPoiMaximumZoom_);
+              std::tie(v6PreviousPoiX_, v6PreviousPoiY_,
+                       v6PreviousPoiCategory_, v6PreviousPoiRank_,
+                       v6PreviousPoiMaximumZoom_);
       if (localX < 0 || localX > 4095 || localY < 0 || localY > 4095 ||
           category < 1 || category > 5 || maximumZoom > 5 || rank > 3 ||
           flags != 0 || outOfOrder)
         return false;
-      v5ActualCategoryMask_ |= 1U << (category - 1U);
-      v5HasPreviousPoi_ = true;
-      v5PreviousPoiX_ = localX;
-      v5PreviousPoiY_ = localY;
-      v5PreviousPoiCategory_ = category;
-      v5PreviousPoiRank_ = rank;
-      v5PreviousPoiMaximumZoom_ = maximumZoom;
+      v6ActualCategoryMask_ |= 1U << (category - 1U);
+      v6HasPreviousPoi_ = true;
+      v6PreviousPoiX_ = localX;
+      v6PreviousPoiY_ = localY;
+      v6PreviousPoiCategory_ = category;
+      v6PreviousPoiRank_ = rank;
+      v6PreviousPoiMaximumZoom_ = maximumZoom;
     }
     v3RecordSize_ = 0;
     v3ParseState_ = --v3RecordsRemaining_ == 0
@@ -728,12 +733,14 @@ bool StreamValidator::feedV3SectionRecord(uint8_t byte) {
 }
 
 bool StreamValidator::finishV3Section() {
+  if (v3Sections_[v3CurrentSection_].type == 5)
+    return contourValidator_.finish();
   return v3ParseState_ == V3ParseState::Complete && v3RecordSize_ == 0 &&
          v3Utf8Remaining_ == 0 &&
          (v3Sections_[v3CurrentSection_].type != 4 ||
           v4BuildingPointsSeen_ == v4DeclaredBuildingPoints_) &&
-         (v3Sections_[v3CurrentSection_].type != 5 ||
-          v5ActualCategoryMask_ == v5DeclaredCategoryMask_);
+         (v3Sections_[v3CurrentSection_].type != 6 ||
+          v6ActualCategoryMask_ == v6DeclaredCategoryMask_);
 }
 
 void StreamValidator::beginCoordinateLine() {

@@ -6,6 +6,7 @@ not require opening Xcode; use the command-line entry point below.
 ## Requirements
 
 - Navigation requires iOS 16.4 or later.
+- iPhone-owned workout recording requires iOS 26 or later; no Watch is required.
 - The mirrored workout experience requires iOS 17 or later and a paired Apple
   Watch running watchOS 10 or later.
 - Real workout validation requires physical devices. HealthKit workout
@@ -110,7 +111,34 @@ If the Watch tunnel times out, keep the Watch near the iPhone and Mac, restore
 the connection in Xcode's Devices and Simulators window, then retry the same
 artifact before rebuilding.
 
-## First run
+## Recording without Apple Watch (iOS 26+)
+
+**Start Workout** uses iPhone when WatchConnectivity has finished activation and
+confirmed that no Watch is paired. With a configured reachable Watch, the default
+is still Watch recording. **Choose Recorder** in the workout dashboard offers an
+explicit **Record with iPhone** choice; an unreachable or incompletely configured
+Watch opens this choice instead of silently falling back.
+
+The recorder is fixed for the ride. Reconnection cannot migrate it, change which
+device saves, or start another workout. Finish and acknowledge the current ride
+before choosing another recorder. Recovery and unresolved Watch starts are checked
+before a new recording is admitted.
+
+Phone recording supports outdoor cycling, pause/resume, segments, elapsed/active
+time, GPS route/distance/speed, available HealthKit heart rate/energy, and
+save/discard. It requests Health permission on iPhone. There is no phone heart-rate
+sensor; a compatible externally paired monitor is required. Cadence/power and
+automatic ride detection remain on the existing Watch path in this change.
+
+Foreground-started phone GPS may continue with When-In-Use location permission
+and the system background indicator. A cold background GPS restart still requires
+Always location; otherwise open Bicino after recovery. Route access and precise
+location remain permission-dependent. Missing measurements are not fabricated.
+
+See [iPhone workout architecture and validation](../docs/iphone-owned-workouts.md)
+for recovery behavior, conflict handling, and physical release gates.
+
+## First run with Apple Watch
 
 1. Build the `BikeComputer` scheme for the paired iPhone. The Watch app is
    embedded; verify its installation on the paired Watch separately.
@@ -175,11 +203,16 @@ physical validation even though the same join succeeded directly on the phone.
 
 ## Workout behavior
 
-The Watch owns the `HKWorkoutSession`, `HKLiveWorkoutBuilder`, sensor collection,
+For Watch-owned rides, the Watch owns the `HKWorkoutSession`, `HKLiveWorkoutBuilder`, sensor collection,
 route builder, final save or discard decision, and recovery record. The iPhone
 is a mirrored display and control surface. It may relay the latest live snapshot
 to authenticated compatible ESP32 firmware, but it never writes a second
 Health workout.
+
+For iPhone-owned rides, the separate local recorder owns the native session and
+HealthKit save. The existing Watch mirror manager remains read/control-only.
+One selected recorder feeds the iPhone, Live Activity, and authenticated bike
+computer display; late metrics from another recorder cannot replace it.
 
 Navigation and workout state are deliberately independent. Either can start or
 end without implicitly changing the other.
@@ -187,6 +220,15 @@ end without implicitly changing the other.
 BikeComputer heart zones use a maximum heart rate configured in iPhone
 **Settings > Developer Settings > Workout Heart Zones**. The default is 190 BPM;
 changes are persisted on iPhone and synced to the paired Watch.
+
+When built with the watchOS 27 SDK and running on watchOS 27, Bicino also reads
+native HealthKit heart-rate and cycling-power zones. iPhone and Watch prefer
+these per-workout configurations and show their source; missing native heart
+zones retain the labelled Bicino fallback. Power zones are never fabricated.
+The bike display keeps the existing five-band Bicino heart zones; its BLE
+protocol has not been changed. See
+[`../docs/native-healthkit-zones.md`](../docs/native-healthkit-zones.md) for the
+SDK and physical-validation gates and recovery behavior.
 
 If the iPhone or bike computer disconnects, the Watch workout continues. The
 iPhone and ESP32 show delayed, disconnected, or stale state instead of treating
@@ -311,11 +353,22 @@ Offline mode is the default:
 1. On iPhone, open **Settings** and find **Saved Routes**. Choose **Import GPX**
    for a durable user-owned GPX route or track, or use the optional Strava flow
    above for a seven-day provider-backed copy. The longest usable route/track
-   segment is validated and saved. MapKit alternatives remain active-navigation
-   only; **Save Offline** stays disabled until an approved export-capable
-   provider is configured.
-2. Send the route to Watch and wait for its green Watch status icon. **Queued**
-   does not prove the route is installed.
+   segment is validated as a draft. Confirm its name and choose **Save Route**;
+   cancelling writes nothing. To save an Apple Maps route without starting it,
+   choose **Save an Online Route**, select a destination and route alternative,
+   then tap **Save Offline**. Confirm its name to save that exact route and its
+   turn instructions into **Saved Routes** on this iPhone.
+   Apple Maps saves are iPhone-only: Watch transfer and offline map tiles are
+   not included. See the [MapKit storage licensing review](../docs/reviews/mapkit-route-storage-2026-09-15.md)
+   before distributing this feature; implementation is not Apple permission.
+   To follow a saved route on **iPhone**, open its map preview and start
+   navigation there. Route following needs no network request; offline basemap
+   coverage is separate. Watch transfer is independent of iPhone navigation.
+2. GPX/Strava routes are queued for Watch automatically once a paired Watch app
+   is available. Wait for the green Watch status icon; **Queued** does not prove
+   the route is installed. WatchConnectivity may deliver the file while the
+   Watch app is inactive, but watchOS chooses the exact background timing.
+   Unacknowledged attempts expire after seven days and show a red retry action.
 3. On Watch, open **Offline Navigation**, select the installed route, and
    confirm navigation. Leaving the route shows an off-route warning; it never
    causes an online request or invents a connector route.
@@ -343,7 +396,7 @@ workout so the Watch can collect cadence or power through HealthKit.
 
 When BikeComputer first receives one of these measurements, the active workout
 sheet offers **Connect sensor?**. Open **Settings > My Bike Computer**, or tap
-that prompt, then use **My Sensors > Connect a new Sensor**. The app listens for
+that prompt, then use **Set Up a Sensor**. The app listens for
 current workout data and lets you name a cadence sensor, power sensor, or
 combined cadence-and-power sensor.
 

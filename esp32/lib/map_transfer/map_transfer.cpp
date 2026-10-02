@@ -5,6 +5,8 @@
 #include "../maps/src/mapBuildingBlock.hpp"
 #include "../maps/src/mapLabelBlock.hpp"
 #include "../maps/src/mapPoiBlock.hpp"
+#include "../maps/src/mapPoiIndex.hpp"
+#include "../maps/src/mapContourBlock.hpp"
 
 #include <algorithm>
 #include <array>
@@ -537,6 +539,8 @@ static bool safeLanguageTag(const std::string &value) {
   return false;
 }
 
+static bool isHexSha256(const std::string &value);
+
 static MapTargetMetadata targetMetadata(const MapManifest &manifest) {
   MapTargetMetadata target;
   target.renderer = manifest.renderer;
@@ -546,6 +550,21 @@ static MapTargetMetadata targetMetadata(const MapManifest &manifest) {
   target.internationalFallback = manifest.internationalFallback;
   target.buildingProfileVersion = manifest.buildingProfileVersion;
   target.poiProfileVersion = manifest.poiProfileVersion;
+  target.poiIndexProfileVersion = manifest.poiIndexProfileVersion;
+  target.poiRecordCount = manifest.poiRecordCount;
+  target.contoursIncluded = manifest.contoursIncluded;
+  for (const ManifestFile &file : manifest.files)
+    if (file.path == std::string(kVectMapPrefix) + manifest.mapId +
+                         "/assets/nearby-pois.fpi")
+      target.poiIndexSha256 = file.sha256;
+  target.topographyProfileVersion = manifest.topographyProfileVersion;
+  target.topographyQualityMode = manifest.contourQualityMode;
+  target.contourMinorIntervalM = manifest.contourMinorIntervalM;
+  target.contourIndexIntervalM = manifest.contourIndexIntervalM;
+  target.contourRecordCount = manifest.contourRecordCount;
+  target.contourNoDataMillionths = manifest.contourNoDataMillionths;
+  target.topographySourcePolicySha256 =
+      manifest.topographySourcePolicySha256;
   return target;
 }
 
@@ -553,7 +572,18 @@ static bool targetMetadataEmpty(const MapTargetMetadata &target) {
   return target.renderer.empty() && target.formatVersion == 0 &&
          target.labelProfileVersion == 0 && target.labelLanguages.empty() &&
          target.internationalFallback.empty() &&
-         target.buildingProfileVersion == 0 && target.poiProfileVersion == 0;
+         target.buildingProfileVersion == 0 &&
+         target.poiProfileVersion == 0 &&
+         target.poiIndexProfileVersion == 0 &&
+         target.poiRecordCount == 0 && !target.contoursIncluded &&
+         target.poiIndexSha256.empty() &&
+         target.topographyProfileVersion == 0 &&
+         target.topographyQualityMode.empty() &&
+         target.contourMinorIntervalM == 0 &&
+         target.contourIndexIntervalM == 0 &&
+         target.contourRecordCount == 0 &&
+         target.contourNoDataMillionths == 0 &&
+         target.topographySourcePolicySha256.empty();
 }
 
 static bool targetMetadataValid(const MapTargetMetadata &target) {
@@ -561,14 +591,26 @@ static bool targetMetadataValid(const MapTargetMetadata &target) {
     return true;
   if (target.renderer != "esp32-fmb" ||
       (target.formatVersion != 1 && target.formatVersion != 2 &&
-       target.formatVersion != 3 && target.formatVersion != 4)) {
+       target.formatVersion != 3 && target.formatVersion != 4 &&
+       target.formatVersion != 5)) {
     return false;
   }
   if (target.formatVersion == 1) {
     return target.labelProfileVersion == 0 &&
            target.labelLanguages.empty() &&
            target.internationalFallback.empty() &&
-           target.buildingProfileVersion == 0 && target.poiProfileVersion == 0;
+           target.buildingProfileVersion == 0 &&
+           target.poiProfileVersion == 0 &&
+           target.poiIndexProfileVersion == 0 &&
+           target.poiRecordCount == 0 && !target.contoursIncluded &&
+           target.poiIndexSha256.empty() &&
+           target.topographyProfileVersion == 0 &&
+           target.topographyQualityMode.empty() &&
+           target.contourMinorIntervalM == 0 &&
+           target.contourIndexIntervalM == 0 &&
+           target.contourRecordCount == 0 &&
+           target.contourNoDataMillionths == 0 &&
+           target.topographySourcePolicySha256.empty();
   }
   if (target.labelProfileVersion != 1 ||
       target.labelLanguages.size() > 3 ||
@@ -584,13 +626,39 @@ static bool targetMetadataValid(const MapTargetMetadata &target) {
         return false;
     }
   }
-  const bool buildingsValid = target.formatVersion >= 3
-                                  ? target.buildingProfileVersion == 1
-                                  : target.buildingProfileVersion == 0;
-  const bool poisValid = target.formatVersion == 4
-                             ? target.poiProfileVersion == 1
-                             : target.poiProfileVersion == 0;
-  return buildingsValid && poisValid;
+  const bool buildingsValid =
+      (target.formatVersion >= 3)
+          ? target.buildingProfileVersion == 1
+          : target.buildingProfileVersion == 0;
+  const bool contourIntervalsValid =
+      (target.contourMinorIntervalM == 20 &&
+       target.contourIndexIntervalM == 100) ||
+      (target.contourMinorIntervalM == 50 &&
+       target.contourIndexIntervalM == 250);
+  const bool topographyValid = (target.formatVersion == 4 ||
+                                (target.formatVersion == 5 &&
+                                 target.contoursIncluded))
+      ? target.topographyProfileVersion == 1 && contourIntervalsValid &&
+            (target.topographyQualityMode == "standard-20m-v1" ||
+             target.topographyQualityMode == "coarse-50m-v1") &&
+            target.contourNoDataMillionths <= 1000000 &&
+            isHexSha256(target.topographySourcePolicySha256)
+      : target.topographyProfileVersion == 0 &&
+            target.topographyQualityMode.empty() &&
+            target.contourMinorIntervalM == 0 &&
+            target.contourIndexIntervalM == 0 &&
+            target.contourRecordCount == 0 &&
+            target.contourNoDataMillionths == 0 &&
+            target.topographySourcePolicySha256.empty();
+  const bool poiValid = target.formatVersion == 5
+      ? target.poiProfileVersion == 1 &&
+            target.poiIndexProfileVersion == 1 &&
+            isHexSha256(target.poiIndexSha256)
+      : target.poiProfileVersion == 0 &&
+            target.poiIndexProfileVersion == 0 &&
+            target.poiRecordCount == 0 && !target.contoursIncluded &&
+            target.poiIndexSha256.empty();
+  return buildingsValid && topographyValid && poiValid;
 }
 
 static bool targetMetadataMatches(const MapTargetMetadata &left,
@@ -601,7 +669,19 @@ static bool targetMetadataMatches(const MapTargetMetadata &left,
          left.labelLanguages == right.labelLanguages &&
          left.internationalFallback == right.internationalFallback &&
          left.buildingProfileVersion == right.buildingProfileVersion &&
-         left.poiProfileVersion == right.poiProfileVersion;
+         left.poiProfileVersion == right.poiProfileVersion &&
+         left.poiIndexProfileVersion == right.poiIndexProfileVersion &&
+         left.poiRecordCount == right.poiRecordCount &&
+         left.contoursIncluded == right.contoursIncluded &&
+         left.poiIndexSha256 == right.poiIndexSha256 &&
+         left.topographyProfileVersion == right.topographyProfileVersion &&
+         left.topographyQualityMode == right.topographyQualityMode &&
+         left.contourMinorIntervalM == right.contourMinorIntervalM &&
+         left.contourIndexIntervalM == right.contourIndexIntervalM &&
+         left.contourRecordCount == right.contourRecordCount &&
+         left.contourNoDataMillionths == right.contourNoDataMillionths &&
+         left.topographySourcePolicySha256 ==
+             right.topographySourcePolicySha256;
 }
 
 static MapTargetMetadata targetMetadataFromJson(const std::string &json,
@@ -622,6 +702,17 @@ static MapTargetMetadata targetMetadataFromJson(const std::string &json,
   const std::string fallbackKey = key("InternationalFallback");
   const std::string buildingProfileKey = key("BuildingProfileVersion");
   const std::string poiProfileKey = key("PoiProfileVersion");
+  const std::string poiIndexProfileKey = key("PoiIndexProfileVersion");
+  const std::string poiRecordCountKey = key("PoiRecordCount");
+  const std::string contoursIncludedKey = key("ContoursIncluded");
+  const std::string poiIndexShaKey = key("PoiIndexSha256");
+  const std::string topographyProfileKey = key("TopographyProfileVersion");
+  const std::string topographyQualityKey = key("TopographyQualityMode");
+  const std::string contourMinorIntervalKey = key("ContourMinorIntervalM");
+  const std::string contourIndexIntervalKey = key("ContourIndexIntervalM");
+  const std::string contourRecordCountKey = key("ContourRecordCount");
+  const std::string contourNoDataKey = key("ContourNoDataMillionths");
+  const std::string sourcePolicyKey = key("TopographySourcePolicySha256");
   const auto hasKey = [&](const std::string &name) {
     return json.find("\"" + name + "\"") != std::string::npos;
   };
@@ -640,17 +731,63 @@ static MapTargetMetadata targetMetadataFromJson(const std::string &json,
   target.buildingProfileVersion =
       static_cast<uint32_t>(buildingProfileVersion);
   const uint64_t poiProfileVersion = jsonUintValue(json, poiProfileKey);
+  const uint64_t poiIndexProfileVersion =
+      jsonUintValue(json, poiIndexProfileKey);
+  const uint64_t poiRecordCount = jsonUintValue(json, poiRecordCountKey);
+  const uint64_t contoursIncluded = jsonUintValue(json, contoursIncludedKey);
   target.poiProfileVersion = static_cast<uint32_t>(poiProfileVersion);
+  target.poiIndexProfileVersion =
+      static_cast<uint32_t>(poiIndexProfileVersion);
+  target.poiRecordCount = static_cast<uint32_t>(poiRecordCount);
+  target.contoursIncluded = contoursIncluded == 1;
+  target.poiIndexSha256 = jsonStringValue(json, poiIndexShaKey);
+  const uint64_t topographyProfileVersion =
+      jsonUintValue(json, topographyProfileKey);
+  target.topographyProfileVersion =
+      static_cast<uint32_t>(topographyProfileVersion);
+  target.topographyQualityMode =
+      jsonStringValue(json, topographyQualityKey);
+  const uint64_t contourMinorIntervalM =
+      jsonUintValue(json, contourMinorIntervalKey);
+  target.contourMinorIntervalM =
+      static_cast<uint32_t>(contourMinorIntervalM);
+  const uint64_t contourIndexIntervalM =
+      jsonUintValue(json, contourIndexIntervalKey);
+  target.contourIndexIntervalM =
+      static_cast<uint32_t>(contourIndexIntervalM);
+  const uint64_t contourRecordCount =
+      jsonUintValue(json, contourRecordCountKey);
+  target.contourRecordCount = static_cast<uint32_t>(contourRecordCount);
+  const uint64_t contourNoDataMillionths =
+      jsonUintValue(json, contourNoDataKey);
+  target.contourNoDataMillionths =
+      static_cast<uint32_t>(contourNoDataMillionths);
+  target.topographySourcePolicySha256 =
+      jsonStringValue(json, sourcePolicyKey);
   const bool metadataPresent =
       hasKey(rendererKey) || hasKey(formatKey) || hasKey(profileKey) ||
       hasKey(languagesKey) || hasKey(fallbackKey) ||
-      hasKey(buildingProfileKey) || hasKey(poiProfileKey);
+      hasKey(buildingProfileKey) || hasKey(poiProfileKey) ||
+      hasKey(poiIndexProfileKey) || hasKey(poiRecordCountKey) ||
+      hasKey(contoursIncludedKey) || hasKey(poiIndexShaKey) ||
+      hasKey(topographyProfileKey) ||
+      hasKey(topographyQualityKey) || hasKey(contourMinorIntervalKey) ||
+      hasKey(contourIndexIntervalKey) || hasKey(contourRecordCountKey) ||
+      hasKey(contourNoDataKey) || hasKey(sourcePolicyKey);
   if (valid != nullptr) {
     *valid = (!metadataPresent || languagesValid) &&
              formatVersion <= UINT32_MAX &&
              labelProfileVersion <= UINT32_MAX &&
              buildingProfileVersion <= UINT32_MAX &&
-             poiProfileVersion <= UINT32_MAX;
+             poiProfileVersion <= UINT32_MAX &&
+             poiIndexProfileVersion <= UINT32_MAX &&
+             poiRecordCount <= UINT32_MAX &&
+             contoursIncluded <= 1 &&
+             topographyProfileVersion <= UINT32_MAX &&
+             contourMinorIntervalM <= UINT32_MAX &&
+             contourIndexIntervalM <= UINT32_MAX &&
+             contourRecordCount <= UINT32_MAX &&
+             contourNoDataMillionths <= UINT32_MAX;
   }
   return target;
 }
@@ -681,9 +818,36 @@ static std::string targetMetadataJson(const MapTargetMetadata &target,
   json += "],\"" + key("InternationalFallback") + "\":\"" +
           jsonEscape(target.internationalFallback) + "\",\"" +
           key("BuildingProfileVersion") + "\":" +
-          std::to_string(target.buildingProfileVersion) + ",\"" +
-          key("PoiProfileVersion") + "\":" +
-          std::to_string(target.poiProfileVersion);
+          std::to_string(target.buildingProfileVersion);
+  if (target.formatVersion == 5) {
+    json += ",\"" + key("PoiProfileVersion") + "\":" +
+            std::to_string(target.poiProfileVersion) + ",\"" +
+            key("PoiIndexProfileVersion") + "\":" +
+            std::to_string(target.poiIndexProfileVersion) + ",\"" +
+            key("PoiRecordCount") + "\":" +
+            std::to_string(target.poiRecordCount) + ",\"" +
+            key("ContoursIncluded") + "\":" +
+            std::to_string(target.contoursIncluded ? 1 : 0) + ",\"" +
+            key("PoiIndexSha256") + "\":\"" +
+            jsonEscape(target.poiIndexSha256) + "\"";
+  }
+  if (target.formatVersion == 4 ||
+      (target.formatVersion == 5 && target.contoursIncluded)) {
+    json += ",\"" + key("TopographyProfileVersion") + "\":" +
+            std::to_string(target.topographyProfileVersion) + ",\"" +
+            key("TopographyQualityMode") + "\":\"" +
+            jsonEscape(target.topographyQualityMode) + "\",\"" +
+            key("ContourMinorIntervalM") + "\":" +
+            std::to_string(target.contourMinorIntervalM) + ",\"" +
+            key("ContourIndexIntervalM") + "\":" +
+            std::to_string(target.contourIndexIntervalM) + ",\"" +
+            key("ContourRecordCount") + "\":" +
+            std::to_string(target.contourRecordCount) + ",\"" +
+            key("ContourNoDataMillionths") + "\":" +
+            std::to_string(target.contourNoDataMillionths) + ",\"" +
+            key("TopographySourcePolicySha256") + "\":\"" +
+            jsonEscape(target.topographySourcePolicySha256) + "\"";
+  }
   return json;
 }
 
@@ -983,8 +1147,18 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       jsonStringValue(manifestText, "internationalFallback");
   manifest.buildingProfileVersion = static_cast<uint32_t>(
       jsonUintValue(manifestText, "buildingProfileVersion"));
+  manifest.topographyProfileVersion = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "topographyProfileVersion"));
   manifest.poiProfileVersion = static_cast<uint32_t>(
       jsonUintValue(manifestText, "poiProfileVersion"));
+  manifest.poiIndexProfileVersion = static_cast<uint32_t>(
+      jsonUintValue(manifestText, "poiIndexProfileVersion"));
+  bool requestedFeaturesValid = false;
+  manifest.requestedFeatures = jsonStringArrayValue(
+      manifestText, "requestedFeatures", &requestedFeaturesValid);
+  const std::string layers = jsonObjectValue(manifestText, "layers");
+  const std::string contourLayer = jsonStringValue(layers, "contours");
+  manifest.contoursIncluded = contourLayer == "included";
   const std::string buildingSummary =
       jsonObjectValue(manifestText, "buildings");
   const std::string poiSummary = jsonObjectValue(manifestText, "pois");
@@ -1000,10 +1174,10 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       jsonUintValue(buildingSummary, "localMedianHeightCount"));
   manifest.buildingProvenanceCounts[4] = static_cast<uint32_t>(
       jsonUintValue(buildingSummary, "classDefaultHeightCount"));
-  manifest.poiRecordCount =
-      static_cast<uint32_t>(jsonUintValue(poiSummary, "recordCount"));
-  manifest.poiCategoryCounts[0] =
-      static_cast<uint32_t>(jsonUintValue(poiSummary, "shopsCount"));
+  manifest.poiRecordCount = static_cast<uint32_t>(
+      jsonUintValue(poiSummary, "recordCount"));
+  manifest.poiCategoryCounts[0] = static_cast<uint32_t>(
+      jsonUintValue(poiSummary, "shopsCount"));
   manifest.poiCategoryCounts[1] = static_cast<uint32_t>(
       jsonUintValue(poiSummary, "restaurantsAndCafesCount"));
   manifest.poiCategoryCounts[2] = static_cast<uint32_t>(
@@ -1012,6 +1186,29 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       jsonUintValue(poiSummary, "gasStationsCount"));
   manifest.poiCategoryCounts[4] = static_cast<uint32_t>(
       jsonUintValue(poiSummary, "bicycleServicesCount"));
+  const size_t topographyPosition = manifestText.find("\"topography\"");
+  const std::string topographyText =
+      topographyPosition == std::string::npos
+          ? std::string()
+          : manifestText.substr(topographyPosition);
+  manifest.contourRecordCount = static_cast<uint32_t>(
+      jsonUintValue(topographyText, "recordCount"));
+  manifest.contourPointCount = static_cast<uint32_t>(
+      jsonUintValue(topographyText, "pointCount"));
+  manifest.contourMinorIntervalM = static_cast<uint32_t>(
+      jsonUintValue(topographyText, "minorIntervalM"));
+  manifest.contourIndexIntervalM = static_cast<uint32_t>(
+      jsonUintValue(topographyText, "indexIntervalM"));
+  manifest.contourNoDataMillionths = static_cast<uint32_t>(
+      jsonUintValue(topographyText, "noDataMillionths"));
+  manifest.contourQualityMode =
+      jsonStringValue(topographyText, "qualityMode");
+  manifest.topographySourcePolicySha256 =
+      jsonStringValue(topographyText, "sourcePolicySha256");
+  manifest.topographyIntermediateSha256 =
+      jsonStringValue(topographyText, "intermediateSha256");
+  manifest.topographyAttributionSha256 =
+      jsonStringValue(topographyText, "attributionSha256");
   manifest.minimumFirmwareVersion =
       jsonStringValue(manifestText, "minFirmwareVersion");
   if (manifest.renderer.empty() && manifest.formatVersion == 0) {
@@ -1024,6 +1221,7 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
     return fail("manifest_map_id", "mapId contains unsafe characters");
 
   uint32_t fontAssetCount = 0;
+  uint32_t poiIndexCount = 0;
   uint32_t legacyTextBlockCount = 0;
   for (const std::string &object : fileObjects(manifestText)) {
     ManifestFile file;
@@ -1043,21 +1241,27 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
     if (file.publishPath == std::string(kActiveMapFile).substr(1))
       return fail("manifest_path", "manifest may not overwrite active map");
     const bool isFontAsset = isFontAssetPath(file.path, manifest.mapId);
+    const bool isPoiIndex = file.path ==
+        std::string(kVectMapPrefix) + manifest.mapId +
+        "/assets/nearby-pois.fpi";
     const bool isBlock = file.path.size() >= 4 &&
                          (file.path.rfind(".fmb") == file.path.size() - 4 ||
                           file.path.rfind(".fmp") == file.path.size() - 4);
-    if (!isBlock && !isFontAsset)
+    if (!isBlock && !isFontAsset && !isPoiIndex)
       return fail("manifest_path", "manifest contains an unsupported map file");
     if (file.bytes == 0 ||
         file.bytes > (isFontAsset
                           ? map_font_asset_format::kMaximumFontAssetBytes
-                          : map_block_format::kMaximumBlockBytes))
+                          : (isPoiIndex ? map_poi_index::kMaximumBytes
+                                        : map_block_format::kMaximumBlockBytes)))
       return fail("manifest_bytes", "map file byte count is invalid");
     if (!isHexSha256(file.sha256))
       return fail("manifest_sha256", "map file sha256 is invalid");
     manifest.files.push_back(file);
     if (isFontAsset)
       fontAssetCount++;
+    if (isPoiIndex)
+      poiIndexCount++;
     if (file.path.rfind(".fmp") == file.path.size() - 4)
       legacyTextBlockCount++;
   }
@@ -1065,14 +1269,18 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
     return fail("manifest_files", "manifest contains no map files");
   if (manifest.renderer != "esp32-fmb" ||
       (manifest.formatVersion != 1 && manifest.formatVersion != 2 &&
-       manifest.formatVersion != 3 && manifest.formatVersion != 4))
+       manifest.formatVersion != 3 && manifest.formatVersion != 4 &&
+       manifest.formatVersion != 5))
     return fail("manifest_target", "manifest renderer target is unsupported");
   if (((manifest.formatVersion == 2 || manifest.formatVersion == 3 ||
-        manifest.formatVersion == 4) &&
+        manifest.formatVersion == 4 || manifest.formatVersion == 5) &&
        (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
-      (manifest.formatVersion == 1 && fontAssetCount != 0))
+      (manifest.formatVersion == 1 && fontAssetCount != 0) ||
+      ((manifest.formatVersion == 5) != (poiIndexCount == 1)) ||
+      poiIndexCount > 1)
     return fail("manifest_target", "manifest files do not match renderer target");
-  if (manifest.formatVersion >= 2) {
+  if (manifest.formatVersion == 2 || manifest.formatVersion == 3 ||
+      manifest.formatVersion == 4 || manifest.formatVersion == 5) {
     bool uniqueLanguages = true;
     for (size_t index = 0; index < manifest.labelLanguages.size(); ++index)
       for (size_t other = index + 1; other < manifest.labelLanguages.size(); ++other)
@@ -1105,7 +1313,7 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   uint64_t poiTotal = 0;
   for (uint32_t count : manifest.poiCategoryCounts)
     poiTotal += count;
-  if (manifest.formatVersion == 4) {
+  if (manifest.formatVersion == 5) {
     static constexpr const char *kRequiredPoiSummaryKeys[] = {
         "recordCount", "shopsCount", "restaurantsAndCafesCount",
         "publicToiletsCount", "gasStationsCount", "bicycleServicesCount"};
@@ -1116,12 +1324,49 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
           poiSummary.find(std::string("\"") + key + "\"") !=
               std::string::npos;
     }
-    if (manifest.poiProfileVersion != 1 || poiSummary.empty() ||
-        !completePoiSummary || poiTotal != manifest.poiRecordCount)
+    const std::vector<std::string> required = {
+        "3d-buildings", "map-pois", "street-labels"};
+    const std::vector<std::string> combined = {
+        "3d-buildings", "contours", "map-pois", "street-labels"};
+    if (manifest.poiProfileVersion != 1 ||
+        manifest.poiIndexProfileVersion != 1 ||
+        !requestedFeaturesValid ||
+        (manifest.requestedFeatures != required &&
+         manifest.requestedFeatures != combined) ||
+        layers.empty() ||
+        (contourLayer != "included" && contourLayer != "not-included") ||
+        manifest.contoursIncluded !=
+            (manifest.requestedFeatures == combined) ||
+        poiSummary.empty() || !completePoiSummary ||
+        poiTotal != manifest.poiRecordCount)
       return fail("manifest_pois", "manifest POI profile is invalid");
-  } else if (manifest.poiProfileVersion != 0 || manifest.poiRecordCount != 0 ||
-             poiTotal != 0 || !poiSummary.empty()) {
+  } else if (manifest.poiProfileVersion != 0 ||
+             manifest.poiIndexProfileVersion != 0 ||
+             !manifest.requestedFeatures.empty() ||
+             manifest.poiRecordCount != 0 || poiTotal != 0 ||
+             !poiSummary.empty() || !layers.empty()) {
     return fail("manifest_pois", "legacy manifest contains POI metadata");
+  }
+  const bool contourIntervalsValid =
+      (manifest.contourMinorIntervalM == 20 &&
+       manifest.contourIndexIntervalM == 100) ||
+      (manifest.contourMinorIntervalM == 50 &&
+       manifest.contourIndexIntervalM == 250);
+  if (manifest.formatVersion == 4 ||
+      (manifest.formatVersion == 5 && manifest.contoursIncluded)) {
+    if (manifest.topographyProfileVersion != 1 ||
+        !contourIntervalsValid ||
+        (manifest.contourQualityMode != "standard-20m-v1" &&
+         manifest.contourQualityMode != "coarse-50m-v1") ||
+        manifest.contourNoDataMillionths > 1000000 ||
+        !isHexSha256(manifest.topographySourcePolicySha256) ||
+        !isHexSha256(manifest.topographyIntermediateSha256) ||
+        !isHexSha256(manifest.topographyAttributionSha256))
+      return fail("manifest_topography", "manifest topography profile is invalid");
+  } else if (manifest.topographyProfileVersion != 0 ||
+             !manifest.contourQualityMode.empty() ||
+             !topographyText.empty()) {
+    return fail("manifest_topography", "map without contours contains topography metadata");
   }
   return {true, "ok", ""};
 }
@@ -2097,6 +2342,26 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
        !targetMetadataMatches(transactionTarget, installedTarget))) {
     ActiveMapSelection active;
     InstallStatus activeStatus = readActiveMap(active);
+    if (!activeStatus.ok &&
+        (activeStatus.code == "active_invalid" ||
+         (activeStatus.code == "active_missing" && !previousRoot.empty()))) {
+      if (previousRoot.empty() ||
+          !rollbackRootMatches(previousRoot, previousMapId,
+                               previousManifestReceipt,
+                               previousSignedManifestReceipt))
+        return fail("stream_transaction_recovery",
+                    "invalid active pointer and no verified previous map");
+      ActiveMapSelection rollback;
+      rollback.mapId = previousMapId;
+      rollback.sessionId = previousSessionId;
+      rollback.root = previousRoot;
+      rollback.target = previousTarget;
+      rollback.manifestReceipt = previousManifestReceipt;
+      rollback.signedManifestReceipt = previousSignedManifestReceipt;
+      if (!writeActiveMap(rollback))
+        return fail("stream_transaction_recovery",
+                    "could not restore previous map after invalid ready state");
+    }
     if (activeStatus.ok && active.root == root) {
       if (!previousRoot.empty() &&
           rollbackRootMatches(previousRoot, previousMapId,
@@ -2144,6 +2409,39 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
   }
   ActiveMapSelection active;
   InstallStatus activeStatus = readActiveMap(active);
+  if (!activeStatus.ok &&
+      (activeStatus.code == "active_invalid" ||
+       (activeStatus.code == "active_missing" && !previousRoot.empty()))) {
+    // A pointer that was accepted by the filesystem but cannot be read back
+    // must not strand the previous, verified map. Keep the journal intact if
+    // rollback cannot be proved or written, so a later recovery can retry.
+    if (previousRoot.empty() ||
+        !rollbackRootMatches(previousRoot, previousMapId,
+                             previousManifestReceipt,
+                             previousSignedManifestReceipt)) {
+      return fail("stream_transaction_recovery",
+                  "invalid active pointer and no verified previous map");
+    }
+    ActiveMapSelection rollback;
+    rollback.mapId = previousMapId;
+    rollback.sessionId = previousSessionId;
+    rollback.root = previousRoot;
+    rollback.target = previousTarget;
+    rollback.manifestReceipt = previousManifestReceipt;
+    rollback.signedManifestReceipt = previousSignedManifestReceipt;
+    if (!writeActiveMap(rollback))
+      return fail("stream_transaction_recovery",
+                  "could not restore previous map after invalid pointer");
+    const bool cleaned = removeTree(joinPath(storageRoot_, root)) &&
+                         clearPendingStreamActivation(sessionId) &&
+                         removeTree(transactionPath + ".tmp") &&
+                         removeTree(transactionPath + ".bak") &&
+                         removeTree(transactionPath);
+    return cleaned ? InstallStatus{true, "recovered_rollback",
+                                   "restored previous map after invalid pointer"}
+                   : fail("stream_transaction_cleanup",
+                          "restored previous map but could not clean transaction");
+  }
   if (!previousRoot.empty() && targetMetadataEmpty(selected.previousTarget) &&
       activeStatus.ok) {
     if (active.root == previousRoot)
@@ -3151,14 +3449,30 @@ MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
            std::to_string(manifest.buildingRecordCount) + "\n";
   for (uint32_t count : manifest.buildingProvenanceCounts)
     value += std::to_string(count) + "\n";
-  if (manifest.formatVersion == 4) {
+  if (manifest.formatVersion == 5) {
     value += std::to_string(manifest.poiProfileVersion) + "\n" +
-             std::to_string(manifest.poiRecordCount) + "\n";
+             std::to_string(manifest.poiIndexProfileVersion) + "\n" +
+             std::to_string(manifest.poiRecordCount) + "\n" +
+             (manifest.contoursIncluded ? "included\n" : "not-included\n");
     for (uint32_t count : manifest.poiCategoryCounts)
       value += std::to_string(count) + "\n";
+    for (const std::string &feature : manifest.requestedFeatures)
+      value += feature + "\n";
   }
-  value +=
-           manifest.minimumFirmwareVersion + "\n";
+  if (manifest.formatVersion == 4 ||
+      (manifest.formatVersion == 5 && manifest.contoursIncluded)) {
+    value += std::to_string(manifest.topographyProfileVersion) + "\n" +
+             manifest.contourQualityMode + "\n" +
+             std::to_string(manifest.contourRecordCount) + "\n" +
+             std::to_string(manifest.contourPointCount) + "\n" +
+             std::to_string(manifest.contourMinorIntervalM) + "\n" +
+             std::to_string(manifest.contourIndexIntervalM) + "\n" +
+             std::to_string(manifest.contourNoDataMillionths) + "\n" +
+             manifest.topographySourcePolicySha256 + "\n" +
+             manifest.topographyIntermediateSha256 + "\n" +
+             manifest.topographyAttributionSha256 + "\n";
+  }
+  value += manifest.minimumFirmwareVersion + "\n";
   for (const ManifestFile &file : manifest.files) {
     value += file.path + "\n" + file.publishPath + "\n" +
              std::to_string(file.bytes) + "\n" + file.sha256 + "\n";
@@ -3184,7 +3498,8 @@ MapTransferInstaller::readInstalledManifest(const std::string &root,
 InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string &root, const MapManifest &manifest,
     bool useManifestPaths) const try {
-  if (manifest.formatVersion < 2 || manifest.formatVersion > 4)
+  if (manifest.formatVersion != 2 && manifest.formatVersion != 3 &&
+      manifest.formatVersion != 4 && manifest.formatVersion != 5)
     return {true, "ok", ""};
   const auto resolvedPath = [&](const ManifestFile &file) {
     if (useManifestPaths)
@@ -3217,8 +3532,18 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
   std::array<uint64_t, 5> buildingProvenance = {};
   uint64_t poiRecords = 0;
   std::array<uint64_t, 5> poiCategories = {};
+  uint64_t contourRecords = 0;
+  uint64_t contourPoints = 0;
+  std::vector<map_poi_index::Entry> expectedPoiIndex;
+  const ManifestFile *poiIndexFile = nullptr;
 
   for (const ManifestFile &file : manifest.files) {
+    if (file.path == std::string(kVectMapPrefix) + manifest.mapId +
+                         "/assets/nearby-pois.fpi") {
+      if (poiIndexFile != nullptr)
+        return fail("poi_index_contract", "duplicate Nearby index asset");
+      poiIndexFile = &file;
+    }
     if (file.path.size() < 4 ||
         file.path.compare(file.path.size() - 4, 4, ".fmb") != 0)
       continue;
@@ -3236,7 +3561,11 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     input.read(reinterpret_cast<char *>(bytes.data()),
                static_cast<size_t>(bytes.size()));
     const uint8_t expectedBlockVersion =
-        static_cast<uint8_t>(manifest.formatVersion + 1U);
+        manifest.formatVersion == 5
+            ? 6
+            : (manifest.formatVersion == 4
+            ? 5
+            : (manifest.formatVersion == 3 ? 4 : 3));
     if (!input || bytes.size() < 4 || bytes[3] != expectedBlockVersion)
       return fail("label_block_version",
                   "map block version does not match renderer target");
@@ -3259,13 +3588,48 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       for (size_t index = 0; index < buildingProvenance.size(); ++index)
         buildingProvenance[index] += buildings.stats.provenance[index];
     }
-    if (manifest.formatVersion == 4) {
+    if (manifest.formatVersion == 5) {
+      int32_t blockX = 0, blockY = 0;
+      if (!map_poi_index::blockFromPath(manifest.mapId, file.path,
+                                         blockX, blockY))
+        return fail("poi_index_contract", "noncanonical POI block path");
       map_poi_block::Block pois;
       if (!map_poi_block::decode(bytes.data(), bytes.size(), pois, &error))
         return fail("poi_block_contract", "FMB POI section is invalid");
       poiRecords += pois.stats.records;
       for (size_t index = 0; index < poiCategories.size(); ++index)
         poiCategories[index] += pois.stats.categories[index];
+      if (pois.stats.records != 0) {
+        if (expectedPoiIndex.size() >= map_poi_index::kMaximumEntries)
+          return fail("poi_index_contract", "Nearby index entry limit exceeded");
+        map_poi_index::Entry entry;
+        entry.blockX = blockX;
+        entry.blockY = blockY;
+        entry.sectionOffset = pois.stats.sectionOffset;
+        entry.sectionBytes = pois.stats.sectionBytes;
+        for (size_t category = 0; category < 5; ++category) {
+          entry.categoryCounts[category] =
+              static_cast<uint16_t>(pois.stats.categories[category]);
+          if (entry.categoryCounts[category] != 0)
+            entry.categoryMask |= 1U << category;
+        }
+        expectedPoiIndex.push_back(entry);
+      }
+    }
+    if (manifest.formatVersion >= 4) {
+      map_contour_block::Block contours;
+      if (!map_contour_block::decode(bytes.data(), bytes.size(), contours))
+        return fail("contour_block_contract", "FMB contour section is invalid");
+      if (manifest.formatVersion == 5 && !manifest.contoursIncluded) {
+        if (!contours.records.empty() || !contours.points.empty() ||
+            contours.minorIntervalM != 20 || contours.indexIntervalM != 100)
+          return fail("contour_block_contract", "map without elevation has contours");
+      } else if (contours.minorIntervalM != manifest.contourMinorIntervalM ||
+                 contours.indexIntervalM != manifest.contourIndexIntervalM) {
+        return fail("contour_block_contract", "contour intervals do not match manifest");
+      }
+      contourRecords += contours.records.size();
+      contourPoints += contours.points.size();
     }
   }
   if (manifest.formatVersion >= 3) {
@@ -3275,13 +3639,63 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       if (buildingProvenance[index] != manifest.buildingProvenanceCounts[index])
         return fail("building_block_contract", "FMB building counts do not match manifest");
   }
-  if (manifest.formatVersion == 4) {
+  if (manifest.formatVersion == 5) {
     if (poiRecords != manifest.poiRecordCount)
       return fail("poi_block_contract", "FMB POI counts do not match manifest");
     for (size_t index = 0; index < poiCategories.size(); ++index)
       if (poiCategories[index] != manifest.poiCategoryCounts[index])
         return fail("poi_block_contract", "FMB POI counts do not match manifest");
+    if (poiIndexFile == nullptr)
+      return fail("poi_index_contract", "Nearby index is missing");
+    std::sort(expectedPoiIndex.begin(), expectedPoiIndex.end(),
+              [](const auto &left, const auto &right) {
+                return left.blockX < right.blockX ||
+                       (left.blockX == right.blockX &&
+                        left.blockY < right.blockY);
+              });
+    for (size_t index = 1; index < expectedPoiIndex.size(); ++index)
+      if (expectedPoiIndex[index].blockX == expectedPoiIndex[index - 1].blockX &&
+          expectedPoiIndex[index].blockY == expectedPoiIndex[index - 1].blockY)
+        return fail("poi_index_contract", "duplicate POI block coordinates");
+    const std::string indexPath = resolvedPath(*poiIndexFile);
+    MapReadFile input(indexPath, true);
+    if (!input || input.tell() < static_cast<long>(map_poi_index::kHeaderBytes) ||
+        static_cast<uint64_t>(input.tell()) > map_poi_index::kMaximumBytes)
+      return fail("poi_index_contract", "Nearby index cannot be read");
+    const size_t indexBytes = static_cast<size_t>(input.tell());
+    input.seek(0);
+    struct CompareContext {
+      const std::vector<map_poi_index::Entry> *expected;
+      size_t next = 0;
+    } context{&expectedPoiIndex, 0};
+    auto compare = [](const map_poi_index::Entry &actual,
+                      void *opaque) -> bool {
+      auto &state = *static_cast<CompareContext *>(opaque);
+      if (state.next >= state.expected->size()) return false;
+      const auto &expected = (*state.expected)[state.next++];
+      return actual.blockX == expected.blockX &&
+             actual.blockY == expected.blockY &&
+             actual.categoryMask == expected.categoryMask &&
+             actual.categoryCounts == expected.categoryCounts &&
+             actual.sectionOffset == expected.sectionOffset &&
+             actual.sectionBytes == expected.sectionBytes;
+    };
+    map_poi_index::StreamValidator validator(compare, &context);
+    std::array<uint8_t, 4096> chunk{};
+    for (size_t remaining = indexBytes; remaining != 0;) {
+      const size_t size = std::min(remaining, chunk.size());
+      input.read(reinterpret_cast<char *>(chunk.data()), size);
+      if (!input || !validator.feed(chunk.data(), size))
+        return fail("poi_index_contract", "Nearby index does not match blocks");
+      remaining -= size;
+    }
+    if (!validator.finish() || context.next != expectedPoiIndex.size())
+      return fail("poi_index_contract", "Nearby index is incomplete or corrupt");
   }
+  if ((manifest.formatVersion == 4 || manifest.contoursIncluded) &&
+      (contourRecords != manifest.contourRecordCount ||
+       contourPoints != manifest.contourPointCount))
+    return fail("contour_block_contract", "contour counts do not match manifest");
   return {true, "ok", ""};
 }
 catch (const std::bad_alloc &) {
@@ -3391,7 +3805,26 @@ bool MapTransferInstaller::writeActiveMap(
             selection.signedManifestReceipt + "\"";
   }
   json += "}\n";
-  return writeTextFileAtomic(joinPath(storageRoot_, kActiveMapFile), json);
+  if (json.size() > 2048 ||
+      !writeTextFileAtomic(joinPath(storageRoot_, kActiveMapFile), json))
+    return false;
+  ActiveMapSelection readback;
+  const InstallStatus status = readActiveMap(readback);
+  return status.ok && readback.mapId == selection.mapId &&
+         readback.sessionId == selection.sessionId &&
+         readback.root == selection.root &&
+         targetMetadataMatches(readback.target, selection.target) &&
+         readback.previousMapId == selection.previousMapId &&
+         readback.previousSessionId == selection.previousSessionId &&
+         readback.previousRoot == selection.previousRoot &&
+         targetMetadataMatches(readback.previousTarget,
+                               selection.previousTarget) &&
+         readback.manifestReceipt == selection.manifestReceipt &&
+         readback.signedManifestReceipt == selection.signedManifestReceipt &&
+         readback.previousManifestReceipt ==
+             selection.previousManifestReceipt &&
+         readback.previousSignedManifestReceipt ==
+             selection.previousSignedManifestReceipt;
 }
 
 bool MapTransferInstaller::activeRootExists(const std::string &root) const {

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from copy import deepcopy
 import shutil
 import subprocess
@@ -170,6 +171,28 @@ def _zip_record(path: Path) -> ArtifactRecord:
 
 
 class MapBuildingContractTests(unittest.TestCase):
+    def test_prepared_only_worker_mode_never_requests_source_scans(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_SOURCE_PREPARATION_MODE": "prepared-only",
+        }):
+            root = Path(tmp)
+            pipeline = MapBuildPipeline(PipelinePaths(root, root / "work", root / "packs"))
+            self.assertEqual(pipeline._source_preparation_flags("a" * 64), ["--require-ready"])
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_SOURCE_PREPARATION_MODE": "demand",
+            "MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS": "a" * 64,
+        }):
+            root = Path(tmp)
+            pipeline = MapBuildPipeline(PipelinePaths(root, root / "work", root / "packs"))
+            self.assertEqual(pipeline._source_preparation_flags("a" * 64), ["--require-ready"])
+            self.assertEqual(pipeline._source_preparation_flags("b" * 64), [])
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_SOURCE_PREPARATION_MODE": "unknown",
+        }):
+            root = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "preparation mode"):
+                MapBuildPipeline(PipelinePaths(root, root / "work", root / "packs"))
+
     def test_cold_source_storage_preflight_is_limited_to_chunked_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -734,7 +757,7 @@ class MapBuildingContractTests(unittest.TestCase):
                 "sourceSnapshotSha256": source_sha,
                 "databaseSha256": "d" * 64,
                 "schemaVersion": 1,
-                "algorithmVersion": 2,
+                "algorithmVersion": 3,
                 "nodeCount": 0,
                 "wayCount": 0,
                 "relationCount": 0,
@@ -1683,7 +1706,7 @@ class MapBuildingContractTests(unittest.TestCase):
                 "sourceSnapshotSha256": source_sha,
                 "databaseSha256": "d" * 64,
                 "schemaVersion": 1,
-                "algorithmVersion": 2,
+                "algorithmVersion": 3,
                 "nodeCount": 0,
                 "wayCount": 0,
                 "relationCount": 0,
@@ -2253,6 +2276,140 @@ class MapBuildingContractTests(unittest.TestCase):
             self.assertEqual(during.exception.code, "building_source_snapshot_changed")
             self.assertEqual(len(runner.calls), 2)
             self.assertFalse((root / "clipped-with-building-closure.osm.pbf").exists())
+
+    def test_prepared_closure_uses_verified_index_instead_of_country_getid(self):
+        class MaterializingRunner(RecordingRunner):
+            def run(self, args, *, cwd=None):
+                super().run(args, cwd=cwd)
+                if args[:2] == ["osmium", "merge"]:
+                    Path(args[args.index("-o") + 1]).write_bytes(b"merged")
+                return ""
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS": "a" * 64,
+        }):
+            root = Path(tmp)
+            runner = MaterializingRunner()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"), runner=runner,
+            )
+            with patch("map_platform.pipeline.sha256_file", side_effect=AssertionError("country hash")):
+                pipeline._rehydrate_building_closure(
+                    root / "source.pbf", root / "clipped.pbf", root / "ids.txt",
+                    "a" * 64, root, closure_plan=root / "plan.json",
+                    source_index_manifest=root / "index.json",
+                )
+            self.assertEqual(len(runner.calls), 3)
+            self.assertTrue(runner.calls[0][0][1].endswith("export_building_closure.py"))
+            self.assertEqual(runner.calls[1][0][:2], ["osmium", "cat"])
+            self.assertEqual(runner.calls[2][0][:2], ["osmium", "merge"])
+            self.assertEqual((root / "clipped.pbf").read_bytes(), b"merged")
+
+    def test_prepared_source_extract_reads_only_selected_shards(self):
+        class MaterializingRunner(RecordingRunner):
+            def run(self, args, *, cwd=None):
+                super().run(args, cwd=cwd)
+                if "-o" in args:
+                    Path(args[args.index("-o") + 1]).write_bytes(b"clipped")
+                return ""
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS": "a" * 64,
+            "MAP_PLATFORM_SOURCE_SHARD_MODE": "prepared-only",
+        }):
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(self._request())
+            plan = plan_building_scope(
+                job, calibration_cell_size_meters=8192,
+                calibration_halo_cells=1, calibration_minimum_samples=3,
+            )
+            shard = root / "prepared-shard.osm.pbf"
+            shard.write_bytes(b"shard")
+            clipped = root / "clipped.osm.pbf"
+            runner = MaterializingRunner()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"), runner=runner,
+            )
+            with patch("map_platform.pipeline.select_shards", return_value=(shard,)) as select, \
+                    patch("map_platform.pipeline.sha256_file", side_effect=AssertionError("country hash")):
+                metrics = pipeline._extract_pbf(
+                    job, root / "country.osm.pbf", clipped, scope_plan=plan,
+                    source_snapshot_sha256="a" * 64,
+                )
+            self.assertEqual(select.call_count, 2)
+            self.assertEqual(metrics["sourceShardCount"], 1)
+            self.assertEqual(metrics["sourceShardBytes"], 5)
+            self.assertIn(str(shard), runner.calls[0][0])
+            self.assertNotIn(str(root / "country.osm.pbf"), runner.calls[0][0])
+            self.assertEqual(clipped.read_bytes(), b"clipped")
+
+    def test_prepared_source_shards_are_available_to_standard_extraction(self):
+        class MaterializingRunner(RecordingRunner):
+            def run(self, args, *, cwd=None):
+                super().run(args, cwd=cwd)
+                Path(args[args.index("-o") + 1]).write_bytes(b"clipped")
+                return ""
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_PREPARED_SOURCE_SNAPSHOTS": "a" * 64,
+            "MAP_PLATFORM_SOURCE_SHARD_MODE": "prepared-only",
+        }):
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(self._request())
+            shard = root / "prepared-shard.osm.pbf"
+            shard.write_bytes(b"shard")
+            clipped = root / "clipped.osm.pbf"
+            runner = MaterializingRunner()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"), runner=runner,
+            )
+            with patch("map_platform.pipeline.select_shards", return_value=(shard,)) as select, \
+                    patch("map_platform.pipeline.sha256_file", side_effect=AssertionError("country hash")):
+                pipeline._extract_pbf(
+                    job, root / "country.osm.pbf", clipped,
+                    source_snapshot_sha256="a" * 64,
+                )
+            self.assertEqual(select.call_count, 2)
+            self.assertIn(str(shard), runner.calls[0][0])
+            self.assertNotIn(str(root / "country.osm.pbf"), runner.calls[0][0])
+            self.assertEqual(clipped.read_bytes(), b"clipped")
+
+    def test_preferred_shards_fall_back_only_when_region_is_uncovered(self):
+        class MaterializingRunner(RecordingRunner):
+            def run(self, args, *, cwd=None):
+                super().run(args, cwd=cwd)
+                Path(args[args.index("-o") + 1]).write_bytes(b"clipped")
+                return ""
+
+        from map_platform.source_shards import NoShardCoverageError
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+            "MAP_PLATFORM_SOURCE_SHARD_MODE": "prefer-prepared",
+        }):
+            root = Path(tmp)
+            job = self._service(JobStore(root / "jobs")).create_job(self._request())
+            source = root / "country.osm.pbf"
+            source.write_bytes(b"source")
+            clipped = root / "clipped.osm.pbf"
+            runner = MaterializingRunner()
+            pipeline = MapBuildPipeline(
+                PipelinePaths(root, root / "work", root / "packs"), runner=runner,
+            )
+            with patch("map_platform.pipeline.select_shards",
+                       side_effect=NoShardCoverageError("no ready source shard generation covers this map")):
+                metrics = pipeline._extract_pbf(
+                    job, source, clipped, source_snapshot_sha256="a" * 64,
+                )
+            self.assertEqual(metrics["sourceShardFallback"], "not_covered")
+            self.assertIn(str(source), runner.calls[0][0])
+            self.assertEqual(clipped.read_bytes(), b"clipped")
+
+            with patch("map_platform.pipeline.select_shards",
+                       side_effect=ValueError("source shard differs from its sealed manifest")):
+                with self.assertRaisesRegex(BuildingScopeError, "prepared source shards are unavailable"):
+                    pipeline._extract_pbf(
+                        job, source, clipped, source_snapshot_sha256="a" * 64,
+                    )
 
     @unittest.skipUnless(shutil.which("osmium"), "osmium is required")
     def test_selected_multi_rectangle_extract_runs_with_real_osmium(self):
@@ -2903,7 +3060,7 @@ class MapBuildingContractTests(unittest.TestCase):
             identity_body = {
                 "sourceSnapshotSha256": "3" * 64,
                 "scope": {"scopePlanSha256": "1" * 64},
-                "sourceIndex": {"schemaVersion": 1, "algorithmVersion": 2},
+                "sourceIndex": {"schemaVersion": 1, "algorithmVersion": 3},
                 "calibration": {
                     "calibrationKey": "7" * 64,
                     "rulesSha256": "8" * 64,
@@ -2942,7 +3099,7 @@ class MapBuildingContractTests(unittest.TestCase):
                         "indexKey": "4" * 64,
                         "databaseSha256": "5" * 64,
                         "schemaVersion": 1,
-                        "algorithmVersion": 2,
+                        "algorithmVersion": 3,
                         "nodeCount": 8,
                         "wayCount": 2,
                         "relationCount": 1,

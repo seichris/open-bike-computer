@@ -222,6 +222,24 @@ int main() {
   assert(wrapped.update(nearWrap + 15'000, {}).current == Mode::Dimmed);
   assert(wrapped.update(nearWrap + 45'000, {}).current == Mode::DisplayOff);
 
+  Policy configurable;
+  configurable.begin(0);
+  Context longerTimeouts;
+  longerTimeouts.dimAfterMs = 30'000;
+  longerTimeouts.displayOffAfterMs = 120'000;
+  assert(configurable.update(15'000, longerTimeouts).current == Mode::Active);
+  assert(configurable.update(30'000, longerTimeouts).current == Mode::Active);
+  assert(configurable.update(60'000, longerTimeouts).current == Mode::Dimmed);
+  assert(configurable.update(150'000, longerTimeouts).current ==
+         Mode::DisplayOff);
+  Context shorterTimeouts;
+  shorterTimeouts.dimAfterMs = 5'000;
+  shorterTimeouts.displayOffAfterMs = 30'000;
+  assert(configurable.update(150'001, shorterTimeouts).current == Mode::Active);
+  assert(configurable.update(155'001, shorterTimeouts).current == Mode::Dimmed);
+  assert(configurable.update(180'001, shorterTimeouts).current ==
+         Mode::DisplayOff);
+
   assert(!display_inactivity::transferInactivityElapsed(
       299'999, 0, display_inactivity::kTransferInactivityTimeoutMs, false));
   assert(display_inactivity::transferInactivityElapsed(

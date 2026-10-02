@@ -172,6 +172,83 @@ class AppAttestTestClient:
             self._installations[credential["clientInstallationId"]] = installation
         return credential
 
+    def rotate_installation(
+        self,
+        client,
+        *,
+        credential: dict[str, str],
+        previous_key_id: str | None = None,
+    ):
+        challenge_response = client.post(
+            "/v1/installations/app-attest/challenges",
+            headers={
+                "X-Installation-Token": credential["clientInstallationToken"]
+            },
+            json={
+                "purpose": APP_ATTEST_ATTESTATION_PURPOSE,
+                "clientInstallationId": credential["clientInstallationId"],
+            },
+        )
+        if challenge_response.status_code != 200:
+            return challenge_response
+        challenge_document = challenge_response.json()
+        challenge = decode_base64(
+            challenge_document["challenge"],
+            field="challenge",
+            maximum_bytes=32,
+            exact_bytes=32,
+        )
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        public_key = private_key.public_key().public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.UncompressedPoint,
+        )
+        key_id = base64.b64encode(hashlib.sha256(public_key).digest()).decode("ascii")
+        attestation_object = encode_cbor(
+            {
+                "publicKey": public_key,
+                "challengeHash": hashlib.sha256(challenge).digest(),
+                "appBuild": TEST_APP_BUILD,
+            }
+        )
+        attestation = {
+            "challengeId": challenge_document["challengeId"],
+            "keyId": key_id,
+            "attestationObject": base64.b64encode(
+                attestation_object
+            ).decode("ascii"),
+            "appBuild": TEST_APP_BUILD,
+        }
+        resolved_previous_key_id = (
+            challenge_document.get("keyId")
+            if previous_key_id is None
+            else previous_key_id
+        )
+        if resolved_previous_key_id is not None:
+            attestation["previousKeyId"] = resolved_previous_key_id
+        response = client.post(
+            "/v1/installations",
+            params={
+                "clientInstallationId": credential["clientInstallationId"]
+            },
+            headers={
+                "X-Installation-Token": credential["clientInstallationToken"]
+            },
+            json={
+                "appAttest": attestation
+            },
+        )
+        if response.status_code != 200:
+            return response
+        rotated = response.json()
+        with self._lock:
+            self._installations[rotated["clientInstallationId"]] = TestInstallation(
+                credential=rotated,
+                private_key=private_key,
+                key_id=key_id,
+            )
+        return rotated
+
     def installation(self, credential: dict[str, str]) -> TestInstallation:
         with self._lock:
             return self._installations[credential["clientInstallationId"]]

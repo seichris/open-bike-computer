@@ -447,6 +447,102 @@ class AppAttestStoreTests(unittest.TestCase):
             {"signature": signature, "authenticatorData": auth_data}
         )
 
+    def test_rotation_is_atomic_invalidates_old_challenges_and_blocks_rollback(self):
+        installation_id = "inst_v2_" + "9" * 32
+        old_private_key, old_key_id = self.enroll(installation_id)
+        payload = {
+            "mode": "custom_bbox",
+            "bbox": [103.75, 1.24, 103.93, 1.37],
+            "clientInstallationId": installation_id,
+            "clientRequestId": "request-key-rotation-store",
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        old_map_challenge = self.store.issue_challenge(
+            purpose=APP_ATTEST_MAP_CREATE_PURPOSE,
+            installation_id=installation_id,
+        )
+        old_assertion = self.assertion(
+            private_key=old_private_key,
+            challenge=old_map_challenge,
+            installation_id=installation_id,
+            payload=payload,
+            body=body,
+            counter=1,
+        )
+        rotation_challenge = self.store.issue_challenge(
+            purpose=APP_ATTEST_ATTESTATION_PURPOSE,
+            installation_id=installation_id,
+        )
+        new_private_key = ec.generate_private_key(ec.SECP256R1())
+        new_public_key = new_private_key.public_key().public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.UncompressedPoint,
+        )
+        new_key_id = base64.b64encode(
+            hashlib.sha256(new_public_key).digest()
+        ).decode("ascii")
+        new_attestation = encode_cbor(
+            {
+                "publicKey": new_public_key,
+                "challengeHash": hashlib.sha256(
+                    rotation_challenge.challenge
+                ).digest(),
+                "appBuild": TEST_APP_BUILD,
+            }
+        )
+        self.store.enroll(
+            installation_id=installation_id,
+            challenge_id=rotation_challenge.challenge_id,
+            key_id=new_key_id,
+            attestation_object=new_attestation,
+            app_build=TEST_APP_BUILD,
+            replacing_key_id=old_key_id,
+        )
+
+        self.assertEqual(
+            self.store.key_id_for_installation(installation_id),
+            new_key_id,
+        )
+        with self.assertRaises(AppAttestError) as stale:
+            self.store.verify_map_create_assertion(
+                installation_id=installation_id,
+                challenge_id=old_map_challenge.challenge_id,
+                key_id=old_key_id,
+                assertion_object=old_assertion,
+                request_body=body,
+                payload=payload,
+                app_build=TEST_APP_BUILD,
+            )
+        self.assertEqual(stale.exception.code, "app_attest_invalid_challenge")
+
+        rollback_challenge = self.store.issue_challenge(
+            purpose=APP_ATTEST_ATTESTATION_PURPOSE,
+            installation_id=installation_id,
+        )
+        old_public_key = old_private_key.public_key().public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.UncompressedPoint,
+        )
+        rollback_attestation = encode_cbor(
+            {
+                "publicKey": old_public_key,
+                "challengeHash": hashlib.sha256(
+                    rollback_challenge.challenge
+                ).digest(),
+                "appBuild": TEST_APP_BUILD,
+            }
+        )
+        with self.assertRaises(AppAttestError) as rollback:
+            self.store.enroll(
+                installation_id=installation_id,
+                challenge_id=rollback_challenge.challenge_id,
+                key_id=old_key_id,
+                attestation_object=rollback_attestation,
+                app_build=TEST_APP_BUILD,
+                replacing_key_id=new_key_id,
+            )
+        self.assertEqual(rollback.exception.code, "app_attest_key_already_bound")
+
     def test_assertion_rejects_single_hash_synthetic_signature(self):
         installation_id = "inst_v2_" + "4" * 32
         private_key, key_id = self.enroll(installation_id)

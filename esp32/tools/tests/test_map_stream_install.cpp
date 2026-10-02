@@ -153,6 +153,30 @@ protected:
   }
 };
 
+class ActiveWriteCorruptingInstaller final : public MapTransferInstaller {
+public:
+  using MapTransferInstaller::MapTransferInstaller;
+
+protected:
+  bool writeTextFileAtomic(const std::string &path,
+                           const std::string &text) const override {
+    if (!MapTransferInstaller::writeTextFileAtomic(path, text))
+      return false;
+    if (!corrupted_ && path.size() >= 24 &&
+        path.compare(path.size() - 24, 24, "/VECTMAP/active-map.json") == 0) {
+      corrupted_ = true;
+      std::ofstream output(path, std::ios::binary | std::ios::trunc);
+      output << "{not-json}\n";
+      output.close();
+      assert(output.good());
+    }
+    return true;
+  }
+
+private:
+  mutable bool corrupted_ = false;
+};
+
 std::string tempRoot() {
   std::string pattern = "/tmp/open-bike-map-stream-install-XXXXXX";
   char *created = ::mkdtemp(pattern.data());
@@ -731,6 +755,58 @@ void testActivePointerWriteFailureRemainsRecoverable() {
   assert(selected.previousSessionId == "old-session");
 }
 
+void testUnreadableActivePointerRestoresPreviousMap() {
+  const std::string root = tempRoot();
+  prepareReadyRoot(root, "prior-stream");
+  MapTransferInstaller original(root);
+  assert(original.activateReadyStreamMap("prior-stream").ok);
+  prepareReadyRoot(root, "corrupt-pointer");
+
+  ActiveWriteCorruptingInstaller failing(root);
+  const auto failed = failing.activateReadyStreamMap("corrupt-pointer");
+  assert(!failed.ok);
+  assert(failed.code == "stream_active_write");
+  ActiveMapSelection restored;
+  assert(failing.readActiveMap(restored).ok);
+  assert(restored.sessionId == "prior-stream");
+  assert(!exists(root + "/VECTMAP/.maps/corrupt-pointer"));
+  assert(!exists(root + "/VECTMAP/.activation-transaction.json"));
+}
+
+void testInvalidReadyRootAndMissingPointerRestorePreviousMap() {
+  const std::string root = tempRoot();
+  const auto previous = prepareReadyRoot(root, "prior-stream");
+  MapTransferInstaller installer(root);
+  assert(installer.activateReadyStreamMap("prior-stream").ok);
+  const auto candidate = prepareReadyRoot(root, "broken-stream");
+  writeFile(root + "/VECTMAP/.activation-transaction.json",
+            "{\"manifestReceipt\":\"" + candidate.manifestReceipt +
+                "\",\"mapId\":\"multi\",\"phase\":\"ready\","
+                "\"previousManifestReceipt\":\"" +
+                previous.manifestReceipt +
+                "\",\"previousMapId\":\"multi\","
+                "\"previousRoot\":\"/VECTMAP/.maps/prior-stream\","
+                "\"previousSessionId\":\"prior-stream\","
+                "\"previousSignedManifestReceipt\":\"" +
+                previous.signedManifestReceipt +
+                "\",\"protocolVersion\":2,"
+                "\"root\":\"/VECTMAP/.maps/broken-stream\","
+                "\"sessionId\":\"broken-stream\","
+                "\"signedManifestReceipt\":\"" +
+                candidate.signedManifestReceipt + "\"}\n");
+  assert(::unlink((root + "/VECTMAP/active-map.json").c_str()) == 0);
+  writeFile(root + "/VECTMAP/.maps/broken-stream/.manifest.json", "corrupt");
+
+  const auto recovered = installer.recoverInterruptedActivation();
+  assert(recovered.ok);
+  assert(recovered.code == "recovered_rollback");
+  ActiveMapSelection restored;
+  assert(installer.readActiveMap(restored).ok);
+  assert(restored.sessionId == "prior-stream");
+  assert(!exists(root + "/VECTMAP/.maps/broken-stream"));
+  assert(!exists(root + "/VECTMAP/.activation-transaction.json"));
+}
+
 void testReadyPayloadDamageCannotBeSkippedOrActivated() {
   const std::string root = tempRoot();
   const auto manifest = prepareReadyRoot(root, "damaged-ready");
@@ -1091,6 +1167,8 @@ int main() {
   testBootDoesNotGuessBetweenMultipleReadyRoots();
   testReadyMarkerRequiresStructuralValidationVersion();
   testActivePointerWriteFailureRemainsRecoverable();
+  testUnreadableActivePointerRestoresPreviousMap();
+  testInvalidReadyRootAndMissingPointerRestorePreviousMap();
   testReadyPayloadDamageCannotBeSkippedOrActivated();
   testSemanticBackupRecovery();
   testPreviousRootIdentityIsProtected();

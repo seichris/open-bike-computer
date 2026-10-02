@@ -1,0 +1,24 @@
+name: Verified firmware build caches
+description: Restore immutable runtime/core transport and content-keyed compiler objects
+inputs:
+  environment:
+    description: Exact PlatformIO environment
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Select isolated cache roots
+      shell: bash
+      run: |
+        echo "OPEN_BIKE_FIRMWARE_BUILD_CACHE=${RUNNER_TEMP}/firmware-build-cache" >> "$GITHUB_ENV"
+        echo "OPEN_BIKE_FIRMWARE_RUNTIME_CACHE=${RUNNER_TEMP}/firmware-runtime-cache" >> "$GITHUB_ENV"
+    - name: Restore verified dependency and compiler caches
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: |
+          ${{ runner.temp }}/firmware-build-cache
+          ${{ runner.temp }}/firmware-runtime-cache
+          esp32/.pio/open-bike-build/platformio/${{ inputs.environment }}/build-cache/application
+        key: firmware-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.environment }}-${{ hashFiles('esp32/platformio.ini', 'esp32/prebuild.py', 'esp32/tools/*.py', 'esp32/tools/firmware-runtime/lock-v1.json', 'esp32/*.csv', 'esp32/**/idf_component.yml', 'esp32/**/dependencies.lock') }}-${{ github.sha }}
+        restore-keys: |
+          firmware-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.environment }}-${{ hashFiles('esp32/platformio.ini', 'esp32/prebuild.py', 'esp32/tools/*.py', 'esp32/tools/firmware-runtime/lock-v1.json', 'esp32/*.csv', 'esp32/**/idf_component.yml', 'esp32/**/dependencies.lock') }}-

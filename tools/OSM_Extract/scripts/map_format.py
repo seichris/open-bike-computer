@@ -9,7 +9,8 @@ FMB_V3_SECTION_STRINGS = 1
 FMB_V3_SECTION_RUNS = 2
 FMB_V3_SECTION_ROAD_LABELS = 3
 FMB_V4_SECTION_BUILDINGS = 4
-FMB_V5_SECTION_POIS = 5
+FMB_V5_SECTION_CONTOURS = 5
+FMB_V6_SECTION_POIS = 6
 FMB_V3_CRITICAL_SECTION = 1
 MAX_BLOCK_STRINGS = 4096
 MAX_BLOCK_STRING_BYTES = 256 * 1024
@@ -407,17 +408,17 @@ def _poi_value(record, key):
 
 def encode_poi_section(records):
     if records is None:
-        raise PoiMapFormatError("target-4 POI records are required")
+        raise PoiMapFormatError("target-5 POI records are required")
     records = list(records)
     if len(records) > MAX_BLOCK_POIS:
-        raise PoiMapFormatLimitError("POI record count exceeds FMB v5 limits")
+        raise PoiMapFormatLimitError("POI record count exceeds FMB v6 limits")
     category_mask = 0
     encoded_records = bytearray()
     previous = None
     category_counts = [0, 0, 0, 0, 0]
     for record in records:
         values = tuple(
-            int(_poi_value(record, key))
+            _poi_value(record, key)
             for key in (
                 "local_x",
                 "local_y",
@@ -429,7 +430,8 @@ def encode_poi_section(records):
         )
         local_x, local_y, category, maximum_zoom, rank, flags = values
         if (
-            not 0 <= local_x <= 4095
+            any(type(value) is not int for value in values)
+            or not 0 <= local_x <= 4095
             or not 0 <= local_y <= 4095
             or not 1 <= category <= 5
             or not 0 <= maximum_zoom <= 5
@@ -505,9 +507,13 @@ def write_fmb(
     building_metadata=None,
     poi_records=None,
 ):
-    """Write one explicit renderer-target FMB v2, v3, v4, or v5 block."""
+    """Write vector FMB v2-v4 or combined FMB v6 with empty contour storage.
 
-    if renderer_target not in {1, 2, 3, 4}:
+    Approved elevation composition replaces section 5 later, preserving POIs.
+    Target 4 is composed from target-3 vectors by the existing topography stage.
+    """
+
+    if type(renderer_target) is not int or renderer_target not in {1, 2, 3, 5}:
         raise MapFormatError("renderer target is unsupported")
     if building_records is not None and building_section is not None:
         raise MapFormatError("building records and preencoded section are mutually exclusive")
@@ -524,9 +530,9 @@ def write_fmb(
         raise MapFormatError("FMB v4 requires the street-label font/profile")
     if building_section is None and building_metadata is not None:
         raise MapFormatError("preencoded building metadata requires a section")
-    if renderer_target == 4 and poi_records is None:
-        raise PoiMapFormatError("renderer target 4 requires a POI section")
-    if renderer_target != 4 and poi_records is not None:
+    if renderer_target == 5 and poi_records is None:
+        raise PoiMapFormatError("renderer target 5 requires a POI section")
+    if renderer_target != 5 and poi_records is not None:
         raise PoiMapFormatError("renderer target does not support POIs")
     version = renderer_target + 1
     data = bytearray(b"FMB" + bytes((version,)))
@@ -586,11 +592,15 @@ def write_fmb(
                 )
             sections = (*sections, (FMB_V4_SECTION_BUILDINGS, encoded_section))
             metadata.update(encoded_metadata)
-            if renderer_target == 4:
+            if renderer_target == 5:
                 poi_section, poi_metadata = encode_poi_section(poi_records)
-                sections = (*sections, (FMB_V5_SECTION_POIS, poi_section))
+                sections = (
+                    *sections,
+                    (FMB_V5_SECTION_CONTOURS, struct.pack("<BBHHHI", 1, 0, 20, 100, 0, 0)),
+                    (FMB_V6_SECTION_POIS, poi_section),
+                )
                 metadata.update(poi_metadata)
-                _append_directory(data, b"EXT5", sections)
+                _append_directory(data, b"EXT6", sections)
             else:
                 _append_directory(data, b"EXT4", sections)
         else:

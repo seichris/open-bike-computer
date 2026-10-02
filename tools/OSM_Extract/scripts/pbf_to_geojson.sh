@@ -15,7 +15,7 @@ set -euo pipefail
 if [ "$#" -lt 6 ]; then
     echo "Invalid arguments."
     echo " Usage:"
-    echo "      $0 <min_lon> <min_lat> <max_lon> <max_lat> <pbf input file> <output file name> [--renderer-format 1|2|3|4] [source index manifest] [scope plan] [relation retry count] [closure plan]"
+    echo "      $0 <min_lon> <min_lat> <max_lon> <max_lat> <pbf input file> <output file name> [--renderer-format 1|2|3|4|5] [source index manifest] [scope plan] [relation retry count] [closure plan]"
     echo ""
     exit 1
 fi
@@ -38,7 +38,7 @@ if [ "${1:-}" = "--renderer-format" ]; then
     shift 2
 fi
 case "$renderer_format" in
-    1|2|3|4) ;;
+    1|2|3|4|5) ;;
     *)
         echo "Invalid renderer format."
         exit 1
@@ -66,7 +66,7 @@ if [ "$#" -eq 4 ]; then
 fi
 ogr2ogr "${ogr_options[@]}" -t_srs EPSG:3857 -spat "$min_lon" "$min_lat" "$max_lon" "$max_lat" "${output_prefix}_lines.geojson" "$source_pbf" lines
 ogr2ogr "${ogr_options[@]}" -t_srs EPSG:3857 -spat "$min_lon" "$min_lat" "$max_lon" "$max_lat" "${output_prefix}_polygons.geojson" "$source_pbf" multipolygons
-if [ "$renderer_format" -eq 4 ]; then
+if [ "$renderer_format" -eq 5 ]; then
     ogr2ogr "${ogr_options[@]}" -t_srs EPSG:3857 -spat "$min_lon" "$min_lat" "$max_lon" "$max_lat" "${output_prefix}_points.geojson" "$source_pbf" points
 fi
 if [ "$#" -eq 3 ]; then

@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .map_labels import renderer_format_version
-from .map_buildings import BUILDING_PROFILE_VERSION, renderer_includes_buildings
+from .map_buildings import BUILDING_PROFILE_VERSION, BUILDING_RENDERER_FORMAT_VERSION
+from .topography_artifacts import TOPOGRAPHY_RENDERER_FORMAT_VERSION
+from .topography_reuse import valid_input_identity
+from .map_pois import request_has_contours
 from .models import Bounds, GeometryMode, MapJob
 from .preview import render_boundary_preview
 
@@ -83,8 +86,12 @@ def reuse_keys(
     source_snapshot_sha256: str | None = None,
     building_preprocessing_identity: dict[str, Any] | None = None,
     preview_sha256: str | None = None,
+    topography_input_identity: dict[str, Any] | None = None,
 ) -> MapReuseKeys | None:
     """Return fail-closed cache identities for an immutable worker build."""
+    format_version = renderer_format_version(job.request)
+    if request_has_contours(job.request) and not valid_input_identity(topography_input_identity):
+        return None
     if not _SHA256_RE.fullmatch(producer_build_sha256 or ""):
         return None
     if not _IMAGE_DIGEST_RE.fullmatch(producer_image_digest or ""):
@@ -124,7 +131,7 @@ def reuse_keys(
         "target": job.request.get("target") or {},
         "labels": job.request.get("labels"),
     }
-    if renderer_includes_buildings(renderer_format_version(job.request)):
+    if format_version in (BUILDING_RENDERER_FORMAT_VERSION, TOPOGRAPHY_RENDERER_FORMAT_VERSION, 5):
         building_identity = (
             building_preprocessing_identity or _legacy_building_identity()
         )
@@ -151,6 +158,8 @@ def reuse_keys(
         if isinstance(scope_identity, dict):
             scope_identity.pop("scopePlanSha256", None)
         compatibility_document["buildingPreprocessing"] = compatibility_identity
+    if request_has_contours(job.request):
+        compatibility_document["topographyInputsSha256"] = topography_input_identity["identitySha256"]
     compatibility = _document_sha256(compatibility_document)
     if preview_sha256 is None:
         preview_sha256 = hashlib.sha256(
@@ -177,7 +186,7 @@ def reuse_keys(
             "corridorWidthM": job.geometry.corridor_width_m,
         },
     }
-    if renderer_includes_buildings(renderer_format_version(job.request)):
+    if format_version in (BUILDING_RENDERER_FORMAT_VERSION, TOPOGRAPHY_RENDERER_FORMAT_VERSION, 5):
         exact_document["buildingPreprocessingIdentitySha256"] = (
             exact_building_identity_sha256
         )

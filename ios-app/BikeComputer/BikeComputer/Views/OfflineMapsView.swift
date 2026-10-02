@@ -52,6 +52,27 @@ struct OfflineMapsView: View {
                         )
                     )
                 }
+
+                Toggle(
+                    "Include Topographic Contours · Free",
+                    isOn: $manager.includeTopographyInNewMaps
+                )
+                .disabled(!manager.canRequestTopographicMap)
+                if !manager.canRequestTopographicMap {
+                    Text("This map server does not support topographic downloads.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Section(header: Text("iPhone Map Layers")) {
+                Toggle(
+                    "Show Topographic Contours",
+                    isOn: $manager.topographicMapsEnabled
+                )
+                Text(manager.topographyOverlayStatus)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
             }
 
             if !manager.statusMessage.isEmpty {
@@ -106,8 +127,11 @@ struct OfflineMapsView: View {
                         )
                     }
 
-                    if manager.downloadedPackURL == nil && !manager.isBusy {
-                        Button(action: manager.downloadPack) {
+                    if manager.downloadedPackURL == nil && manager.hasPendingMapJob &&
+                        !manager.hasTerminalMapJobFailure {
+                        Button {
+                            manager.retryPendingMapJob()
+                        } label: {
                             Label("Retry Download", systemImage: "arrow.clockwise")
                         }
                     }

@@ -125,6 +125,13 @@ decodeCst9217Frame(const uint8_t *data, std::size_t length,
   return Cst9217DecodeStatus::Ok;
 }
 
+// The 1.75 CST9217 sensor axes are half a turn from panel pixel coordinates.
+// Physical capture: raw (415,330) at the displayed shuffle button must become
+// logical (135,415) with display rotation 1. Remote panel pixels need no offset.
+constexpr uint8_t cst9217CalibratedRotation(uint8_t displayRotation) {
+  return (displayRotation + 2U) & 0x03U;
+}
+
 inline TouchContact rotateTouchContact(const TouchContact &raw,
                                        uint8_t rotation, uint16_t maxX,
                                        uint16_t maxY) {

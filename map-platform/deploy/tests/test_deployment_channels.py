@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import re
 import unittest
@@ -58,6 +59,33 @@ class DeploymentChannelComposeTests(unittest.TestCase):
         )
         self.assertNotIn("${MAP_PLATFORM_DEPLOYMENT_CHANNEL:-production}", compose)
         self.assertNotIn("${MAP_PLATFORM_CATALOG_CHANNEL:-production}", compose)
+
+    def test_development_topography_is_global_without_installation_allowlist(self):
+        development = (DEPLOY_DIR / "compose.development.yaml").read_text(
+            encoding="utf-8"
+        )
+        production = (DEPLOY_DIR / "compose.yaml").read_text(
+            encoding="utf-8"
+        )
+        development_policy = json.loads(
+            (DEPLOY_DIR.parent / "config" / "generation-profile-policy-v2.json")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            "MAP_PLATFORM_GENERATION_PROFILE_POLICY: "
+            "/app/config/generation-profile-policy-v2.json",
+            development,
+        )
+        self.assertNotIn("generation-profile-policy-v1.json", development)
+        self.assertIn(
+            "topographic-contours-v1",
+            development_policy["channels"]["development"]["globalProfiles"],
+        )
+        self.assertEqual(
+            [], development_policy["channels"]["development"]["canaryProfiles"]
+        )
+        self.assertNotIn("generation-profile-policy-v2.json", production)
+        self.assertNotIn("MAP_PLATFORM_TOPOGRAPHY_TARGET4_ALLOWLIST", production)
 
     def test_catalog_maintenance_has_bounded_network_batches(self):
         for filename in (
@@ -122,19 +150,27 @@ class PreparationEstimateComposeTests(unittest.TestCase):
                 for variable in self._VARIABLES:
                     self.assertIn(variable, section, (filename, service, variable))
 
-    def test_production_and_validation_defaults_keep_estimates_off(self):
-        for filename in (
-            "compose.yaml",
-            "compose.hardware-validation.yaml",
-        ):
-            compose = (DEPLOY_DIR / filename).read_text(encoding="utf-8")
-            for service in self._SERVICES:
-                section = self._service_section(compose, service)
-                self.assertIn(
-                    "MAP_PLATFORM_PREPARATION_ESTIMATES_MODE: "
-                    "${MAP_PLATFORM_PREPARATION_ESTIMATES_MODE:-off}",
-                    section,
-                )
+    def test_production_defaults_estimates_to_shadow(self):
+        compose = (DEPLOY_DIR / "compose.yaml").read_text(encoding="utf-8")
+        for service in self._SERVICES:
+            section = self._service_section(compose, service)
+            self.assertIn(
+                "MAP_PLATFORM_PREPARATION_ESTIMATES_MODE: "
+                "${MAP_PLATFORM_PREPARATION_ESTIMATES_MODE:-shadow}",
+                section,
+            )
+
+    def test_hardware_validation_defaults_keep_estimates_off(self):
+        compose = (DEPLOY_DIR / "compose.hardware-validation.yaml").read_text(
+            encoding="utf-8"
+        )
+        for service in self._SERVICES:
+            section = self._service_section(compose, service)
+            self.assertIn(
+                "MAP_PLATFORM_PREPARATION_ESTIMATES_MODE: "
+                "${MAP_PLATFORM_PREPARATION_ESTIMATES_MODE:-off}",
+                section,
+            )
 
     def test_development_defaults_estimates_to_shadow(self):
         compose = (DEPLOY_DIR / "compose.development.yaml").read_text(

@@ -7,6 +7,8 @@
  */
 
 #include "power.hpp"
+#include "sleep_audit.hpp"
+#include "sleep_audit_policy.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
 #ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
@@ -18,11 +20,14 @@
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include "hal.hpp"
+#include "../ble_navigation/ble_navigation.hpp"
+#include "../speaker/speaker.hpp"
 #else
 extern const uint8_t BOARD_BOOT_PIN;
 #endif
 
 void Power::begin() {
+  sleep_audit::begin();
   // Radio shutdown touches Arduino/IDF subsystems and must not run from the
   // global Power object's constructor before framework initialization.
 #ifdef DISABLE_RADIO
@@ -41,13 +46,15 @@ void Power::begin() {
  *
  */
 void Power::powerDeepSleep() {
+  int32_t bluedroidStopResult = sleep_audit::policy::kNotAttempted;
+  int32_t bluetoothStopResult = sleep_audit::policy::kNotAttempted;
 #ifndef DISABLE_BLUETOOTH
 #ifndef CONFIG_BT_NIMBLE_ENABLED
-  esp_bluedroid_disable();
+  bluedroidStopResult = esp_bluedroid_disable();
 #endif
-  esp_bt_controller_disable();
+  bluetoothStopResult = esp_bt_controller_disable();
 #endif
-  esp_wifi_stop();
+  const int32_t wifiStopResult = esp_wifi_stop();
   esp_deep_sleep_disable_rom_logging();
   delay(10);
 
@@ -59,7 +66,11 @@ void Power::powerDeepSleep() {
   gpio_deep_sleep_hold_en();
 #endif
 
-  esp_sleep_enable_ext1_wakeup(1ull << BOARD_BOOT_PIN, ESP_EXT1_WAKEUP_ANY_LOW);
+  const int32_t wakeConfigResult = esp_sleep_enable_ext1_wakeup(
+      1ull << BOARD_BOOT_PIN, ESP_EXT1_WAKEUP_ANY_LOW);
+  sleep_audit::entering(wifiStopResult, bluetoothStopResult, bluedroidStopResult,
+                         wakeConfigResult, 1ull << BOARD_BOOT_PIN,
+                         static_cast<uint8_t>(digitalRead(BOARD_BOOT_PIN)));
   esp_deep_sleep_start();
 }
 
@@ -91,10 +102,12 @@ void Power::powerOffPeripherals() {
   tft.fillScreen(TFT_BLACK);
 #else
   displayPowerManager.requestState(display_power::State::Off);
-  displayPowerManager.applyPendingPanelChange();
+  const bool panelChangeApplied = displayPowerManager.applyPendingPanelChange();
+  sleep_audit::panelRequested(panelChangeApplied);
 #endif
   SPI.end();
   Wire.end();
+  sleep_audit::peripheralsReturned();
 }
 
 /**
@@ -129,6 +142,14 @@ void Power::deviceSuspend() {
  *
  */
 void Power::deviceShutdown() {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  sleep_audit::RequestContext context;
+  context.configuredTimeoutSeconds = mapRenderSettings.disconnectedSleepTimeoutSeconds;
+  context.connected = bleNavServer.isConnected();
+  context.displayState = static_cast<uint8_t>(displayPowerManager.state());
+  context.audioPlaying = waveshare_board::speaker::isPlaying();
+  sleep_audit::requested(context);
+#endif
   bool diagnosticsSealed = ride_diagnostics::prepareForShutdown();
   if (!diagnosticsSealed) {
     // A transient producer/seal race should not silently discard the final
@@ -137,6 +158,7 @@ void Power::deviceShutdown() {
     delay(25);
     diagnosticsSealed = ride_diagnostics::prepareForShutdown(3000);
   }
+  sleep_audit::recorderSealed(diagnosticsSealed);
   Serial.printf("RIDE_DIAGNOSTICS: shutdown checkpoint sealed=%d\n",
                 diagnosticsSealed);
   powerOffPeripherals();

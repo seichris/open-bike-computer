@@ -63,10 +63,26 @@ int main() {
       (1UL << 21));
   static_assert(
       device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION == 20);
+  static_assert(device_capabilities_protocol::WORLD_RADIO_CLIENT_VERSION == 25);
+  static_assert(device_capabilities_protocol::WORLD_RADIO_FEATURE ==
+                (1UL << 27));
+  static_assert(device_capabilities_protocol::
+                    DISPLAY_INACTIVITY_TIMEOUTS_CLIENT_VERSION == 26);
+  static_assert(device_capabilities_protocol::
+                    DISPLAY_INACTIVITY_TIMEOUTS_FEATURE == (1UL << 28));
+  static_assert(device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_CLIENT_VERSION ==
+                28);
+  static_assert(device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE ==
+                (1UL << 30));
+  static_assert((device_capabilities_protocol::WORLD_RADIO_FEATURE &
+                 (device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE |
+                  device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
+                  device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE)) == 0);
   static_assert(device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE ==
                 (1UL << 22));
-  static_assert(device_capabilities_protocol::MAP_POIS_CLIENT_VERSION == 24);
-  static_assert(device_capabilities_protocol::MAP_POIS_FEATURE ==
+  static_assert(
+      device_capabilities_protocol::SCREEN_CONFIGURATION_CLIENT_VERSION == 24);
+  static_assert(device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE ==
                 (1UL << 26));
   static_assert(device_capabilities_protocol::
                     RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION == 21);
@@ -82,6 +98,10 @@ int main() {
   static_assert(device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE ==
                 (1UL << 24));
   static_assert(device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_CLIENT_VERSION == 22);
+  static_assert((device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE &
+                 (device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE |
+                  device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
+                  device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE)) == 0);
   static_assert((device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE &
                  device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE) == 0);
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
@@ -90,7 +110,6 @@ int main() {
       0x00003fff, power, true, output, sizeof(output));
   const uint8_t expected[] = {'C', 'A', 'P', '2', 1, 0xff, 0x3f,
                               0x00, 0x00, 1,   3, 1,    4,    80};
-  static_assert(sizeof(expected) == device_capabilities_protocol::CAP2_MAX_BYTES);
   assert(size == sizeof(expected));
   for (size_t index = 0; index < size; ++index)
     assert(output[index] == expected[index]);
@@ -150,6 +169,25 @@ int main() {
   assert(automaticDisplayOffSize == sizeof(expectedAutomaticDisplayOff));
   for (size_t index = 0; index < automaticDisplayOffSize; ++index)
     assert(output[index] == expectedAutomaticDisplayOff[index]);
+  const size_t displayInactivityTimeoutsSize =
+      device_capabilities_protocol::encodeCap2(
+          device_capabilities_protocol::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE,
+          nullptr, false, output, sizeof(output));
+  const uint8_t expectedDisplayInactivityTimeouts[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x10};
+  assert(displayInactivityTimeoutsSize ==
+         sizeof(expectedDisplayInactivityTimeouts));
+  for (size_t index = 0; index < displayInactivityTimeoutsSize; ++index)
+    assert(output[index] == expectedDisplayInactivityTimeouts[index]);
+  const size_t topographicContoursSize =
+      device_capabilities_protocol::encodeCap2(
+          device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE, nullptr,
+          false, output, sizeof(output));
+  const uint8_t expectedTopographicContours[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x40};
+  assert(topographicContoursSize == sizeof(expectedTopographicContours));
+  for (size_t index = 0; index < topographicContoursSize; ++index)
+    assert(output[index] == expectedTopographicContours[index]);
   const size_t rideDiagnosticsSize = device_capabilities_protocol::encodeCap2(
       device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE, nullptr, false,
       output, sizeof(output));
@@ -177,14 +215,17 @@ int main() {
   assert(rideDeliveryAckSize == sizeof(expectedRideDeliveryAck));
   for (size_t index = 0; index < rideDeliveryAckSize; ++index)
     assert(output[index] == expectedRideDeliveryAck[index]);
-  const size_t mapPoisSize = device_capabilities_protocol::encodeCap2(
-      device_capabilities_protocol::MAP_POIS_FEATURE, nullptr, false, output,
-      sizeof(output));
-  const uint8_t expectedMapPois[] = {
-      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x04};
-  assert(mapPoisSize == sizeof(expectedMapPois));
-  for (size_t index = 0; index < mapPoisSize; ++index)
-    assert(output[index] == expectedMapPois[index]);
+  const uint8_t screenTLV[] = {2, 14, 1, 16, 24, 7, 0x1f, 0, 0, 0,
+                               0xff, 0xff, 1, 0, 0, 0x10};
+  const size_t screenSize = device_capabilities_protocol::encodeCap2(
+      device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE, nullptr,
+      false, output, sizeof(output), screenTLV, sizeof(screenTLV));
+  assert(screenSize == device_capabilities_protocol::CAP2_BASE_BYTES +
+                           sizeof(screenTLV));
+  assert(output[7] == 0x00 && output[8] == 0x04);
+  for (size_t index = 0; index < sizeof(screenTLV); ++index)
+    assert(output[device_capabilities_protocol::CAP2_BASE_BYTES + index] ==
+           screenTLV[index]);
   const size_t rendererBenchmarkSampleSize =
       device_capabilities_protocol::encodeCap2(
           device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE,

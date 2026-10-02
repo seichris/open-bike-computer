@@ -10,7 +10,7 @@ SCRIPT = ROOT / "scripts" / "pbf_to_geojson.sh"
 
 
 class PbfToGeoJSONTests(unittest.TestCase):
-    def test_target_four_adds_the_projected_points_layer(self):
+    def test_target_five_adds_the_projected_points_layer(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bin_dir = root / "bin"
@@ -41,7 +41,7 @@ class PbfToGeoJSONTests(unittest.TestCase):
                     str(root / "source.osm.pbf"),
                     str(root / "features"),
                     "--renderer-format",
-                    "4",
+                    "5",
                 ],
                 check=True,
                 env=env,

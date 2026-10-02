@@ -75,6 +75,8 @@ extern xSemaphoreHandle gpsMutex;
 #include "device_transfer_http.hpp"
 #include "device_debug_http.hpp"
 #include "firmware_update_http.hpp"
+#include "firmware_maintenance.hpp"
+#include "firmware_maintenance_policy.hpp"
 #include "firmware_metadata.hpp"
 #include "map_transfer.hpp"
 #include "map_transfer_http.hpp"
@@ -120,6 +122,102 @@ map_transfer::MapTransferHttpServer mapTransferHttp;
 firmware_update::FirmwareUpdateHttpServer firmwareUpdateHttp;
 device_debug::DeviceDebugHttp deviceDebugHttp;
 ride_diagnostics::RideDiagnosticsHttp rideDiagnosticsHttp;
+
+static void queueDeviceTransferStatusNotification() {
+  bleNavServer.requestDeviceTransferStatusNotification();
+}
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+static void setupFirmwareMaintenanceMode() {
+  deviceTransferHttp.configure(8080, "BikeComputer-Transfer");
+  firmwareUpdateHttp.configure(&deviceTransferHttp);
+  deviceTransferHttp.noteStatusChanged("maintenance_boot_baseline");
+  deviceTransferHttp.setStatusChangedCallback(
+      queueDeviceTransferStatusNotification);
+  boot_diagnostics::markFirmwareMaintenance();
+  firmware_maintenance::setStage(
+      firmware_maintenance::Stage::AwaitingAuthentication);
+  // Preserve boot diagnostics before NimBLE allocates its tasks and buffers,
+  // matching the normal startup ordering contract.
+  (void)std::fflush(stdout);
+  bleNavServer.init("BikeComputer");
+  power_management::completeStartup();
+  Serial.printf(
+      "FIRMWARE_MAINTENANCE: ready correlation=%lu internal_free=%u "
+      "dma_free=%u\n",
+      static_cast<unsigned long>(firmware_maintenance::correlation()),
+      static_cast<unsigned>(heap_caps_get_free_size(
+          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+      static_cast<unsigned>(
+          heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_8BIT)));
+}
+
+static void processFirmwareMaintenanceMode() {
+  bleNavServer.process();
+  deviceTransferHttp.process();
+  const device_transfer::HttpTransferStatus transferStatus =
+      deviceTransferHttp.status();
+  const uint32_t now = millis();
+
+  const firmware_maintenance::Stage stage = firmware_maintenance::stage();
+  const bool commitOwnsReboot =
+      stage == firmware_maintenance::Stage::Committing ||
+      stage == firmware_maintenance::Stage::Rebooting;
+  static firmware_maintenance::policy::BootButtonExitState bootButtonExit;
+  if (!commitOwnsReboot && !firmware_maintenance::exitRequested() &&
+      firmware_maintenance::policy::bootButtonExitRequested(
+          bootButtonExit, digitalRead(BOARD_BOOT_PIN) == LOW, now)) {
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_boot_button", "{}");
+    firmware_maintenance::requestExit();
+  }
+
+  const uint32_t maintenanceElapsed =
+      now - firmware_maintenance::activeSinceMs();
+  if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
+      !transferStatus.enabled &&
+      firmware_maintenance::policy::authenticationTimedOut(
+          maintenanceElapsed, bleNavServer.isAuthenticated())) {
+    deviceTransferHttp.setLastError(
+        "maintenance_authentication_timeout",
+        "owner authentication did not complete before the deadline");
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_auth_timeout", "{}");
+    firmware_maintenance::requestExit();
+  } else if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
+             firmware_maintenance::policy::transferTimedOut(
+                 now, transferStatus.lastUsefulTrafficMs,
+                 transferStatus.enabled,
+                 transferStatus.authorizedRequestInProgress)) {
+    deviceTransferHttp.setLastError(
+        "maintenance_inactivity_timeout",
+        "firmware transfer made no useful progress before the deadline");
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_inactivity", "{}");
+    firmware_maintenance::requestExit();
+  }
+  if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
+      maintenanceElapsed >=
+          firmware_maintenance::kOverallDeadlineMs) {
+    deviceTransferHttp.setLastError(
+        "maintenance_deadline",
+        "firmware maintenance exceeded its overall deadline");
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                   "maintenance", "exit_deadline", "{}");
+    firmware_maintenance::requestExit();
+  }
+
+  if (firmware_maintenance::exitRequested() && !commitOwnsReboot) {
+    const bool disabled = firmwareUpdateHttp.setEnabled(false);
+    if (disabled && deviceTransferHttp.waitUntilStopped(5500)) {
+      Serial.println("FIRMWARE_MAINTENANCE: returning to normal boot");
+      delay(250);
+      ESP.restart();
+    }
+  }
+  delay(5);
+}
+#endif
 
 static bool diagnosticsStorageRecoveryAllowed() {
   const device_transfer::HttpTransferStatus status =
@@ -316,15 +414,16 @@ static bool processWavesharePowerButton() {
         bleNavServer.confirmOwnershipPairing()) {
       log_i("Waveshare PWR pressed; handled ownership pairing");
     }
-    // Never honk while a pairing comparison is active, including before the
-    // screen has flushed and the fresh-edge gate has been armed.
+    // Never navigate while a pairing comparison is active, including before
+    // the screen has flushed and the fresh-edge gate has been armed.
     return hadInput;
   }
 
   wavesharePowerPairingGate.cancel();
   wavesharePowerPairingGeneration = 0;
   if (events.shortPress) {
-    waveshare_board::speaker::handlePowerButtonHonkPress();
+    log_i("Waveshare PWR short press; handling backward action");
+    togglePreviousNavigationScreen();
   }
   return hadInput;
 }
@@ -594,7 +693,13 @@ bool stopActiveDeviceTransfer() {
   const device_transfer::HttpTransferStatus status = deviceTransferHttp.status();
   if (status.mode == "diagnostics") {
     ride_diagnostics::endTransferSnapshotLease();
-    return deviceTransferHttp.setEnabled(false);
+    deviceTransferHttp.setEnabled(false);
+    // DTRN exit is also the sequencing boundary before iOS requests the
+    // endpoint-unreachable hotspot fallback. Do not acknowledge an empty
+    // diagnostics status while the old LAN worker is still unwinding: a
+    // replacement session can otherwise observe the stale worker handle and
+    // fail without ever publishing a fresh DSTS response.
+    return deviceTransferHttp.waitUntilStopped(5500);
   }
   if (status.mode == "map")
     return mapTransferHttp.setEnabled(false);
@@ -790,10 +895,10 @@ static bool processTransferInactivityTimeout(uint32_t nowMs) {
   }
 
   const bool disabled = stopActiveDeviceTransfer();
-  Serial.printf(
-      "DEVICE_TRANSFER_HTTP: inactivity timeout mode=%s disabled=%d\n",
-      transferStatus.mode.empty() ? "unknown" : transferStatus.mode.c_str(),
-      disabled);
+  Serial.printf("DTRN timeout %s %d\n",
+                transferStatus.mode.empty() ? "unknown"
+                                            : transferStatus.mode.c_str(),
+                disabled);
   return disabled;
 }
 
@@ -956,6 +1061,12 @@ static display_inactivity::Update updateDisplayInactivityPolicy(
       workout_telemetry_runtime::isWorkoutActive();
   context.automaticDisplayOffEnabled =
       displayPowerManager.automaticDisplayOffEnabled();
+  const display_power::InactivityTimeouts displayTimeouts =
+      displayPowerManager.displayInactivityTimeouts();
+  context.dimAfterMs =
+      static_cast<uint32_t>(displayTimeouts.dimAfterSeconds) * 1'000U;
+  context.displayOffAfterMs =
+      static_cast<uint32_t>(displayTimeouts.displayOffAfterSeconds) * 1'000U;
   context.transferActive =
       (signals.transferEnabled && signals.transferMode != "debug") ||
       signals.activationRunning;
@@ -1460,6 +1571,8 @@ void setup() {
   boot_diagnostics::begin();
   const boot_diagnostics::Snapshot initialBoot =
       boot_diagnostics::snapshot();
+  (void)firmware_maintenance::consumeForCurrentBoot(
+      initialBoot.firmwareFingerprint, initialBoot.resetReason);
   runtime_watchdog_diagnostics::begin(
       initialBoot.bootSequence, initialBoot.firmwareFingerprint,
       initialBoot.resetReason == static_cast<uint32_t>(ESP_RST_TASK_WDT));
@@ -1490,7 +1603,8 @@ void setup() {
   power_management::setGpioWakeNotifier(notifyAutomaticLightSleepGpioWake);
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  displayPowerManager.begin();
+  if (!firmware_maintenance::active())
+    displayPowerManager.begin();
 #endif
   log_i("Starting Setup...");
 
@@ -1502,14 +1616,16 @@ void setup() {
   pinMode(BOARD_BOOT_PIN, INPUT_PULLUP);
 #endif
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
-  attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
-                  latchWaveshareBootScreenCycle, FALLING);
-  uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
+  if (!firmware_maintenance::active()) {
+    attachInterrupt(digitalPinToInterrupt(BOARD_BOOT_PIN),
+                    latchWaveshareBootScreenCycle, FALLING);
+    uint64_t ext1WakeMask = 1ULL << BOARD_BOOT_PIN;
 #ifdef WAVESHARE_AMOLED_175
-  ext1WakeMask |= 1ULL << TCH_I2C_INT;
+    ext1WakeMask |= 1ULL << TCH_I2C_INT;
 #endif
-  power_management::configureExt1Wakeup(ext1WakeMask);
-  configureTouchWakeInterrupt();
+    power_management::configureExt1Wakeup(ext1WakeMask);
+    configureTouchWakeInterrupt();
+  }
 #endif
 #ifdef POWER_SAVE
 #ifdef ICENAV_BOARD
@@ -1553,9 +1669,6 @@ void setup() {
   boot_diagnostics::enterStage(boot_diagnostics::Stage::PmicInspection);
   waveshare_board::initializePowerManagement();
   boot_diagnostics::completeStage(boot_diagnostics::Stage::PmicInspection);
-  boot_diagnostics::enterStage(boot_diagnostics::Stage::Display);
-  initTFT();
-  boot_diagnostics::completeStage(boot_diagnostics::Stage::Display);
 #ifdef WAVESHARE_DISPLAY_PROBE
   boot_diagnostics::markDiagnosticHold();
   Serial.println("Waveshare 2.06 display probe complete; holding before RTC/IMU/SD/LVGL/BLE/touch init");
@@ -1581,6 +1694,10 @@ void setup() {
 #endif
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (firmware_maintenance::active()) {
+    setupFirmwareMaintenanceMode();
+    return;
+  }
   boot_diagnostics::enterStage(boot_diagnostics::Stage::ClockAndSensors);
 #ifdef WAVESHARE_DISPLAY_PROBE
   Serial.println("Waveshare display probe: skipping RTC and IMU init");
@@ -1616,12 +1733,11 @@ void setup() {
   // Preserve the established display-first board bring-up order. Waveshare
   // storage now uses the independent native SDMMC peripheral, so later QSPI
   // display traffic cannot change the card bus configuration.
-#ifndef WAVESHARE_AMOLED_206
-#if defined(WAVESHARE_AMOLED_175)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::enterStage(boot_diagnostics::Stage::Display);
 #endif
   initTFT();
-#if defined(WAVESHARE_AMOLED_175)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   boot_diagnostics::completeStage(boot_diagnostics::Stage::Display);
 #endif
 
@@ -1631,7 +1747,6 @@ void setup() {
   while (true) {
     delay(1000);
   }
-#endif
 #endif
 
   // Initialize removable storage after board display bring-up.
@@ -1873,6 +1988,9 @@ void setup() {
     return mapView.requestStorageControl(work, context);
   });
   firmwareUpdateHttp.configure(&deviceTransferHttp);
+  mapTransferHttp.setOperationOwner(firmwareUpdateHttp.operationOwner());
+  deviceTransferHttp.setStatusChangedCallback(
+      queueDeviceTransferStatusNotification);
   deviceDebugHttp.configure(&deviceTransferHttp);
   rideDiagnosticsHttp.configure(&deviceTransferHttp);
   deviceTransferHttp.registerHandler("/device-diagnostics/", &rideDiagnosticsHttp);
@@ -2010,6 +2128,17 @@ void loop() {
   if (boot_diagnostics::safeModeActive()) {
     delay(1000);
     return;
+  }
+  if (firmware_maintenance::active()) {
+    processFirmwareMaintenanceMode();
+    return;
+  }
+  if (firmware_maintenance::stage() ==
+          firmware_maintenance::Stage::RebootPending &&
+      millis() - firmware_maintenance::activeSinceMs() >= 750) {
+    Serial.println("FIRMWARE_MAINTENANCE: rebooting into maintenance");
+    Serial.flush();
+    ESP.restart();
   }
 #endif
   uint32_t now = millis();
@@ -2449,6 +2578,7 @@ void loop() {
 
   Maps::MapAvailabilityTransition mapAvailability;
   if (mapView.takeMapAvailabilityTransition(mapAvailability)) {
+    bleNavServer.noteMapAvailabilityChanged();
     const bool hasActiveIdentity =
         !rendererMapDiagnosticIdentity.mapId.empty();
     recordMapDiagnostic(
@@ -2470,7 +2600,9 @@ void loop() {
     (defined(WAVESHARE_IMU_DIAGNOSTICS) || defined(RIDE_AUTOMATION_SHADOW))
   waveshare_board::imu::process();
 #endif
-  ride_automation_runtime::processFirmwareShadow(now);
+  // IMU acquisition and UI work can advance the clock beyond loop entry.
+  // Evaluate freshness only after the latest sample has been timestamped.
+  ride_automation_runtime::processFirmwareShadow(millis());
 
   logSystemDebugHeartbeat();
   logPowerMetricsReport();

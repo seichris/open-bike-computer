@@ -37,6 +37,7 @@ navigation-ready.
 | `2A73` | iOS -> ESP32 | Binary setting packet | Runtime map-renderer, device-screen, and phone-status values. |
 | `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1003` | iOS/Watch -> ESP32 | Fixed 16-byte core/extended/Watch-motion or 28-byte origin workout frame | Watch-owned workout state, optional live metrics/provenance, and capability-gated raw Watch GPS motion evidence. |
 | `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004` | bidirectional | Fixed 52-byte `RAUT` v2 frame | Internal, feature-gated ride-detection decisions, configuration, prompt responses, cancellations, acknowledgements, confirmations, and resynchronization. |
+| `9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005` | bidirectional | Chunked binary screen-configuration document | Owner-only atomic read/write of ordered, duplicate-capable screen instances and per-instance settings. |
 
 `DistanceMeters` is an unsigned 16-bit decimal value (`0...65535`). The iOS
 sender saturates larger maneuver distances at `65535` instead of allowing the
@@ -141,7 +142,8 @@ completes.
 ### Protected session frames
 
 After `OK2`, all app-to-device writes on the auth, navigation, route, GPS,
-settings, and workout characteristics use AES-256-GCM. Auth replies and every
+settings, workout, ride-automation, and screen-configuration characteristics
+use AES-256-GCM. Auth replies and every
 device-to-app navigation notification—including destination requests,
 capabilities, acknowledgements, and transfer status—use the reverse protected
 direction. Plaintext notifications are rejected while a v2 session exists. The
@@ -162,7 +164,8 @@ Tag: 16-byte AES-GCM tag
 ```
 
 Channels are `1=auth`, `2=navigation`, `3=route`, `4=GPS`, `5=settings`,
-`6=workout`, and `7=ride automation`.
+`6=workout`, `7=ride automation`, and `8=screen configuration`. Channel `8`
+is owner-only; a scoped Watch controller cannot read or change screen layouts.
 Each direction has an independent strictly increasing sequence per channel.
 Receivers reject zero, replayed, out-of-order, wrong-channel, or invalid-tag
 frames. Sequence gaps are accepted; this lets a newer replaceable-state frame
@@ -362,6 +365,21 @@ resynchronization from logical state. Each client admits a critical group to its
 outbound queue atomically, and replaceable telemetry cannot evict it; firmware
 then serializes and tracks its individual members through completion.
 
+Active phone and Watch recovery uses a separate five-second cancellation
+deadline after a writer/application failure. If CoreBluetooth never reports the
+disconnect, the controller displays a recovery-blocked instruction to turn
+Bluetooth off and on in Settings. This is not a successful reconnect. The
+connection stays fenced until an actual disconnect/failure/radio boundary;
+timeout alone never permits reuse of unidentified ATT callbacks. Watch demand
+and its exact phone preparation identity remain retained. A retired timer cannot
+change a successor connection. On iPhone the warning appears in My Bike Computers.
+
+Watch route snapshots compare plaintext geometry against the last submitted
+route in the current connection. Unchanged replaceable geometry is skipped;
+critical clears and reconnect resynchronization always dispatch. Protection is
+constructed only once the selected write mode is writable. These changes do not
+alter queue capacity, critical ACK requirements, or acknowledged-write preference.
+
 Golden vectors (command payload bytes `aa bb`):
 
 ```text
@@ -472,6 +490,11 @@ loops or self-intersections from making firmware reacquire an older segment;
 ordinary window revisions update the live foreground and do not cancel a 3D
 base render.
 
+Nonempty route packets must contain the complete eight-byte start point and
+complete four-byte delta pairs. Every decoded coordinate must be within WGS-84
+latitude/longitude bounds. Malformed packets and allocation failures retain the
+previous route, map position, and screen-entry state.
+
 A zero-length route geometry packet clears the route overlay on the ESP32. The
 iOS app sends this when navigation stops so stale route geometry is not used for
 route-overlay rendering or Course Up rotation.
@@ -484,7 +507,7 @@ Little-endian binary packet:
 Lat: Int32 microdegrees
 Lon: Int32 microdegrees
 Heading: UInt16 degrees, 0...359; 0xFFFF invalid when CAP2 bit 13 is negotiated
-UnixTime: UInt32 seconds since 1970-01-01T00:00:00Z (optional)
+UnixTime: UInt32 current sender time at dispatch, seconds since 1970-01-01T00:00:00Z (optional)
 Speed: UInt16 centimeters/second, 0xFFFF invalid (optional)
 Altitude: Int16 meters (optional)
 DistanceTraveled: UInt32 meters (optional)
@@ -496,6 +519,9 @@ HorizontalAccuracy: UInt16 decimeters, 0xFFFF unavailable
 SampleAge: UInt16 milliseconds, 0xFFFF unavailable
 ```
 
+All GPS packet versions reject latitude outside -90...90 degrees or longitude
+outside -180...180 degrees before updating map state or arrival freshness.
+
 Live CoreLocation coordinates are sent as WGS-84. Simulated or MapKit route
 coordinates are converted from GCJ-02 to WGS-84 before writing. Firmware accepts
 the original 8-byte lat/lon payload, the 10-byte lat/lon/heading payload, the
@@ -504,8 +530,25 @@ client that negotiated CAP2 bit `17` appends the six-byte quality-v1 tail for a
 36-byte payload. The quality tail carries the original Core Location horizontal
 accuracy and sample age; it never fabricates HDOP. `SampleAge`, rather than the
 sender's wall clock, is subtracted from the BLE arrival timestamp before ride
-detection evaluates freshness. The
-Waveshare firmware uses the optional Unix time to sync the onboard PCF85063 RTC.
+detection and map presentation evaluate source freshness. UI/mailbox delay adds
+to this age; packet arrival/cadence remains a separate transport diagnostic.
+The Waveshare firmware uses the optional Unix time to sync the onboard PCF85063
+RTC. Both controllers refresh UnixTime and SampleAge at the final writable
+plaintext dispatch boundary, before protection. Source age is anchored when the
+source is first retained and advances with monotonic time, including queue wait
+and reconnect replay. A repeated timestamp retains its anchor; changed coordinates
+are not required for a genuinely new stationary observation. Ages saturate at
+65534 ms; 65535 means unknown. A future-invalid or unknown age cannot claim a
+valid fix. Older Watch builds that used capture time as UnixTime need an app
+update; firmware cannot safely infer or compensate for that older clock meaning.
+
+Map prediction retains its 1.5-second full-speed and 2.5-second maximum windows,
+measured from source capture. Expired repeats at the same position do not restart
+convergence. A stale or unknown-source marker remains visible at reduced opacity;
+legacy Ride Stats shows GPS stale/unavailable and withholds measured speed rather
+than inventing zero. Independent workout telemetry retains its own freshness and
+terminal-summary rules. Legacy packets without quality still move the marker,
+but cannot establish source freshness or enable velocity prediction.
 
 Quality-v1 is accepted only as a complete 36-byte payload. Unknown schemas,
 reserved flag bits, truncated or oversized extensions, mismatched accuracy
@@ -757,11 +800,11 @@ screen cycling remain unchanged.
 
 ## Ride Automation (`9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1004`)
 
-Ride automation is an internal-build protocol while the physical false-start,
-recovery, and board-stability gates in
-`docs/plans/automatic-ride-detection-implementation-plan.md` remain open.
-Production firmware neither advertises CAP2 bit `15` nor runs this control
-path. Manual `WREQ` and workout telemetry remain available.
+Ride automation is enabled in the production profiles, while the physical
+false-start, recovery, and board-stability gates in
+[the historical implementation plan](https://github.com/seichris/open-bike-computer/blob/d43ef487db3a85691d186067fb78f1d0952ca877/docs/plans/automatic-ride-detection-implementation-plan.md) remain open.
+Production advertises CAP2 bit `15` and runs the bounded control path. Manual
+`WREQ` and workout telemetry remain available.
 
 The native characteristic carries authenticated notifications and writes on
 ownership-v2 channel `7`. A cached GATT table uses:
@@ -872,7 +915,7 @@ Current setting IDs:
 | `4` | Legacy display rotation | Ignored. Rotation is fixed by firmware target: 90° on the 1.75-inch device and 0° on the 2.06-inch device. |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Map zoom level | `0...5` |
-| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker, bits 13-17 Shops, Restaurants & Cafes, Public Toilets, Gas Stations, and Bicycle Shops & Repair |
+| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker, bit 13 topographic contours |
 | `9` | Map street width | Absolute rendered width is `1...24` px. The wire value remains `width - 4` (`-3...20`) so older apps that send a boost remain compatible. |
 | `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a route-blue dot when no route is loaded and a route-blue arrow while navigating. Both shapes are rendered at their final display resolution. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device through the enabled main screens. Map drags and long presses are ignored by this shortcut. |
@@ -900,7 +943,9 @@ Current setting IDs:
 | `33` | Map + Navigation street-label size | Same values as ID `29` |
 | `34` | Map + Navigation street-label orientation | Same values as ID `30` |
 | `35` | Map + Navigation 3D buildings | `0` flat footprints, `1` LoD1 walls and roofs in the bird's-eye Map + Navigation view; defaults to enabled and is persisted as `nav3DBuild` |
-| `36` | Automatic display off | `0` disabled, `1` enabled; defaults to enabled and is persisted as `autoDisplayOff`. When enabled, the connected display dims after 15 seconds and turns off after 45 seconds without meaningful activity, except for navigation, workout, transfer, or attention holds. |
+| `36` | Automatic display off | `0` disabled, `1` enabled; defaults to enabled and is persisted as `autoDisplayOff`. When enabled, the connected display uses the configured inactivity timeouts (15 seconds before dimming and 45 seconds before panel off by default), except for navigation, workout, transfer, or attention holds. |
+| `37` | Map + Navigation rotation | `0` North Up, `1` Course Up; defaults to Course Up and is persisted as `navRotation`. |
+| `38` | Display inactivity timeouts | Atomic `Int32LE` pair: low 16 bits are seconds before dimming and high 16 bits are seconds before panel off. Defaults are `15` and `45`. Firmware accepts dim `5...600`, off `10...3600`, and requires off to be at least five seconds later than dim. The pair is persisted as one NVS value. |
 
 In a dense scene, firmware reserves its bounded extrusion workspace from the
 nearest eligible buildings outward, preserves global back-to-front drawing,
@@ -958,6 +1003,94 @@ negotiation. Fresh Map profiles enable all five; fresh Map + Navigation profiles
 disable all five. Older firmware receives no POI bits and saved choices remain
 available for a later capable connection.
 
+Visibility bit `13` controls FMB5 topographic contours independently for Map
+and Map + Navigation. It remains off in fresh profiles. iOS exposes and sends
+the bit only when CAP2 bit `30`, active renderer format `4`, topography profile
+`1`, and a healthy active contour section all agree. Firmware preserves the bit
+through configurable-screen round trips and ignores it for older blocks. This
+source contract does not by itself enable production generation or establish
+physical performance qualification.
+
+## Configurable screen instances
+
+Clients at version `24` can negotiate CAP2 feature bit `26` and TLV type `2`.
+The feature is advertised only after the firmware configuration store and the
+dedicated characteristic both initialize. The 14-byte TLV value is:
+
+```text
+Schema: UInt8 (=1)
+MaximumInstances: UInt8 (=16)
+MaximumNameBytes: UInt8 (=24)
+RideStatsSlotCount: UInt8 (=7)
+SupportedScreenTypes: UInt32LE
+SupportedRideStatsWidgets: UInt32LE
+MaximumDocumentBytes: UInt16LE (=4096)
+```
+
+Screen types are `0=Map`, `1=Navigation`, `2=Ride Stats`, `3=Map +
+Navigation`, and `4=Battery Status`. Multiple instances may use the same type.
+Each instance has a nonzero stable `UInt32` ID, an independent enabled flag and
+name, and type-specific payload. The ordered enabled instances define the
+device's tap/PWR-button cycle; `DefaultInstanceID` must identify an enabled
+instance.
+
+The schema-1 document is CRC-protected and bounded to 4096 bytes:
+
+```text
+"SCV1" | Schema: UInt8 | InstanceCount: UInt8 | DefaultInstanceID: UInt32LE
+repeat InstanceCount times:
+  InstanceID: UInt32LE | Type: UInt8 | Flags: UInt8
+  NameLength: UInt8 | PayloadLength: UInt16LE | UTF8Name | Payload
+DocumentCRC32: UInt32LE
+```
+
+Flag bit `0` means enabled; other flag bits are invalid. Navigation and Battery
+Status payloads contain only payload version `1`. Map and Map + Navigation
+payloads carry the complete independent map profile (detail, widths, zoom,
+visibility, labels, rotation, and the type-specific bird's-eye fields). Map +
+Navigation appends its independent rotation byte (`0` north-up, `1` course-up)
+after the 3D-buildings flag, for a 19-byte payload. A pre-integration 18-byte
+payload is accepted with the legacy course-up default. The orientation control
+is effective only when the device also advertises bit `24`; production retains
+its existing hardware-qualification gate. Ride
+Stats uses payload version `1`, layout kind `1`, slot count `7`, then seven
+widget IDs. Widget IDs are `0=Empty`, `1=Speed`, `2=Heart Rate`, `3=Heart-Rate
+Zone`, `4=Distance`, `5=Moving Time`, `6=Elapsed Time`, `7=Altitude`, `8=Route
+Remaining`, `9=Power`, `10=Cadence`, `11=Average Speed`, `12=Maximum Speed`,
+`13=Calories`, `14=Average Heart Rate`, and `15...16=Smart Metric 1...2`.
+At least one Ride Stats slot and one screen instance must be visible.
+
+All transfer messages use protected channel `8`. iOS uses acknowledged GATT
+writes and queues every upload batch atomically. Chunk count is at most 160 and
+in-order reassembly expires after five seconds:
+
+```text
+Read:     "SCRQ" | RequestID: UInt32LE
+Upload:   "SCUP" | RequestID: UInt32LE | BaseRevision: UInt32LE |
+          ChunkIndex: UInt8 | ChunkCount: UInt8 | Bytes...
+Download: "SCDN" | RequestID: UInt32LE | Revision: UInt32LE |
+          ChunkIndex: UInt8 | ChunkCount: UInt8 | Bytes...
+Ack:      "SCAK" | RequestID: UInt32LE | Result: UInt8 |
+          Revision: UInt32LE | DocumentCRC32: UInt32LE
+```
+
+Acknowledgement results are `0=Applied`, `1=Conflict`, `2=Malformed`,
+`3=Unsupported`, `4=Persistence Failed`, `5=Busy`, and `6=Unauthorized`.
+Applied acknowledgements echo the committed document CRC and the new nonzero
+revision. Firmware rejects stale `BaseRevision` values without partial changes,
+and remembers a bounded set of completed request IDs so a repeated transfer is
+idempotent.
+
+Persistence uses CRC-checked A/B document slots, an active-head record written
+after the inactive slot verifies, and a mirror-transaction marker for the
+legacy settings projection. On first boot it migrates the five legacy screen
+types in their existing order. Older apps continue to read and write setting
+IDs `13` and `14`; those values project to the primary instance of each type
+and are imported back into the schema-1 document after a short debounce. New
+apps keep an acknowledged per-device cache, always request a fresh snapshot on
+connect, preserve unsaved same-device edits across a transient reconnect, and
+offer an explicit choice after a revision conflict.
+
 ## Device Sound Playback
 
 The authenticated command channel accepts a sound-play frame on either the
@@ -974,8 +1107,12 @@ Supported sound IDs on `WAVESHARE_AMOLED_175` and `WAVESHARE_AMOLED_206`:
 | ---: | --- |
 | `1` | Bell ding |
 | `2` | Plastic bicycle horn |
-| `3` | Rotating bicycle bell |
 | `5` | Squeeze horn |
+
+Sound ID `3` was the retired rotating-bell recording and remains reserved. New
+firmware rejects it rather than reassigning it to a different sound. Bicino
+continues to decode legacy device state containing ID `3`, but does not offer
+it in the current sound picker.
 
 `VolumePercent` must be in the inclusive range `0...100`. For compatibility,
 the firmware also accepts the older frame containing only `SoundID` and uses
@@ -1006,8 +1143,9 @@ after an AXP2101 short-press event, so the button works without an active app
 connection. Firmware configures the AXP2101's hard power-off threshold to four
 seconds; this remains independent of the short-press honk behavior.
 
-Independently of hard power-off, connected firmware dims after 15 seconds and
-turns the panel off after 45 seconds without meaningful activity when no
+Independently of hard power-off, connected firmware dims after the selected
+delay (15 seconds by default) and turns the panel off after the selected later
+delay (45 seconds by default) without meaningful activity when no
 navigation is active. GPS and workout telemetry alone do not keep the panel
 awake. A
 changed maneuver instruction/icon, a closer maneuver-distance threshold,
@@ -1141,8 +1279,11 @@ critical ride-delivery contract described above. Bit `23` reports the atomic
 renderer replay sample described below. Bit `24` reports independent map navigation
 orientation. Bit `25` reports the Watch GPS
 motion-evidence frame and is advertised only with internal ride control. Bit `26`
-reports the complete renderer-target-4 map POI reader, installer, renderer,
-profile, and persistence path. Client version `11` requests
+reports the complete configurable-screen store, characteristic, codec, and runtime
+path described above. Bit `27` reports World Radio. Bit `28` reports the
+atomic configurable display-inactivity timeout pair (setting ID `38`). Bit
+`29` reports versioned workout zones. Bit `30` reports the complete renderer
+format 4/FMB5 contour decode, installation, status, and visibility path. Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
@@ -1152,27 +1293,48 @@ released automatic-display setting. Version `18` requests bit `20`, version
 `19` requests bit `21`, version `20` requests bit `22`, and version `21`
 requests bit `23`. Version `22` requests bit `24`, independent Map + Navigation
 orientation (setting ID `37`). Firmware advertises bit `24` only with
-`MAP_STABLE_CAMERA=1`; production profiles keep it clear pending per-target
-physical qualification. This capability is independent of label orientation.
+`MAP_STABLE_CAMERA=1`; both Waveshare production profiles now set it, while
+physical qualification remains tracked separately for each panel. This
+capability is independent of label orientation.
 Version `23` requests bit `25`, Watch GPS motion evidence.
-Version `24` requests bit `26`, map POIs.
-Production builds keep bit `15` clear until the
-ride-detection physical gates pass. Firmware sets bit `16` only in
+Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
+Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
+configurable display inactivity timeouts. Version `27` requests bit `29`,
+versioned workout zones. Version `28` requests bit `30`, topographic contours.
+The current iPhone client negotiates version `28`; older direct Watch clients
+remain valid at version `23`. Bit `23` remains the
+renderer replay capability and must never be interpreted as World Radio.
+World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
+Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
+omits both the screen and capability pending physical interaction qualification.
+Its owner-authenticated `WRQ1` requests and `WRS1` status use the existing
+navigation characteristic; stream discovery and playback run on the iPhone.
+See [World Radio](world-radio.md) and the bounded codecs in
+`esp32/lib/world_radio/world_radio_protocol.hpp` and
+`ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift`.
+Production builds now advertise bit `15` because the RAUT control path is
+enabled; physical ride-detection gates remain outstanding. Firmware sets bit
+`16` only in
 `DEVICE_REMOTE_DEBUG=1` builds after the debug HTTP/input service initializes.
 Firmware sets bit `18` only when `FIRMWARE_DIAGNOSTICS=1`; production builds
 therefore expose neither the snapshot nor experimental profile control. GFX
 firmware advertises bit `19` for client version `16` and newer; iOS enables the
 toggle and sends ID `36` only after this bit is received, so legacy firmware
 with the generic settings characteristic never receives an unsupported setting.
+GFX firmware advertises bit `28` for client version `26` and newer. iOS shows
+the two timeout pickers and sends ID `38` only after this bit is received.
 The bounded persistent recorder may advertise bit `20` in ordinary and
 production profiles; it never enables USB serial diagnostics or the
 remote-debug service.
-Firmware advertises bit `21` only when the read-only ride-automation shadow
-producer is compiled. Production firmware keeps it clear, and iOS downgrades
-an otherwise detailed capture binding to standard correlation when it is absent.
+Firmware advertises bit `21` only when detailed ride diagnostics are compiled.
+Development profiles include both detailed diagnostics and the normalized
+ride-automation trace producer; production keeps the control path but omits
+both to stay within the dual-OTA image budget. Detailed capture binding is
+therefore unavailable in production.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
-exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). Types are unique;
+exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
+carries the 14-byte screen-configuration limits and support masks. Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
 well-formed types are skipped. Firmware sends legacy `CAPS` to clients below
 version `10`, preserving the version `7...9` extended-byte contract, and current
@@ -1214,14 +1376,23 @@ Detailed ride diagnostics, CAP2 schema 1, only feature bit 21:
 Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
 43 41 50 32 01 00 00 40 00
 
+Configurable screens, CAP2 schema 1, feature bit 26 and TLV type 2:
+43 41 50 32 01 00 00 00 04 02 0e 01 10 18 07 1f 00 00 00 ff ff 01 00 00 10
+
 Atomic renderer replay sample, CAP2 schema 1, only feature bit 23:
 43 41 50 32 01 00 00 80 00
 
 Watch GPS motion evidence, CAP2 schema 1, only feature bit 25:
 43 41 50 32 01 00 00 00 02
 
-Map POIs, CAP2 schema 1, only feature bit 26:
-43 41 50 32 01 00 00 00 04
+World Radio, CAP2 schema 1, only feature bit 27:
+43 41 50 32 01 00 00 00 08
+
+Display inactivity timeouts, CAP2 schema 1, only feature bit 28:
+43 41 50 32 01 00 00 00 10
+
+Topographic contours, CAP2 schema 1, only feature bit 30:
+43 41 50 32 01 00 00 00 40
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -1381,6 +1552,11 @@ ID `36` is sent only after a valid `CAP2` response advertises bit `19`.
 Firmware without that bit is never offered the Automatic Display Off toggle;
 the setting remains app-local until a compatible connected display is
 negotiated.
+
+ID `38` is sent only after a valid `CAP2` response advertises bit `28`. The app
+presents separate Dim After and Turn Off After pickers but sends both values in
+one atomic setting. Older firmware retains the fixed 15/45-second policy and is
+not offered the timeout pickers.
 
 ### Independent navigation orientation setting
 
@@ -1555,7 +1731,8 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
 | `MSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Current map-transfer status notification. |
 | `DTRN` | iOS -> ESP32 | `enter\|map` | Preferred atomic map-mode entry; publishes both map status and generic device-transfer status. |
-| `DTRN` | iOS -> ESP32 | `enter\|firmware` | Enter firmware-update transfer mode. |
+| `DTRN` | iOS -> ESP32 | `prepare\|firmware` | Validate OTA eligibility, write a one-shot maintenance request, acknowledge `reboot_pending`, then reboot. |
+| `DTRN` | iOS -> ESP32 | `enter\|firmware` | Enter firmware-update transfer mode after reconnecting and authenticating in maintenance boot. Normal boot rejects this command. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug` | Enter opt-in real-device browser-debug mode when CAP2 bit `16` is present. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|lan1\|` plus bounded binary credentials | Enter browser-debug mode by trying a normal LAN first, with device-hotspot fallback. |
 | `DTRN` | iOS -> ESP32 | `enter\|debug\|h1\|e` | Force the hotspot after authenticated LAN endpoint verification fails; `e` records `endpoint_unreachable`. |
@@ -1609,9 +1786,61 @@ transfer id and accepts both forms.
 Generic device-transfer status uses the equivalent `DSTS{...}` direct response
 or `DSTC` chunk header. Firmware keeps an incomplete `DSTC` snapshot on the
 owner task and resumes it only as the bounded authenticated-notification queue
-drains. A request received while that snapshot is pending continues the same
-transfer instead of assigning a new transfer id and stranding the iOS
-reassembler with another partial response.
+drains. A fresh status event supersedes an incomplete older snapshot and uses a
+new transfer id, so chunks from different `statusRevision` values cannot be
+combined.
+
+Firmware-update clients require `capabilities.firmwareMaintenanceV1`. Before
+downloading or rebooting, iOS checks `firmware.otaEligible`,
+`firmware.eligibilityCode`, `firmware.inactivePartition`, and
+`firmware.maxImageBytes`. Preparation publishes a `maintenance` object with
+`active: false`, stage `reboot_pending`, and a non-zero correlation. After the
+expected disconnect, iOS reconnects to the same device identity, authenticates
+again, and requires `maintenance.active: true` with the same correlation before
+sending `enter|firmware`. The first status request after that reconnect, and all
+transfer control while maintenance is active, use the authenticated Navigation
+fallback. This also lets the app upgrade older maintenance firmware whose
+cached Settings handle can acknowledge a write without delivering it.
+
+Maintenance stages are `awaiting_authentication`, `network_starting`, `ready`,
+`receiving`, `verifying`, `committing`, `rebooting`, `cancelling`, and `failed`.
+The status also carries non-secret `resources` counters for current and minimum
+internal/DMA free space, largest blocks, worker stack high-water bytes, and the
+measurement phase. The nested `firmware.flashOwnerStackHighWaterBytes` field
+separately reports the internal flash owner's worst remaining stack margin when
+that owner has started. Transfer tokens, hotspot passwords, and TLS private keys
+are never retained in resource evidence.
+
+Before creating the firmware worker and again before accepting HTTPS clients,
+maintenance firmware applies named internal-heap and DMA-heap admission floors.
+It fails closed with a `maintenance_*_low` error when any free-space or
+largest-block floor is missed. The initial floors are conservative candidates;
+the per-target production qualification report records observed minima and may
+raise them. It must not lower them below the authenticated-control reserve.
+Waiting for owner authentication is bounded to two minutes, inactivity after
+transfer entry is bounded to 90 seconds, and the existing ten-minute overall
+maintenance deadline remains authoritative. Commit and reboot own their terminal
+path once the serialized commit boundary has been crossed.
+
+`DSTS.bootCheckpoint` is the SD-independent boot acceptance record. Schema 1
+contains `target`, `profile`, full `gitSha`, `version`, `build`, `bootSequence`,
+`bootFingerprint`, `normalReady`, `maintenance`, and `otaState`. The nested
+`firmware` object also reports `runningPartition`, `profile`, and `otaState`.
+iOS completes a pending update only when the exact requested image identity is
+reported with `normalReady: true` and `maintenance: false`. A matching active
+maintenance correlation resumes reconciliation; an old normal-ready image after
+commit is reported as rollback, while missing or contradictory evidence remains
+unresolved. The app runs this reconciliation after every fresh authenticated
+device-transfer status, including the first status after an app relaunch.
+Optional navigation and telemetry writes are suppressed while
+maintenance is active, but authentication and transfer status/control remain
+available. The maintenance GATT database preserves the normal characteristic
+order and properties from Navigation through Settings (`2A6E`, Auth, `2A6F`,
+`2A72`, `2A73`). This keeps cached CoreBluetooth handles valid across the
+intentional reboot. Route and GPS are inert placeholders in maintenance;
+Settings accepts only owner-authenticated `DTRN`, `DSTS`, and capabilities
+traffic, with responses emitted on Navigation. All other Settings payloads are
+rejected before normal riding or renderer state can be touched.
 
 The HTTPS credential is not part of the map-status payload. Current iOS clients
 send `DTRNenter|map`, which applies map mode and publishes a fresh generic
@@ -1647,6 +1876,17 @@ password and reports a hotspot fallback.
 for an active hotspot) `apPassphrase`; `baseUrl` remains empty until the
 selected listener is ready. Stable fallback reasons are `ssid_unavailable`,
 `authentication_failed`, `association_timeout`, and `endpoint_unreachable`.
+On failed hotspot startup, authenticated `DSTS.lastError.code` identifies
+`wifi_owner_create`, `wifi_owner_dispatch`, `wifi_memory`, `wifi_mode`,
+`wifi_ram_storage`, or `wifi_softap`. Optional `wifiStartFailure` contains
+`step`, numeric `espError` when available, and `before`/`after` internal and
+DMA free and largest blocks at the failing substep. The status persists after
+the listener fails, is cleared at the next admitted session, and contains no
+SSID, password, bearer token, TLS secret, or map data. Older firmware omits it.
+When AP setup reaches the internal owner, optional `wifiStartupPhases` retains
+before/after internal and DMA blocks for the attempted `mode`, `ramStorage`,
+and `accessPoint` transitions, including successful transitions before a later
+failure. Missing phases were not attempted.
 
 `DSTS` also includes a top-level `storage` object. `storage.backend` is one of
 `sdmmc`, `legacy_spi_migration`, `spi`, `ffat`, or `unavailable`, and
@@ -1720,14 +1960,21 @@ the existing bearer token. The read-only API is:
 Every route requires the authenticated transfer token and an active
 `diagnostics` mode. The device never accepts an arbitrary filesystem path or a
 remote-delete request. Before enabling the HTTP session, the firmware writer
-performs a fresh directory and write/flush/close/remove probe, drains all
-earlier queue entries, and seals its current chunk; short, normal rides are
-therefore included without exposing a mutable tail. The recorder root is stable
+acquires the bounded transfer snapshot lease, performs a fresh directory and
+write/flush/close/remove probe, drains all earlier queue entries, and seals its
+current chunk; short, normal rides are therefore included without exposing a
+mutable tail. Acquiring the lease before the seal keeps retention enumeration
+out of the seal deadline. Because the writer serializes pruning and sealing,
+seal completion also proves that any prune which began before the lease has
+finished. The recorder root is stable
 for the complete boot. When removable SD was mounted at boot, diagnostics uses
 that mount without unmounting it beneath map/font readers. When the boot is
 already using the bounded internal FFat fallback, diagnostics exports FFat and
 does not switch to a newly inserted removable card while recorder or map file
-handles may still be open; adopting removable storage requires a reboot.
+handles may still be open; adopting removable storage requires a reboot. FFat
+uses a 1 MiB diagnostics retention ceiling and preserves 2 MiB of free space,
+while removable SD retains the original 32 MiB ceiling and 8 MiB reserve. See
+[Ride diagnostics format](ride-diagnostics-format.md#device-storage-retention).
 
 The diagnostics-entry `DSTS.lastError` codes are stable and stage-specific:
 
@@ -1756,9 +2003,11 @@ streaming, verifies length, SHA-256, JSONL schema/source, per-field types, and
 sequence ordering within and across chunks, then atomically
 retains it under its local diagnostics root. Repeating a download skips an
 already-imported chunk with the same hash.
-Creating the index starts a bounded transfer snapshot lease. Retention pruning
-cannot delete indexed closed chunks while that authenticated session is active;
-each non-exit request refreshes the lease and session exit releases it.
+Diagnostics entry starts a bounded transfer snapshot lease before the recorder
+seal. Retention pruning cannot delete the sealed or indexed closed chunks while
+that authenticated session is active; index creation and each non-exit request
+refresh the lease, while setup failure, disconnect, timeout, or session exit
+releases it.
 
 The browser API and binary RGB565 frame contract are documented in
 [Remote device debugging](remote-device-debugging.md). BLE exit, browser exit,
@@ -1770,6 +2019,13 @@ order.
 
 Status responses should include:
 
+- `sdPresent`: whether firmware initialized the microSD storage used for maps.
+- `mapStateKnown`: `true` only after the renderer has published a frame for the
+  current location. Clients must not treat `mapFound: false` as an
+  out-of-coverage result until this is true.
+- `mapFound`: whether the active map contains data for the current rendered
+  location.
+- `mapBlocks`: number of map blocks currently held by the renderer cache.
 - `activeMapId`: map id from `/sdcard/VECTMAP/active-map.json`, if present.
 - `activeSessionId`: durable content-derived session selected by
   `active-map.json`, when installed by transfer-capable firmware. This
@@ -1786,8 +2042,8 @@ Status responses should include:
   them to generate a local preview; preview image bytes are never sent over
   BLE.
 - `activeRendererFormat`: the installed renderer target format (`1` legacy,
-  `2` FMB v3 + FMA1 street labels, `3` FMB v4 + FMA1 + OSM buildings,
-  `4` FMB v5 + FMA1 + buildings + map POIs).
+  `2` FMB v3 + FMA1 street labels, `3` FMB v4 + FMA1 + OSM buildings, `4`
+  FMB v5 + FMA1 + OSM buildings + contours).
 - `labelProfileVersion`: `1` for the current target-2/3/4 label profile, otherwise
   `0`.
 - `labelLanguages`: the bounded ordered BCP-47 language tags embedded in the
@@ -1796,9 +2052,18 @@ Status responses should include:
   validation and the active renderer can open it. The app uses these fields to
   distinguish unsupported firmware, a legacy map that needs regeneration, and
   an unhealthy label asset.
-- `poiProfileVersion`: `1` only for an active target-4 POI profile.
-- `poiDataHealthy`: `true` only after every active FMB v5 POI section and the
-  signed aggregate summary pass independent activation validation.
+- `topographyProfileVersion`: `1` for the renderer-format-4 contour profile,
+  otherwise `0`.
+- `topographyQualityMode`, `contourMinorIntervalM`, and
+  `contourIndexIntervalM`: the signed active manifest's quality label and fixed
+  contour interval pair.
+- `contourNoDataMillionths` and `containsContours`: signed source-gap summary
+  and whether the installed sections contain any contour records.
+- `topographySourcePolicyReceiptPrefix`: the first 12 lowercase hexadecimal
+  characters of the signed source-policy receipt, for bounded diagnostics.
+- `topographySectionHealthy`: `true` only when renderer format 4 metadata and
+  every installed FMB5 contour section passed activation validation. The app
+  requires this field before it enables contour visibility.
 - `enabled`: whether Wi-Fi/HTTPS upload mode is enabled.
 - `firmwareVersion`, `firmwareBuild`, and `firmwareGitSha`: the exact running
   firmware identity. The git identity must be the full 40-character lowercase
@@ -1937,3 +2202,50 @@ The HTTPS service is configured by firmware at boot but remains disabled until
 BLE transfer control binds it to an authenticated owner session. BLE disconnect
 synchronously clears the token, hotspot secret, binding, and request generation,
 stops the listener, and schedules mode-specific cleanup.
+
+### World Radio reuse invariants
+
+The World Radio reuse/lifecycle follow-up does not change WRQ1/WRS1 bytes,
+CAP2 bit 27, client version 25, or screen type 5. Stable screen identifiers now
+come from `screen_types` in `protocol/ride-ble-contract-v1.json`; generated
+Swift/C++ adapters preserve legacy masks and configurable-screen payload IDs.
+The common request/status fixtures in `protocol/fixtures/world-radio-v1.txt`
+are consumed by firmware and phone host tests. See `docs/world-radio.md` for
+playback intent, item/search generation, and vector-Earth coordinate selection.
+
+### Native HealthKit zones and legacy workout frames
+
+Workout mirror schema 1.7 adds optional `snapshot.nativeZones` for iPhone/Watch. It carries separate heart-rate and cycling-power groups, exact thresholds,
+configuration provenance, native durations, observation timestamps and an
+explicit final/saved distinction. The property-list addition is distinct from the versioned device sidecar below. Unknown legacy phone projection strips
+this optional payload; known schema-1.6 peers may ignore its unknown key.
+
+`WEXT` and its five-band Bicino heart-rate model remain byte-for-byte unchanged.
+Never copy a native ordinal (including a five-zone native ordinal with different
+thresholds) into that legacy field. Native power zones do not replace watts.
+Native zones on the ESP32 use the separately versioned kind-5 sidecar; they do
+not change WEXT, watts, cadence, or the old source-flag meanings.
+
+### Versioned workout zone device sidecars
+
+Client version 27 requests CAP2 bit 29 (`workout_zones_v1`). Updated iOS 26 and
+older supported Watch systems retain the explicitly labelled Bicino HR fallback.
+Native HealthKit groups require the SDK/runtime-gated Watch API; power zones are
+unavailable rather than estimated without it. Firmware advertises this feature
+and new widget IDs 17–21 only in diagnostic/development profiles pending physical
+qualification. Older peers, production firmware and insufficient-MTU connections
+continue the original legacy telemetry path.
+
+Kind 5 uses a 32-byte header, exact binary64 thresholds, a full workout UUID,
+ordered sequence, per-metric source age and bounded millisecond durations, for
+3–9 zones and at most 132 bytes. HR and power packets are self-contained rather
+than referring to an unacknowledged configuration cache. Capability-negotiated
+critical workout ACK groups have exactly five members (core, extended, origin,
+HR zones, power zones); existing 1–3-member groups remain valid. Both relays use
+the shared encoder and age queued samples immediately before encryption/retry.
+
+See [Workout zone device protocol](workout-zone-device-protocol.md) for the
+normative offsets, validation, replay/expiry and compatibility matrix. The JSON
+contract generates Swift/C++ constants and append-only widget IDs. Golden
+packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
+by both languages.

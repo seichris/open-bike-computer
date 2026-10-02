@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import unittest
+from contextlib import redirect_stdout
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "changed_components.py"
@@ -13,6 +17,88 @@ SPEC.loader.exec_module(changed_components)
 
 
 class ChangedComponentsTests(unittest.TestCase):
+    def test_evidence_and_scenario_tools_select_their_consumers(self):
+        for path in ("tools/build_evidence.py", "tools/build-and-record-firmware"):
+            result = changed_components.classify_paths([path])
+            self.assertTrue(result["firmware_build"])
+            self.assertTrue(result["firmware_host"])
+            self.assertEqual(result["ios"], path == "tools/build_evidence.py")
+        for path in ("protocol/scenarios/reconnect.json", "tools/replay_scenario.py"):
+            result = changed_components.classify_paths([path])
+            self.assertTrue(result["ios"])
+            self.assertTrue(result["firmware_host"])
+        self.assertTrue(changed_components.classify_paths(["tools/incident_bundle.py"])["firmware_host"])
+
+    def test_host_scenarios_and_source_lists_skip_native_builds(self):
+        for path in (*changed_components.IOS_FAST_ONLY_PATHS, "protocol/scenarios/reconnect.json", "ios-app/scripts/tests/test_xcodebuild_evidence_mode.py"):
+            with self.subTest(path=path):
+                self.assertTrue(changed_components.classify_paths([path])["ios"])
+                self.assertFalse(changed_components.native_ios_required([path]))
+        for path in ("ios-app/BikeComputer/App.swift", "tools/development/simulator_session.py",
+                     "tools/development/ios_build.py", "tools/build_evidence.py"):
+            self.assertTrue(changed_components.native_ios_required([path]), path)
+        self.assertTrue(changed_components.native_ios_required(["protocol/scenarios/reconnect.json", "ios-app/BikeComputer/App.swift"]))
+
+    def test_registry_changes_scope_old_and_new_consumers(self):
+        before = {"schema":1, "checks":[{"id":"host", "component":"ios", "command":"old"},
+                                       {"id":"native", "component":"ios_native", "command":"build"}]}
+        after = json.loads(json.dumps(before)); after["checks"][0]["command"] = "new"
+        affected = changed_components.registry_affected_components(json.dumps(before),json.dumps(after))
+        self.assertEqual(affected, {"ios"})
+        paths = [changed_components.CHECK_REGISTRY]
+        selected = changed_components.classify_paths(paths, registry_components=affected)
+        self.assertEqual({key for key,value in selected.items() if value}, {"ios"})
+        self.assertFalse(changed_components.native_ios_required(paths, registry_components=affected))
+        after["checks"][0]["component"] = "firmware_host"
+        self.assertEqual(changed_components.registry_affected_components(json.dumps(before),json.dumps(after)), {"ios","firmware_host"})
+        after["checks"] = []
+        affected = changed_components.registry_affected_components(json.dumps(before),json.dumps(after))
+        self.assertEqual(affected,{"ios","ios_native"})
+        self.assertTrue(changed_components.native_ios_required(paths, registry_components=affected))
+
+    def test_registry_unknown_inputs_fall_back_to_all_consumers(self):
+        valid = json.dumps({"schema":1,"checks":[]})
+        for value in ('invalid', '{"schema":2,"checks":[]}',
+                      '{"schema":1,"checks":[{"id":"a","component":"unknown"}]}'):
+            self.assertIsNone(changed_components.registry_affected_components(valid,value))
+        self.assertTrue(all(changed_components.classify_paths([changed_components.CHECK_REGISTRY]).values()))
+        self.assertTrue(changed_components.native_ios_required([changed_components.CHECK_REGISTRY]))
+
+    def test_development_unit_tests_do_not_select_product_builds(self):
+        self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))
+        self.assertFalse(changed_components.native_ios_required(["tools/development/tests/test_development_checks.py"]))
+
+    def test_cache_and_core_changes_keep_regular_builds_and_fast_tests(self):
+        for path in (
+            "esp32/tools/shared_firmware_cache.py", "esp32/tools/firmware_compile_cache.py",
+            "esp32/tools/build_firmware.py", "esp32/tools/firmware_runtime.py",
+            "esp32/platformio.ini", "esp32/tools/firmware-runtime/lock-v1.json",
+            ".github/actions/firmware-build-cache/action.yml",
+        ):
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["firmware_build"])
+                self.assertTrue(selected["firmware_host"])
+
+    def test_cli_emits_only_regular_ci_components_and_targets(self):
+        for scope, paths, native_ios in (
+            ("auto", ["esp32/tools/shared_firmware_cache.py"], False),
+            ("auto", ["esp32/platformio.ini"], False),
+            ("auto", ["esp32/src/main.cpp"], False), ("auto", None, True),
+            ("auto", ["ios-app/BikeComputer/App.swift"], True),
+            ("auto", ["ios-app/scripts/tests/test_xcodebuild_evidence_mode.py"], False),
+            ("firmware", [], False), ("all", [], True), ("ios", [], True), ("map", [], False),
+        ):
+            with self.subTest(scope=scope, paths=paths):
+                output = io.StringIO()
+                with patch("sys.argv", [str(SCRIPT), "--event", "workflow_dispatch", "--scope", scope]), patch.object(
+                    changed_components, "changed_paths", return_value=paths
+                ), redirect_stdout(output):
+                    self.assertEqual(0, changed_components.main())
+                selected = dict(line.split("=", 1) for line in output.getvalue().splitlines())
+                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets", "ios_native"}, set(selected))
+                self.assertEqual("true" if native_ios else "false", selected["ios_native"])
+
     def test_docs_only_change_skips_product_jobs(self) -> None:
         self.assertEqual(
             {

@@ -51,11 +51,30 @@ extension WatchDeviceLink {
     var testHeartbeat: Bool { heartbeatTimer != nil }
     var testGeneration: UInt64 { connectionGeneration }
     var testReleasePending: Bool { phonePreparationReleasePending }
+    var testPendingReconciliation:
+        WatchDirectRideReconciliationRequestV1? {
+        pendingPhonePreparationReconciliation
+    }
     var testPendingACK: WatchBLEOutboundGroupV1? { pendingApplicationAckGroup }
+    var testRecoveryPhase: RideBLERecoveryPhaseV1? { transportStateMachine.recoveryPhase }
     var testWriter: RideBLEWriterStateV1 { transportStateMachine.writerState }
     var testIntent: WatchDirectRidePreparationIntentV1? {
         guard let data = defaults.data(forKey: directRidePreparationIntentKey) else { return nil }
         return try? .decode(data)
+    }
+    static func testInstallRestoredPreparation(
+        defaults: UserDefaults,
+        preparationID: UUID
+    ) {
+        let intent = try! WatchDirectRidePreparationIntentV1(
+            preparationID: preparationID,
+            operation: .prepare,
+            deviceID: "00112233445566778899aabbccddeeff"
+        )
+        defaults.set(
+            try! intent.encoded(),
+            forKey: "watchDeviceLink.directRidePreparationIntent.v1"
+        )
     }
     func testAuth(_ message: String, on peer: CBPeripheral) {
         let characteristic = peer.services![0].characteristics!.first { $0.uuid == authUUID }!
@@ -118,6 +137,7 @@ extension WatchDeviceLink {
         testDrainATT(on: peer)
     }
     func testDispose() {
+        recoveryCancellationTask?.cancel()
         reconnectTask?.cancel(); operationTimeoutTask?.cancel()
         leaseReleaseAckTask?.cancel(); writerWatchdogTask?.cancel()
         withoutResponseWatchdogTask?.cancel(); applicationAckWatchdogTask?.cancel()

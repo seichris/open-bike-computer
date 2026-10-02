@@ -148,10 +148,10 @@ struct Fix {
   // the fix lets prediction remain bounded in real metres while producing a
   // position in the exact world-coordinate space used by the map renderer.
   double worldUnitsPerMeter = 1.0;
-  // Local monotonic time when the GPS packet was accepted. This deliberately
-  // remains separate from the later UI time at which heading convergence may
-  // re-observe the same physical fix.
+  // Estimated source capture time in the receiver's monotonic domain. Source
+  // age, transport arrival and UI processing time are separate contracts.
   uint32_t timestampMs = 0;
+  bool sourceTimeKnown = true;
 };
 
 struct PresentedPose {
@@ -300,6 +300,15 @@ public:
             ? fix.worldUnitsPerMeter
             : 1.0;
     normalized.headingDegrees = normalizeDegrees(fix.headingDegrees);
+    if (!normalized.sourceTimeKnown) normalized.speedMetersPerSecond = 0;
+    // Repeated expired/unknown snapshots at the same position cannot keep
+    // restarting positional convergence. Retain the already frozen endpoint.
+    if (hasFix_ && present(receivedAtMs).predictionExhausted &&
+        (!normalized.sourceTimeKnown || receivedAtMs - normalized.timestampMs >= config_.maximumPredictionMs) &&
+        normalized.position.x == current_.position.x && normalized.position.y == current_.position.y) {
+      updateHeading(normalized.headingDegrees, normalized.headingValid, receivedAtMs);
+      return;
+    }
     if (hasFix_) {
       previousPresented_ = present(receivedAtMs);
       positionConvergenceStartMs_ = receivedAtMs;
@@ -347,9 +356,7 @@ public:
     if (!hasFix_)
       return {};
 
-    // Fix::timestampMs is the accepted GPS-packet time. Keep freshness tied to
-    // that source while later route-bearing updates affect only display
-    // heading convergence.
+    // Capture time, never transport heartbeat time, bounds prediction.
     const uint32_t ageMs = nowMs - current_.timestampMs;
     const uint32_t predictionMs =
         std::min(ageMs, config_.maximumPredictionMs);
@@ -401,13 +408,13 @@ public:
       pose.headingDegrees = previousPresented_.headingDegrees;
     }
     pose.sourceTimestampMs = current_.timestampMs;
-    pose.observationAgeMs = ageMs;
+    pose.observationAgeMs = current_.sourceTimeKnown ? ageMs : UINT32_MAX;
     pose.predictionAgeMs = predictionMs;
     const bool timeExhausted = ageMs >= config_.maximumPredictionMs;
     const bool distanceExhausted =
         current_.speedMetersPerSecond > 0.0 &&
         uncappedDistanceMeters >= maximumPredictionMeters;
-    pose.predictionExhausted = timeExhausted || distanceExhausted;
+    pose.predictionExhausted = !current_.sourceTimeKnown || timeExhausted || distanceExhausted;
     pose.predictionGraceActive =
         !pose.predictionExhausted && ageMs > fullSpeedPredictionMs;
     return pose;

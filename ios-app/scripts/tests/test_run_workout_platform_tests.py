@@ -12,7 +12,7 @@ SCRIPT = Path(__file__).resolve().parents[1] / "run-workout-platform-tests.sh"
 
 
 class WorkoutPlatformScriptTests(unittest.TestCase):
-    def run_script(self, root: Path, *, shared: Path | None) -> Path:
+    def run_script(self, root: Path, *, shared: Path | None, artifacts: Path | None = None, exit_code: int = 0) -> Path:
         bin_dir = root / "bin"
         bin_dir.mkdir(parents=True)
         args_log = root / "xcodebuild-args.json"
@@ -22,7 +22,7 @@ class WorkoutPlatformScriptTests(unittest.TestCase):
                     "com.apple.CoreSimulator.SimRuntime.iOS-26-5": [
                         {
                             "udid": "00000000-0000-0000-0000-000000000001",
-                            "state": "Booted",
+                            "state": "Shutdown",
                             "isAvailable": True,
                         }
                     ]
@@ -30,6 +30,7 @@ class WorkoutPlatformScriptTests(unittest.TestCase):
             },
             separators=(",", ":"),
         )
+        runtime_payload = json.dumps({"runtimes": [{"identifier": "com.apple.CoreSimulator.SimRuntime.iOS-26-5", "version": "26.5", "isAvailable": True, "supportedDeviceTypes": [{"productFamily": "iPhone", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17"}]}]})
         xcrun = bin_dir / "xcrun"
         xcrun.write_text(
             "#!/usr/bin/env bash\n"
@@ -38,7 +39,13 @@ class WorkoutPlatformScriptTests(unittest.TestCase):
             f"  printf '%s\\n' '{simulator_payload}'\n"
             "  exit 0\n"
             "fi\n"
+            "if [[ \"$*\" == \"simctl list runtimes --json\" ]]; then\n"
+            f"  printf '%s\\n' '{runtime_payload}'\n"
+            "  exit 0\n"
+            "fi\n"
+            "if [[ \"${2:-}\" == \"create\" ]]; then echo 00000000-0000-0000-0000-000000000001; exit 0; fi\n"
             "if [[ \"${1:-}\" == \"simctl\" ]]; then exit 0; fi\n"
+            "if [[ \"$*\" == \"--sdk iphonesimulator --show-sdk-version\" ]]; then echo 26.5; exit 0; fi\n"
             "exit 64\n",
             encoding="utf-8",
         )
@@ -48,9 +55,13 @@ class WorkoutPlatformScriptTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "/usr/bin/python3 - \"$XCODEBUILD_ARGS_LOG\" \"$@\" <<'PY'\n"
-            "import json, sys\n"
+            "import json, os, sys\n"
             "from pathlib import Path\n"
             "Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]), encoding='utf-8')\n"
+            "if '-resultBundlePath' in sys.argv:\n"
+            "    bundle = Path(sys.argv[sys.argv.index('-resultBundlePath') + 1]); bundle.mkdir(parents=True)\n"
+            "    (bundle / 'result.txt').write_text('native test evidence')\n"
+            "raise SystemExit(int(os.environ.get('XCODEBUILD_EXIT_CODE', '0')))\n"
             "PY\n",
             encoding="utf-8",
         )
@@ -67,6 +78,11 @@ class WorkoutPlatformScriptTests(unittest.TestCase):
                 "XCODEBUILD_PATH": str(xcodebuild),
             }
         )
+        environment["XCODEBUILD_EXIT_CODE"] = str(exit_code)
+        if artifacts is None:
+            environment.pop("DEV_CHECK_ARTIFACTS", None)
+        else:
+            environment["DEV_CHECK_ARTIFACTS"] = str(artifacts)
         if shared is None:
             environment.pop("CI_DERIVED_DATA_PATH", None)
         else:
@@ -81,6 +97,17 @@ class WorkoutPlatformScriptTests(unittest.TestCase):
             text=True,
         )
         return args_log
+
+    def test_native_failure_preserves_result_bundle_outside_owned_derived_data(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "retained"
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.run_script(root / "run", shared=None, artifacts=artifacts, exit_code=65)
+            results = list(artifacts.rglob("tests.xcresult/result.txt"))
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].read_text(), "native test evidence")
+            self.assertEqual(list((root / "run/tmp").iterdir()), [])
 
     def test_external_derived_data_is_reused_across_invocations_and_preserved(
         self,

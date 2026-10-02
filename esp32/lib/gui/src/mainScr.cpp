@@ -7,7 +7,11 @@
  */
 
 #include "mainScr.hpp"
+#include "mainScreenRegistry.hpp"
+#include "worldRadioScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
+#include "../../ble_navigation/gps_input_freshness.hpp"
+#include "../../ble_navigation/screen_configuration.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../device_debug/device_debug_camera.hpp"
 #include "../../route_overlay/route_overlay.hpp"
@@ -20,7 +24,10 @@
 #include "uiUpdatePolicy.hpp"
 #include "../../ble_navigation/workout_telemetry_runtime.hpp"
 #include "../../utils/src/mapTapArbiter.hpp"
+#include "../../maps/src/mapPoiIcon.hpp"
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <type_traits>
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -72,6 +79,7 @@ lv_obj_t *compassTile;
 lv_obj_t *navTile;
 lv_obj_t *rideStatsTile;
 lv_obj_t *batteryStatusTile;
+lv_obj_t *worldRadioTile;
 lv_obj_t *mapTile;
 lv_obj_t *satTrackTile;
 lv_obj_t *btnFullScreen;
@@ -87,6 +95,50 @@ static uint32_t mapTileTransitionStartedMs = 0;
 static bool mapTileTransitionUsedRenderAhead = false;
 static bool mapRenderAheadPending = false;
 static tileName mapRenderAheadTile = MAP;
+static uint32_t mapRenderAheadInstanceID = 0;
+static uint32_t mapRenderAheadProfileSignature = 0;
+static uint8_t activeScreenInstanceIndex =
+    screen_configuration::kInvalidInstanceIndex;
+static uint32_t activeScreenInstanceID = 0;
+static uint32_t activeScreenPayloadSignature = 0;
+static uint32_t mapRenderInstanceID = 0;
+static uint8_t mapRenderInstanceType = DEVICE_SCREEN_MAP;
+static uint32_t mapRenderProfileSignature = 0;
+struct NearbyMarkerView {
+  lv_obj_t *button = nullptr;
+  lv_obj_t *icon = nullptr;
+  lv_obj_t *distance = nullptr;
+  lv_obj_t *count = nullptr;
+  lv_obj_t *arrow = nullptr;
+  lv_point_precise_t arrowPoints[3]{};
+};
+struct NearbyView {
+  lv_obj_t *picker = nullptr;
+  lv_obj_t *categoryButtons[5]{};
+  lv_obj_t *categoryChecks[5]{};
+  lv_obj_t *showButton = nullptr;
+  lv_obj_t *pickerStatus = nullptr;
+  lv_obj_t *overlay = nullptr;
+  lv_obj_t *status = nullptr;
+  lv_obj_t *furtherButton = nullptr;
+  lv_obj_t *chooser = nullptr;
+  NearbyMarkerView markers[10]{};
+  map_nearby_storage::SearchResult result{};
+  map_nearby_layout::Layout layout{};
+  std::array<bool, map_nearby_layout::kMaximumResults> wasOnMap{};
+  uint32_t selectedMask = 0;
+  uint32_t querySequence = 0;
+  uint32_t lastQueryMs = 0;
+  uint32_t lastLayoutMs = 0;
+  map_nearby_query::Position lastQueryPosition{};
+  double radiusM = 10000.0;
+  bool showingMap = false;
+  bool querying = false;
+  bool haveResults = false;
+  uint8_t highlightedResult = 255;
+};
+static NearbyView nearby;
+static std::array<std::array<uint16_t, 14 * 14>, 5> nearbyIconPixels{};
 struct DestinationRowContext {
   uint32_t generation = 0;
   uint16_t token = 0;
@@ -108,6 +160,10 @@ static constexpr lv_point_precise_t DESTINATION_STAR_POINTS[] = {
     {3, 18}, {5, 11}, {0, 7},  {7, 6},   {9, 0}};
 
 static void refreshDestinationPickersAsync(void *userData);
+static void createNearbyScreen();
+static void showNearbyPicker();
+static void hideNearbyScreen();
+static void serviceNearbyScreen(uint32_t nowMs);
 
 namespace {
 
@@ -163,8 +219,14 @@ uint64_t navigationSignature() {
   return hash;
 }
 
-uint64_t gpsSignature() {
+uint64_t gpsSignature(uint32_t nowMs) {
   uint64_t hash = FNV_OFFSET;
+  const auto sourceSample = gps_input_freshness::presentationSample(
+      gps.presentationSample, bleNavServer.getDebugStats().gpsSource);
+  // A source can expire without changing any GPSDATA field. Make that
+  // transition invalidate Ride Stats so its stale status and speed update.
+  hashScalar(hash, gps_input_freshness::presentationStatusBits(sourceSample,
+                                                                nowMs));
   hashScalar(hash, gps.gpsData.satellites);
   hashScalar(hash, gps.gpsData.fixMode);
   hashScalar(hash, isGpsFixed);
@@ -298,7 +360,7 @@ ui_update_policy::SourceSignatures captureSourceSignatures(uint32_t nowMs) {
 
   ui_update_policy::SourceSignatures signatures;
   signatures[ui_update_policy::Source::Navigation] = navigationSignature();
-  signatures[ui_update_policy::Source::Gps] = gpsSignature();
+  signatures[ui_update_policy::Source::Gps] = gpsSignature(nowMs);
   signatures[ui_update_policy::Source::Route] = routeOverlay.revision();
   signatures[ui_update_policy::Source::Workout] = cachedWorkoutSignature;
   uint64_t phoneBattery = FNV_OFFSET;
@@ -391,7 +453,9 @@ void requestMapRender(map_render_policy::Reason reason) {
 static map_pinch_zoom::Controller mapPinchController;
 
 static bool standaloneMapAcceptsMultiTouch() {
-  return isMainScreen && activeTile == MAP && mapSet.vectorMap;
+  return isMainScreen &&
+         (activeTile == MAP || (activeTile == NEARBY && nearby.showingMap)) &&
+         mapSet.vectorMap;
 }
 
 static map_pinch_zoom::Frame
@@ -520,7 +584,7 @@ static void serviceMapPinchZoomOutBackdrop() {
 static void serviceMapPinchZoomOutBackdrop() {}
 #endif
 
-bool isMapScreenActive() { return activeTile == MAP; }
+bool isMapScreenActive() { return activeTile == MAP || activeTile == NEARBY; }
 
 bool isMapGuidanceScreenActive() { return activeTile == MAP_GUIDANCE; }
 
@@ -530,7 +594,7 @@ bool shouldInterruptMapRenderForScreenCycle() {
     return false;
   }
 
-  if (activeTile == MAP) {
+  if (activeTile == MAP || activeTile == NEARBY) {
     return mapPinchBlocksMapRender() || hasUnattemptedTouchInterrupt();
   }
   if (activeTile != MAP_GUIDANCE) {
@@ -562,8 +626,92 @@ const ScreenMapRenderSettings &currentMapStyleSettings() {
   return mapStyleSettingsForTile(static_cast<tileName>(activeTile));
 }
 
+uint32_t currentScreenInstanceID() { return activeScreenInstanceID; }
+
+uint32_t currentMapRenderInstanceID() { return mapRenderInstanceID; }
+
+uint8_t currentMapRenderInstanceType() { return mapRenderInstanceType; }
+
+uint32_t currentMapRenderProfileSignature() {
+  return mapRenderProfileSignature;
+}
+
+static void applyMapInstanceProfile(
+    const screen_configuration_protocol::ScreenInstance &instance) {
+  if (instance.type != screen_configuration_protocol::ScreenType::Map &&
+      instance.type != screen_configuration_protocol::ScreenType::Nearby &&
+      instance.type !=
+          screen_configuration_protocol::ScreenType::MapNavigation) {
+    return;
+  }
+  const auto &source = instance.mapProfile;
+  ScreenMapRenderSettings &target =
+      instance.type != screen_configuration_protocol::ScreenType::MapNavigation
+          ? mapRenderSettings.mapStyle
+          : mapRenderSettings.mapNavigationStyle;
+  target.minPolygonSize = source.minPolygonSize;
+  target.detailLevel = source.detailLevel;
+  target.routeLineWidth = source.routeLineWidth;
+  target.streetLineWidth = source.streetLineWidth;
+  target.positionMarkerScale = source.positionMarkerScale;
+  target.zoomLevel = source.zoomLevel;
+  target.visibilityMask =
+      source.visibilityMask &
+      map_profile_protocol::VISIBILITY_RENDER_FEATURE_MASK &
+      (instance.type == screen_configuration_protocol::ScreenType::Nearby
+           ? ~map_profile_protocol::VISIBILITY_POI_MASK : UINT32_MAX);
+  target.labelDensity = source.labelDensity;
+  target.labelLanguageMode = source.labelLanguageMode;
+  target.labelTextSize = source.labelTextSize;
+  target.labelOrientation = source.labelOrientation;
+  mapRenderSettings.navigationOverlayVisibilityMask =
+      source.visibilityMask & MAP_VISIBILITY_OVERLAY_MASK;
+  if (instance.type == screen_configuration_protocol::ScreenType::Map ||
+      instance.type == screen_configuration_protocol::ScreenType::Nearby) {
+    mapRenderSettings.mapRotationMode = source.rotationMode;
+  } else {
+    mapRenderSettings.mapNavigationRotationMode = source.rotationMode;
+    mapRenderSettings.mapNavigationBirdsEyeEnabled = source.birdsEyeEnabled;
+    mapRenderSettings.mapNavigationBirdsEyePerspective =
+        source.birdsEyePerspective;
+    mapRenderSettings.mapNavigation3DBuildingsEnabled =
+        source.buildings3DEnabled;
+  }
+  mapRenderInstanceID = instance.id;
+  mapRenderInstanceType = static_cast<uint8_t>(instance.type);
+  mapRenderProfileSignature =
+      screen_configuration::mapProfileSignature(instance);
+}
+
+const screen_configuration_protocol::RideStatsLayout &
+currentRideStatsLayout() {
+  static const screen_configuration_protocol::RideStatsLayout defaultLayout{};
+  if (!screen_configuration::isReady())
+    return defaultLayout;
+  const auto &snapshot = screen_configuration::activeSnapshot();
+  const uint8_t index = screen_configuration::findInstanceIndex(
+      snapshot.document, activeScreenInstanceID);
+  if (index == screen_configuration::kInvalidInstanceIndex ||
+      snapshot.document.instances[index].type !=
+          screen_configuration_protocol::ScreenType::RideStats) {
+    return defaultLayout;
+  }
+  return snapshot.document.instances[index].rideStatsLayout;
+}
+
 static void tapCycleScreenEvent(lv_event_t *event);
 static void mapGuidanceOverlayTapEvent(lv_event_t *event);
+static bool sendWorldRadioRequest(
+    const world_radio_protocol::Request &request) {
+  return bleNavServer.requestWorldRadio(request);
+}
+static void cycleFromWorldRadio() { showNextMainScreen(); }
+static bool worldRadioTapCyclesScreens() {
+  return mapRenderSettings.tapToSwitchScreens != 0;
+}
+static bool worldRadioPhoneReady() {
+  return bleNavServer.canRequestWorldRadio();
+}
 static void updateMapGuidanceOverlay();
 static void revealPendingMapTileIfReady();
 
@@ -611,125 +759,69 @@ static bool currentCourseUpHeading(uint16_t &headingDegrees) {
 }
 
 static bool isMapBackedTile(uint8_t tile) {
-  return tile == MAP || tile == MAP_GUIDANCE;
+  return main_screen_registry::isMapBacked(static_cast<tileName>(tile));
 }
 
 static uint8_t normalizedEnabledScreensMask() {
-  const uint8_t mask =
-      mapRenderSettings.enabledScreensMask & DEVICE_SCREEN_SUPPORTED_MASK;
-  return mask == 0 ? DEVICE_SCREEN_SUPPORTED_MASK : mask;
-}
-
-static uint8_t deviceScreenBit(uint8_t screen) {
-  return (screen <= DEVICE_SCREEN_BATTERY_STATUS) ? (1 << screen) : 0;
-}
-
-static constexpr uint8_t DEVICE_SCREEN_CYCLE_ORDER[] = {
-    DEVICE_SCREEN_MAP_PLUS_NAVIGATION, DEVICE_SCREEN_RIDE_STATS,
-    DEVICE_SCREEN_MAP, DEVICE_SCREEN_NAVIGATION,
-    DEVICE_SCREEN_BATTERY_STATUS};
-static constexpr uint8_t DEVICE_SCREEN_COUNT =
-    sizeof(DEVICE_SCREEN_CYCLE_ORDER) / sizeof(DEVICE_SCREEN_CYCLE_ORDER[0]);
-
-static tileName tileForDeviceScreen(uint8_t screen) {
-  switch (screen) {
-  case DEVICE_SCREEN_NAVIGATION:
-    return NAV;
-  case DEVICE_SCREEN_RIDE_STATS:
-    return RIDESTATS;
-  case DEVICE_SCREEN_MAP_PLUS_NAVIGATION:
-    return MAP_GUIDANCE;
-  case DEVICE_SCREEN_BATTERY_STATUS:
-    return BATTERY_STATUS;
-  case DEVICE_SCREEN_MAP:
-  default:
-    return MAP;
-  }
-}
-
-static uint8_t deviceScreenForTile(tileName tile) {
-  switch (tile) {
-  case NAV:
-    return DEVICE_SCREEN_NAVIGATION;
-  case RIDESTATS:
-    return DEVICE_SCREEN_RIDE_STATS;
-  case MAP_GUIDANCE:
-    return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
-  case BATTERY_STATUS:
-    return DEVICE_SCREEN_BATTERY_STATUS;
-  case MAP:
-  default:
-    return DEVICE_SCREEN_MAP;
-  }
+  return main_screen_registry::normalizedMask(
+      mapRenderSettings.enabledScreensMask);
 }
 
 static bool isScreenEnabled(tileName tile) {
-  return (normalizedEnabledScreensMask() &
-          deviceScreenBit(deviceScreenForTile(tile))) != 0;
+  return main_screen_registry::isEnabled(tile,
+                                         normalizedEnabledScreensMask());
 }
 
 static uint8_t normalizedDefaultDeviceScreen() {
-  const uint8_t mask = normalizedEnabledScreensMask();
-  uint8_t defaultScreen = mapRenderSettings.defaultScreen;
-  if (defaultScreen > DEVICE_SCREEN_BATTERY_STATUS) {
-    defaultScreen = DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
-  }
-  if (mask & deviceScreenBit(defaultScreen)) {
-    return defaultScreen;
-  }
-  for (uint8_t screen : DEVICE_SCREEN_CYCLE_ORDER) {
-    if (mask & deviceScreenBit(screen)) {
-      return screen;
-    }
-  }
-  return DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
+  return main_screen_registry::normalizedDefault(
+      mapRenderSettings.defaultScreen, normalizedEnabledScreensMask());
 }
 
 static tileName configuredDefaultTile() {
-  return tileForDeviceScreen(normalizedDefaultDeviceScreen());
+  return main_screen_registry::tileForDeviceScreen(normalizedDefaultDeviceScreen());
 }
 
 static tileName nextEnabledTile(tileName current) {
-  const uint8_t currentScreen = deviceScreenForTile(current);
-  uint8_t currentIndex = 0;
-  for (uint8_t index = 0; index < DEVICE_SCREEN_COUNT; index++) {
-    if (DEVICE_SCREEN_CYCLE_ORDER[index] == currentScreen) {
-      currentIndex = index;
-      break;
-    }
-  }
-  for (uint8_t offset = 1; offset <= DEVICE_SCREEN_COUNT; offset++) {
-    const uint8_t screen = DEVICE_SCREEN_CYCLE_ORDER[
-        (currentIndex + offset) % DEVICE_SCREEN_COUNT];
-    tileName candidate = tileForDeviceScreen(screen);
-    if (isScreenEnabled(candidate)) {
-      return candidate;
-    }
-  }
-  return configuredDefaultTile();
+  return main_screen_registry::nextEnabled(current,
+                                           normalizedEnabledScreensMask());
+}
+
+static tileName previousEnabledTile(tileName current) {
+  return main_screen_registry::previousEnabled(
+      current, normalizedEnabledScreensMask());
 }
 
 static bool nextEnabledMapBackedTile(tileName current, tileName &next) {
-  const uint8_t currentScreen = deviceScreenForTile(current);
-  uint8_t currentIndex = 0;
-  for (uint8_t index = 0; index < DEVICE_SCREEN_COUNT; index++) {
-    if (DEVICE_SCREEN_CYCLE_ORDER[index] == currentScreen) {
-      currentIndex = index;
-      break;
-    }
-  }
-
-  for (uint8_t offset = 1; offset <= DEVICE_SCREEN_COUNT; offset++) {
-    const uint8_t screen = DEVICE_SCREEN_CYCLE_ORDER[
-        (currentIndex + offset) % DEVICE_SCREEN_COUNT];
-    const tileName candidate = tileForDeviceScreen(screen);
-    if (isScreenEnabled(candidate) && isMapBackedTile(candidate)) {
-      next = candidate;
-      return true;
-    }
-  }
-  return false;
+  return main_screen_registry::nextEnabledMapBacked(
+      current, normalizedEnabledScreensMask(), next);
 }
+
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::Map) ==
+                  DEVICE_SCREEN_MAP);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::Navigation) ==
+                  DEVICE_SCREEN_NAVIGATION);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::RideStats) ==
+                  DEVICE_SCREEN_RIDE_STATS);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::MapPlusNavigation) ==
+                  DEVICE_SCREEN_MAP_PLUS_NAVIGATION);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::BatteryStatus) ==
+                  DEVICE_SCREEN_BATTERY_STATUS);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::WorldRadio) ==
+                  DEVICE_SCREEN_WORLD_RADIO);
+static_assert(main_screen_registry::SUPPORTED_MASK ==
+                  DEVICE_SCREEN_SUPPORTED_MASK);
+static bool configuredInstance(uint8_t index,
+                               const screen_configuration_protocol::ScreenInstance *&instance) {
+  if (!screen_configuration::isReady())
+    return false;
+  const auto &document = screen_configuration::activeSnapshot().document;
+  if (index >= document.instanceCount)
+    return false;
+  instance = &document.instances[index];
+  return true;
+}
+
+static void showScreenInstance(uint8_t index);
 
 static bool isGuidanceNavigating() {
   return routeOverlay.hasRoute() || hasCurrentNavigationData();
@@ -781,7 +873,7 @@ static void applyMapRotationForTile(tileName tile) {
     return;
   }
 
-  if (tile != MAP) {
+  if (tile != MAP && tile != NEARBY) {
     return;
   }
 
@@ -809,11 +901,31 @@ static void prepareNextMapScreenRenderAhead(tileName current) {
   }
 
   tileName target = MAP;
-  if (!nextEnabledMapBackedTile(current, target)) {
+  uint32_t targetInstanceID = 0;
+  uint32_t targetProfileSignature = 0;
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    const uint8_t targetIndex =
+        screen_configuration::nextEnabledInstanceOfType(
+            document, activeScreenInstanceIndex,
+            screen_configuration_protocol::ScreenType::Map,
+            screen_configuration_protocol::ScreenType::MapNavigation);
+    if (targetIndex == screen_configuration::kInvalidInstanceIndex) {
+      mapRenderAheadPending = false;
+      return;
+    }
+    const auto &targetInstance = document.instances[targetIndex];
+    target = main_screen_registry::tileForDeviceScreen(static_cast<uint8_t>(targetInstance.type));
+    targetInstanceID = targetInstance.id;
+    applyMapInstanceProfile(targetInstance);
+    targetProfileSignature = mapRenderProfileSignature;
+  } else if (!nextEnabledMapBackedTile(current, target)) {
     mapRenderAheadPending = false;
     return;
   }
-  if (mapRenderAheadPending && mapRenderAheadTile == target) {
+  if (mapRenderAheadPending && mapRenderAheadTile == target &&
+      mapRenderAheadInstanceID == targetInstanceID &&
+      mapRenderAheadProfileSignature == targetProfileSignature) {
     return;
   }
 
@@ -836,8 +948,12 @@ static void prepareNextMapScreenRenderAhead(tileName current) {
   mapRenderScheduler.markSubmitted(nowMs, currentMapFix());
   mapRenderAheadPending = true;
   mapRenderAheadTile = target;
-  log_i("UI: render-ahead requested for %s screen",
-        target == MAP_GUIDANCE ? "map guidance" : "map");
+  mapRenderAheadInstanceID = targetInstanceID;
+  mapRenderAheadProfileSignature = targetProfileSignature;
+  log_i("UI: render-ahead requested instance=%lu type=%s profile=%lu",
+        static_cast<unsigned long>(targetInstanceID),
+        target == MAP_GUIDANCE ? "map guidance" : "map",
+        static_cast<unsigned long>(mapRenderProfileSignature));
 }
 
 static uint16_t mapGuidanceOverlayHeight() {
@@ -1251,6 +1367,7 @@ void updateMainScreen(lv_timer_t *t) {
   const uint32_t nowMs = millis();
   (void)uiChangeTracker.observe(captureSourceSignatures(nowMs));
   const bool navigationOverlayChanged = prepareVisibleMapUpdate(nowMs);
+  serviceNearbyScreen(nowMs);
 
   if (isScrolled && isMainScreen) {
     switch (activeTile) {
@@ -1284,6 +1401,7 @@ void updateMainScreen(lv_timer_t *t) {
       break;
 
     case MAP:
+    case NEARBY:
     case MAP_GUIDANCE:
       break;
 
@@ -1318,6 +1436,12 @@ void updateMainScreen(lv_timer_t *t) {
       }
       break;
     }
+
+    case WORLD_RADIO:
+      if constexpr (world_radio_config::ENABLED) {
+        updateWorldRadioScr();
+      }
+      break;
 
     case SATTRACK:
       if (uiChangeTracker.take(ui_update_policy::Source::Gps)) {
@@ -1920,17 +2044,558 @@ static void createMapGuidanceOverlay() {
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 }
 
+static bool nearbyFreshPosition(uint32_t nowMs,
+                                map_nearby_query::Position &position) {
+  const auto sample = gps_input_freshness::presentationSample(
+      gps.presentationSample, bleNavServer.getDebugStats().gpsSource);
+  position = {gps.gpsData.latitude, gps.gpsData.longitude};
+  return isGpsFixed && sample.fresh(nowMs) &&
+         map_nearby_query::valid(position);
+}
+
+static void nearbyPickerStatus() {
+  if (nearby.pickerStatus == nullptr) return;
+  lv_label_set_text(nearby.pickerStatus,
+      nearby.selectedMask == 0
+          ? "Choose one or more categories"
+          : "Direct distance - not route distance");
+  if (nearby.showButton != nullptr) {
+    if (nearby.selectedMask == 0)
+      lv_obj_add_state(nearby.showButton, LV_STATE_DISABLED);
+    else
+      lv_obj_clear_state(nearby.showButton, LV_STATE_DISABLED);
+  }
+  for (uint8_t index = 0; index < 5; ++index) {
+    if (nearby.categoryButtons[index] == nullptr) continue;
+    const bool selected = (nearby.selectedMask & (1U << index)) != 0;
+    lv_obj_set_style_border_color(
+        nearby.categoryButtons[index],
+        selected ? lv_color_hex(0x80E8A1) : lv_color_hex(0x5B6972), 0);
+    lv_label_set_text(nearby.categoryChecks[index],
+                      selected ? "[x]" : "[ ]");
+  }
+}
+
+static void nearbyCategoryTap(lv_event_t *event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+  const auto index = static_cast<uint8_t>(
+      reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)) - 1U);
+  if (index >= 5) return;
+  nearby.selectedMask ^= 1U << index;
+  nearbyPickerStatus();
+}
+
+static void nearbyStartSearch(uint32_t nowMs) {
+  if (!nearby.showingMap || nearby.selectedMask == 0) return;
+  nearby.lastQueryMs = nowMs;
+  map_nearby_query::Position position;
+  if (!nearbyFreshPosition(nowMs, position)) {
+    nearby.querying = false;
+    lv_label_set_text(nearby.status, "Waiting for GPS");
+    return;
+  }
+  const uint32_t sequence = mapView.requestNearbySearch(
+      position, nearby.selectedMask, nearby.radiusM);
+  if (sequence == 0) {
+    nearby.querying = false;
+    lv_label_set_text(nearby.status, "Nearby search unavailable");
+    return;
+  }
+  nearby.querySequence = sequence;
+  nearby.lastQueryPosition = position;
+  nearby.querying = true;
+  lv_label_set_text(nearby.status, "Finding nearby places...");
+}
+
+static void nearbyShowMapTap(lv_event_t *event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED ||
+      nearby.selectedMask == 0) return;
+  nearby.showingMap = true;
+  nearby.radiusM = 10000.0;
+  nearby.haveResults = false;
+  nearby.result = {};
+  nearby.querySequence = 0;
+  nearby.wasOnMap.fill(false);
+  nearby.highlightedResult = 255;
+  for (auto &marker : nearby.markers)
+    lv_obj_add_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(nearby.picker, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(nearby.overlay, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(nearby.overlay);
+  nearbyStartSearch(millis());
+}
+
+static void nearbyReturnToPicker(lv_event_t *event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+  showNearbyPicker();
+}
+
+static void nearbySearchFurther(lv_event_t *event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED ||
+      nearby.radiusM >= 25000.0) return;
+  nearby.radiusM = 25000.0;
+  lv_obj_add_flag(nearby.furtherButton, LV_OBJ_FLAG_HIDDEN);
+  nearbyStartSearch(millis());
+}
+
+static void nearbyFocusResult(uint8_t resultIndex) {
+  if (resultIndex >= nearby.result.count) return;
+  const auto &place = nearby.result.places[resultIndex];
+  nearby.highlightedResult = resultIndex;
+  mapView.centerOnCoordinate(place.position.latitude, place.position.longitude);
+  requestMapRender(map_render_policy::Reason::Screen);
+  lv_obj_add_flag(nearby.chooser, LV_OBJ_FLAG_HIDDEN);
+  nearby.lastLayoutMs = 0;
+}
+
+static void nearbyChooserResultTap(lv_event_t *event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+  nearbyFocusResult(static_cast<uint8_t>(
+      reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)) - 1U));
+}
+
+static void nearbyCloseChooser(lv_event_t *event) {
+  if (lv_event_get_code(event) == LV_EVENT_CLICKED)
+    lv_obj_add_flag(nearby.chooser, LV_OBJ_FLAG_HIDDEN);
+}
+
+static const char *nearbyCategoryName(uint8_t category) {
+  switch (category) {
+  case 1: return "Shop";
+  case 2: return "Restaurant / cafe";
+  case 3: return "Public toilet";
+  case 4: return "Gas station";
+  case 5: return "Bicycle service";
+  default: return "Mixed places";
+  }
+}
+
+static void nearbyFormatDistance(double meters, char *buffer, size_t capacity) {
+  if (!std::isfinite(meters) || meters < 0.0) {
+    snprintf(buffer, capacity, "--");
+  } else if (meters < 995.0) {
+    snprintf(buffer, capacity, "%.0f m", std::round(meters / 10.0) * 10.0);
+  } else {
+    snprintf(buffer, capacity, "%.1f km", std::round(meters / 100.0) / 10.0);
+  }
+}
+
+static void nearbyMarkerTap(lv_event_t *event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
+  const auto index = static_cast<size_t>(
+      reinterpret_cast<uintptr_t>(lv_event_get_user_data(event)) - 1U);
+  if (index >= nearby.layout.count) return;
+  const auto &placement = nearby.layout.placements[index];
+  if (placement.count == 1) {
+    for (uint8_t member = 0; member < nearby.result.count; ++member) {
+      if ((placement.members & (1U << member)) != 0) {
+        nearbyFocusResult(member);
+        return;
+      }
+    }
+    return;
+  }
+  lv_obj_clean(nearby.chooser);
+  lv_obj_t *heading = lv_label_create(nearby.chooser);
+  lv_label_set_text(heading, "Nearby places");
+  lv_obj_align(heading, LV_ALIGN_TOP_MID, 0, 8);
+  lv_obj_set_style_text_color(heading, lv_color_white(), 0);
+  lv_obj_t *list = lv_obj_create(nearby.chooser);
+  lv_obj_set_size(list, lv_obj_get_width(nearby.chooser) - 20,
+                  lv_obj_get_height(nearby.chooser) - 85);
+  lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 34);
+  lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(list, 0, 0);
+  lv_obj_set_style_pad_all(list, 0, 0);
+  lv_obj_set_scroll_dir(list, LV_DIR_VER);
+  uint8_t row = 0;
+  for (uint8_t member = 0; member < nearby.result.count; ++member) {
+    if ((placement.members & (1U << member)) == 0) continue;
+    lv_obj_t *button = lv_btn_create(list);
+    lv_obj_set_size(button, lv_obj_get_width(list) - 8, 37);
+    lv_obj_set_pos(button, 2, row * 42);
+    lv_obj_add_event_cb(button, nearbyChooserResultTap, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(uintptr_t(member + 1U)));
+    lv_obj_t *label = lv_label_create(button);
+    char distance[24];
+    nearbyFormatDistance(nearby.result.places[member].directDistanceM,
+                         distance, sizeof(distance));
+    lv_label_set_text_fmt(label, "%s  %s",
+                          nearbyCategoryName(nearby.result.places[member].category),
+                          distance);
+    lv_obj_center(label);
+    ++row;
+  }
+  lv_obj_t *close = lv_btn_create(nearby.chooser);
+  lv_obj_set_size(close, 80, 34);
+  lv_obj_align(close, LV_ALIGN_BOTTOM_MID, 0, -7);
+  lv_obj_add_event_cb(close, nearbyCloseChooser, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *closeLabel = lv_label_create(close);
+  lv_label_set_text(closeLabel, "Close");
+  lv_obj_center(closeLabel);
+  lv_obj_clear_flag(nearby.chooser, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(nearby.chooser);
+}
+
+static lv_obj_t *nearbyIcon(lv_obj_t *parent, uint8_t category) {
+  if (category < 1 || category > 5) return nullptr;
+  lv_obj_t *icon = lv_canvas_create(parent);
+  lv_canvas_set_buffer(icon, nearbyIconPixels[category - 1U].data(),
+                       14, 14, LV_COLOR_FORMAT_RGB565);
+  return icon;
+}
+
+static void createNearbyScreen() {
+  nearby = {};
+  for (uint8_t category = 1; category <= 5; ++category) {
+    map_surface::Rgb565Surface surface{
+        nearbyIconPixels[category - 1U].data(), 14, 14, 14};
+    map_poi_icon::draw(surface, 7, 7,
+        static_cast<map_poi_block::Category>(category));
+  }
+  const bool round = TFT_WIDTH == TFT_HEIGHT;
+  const int16_t centerX = TFT_WIDTH / 2;
+  const int16_t tileWidth = round ? 178 : 164;
+  const int16_t gap = round ? 10 : 9;
+  const int16_t tileHeight = 64;
+  const int16_t leftX = centerX - gap / 2 - tileWidth;
+  const int16_t rightX = centerX + gap / 2;
+  const int16_t rowY[3] = {round ? 94 : 112,
+                            round ? 173 : 195,
+                            round ? 252 : 278};
+  nearby.picker = lv_obj_create(mainScreen);
+  lv_obj_remove_style_all(nearby.picker);
+  lv_obj_set_size(nearby.picker, TFT_WIDTH, TFT_HEIGHT);
+  lv_obj_set_style_bg_color(nearby.picker, lv_color_hex(0x0C151C), 0);
+  lv_obj_set_style_bg_opa(nearby.picker, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(nearby.picker, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t *title = lv_label_create(nearby.picker);
+  lv_label_set_text(title, "Nearby");
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+  lv_obj_set_style_text_color(title, lv_color_white(), 0);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, round ? 43 : 55);
+  const char *names[5] = {
+      "Shops", "Restaurants\n& Cafes", "Public Toilets",
+      "Gas Stations", "Bicycle Shops\n& Repair"};
+  for (uint8_t index = 0; index < 5; ++index) {
+    const int16_t x = index == 4 ? centerX - 126 :
+        (index % 2 == 0 ? leftX : rightX);
+    const int16_t y = rowY[index / 2];
+    lv_obj_t *button = lv_btn_create(nearby.picker);
+    nearby.categoryButtons[index] = button;
+    lv_obj_set_size(button, index == 4 ? 252 : tileWidth, tileHeight);
+    lv_obj_set_pos(button, x, y);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x20323D), 0);
+    lv_obj_set_style_border_width(button, 3, 0);
+    lv_obj_set_style_radius(button, 15, 0);
+    lv_obj_add_event_cb(button, nearbyCategoryTap, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(uintptr_t(index + 1U)));
+    lv_obj_t *icon = nearbyIcon(button, index + 1U);
+    lv_obj_set_pos(icon, 10, 12);
+    lv_obj_t *label = lv_label_create(button);
+    lv_label_set_text(label, names[index]);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_set_pos(label, 30, index == 1 || index == 4 ? 5 : 19);
+    nearby.categoryChecks[index] = lv_label_create(button);
+    lv_obj_align(nearby.categoryChecks[index], LV_ALIGN_RIGHT_MID, -5, 0);
+    lv_obj_set_style_text_color(nearby.categoryChecks[index],
+                                lv_color_white(), 0);
+  }
+  nearby.showButton = lv_btn_create(nearby.picker);
+  lv_obj_set_size(nearby.showButton, 190, 52);
+  lv_obj_align(nearby.showButton, LV_ALIGN_TOP_MID, 0,
+               round ? 345 : 390);
+  lv_obj_add_event_cb(nearby.showButton, nearbyShowMapTap, LV_EVENT_CLICKED,
+                      nullptr);
+  lv_obj_t *showLabel = lv_label_create(nearby.showButton);
+  lv_label_set_text(showLabel, "Show nearby");
+  lv_obj_center(showLabel);
+  nearby.pickerStatus = lv_label_create(nearby.picker);
+  lv_obj_set_style_text_font(nearby.pickerStatus, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(nearby.pickerStatus, lv_color_hex(0xB7C7D2), 0);
+  lv_obj_align(nearby.pickerStatus, LV_ALIGN_TOP_MID, 0,
+               round ? 411 : 458);
+  nearbyPickerStatus();
+  lv_obj_add_flag(nearby.picker, LV_OBJ_FLAG_HIDDEN);
+
+  nearby.overlay = lv_obj_create(mapTile);
+  lv_obj_remove_style_all(nearby.overlay);
+  lv_obj_set_size(nearby.overlay, TFT_WIDTH, TFT_HEIGHT);
+  lv_obj_set_style_bg_opa(nearby.overlay, LV_OPA_TRANSP, 0);
+  lv_obj_clear_flag(nearby.overlay, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(nearby.overlay, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_t *categories = lv_btn_create(nearby.overlay);
+  lv_obj_set_size(categories, 108, 38);
+  lv_obj_set_pos(categories, round ? 70 : 12, round ? 55 : 20);
+  lv_obj_add_event_cb(categories, nearbyReturnToPicker, LV_EVENT_CLICKED,
+                      nullptr);
+  lv_obj_t *categoriesLabel = lv_label_create(categories);
+  lv_label_set_text(categoriesLabel, "Categories");
+  lv_obj_set_style_text_font(categoriesLabel, &lv_font_montserrat_14, 0);
+  lv_obj_center(categoriesLabel);
+  nearby.status = lv_label_create(nearby.overlay);
+  lv_obj_set_width(nearby.status, round ? 200 : 260);
+  lv_label_set_long_mode(nearby.status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_align(nearby.status, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_font(nearby.status, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(nearby.status, lv_color_white(), 0);
+  lv_obj_set_pos(nearby.status, round ? 187 : 138, round ? 57 : 22);
+  nearby.furtherButton = lv_btn_create(nearby.overlay);
+  lv_obj_set_size(nearby.furtherButton, 150, 42);
+  lv_obj_align(nearby.furtherButton, LV_ALIGN_BOTTOM_MID, 0,
+               round ? -52 : -30);
+  lv_obj_add_event_cb(nearby.furtherButton, nearbySearchFurther,
+                      LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *furtherLabel = lv_label_create(nearby.furtherButton);
+  lv_label_set_text(furtherLabel, "Search further");
+  lv_obj_set_style_text_font(furtherLabel, &lv_font_montserrat_14, 0);
+  lv_obj_center(furtherLabel);
+  lv_obj_add_flag(nearby.furtherButton, LV_OBJ_FLAG_HIDDEN);
+  for (uint8_t index = 0; index < 10; ++index) {
+    NearbyMarkerView &marker = nearby.markers[index];
+    marker.button = lv_btn_create(nearby.overlay);
+    lv_obj_set_size(marker.button, 72, 52);
+    lv_obj_set_style_radius(marker.button, 11, 0);
+    lv_obj_set_style_bg_color(marker.button, lv_color_hex(0x142D3A), 0);
+    lv_obj_set_style_border_width(marker.button, 2, 0);
+    lv_obj_set_style_border_color(marker.button, lv_color_white(), 0);
+    lv_obj_add_event_cb(marker.button, nearbyMarkerTap, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(uintptr_t(index + 1U)));
+    marker.icon = nearbyIcon(marker.button, 1);
+    lv_obj_set_pos(marker.icon, 10, 8);
+    marker.distance = lv_label_create(marker.button);
+    lv_obj_set_style_text_font(marker.distance, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(marker.distance, lv_color_white(), 0);
+    lv_obj_align(marker.distance, LV_ALIGN_BOTTOM_MID, 0, -3);
+    marker.count = lv_label_create(marker.button);
+    lv_obj_set_style_text_font(marker.count, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(marker.count, lv_color_white(), 0);
+    lv_obj_align(marker.count, LV_ALIGN_TOP_RIGHT, -5, 4);
+    marker.arrow = lv_line_create(marker.button);
+    lv_obj_set_style_line_color(marker.arrow, lv_color_white(), 0);
+    lv_obj_set_style_line_width(marker.arrow, 2, 0);
+    lv_obj_add_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_add_flag(nearby.overlay, LV_OBJ_FLAG_HIDDEN);
+
+  nearby.chooser = lv_obj_create(mainScreen);
+  lv_obj_set_size(nearby.chooser, std::min<int>(TFT_WIDTH - 70, 320),
+                  std::min<int>(TFT_HEIGHT - 95, 430));
+  lv_obj_center(nearby.chooser);
+  lv_obj_set_style_bg_color(nearby.chooser, lv_color_hex(0x152630), 0);
+  lv_obj_set_style_bg_opa(nearby.chooser, LV_OPA_COVER, 0);
+  lv_obj_add_flag(nearby.chooser, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void showNearbyPicker() {
+  mapView.cancelNearbySearch();
+  nearby.querying = false;
+  nearby.showingMap = false;
+  nearby.haveResults = false;
+  nearby.querySequence = 0;
+  if (nearby.overlay != nullptr)
+    lv_obj_add_flag(nearby.overlay, LV_OBJ_FLAG_HIDDEN);
+  if (nearby.chooser != nullptr)
+    lv_obj_add_flag(nearby.chooser, LV_OBJ_FLAG_HIDDEN);
+  if (nearby.picker != nullptr) {
+    nearbyPickerStatus();
+    lv_obj_clear_flag(nearby.picker, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(nearby.picker);
+  }
+}
+
+static void hideNearbyScreen() {
+  mapView.cancelNearbySearch();
+  nearby.querying = false;
+  nearby.showingMap = false;
+  nearby.querySequence = 0;
+  if (nearby.picker != nullptr)
+    lv_obj_add_flag(nearby.picker, LV_OBJ_FLAG_HIDDEN);
+  if (nearby.overlay != nullptr)
+    lv_obj_add_flag(nearby.overlay, LV_OBJ_FLAG_HIDDEN);
+  if (nearby.chooser != nullptr)
+    lv_obj_add_flag(nearby.chooser, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void refreshNearbyMarkers(uint32_t nowMs) {
+  if (!nearby.showingMap || !nearby.haveResults ||
+      !mapView.hasPublishedMapFrame()) return;
+  if (nearby.lastLayoutMs != 0 &&
+      static_cast<uint32_t>(nowMs - nearby.lastLayoutMs) < 200U) return;
+  nearby.lastLayoutMs = nowMs;
+  std::array<map_nearby_layout::Input, 10> projected{};
+  map_nearby_query::Position rider;
+  const bool fresh = nearbyFreshPosition(nowMs, rider);
+  for (uint8_t index = 0; index < nearby.result.count; ++index) {
+    if (!mapView.projectNearbyResult(nearby.result.places[index],
+                                     projected[index])) return;
+    if (fresh) {
+      projected[index].directDistanceM = map_nearby_query::distanceMeters(
+          rider, nearby.result.places[index].position);
+    }
+  }
+  const bool round = TFT_WIDTH == TFT_HEIGHT;
+  nearby.layout = map_nearby_layout::arrange(
+      projected.data(), nearby.result.count, TFT_WIDTH, TFT_HEIGHT, round,
+      round ? 95.0 : 70.0, round ? 95.0 : 80.0, nearby.wasOnMap);
+  nearby.wasOnMap = nearby.layout.onMap;
+  for (uint8_t index = 0; index < 10; ++index) {
+    NearbyMarkerView &marker = nearby.markers[index];
+    if (index >= nearby.layout.count) {
+      lv_obj_add_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
+      continue;
+    }
+    const auto &placed = nearby.layout.placements[index];
+    const int16_t width = placed.edge ? 72 : 30;
+    const int16_t height = placed.edge ? 52 : 30;
+    lv_obj_set_size(marker.button, width, height);
+    lv_obj_set_pos(marker.button,
+        static_cast<int16_t>(std::lround(placed.x)) - width / 2,
+        static_cast<int16_t>(std::lround(placed.y)) - height / 2);
+    lv_obj_set_style_border_color(
+        marker.button,
+        (nearby.highlightedResult < nearby.result.count &&
+         (placed.members & (1U << nearby.highlightedResult)) != 0)
+            ? lv_color_hex(0xFFE269) : lv_color_white(), 0);
+    if (placed.category != 0) {
+      lv_canvas_set_buffer(marker.icon,
+                           nearbyIconPixels[placed.category - 1U].data(),
+                           14, 14, LV_COLOR_FORMAT_RGB565);
+      lv_obj_set_pos(marker.icon, placed.edge ? 10 : 8,
+                     placed.edge ? 7 : 8);
+      lv_obj_clear_flag(marker.icon, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(marker.icon, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (placed.count > 1) {
+      lv_label_set_text_fmt(marker.count, "%u", placed.count);
+      lv_obj_clear_flag(marker.count, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(marker.count, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (placed.edge) {
+      char distance[24];
+      nearbyFormatDistance(placed.nearestDistanceM,
+                           distance, sizeof(distance));
+      lv_label_set_text(marker.distance, distance);
+      lv_obj_clear_flag(marker.distance, LV_OBJ_FLAG_HIDDEN);
+      const double dx = placed.x - TFT_WIDTH / 2.0;
+      const double dy = placed.y - TFT_HEIGHT / 2.0;
+      const double length = std::max(1.0, std::hypot(dx, dy));
+      const double ux = dx / length;
+      const double uy = dy / length;
+      const double px = -uy;
+      const double py = ux;
+      marker.arrowPoints[0] = {
+          static_cast<lv_point_precise_t>(std::lround(48 - ux * 8 + px * 4)),
+          static_cast<lv_point_precise_t>(std::lround(13 - uy * 8 + py * 4))};
+      marker.arrowPoints[1] = {
+          static_cast<lv_point_precise_t>(std::lround(48 + ux * 3)),
+          static_cast<lv_point_precise_t>(std::lround(13 + uy * 3))};
+      marker.arrowPoints[2] = {
+          static_cast<lv_point_precise_t>(std::lround(48 - ux * 8 - px * 4)),
+          static_cast<lv_point_precise_t>(std::lround(13 - uy * 8 - py * 4))};
+      lv_line_set_points(marker.arrow, marker.arrowPoints, 3);
+      lv_obj_clear_flag(marker.arrow, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(marker.distance, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(marker.arrow, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_clear_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_move_foreground(nearby.overlay);
+}
+
+static void serviceNearbyScreen(uint32_t nowMs) {
+  if (activeTile != NEARBY || !nearby.showingMap) return;
+  uint32_t sequence = 0;
+  map_nearby_storage::SearchResult replacement;
+  if (mapView.takeNearbySearchResult(sequence, replacement) &&
+      sequence == nearby.querySequence) {
+    nearby.querying = false;
+    if (replacement.status == map_nearby_storage::Status::Ok) {
+      nearby.result = replacement;
+      nearby.haveResults = true;
+      nearby.wasOnMap.fill(false);
+      nearby.lastLayoutMs = 0;
+    } else {
+      nearby.haveResults = false;
+      nearby.result = {};
+      for (auto &marker : nearby.markers)
+        lv_obj_add_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
+    }
+    switch (replacement.status) {
+    case map_nearby_storage::Status::Ok:
+      if (replacement.count == 0) {
+        lv_label_set_text_fmt(nearby.status,
+            "No matching places within %.0f km in this map",
+            nearby.radiusM / 1000.0);
+      } else {
+        lv_label_set_text_fmt(nearby.status,
+            "%u places - %.0f km - downloaded area only",
+            replacement.count, nearby.radiusM / 1000.0);
+      }
+      break;
+    case map_nearby_storage::Status::Unavailable:
+      lv_label_set_text(nearby.status,
+          "Updated offline map required - download on phone");
+      break;
+    case map_nearby_storage::Status::Corrupt:
+      lv_label_set_text(nearby.status, "Map POI data is corrupt");
+      break;
+    case map_nearby_storage::Status::ReadFailed:
+      lv_label_set_text(nearby.status, "Cannot read map POI data");
+      break;
+    case map_nearby_storage::Status::ResourceRejected:
+      lv_label_set_text(nearby.status, "Not enough memory for Nearby");
+      break;
+    case map_nearby_storage::Status::Cancelled:
+      break;
+    }
+  }
+  const bool canExpand = nearby.radiusM < 25000.0 &&
+      !nearby.querying && nearby.haveResults && nearby.result.count < 10;
+  if (canExpand)
+    lv_obj_clear_flag(nearby.furtherButton, LV_OBJ_FLAG_HIDDEN);
+  else
+    lv_obj_add_flag(nearby.furtherButton, LV_OBJ_FLAG_HIDDEN);
+
+  map_nearby_query::Position current;
+  if (!nearbyFreshPosition(nowMs, current)) {
+    if (!nearby.querying &&
+        (nearby.haveResults || nearby.querySequence == 0))
+      lv_label_set_text(nearby.status,
+          nearby.haveResults ? "Waiting for GPS - results stale"
+                             : "Waiting for GPS");
+    refreshNearbyMarkers(nowMs);
+    return;
+  }
+  if (!nearby.querying &&
+      static_cast<uint32_t>(nowMs - nearby.lastQueryMs) >= 5000U &&
+      (nearby.querySequence == 0 ||
+       (nearby.haveResults &&
+       map_nearby_query::distanceMeters(current, nearby.lastQueryPosition) >=
+           50.0))) {
+    nearbyStartSearch(nowMs);
+  }
+  refreshNearbyMarkers(nowMs);
+}
+
 static void showMainTile(tileName tile) {
   if (!mapTile || !navTile || !rideStatsTile || !batteryStatusTile ||
+      (world_radio_config::ENABLED && !worldRadioTile) ||
       !mapGuidanceOverlay) {
     return;
   }
 
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 
+  if (tile != NEARBY) hideNearbyScreen();
+
   activeTile = tile;
-  canScrollMap = tile == MAP;
-  if (tile != MAP) {
+  canScrollMap = tile == MAP || tile == NEARBY;
+  if (tile != MAP && tile != NEARBY) {
     mapView.cancelDragPreview();
   }
   if (isMapBackedTile(activeTile)) {
@@ -1943,7 +2608,10 @@ static void showMainTile(tileName tile) {
     mapTileTransition.begin();
     mapTileTransitionStartedMs = millis();
     mapTileTransitionUsedRenderAhead =
-        mapRenderAheadPending && mapRenderAheadTile == tile;
+        mapRenderAheadPending && mapRenderAheadTile == tile &&
+        (!screen_configuration::isReady() ||
+         (mapRenderAheadInstanceID == activeScreenInstanceID &&
+          mapRenderAheadProfileSignature == mapRenderProfileSignature));
     zoom = currentMapStyleSettings().zoomLevel;
     if (tile == MAP_GUIDANCE) {
       mapView.followGps = true;
@@ -1952,7 +2620,10 @@ static void showMainTile(tileName tile) {
 
     bool framePublished = false;
     bool renderPending = false;
-    if (mapRenderAheadPending && mapRenderAheadTile == tile) {
+    if (mapRenderAheadPending && mapRenderAheadTile == tile &&
+        (!screen_configuration::isReady() ||
+         (mapRenderAheadInstanceID == activeScreenInstanceID &&
+          mapRenderAheadProfileSignature == mapRenderProfileSignature))) {
       const uint32_t nowMs = millis();
       framePublished = mapView.serviceRenderPipeline(nowMs);
       if (framePublished) {
@@ -1984,10 +2655,18 @@ static void showMainTile(tileName tile) {
     lv_obj_add_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+    if (worldRadioTile != nullptr) {
+      lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   }
 
   switch (tile) {
+  case NEARBY:
+    lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
+    showNearbyPicker();
+    log_i("UI: switched to Nearby screen");
+    break;
   case MAP_GUIDANCE:
     uiChangeTracker.mark(ui_update_policy::Source::Navigation);
     updateMapGuidanceOverlay();
@@ -2025,6 +2704,13 @@ static void showMainTile(tileName tile) {
             ui_update_policy::Source::DeviceBattery));
     log_i("UI: switched to battery status screen");
     break;
+  case WORLD_RADIO:
+    if constexpr (world_radio_config::ENABLED) {
+      lv_obj_clear_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+      activateWorldRadioScr();
+      log_i("UI: switched to world radio screen");
+    }
+    break;
   case MAP:
   default:
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
@@ -2037,6 +2723,25 @@ static void showMainTile(tileName tile) {
   }
 }
 
+static void showScreenInstance(uint8_t index) {
+  const screen_configuration_protocol::ScreenInstance *instance = nullptr;
+  if (!configuredInstance(index, instance) || instance == nullptr ||
+      !instance->enabled) {
+    return;
+  }
+  activeScreenInstanceIndex = index;
+  activeScreenInstanceID = instance->id;
+  activeScreenPayloadSignature =
+      screen_configuration::screenPayloadSignature(*instance);
+  applyMapInstanceProfile(*instance);
+  const tileName tile =
+      main_screen_registry::tileForDeviceScreen(static_cast<uint8_t>(instance->type));
+  log_i("UI: switching screen instance=%lu type=%u index=%u",
+        static_cast<unsigned long>(instance->id),
+        static_cast<unsigned>(instance->type), index);
+  showMainTile(tile);
+}
+
 static void revealPendingMapTileIfReady() {
   if (!mapView.hasPublishedMapFrame() ||
       !mapTileTransition.canReveal(mapView.isPosMoved, mapView.redrawMap)) {
@@ -2045,6 +2750,9 @@ static void revealPendingMapTileIfReady() {
 
   lv_obj_add_flag(navTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
+  if (worldRadioTile != nullptr) {
+    lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+  }
   lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
 
@@ -2067,21 +2775,77 @@ static void revealPendingMapTileIfReady() {
 }
 
 void showNextMainScreen() {
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    showScreenInstance(screen_configuration::nextEnabledInstanceIndex(
+        document, activeScreenInstanceIndex));
+    return;
+  }
   showMainTile(nextEnabledTile((tileName)activeTile));
 }
 
-void showConfiguredDefaultMainScreen() { showMainTile(configuredDefaultTile()); }
+void showPreviousMainScreen() {
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    showScreenInstance(screen_configuration::previousEnabledInstanceIndex(
+        document, activeScreenInstanceIndex));
+    return;
+  }
+  showMainTile(previousEnabledTile((tileName)activeTile));
+}
+
+void showConfiguredDefaultMainScreen() {
+  if (screen_configuration::isReady()) {
+    showScreenInstance(screen_configuration::defaultInstanceIndex(
+        screen_configuration::activeSnapshot().document));
+    return;
+  }
+  showMainTile(configuredDefaultTile());
+}
 
 void applyDeviceScreenSettings() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
-      !batteryStatusTile || !mapGuidanceOverlay) {
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
     return;
   }
 
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    const uint8_t matchingIndex = screen_configuration::findInstanceIndex(
+        document, activeScreenInstanceID);
+    if (matchingIndex == screen_configuration::kInvalidInstanceIndex ||
+        !document.instances[matchingIndex].enabled) {
+      showScreenInstance(screen_configuration::defaultInstanceIndex(document));
+    } else {
+      const auto &matching = document.instances[matchingIndex];
+      activeScreenInstanceIndex = matchingIndex;
+      // Reordering, renaming, or changing only the default screen must not
+      // interrupt the screen currently being ridden. Rebind only when its
+      // render-affecting payload changed.
+      if (activeScreenPayloadSignature !=
+          screen_configuration::screenPayloadSignature(matching)) {
+        showScreenInstance(matchingIndex);
+      } else if (isMapBackedTile(static_cast<tileName>(activeTile))) {
+        // Legacy scalar handling temporarily uses the shared settings. Restore
+        // the visible instance even when only a different instance changed.
+        applyMapInstanceProfile(matching);
+        zoom = currentMapStyleSettings().zoomLevel;
+        applyMapRotationForTile(static_cast<tileName>(activeTile));
+      } else if (!isMapBackedTile(static_cast<tileName>(activeTile))) {
+        // The visible payload is unchanged, but reordering/enabling another
+        // instance can change which map should be rendered ahead.
+        prepareNextMapScreenRenderAhead(static_cast<tileName>(activeTile));
+      }
+    }
+    return;
+  }
   if (!isScreenEnabled((tileName)activeTile)) {
     showMainTile(configuredDefaultTile());
   }
 }
+
+void applyDeviceScreenConfiguration() { applyDeviceScreenSettings(); }
 
 static void tapCycleScreenEvent(lv_event_t *event) {
   if (!mapRenderSettings.tapToSwitchScreens) {
@@ -2102,11 +2866,22 @@ static void mapGuidanceOverlayTapEvent(lv_event_t *event) {
 
 void toggleNavigationScreen() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
-      !batteryStatusTile || !mapGuidanceOverlay) {
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
     return;
   }
 
   showNextMainScreen();
+}
+
+void togglePreviousNavigationScreen() {
+  if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
+    return;
+  }
+
+  showPreviousMainScreen();
 }
 
 /**
@@ -2174,6 +2949,21 @@ void createMainScr() {
                       NULL);
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
 
+  if constexpr (world_radio_config::ENABLED) {
+    worldRadioTile = lv_obj_create(mainScreen);
+    lv_obj_remove_style_all(worldRadioTile);
+    lv_obj_set_size(worldRadioTile, TFT_WIDTH, TFT_HEIGHT);
+    lv_obj_set_pos(worldRadioTile, 0, 0);
+    lv_obj_clear_flag(worldRadioTile, LV_OBJ_FLAG_SCROLLABLE);
+    WorldRadioScreenCallbacks worldRadioCallbacks{};
+    worldRadioCallbacks.sendRequest = sendWorldRadioRequest;
+    worldRadioCallbacks.cycleScreen = cycleFromWorldRadio;
+    worldRadioCallbacks.tapToSwitchScreens = worldRadioTapCyclesScreens;
+    worldRadioCallbacks.phoneReady = worldRadioPhoneReady;
+    worldRadioScr(worldRadioTile, worldRadioCallbacks);
+    lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+  }
+
   batteryStatusTile = lv_obj_create(mainScreen);
   lv_obj_remove_style_all(batteryStatusTile);
   lv_obj_set_size(batteryStatusTile, TFT_WIDTH, TFT_HEIGHT);
@@ -2188,6 +2978,7 @@ void createMainScr() {
   lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
 
   createMapGuidanceOverlay();
+  createNearbyScreen();
 
   // Set tilesScreen to same as mapTile for compatibility
   tilesScreen = mapTile;

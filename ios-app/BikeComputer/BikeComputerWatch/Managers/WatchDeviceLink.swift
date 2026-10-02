@@ -129,13 +129,19 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var gracefulStopPending: Bool {
         transportStateMachine.phase == .stopping
     }
+    private var recoveryCancellationTask: Task<Void, Never>?
     private var leaseReleaseAckTask: Task<Void, Never>?
     private var latestWorkoutFrames: WorkoutDeviceFrames?
+    private var workoutZoneSequence: UInt32 = 0
+    private var navigationGPSClock = RideGPSSampleClockCache()
+    private var workoutGPSClock = RideGPSSampleClockCache()
+    private var lastDispatchedRouteWindow: Data?
     private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
     private var latestWorkoutMotion: WorkoutDeviceMotionUpdate?
     private var workoutPairGeneration: UInt8 = 0
     private var latestLocation: NavigationLocationSampleV1?
     private var latestNavigationSnapshot: NavigationSnapshotV1?
+    private var lastDispatchedNavigationSnapshot: NavigationSnapshotV1?
     private var latestRouteWindow = Data()
     private var preparedPhoneDeviceID: String?
     private var preparedPhonePreparationID: UUID?
@@ -149,6 +155,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         WatchDirectRidePreparationRestorationGateV1(
             restoredOperation: nil
         )
+    private var initialDemandRestorationCompleted = false
+    private var pendingPhonePreparationReconciliation:
+        WatchDirectRideReconciliationRequestV1?
+    private let pendingPhonePreparationReconciliationKey =
+        "watchBLE.pendingPhonePreparationReconciliation.v1"
 
     private let peripheralMapKey =
         "watchDeviceLink.peripheralByDeviceID.v1"
@@ -180,6 +191,12 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             phonePreparationRestorationGate = .init(
                 restoredOperation: intent.operation
             )
+        }
+        if let data = defaults.data(
+            forKey: pendingPhonePreparationReconciliationKey
+        ) {
+            pendingPhonePreparationReconciliation = try?
+                WatchDirectRideReconciliationRequestV1.decode(data)
         }
         super.init()
     }
@@ -403,6 +420,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     func directRidePreparationAvailabilityDidChange() {
         guard !gracefulStopPending else { return }
+        reconcilePendingPhonePreparationRequest()
         if hasDemand {
             reconcileDemand()
         } else if phonePreparationReleasePending {
@@ -412,6 +430,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     func completeInitialDemandRestoration() {
         guard !gracefulStopPending else { return }
+        initialDemandRestorationCompleted = true
         switch phonePreparationRestorationGate.complete(
             hasRecoveredDemand: hasDemand
         ) {
@@ -422,29 +441,47 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         case .none:
             break
         }
+        reconcilePendingPhonePreparationRequest()
+    }
+
+    func requestPhonePreparationReconciliation(
+        _ request: WatchDirectRideReconciliationRequestV1
+    ) {
+        guard (try? request.validated()) != nil else { return }
+        pendingPhonePreparationReconciliation = request
+        if let data = try? request.encoded() {
+            defaults.set(
+                data,
+                forKey: pendingPhonePreparationReconciliationKey
+            )
+        }
+        reconcilePendingPhonePreparationRequest()
     }
 
     func updateNavigation(
         location: NavigationLocationSampleV1,
         snapshot: NavigationSnapshotV1
     ) {
-        let previousSnapshot = latestNavigationSnapshot
         latestLocation = location
+        _ = navigationGPSClock.sample(location.timestamp)
         latestNavigationSnapshot = snapshot
         latestRouteWindow = snapshot.routeWindow
         guard transportStateMachine.isReady else { return }
         enqueueLiveNavigation(
             location: location,
-            snapshot: snapshot,
-            previousSnapshot: previousSnapshot
+            snapshot: snapshot
         )
     }
 
     func clearNavigation() {
         latestLocation = nil
         latestNavigationSnapshot = nil
+        lastDispatchedNavigationSnapshot = nil
         latestRouteWindow = Data()
         guard transportStateMachine.isReady else { return }
+        // These snapshots predate the clear. Leave an already dispatched
+        // group to finish, but never replay queued navigation after the clear.
+        queue.removeReplaceableGroups(coalescingKeys: ["route", "maneuver", "gps"])
         _ = enqueueGroup(
             priority: .control,
             disposition: .critical,
@@ -476,6 +513,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     ) {
         latestWorkoutFrames = frames
         latestWorkoutGPS = gps
+        if let gps { _ = workoutGPSClock.sample(gps.capturedAt) }
         latestWorkoutMotion = motion
         guard transportStateMachine.isReady else { return }
         enqueueWorkoutFrames(frames)
@@ -681,12 +719,59 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             preparationID
         ) ?? .transportUnavailable
         guard disposition == .submitted else { return false }
+        clearPendingPhonePreparationReconciliation(
+            deviceID: deviceID,
+            preparationID: preparationID
+        )
         preparedPhoneDeviceID = nil
         preparedPhonePreparationID = nil
         phonePreparationReleasePending = false
         phonePreparationAttempt = 0
         defaults.removeObject(forKey: directRidePreparationIntentKey)
         return true
+    }
+
+    private func reconcilePendingPhonePreparationRequest() {
+        guard initialDemandRestorationCompleted,
+              let request = pendingPhonePreparationReconciliation else {
+            return
+        }
+        let matchesCurrentPreparation =
+            preparedPhoneDeviceID == request.deviceID &&
+            preparedPhonePreparationID == request.preparationID
+        guard matchesCurrentPreparation else {
+            let disposition = onDirectRidePreparationChange?(
+                .release,
+                request.deviceID,
+                request.preparationID
+            ) ?? .transportUnavailable
+            if disposition == .submitted {
+                clearPendingPhonePreparationReconciliation(
+                    deviceID: request.deviceID,
+                    preparationID: request.preparationID
+                )
+            }
+            return
+        }
+        guard !hasDemand else { return }
+        if transportStateMachine.phase == .idle {
+            _ = releasePhonePreparationIfNeeded()
+        } else {
+            reconcileDemand()
+        }
+    }
+
+    private func clearPendingPhonePreparationReconciliation(
+        deviceID: String,
+        preparationID: UUID
+    ) {
+        guard pendingPhonePreparationReconciliation?.deviceID == deviceID,
+              pendingPhonePreparationReconciliation?.preparationID ==
+                preparationID else { return }
+        pendingPhonePreparationReconciliation = nil
+        defaults.removeObject(
+            forKey: pendingPhonePreparationReconciliationKey
+        )
     }
 
     private func persistPhonePreparationIntent(
@@ -935,6 +1020,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         challenge = nil
         protectedSession = nil
         capabilities = nil
+        lastDispatchedNavigationSnapshot = nil
+        lastDispatchedRouteWindow = nil
+        workoutZoneSequence = 0
         authCharacteristic = nil
         navigationCharacteristic = nil
         routeCharacteristic = nil
@@ -1208,7 +1296,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                         includeRideDetectionQuality:
                             capabilities?.supportsGPSPositionQualityV1 == true
                     ),
-                    gpsSampleTimestamp: latestLocation.timestamp
+                    gpsSampleClock: navigationGPSClock.sample(latestLocation.timestamp)
                 )]
             )
         } else {
@@ -1243,7 +1331,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     target: .navigation,
                     payload: WatchRidePacketEncoderV1.maneuver(
                         latestNavigationSnapshot
-                    )
+                    ),
+                    navigationSnapshot: latestNavigationSnapshot
                 )]
             )
         }
@@ -1251,8 +1340,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
 
     private func enqueueLiveNavigation(
         location: NavigationLocationSampleV1,
-        snapshot: NavigationSnapshotV1,
-        previousSnapshot: NavigationSnapshotV1?
+        snapshot: NavigationSnapshotV1
     ) {
         _ = enqueueGroup(
             priority: .livePosition,
@@ -1266,7 +1354,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     includeRideDetectionQuality:
                         capabilities?.supportsGPSPositionQualityV1 == true
                 ),
-                gpsSampleTimestamp: location.timestamp
+                gpsSampleClock: navigationGPSClock.sample(location.timestamp)
             )]
         )
         _ = enqueueGroup(
@@ -1277,7 +1365,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         )
         if Self.shouldSendManeuver(
             snapshot,
-            after: previousSnapshot
+            after: lastDispatchedNavigationSnapshot
         ) {
             _ = enqueueGroup(
                 priority: .navigationBoundary,
@@ -1285,7 +1373,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 coalescingKey: "maneuver",
                 writes: [.init(
                     target: .navigation,
-                    payload: WatchRidePacketEncoderV1.maneuver(snapshot)
+                    payload: WatchRidePacketEncoderV1.maneuver(snapshot),
+                    navigationSnapshot: snapshot
                 )]
             )
         }
@@ -1314,10 +1403,21 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         workoutPairGeneration = workoutPairGeneration == 3
             ? 1
             : workoutPairGeneration + 1
+        let zonesSupported = capabilities?.supportsWorkoutZonesV1 == true
+            && (peripheral?.maximumWriteValueLength(for: .withResponse) ?? 0) >=
+                RideBLEGeneratedProtocolV1.workoutZoneMaximumFrameBytes +
+                RideBLEGeneratedProtocolV1.protectedFrameOverhead +
+                RideBLEGeneratedProtocolV1.applicationCommandHeaderBytes
+        var zoneSequence: UInt32 = 0
+        if zonesSupported && workoutZoneSequence < UInt32.max {
+            workoutZoneSequence += 1
+            zoneSequence = workoutZoneSequence
+        }
         let payloads = WorkoutDeviceFrameBuilder.transportFrames(
             for: frames,
             generation: workoutPairGeneration,
-            includeOrigin: capabilities?.supportsRideAutomation == true
+            includeOrigin: capabilities?.supportsRideAutomation == true,
+            zoneSequence: zoneSequence
         )
         let isCritical = [
             WorkoutDeviceSessionState.ending,
@@ -1331,7 +1431,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             applicationCommandType: isCritical ? .workoutState : nil,
             coalescingKey: "workout",
             writes: payloads.map {
-                .init(target: .workout, payload: $0)
+                .init(target: .workout, payload: $0,
+                      zoneDispatch: $0.first == 5 ? RideBLEZoneDispatch(frame: $0) : nil)
             }
         )
     }
@@ -1367,7 +1468,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 includeRideDetectionQuality:
                     capabilities?.supportsGPSPositionQualityV1 == true
               ),
-              gpsSampleTimestamp: latestWorkoutGPS.capturedAt
+              gpsSampleClock: workoutGPSClock.sample(latestWorkoutGPS.capturedAt)
             )]
         )
     }
@@ -1466,16 +1567,38 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             }
             let write = group.writes[activeWriteIndex]
             let memberIndex = activeWriteIndex
+            if write.target == .route, group.applicationCommandType == nil,
+               write.payload == lastDispatchedRouteWindow {
+                // Compare against submission, not an earlier coalesced sample.
+                // Critical clears always reach firmware and retain their ACK.
+                activeWriteIndex += 1
+                continue
+            }
             guard let characteristic = characteristic(for: write.target) else {
                 fail("Bike Computer characteristic disappeared")
                 return
             }
-            var payload = write.gpsSampleTimestamp.map {
-                WatchRidePacketEncoderV1.refreshingQualityAge(
-                    in: write.payload,
-                    sampleTimestamp: $0
-                )
-            } ?? write.payload
+            let writeType: CBCharacteristicWriteType
+            if characteristic.properties.contains(.write) {
+                writeType = .withResponse
+            } else if characteristic.properties.contains(
+                .writeWithoutResponse
+            ) {
+                guard peripheral.canSendWriteWithoutResponse else {
+                    startWithoutResponseWatchdog(
+                        peripheralID: peripheral.identifier,
+                        generation: connectionGeneration
+                    )
+                    return
+                }
+                withoutResponseWatchdogTask?.cancel()
+                withoutResponseWatchdogTask = nil
+                writeType = .withoutResponse
+            } else {
+                fail("Bike Computer characteristic is not writable")
+                return
+            }
+            var payload = write.gpsDispatch?.payload() ?? write.payload
             if let motion = write.motionDispatch {
                 guard let freshPayload = motion.payload() else {
                     activeWriteIndex += 1
@@ -1483,6 +1606,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 }
                 payload = freshPayload
             }
+            if let zone = write.zoneDispatch { payload = zone.payload() }
             if shouldUseApplicationAcknowledgement(for: group) {
                 guard let commandType = group.applicationCommandType,
                       let wrapped = RideBLEApplicationCommandEnvelopeV1(
@@ -1517,26 +1641,6 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     return
                 }
             }
-            let writeType: CBCharacteristicWriteType
-            if characteristic.properties.contains(.write) {
-                writeType = .withResponse
-            } else if characteristic.properties.contains(
-                .writeWithoutResponse
-            ) {
-                guard peripheral.canSendWriteWithoutResponse else {
-                    startWithoutResponseWatchdog(
-                        peripheralID: peripheral.identifier,
-                        generation: connectionGeneration
-                    )
-                    return
-                }
-                withoutResponseWatchdogTask?.cancel()
-                withoutResponseWatchdogTask = nil
-                writeType = .withoutResponse
-            } else {
-                fail("Bike Computer characteristic is not writable")
-                return
-            }
             let maximum = peripheral.maximumWriteValueLength(for: writeType)
             guard frame.count <= maximum else {
                 fail("Watch ride packet exceeds the BLE write limit")
@@ -1550,6 +1654,12 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                     characteristicID: characteristic.uuid
                 )
             }
+            if let snapshot = write.navigationSnapshot {
+                // Compare movement with the value submitted to the transport,
+                // not with the preceding GPS sample or an evicted queue entry.
+                lastDispatchedNavigationSnapshot = snapshot
+            }
+            if write.target == .route { lastDispatchedRouteWindow = write.payload }
             peripheral.writeValue(
                 frame,
                 for: characteristic,
@@ -1877,6 +1987,10 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         _ event: RideBLETransportEventV1
     ) -> RideBLETransportTransitionV1 {
         let transition = transportStateMachine.reduce(event)
+        if transportStateMachine.phase != .recovering {
+            recoveryCancellationTask?.cancel()
+            recoveryCancellationTask = nil
+        }
         transportPhase = transportStateMachine.phase
         transportFailureReason = transportStateMachine.lastFailure
         if state.isReady && !transportStateMachine.isReady {
@@ -1958,9 +2072,31 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         applicationAckWatchdogTask = nil
         if wasScanning { central.stopScan() }
         if let peripheral {
+            armRecoveryCancellationDeadline()
             central.cancelPeripheralConnection(peripheral)
         } else {
             scheduleReconnect()
+        }
+    }
+
+    private func armRecoveryCancellationDeadline() {
+        if transportStateMachine.recoveryPhase == .cancellationTimedOut {
+            lastError = RideBLERecoveryPolicyV1.blockedMessage
+            state = .failed(RideBLERecoveryPolicyV1.blockedMessage)
+            return
+        }
+        let generation = transportStateMachine.generation
+        guard reduceTransport(.recoveryCancellationRequested(generation: generation)) == .applied else { return }
+        recoveryCancellationTask = Task { [weak self, sleep] in
+            try? await sleep(.seconds(RideBLERecoveryPolicyV1.cancellationTimeoutSeconds))
+            guard !Task.isCancelled, let self,
+                  self.reduceTransport(.recoveryCancellationTimedOut(generation: generation)) == .applied else { return }
+            self.recoveryCancellationTask = nil
+            let message = RideBLERecoveryPolicyV1.blockedMessage
+            self.lastError = message
+            self.state = .failed(message)
+            // Time passing does not fence CoreBluetooth callbacks. Retain the
+            // active demand and exact handoff until a real boundary or stop.
         }
     }
 

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include "mapContourFormat.hpp"
 
 namespace map_block_format {
 
@@ -116,7 +117,8 @@ private:
     uint32_t length = 0;
     uint32_t crc32 = 0;
   };
-  V3Section v3Sections_[5] = {};
+  V3Section v3Sections_[6] = {};
+  map_contour_format::Validator contourValidator_;
   uint8_t v3Directory_[16] = {};
   size_t v3DirectorySize_ = 0;
   uint8_t v3SectionCount_ = 0;
@@ -149,14 +151,14 @@ private:
   uint8_t v4CurrentBuildingFlags_ = 0;
   int16_t v4DeclaredBounds_[4] = {};
   int16_t v4ActualBounds_[4] = {};
-  uint32_t v5DeclaredCategoryMask_ = 0;
-  uint32_t v5ActualCategoryMask_ = 0;
-  bool v5HasPreviousPoi_ = false;
-  int16_t v5PreviousPoiX_ = 0;
-  int16_t v5PreviousPoiY_ = 0;
-  uint8_t v5PreviousPoiCategory_ = 0;
-  uint8_t v5PreviousPoiRank_ = 0;
-  uint8_t v5PreviousPoiMaximumZoom_ = 0;
+  uint32_t v6DeclaredCategoryMask_ = 0;
+  uint32_t v6ActualCategoryMask_ = 0;
+  bool v6HasPreviousPoi_ = false;
+  int16_t v6PreviousPoiX_ = 0;
+  int16_t v6PreviousPoiY_ = 0;
+  uint8_t v6PreviousPoiCategory_ = 0;
+  uint8_t v6PreviousPoiRank_ = 0;
+  uint8_t v6PreviousPoiMaximumZoom_ = 0;
   AsciiState asciiState_ = AsciiState::PolygonHeader;
   std::string line_;
   CoordinateState coordinateState_ = CoordinateState::Prefix;

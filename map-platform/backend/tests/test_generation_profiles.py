@@ -29,7 +29,7 @@ class GenerationProfilePolicyTests(unittest.TestCase):
                 profile.renderer_format_version
                 for profile in policy.available_profiles("development")
             ],
-            [4, 3, 2, 1],
+            [3, 2, 1],
         )
         self.assertEqual(
             [
@@ -43,10 +43,10 @@ class GenerationProfilePolicyTests(unittest.TestCase):
                 profile.renderer_format_version
                 for profile in policy.available_profiles(
                     "production",
-                    canary_profile_ids=frozenset({"map-pois-v1"}),
+                    canary_profile_ids=frozenset({"buildings-3d-v1"}),
                 )
             ],
-            [4, 3, 2, 1],
+            [3, 2, 1],
         )
 
     def test_invalid_or_ambiguous_policy_fails_closed(self):
@@ -60,10 +60,89 @@ class GenerationProfilePolicyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "production is invalid"):
                 GenerationProfilePolicy.load(path)
 
+    def test_v3_poi_and_optional_contours_are_separately_gated(self):
+        policy = GenerationProfilePolicy.load(self.policy_path.with_name("generation-profile-policy-v4.json"))
+        self.assertEqual([p.renderer_format_version for p in policy.available_profiles("development")], [4, 3, 2, 1])
+        allowed = policy.available_profiles("development", canary_profile_ids=frozenset({"map-pois-v1"}))
+        self.assertEqual([p.renderer_format_version for p in allowed], [5, 4, 3, 2, 1])
+        self.assertEqual(allowed[0].features, ("3d-buildings", "map-pois", "street-labels"))
+        self.assertEqual(policy.available_optional_features("development"), ())
+        self.assertEqual(policy.available_optional_features("development", canary=True), ("contours",))
+        self.assertEqual(policy.available_optional_features("production", canary=True), ())
+        self.assertEqual([p.renderer_format_version for p in policy.available_profiles("production", canary_profile_ids=frozenset({"map-pois-v1"}))], [3, 2, 1])
+
+    def test_v3_rejects_ambiguous_optional_features_and_channels(self):
+        payload = json.loads(self.policy_path.with_name("generation-profile-policy-v4.json").read_text())
+        mutations = [lambda p: p["profiles"][-1].update(optionalFeatures=["map-pois"]),
+                     lambda p: p["profiles"][-1].update(optionalFeatures=["contours", "contours"]),
+                     lambda p: p["profiles"][-1].pop("optionalFeatures"),
+                     lambda p: p["channels"]["development"]["globalOptionalFeatures"].append("contours"),
+                     lambda p: p["channels"]["production"].update(disabledOptionalFeatures=[]),
+                     lambda p: p.update(schemaVersion=2)]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "policy.json"
+            for mutate in mutations:
+                value = json.loads(json.dumps(payload))
+                mutate(value)
+                path.write_text(json.dumps(value))
+                with self.assertRaises(ValueError):
+                    GenerationProfilePolicy.load(path)
+
     def test_deployment_channel_is_strict(self):
         with patch.dict(os.environ, {"MAP_PLATFORM_DEPLOYMENT_CHANNEL": "DEV"}):
             with self.assertRaisesRegex(ValueError, "development or production"):
                 configured_deployment_channel()
+
+    def test_v2_exposes_topography_globally_in_development(self):
+        policy = GenerationProfilePolicy.load(self.policy_path.with_name("generation-profile-policy-v2.json"))
+        development = policy.available_profiles("development")
+        production = policy.available_profiles(
+            "production",
+            canary_profile_ids=frozenset({"topographic-contours-v1"}),
+        )
+        self.assertEqual([p.renderer_format_version for p in development], [4, 3, 2, 1])
+        self.assertEqual([p.renderer_format_version for p in production], [3, 2, 1])
+        self.assertEqual(policy.channels["development"].disabled_profile_ids, ())
+        self.assertEqual(
+            policy.channels["production"].disabled_profile_ids,
+            ("topographic-contours-v1",),
+        )
+
+    def test_v2_allows_explicit_production_topography_policy(self):
+        payload = json.loads(self.policy_path.with_name("generation-profile-policy-v2.json").read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "policy.json"
+            production = payload["channels"]["production"]
+            production["disabledProfiles"] = []
+            production["globalProfiles"].append("topographic-contours-v1")
+            path.write_text(json.dumps(payload))
+            policy = GenerationProfilePolicy.load(path)
+            self.assertEqual(
+                [p.renderer_format_version for p in policy.available_profiles("production")],
+                [4, 3, 2, 1],
+            )
+        release_policy = GenerationProfilePolicy.load(
+            self.policy_path.with_name("generation-profile-policy-v3.json")
+        )
+        self.assertEqual(
+            [p.renderer_format_version for p in release_policy.available_profiles("production")],
+            [4, 3, 2, 1],
+        )
+
+    def test_v2_rejects_missing_overlapping_and_wrong_feature_contracts(self):
+        payload = json.loads(self.policy_path.with_name("generation-profile-policy-v2.json").read_text())
+        mutations = [lambda p: p.update(schemaVersion=True),
+                     lambda p: p["channels"]["development"]["canaryProfiles"].append("legacy-vector-v1"),
+                     lambda p: p["channels"]["development"]["disabledProfiles"].append("legacy-vector-v1"),
+                     lambda p: p["profiles"][-1].update(features=["contours"])]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "policy.json"
+            for mutate in mutations:
+                value = json.loads(json.dumps(payload))
+                mutate(value)
+                path.write_text(json.dumps(value))
+                with self.assertRaises(ValueError):
+                    GenerationProfilePolicy.load(path)
 
     def test_duplicate_json_keys_fail_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

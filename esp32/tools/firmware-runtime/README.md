@@ -38,7 +38,8 @@ already locked bytes; it does not update dependencies or weaken validation.
 The optional `OPEN_BIKE_FIRMWARE_RUNTIME_CACHE` override is intended for an
 absolute, isolated CI cache root and receives the same path and symlink checks.
 
-The shared transport cache is content-addressed and rehashed before use. All
+The shared transport cache is content-addressed and rehashed before use. Compiled core transport uses a separate verified shared cache; see
+[`firmware build caching`](../../../docs/firmware-build-caching.md). All
 mutable PlatformIO, package, build, manifest, and upload state remains private
 to the current worktree. Accepted runtime trees are read-only, and a changed
 member fails before PlatformIO executes.

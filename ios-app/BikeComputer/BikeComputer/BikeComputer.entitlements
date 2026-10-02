@@ -4,6 +4,7 @@
 <dict>
 	<key>com.apple.developer.associated-domains</key>
 	<array>
+		<string>applinks:bicino.com</string>
 		<string>applinks:$(BICINO_MAP_CATALOG_HOST)</string>
 	</array>
 	<key>com.apple.developer.devicecheck.appattest-environment</key>

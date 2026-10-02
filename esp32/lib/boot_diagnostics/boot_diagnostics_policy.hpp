@@ -32,6 +32,7 @@ enum class Stage : uint8_t {
   Ready = 15,
   SafeMode = 16,
   DiagnosticHold = 17,
+  FirmwareMaintenance = 18,
 };
 
 constexpr const char *stageName(Stage stage) {
@@ -72,19 +73,23 @@ constexpr const char *stageName(Stage stage) {
     return "safe_mode";
   case Stage::DiagnosticHold:
     return "diagnostic_hold";
+  case Stage::FirmwareMaintenance:
+    return "firmware_maintenance";
   }
   return "invalid";
 }
 
 constexpr bool isKnownStage(uint8_t stage) {
-  return stage <= static_cast<uint8_t>(Stage::DiagnosticHold);
+  return stage <= static_cast<uint8_t>(Stage::FirmwareMaintenance);
 }
 
 constexpr uint8_t kFlagReady = 1U << 0;
 constexpr uint8_t kFlagSafeMode = 1U << 1;
 constexpr uint8_t kFlagDiagnosticHold = 1U << 2;
+constexpr uint8_t kFlagFirmwareMaintenance = 1U << 3;
 constexpr uint8_t kKnownFlags =
-    kFlagReady | kFlagSafeMode | kFlagDiagnosticHold;
+    kFlagReady | kFlagSafeMode | kFlagDiagnosticHold |
+    kFlagFirmwareMaintenance;
 
 // RTC no-init memory preserves this state across software, watchdog, panic,
 // brownout, and USB resets. A magic/version/size/checksum envelope makes
@@ -168,6 +173,8 @@ constexpr bool isValid(const PersistentState &state) {
   const bool ready = (state.flags & kFlagReady) != 0;
   const bool safeMode = (state.flags & kFlagSafeMode) != 0;
   const bool diagnosticHold = (state.flags & kFlagDiagnosticHold) != 0;
+  const bool firmwareMaintenance =
+      (state.flags & kFlagFirmwareMaintenance) != 0;
   if (ready &&
       (state.activeStage != static_cast<uint8_t>(Stage::Ready) ||
        state.completedStage != static_cast<uint8_t>(Stage::Ready))) {
@@ -181,8 +188,13 @@ constexpr bool isValid(const PersistentState &state) {
       state.activeStage != static_cast<uint8_t>(Stage::DiagnosticHold)) {
     return false;
   }
+  if (firmwareMaintenance &&
+      state.activeStage != static_cast<uint8_t>(Stage::FirmwareMaintenance)) {
+    return false;
+  }
   return static_cast<unsigned>(ready) + static_cast<unsigned>(safeMode) +
-             static_cast<unsigned>(diagnosticHold) <=
+             static_cast<unsigned>(diagnosticHold) +
+             static_cast<unsigned>(firmwareMaintenance) <=
          1;
 }
 
@@ -196,6 +208,10 @@ constexpr bool isSafeMode(const PersistentState &state) {
 
 constexpr bool isDiagnosticHold(const PersistentState &state) {
   return (state.flags & kFlagDiagnosticHold) != 0;
+}
+
+constexpr bool isFirmwareMaintenance(const PersistentState &state) {
+  return (state.flags & kFlagFirmwareMaintenance) != 0;
 }
 
 constexpr uint8_t incrementSaturating(uint8_t value) {
@@ -228,7 +244,8 @@ inline BeginResult beginBoot(PersistentState &state,
     lastFailureCompleted = previous.lastFailureCompletedStage;
     lastFailureResetReason = previous.lastFailureResetReason;
 
-    if (isReady(previous) || isDiagnosticHold(previous)) {
+    if (isReady(previous) || isDiagnosticHold(previous) ||
+        isFirmwareMaintenance(previous)) {
       failures = 0;
       lastFailure = static_cast<uint8_t>(Stage::None);
       lastFailureCompleted = static_cast<uint8_t>(Stage::None);
@@ -274,9 +291,10 @@ inline BeginResult beginBoot(PersistentState &state,
 
 inline bool enterStage(PersistentState &state, Stage stage) {
   if (!isValid(state) || isReady(state) || isSafeMode(state) ||
-      isDiagnosticHold(state) ||
+      isDiagnosticHold(state) || isFirmwareMaintenance(state) ||
       stage == Stage::None || stage == Stage::Ready ||
-      stage == Stage::SafeMode || stage == Stage::DiagnosticHold) {
+      stage == Stage::SafeMode || stage == Stage::DiagnosticHold ||
+      stage == Stage::FirmwareMaintenance) {
     return false;
   }
   state.activeStage = static_cast<uint8_t>(stage);
@@ -286,10 +304,11 @@ inline bool enterStage(PersistentState &state, Stage stage) {
 
 inline bool completeStage(PersistentState &state, Stage stage) {
   if (!isValid(state) || isReady(state) || isSafeMode(state) ||
-      isDiagnosticHold(state) ||
+      isDiagnosticHold(state) || isFirmwareMaintenance(state) ||
       state.activeStage != static_cast<uint8_t>(stage) ||
       stage == Stage::None || stage == Stage::Ready ||
-      stage == Stage::SafeMode || stage == Stage::DiagnosticHold) {
+      stage == Stage::SafeMode || stage == Stage::DiagnosticHold ||
+      stage == Stage::FirmwareMaintenance) {
     return false;
   }
   state.completedStage = static_cast<uint8_t>(stage);
@@ -299,7 +318,8 @@ inline bool completeStage(PersistentState &state, Stage stage) {
 }
 
 inline bool markReady(PersistentState &state) {
-  if (!isValid(state) || isSafeMode(state) || isDiagnosticHold(state)) {
+  if (!isValid(state) || isSafeMode(state) || isDiagnosticHold(state) ||
+      isFirmwareMaintenance(state)) {
     return false;
   }
   state.activeStage = static_cast<uint8_t>(Stage::Ready);
@@ -328,6 +348,26 @@ inline bool markDiagnosticHold(PersistentState &state) {
   state.lastFailureCompletedStage = static_cast<uint8_t>(Stage::None);
   state.consecutiveEarlyFailures = 0;
   state.flags = kFlagDiagnosticHold;
+  state.lastFailureResetReason = 0;
+  seal(state);
+  return true;
+}
+
+// Firmware maintenance is an intentional partial boot. It must neither satisfy
+// normal application readiness nor be counted as an early-boot crash when it
+// reboots back to the old image after cancellation or timeout.
+inline bool markFirmwareMaintenance(PersistentState &state) {
+  if (!isValid(state) || isReady(state) || isSafeMode(state) ||
+      isDiagnosticHold(state) || isFirmwareMaintenance(state) ||
+      state.activeStage != static_cast<uint8_t>(Stage::None) ||
+      state.completedStage == static_cast<uint8_t>(Stage::None)) {
+    return false;
+  }
+  state.activeStage = static_cast<uint8_t>(Stage::FirmwareMaintenance);
+  state.lastFailureStage = static_cast<uint8_t>(Stage::None);
+  state.lastFailureCompletedStage = static_cast<uint8_t>(Stage::None);
+  state.consecutiveEarlyFailures = 0;
+  state.flags = kFlagFirmwareMaintenance;
   state.lastFailureResetReason = 0;
   seal(state);
   return true;

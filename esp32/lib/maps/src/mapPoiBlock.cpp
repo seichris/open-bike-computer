@@ -35,7 +35,7 @@ bool take(size_t amount, size_t size, size_t &offset) {
 }
 
 bool baseEnd(const uint8_t *data, size_t size, size_t &offset) {
-  if (size < 6 || data[3] != 5)
+  if (size < 6 || data[3] != 6)
     return false;
   offset = 4;
   const uint16_t polygonCount = le16(data + offset);
@@ -68,32 +68,34 @@ bool decode(const uint8_t *data, size_t size, Block &output,
   if (data == nullptr || size < 4 || data[0] != 'F' || data[1] != 'M' ||
       data[2] != 'B')
     return fail(error, "invalid FMB header");
-  if (data[3] < 5)
+  if (data[3] < 6)
     return map_block_format::validate(data, size)
                ? true
                : fail(error, "invalid legacy FMB block");
-  if (data[3] != 5 || !map_block_format::validate(data, size))
-    return fail(error, "invalid FMB v5 block");
+  if (data[3] != 6 || !map_block_format::validate(data, size))
+    return fail(error, "invalid FMB v6 block");
 
   size_t directoryOffset = 0;
   if (!baseEnd(data, size, directoryOffset) || directoryOffset > size ||
-      size - directoryOffset < 88U)
-    return fail(error, "invalid FMB v5 geometry boundary");
-  const size_t entry = directoryOffset + 8U + 4U * 16U;
-  if (data[entry] != 5)
-    return fail(error, "missing FMB v5 POI section");
+      size - directoryOffset < 104U)
+    return fail(error, "invalid FMB v6 geometry boundary");
+  const size_t entry = directoryOffset + 8U + 5U * 16U;
+  if (data[entry] != 6)
+    return fail(error, "missing FMB v6 POI section");
   size_t cursor = le32(data + entry + 4U);
   const size_t length = le32(data + entry + 8U);
   if (cursor > size || length > size - cursor || length < 8U)
-    return fail(error, "invalid FMB v5 POI section range");
+    return fail(error, "invalid FMB v6 POI section range");
   const size_t end = cursor + length;
+  output.stats.sectionOffset = static_cast<uint32_t>(cursor);
+  output.stats.sectionBytes = static_cast<uint32_t>(length);
   const uint16_t count = le16(data + cursor);
   cursor += 8U;
   output.records.reserve(count);
   output.stats.records = count;
   for (uint16_t index = 0; index < count; ++index) {
     if (cursor > end || end - cursor < 8U)
-      return fail(error, "truncated FMB v5 POI record");
+      return fail(error, "truncated FMB v6 POI record");
     Record record;
     record.localX = sle16(data + cursor);
     record.localY = sle16(data + cursor + 2U);
@@ -106,7 +108,7 @@ bool decode(const uint8_t *data, size_t size, Block &output,
     cursor += 8U;
   }
   if (cursor != end)
-    return fail(error, "FMB v5 POI section has trailing bytes");
+    return fail(error, "FMB v6 POI section has trailing bytes");
   return true;
 }
 
