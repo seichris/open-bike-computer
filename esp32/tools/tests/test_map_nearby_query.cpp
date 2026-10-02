@@ -19,6 +19,18 @@ int main() {
   assert(!valid({NAN, 0.0}));
   assert(!valid({0.0, 181.0}));
 
+  int32_t parsed = 0;
+  size_t cursor = 0;
+  assert(map_nearby_coverage::integer("-2147483648", cursor, parsed));
+  assert(parsed == INT32_MIN);
+  cursor = 0;
+  assert(map_nearby_coverage::integer("2147483647", cursor, parsed));
+  assert(parsed == INT32_MAX);
+  cursor = 0;
+  assert(!map_nearby_coverage::integer("-2147483649", cursor, parsed));
+  cursor = 0;
+  assert(!map_nearby_coverage::integer("2147483648", cursor, parsed));
+
   std::vector<map_nearby_coverage::Block> signedCoverage;
   assert(map_nearby_coverage::decodeManifest(
       "{\"nearbyCoverage\":{\"blockSizeMeters\":4096,"

@@ -5,10 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <limits>
-#include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 // Signed target-5 selection coverage, including blocks that emitted no FMB.
@@ -41,29 +38,30 @@ inline bool consume(std::string_view text, size_t &cursor, char value) {
 inline bool integer(std::string_view text, size_t &cursor, int32_t &value) {
   skipSpace(text, cursor);
   if (cursor >= text.size()) return false;
-  const size_t start = cursor;
-  if (text[cursor] == '-') ++cursor;
+  const bool negative = text[cursor] == '-';
+  if (negative) ++cursor;
   if (cursor >= text.size() || text[cursor] < '0' || text[cursor] > '9')
     return false;
   if (text[cursor] == '0' && cursor + 1 < text.size() &&
       text[cursor + 1] >= '0' && text[cursor + 1] <= '9') return false;
-  int64_t number = 0;
+  // Accumulate negatively so INT32_MIN is representable without 64-bit math.
+  const int32_t limit = negative ? INT32_MIN : -INT32_MAX;
+  int32_t number = 0;
   do {
-    number = number * 10 + (text[cursor++] - '0');
-    if (number > int64_t(std::numeric_limits<int32_t>::max()) + 1)
-      return false;
+    const int32_t digit = text[cursor++] - '0';
+    if (number < limit / 10 ||
+        (number == limit / 10 && digit > -(limit % 10))) return false;
+    number = number * 10 - digit;
   } while (cursor < text.size() && text[cursor] >= '0' &&
            text[cursor] <= '9');
-  if (cursor > start && text[start] == '-') number = -number;
-  if (number < INT32_MIN || number > INT32_MAX) return false;
-  value = static_cast<int32_t>(number);
+  value = negative ? number : -number;
   return true;
 }
 
 inline bool memberInteger(std::string_view object, std::string_view name,
                           int32_t &value) {
   size_t cursor = object.find(name);
-  if (cursor == std::string::npos) return false;
+  if (cursor == std::string_view::npos) return false;
   cursor += name.size();
   return consume(object, cursor, ':') && integer(object, cursor, value) &&
          (cursor == object.size() || object[cursor] == ',' ||
@@ -76,21 +74,21 @@ inline bool decodeManifestInto(std::string_view manifest,
   blocks.clear();
   constexpr std::string_view needle = "\"nearbyCoverage\"";
   size_t cursor = manifest.find(needle);
-  if (cursor == std::string::npos) return false;
+  if (cursor == std::string_view::npos) return false;
   cursor += needle.size();
   if (!consume(manifest, cursor, ':') || !consume(manifest, cursor, '{'))
     return false;
   const size_t start = cursor - 1;
   // This profile has only primitive members and arrays, never nested objects.
   const size_t end = manifest.find('}', cursor);
-  if (end == std::string::npos) return false;
+  if (end == std::string_view::npos) return false;
   const std::string_view object = manifest.substr(start, end - start + 1);
   int32_t profile = 0, size = 0;
   if (!memberInteger(object, "\"profileVersion\"", profile) || profile != 1 ||
       !memberInteger(object, "\"blockSizeMeters\"", size) || size != 4096)
     return false;
   cursor = object.find("\"blocks\"");
-  if (cursor == std::string::npos) return false;
+  if (cursor == std::string_view::npos) return false;
   cursor += sizeof("\"blocks\"") - 1;
   if (!consume(object, cursor, ':') || !consume(object, cursor, '['))
     return false;
@@ -108,8 +106,8 @@ inline bool decodeManifestInto(std::string_view manifest,
     Block block;
     if (!integer(object, cursor, block.x) || !consume(object, cursor, ',') ||
         !integer(object, cursor, block.y) || !consume(object, cursor, ']') ||
-        std::abs(int64_t(block.x)) > 4893 ||
-        std::abs(int64_t(block.y)) > 4893 ||
+        block.x < -4893 || block.x > 4893 ||
+        block.y < -4893 || block.y > 4893 ||
         (!blocks.empty() && !less(blocks.back(), block))) return false;
     blocks.push_back(block);
     afterComma = false;
