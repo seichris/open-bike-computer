@@ -5310,9 +5310,9 @@ bool Maps::projectNearbyResult(
   constexpr double pi = 3.14159265358979323846;
   constexpr double worldWidth = 2.0 * pi * EARTH_RADIUS;
   map_transform::WorldPoint world{
-      map_nearby_query::radians(place.position.longitude) * EARTH_RADIUS,
+      map_nearby_query::degreesToRadians(place.position.longitude) * EARTH_RADIUS,
       std::log(std::tan(pi / 4.0 +
-                        map_nearby_query::radians(place.position.latitude) /
+                        map_nearby_query::degreesToRadians(place.position.latitude) /
                             2.0)) * EARTH_RADIUS};
   if (!std::isfinite(world.x) || !std::isfinite(world.y)) return false;
   world.x += std::round((visibleProjection.config().worldOrigin.x - world.x) /

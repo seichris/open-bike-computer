@@ -104,6 +104,11 @@ constexpr uint32_t MAP_NAVIGATION_ORIENTATION_FEATURE =
     ride_ble_protocol_generated::MAP_NAVIGATION_ORIENTATION_FEATURE;
 constexpr uint8_t MAP_NAVIGATION_ORIENTATION_CLIENT_VERSION =
     ride_ble_protocol_generated::MAP_NAVIGATION_ORIENTATION_MINIMUM_CLIENT_VERSION;
+inline bool supportsMapPois(uint8_t clientVersion, bool runtimeEnabled,
+                            bool screenConfigurationReady) {
+  return runtimeEnabled && screenConfigurationReady &&
+         clientVersion >= MAP_POIS_CLIENT_VERSION;
+}
 inline bool supportsMapNavigationOrientation(uint8_t clientVersion,
                                               bool implementationEnabled) {
   return implementationEnabled &&

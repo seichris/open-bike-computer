@@ -39,14 +39,16 @@ inline bool valid(Position position) {
          position.longitude >= -180.0 && position.longitude <= 180.0;
 }
 
-inline double radians(double degrees) { return degrees * kPi / 180.0; }
+inline double degreesToRadians(double degrees) {
+  return degrees * kPi / 180.0;
+}
 
 inline double centralAngle(Position first, Position second) {
-  const double latitudeDelta = radians(second.latitude - first.latitude);
+  const double latitudeDelta = degreesToRadians(second.latitude - first.latitude);
   const double longitudeDelta =
-      radians(std::remainder(second.longitude - first.longitude, 360.0));
-  const double firstLatitude = radians(first.latitude);
-  const double secondLatitude = radians(second.latitude);
+      degreesToRadians(std::remainder(second.longitude - first.longitude, 360.0));
+  const double firstLatitude = degreesToRadians(first.latitude);
+  const double secondLatitude = degreesToRadians(second.latitude);
   const double sineLatitude = std::sin(latitudeDelta * 0.5);
   const double sineLongitude = std::sin(longitudeDelta * 0.5);
   const double haversine = sineLatitude * sineLatitude +
@@ -65,11 +67,11 @@ inline double distanceMeters(Position first, Position second) {
   constexpr double a = 6378137.0;
   constexpr double f = 1.0 / 298.257223563;
   constexpr double b = a * (1.0 - f);
-  const double U1 = std::atan((1.0 - f) * std::tan(radians(first.latitude)));
-  const double U2 = std::atan((1.0 - f) * std::tan(radians(second.latitude)));
+  const double U1 = std::atan((1.0 - f) * std::tan(degreesToRadians(first.latitude)));
+  const double U2 = std::atan((1.0 - f) * std::tan(degreesToRadians(second.latitude)));
   const double sinU1 = std::sin(U1), cosU1 = std::cos(U1);
   const double sinU2 = std::sin(U2), cosU2 = std::cos(U2);
-  const double L = radians(
+  const double L = degreesToRadians(
       std::remainder(second.longitude - first.longitude, 360.0));
   double lambda = L;
   double sinSigma = 0.0, cosSigma = 0.0, sigma = 0.0;

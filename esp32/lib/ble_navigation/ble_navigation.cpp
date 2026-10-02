@@ -4149,6 +4149,12 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE;
     }
+    if (device_capabilities_protocol::supportsMapPois(
+            clientVersion, map_profile_protocol::POIS_RUNTIME_ENABLED,
+            (featureFlags & device_capabilities_protocol::
+                                SCREEN_CONFIGURATION_FEATURE) != 0)) {
+      featureFlags |= device_capabilities_protocol::MAP_POIS_FEATURE;
+    }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,

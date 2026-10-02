@@ -116,10 +116,13 @@ code across extractor, backend, installer, iPhone validation, firmware query,
 and bike-computer Nearby presentation. Host checks cover index trust,
 nearest-ten ranking, cancellation/corruption, layout, and the screen feature
 gate. The feature remains **off by default** with
-`MAP_POIS_RUNTIME_ENABLED=0`, and CAP2 bit 31 is not advertised. Source review,
-full firmware builds, CI, and physical acceptance on both board families are
-still required. The connected ESP32's board family has not been identified,
-so no board-specific build or flash is evidence for this checkpoint.
+`MAP_POIS_RUNTIME_ENABLED=0` in ordinary and production profiles. Both
+`*_REMOTE_DEBUG` development profiles opt in for hardware qualification and
+advertise CAP2 bit 31 only when the configurable-screen subsystem is ready
+for client version 29 or newer. Source review, full firmware builds, CI, and
+physical acceptance on both board families are still required. The connected
+ESP32's board family has not been identified, so no board-specific local build
+or flash is evidence for this checkpoint.
 
 The September allocation remains available in code: target 5/FMB v6,
 visibility bits 14-18, and CAP2 bit 31/client 29. The topography plan's

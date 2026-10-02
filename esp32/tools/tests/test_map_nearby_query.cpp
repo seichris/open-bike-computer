@@ -1,3 +1,5 @@
+// Arduino.h defines this macro before firmware includes the query helper.
+#define radians(deg) ((deg) * 0.017453292519943295)
 #include "../../lib/maps/src/mapNearbyQuery.hpp"
 
 #include <cassert>
@@ -64,9 +66,9 @@ int main() {
   // the direct distance to any point in the block, even at high latitude or
   // across the anti-meridian.
   const Position rider{80.0, 179.99};
-  const double riderX = kMercatorRadiusM * radians(rider.longitude);
+  const double riderX = kMercatorRadiusM * degreesToRadians(rider.longitude);
   const double riderY = kMercatorRadiusM *
-      std::log(std::tan(kPi / 4.0 + radians(rider.latitude) / 2.0));
+      std::log(std::tan(kPi / 4.0 + degreesToRadians(rider.latitude) / 2.0));
   map_poi_index::Entry highLatitude{};
   highLatitude.blockX = static_cast<int32_t>(std::floor(riderX / kBlockSizeM));
   highLatitude.blockY = static_cast<int32_t>(std::floor(riderY / kBlockSizeM));
