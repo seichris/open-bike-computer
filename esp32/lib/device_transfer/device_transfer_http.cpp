@@ -665,10 +665,16 @@ bool HttpTransferServer::startNetwork() {
     networkSsid_ = preferredNetwork.ssid;
     unlockState();
 
-    if (!networkOwner->startStation(preferredNetwork.ssid,
-                                    preferredNetwork.password)) {
-      setLastError("wifi_station_start",
-                   "could not start transfer Wi-Fi station safely");
+    observeResources("before_wifi_station");
+    const NetworkStartResult stationStart = networkOwner->startStationDetailed(
+        preferredNetwork.ssid, preferredNetwork.password);
+    lockState();
+    networkStart_ = stationStart;
+    unlockState();
+    observeResources("after_wifi_station");
+    if (!stationStart.ok()) {
+      setLastError(networkStartCode(stationStart.failedStep),
+                   "could not start transfer Wi-Fi station safely; see Wi-Fi startup status for the failed step and memory snapshot");
       return false;
     }
     const uint32_t started = millis();

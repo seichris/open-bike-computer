@@ -124,10 +124,26 @@ FirmwarePartitionSnapshot DeviceOperationOwner::partitionSnapshot() {
 
 bool DeviceOperationOwner::startStation(const std::string &ssid,
                                       const std::string &password) {
+  return startStationDetailed(ssid, password).ok();
+}
+
+device_transfer::NetworkStartResult DeviceOperationOwner::startStationDetailed(
+    const std::string &ssid, const std::string &password) {
   Result result;
-  return execute(Command{Operation::StartStation}, result, nullptr, &ssid,
-                 &password) == ESP_OK &&
-         result.error == ESP_OK;
+  const auto before = networkMemory();
+  const esp_err_t dispatch = execute(Command{Operation::StartStation}, result,
+                                     nullptr, &ssid, &password);
+  if (dispatch != ESP_OK) {
+    device_transfer::NetworkStartResult failed;
+    failed.failedStep = dispatch == ESP_ERR_NO_MEM
+        ? device_transfer::NetworkStartStep::OwnerCreate
+        : device_transfer::NetworkStartStep::OwnerDispatch;
+    failed.espError = dispatch;
+    failed.before = before;
+    failed.after = networkMemory();
+    return failed;
+  }
+  return result.networkStart;
 }
 
 bool DeviceOperationOwner::disconnectStation(bool wifiOff) {
@@ -411,19 +427,33 @@ void DeviceOperationOwner::run() {
           command.firmwareReceipt.operation, command.firmwareReceipt.image) ? ESP_OK : ESP_FAIL;
       break;
     case Operation::StartStation:
+      result.networkStart.mode.before = networkMemory();
       if (WiFi.getMode() == WIFI_OFF &&
           !device_transfer::wifiStartupMemoryAboveObservedFailure(
-              networkMemory())) {
+              result.networkStart.mode.before)) {
+        result.networkStart.failedStep = device_transfer::NetworkStartStep::Memory;
+        result.networkStart.mode.after = result.networkStart.mode.before;
+        result.networkStart.espError = ESP_ERR_NO_MEM;
         result.error = ESP_ERR_NO_MEM;
         break;
       }
+      result.networkStart.mode.attempted = true;
       WiFi.persistent(false);
       if (!WiFi.mode(WIFI_STA)) {
+        result.networkStart.mode.after = networkMemory();
+        result.networkStart.failedStep = device_transfer::NetworkStartStep::Mode;
+        result.networkStart.espError = ESP_FAIL;
         result.error = ESP_FAIL;
         break;
       }
-      if (esp_wifi_set_storage(WIFI_STORAGE_RAM) != ESP_OK) {
-        result.error = ESP_FAIL;
+      result.networkStart.mode.after = networkMemory();
+      result.networkStart.ramStorage.attempted = true;
+      result.networkStart.ramStorage.before = networkMemory();
+      result.error = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+      result.networkStart.ramStorage.after = networkMemory();
+      if (result.error != ESP_OK) {
+        result.networkStart.failedStep = device_transfer::NetworkStartStep::RamStorage;
+        result.networkStart.espError = result.error;
         break;
       }
       WiFi.setAutoReconnect(false);
@@ -499,14 +529,16 @@ void DeviceOperationOwner::run() {
       result.error = ESP_OK;
       break;
     }
-    if (command.operation == Operation::StartAccessPoint) {
+    if (command.operation == Operation::StartAccessPoint ||
+        command.operation == Operation::StartStation) {
       const auto *step = (result.networkStart.failedStep ==
                                  device_transfer::NetworkStartStep::Mode ||
                              result.networkStart.failedStep ==
                                  device_transfer::NetworkStartStep::Memory)
                              ? &result.networkStart.mode
                          : result.networkStart.failedStep ==
-                                 device_transfer::NetworkStartStep::RamStorage
+                                 device_transfer::NetworkStartStep::RamStorage ||
+                               command.operation == Operation::StartStation
                              ? &result.networkStart.ramStorage
                              : &result.networkStart.accessPoint;
       result.networkStart.before = step->before;

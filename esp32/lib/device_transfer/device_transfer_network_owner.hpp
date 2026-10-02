@@ -68,6 +68,8 @@ public:
 
   virtual bool startStation(const std::string &ssid,
                             const std::string &password) = 0;
+  virtual NetworkStartResult startStationDetailed(
+      const std::string &ssid, const std::string &password) = 0;
   virtual bool disconnectStation(bool wifiOff) = 0;
   virtual bool startAccessPoint(const std::string &ssid,
                                 const std::string &passphrase) = 0;
