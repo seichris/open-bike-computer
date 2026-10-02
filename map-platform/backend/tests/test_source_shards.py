@@ -77,10 +77,22 @@ class SourceShardTests(unittest.TestCase):
                          [(child.tag, tuple(sorted(child.attrib.items()))) for child in obj])
                         for obj in tree]
 
-            self.assertEqual(objects(from_shards), objects(direct))
-            included_ids = {(kind, object_id) for kind, object_id, *_ in objects(direct)}
+            direct_objects = objects(direct)
+            self.assertEqual(objects(from_shards), direct_objects)
+            included_ids = {(kind, object_id) for kind, object_id, *_ in direct_objects}
             self.assertTrue({("node", "4"), ("node", "5"), ("way", "11"),
                              ("relation", "21")} <= included_ids)
+            tags = {
+                (kind, object_id): {
+                    dict(attributes)["k"]: dict(attributes)["v"]
+                    for child, attributes in children if child == "tag"
+                }
+                for kind, object_id, _, children in direct_objects
+            }
+            self.assertEqual(tags[("node", "4")]["amenity"], "toilets")
+            self.assertEqual(tags[("node", "5")]["shop"], "bicycle")
+            self.assertEqual(tags[("way", "11")]["amenity"], "cafe")
+            self.assertEqual(tags[("relation", "21")]["shop"], "supermarket")
             with patch("map_platform.source_shards.shutil.disk_usage",
                        return_value=SimpleNamespace(free=1 << 40)):
                 with self.assertRaisesRegex(NoShardCoverageError, "no ready"):
