@@ -83,7 +83,7 @@ def prerequisites(check):
         for probe in check.get("probes", []):
             try:
                 result = subprocess.run(probe["command"], input=probe.get("input"),
-                    cwd=ROOT, text=True, capture_output=True, timeout=15)
+                    cwd=ROOT, text=True, capture_output=True, timeout=probe.get("timeoutSeconds", 15))
                 if result.returncode:
                     reasons.append("prerequisite probe failed: " + " ".join(probe["command"]) +
                                    " — " + result.stderr[-1000:].strip())

@@ -49,6 +49,19 @@ class DevelopmentChecksTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(report["checks"][0]["status"], "blocked")
 
+    def test_cold_simulator_probe_has_a_longer_bounded_timeout(self):
+        checks = json.loads(runner.REGISTRY.read_text())["checks"]
+        check = next(c for c in checks if c["id"] == "ios-simulator")
+        probes = [p for p in check["probes"] if "--check-only" in p["command"]]
+        self.assertEqual(len(probes), 2)
+        with patch.object(runner.subprocess, "run") as command:
+            command.return_value.returncode = 0
+            for probe in probes:
+                self.assertEqual(runner.prerequisites({"probes": [probe]}), [])
+            self.assertEqual([c.kwargs["timeout"] for c in command.call_args_list], [120, 120])
+        with patch.object(runner.subprocess, "run", side_effect=subprocess.TimeoutExpired(probes[0]["command"],120)):
+            self.assertIn("blocked", runner.prerequisites({"probes": probes[:1]})[0])
+
     def test_failure_does_not_hide_other_results(self):
         code, report = self.run_checks([
             {"id": "bad", "name": "Bad", "command": "exit 7"},

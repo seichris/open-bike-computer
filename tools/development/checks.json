@@ -612,7 +612,8 @@
             "--platform",
             "ios",
             "--check-only"
-          ]
+          ],
+          "timeoutSeconds": 120
         },
         {
           "command": [
@@ -621,7 +622,8 @@
             "--platform",
             "watchos",
             "--check-only"
-          ]
+          ],
+          "timeoutSeconds": 120
         }
       ]
     },
