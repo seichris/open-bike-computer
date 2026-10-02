@@ -1282,7 +1282,7 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
   if (manifest.formatVersion == 5) {
     if (!map_nearby_coverage::decodeManifest(
             manifestText, manifest.nearbyCoverageBlocks))
-      return fail("manifest_poi_coverage", "Nearby coverage is missing or invalid");
+      return fail("manifest_poi_coverage", "invalid Nearby coverage");
     for (const ManifestFile &file : manifest.files) {
       if (file.path.size() < 4 ||
           file.path.compare(file.path.size() - 4, 4, ".fmb") != 0)
@@ -1291,12 +1291,10 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       if (!map_poi_index::blockFromPath(manifest.mapId, file.path, x, y) ||
           !map_nearby_coverage::contains(
               manifest.nearbyCoverageBlocks, {x, y}))
-        return fail("manifest_poi_coverage",
-                    "rendered block lies outside Nearby coverage");
+        return fail("manifest_poi_coverage", "block outside Nearby coverage");
     }
   } else if (manifestText.find("\"nearbyCoverage\"") != std::string::npos) {
-    return fail("manifest_poi_coverage",
-                "Nearby coverage requires renderer target 5");
+    return fail("manifest_poi_coverage", "coverage requires target 5");
   }
   if (((manifest.formatVersion == 2 || manifest.formatVersion == 3 ||
         manifest.formatVersion == 4 || manifest.formatVersion == 5) &&
@@ -3489,9 +3487,12 @@ MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
       value += std::to_string(count) + "\n";
     for (const std::string &feature : manifest.requestedFeatures)
       value += feature + "\n";
-    for (const auto &block : manifest.nearbyCoverageBlocks)
-      value += std::to_string(block.x) + "," +
-               std::to_string(block.y) + "\n";
+    for (const auto &block : manifest.nearbyCoverageBlocks) {
+      value += std::to_string(block.x);
+      value.push_back(',');
+      value += std::to_string(block.y);
+      value.push_back('\n');
+    }
   }
   if (manifest.formatVersion == 4 ||
       (manifest.formatVersion == 5 && manifest.contoursIncluded)) {

@@ -2,7 +2,6 @@
 
 #include "mapNearbyQuery.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string_view>
@@ -136,9 +135,20 @@ inline bool decodeManifest(std::string_view manifest,
 }
 
 inline bool contains(const std::vector<Block> &blocks, Block block) {
-  const auto found = std::lower_bound(blocks.begin(), blocks.end(), block,
-                                     less);
-  return found != blocks.end() && found->x == block.x && found->y == block.y;
+  size_t first = 0;
+  size_t count = blocks.size();
+  while (count != 0) {
+    const size_t half = count / 2;
+    const size_t middle = first + half;
+    if (less(blocks[middle], block)) {
+      first = middle + 1;
+      count -= half + 1;
+    } else {
+      count = half;
+    }
+  }
+  return first < blocks.size() && blocks[first].x == block.x &&
+         blocks[first].y == block.y;
 }
 
 // Conservative: warn whenever any block that might meet the WGS-84 search
