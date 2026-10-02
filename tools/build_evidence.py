@@ -49,7 +49,7 @@ def store_root():
         str(Path.home() / 'Library/Application Support/OpenBikeComputer/build-evidence')))
 
 
-def publish(kind, identity, files, root):
+def publish(kind, identity, files, root, expected_hashes=None):
     """Write an immutable, content-addressed index; never replace an earlier record."""
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     if root.is_symlink():
@@ -63,6 +63,8 @@ def publish(kind, identity, files, root):
                 raise ValueError('unsafe artifact path')
             if len(artifacts) >= 20000: raise ValueError('too many symbol files')
             digest = sha(original)
+            if expected_hashes and relative in expected_hashes and digest != expected_hashes[relative]:
+                raise ValueError('artifact changed after validation')
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(original, target)
             if sha(target) != digest or sha(original) != digest:
@@ -133,6 +135,7 @@ def firmware(project, environment, root, previous=None):
     if not re.fullmatch(r'WAVESHARE_AMOLED_(175|206)(_[A-Z_]+)?', environment):
         raise ValueError('invalid firmware environment')
     manifest_path = project / '.pio/open-bike-build/builds' / environment / 'current.json'
+    manifest_digest = sha(manifest_path)
     manifest = read_json(manifest_path)
     if manifest.get('environment') != environment or manifest.get('uploadEligible') is not True:
         raise ValueError('requires a successful attested build manifest')
@@ -148,7 +151,8 @@ def firmware(project, environment, root, previous=None):
     files['firmware.map'] = maps[0]
     identity = {key: manifest.get(key) for key in ('sourceIdentity', 'environment',
                 'firmwareElfSha256', 'firmwareBinSha256', 'coreInputKey', 'runtimeProvenance')}
-    record = publish('firmware', identity, files, root)
+    record = publish('firmware', identity, files, root, {'firmware.elf': manifest['firmwareElfSha256'],
+                                                        'build-manifest.json': manifest_digest})
     # Derive producer inputs from the manifest's exact Git identity, never from
     # whichever source happens to occupy the worktree now. This is observational.
     manifest = dict(manifest)

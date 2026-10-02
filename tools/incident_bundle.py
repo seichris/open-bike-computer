@@ -71,6 +71,9 @@ def app_match(manifest, symbols, crash=None):
 
 
 def create(bundle, context_path, scenario, records, root, native_crash=None):
+    originals = {'bundle.zip': bundle, 'context.json': context_path, 'scenario.json': scenario}
+    if native_crash: originals['native-crash.ips'] = native_crash
+    expected_hashes = {name: evidence.sha(path) for name, path in originals.items()}
     context = context_data(context_path)
     manifest, streams = ride_diagnostics.validate_bundle(bundle)
     # Do not use a different capture's streams to fill this incident's coverage.
@@ -92,7 +95,10 @@ def create(bundle, context_path, scenario, records, root, native_crash=None):
     files = {'bundle.zip': bundle, 'context.json': context_path, 'scenario.json': scenario}
     for record in records:
         for path in record.rglob('*'):
-            if path.is_file() or path.is_symlink(): files[f'symbols/{record.name}/{path.relative_to(record)}'] = path
+            if path.is_file() or path.is_symlink():
+                relative = f'symbols/{record.name}/{path.relative_to(record)}'
+                files[relative] = path
+                expected_hashes[relative] = evidence.sha(path)
     if native_crash: files['native-crash.ips'] = native_crash
     identity = {'createdAt': datetime.now(timezone.utc).isoformat(), 'context': context,
         'diagnosticSchema': manifest['schema'], 'appBuildIdentity': manifest['appBuildIdentity'],
@@ -104,7 +110,7 @@ def create(bundle, context_path, scenario, records, root, native_crash=None):
         'scenarioIdentity': replay_scenario.validate(scenario)['id'],
         'replayStatus': 'not-run',
         'physicalAcceptance': 'not established by an incident archive or host replay'}
-    return evidence.publish('incident', identity, files, root)
+    return evidence.publish('incident', identity, files, root, expected_hashes)
 
 
 def verify(record):
