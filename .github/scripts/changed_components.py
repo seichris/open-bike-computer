@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import re
 import subprocess
@@ -29,11 +30,13 @@ FULL_CI_PATHS = {
 }
 FIRMWARE_HOST_ONLY_PATH_PREFIXES = ("esp32/tools/tests/",)
 FIRMWARE_HOST_PATH_PREFIXES = (
+    ".github/actions/firmware-build-cache/",
     ".github/actions/require-immutable-releases/",
     ".github/actions/require-firmware-release-controls/",
 )
 FIRMWARE_WORKFLOW_PATHS = {
     ".github/workflows/firmware-diagnostics.yml",
+    ".github/workflows/firmware-cache-qualification.yml",
     ".github/workflows/firmware-release-candidate.yml",
     ".github/workflows/firmware-release.yml",
     ".github/workflows/firmware-runtime-performance.yml",
@@ -87,6 +90,30 @@ SHARED_MAP_STREAM_FIXTURE_PATH = (
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 ZERO_SHA = "0" * 40
 
+CACHE_QUALIFICATION_PATHS = {
+    *FULL_CI_PATHS,
+    ".github/workflows/firmware-cache-qualification.yml",
+    "esp32/prebuild.py", "esp32/platformio.ini", "esp32/sdkconfig",
+    "esp32/idf_component.yml", "esp32/dependencies.lock",
+    "esp32/tools/firmware-runtime/lock-v1.json",
+    *(f"esp32/tools/{name}.py" for name in (
+        "firmware_runtime", "pioarduino_custom_core", "build_firmware",
+        "generated_sdkconfig", "shared_firmware_cache", "firmware_compile_cache",
+        "benchmark_firmware_cache",
+    )),
+}
+
+
+def cache_qualification_required(paths: Iterable[str]) -> bool:
+    return any(
+        path in CACHE_QUALIFICATION_PATHS
+        or path.startswith(".github/actions/firmware-build-cache/")
+        or any(fnmatch.fnmatch(path, pattern) for pattern in (
+            "esp32/*.csv", "esp32/**/idf_component.yml", "esp32/**/dependencies.lock",
+        ))
+        for path in paths
+    )
+
 
 def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
     """Return the CI components affected by a collection of Git paths."""
@@ -102,6 +129,10 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
 
         if path in FULL_CI_PATHS:
             return {component: True for component in COMPONENTS}
+
+        if path.startswith(".github/actions/firmware-build-cache/"):
+            selected["firmware_build"] = True
+            selected["firmware_host"] = True
 
         if path.startswith("esp32/"):
             selected["firmware_host"] = True
@@ -299,9 +330,11 @@ def main() -> int:
 
     try:
         selected = select_scope(args.scope)
+        qualify_cache = args.scope in {"all", "firmware"}
         if selected is None:
             paths = changed_paths(args.event, args.base, args.head)
             selected = classify_paths(paths or (), run_all=paths is None)
+            qualify_cache = paths is None or cache_qualification_required(paths)
     except (subprocess.CalledProcessError, ValueError) as error:
         parser.error(str(error))
 
@@ -313,6 +346,7 @@ def main() -> int:
         separators=(",", ":"),
     )
     print(f"firmware_targets={firmware_targets}")
+    print(f"firmware_cache_qualification={'true' if qualify_cache else 'false'}")
     return 0
 
 

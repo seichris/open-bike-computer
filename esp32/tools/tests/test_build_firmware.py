@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import hashlib
+import configparser
 import io
 import json
 import os
@@ -135,6 +136,9 @@ class DynamicTlsLinkProofTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.project_dir = Path(self.temp_dir.name)
+        cache_patch = patch.dict(os.environ, {"OPEN_BIKE_FIRMWARE_BUILD_CACHE": str(self.project_dir.resolve() / ".pio/shared-cache")})
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
 
     def write_sdkconfig(self, dynamic: bool) -> None:
         value = "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y\n" if dynamic else ""
@@ -238,6 +242,9 @@ class FirmwareBuildTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.project_dir = Path(self.temp_dir.name)
+        cache_patch = patch.dict(os.environ, {"OPEN_BIKE_FIRMWARE_BUILD_CACHE": str(self.project_dir.resolve() / ".pio/shared-cache")})
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
         self.runtime_patch = patch.dict(
             os.environ,
             {
@@ -259,6 +266,8 @@ class FirmwareBuildTests(unittest.TestCase):
             "tools/generated_sdkconfig.py",
             "tools/pioarduino_custom_core.py",
             "tools/firmware_runtime.py",
+            "tools/firmware_compile_cache.py",
+            "tools/shared_firmware_cache.py",
         ):
             path = self.project_dir / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -562,6 +571,7 @@ class FirmwareBuildTests(unittest.TestCase):
                 "git", "add", "platformio.ini", ".gitignore", "prebuild.py",
                 "tools/build_firmware.py", "tools/generated_sdkconfig.py",
                 "tools/pioarduino_custom_core.py", "tools/firmware_runtime.py",
+                "tools/firmware_compile_cache.py", "tools/shared_firmware_cache.py",
             ],
             cwd=self.project_dir,
             check=True,
@@ -2369,6 +2379,7 @@ build_src_filter =
                 "build_firmware.record_generated_sdkconfig_defaults",
                 return_value=fake_manifest,
             ),
+            patch("build_firmware.publish_shared_core"),
         ):
             build_firmware(self.project_dir, self.environment, runner=runner)
 
@@ -2442,6 +2453,32 @@ build_src_filter =
             },
             fields,
         )
+
+    def test_verified_config_preserves_local_file_paths_through_ini_interpolation(self):
+        self.platform_config_patch.stop()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                project = Path(directory).resolve() / "consumer with 100% space's#tag"
+                project.mkdir()
+                (project / "platformio.ini").write_text(
+                    f"[env:{self.environment}]\nplatform = {WAVESHARE_PLATFORM_URL}\n"
+                )
+                staged = project / ".pio/staged platform"
+                with (
+                    patch("build_firmware._stage_verified_platform", return_value=staged),
+                    patch("build_firmware._download_verified_archive", side_effect=lambda downloads, **kwargs: downloads / kwargs["filename"]),
+                    patch("build_firmware.WAVESHARE_PLATFORM_PACKAGES", (("tool-test", "https://example.invalid/tool.zip", "a" * 64, 1),)),
+                ):
+                    config, _ = _verified_platformio_project_config(project)
+                for name in ("platformio-verified.ini", "platformio-bootstrap.ini", "platformio-custom-core.ini"):
+                    parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
+                    parser.read(config.with_name(name))
+                    section = parser[f"env:{self.environment}"]
+                    self.assertEqual(section["platform"], "file://" + str(staged))
+                    expected = project / ".pio/open-bike-build/downloads/platform-packages" / ("tool-test-" + "a" * 64 + ".zip")
+                    self.assertEqual(section["platform_packages"].strip(), "tool-test @ file://" + str(expected))
+        finally:
+            self.platform_config_patch.start()
 
     def test_downloads_and_content_pins_platform_project_config(self):
         self.platform_config_patch.stop()

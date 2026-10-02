@@ -99,3 +99,12 @@ developer build latency.
 The JSON build-manifest schema, runtime-lock schema, core-cache schema,
 flash-plan schema, factory-bundle schema, and factory-release schema remain the
 authoritative structured contracts for their respective boundaries.
+
+## Shared dependency caches
+
+See [firmware build caching](firmware-build-caching.md) for shared core transport,
+source-only compiler reuse, CI cache boundaries, and the required native-host
+relocation qualification. `FIRMWARE_SHARED_CORE_CACHE schema=1` records a miss,
+publication, or verified restore (`status=hit` with `restoreMs`). A restore is
+never firmware/upload acceptance; the normal exact-source build provenance
+remains authoritative.

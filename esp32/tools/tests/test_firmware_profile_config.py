@@ -25,6 +25,11 @@ def inherited_option(section: str, option: str) -> str:
 
 
 prebuild_source = (project_dir / "prebuild.py").read_text()
+for section in config.sections():
+    if section.startswith("env:WAVESHARE_AMOLED_"):
+        sdk = inherited_option(section, "custom_sdkconfig")
+        assert "CONFIG_APP_COMPILE_TIME_DATE=n" in sdk, section
+        assert "CONFIG_BOOTLOADER_COMPILE_TIME_DATE=n" in sdk, section
 main_source = (project_dir / "src/main.cpp").read_text()
 lv_conf_source = (project_dir / "lib/lvgl/lv_conf.h").read_text()
 assert "-DBUILD_PROFILE=" in prebuild_source

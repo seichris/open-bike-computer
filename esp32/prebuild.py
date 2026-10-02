@@ -23,6 +23,7 @@ from firmware_build_identity import (
     firmware_git_identity,
 )
 from generated_sdkconfig import recognized_generated_sdkconfigs
+from firmware_compile_cache import configure_metadata_identity
 from pioarduino_custom_core import (
     correct_espidf_text,
     correct_penv_setup_text,
@@ -321,9 +322,15 @@ env.Append(BUILD_FLAGS=[
     u'-DVERSION=\\"' + version + '\\"',
     u'-DFLAVOR=\\"' + firmware_target + '\\"',
     u'-DBUILD_PROFILE=\\"' + flavor + '\\"',
-    u'-DGIT_SHA=\\"' + git_sha + '\\"',
-    u'-DBUILD_TIMESTAMP=\\"' + build_timestamp + '\\"',
     u'-D'+ flavor + '=1'
+    ])
+
+if deterministic_build:
+    configure_metadata_identity(env, git_sha, build_timestamp)
+else:
+    env.Append(BUILD_FLAGS=[
+        '-DGIT_SHA=\\"' + git_sha + '\\"',
+        '-DBUILD_TIMESTAMP=\\"' + build_timestamp + '\\"',
     ])
 
 if dfl_lat != None and dfl_lon != None:
