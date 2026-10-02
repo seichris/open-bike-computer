@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ $# != 1 ]]; then echo 'Usage: tools/build-and-record-firmware WAVESHARE_AMOLED_175[_PROFILE]' >&2; exit 2; fi
+python3 "$root/esp32/tools/build_firmware.py" "$1" --project-dir "$root/esp32"
+python3 "$root/tools/build_evidence.py" firmware --environment "$1"

@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "ble-backpressure-reconnect-v1",
+  "module": "navigation-write-queue",
+  "maxCount": 4,
+  "steps": [
+    {"action":"enqueue","label":"turn","writeClass":"navigation"},
+    {"action":"enqueue","label":"gps-old","writeClass":"gps","key":"gps"},
+    {"action":"advance","milliseconds":250},
+    {"action":"enqueue","label":"gps-fresh","writeClass":"gps","key":"gps"},
+    {"action":"flush","canSend":false},
+    {"action":"expect","depth":2,"oldestAgeMs":250,"coalesced":1,"delivered":[]},
+    {"action":"disconnect"},
+    {"action":"expect","depth":0,"cleared":2,"delivered":[]},
+    {"action":"enqueue","label":"reconnected-turn","writeClass":"navigation"},
+    {"action":"flush","canSend":true},
+    {"action":"expect","depth":0,"delivered":["reconnected-turn"]}
+  ]
+}

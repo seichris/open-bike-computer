@@ -18,3 +18,5 @@ fi
   "${IOS_DIR}/BikeComputer/WorkoutShared/WatchCyclingSensorObservationPublisher.swift" \
   "${IOS_DIR}/BikeComputerTests/WatchCyclingSensorObservationTests.swift"
 "${OUT_DIR}/tests"
+
+python3 "${IOS_DIR}/../tools/replay_scenario.py"

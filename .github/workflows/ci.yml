@@ -184,6 +184,17 @@ jobs:
           fi
           env -u LD_LIBRARY_PATH python3 tools/build_firmware.py \
             "${BUILD_ENVIRONMENT}" "${factory_args[@]}"
+      - name: Retain exact firmware symbols and report cache observations
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+          BICINO_BUILD_EVIDENCE_DIR: ${{ runner.temp }}/bicino-build-symbols
+        run: python3 ../tools/build_evidence.py firmware --environment "$BUILD_ENVIRONMENT"
+      - name: Upload firmware symbol and cache evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: firmware-build-evidence-${{ matrix.target }}
+          path: ${{ runner.temp }}/bicino-build-symbols/
+          if-no-files-found: error
       - name: Report largest firmware symbols after build failure
         if: failure()
         env:
@@ -332,10 +343,14 @@ jobs:
       needs.changes.outputs.ios == 'true' &&
       needs.changes.outputs.heavy_ci == 'true'
     runs-on: macos-latest
+    env:
+      BICINO_REQUIRE_BUILD_EVIDENCE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Configure job-scoped Xcode DerivedData
-        run: echo "CI_DERIVED_DATA_PATH=$RUNNER_TEMP/BikeComputerDerivedData" >> "$GITHUB_ENV"
+        run: |
+          echo "CI_DERIVED_DATA_PATH=$RUNNER_TEMP/BikeComputerDerivedData" >> "$GITHUB_ENV"
+          echo "BICINO_BUILD_EVIDENCE_DIR=$RUNNER_TEMP/bicino-build-symbols" >> "$GITHUB_ENV"
       - name: Run workout contract tests on iOS
         run: ./scripts/run-workout-platform-tests.sh ios
         working-directory: ios-app
@@ -380,6 +395,13 @@ jobs:
             echo "Release app contains the Debug-only remote device settings"
             exit 1
           fi
+      - name: Upload exact app symbols
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ios-exact-build-symbols
+          path: ${{ runner.temp }}/bicino-build-symbols/
+          if-no-files-found: error
+
 
   esp32-host:
     name: ESP32 Host Tests
