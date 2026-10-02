@@ -30,6 +30,20 @@ class ChangedComponentsTests(unittest.TestCase):
                     "map_backend": False, "osm": False,
                 })
 
+    def test_cache_qualification_runs_for_core_inputs_without_rebuilding_for_app_edits(self):
+        for path in (
+            "esp32/platformio.ini", "esp32/prebuild.py",
+            "esp32/tools/firmware_runtime.py", "esp32/tools/shared_firmware_cache.py",
+            "esp32/tools/firmware-runtime/lock-v1.json", "esp32/partitions.csv",
+            "esp32/components/custom/idf_component.yml", "esp32/dependencies.lock",
+            ".github/actions/firmware-build-cache/action.yml", ".github/workflows/ci.yml",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(changed_components.cache_qualification_required([path]))
+        for path in ("esp32/src/main.cpp", "esp32/lib/gui/gui.cpp", "README.md", "esp32/tools/tests/test_build_firmware.py"):
+            with self.subTest(path=path):
+                self.assertFalse(changed_components.cache_qualification_required([path]))
+
     def test_docs_only_change_skips_product_jobs(self) -> None:
         self.assertEqual(
             {

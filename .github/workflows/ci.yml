@@ -61,6 +61,7 @@ jobs:
     outputs:
       firmware_build: ${{ steps.components.outputs.firmware_build }}
       firmware_host: ${{ steps.components.outputs.firmware_host }}
+      firmware_cache_qualification: ${{ steps.components.outputs.firmware_cache_qualification }}
       firmware_targets: ${{ steps.components.outputs.firmware_targets }}
       heavy_ci: ${{ steps.policy.outputs.heavy_ci }}
       ios: ${{ steps.components.outputs.ios }}
@@ -139,6 +140,12 @@ jobs:
           --firmware-hardware "$FIRMWARE_HARDWARE"
           >> "$GITHUB_OUTPUT"
 
+  firmware-cache:
+    name: Firmware cache qualification
+    needs: changes
+    if: needs.changes.outputs.firmware_cache_qualification == 'true'
+    uses: ./.github/workflows/firmware-cache-qualification.yml
+
   esp32:
     name: ESP32 (${{ matrix.target }})
     needs: changes
@@ -160,6 +167,10 @@ jobs:
         with:
           path: esp32/.pio/open-bike-build/downloads
           key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
+      - name: Restore verified firmware build caches
+        uses: ./.github/actions/firmware-build-cache
+        with:
+          environment: ${{ matrix.target }}
       - name: Build with the repository-owned firmware runtime
         env:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
@@ -474,6 +485,9 @@ jobs:
             tools.tests.test_package_factory_firmware \
             tools.tests.test_firmware_build_identity \
             tools.tests.test_generated_sdkconfig \
+            tools.tests.test_shared_firmware_cache \
+            tools.tests.test_firmware_compile_cache \
+            tools.tests.test_firmware_download_cache \
             tools.tests.test_firmware_runtime \
             tools.tests.test_refresh_firmware_runtime \
             tools.tests.test_capture_boot \
@@ -1032,6 +1046,7 @@ jobs:
       - changes
       - esp32
       - esp32-host
+      - firmware-cache
       - ios-fast
       - ios
       - map-platform
@@ -1044,6 +1059,8 @@ jobs:
           ESP32_RESULT: ${{ needs.esp32.result }}
           FIRMWARE_BUILD_CHANGED: ${{ needs.changes.outputs.firmware_build }}
           FIRMWARE_HOST_CHANGED: ${{ needs.changes.outputs.firmware_host }}
+          FIRMWARE_CACHE_QUALIFICATION: ${{ needs.changes.outputs.firmware_cache_qualification }}
+          CACHE_RESULT: ${{ needs.firmware-cache.result }}
           HOST_RESULT: ${{ needs.esp32-host.result }}
           HEAVY_CI: ${{ needs.changes.outputs.heavy_ci }}
           IOS_CHANGED: ${{ needs.changes.outputs.ios }}
@@ -1064,6 +1081,12 @@ jobs:
           }
 
           require_result "CI component selection" "$CHANGES_RESULT" success
+
+          if test "$FIRMWARE_CACHE_QUALIFICATION" = true; then
+            require_result "Firmware cache qualification" "$CACHE_RESULT" success
+          else
+            require_result "Firmware cache qualification" "$CACHE_RESULT" skipped
+          fi
 
           if test "$FIRMWARE_BUILD_CHANGED" = true && test "$HEAVY_CI" = true; then
             require_result "ESP32 builds" "$ESP32_RESULT" success

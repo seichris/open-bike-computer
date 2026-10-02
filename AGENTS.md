@@ -73,8 +73,8 @@ Custom-core and firmware identities are separate. A source-only commit may
 reuse an attested project-private core key, but upload-only always revalidates
 the exact clean Git identity, source clock, runtime/core reference, generated
 state, artifacts, and flash plan. Dirty builds may consume an entry but never
-publish or upload. Cross-worktree core sharing is disabled until artifacts pass
-the documented relocatability gate.
+publish or upload. Cross-worktree core transport is verified and rebased into private state;
+cache-key/relocation changes must pass `docs/firmware-build-caching.md` qualification.
 
 Optional device nicknames are stored outside Git with
 `tools/device_registry.py`. `--device-name NAME` must resolve to one enrolled
@@ -216,8 +216,9 @@ profile-private copy. Missing, extra, truncated, symlinked, wrong-owner, or
 post-build-mutated entries fail closed and only the exact entry is quarantined.
 A source-only commit may reuse the same core key, but every build writes a new
 exact-source firmware manifest. Dirty builds may consume a verified entry but
-cannot publish, upload, or replace it. Cross-worktree core lookup remains
-disabled until the separate relocatability gate passes. Nested passes exclude
+cannot publish, upload, or replace it. Cross-worktree core transport uses a shared immutable archive and
+re-attests the receiving worktree before execution; see
+`docs/firmware-build-caching.md` for the relocatability gate. Nested passes exclude
 only recognized generated SDK configs from the Git identity.
 
 The helper accepts `PLATFORMIO_CORE_DIR` (or the legacy
