@@ -3,6 +3,7 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstring>
 
 using map_nearby_layout::Input;
 
@@ -64,4 +65,28 @@ int main() {
       &behind, 1, 466, 466, true, 42, 42);
   assert(fallback.count == 1 && fallback.placements[0].edge);
   assert(fallback.placements[0].x < 233 && fallback.placements[0].y > 233);
+
+  bool kilometres = false;
+  char distance[24]{};
+  assert(map_nearby_layout::formatDirectDistance(
+      999.0, kilometres, distance, sizeof(distance)));
+  assert(std::strcmp(distance, "1000 m") == 0 && !kilometres);
+  assert(map_nearby_layout::formatDirectDistance(
+      1049.0, kilometres, distance, sizeof(distance)));
+  assert(std::strcmp(distance, "1050 m") == 0 && !kilometres);
+  assert(map_nearby_layout::formatDirectDistance(
+      1051.0, kilometres, distance, sizeof(distance)));
+  assert(std::strcmp(distance, "1.1 km") == 0 && kilometres);
+  assert(map_nearby_layout::formatDirectDistance(
+      1000.0, kilometres, distance, sizeof(distance)));
+  assert(std::strcmp(distance, "1.0 km") == 0 && kilometres);
+  assert(map_nearby_layout::formatDirectDistance(
+      949.0, kilometres, distance, sizeof(distance)));
+  assert(std::strcmp(distance, "950 m") == 0 && !kilometres);
+  assert(map_nearby_layout::formatDirectDistance(
+      NAN, kilometres, distance, sizeof(distance)));
+  assert(std::strcmp(distance, "--") == 0 && !kilometres);
+  char tooSmall[2]{};
+  assert(!map_nearby_layout::formatDirectDistance(
+      1200.0, kilometres, tooSmall, sizeof(tooSmall)));
 }

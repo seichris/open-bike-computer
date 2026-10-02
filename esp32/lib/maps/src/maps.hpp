@@ -694,6 +694,7 @@ public:
   bool nearbyIndexHealthy() const {
     return nearbyPoiIndexHealthy.load(std::memory_order_acquire);
   }
+  uint32_t currentMapEpoch() const { return mapEpoch; }
   bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);
   void deleteMapScrSprites();
   void createMapScrSprites();

@@ -201,6 +201,11 @@ struct Result {
   uint8_t category = 0;
 };
 
+inline bool sameRecord(const Result &left, const Result &right) {
+  return left.blockX == right.blockX && left.blockY == right.blockY &&
+         left.recordOrdinal == right.recordOrdinal;
+}
+
 inline bool better(const Result &left, const Result &right) {
   if (left.directDistanceM != right.directDistanceM)
     return left.directDistanceM < right.directDistanceM;

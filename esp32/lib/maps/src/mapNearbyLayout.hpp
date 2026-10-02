@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 
 namespace map_nearby_layout {
 constexpr size_t kMaximumResults = 10;
@@ -51,6 +52,28 @@ inline uint8_t displayCategory(const Placement &placement,
       return inputs[index].category;
   }
   return 0;
+}
+
+// Preserve the current unit through ordinary GPS noise near one kilometre.
+// The caller owns the per-result bit and carries it across result refreshes.
+inline bool formatDirectDistance(double meters, bool &kilometres,
+                                 char *buffer, size_t capacity) {
+  if (buffer == nullptr || capacity == 0) return false;
+  if (!std::isfinite(meters) || meters < 0.0) {
+    const int written = std::snprintf(buffer, capacity, "--");
+    return written >= 0 && static_cast<size_t>(written) < capacity;
+  }
+  if (kilometres) {
+    if (meters < 950.0) kilometres = false;
+  } else if (meters > 1050.0) {
+    kilometres = true;
+  }
+  const int written = kilometres
+      ? std::snprintf(buffer, capacity, "%.1f km",
+                      std::round(meters / 100.0) / 10.0)
+      : std::snprintf(buffer, capacity, "%.0f m",
+                      std::round(meters / 10.0) * 10.0);
+  return written >= 0 && static_cast<size_t>(written) < capacity;
 }
 
 inline bool pinFits(double x, double y, double width, double height,

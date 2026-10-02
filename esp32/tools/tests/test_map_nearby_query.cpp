@@ -55,6 +55,11 @@ int main() {
   assert(search.size() == 10);
   assert(search[0].recordOrdinal == 0);
   assert(search[9].recordOrdinal == 9);
+  auto updatedDistance = search[0];
+  updatedDistance.directDistanceM += 12.0;
+  assert(sameRecord(search[0], updatedDistance));
+  ++updatedDistance.recordOrdinal;
+  assert(!sameRecord(search[0], updatedDistance));
   for (size_t item = 1; item < search.size(); ++item)
     assert(search[item - 1].directDistanceM <=
            search[item].directDistanceM);

@@ -127,7 +127,9 @@ struct NearbyView {
   map_nearby_storage::SearchResult result{};
   map_nearby_layout::Layout layout{};
   std::array<bool, map_nearby_layout::kMaximumResults> wasOnMap{};
+  std::array<bool, map_nearby_layout::kMaximumResults> distanceKilometres{};
   uint32_t selectedMask = 0;
+  uint32_t mapEpoch = 0;
   uint32_t querySequence = 0;
   uint32_t lastQueryMs = 0;
   uint32_t lastLayoutMs = 0;
@@ -2117,7 +2119,9 @@ static void nearbyStartSearch(uint32_t nowMs) {
   nearby.querySequence = sequence;
   nearby.lastQueryPosition = position;
   nearby.querying = true;
-  lv_label_set_text(nearby.status, "Finding nearby places...");
+  lv_label_set_text(nearby.status,
+      nearby.haveResults ? "Updating nearby places..."
+                         : "Finding nearby places...");
 }
 
 static void nearbyShowMapTap(lv_event_t *event) {
@@ -2125,10 +2129,12 @@ static void nearbyShowMapTap(lv_event_t *event) {
       nearby.selectedMask == 0) return;
   nearby.showingMap = true;
   nearby.radiusM = 10000.0;
+  nearby.mapEpoch = mapView.currentMapEpoch();
   nearby.haveResults = false;
   nearby.result = {};
   nearby.querySequence = 0;
   nearby.wasOnMap.fill(false);
+  nearby.distanceKilometres.fill(false);
   nearby.highlightedResult = 255;
   for (auto &marker : nearby.markers)
     lv_obj_add_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
@@ -2183,16 +2189,6 @@ static const char *nearbyCategoryName(uint8_t category) {
   }
 }
 
-static void nearbyFormatDistance(double meters, char *buffer, size_t capacity) {
-  if (!std::isfinite(meters) || meters < 0.0) {
-    snprintf(buffer, capacity, "--");
-  } else if (meters < 995.0) {
-    snprintf(buffer, capacity, "%.0f m", std::round(meters / 10.0) * 10.0);
-  } else {
-    snprintf(buffer, capacity, "%.1f km", std::round(meters / 100.0) / 10.0);
-  }
-}
-
 static void nearbyMarkerTap(lv_event_t *event) {
   if (lv_event_get_code(event) != LV_EVENT_CLICKED) return;
   const auto index = static_cast<size_t>(
@@ -2221,6 +2217,8 @@ static void nearbyMarkerTap(lv_event_t *event) {
   lv_obj_set_style_border_width(list, 0, 0);
   lv_obj_set_style_pad_all(list, 0, 0);
   lv_obj_set_scroll_dir(list, LV_DIR_VER);
+  map_nearby_query::Position rider;
+  const bool fresh = nearbyFreshPosition(millis(), rider);
   uint8_t row = 0;
   for (uint8_t member = 0; member < nearby.result.count; ++member) {
     if ((placement.members & (1U << member)) == 0) continue;
@@ -2231,8 +2229,13 @@ static void nearbyMarkerTap(lv_event_t *event) {
                         reinterpret_cast<void *>(uintptr_t(member + 1U)));
     lv_obj_t *label = lv_label_create(button);
     char distance[24];
-    nearbyFormatDistance(nearby.result.places[member].directDistanceM,
-                         distance, sizeof(distance));
+    const double directDistance = fresh
+        ? map_nearby_query::distanceMeters(
+              rider, nearby.result.places[member].position)
+        : nearby.result.places[member].directDistanceM;
+    (void)map_nearby_layout::formatDirectDistance(
+        directDistance, nearby.distanceKilometres[member],
+        distance, sizeof(distance));
     lv_label_set_text_fmt(label, "%s  %s",
                           nearbyCategoryName(nearby.result.places[member].category),
                           distance);
@@ -2491,8 +2494,17 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
     }
     if (placed.edge) {
       char distance[24];
-      nearbyFormatDistance(placed.nearestDistanceM,
-                           distance, sizeof(distance));
+      uint8_t nearest = 0;
+      while (nearest < nearby.result.count &&
+             (placed.members & (1U << nearest)) == 0)
+        ++nearest;
+      if (nearest >= nearby.result.count) {
+        lv_obj_add_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
+        continue;
+      }
+      (void)map_nearby_layout::formatDirectDistance(
+          placed.nearestDistanceM, nearby.distanceKilometres[nearest],
+          distance, sizeof(distance));
       lv_label_set_text(marker.distance, distance);
       lv_obj_clear_flag(marker.distance, LV_OBJ_FLAG_HIDDEN);
       const double dx = placed.x - TFT_WIDTH / 2.0;
@@ -2530,15 +2542,53 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
 
 static void serviceNearbyScreen(uint32_t nowMs) {
   if (activeTile != NEARBY || !nearby.showingMap) return;
+  const uint32_t currentEpoch = mapView.currentMapEpoch();
+  if (nearby.mapEpoch != currentEpoch) {
+    mapView.cancelNearbySearch();
+    nearby.mapEpoch = currentEpoch;
+    nearby.querying = false;
+    nearby.querySequence = 0;
+    nearby.haveResults = false;
+    nearby.result = {};
+    nearby.layout = {};
+    nearby.wasOnMap.fill(false);
+    nearby.distanceKilometres.fill(false);
+    nearby.highlightedResult = 255;
+    nearby.lastLayoutMs = 0;
+    for (auto &marker : nearby.markers)
+      lv_obj_add_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
+    if (nearby.chooser != nullptr)
+      lv_obj_add_flag(nearby.chooser, LV_OBJ_FLAG_HIDDEN);
+    nearbyStartSearch(nowMs);
+  }
   uint32_t sequence = 0;
   map_nearby_storage::SearchResult replacement;
   if (mapView.takeNearbySearchResult(sequence, replacement) &&
       sequence == nearby.querySequence) {
     nearby.querying = false;
     if (replacement.status == map_nearby_storage::Status::Ok) {
+      std::array<bool, map_nearby_layout::kMaximumResults> nextUnits{};
+      std::array<bool, map_nearby_layout::kMaximumResults> nextOnMap{};
+      uint8_t nextHighlighted = 255;
+      for (uint8_t next = 0; next < replacement.count; ++next) {
+        nextUnits[next] = replacement.places[next].directDistanceM >= 1000.0;
+        if (!nearby.haveResults) continue;
+        for (uint8_t previous = 0; previous < nearby.result.count; ++previous) {
+          if (!map_nearby_query::sameRecord(replacement.places[next],
+                                            nearby.result.places[previous]))
+            continue;
+          nextUnits[next] = nearby.distanceKilometres[previous];
+          nextOnMap[next] = nearby.wasOnMap[previous];
+          if (previous == nearby.highlightedResult)
+            nextHighlighted = next;
+          break;
+        }
+      }
       nearby.result = replacement;
       nearby.haveResults = true;
-      nearby.wasOnMap.fill(false);
+      nearby.distanceKilometres = nextUnits;
+      nearby.wasOnMap = nextOnMap;
+      nearby.highlightedResult = nextHighlighted;
       nearby.lastLayoutMs = 0;
     } else if (replacement.status != map_nearby_storage::Status::Cancelled) {
       nearby.haveResults = false;
