@@ -66,10 +66,10 @@ assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=n" in qualification_sdkconfig
 assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y" in qualification_sdkconfig
 assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in qualification_sdkconfig
 assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304" in qualification_sdkconfig
-for shipping in ("env:WAVESHARE_AMOLED_175_PRODUCTION",
-                 "env:WAVESHARE_AMOLED_206_PRODUCTION"):
-    assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y" not in inherited_option(
-        shipping, "custom_sdkconfig"), "PSRAM host allocation still needs per-board qualification"
+assert qualification_sdkconfig == inherited_option(
+    "env:WAVESHARE_AMOLED_175_PRODUCTION", "custom_sdkconfig")
+assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y" not in inherited_option(
+    "env:WAVESHARE_AMOLED_206_PRODUCTION", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
 assert "CONFIG_PM_DFS_INIT_AUTO=n" in waveshare_sdkconfig
 assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig
