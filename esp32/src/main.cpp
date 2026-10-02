@@ -36,6 +36,7 @@
 #include "gps.hpp"
 #include "hal.hpp"
 #include "storage.hpp"
+#include "usb_recovery_status.hpp"
 #include "tft.hpp"
 
 #ifdef HMC5883L
@@ -1556,6 +1557,7 @@ static void processDisconnectedShutdown() {
  *
  */
 void setup() {
+  usb_recovery_status::begin();
   power.setShutdownDeferredCallback(showShutdownDeferredNotice);
   power.configureShutdown(
       []() { deviceTransferHttp.beginShutdown(); return true; },
@@ -2216,6 +2218,7 @@ void setup() {
  *
  */
 void loop() {
+  usb_recovery_status::process();
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::heartbeat(
       runtime_watchdog_diagnostics::Role::Ui);
