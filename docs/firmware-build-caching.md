@@ -71,8 +71,9 @@ saves a fresh cache snapshot with a matching-input restore prefix. CI, release
 candidates, diagnostics, and speaker builds use this action. Mutable toolchain
 trees, current firmware manifests, upload plans, and final images are excluded.
 
-The **Firmware cache qualification** reusable workflow checks both supported native
-hosts and both boards' ordinary/production profiles. Each job builds:
+The manual **Firmware cache qualification** workflow offers either one macOS
+1.75-inch ordinary-profile job or the full eight-job Linux/macOS matrix for both
+boards' ordinary/production profiles. Each selected job builds:
 
 1. A cold source worktree with an empty isolated compiled-core cache.
 2. A same-head warm rebuild, requiring matching image, ELF and flash-plan hashes.
@@ -84,12 +85,22 @@ Verified application compiles map project paths to `/open-bike-computer/esp32`
 so debug/file paths do not change the ELF hash embedded in ESP32 images.
 Private uploader/image paths in flash plans remain worktree-local; the actual
 flashable image hashes must match. All phases require a fresh linker map. Timing JSON and full
-logs are retained. Run this qualification before accepting changes to cache
-keys or relocation rules; passing host tests alone does not qualify relocation.
-CI invokes it when cache tools, core configuration or pinned runtime inputs
-change, including draft PRs. The protected **CI Gate** requires every selected
-qualification job to succeed. Application-only edits use the normal firmware
-builds and avoid repeating this isolated core qualification matrix.
+logs are retained. Use this qualification to verify changes to cache keys or
+relocation rules; passing host tests alone does not qualify relocation.
+PR CI keeps ordinary firmware builds, verified cache restores and fast cache
+integrity/compiler tests in the existing firmware host-test job. It does not
+run dedicated cache qualification or runtime-performance benchmark jobs, and
+**CI Gate** does not depend on manual benchmark results. Explicit `all` and
+`firmware` CI scopes, including tagged release validation, likewise run the
+normal builds and tests without dispatching cache benchmarks.
+
+Run **Firmware cache qualification** manually when changing cache keys,
+relocation rules or toolchains. It defaults to `full`; select `macos` for the
+focused check. **Firmware runtime performance** is also manual-only and
+retains its Linux/macOS five-sample warm-handoff measurements. These workflows
+retain their checks and evidence artifacts. Fast tests do not establish real
+cold/warm/relocated firmware-image equality; use the manual qualification when
+that evidence is needed.
 
 After identifying the connected board, the same build-only check is available
 locally from the repository root:

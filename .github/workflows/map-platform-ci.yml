@@ -116,7 +116,7 @@ jobs:
             tests/test_map_format.py \
             tests/test_target3_cli.py
       - name: YAML/config tests
-        run: python -m unittest discover -s tests
+        run: python "${{ github.workspace }}/tools/dev_check.py" --check osm-tests --report "$RUNNER_TEMP/dev-checks/osm-tests/results.json"
       - name: Shell syntax
         run: bash -n scripts/pbf_to_geojson.sh
       - name: Shellcheck
@@ -146,7 +146,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Install backend test dependencies
         run: python -m pip install -e '.[test,object-storage,topography]'
       - name: Install OSM extraction test tool
@@ -166,9 +166,7 @@ jobs:
           python tools/generate_map_stream_trust.py --check
           python tools/check_map_stream_hardware_gate.py --validate-requirements
       - name: Unit tests
-        run: |
-          python -m unittest discover -s tests
-          python -m unittest discover -s ../deploy/tests
+        run: python "${{ github.workspace }}/tools/dev_check.py" --check map-backend-tests --check map-deploy-tests --report "$RUNNER_TEMP/dev-checks/map-backend-tests/results.json"
       - name: Production promotion scheduler image
         working-directory: .
         run: >-

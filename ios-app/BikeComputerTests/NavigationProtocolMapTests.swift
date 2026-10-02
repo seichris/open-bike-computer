@@ -5334,6 +5334,12 @@ extension NavigationProtocolTests {
             session: session
         )
 
+        let clock = TestClock()
+        var pollWaits: [UInt64] = []
+        let advancePollClock: (UInt64) async throws -> Void = { nanoseconds in
+            pollWaits.append(nanoseconds)
+            clock.advance(by: TimeInterval(nanoseconds) / 1_000_000_000)
+        }
         var statusRequests = 0
         FirmwareRequestCaptureProtocol.handler = { _, _ in
             statusRequests += 1
@@ -5355,11 +5361,14 @@ extension NavigationProtocolTests {
                 client: client,
                 bleManager: bleManager,
                 timeout: 0.2,
-                pollIntervalNanoseconds: 1_000_000
+                pollIntervalNanoseconds: 1_000_000,
+                now: clock.now,
+                sleep: advancePollClock
             )
         }
         assertEqual(confirmation, .installed, "BLE fallback confirms installation")
         assertEqual(statusRequests, 1, "HTTP status failure falls back to BLE")
+        assertEqual(pollWaits.count, 0, "BLE installation confirms without waiting")
 
         statusRequests = 0
         FirmwareRequestCaptureProtocol.handler = { request, _ in
@@ -5387,7 +5396,9 @@ extension NavigationProtocolTests {
                 client: client,
                 bleManager: bleManager,
                 timeout: 0.2,
-                pollIntervalNanoseconds: 1_000_000
+                pollIntervalNanoseconds: 1_000_000,
+                now: clock.now,
+                sleep: advancePollClock
             )
         }
         assertEqual(confirmation, .installed, "HTTP polling confirms installation")
@@ -5408,6 +5419,8 @@ extension NavigationProtocolTests {
                     "HTTP reconciliation projects terminal activation completion")
 
         statusRequests = 0
+        pollWaits.removeAll()
+        let pendingStartedAt = clock.now()
         FirmwareRequestCaptureProtocol.handler = { request, _ in
             statusRequests += 1
             let body = Data("""
@@ -5431,7 +5444,9 @@ extension NavigationProtocolTests {
                 client: client,
                 bleManager: bleManager,
                 timeout: 0.02,
-                pollIntervalNanoseconds: 1_000_000
+                pollIntervalNanoseconds: 1_000_000,
+                now: clock.now,
+                sleep: advancePollClock
             )
         }
         guard let confirmation,
@@ -5442,6 +5457,13 @@ extension NavigationProtocolTests {
         assertEqual(manager.statusMessage.hasPrefix("activating map-1"), true,
                     "pending confirmation retains activation status")
         assert(statusRequests > 1, "confirmation limit covers repeated pending polls")
+        assertEqual(statusRequests, pollWaits.count,
+                    "every pending poll uses the confirmation wait")
+        assert(pollWaits.allSatisfy { $0 == 1_000_000 },
+               "pending confirmation preserves the requested poll interval")
+        let elapsed = clock.now().timeIntervalSince(pendingStartedAt)
+        assert(elapsed >= 0.02 && elapsed < 0.022,
+               "pending confirmation stops at its deadline within one poll interval")
         FirmwareRequestCaptureProtocol.handler = { request, _ in
             if Thread.isMainThread {
                 MainActor.assumeIsolated { bleManager.deviceTransferSessionToken = "rotated-token" }

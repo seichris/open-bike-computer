@@ -6,22 +6,33 @@ module, even though the first compiler invocation already included them.
 """
 from pathlib import Path
 import re
+import json
+import importlib.util
 import unittest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 PREFIX = "ios-app/BikeComputer/BikeComputer/"
+SPEC = importlib.util.spec_from_file_location(
+    "swift_compile", ROOT / "tools/development/swift_compile.py")
+swift_compile = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(swift_compile)
+
 
 
 class DiagnosticsSourceGraphTests(unittest.TestCase):
     def test_every_ble_harness_has_its_diagnostics_dependencies(self):
         checked = 0
+        groups = json.loads((ROOT / "tools/development/swift-sources.json").read_text())["groups"]
         for path in (ROOT / "ios-app/scripts").glob("*.sh"):
             # Join shell continuations so each compiler command is inspected
             # independently; do not let another module hide a missing source.
             commands = path.read_text().replace("\\\n", " ").splitlines()
             for command in commands:
                 sources = set(re.findall(r"ios-app/[^\s\\\"]+\.swift", command))
+                registered = re.search(r'\$\{DEV_SWIFT_COMPILER\}"\s+([a-z0-9-]+)', command)
+                if registered:
+                    sources.update(swift_compile.sources(registered[1], groups))
                 if PREFIX + "Managers/BLEManager.swift" not in sources:
                     continue
                 checked += 1
@@ -71,12 +82,19 @@ class DiagnosticsSourceGraphTests(unittest.TestCase):
     def test_fast_ci_local_scripts_resolve_from_effective_directory(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
         job = workflow["jobs"]["ios-fast"]
+        checks = {c["id"]: c for c in json.loads(
+            (ROOT / "tools/development/checks.json").read_text())["checks"]}
         default = job.get("defaults", {}).get("run", {}).get("working-directory", ".")
         checked = 0
         for step in job["steps"]:
             command = step.get("run", "")
+            directory = step.get("working-directory", default)
+            registered = re.search(r"--check ([a-z0-9-]+)", command)
+            if registered:
+                check = checks[registered[1]]
+                command = check["command"]
+                directory = check.get("cwd", ".")
             for script in re.findall(r"(?:^|\s)(\./scripts/[A-Za-z0-9_-]+\.sh)", command):
-                directory = step.get("working-directory", default)
                 self.assertTrue((ROOT / directory / script).is_file(),
                                 f"{step['name']}: {script} does not exist from {directory}")
                 checked += 1

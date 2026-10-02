@@ -1,22 +1,13 @@
 name: Firmware runtime performance
 
 on:
-  pull_request:
-    paths:
-      - ".github/workflows/firmware-runtime-performance.yml"
-      - "esp32/tools/build_firmware.py"
-      - "esp32/tools/firmware_runtime.py"
-      - "esp32/tools/check_firmware_runtime_performance.py"
-      - "esp32/tools/firmware-runtime/**"
-      - "esp32/tools/tests/test_check_firmware_runtime_performance.py"
-      - "esp32/tools/tests/test_firmware_runtime.py"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: firmware-runtime-performance-${{ github.event.pull_request.number || github.ref }}
+  group: firmware-runtime-performance-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

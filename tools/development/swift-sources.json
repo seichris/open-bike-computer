@@ -1,0 +1,593 @@
+{
+  "schema": 1,
+  "groups": {
+    "native-workout-zone-1": {
+      "sources": [
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WatchWorkoutLaunchRequest.swift",
+        "ios-app/BikeComputerTests/WorkoutNativeZoneTests.swift"
+      ]
+    },
+    "navigation-1": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
+        "ios-app/BikeComputerTests/TopographyMapKitTileWarpTests.swift"
+      ]
+    },
+    "navigation-2": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkReplayScheduler.swift",
+        "ios-app/BikeComputerTests/RendererBenchmarkReplaySchedulerTests.swift"
+      ]
+    },
+    "navigation-3": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkWindowAdmission.swift",
+        "ios-app/BikeComputerTests/RendererBenchmarkWindowAdmissionTests.swift"
+      ]
+    },
+    "navigation-4": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkOutcome.swift",
+        "ios-app/BikeComputerTests/RendererDeliveryRegressionTests.swift"
+      ]
+    },
+    "navigation-5": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Models/BicinoDeviceIntroductionPolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/BicinoURLSchemeConfig.swift",
+        "ios-app/BikeComputerTests/DeviceScreenConfigurationTests.swift",
+        "ios-app/BikeComputerTests/DeviceScreenConfigurationStateTests.swift",
+        "ios-app/BikeComputerTests/NavigationProtocolTests.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/DeviceMapOperation.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceOperationCoordinator.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift",
+        "ios-app/BikeComputer/RideShared/GPXRouteImporter.swift",
+        "ios-app/BikeComputer/RideShared/StravaRouteURL.swift",
+        "ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteContract.swift",
+        "ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift",
+        "ios-app/BikeComputer/RideShared/RouteProviderContract.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteArchive.swift",
+        "ios-app/BikeComputer/RideShared/NavigationGeometry.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRuntime.swift",
+        "ios-app/BikeComputer/RideShared/WatchControllerContract.swift",
+        "ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift",
+        "ios-app/BikeComputer/RideShared/WireBytes.swift",
+        "ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift",
+        "ios-app/BikeComputer/RideShared/RideGPSPacket.swift",
+        "ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
+        "ios-app/BikeComputerTests/NavigationProtocolMapTests.swift",
+        "ios-app/BikeComputerTests/NavigationProtocolRideTests.swift"
+      ],
+      "groups": [
+        "common-1",
+        "common-5"
+      ]
+    },
+    "navigation-6": {
+      "sources": [
+        "ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift",
+        "ios-app/BikeComputer/RideShared/WireBytes.swift",
+        "ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservation.swift",
+        "ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservation+Workout.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/CyclingSensorProfile.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/CyclingSensorStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/CyclingSensorDetectionCoordinator.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift"
+      ],
+      "groups": [
+        "common-4"
+      ]
+    },
+    "navigation-7": {
+      "sources": [
+        "ios-app/BikeComputerTests/DestinationCalloutLayoutTests.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift"
+      ],
+      "groups": [
+        "common-3"
+      ]
+    },
+    "navigation-8": {
+      "sources": [
+        "ios-app/BikeComputerTests/MapAppearanceTests.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift"
+      ],
+      "groups": [
+        "common-3"
+      ]
+    },
+    "navigation-9": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
+        "ios-app/BikeComputerTests/SavedMapPreviewCatalystTests.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/DeviceMapOperation.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceOperationCoordinator.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteContract.swift",
+        "ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift",
+        "ios-app/BikeComputer/RideShared/RouteProviderContract.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteArchive.swift",
+        "ios-app/BikeComputer/RideShared/NavigationGeometry.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRuntime.swift",
+        "ios-app/BikeComputer/RideShared/WatchControllerContract.swift",
+        "ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift",
+        "ios-app/BikeComputer/RideShared/WireBytes.swift",
+        "ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift",
+        "ios-app/BikeComputer/RideShared/RideGPSPacket.swift",
+        "ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift"
+      ],
+      "groups": [
+        "common-1"
+      ]
+    },
+    "offline-route-1": {
+      "sources": [
+        "ios-app/BikeComputer/RideShared/SavedDestinationContract.swift",
+        "ios-app/BikeComputer/RideShared/StravaRouteReloadBookmark.swift",
+        "ios-app/BikeComputer/RideShared/WatchRouteSyncContract.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteFileStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SavedRouteMapSelection.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/PhoneRouteLibrary.swift",
+        "ios-app/BikeComputerTests/OfflineRouteSaveTests.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/DeviceMapOperation.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceOperationCoordinator.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteContract.swift",
+        "ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift",
+        "ios-app/BikeComputer/RideShared/RouteProviderContract.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteArchive.swift",
+        "ios-app/BikeComputer/RideShared/NavigationGeometry.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRuntime.swift",
+        "ios-app/BikeComputer/RideShared/WatchControllerContract.swift",
+        "ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift",
+        "ios-app/BikeComputer/RideShared/WireBytes.swift",
+        "ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift",
+        "ios-app/BikeComputer/RideShared/RideGPSPacket.swift",
+        "ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
+        "ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift",
+        "ios-app/BikeComputer/RideShared/StravaRouteURL.swift",
+        "ios-app/BikeComputer/RideShared/GPXRouteImporter.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift"
+      ],
+      "groups": [
+        "common-1",
+        "common-5"
+      ]
+    },
+    "ride-diagnostics-1": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
+        "ios-app/BikeComputerTests/RideDiagnosticsHostTests.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift"
+      ]
+    },
+    "ride-shared-1": {
+      "sources": [
+        "ios-app/BikeComputerTests/RideSharedTests.swift"
+      ],
+      "groups": [
+        "common-2",
+        "common-6"
+      ]
+    },
+    "saved-route-map-1": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift",
+        "ios-app/BikeComputerTests/SavedRouteMapPolicyTests.swift"
+      ]
+    },
+    "saved-route-map-2": {
+      "sources": [
+        "ios-app/BikeComputer/RideShared/WireBytes.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SavedRouteMapSelection.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/PhoneRouteLibrary.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/SavedRouteMapPreview.swift",
+        "ios-app/BikeComputerTests/SavedRouteMapPreviewTests.swift"
+      ],
+      "groups": [
+        "common-2",
+        "common-3",
+        "common-6"
+      ]
+    },
+    "watch-offline-navigation-1": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchRouteLibrary.swift",
+        "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchNavigationJournal.swift",
+        "ios-app/BikeComputerTests/WatchOfflineNavigationTests.swift"
+      ],
+      "groups": [
+        "common-2"
+      ]
+    },
+    "watch-online-navigation-1": {
+      "sources": [
+        "ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift",
+        "ios-app/BikeComputer/RideShared/SavedDestinationContract.swift",
+        "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchRouteLibrary.swift",
+        "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchNavigationJournal.swift",
+        "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchNavigationSettingsStore.swift",
+        "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchFavoriteStore.swift",
+        "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchNetworkPathMonitor.swift",
+        "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchNavigationManager.swift",
+        "ios-app/BikeComputerTests/WatchOnlineNavigationTests.swift"
+      ],
+      "groups": [
+        "common-2"
+      ]
+    },
+    "workout-contract-1": {
+      "sources": [
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WatchWorkoutLaunchRequest.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift",
+        "ios-app/BikeComputer/BikeComputerWatch/Managers/WatchWorkoutRecoveryStore.swift",
+        "ios-app/BikeComputerTests/WorkoutContractTests.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift"
+      ],
+      "groups": [
+        "common-4"
+      ]
+    },
+    "workout-recording-1": {
+      "sources": [
+        "ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutRecordingStore.swift",
+        "ios-app/BikeComputerTests/WorkoutRecordingOwnershipTests.swift"
+      ]
+    },
+    "world-radio-1": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift",
+        "ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift",
+        "ios-app/BikeComputer/RideShared/WireBytes.swift",
+        "ios-app/BikeComputerTests/WorldRadioTests.swift"
+      ]
+    },
+    "common-1": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceTransferSecurity.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/FirmwareUpdateManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/MapKitRouteAdapter.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/NavigationEngine.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/OfflineMapManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamFormat.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/BikeMapStreamProductionTrust.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DeviceCapabilityRetry.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
+        "ios-app/BikeComputer/RideShared/NavigationGeometry.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteArchive.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteContract.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRuntime.swift",
+        "ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift",
+        "ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift",
+        "ios-app/BikeComputer/RideShared/RideGPSPacket.swift",
+        "ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift",
+        "ios-app/BikeComputer/RideShared/RouteProviderContract.swift",
+        "ios-app/BikeComputer/RideShared/WatchControllerContract.swift",
+        "ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift",
+        "ios-app/BikeComputer/RideShared/WireBytes.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DurableMapDownloadCoordinator.swift",
+        "ios-app/BikeComputer/RideShared/RideBLEZoneDispatch.swift"
+      ]
+    },
+    "common-2": {
+      "sources": [
+        "ios-app/BikeComputer/RideShared/NavigationGeometry.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteArchive.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteContract.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRouteFileStore.swift",
+        "ios-app/BikeComputer/RideShared/NavigationRuntime.swift",
+        "ios-app/BikeComputer/RideShared/RouteProviderContract.swift",
+        "ios-app/BikeComputer/RideShared/WatchRouteSyncContract.swift"
+      ]
+    },
+    "common-3": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift"
+      ]
+    },
+    "common-4": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift"
+      ]
+    },
+    "common-5": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DeviceDiagnosticsTransferManager.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutDeviceRelay.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/SecureRendererBenchmarkProtocol.swift",
+        "ios-app/BikeComputer/RideShared/GPXRouteImporter.swift",
+        "ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift",
+        "ios-app/BikeComputer/RideShared/StravaRouteURL.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift"
+      ]
+    },
+    "common-6": {
+      "sources": [
+        "ios-app/BikeComputer/RideShared/GPXRouteImporter.swift",
+        "ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift",
+        "ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift",
+        "ios-app/BikeComputer/RideShared/RideGPSPacket.swift",
+        "ios-app/BikeComputer/RideShared/RouteCoordinateNormalization.swift",
+        "ios-app/BikeComputer/RideShared/SavedDestinationContract.swift",
+        "ios-app/BikeComputer/RideShared/StravaAthleteRoutes.swift",
+        "ios-app/BikeComputer/RideShared/StravaRouteReloadBookmark.swift",
+        "ios-app/BikeComputer/RideShared/StravaRouteURL.swift",
+        "ios-app/BikeComputer/RideShared/WatchControllerContract.swift",
+        "ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift",
+        "ios-app/BikeComputer/RideShared/RideBLEZoneDispatch.swift"
+      ]
+    }
+  }
+}
