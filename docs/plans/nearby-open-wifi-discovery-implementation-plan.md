@@ -3,10 +3,26 @@
 ## Status and baseline
 
 This plan addresses [GitHub issue #101](https://github.com/seichris/open-bike-computer/issues/101).
-It was authored from a freshly fetched `origin/main` at
-`9ef7f09fce0e0d95e349e6ef9c54da137fcff286` on 2026-08-31. It is an
-implementation contract, not a claim that the feature, BLE protocol, endpoint,
+It was refreshed against freshly fetched GitHub `main` at
+`0f6fc8c6f0238d5508df199f2a50b1482b62ca1d` on 2026-10-02, superseding the
+2026-08-31 baseline `9ef7f09fce0e0d95e349e6ef9c54da137fcff286`. PR #375 remains
+documentation-only. This is an implementation contract, not a claim that the
+feature, BLE protocol, endpoint,
 or physical validation already exists.
+
+### Changes required by current main
+
+| Area | Verified current source | Revised implementation decision |
+| --- | --- | --- |
+| Capability allocation | `protocol/ride-ble-contract-v1.json`: client 28; bits 0–30 assigned | Propose bit 31/client 29; recheck allocation before implementing; test unsigned high-bit handling |
+| Wi-Fi execution | `device_operation_owner.hpp/.cpp` implements `NetworkOperationOwner` on an internal-RAM task | Extend this executor with bounded scan and BSSID-bound association operations; add admission leases without a second driver owner |
+| Transfer lifecycle | `device_transfer_http.cpp`: PSRAM HTTP worker, RAM-backed Wi-Fi configuration, owner release, startup memory failures | Preserve cache safety, memory admission, TLS identity, session revocation, map activation and OTA maintenance |
+| BLE routing | `BLEManager.sendTransferControlPacket`: Settings first, navigation fallback; maintenance-specific routing | Use existing queue and protected channel selection; reject discovery in firmware maintenance |
+| Credentials | `RemoteDebugLANCredentialStore` and Diagnostics Transfer Network settings already exist | Keep trusted-transfer credentials isolated from temporary discovery; any secured-network extension gets its own explicit scope |
+| Validation | `tools/dev-check`, `tools/development/checks.json`, `swift-sources.json` | Register checks and source graphs centrally; do not copy old compiler lists into new scripts |
+
+All source paths in this table are repository-relative; detailed paths appear
+below. Plans for other unmerged branches are not treated as implemented code.
 
 The requested placement is the iPhone app's **Settings > Developer Settings**
 screen (`DeveloperSettingsView` in `SettingsView.swift`). It is not the
@@ -53,14 +69,16 @@ map/firmware/debug/diagnostics transfer server on an untrusted WLAN.
 
 `ios-app/BikeComputer/BikeComputer/Views/SettingsView.swift` contains a
 `DeveloperSettingsView` with map-server, map-library, workout, transfer,
-diagnostics, device-status, and test-navigation sections. It already receives
+diagnostics, remote-debug/renderer, device-status, and test-navigation sections.
+It already receives
 `BLEManager` as an environment object and is the correct owner for an
 experimental hardware-connectivity row. There is no nearby-network view model,
 scan result model, or BLE command for this feature today.
 
 The iPhone's existing CoreBluetooth path is deliberately centralized in
-`BLEManager`. Authenticated control writes and reverse notifications share the
-protected `2A6E` navigation characteristic, while the manager's queues classify
+`BLEManager`. `sendTransferControlPacket` prefers protected Settings (`2A73`)
+writes and falls back to protected navigation (`2A6E`); reverse control
+notifications use navigation. The manager's queues classify
 transfer/control traffic separately from replaceable GPS, route, and workout
 telemetry. A new feature must use that transport rather than opening a second
 CoreBluetooth writer or a direct Wi-Fi API.
@@ -68,9 +86,14 @@ CoreBluetooth writer or a direct Wi-Fi API.
 ### BLE protocol and capability state
 
 The current generated BLE contract advertises a 32-bit `CAP2` feature mask; the
-highest assigned feature is bit 22 and the current client version is 20.
-Authenticated control commands such as `DTRN`/`DSTS` already use strict text
-prefixes over protected `2A6E` frames. Device-originated status can be sent as
+highest assigned feature is bit 30 (`topographic_contours`) and the current
+client version is 28. Bits 23–29 now cover renderer samples, map orientation,
+Watch motion evidence, screen configuration, World Radio, display timeouts,
+and workout zones. The earlier bit 23/client 21 proposal is no longer valid.
+Bit 26 is also assigned to screen configuration. The remaining current mask
+slot is **bit 31**, provisionally paired with **client version 29**.
+Authenticated transfer controls already use Settings/native and navigation
+fallback paths. Device-originated status can be sent as
 one protected notification or as a bounded chunk sequence.
 
 There is no scan/connection command, nearby-Wi-Fi capability bit, or scan-result
@@ -84,18 +107,40 @@ The Waveshare environments currently compile with `DISABLE_RADIO=1`.
 driver at startup. Deep sleep also stops Wi-Fi. This is the low-power baseline
 that discovery must restore when no other owner needs the radio.
 
-The HTTP device-transfer server currently controls the global `WiFi` singleton
-directly:
+The transfer subsystem now has an explicit internal execution boundary:
+
+- `esp32/lib/device_transfer/device_transfer_network_owner.hpp` defines
+  `NetworkOperationOwner`, detailed startup failures, and internal/DMA memory
+  admission checks. These are conservative rejection floors derived from
+  observed failures, not proof of successful discovery operation.
+- `esp32/lib/firmware_update/device_operation_owner.hpp/.cpp` implements
+  `DeviceOperationOwner`: a serialized 16 KiB internal-RAM worker for Wi-Fi
+  mutations, OTA flash operations, and durable map activation. It correlates
+  command/results and poisons the owner on unsafe timeout/mismatch. Healthy
+  shutdown reclaims its task; poisoned state remains unavailable for the boot.
+- `HttpTransferServer` delegates Wi-Fi mutations through that interface. Its
+  HTTP/TLS worker uses PSRAM; map activation remains on the internal owner.
+  Wi-Fi configuration uses `WIFI_STORAGE_RAM`, persistence off, and
+  auto-reconnect off. Network teardown precedes owner release.
+
+The existing transfer path:
 
 1. it switches to station mode and attempts the configured preferred LAN;
 2. it falls back to a WPA2 SoftAP when station association fails;
-3. it starts the authenticated transfer HTTP server; and
+3. it starts the authenticated, pinned-HTTPS transfer server; and
 4. it disconnects and selects `WIFI_OFF` when transfer ends.
 
-There is no shared Wi-Fi ownership abstraction. A second independent caller
-could stop or reconfigure Wi-Fi while a map, firmware, debug-log, or diagnostic
-transfer is active. Shared ownership is therefore a prerequisite, not a later
-cleanup.
+There is still no discovery-versus-transfer admission lease or scan interface.
+Execution serialization alone does not prevent a discovery request from
+reconfiguring a live transfer. Extend the existing owner and add non-preemptive
+admission above it. Do not reintroduce direct Wi-Fi mutations from a new worker.
+Preserve committed map activation/rollback and OTA maintenance boundaries even
+after BLE revocation; a discovery cancellation cannot interrupt those operations.
+
+`RemoteDebugLANCredentialStore` in `DeviceTransferManager.swift` already keeps
+one trusted LAN credential in this iPhone's device-only Keychain, with separate
+Debug/Release service identities. That is deliberate saved configuration for
+trusted transfers, not a scan-history store or implicit consent to try networks.
 
 ### BLE and ride constraints
 
@@ -291,8 +336,10 @@ connectability, and current action. Signal bars and color are supplementary.
 
 ### 1. Shared Wi-Fi radio coordinator
 
-Introduce `wifi_radio` as the only firmware code allowed to begin or end a
-global Wi-Fi lifecycle. The initial owners are:
+Introduce a pure `wifi_radio` admission policy around the existing
+`DeviceOperationOwner` execution boundary. The coordinator decides which
+session may use Wi-Fi; the existing internal executor performs all driver
+mutations. The initial lease owners are:
 
 ```cpp
 enum class Owner {
@@ -314,23 +361,38 @@ Ownership is non-preemptive:
 | None | Any valid owner | Grant |
 | DeviceTransfer | Discovery/temporary connection | Reject; transfer continues |
 | Discovery/temporary connection | DeviceTransfer | Reject with `wifi_busy` |
-| Discovery scan | Temporary connection | Stop/delete scan records, then transfer lease |
+| Discovery scan still running | Temporary connection | Reject as busy; finish scan and release its lease before confirming a result |
 | Any owner | Same owner with stale token | Reject as stale |
 
-Refactor `HttpTransferServer` to acquire `DeviceTransfer` before its first
-`WiFi` mutation and release it only after server, station, and AP cleanup. A
+Have `HttpTransferServer` acquire `DeviceTransfer` before its first network
+owner command and release it only after server, station, AP, and required
+activation handoffs finish. Reuse the same `DeviceOperationOwner` instance
+already wired through firmware-update/transfer setup; inject its narrow
+network interface into discovery rather than constructing another executor. A
 rejected transfer publishes the existing generic status with stable
 `lastError.code = "wifi_busy"`; the iPhone can explain that the Developer
 Settings session must end before transfer can start.
 
-The coordinator's last-owner cleanup must:
+The coordinator's last-owner cleanup, dispatched on the internal executor, must:
 
 1. cancel/delete scan state;
 2. stop owner-specific listeners before disconnecting;
-3. disconnect station and SoftAP state using the pinned SDK's credential-erasing
-   path;
+3. disconnect station and SoftAP state and clear temporary RAM configuration;
+   preserve existing persistent settings and never erase unrelated NVS;
 4. select `WIFI_OFF` and stop the driver when no owner remains; and
-5. release the matching power-management lock.
+5. release the matching power-management lock and reclaim a healthy executor
+   only after no network, flash, or activation command remains. If the owner is
+   poisoned, fail closed for the boot rather than reclaiming live buffers.
+
+Extend `NetworkOperationOwner` with scan start/poll/cancel/delete and
+BSSID/channel-bound station association operations, carrying session generation
+and command identity. Keep calls short and asynchronous at the discovery
+boundary; its eight-second deadline must not block behind the existing
+60-second synchronous owner dispatch or ten-minute map-activation timeout.
+Do not hold the internal executor waiting for DHCP, DNS, TCP, or a probe body.
+Admission must reject discovery while transfer, activation, or firmware
+maintenance is active. Preserve startup internal/DMA free-and-largest-block
+checks and expose bounded, non-secret failure codes to iOS.
 
 Do not snapshot/replay arbitrary `WiFi.getMode()` values. A failed discovery
 acquisition leaves the transfer owner untouched; release from the only owner
@@ -338,18 +400,29 @@ returns to the measured radio-off baseline.
 
 ### 2. Capability-gated authenticated BLE contract
 
-Add `nearby_open_wifi` as capability bit 23 with minimum client version 21 in
+Provisionally add `nearby_open_wifi` as capability bit 31 with minimum client
+version 29 in
 `protocol/ride-ble-contract-v1.json`, regenerate the checked-in Swift and C++
 constants, and expose `supportsNearbyOpenWiFi` from `BLEManager`. Clear it on
 disconnect, authentication reset, malformed capability response, or downgrade.
+Recheck the generator input immediately before implementation: bit 31 is the
+last slot in the current 32-bit mask. If already assigned, design a versioned
+capability extension first; never reuse another feature's bit or shift beyond
+the wire width. Test `0x80000000` in Swift `UInt32`, C++ `uint32_t`, CAP2
+serialization, capability reset, and old-client parsing without signed casts.
 The Developer Settings row remains disabled until the bit and navigation-ready
 state are both true. Older clients ignore the bit; older firmware never receives
 new commands.
 
-Use the existing authenticated `2A6E` command/notification route. Do not add a
-new characteristic, a second CoreBluetooth writer, or an unauthenticated scan
+Use `BLEManager.sendTransferControlPacket` and its existing prioritized queue:
+protected `2A73` when available, protected `2A6E` fallback otherwise, with
+notifications on `2A6E`. Dispatch both firmware input paths to the same
+authenticated-owner handler. Do not add a new characteristic, a second
+CoreBluetooth writer, or an unauthenticated scan
 path. The owner role is required; the Apple Watch role has no Developer
-Settings/control authority and cannot start discovery.
+Settings/control authority and cannot start discovery. Normal-boot capability
+publication must exclude discovery in firmware-maintenance boot. Do not expand
+maintenance's command allowlist or route discovery through its reconnect path.
 
 Define a strict versioned command prefix, for example `WFTR`:
 
@@ -380,11 +453,16 @@ WFSC { version, resultTransferId, generation, chunkIndex, chunkCount,
 The result JSON contains only `networkId`, safe `displaySSID`, RSSI, security
 class, access-point multiplicity, and connectability. It never contains BSSID,
 channel, raw SSID bytes, credentials, probe body, redirect URL, or location.
-Use a bounded chunk payload (128 bytes is safe at the minimum supported
-protected ATT payload), a maximum result size/count, and reject duplicate,
+Compute each chunk budget from the actual negotiated ATT payload minus the
+22-byte protected frame overhead and the finalized chunk header. Cap data at
+128 bytes only when it fits; apply the same budget to status frames. Freeze a
+shared maximum serialized byte count and corresponding maximum chunk count so
+24 worst-case escaped SSIDs fit both encoders and decoders. Never use a network
+count as the chunk-count limit. Reject conflicting duplicate,
 missing, out-of-order, stale, or over-limit chunks. `WFST` acknowledges each
-logical command with the same operation ID and terminal state. If iOS does not
-receive an acknowledgement, it may retry one idempotent command with the same
+logical command with the same operation ID and terminal state. Identical
+duplicate chunks may be ignored, with an explicit deadline for missing chunks.
+If iOS does not receive an acknowledgement, it may retry one idempotent command with the same
 operation ID; it must never create a new connection attempt without a new
 confirmation and operation ID.
 
@@ -407,13 +485,20 @@ void requestDisconnect(uint32_t operationId);
 void process();
 ```
 
-Every scan, connect, cancel, disconnect, BLE-loss, and capability-reset event
-increments or invalidates a generation. Worker completions carry both
-generation and lease token; stale completions are discarded without changing
-radio state or emitting a terminal success.
+Keep BLE session generation, scan generation, operation ID, and lease token
+distinct. A new scan creates a new scan generation; Connect consumes the
+selected still-valid generation and creates a fresh operation ID. Cancel,
+disconnect, BLE loss, capability reset, and expiry invalidate the corresponding
+session/results. Worker completions carry session generation, operation ID,
+and lease token; stale completions cannot change radio state or emit success.
+After a successful scan, release the radio but retain only the bounded RAM
+candidate table for the 30-second selection window. Expiry/view exit clears
+it even while the radio is already off.
 
-Run scan, association, DNS, TCP, and response parsing on a bounded low-priority
-worker. Publish immutable snapshots for the BLE notification pump through a
+Run scan/association orchestration and the probe on a bounded low-priority
+worker. Dispatch driver mutations to the existing internal-RAM owner; a PSRAM
+worker must never invoke a flash-cache-disabling driver path. Publish immutable
+snapshots for the BLE notification pump through a
 mutex/queue. The existing main/control task can use a `Wifi` wake reason to
 flush notifications, but no worker path may touch LVGL or block the BLE host
 task.
@@ -452,7 +537,8 @@ After a valid authenticated `WFTR connect` command, acquire
 
 1. disable persistence and auto-reconnect;
 2. select station-only mode;
-3. start one null-passphrase connection bound to the retained raw SSID,
+3. ensure RAM-backed driver storage, then start one null-passphrase connection
+   bound to the retained raw SSID,
    channel, and BSSID;
 4. wait for association and DHCP until the eight-second deadline while checking
    cancellation/generation; and
@@ -461,8 +547,9 @@ After a valid authenticated `WFTR connect` command, acquire
 Cleanup is idempotent and safe before, during, or after every step. It must
 erase the candidate table and selected bytes, release the exact lease, clear
 the operation result, and prevent late callbacks from affecting a newer scan or
-owner. Use the pinned SDK's station-configuration erase API and verify that the
-temporary network is absent from Wi-Fi NVS after success, failure, and cancel.
+owner. Verify RAM-only configuration and temporary-buffer clearing against the
+pinned SDK. Prove Wi-Fi NVS is unchanged after success, failure, and cancel;
+do not use a blanket NVS erase as cleanup.
 
 Before physical testing, audit all listeners compiled into firmware and assert
 that the temporary-open owner starts none of them. The transfer server must
@@ -619,13 +706,20 @@ should remain recognizable.
 
 ### BLE contract and firmware
 
-- Add `nearby_open_wifi` bit 23/minimum client version 21 to
+- Add `nearby_open_wifi` provisionally at bit 31/minimum client version 29 to
   `protocol/ride-ble-contract-v1.json`; regenerate the checked-in Swift/C++
   contract files and run the generator drift check.
 - Update `docs/ble-protocol.md` with `WFTR`, `WFST`, and `WFSC` semantics,
   authentication, bounds, operation idempotency, chunking, and compatibility.
-- Add `esp32/lib/wifi_radio/wifi_radio.hpp/.cpp` for lease ownership,
-  restoration, and power-lock integration.
+- Add `esp32/lib/wifi_radio/wifi_radio.hpp/.cpp` for lease admission,
+  restoration policy, and power-lock integration; driver execution remains in
+  the existing internal owner.
+- Extend `esp32/lib/device_transfer/device_transfer_network_owner.hpp` and
+  `esp32/lib/firmware_update/device_operation_owner.hpp/.cpp` with bounded
+  generation-aware scan and exact-candidate station operations. Preserve
+  `firmware_internal_owner_policy.hpp` poisoning and release guarantees.
+- Update the wiring in `esp32/lib/firmware_update/firmware_update_http.cpp`
+  to share its owner with discovery through an injected narrow interface.
 - Add `esp32/lib/wifi_discovery/wifi_discovery.hpp/.cpp` plus pure policy,
   normalization, authentication-mapping, deadline, and HTTP-response helpers.
 - Update `esp32/lib/ble_navigation/ble_navigation.cpp/.hpp` to dispatch
@@ -662,6 +756,15 @@ Add focused suites following repository conventions:
 - transfer/radio mutual-exclusion regression coverage; and
 - Swift nearby-Wi-Fi model, BLE parser, and Developer Settings UI tests.
 
+Register commands and affected paths in `tools/development/checks.json` and
+production Swift dependencies in `tools/development/swift-sources.json`.
+Compatibility shell entry points should delegate to those definitions, as
+current navigation tests do. Add protocol golden vectors under
+`protocol/fixtures/` and deterministic cancellation/backpressure scenarios
+under `protocol/scenarios/` where the existing replay runner applies. Keep
+Worker checks in the existing map-platform CI entry point and central registry
+where applicable. Do not recreate parallel hard-coded Swift compiler lists.
+
 ## Implementation sequence
 
 ### Phase 0: freeze cross-platform contracts
@@ -672,7 +775,9 @@ Add focused suites following repository conventions:
    radio-off current, BLE counters, and iPhone transport/UI baselines for both
    hardware families.
 3. Inventory all firmware `WiFi` mutations/listeners and all BLE command/status
-   dispatch points.
+   dispatch points, including boot/deep-sleep shutdown, internal owner commands,
+   map activation/rollback and firmware maintenance. Confirm World Radio's
+   current transport rather than treating its name as a Wi-Fi owner.
 4. Finalize capability bit/version, `WFTR` fields, `WFST`/`WFSC` bounds,
    operation idempotency, security enum mapping, and timeout constants.
 5. Stage the probe hostname policy and prove plain HTTP can be isolated without
@@ -685,9 +790,12 @@ contract, or privacy review.
 ### Phase 1: radio ownership first
 
 1. Implement pure owner/token transitions and exhaustive stale-release tests.
-2. Integrate `HttpTransferServer` with `DeviceTransfer` leases.
+2. Integrate `HttpTransferServer` and discovery admission with `DeviceTransfer`
+   leases around the existing `DeviceOperationOwner`; extend its narrow network
+   interface rather than creating a second internal worker.
 3. Preserve preferred-LAN, SoftAP fallback, authentication, and transfer status
-   behavior, adding only stable `wifi_busy` rejection.
+   behavior, memory admission, poisoning, task reclamation, and activation/OTA
+   commit boundaries; add stable `wifi_busy` rejection.
 4. Add Wi-Fi power-lock accounting and assert `WIFI_OFF` after the last owner.
 
 Exit gate: existing transfer host/device regressions pass and concurrent owners
@@ -695,7 +803,8 @@ cannot mutate the radio.
 
 ### Phase 2: authenticated BLE contract
 
-1. Add the generated capability bit and iOS capability gating.
+1. Recheck the provisional bit 31/client 29 allocation, add generated constants,
+   and test the mask's unsigned high bit and iOS capability gating.
 2. Implement strict `WFTR` command parsing/building and protected routing.
 3. Implement bounded `WFST`/`WFSC` notifications, Swift reassembly, golden
    vectors, retries, and generation/operation validation.
@@ -706,14 +815,17 @@ command/status delivery without starving replaceable ride telemetry.
 
 ### Phase 3: headless scan domain
 
-1. Implement asynchronous scan/cancel/deadline handling on the ESP32 worker.
+1. Implement asynchronous scan/cancel/deadline orchestration with driver calls
+   dispatched to the internal owner and nonblocking BLE callbacks.
 2. Add safe SSID presentation, complete auth mapping, grouping, open-first
    ordering, 24-result cap, boot-local IDs, and expiry.
 3. Publish snapshots/chunks and prove scan deletion, lease release, and radio
    restoration on every completion/cancel/error/BLE-loss path.
 
-Exit gate: C++ policy tests pass and a serial-only harness can scan without
-logging network identity or blocking the BLE host task.
+Exit gate: C++ policy tests pass and the authenticated control harness can scan
+without logging network identity or blocking the BLE host task. Physical
+evidence must use the intended build/profile and deliberate capture flow;
+opening serial solely to observe a running session can reset the device.
 
 ### Phase 4: iPhone Developer Settings UI
 
@@ -755,6 +867,21 @@ firmware service.
 
 ## Verification plan
 
+### Current validation entry point
+
+For this documentation refresh, run `tools/dev-check --plan`, the selected
+fast checks via `tools/dev-check`, and `git diff --check`. A docs-only refresh
+does not establish any of the implementation or physical gates below.
+
+During implementation, register new checks/source graphs first, then use the
+same entry point locally and in CI. Add explicit full iOS and board-specific
+firmware checks only when their sources change and prerequisites are available.
+Retain the generated report and label blocked prerequisites separately from
+failed or passed tests. Follow `docs/development-checks.md` and `AGENTS.md` for
+isolated simulator ownership, the Xcode wrapper, locked firmware runtime, and
+clean-source evidence. The default firmware CI gate covers 1.75 ordinary and
+production profiles; 2.06 remains a separate explicit qualification.
+
 ### Pure host tests
 
 Cover at least:
@@ -772,6 +899,11 @@ Cover at least:
   JSON, wrong generation, and wrong transfer ID;
 - radio owner transitions, busy rejection, stale release, double cleanup, and
   scan-to-connection ownership transfer;
+- internal-owner creation/dispatch failure, memory rejection, timeout poison,
+  late result, safe task reclamation, map activation handoff, and rejected
+  discovery during firmware maintenance;
+- both native Settings and navigation fallback routes, maintenance rejection,
+  high-bit CAP2 round trips, and smallest-supported protected ATT budgets;
 - cancellation during scan, association, DNS, TCP, headers, body, and display;
 - no automatic retry/reconnect transition;
 - exact 204 success, wrong marker, redirect, HTML, 2xx body, 5xx, timeout,
@@ -915,12 +1047,18 @@ after a bounded settle for:
 - transfer-busy rejection in both directions; and
 - connection loss after a successful probe.
 
-Every case must finish with no discovery worker operation, no retained scan
-record/candidate, no station/SoftAP connection, no discovery power lock, no
+Every terminal session case must finish with no discovery worker operation,
+no retained scan record/candidate, no station/SoftAP connection, no discovery
+power lock, no
 automatic probe/reconnect, and the coordinator's correct owner. When no
 transfer owns the radio, mode and settled current must return to the measured
 radio-off baseline. A cold boot after representative success and failure must
 remain radio-off and contain no temporary station.
+
+A successful scan with its results still displayed is the sole retention
+exception: driver scan records and the radio lease are released immediately,
+while the bounded candidate table remains for at most 30 seconds. Exercise
+expiry without a new BLE command and prove the table is then cleared.
 
 ### Endpoint and production gates
 
@@ -948,7 +1086,44 @@ other.
 | Wi-Fi discovery does not persist or upload scan history | RAM-only device/iPhone snapshots, no BSSID/raw bytes over BLE, no storage/log/analytics fields, NVS/cold-boot checks, and no-storage Worker |
 | Leaving restores the previous low-power Wi-Fi state | Generation-scoped shared radio lease, idempotent cleanup, dedicated power lock, BLE-loss/background teardown, NVS check, and settled-current matrix |
 
-## Non-goals
+## Requested follow-up: user-supplied passwords for secured networks
+
+The owner has requested an app-managed password list that could be used with
+nearby secured Wi-Fi. This expands issue #101's open-only scope. Target scope
+is pending clarification: password-list testing must be limited to networks
+the user owns or has explicit permission to test. Manual selection of a known
+password is a separate possible flow. Do not infer permission from proximity,
+an SSID match, or possession of a password list.
+
+Keep this as a separately approved implementation phase; it is not implicitly
+enabled by the open-network capability or the v1 command contract above.
+Before implementation, settle these concrete design requirements:
+
+- An explicitly selected authorized target and foreground action, with clear
+  cancellation and bounded duration; no background testing of discovered APs.
+- A device-only iPhone Keychain collection, separate from
+  `RemoteDebugLANCredentialStore`, with user-driven add/delete and no cloud
+  sync, analytics, diagnostic export, or password values in UI status/logs.
+  Saving a password does not save scan history or grant consent for any network.
+- A separately versioned credential-bearing protocol with dedicated redaction
+  and compatibility tests. The current open-only `WFTR` format carries no
+  secrets. Send only the credential needed for the current authorized operation
+  through the authenticated owner session, never the whole collection.
+- Firmware RAM-only credential lifetime and clearing on every terminal path;
+  preserve driver admission, internal-stack execution, maintenance rejection,
+  and BLE responsiveness. A successful check never silently promotes the WLAN
+  to a trusted transfer network or starts its HTTPS/debug listeners.
+- Distinguish authentication failure, association failure, DHCP failure, and
+  Internet/probe failure. No-Internet does not mean the password is wrong.
+  Define supported WPA personal modes explicitly; enterprise, WPS, hidden
+  networks, and unknown security need separate decisions.
+- Controlled-AP validation for credential redaction, cancellation, stale
+  responses, Keychain isolation, and cleanup before enabling the extension.
+
+Until target authorization and manual-versus-list behavior are resolved, the
+open-only acceptance criteria and non-goals below remain the v1 contract.
+
+## Non-goals for open-only v1
 
 - Adding this feature to the ESP32 LVGL **Device Settings** page; the entry is
   exclusively in the iPhone **Developer Settings** page.
