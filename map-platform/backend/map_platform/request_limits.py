@@ -19,8 +19,12 @@ class RequestBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # The opt-in social avatar endpoint accepts a single bounded raster.
+        # Keep the existing map/API body limit unchanged everywhere else.
+        limit = (5 * 1024 * 1024 if scope.get("path") in {"/v1/social/me/avatar", "/v1/social/routes", "/v1/social/activities"}
+                 and scope.get("method") in {"PUT", "POST"} else self.max_body_bytes)
         content_length = self._content_length(scope)
-        if content_length is not None and content_length > self.max_body_bytes:
+        if content_length is not None and content_length > limit:
             await self._reject(send)
             return
 
@@ -32,7 +36,7 @@ class RequestBodyLimitMiddleware:
             if message.get("type") != "http.request":
                 break
             received += len(message.get("body", b""))
-            if received > self.max_body_bytes:
+            if received > limit:
                 await self._reject(send)
                 return
             if not message.get("more_body", False):
@@ -41,7 +45,7 @@ class RequestBodyLimitMiddleware:
         async def replay_receive() -> dict[str, Any]:
             if messages:
                 return messages.pop(0)
-            return {"type": "http.request", "body": b"", "more_body": False}
+            return await receive()
 
         await self.app(scope, replay_receive, send)
 

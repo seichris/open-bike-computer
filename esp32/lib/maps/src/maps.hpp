@@ -666,6 +666,7 @@ public:
   bool hasMapCanvas() const { return canvasMap != nullptr; }
   void displayMap();
   void updatePositionOverlay();
+  void updateSocialOverlay();
   void setWaypoint(double wptLat, double wptLon);
   void updateMap();
   void panMap(int8_t dx, int8_t dy);

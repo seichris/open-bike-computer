@@ -2245,3 +2245,44 @@ normative offsets, validation, replay/expiry and compatibility matrix. The JSON
 contract generates Swift/C++ constants and append-only widget IDs. Golden
 packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
 by both languages.
+
+## Group rider portraits (GRUP v1, diagnostic rollout)
+
+CAP2 bit 31 (`group_riders_v1`) requires client version 29, owner-authenticated
+navigation writes, at least ATT MTU 150, PSRAM allocation, and diagnostic firmware.
+Scoped Watch sessions cannot send these packets. Production does not advertise
+the feature until physical display/transport qualification is recorded.
+
+All fields are little endian. Packets use the existing protected navigation
+characteristic, not a new characteristic. The 10-byte header is `GRUP`, version
+`1` (u8), operation (u8), and a nonzero per-session epoch (u32). Phone resets the
+epoch on connection, account, or ride change; disconnect/auth reset erases state
+and pixel caches. Up to eight stable local slots represent the nearest riders;
+no Firebase UID, public ID, URL, or account token reaches firmware.
+
+| Operation | Bytes after header | Meaning |
+| --- | --- | --- |
+| 0 reset | none | Start epoch; repeated same-epoch reset is idempotent |
+| 1 state | slot:u8, sequence:u32, lat:i32 E6, lon:i32 E6, age:u16 seconds, accuracy:u16 meters, course:u16 degrees or 65535, ASCII initials:4, pixel SHA256:32 | Exactly 65 bytes; WGS-84; reject invalid coordinates, age >=60, accuracy >100, or old sequence |
+| 2 remove | slot:u8 | Immediately clear this slot and matching staging transfer |
+| 3 image begin | slot:u8, SHA256:32 | One shared staging image; hash must match the current rider reference |
+| 4 image chunk | slot:u8, offset:u16, 1–112 pixel bytes | Contiguous byte offsets; identical repeated chunks are safe |
+| 5 image commit | slot:u8 | Exactly 3200 bytes of 40×40 RGB565 little endian; SHA256 verified before atomic publication |
+
+Each accepted protocol attempt returns protected `GACK` (17 bytes): magic:4,
+epoch:u32, slot:u8 (255 for reset), next image offset:u16, result:u8,
+operation:u8, current rider sequence:u32. Result 0=applied, 1=stale/session or
+offset mismatch, 2=malformed, 3=image hash mismatch. The phone permits only one
+outstanding operation, checks epoch/slot/operation/sequence/offset, and retries at
+most three times with a two-second ACK timeout. Navigation retains queue priority.
+Image errors leave an initials fallback and never publish partial pixels.
+
+Age includes server-reported capture age plus monotonic elapsed time; retries
+cannot refresh an old fix. Rider markers fade at 15 seconds and expire at 60.
+The complete portrait/distance footprint is constrained to the round screen (or
+a rectangular safe boundary for 2.06-inch). Offscreen bearing is derived from
+fresh own GPS through the same visible map projection; its distance is straight
+line distance, distinct from the phone's confident same-route progress gap.
+Overlapping footprints show a count badge. Pan/zoom gestures hide the layer until
+the published projection is stable. The existing full-buffer/full-refresh display
+strategy is unchanged.

@@ -130,6 +130,31 @@ jobs:
       - name: Smoke test tools image
         run: docker compose run --rm tools python -c "import mapnik; import matplotlib; import osmium; import shapely; import yaml; from osgeo import ogr"
 
+  social-postgres:
+    name: Social PostgreSQL contracts
+    if: inputs.run_backend
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_DB: social_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d social_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e './map-platform/backend[test,object-storage,social]'
+      - name: PostgreSQL authorization, replay, and concurrency tests
+        env:
+          BICINO_SOCIAL_TEST_DATABASE_URL: postgresql+psycopg://postgres@127.0.0.1:5432/social_test
+        run: python -m unittest discover -s map-platform/backend/tests/social -v
+
   backend:
     name: Map Backend
     if: inputs.run_backend
@@ -148,7 +173,7 @@ jobs:
           python-version: "3.12"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Install backend test dependencies
-        run: python -m pip install -e '.[test,object-storage,topography]'
+        run: python -m pip install -e '.[test,object-storage,topography,social]'
       - name: Install OSM extraction test tool
         run: |
           sudo apt-get update
