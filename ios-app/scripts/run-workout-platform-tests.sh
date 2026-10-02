@@ -61,7 +61,7 @@ python3 "${IOS_APP_DIR}/../tools/development/simulator_session.py" --platform "$
   -scheme "${SCHEME}" \
   -destination "id={simulator}" \
   -derivedDataPath "${DERIVED_DATA}" \
-  "${RESULT_BUNDLE_ARGS[@]}" \
+  ${RESULT_BUNDLE_ARGS[@]+"${RESULT_BUNDLE_ARGS[@]}"} \
   CODE_SIGNING_ALLOWED=NO \
   ${ONLY_TESTING:+-only-testing:"${ONLY_TESTING}"} \
   test
