@@ -448,6 +448,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {
             **os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "true",
+            "AMOLED_EQUIVALENCE_REQUIRED": "false", "AMOLED_EQUIVALENCE_RESULT": "skipped",
             "FIRMWARE_HOST_CHANGED": "true", "HEAVY_CI": "true", "IOS_CHANGED": "false", "IOS_NATIVE_CHANGED": "false",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
             "ESP32_RESULT": "success", "HOST_RESULT": "success",
@@ -465,11 +466,23 @@ class WorkflowPolicyTests(unittest.TestCase):
                         completed.stdout + completed.stderr,
                     )
 
+        # Stacked e-paper changes additionally require actual AMOLED isolation
+        # evidence. Do not weaken that gate while reconciling main's fixtures.
+        for result in ("success", "failure", "cancelled", "skipped", ""):
+            with self.subTest(isolation=result):
+                completed = subprocess.run(["bash", "-c", script],
+                    capture_output=True, text=True, env={**environment,
+                        "AMOLED_EQUIVALENCE_REQUIRED": "true",
+                        "AMOLED_EQUIVALENCE_RESULT": result})
+                self.assertEqual(0 if result == "success" else 1,
+                                 completed.returncode)
+
     def test_each_ios_job_failure_blocks_the_gate(self):
         gate = mapping_block(workflow_source("ci.yml"), "gate", indent=2)
         self.assertIn("- ios-platform", gate)
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {**os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "false",
+            "AMOLED_EQUIVALENCE_REQUIRED": "false", "AMOLED_EQUIVALENCE_RESULT": "skipped",
             "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "true", "IOS_CHANGED": "true", "IOS_NATIVE_CHANGED": "true",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
             "ESP32_RESULT": "skipped", "HOST_RESULT": "skipped",
