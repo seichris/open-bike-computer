@@ -147,7 +147,7 @@ class BinaryMapFormatTests(unittest.TestCase):
         self.assertEqual(
             set(fixtures), {
                 "fmb_v1", "fmb_v2", "fmb_v3", "fmb_v4", "fmb_v6",
-                "fmb_v6_combined",
+                "fmb_v6_combined", "fmb_v6_flat_empty",
             }
         )
         self.assertEqual(fixtures["fmb_v1"][:4], b"FMB\x01")
@@ -206,12 +206,18 @@ class BinaryMapFormatTests(unittest.TestCase):
                         },
                     ],
                 ),
+                "fmb_v6_flat_empty": write_fmb(
+                    root / "flat-empty-v6.fmb", [], [], 0, 0,
+                    renderer_target=5, font_builder=GoldenFontBuilder(),
+                    building_records=[], poi_records=[],
+                ),
             }
             generated = {
                 "fmb_v2": (root / "v2.fmb").read_bytes(),
                 "fmb_v3": (root / "v3.fmb").read_bytes(),
                 "fmb_v4": (root / "v4.fmb").read_bytes(),
                 "fmb_v6": (root / "v6.fmb").read_bytes(),
+                "fmb_v6_flat_empty": (root / "flat-empty-v6.fmb").read_bytes(),
             }
             contours = ContourSection(20, 100, (
                 Contour(-100, 1, ((0, 0), (100, 100), (200, 50))),
@@ -226,6 +232,7 @@ class BinaryMapFormatTests(unittest.TestCase):
             ("fmb_v3", 3),
             ("fmb_v4", 4),
             ("fmb_v6", 6),
+            ("fmb_v6_flat_empty", 6),
         ):
             self.assertEqual(expected_versions[name]["version"], version)
             self.assertEqual(generated[name], fixtures[name])

@@ -160,7 +160,7 @@ int main() {
     assert(map_byte_order::readLeI16(bytes + 2) == -2);
   }
   const auto golden = loadGoldenBlocks();
-  assert(golden.size() == 6);
+  assert(golden.size() == 7);
   const std::vector<uint8_t> &validV1 = golden.at("fmb_v1");
   const std::vector<uint8_t> &valid = golden.at("fmb_v2");
   const std::vector<uint8_t> &validV3 = golden.at("fmb_v3");
@@ -168,6 +168,8 @@ int main() {
   const std::vector<uint8_t> &validV6 = golden.at("fmb_v6");
   const std::vector<uint8_t> &validV6Combined =
       golden.at("fmb_v6_combined");
+  const std::vector<uint8_t> &validV6FlatEmpty =
+      golden.at("fmb_v6_flat_empty");
 
   assert(map_block_format::validate(validV1.data(), validV1.size()));
   for (size_t size = 0; size < validV1.size(); ++size)
@@ -287,6 +289,20 @@ int main() {
   changed = validV6Combined;
   changed[contourSection + 12U] ^= 1U;
   assert(!map_block_format::validate(changed.data(), changed.size()));
+  assert(map_block_format::validate(validV6FlatEmpty.data(),
+                                    validV6FlatEmpty.size()));
+  assert(map_building_block::decode(validV6FlatEmpty.data(),
+                                    validV6FlatEmpty.size(), buildingBlock,
+                                    &buildingError));
+  assert(buildingBlock.stats.records == 0);
+  assert(map_poi_block::decode(validV6FlatEmpty.data(),
+                               validV6FlatEmpty.size(), poiBlock, &poiError));
+  assert(poiBlock.records.empty());
+  const size_t flatContourEntry = sectionEntryOffset(validV6FlatEmpty, 6, 5);
+  const size_t flatContourSection = read32(validV6FlatEmpty,
+                                           flatContourEntry + 4U);
+  assert(read32(validV6FlatEmpty, flatContourEntry + 8U) == 12U);
+  assert(validV6FlatEmpty[flatContourSection + 6U] == 0U);
 
   const size_t poiEntry = sectionEntryOffset(validV6, 6, 6);
   const size_t poiSection = read32(validV6, poiEntry + 4U);

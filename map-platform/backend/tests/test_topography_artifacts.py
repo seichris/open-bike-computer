@@ -78,6 +78,21 @@ class ContourArtifactsTests(unittest.TestCase):
         self.assertEqual((result.poi_records, result.poi_categories),
                          (2, (0, 1, 0, 0, 1)))
 
+    def test_shared_flat_empty_fmb6_golden_is_a_valid_empty_map(self):
+        fixture = ROOT / "tools/tests/fixtures/fmb/golden_blocks.txt"
+        empty_line = next(
+            line for line in fixture.read_text(encoding="ascii").splitlines()
+            if line.startswith("fmb_v6_flat_empty=")
+        )
+        raw = bytes.fromhex(empty_line.split("=", 1)[1])
+        self.path.write_bytes(raw)
+        result = validate_fmb6(self.path)
+        self.assertEqual((result.contour_records, result.contour_points,
+                          result.poi_records, result.building_records),
+                         (0, 0, 0, 0))
+        self.assertEqual(replace_fmb6_contours(
+            self.path, ContourSection(20, 100, ())), raw)
+
     def test_terrain_only_combined_block_has_empty_poi_section(self):
         self.path.write_bytes(empty_fmb6(0x12345678, self.section))
         result = validate_fmb6(self.path)

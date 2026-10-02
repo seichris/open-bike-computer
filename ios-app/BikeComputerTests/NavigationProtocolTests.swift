@@ -1175,6 +1175,29 @@ struct NavigationProtocolTests {
         assertEqual(contour.pointCount, 5, "combined FMB6 carries five contour points")
         assertEqual(Int(crc32(combinedBlock.subdata(in: contourOffset..<(contourOffset + contourLength)))),
                     contourCRC, "combined contour directory CRC matches its section")
+
+        guard let flatLine = goldenText.split(separator: "\n").first(where: {
+                  $0.hasPrefix("fmb_v6_flat_empty=")
+              }),
+              let flatBlock = Data(hex: String(flatLine.dropFirst("fmb_v6_flat_empty=".count))),
+              let flatDirectory = flatBlock.range(of: Data("EXT6".utf8))?.lowerBound,
+              let flatContourOffset = read32(flatBlock, at: flatDirectory + 8 + 4 * 16 + 4),
+              let flatContourLength = read32(flatBlock, at: flatDirectory + 8 + 4 * 16 + 8),
+              flatContourLength == 12,
+              flatContourOffset <= flatBlock.count - flatContourLength,
+              let flatContours = try? TopographyContourSection.validate(
+                  flatBlock.subdata(in: flatContourOffset..<(flatContourOffset + flatContourLength))
+              ) else {
+            assert(false, "iPhone independently reads the shared flat and empty FMB6 block")
+            return
+        }
+        assertEqual(flatContours.recordCount, 0, "flat FMB6 carries no contours")
+        do {
+            let emptyPOI = try BikeMapPOIIndexValidator.blockEntry(flatBlock)
+            assert(emptyPOI == nil, "flat FMB6 carries a valid empty POI section")
+        } catch {
+            assert(false, "flat FMB6 empty POI section is valid: \(error)")
+        }
     }
 
     static func testBikeMapStreamGoldenVector() {
