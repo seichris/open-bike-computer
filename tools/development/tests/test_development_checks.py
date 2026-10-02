@@ -69,6 +69,14 @@ class DevelopmentChecksTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("--board", report["checks"][0]["reasons"][0])
 
+    def test_exact_build_is_blocked_before_expensive_dirty_source_validation(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(runner, "source_identity", return_value={"commit":"a"*40,"dirty":True}), contextlib.redirect_stdout(io.StringIO()):
+            report=Path(temporary)/"results.json"
+            self.assertEqual(runner.run_checks([{"id":"exact", "name":"Exact", "command":"exit 99", "requiresCleanSource":True}],report),1)
+            result=json.loads(report.read_text())["checks"][0]
+            self.assertEqual(result["status"],"blocked")
+            self.assertNotIn("exitCode",result)
+
     def test_success_retains_commit_and_logs(self):
         code, report = self.run_checks([{"id": "good", "name": "Good", "command": "echo checked"}])
         self.assertEqual(code, 0)

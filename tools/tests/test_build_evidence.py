@@ -77,5 +77,20 @@ class BuildEvidenceTests(unittest.TestCase):
         with patch.object(evidence, 'source', return_value={**source,'dirty':True}):
             with self.assertRaisesRegex(ValueError, 'clean'): evidence.ios(derived, 'Debug', source, self.root / 'records')
 
+    def test_debug_symbols_match_the_actual_code_dylib(self):
+        derived = self.make_app()
+        dylib = derived / 'Build/Products/Debug-iphoneos/BikeComputer.app/BikeComputer.debug.dylib'
+        dylib.write_bytes(b'actual debug code')
+        source = {'commit':'a'*40,'tree':'b'*40,'dirty':False}
+        code_uuid = [('00000000-0000-0000-0000-000000000001','arm64')]
+        stub_uuid = [('00000000-0000-0000-0000-000000000002','arm64')]
+        def uuids(path): return stub_uuid if path.name == 'BikeComputer' else code_uuid
+        with patch.object(evidence, 'source', return_value=source), patch.object(evidence, 'dwarf_uuids', side_effect=uuids), contextlib.redirect_stdout(io.StringIO()):
+            record = evidence.ios(derived, 'Debug', source, self.root / 'records')
+        identity = evidence.verify(record)['identity']
+        self.assertEqual(identity['binaryName'],'BikeComputer.debug.dylib')
+        self.assertEqual(identity['binarySha256'],evidence.sha(dylib))
+        self.assertNotEqual(identity['machOUUIDs'],identity['launcherMachOUUIDs'])
+
 
 if __name__ == '__main__': unittest.main()

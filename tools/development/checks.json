@@ -579,7 +579,8 @@
       ],
       "requiresBoard": true,
       "level": "full",
-      "timeoutSeconds": 7200
+      "timeoutSeconds": 7200,
+      "requiresCleanSource": true
     },
     {
       "id": "ios-simulator",
@@ -673,7 +674,7 @@
         "python3"
       ],
       "timeoutSeconds": 3600,
-      "command": "for configuration in Debug Release; do\n  derived=\"$TMPDIR/containers/$configuration\"\n  ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration \"$configuration\" -destination 'generic/platform=iOS' -derivedDataPath \"$derived\" CODE_SIGNING_ALLOWED=NO DEBUG_INFORMATION_FORMAT=dwarf-with-dsym build\n  app=\"$derived/Build/Products/$configuration-iphoneos/BikeComputer.app\"\n  if test \"$configuration\" = Debug; then\n    bash ./scripts/verify-development-container.sh \"$app\"\n  else\n    bash ./scripts/verify-release-container.sh \"$app\"\n    if LC_ALL=C grep -aFq 'Start Remote Debugging' \"$app/BikeComputer\"; then\n      echo 'Release app contains Debug-only remote device settings' >&2\n      exit 1\n    fi\n  fi\ndone",
+      "command": "export BICINO_REQUIRE_BUILD_EVIDENCE=1\nfor configuration in Debug Release; do\n  derived=\"$TMPDIR/containers/$configuration\"\n  ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration \"$configuration\" -destination 'generic/platform=iOS' -derivedDataPath \"$derived\" CODE_SIGNING_ALLOWED=NO DEBUG_INFORMATION_FORMAT=dwarf-with-dsym build\n  app=\"$derived/Build/Products/$configuration-iphoneos/BikeComputer.app\"\n  if test \"$configuration\" = Debug; then\n    bash ./scripts/verify-development-container.sh \"$app\"\n  else\n    bash ./scripts/verify-release-container.sh \"$app\"\n    if LC_ALL=C grep -aFq 'Start Remote Debugging' \"$app/BikeComputer\"; then\n      echo 'Release app contains Debug-only remote device settings' >&2\n      exit 1\n    fi\n  fi\ndone",
       "probes": [
         {
           "command": [
@@ -682,7 +683,8 @@
             "swiftc"
           ]
         }
-      ]
+      ],
+      "requiresCleanSource": true
     }
   ]
 }

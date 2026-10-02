@@ -152,6 +152,17 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, 
         ):
             selected["firmware_host"] = True
 
+        if path in {"tools/build_evidence.py", "tools/build-and-record-firmware"}:
+            # Both native build jobs exercise evidence collection and retention.
+            selected["firmware_build"] = True
+            selected["firmware_host"] = True
+            selected["ios"] = True
+        if path == "tools/incident_bundle.py":
+            selected["firmware_host"] = True
+        if path.startswith("protocol/scenarios/") or path == "tools/replay_scenario.py":
+            selected["firmware_host"] = True
+            selected["ios"] = True
+
         if path.startswith("ios-app/") or path in IOS_CONTRACT_PATHS:
             selected["ios"] = True
 

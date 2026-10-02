@@ -209,7 +209,9 @@ def ios(derived, configuration, before, root):
     app = products / (configuration + '-iphoneos') / 'BikeComputer.app'
     with (app / 'Info.plist').open('rb') as stream:
         info = plistlib.load(stream)
-    binary = app / info['CFBundleExecutable']
+    launcher = app / info['CFBundleExecutable']
+    debug_image = app / (info['CFBundleExecutable'] + '.debug.dylib')
+    binary = debug_image if debug_image.exists() else launcher
     binary_uuids = dwarf_uuids(binary)
     dsyms = sorted(products.rglob('*.dSYM'))
     files, matched, dsym_identities = {}, [], {}
@@ -230,7 +232,8 @@ def ios(derived, configuration, before, root):
     files['app-Info.plist'] = app / 'Info.plist'
     identity = {'source': after, 'configuration': configuration,
         'bundleIdentifier': info['CFBundleIdentifier'], 'version': info['CFBundleShortVersionString'],
-        'build': info['CFBundleVersion'], 'binarySha256': sha(binary),
+        'build': info['CFBundleVersion'], 'binarySha256': sha(binary), 'binaryName': binary.name,
+        'launcherSha256': sha(launcher), 'launcherMachOUUIDs': dwarf_uuids(launcher),
         'machOUUIDs': binary_uuids, 'matchingDSYM': matched[0], 'dSYMs': dsym_identities}
     record = publish('ios', identity, files, root)
     print(json.dumps({'symbols': str(record), 'identity': identity}))

@@ -60,7 +60,7 @@ def app_match(manifest, symbols, crash=None):
             if (info.get('CFBundleIdentifier') != identity['bundleIdentifier'] or
                 info.get('CFBundleShortVersionString') != identity['version'] or
                 info.get('CFBundleVersion') != identity['build']): continue
-            images = [image for image in crash['usedImages'] if image.get('name') == 'BikeComputer']
+            images = [image for image in crash['usedImages'] if image.get('name') == identity.get('binaryName', 'BikeComputer')]
             crash_uuids = {str(uuid.UUID(image['uuid'])).upper() for image in images}
             symbol_uuids = {pair[0] for pair in identity['machOUUIDs']}
             if crash_uuids and crash_uuids <= symbol_uuids: matches.append(identifier)

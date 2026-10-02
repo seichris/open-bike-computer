@@ -13,6 +13,18 @@ SPEC.loader.exec_module(changed_components)
 
 
 class ChangedComponentsTests(unittest.TestCase):
+    def test_evidence_and_scenario_tools_select_their_consumers(self):
+        for path in ("tools/build_evidence.py", "tools/build-and-record-firmware"):
+            result = changed_components.classify_paths([path])
+            self.assertTrue(result["firmware_build"])
+            self.assertTrue(result["firmware_host"])
+            self.assertTrue(result["ios"])
+        for path in ("protocol/scenarios/reconnect.json", "tools/replay_scenario.py"):
+            result = changed_components.classify_paths([path])
+            self.assertTrue(result["ios"])
+            self.assertTrue(result["firmware_host"])
+        self.assertTrue(changed_components.classify_paths(["tools/incident_bundle.py"])["firmware_host"])
+
     def test_cache_qualification_runs_for_core_inputs_without_rebuilding_for_app_edits(self):
         for path in (
             "esp32/platformio.ini", "esp32/prebuild.py",

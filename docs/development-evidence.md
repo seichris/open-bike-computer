@@ -6,7 +6,8 @@ manifest. Identify the actual board first. It does not flash the device.
 
 Successful device app builds through `ios-app/scripts/xcodebuild-cli.sh` retain
 Debug/Release dSYMs when an explicit DerivedData path and BikeComputer scheme
-are supplied. The app Mach-O UUIDs must match its dSYM. The checkout must remain
+are supplied. The app code image UUIDs must match its dSYM. Debug builds may put that code
+in `BikeComputer.debug.dylib`; the executable launcher is identified separately. The checkout must remain
 clean at the same commit throughout the build. Dirty builds still work locally,
 but report symbol retention as blocked. CI sets `BICINO_REQUIRE_BUILD_EVIDENCE=1`
 so missing or mismatched symbols fail validation. Simulator contract builds keep

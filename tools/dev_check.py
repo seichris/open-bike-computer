@@ -123,6 +123,8 @@ def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selec
     readiness = {check["id"]: prerequisites(check) for check in checks}
     for check in checks:
         reasons = readiness[check["id"]]
+        if check.get("requiresCleanSource") and before["dirty"]:
+            reasons.append("exact-build symbol retention requires clean committed source")
         if check.get("requiresBoard") and board is None:
             reasons.append("select the identified board with --board 175 or --board 206")
         entry = {"id": check["id"], "name": check["name"], "status": "blocked" if reasons else "planned",

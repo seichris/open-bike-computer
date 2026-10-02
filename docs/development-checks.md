@@ -18,7 +18,9 @@ Automatic selection uses the merge base with `origin/main`, commits since that
 base, staged/unstaged edits, and nonignored untracked files. `--base REF` changes
 the comparison. The default fast level selects affected host checks and always
 checks the development registry and CI policy. Full adds simulator contracts,
-unsigned Debug/Release app containers and a verified firmware build. Identify
+unsigned Debug/Release app containers and a verified firmware build. Exact-build
+symbol retention requires clean committed source; full native build checks report
+dirty source as blocked before compilation. Identify
 the connected board before selecting its build environment; this command never
 flashes, installs apps, or deploys services. CI-only image/service qualification
 continues to use the existing deployment scripts and required aggregate gate.
