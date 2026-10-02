@@ -13,4 +13,4 @@ COPY --from=production-base /app /opt/promotion-base-app
 COPY map-platform/backend/tests/test_automatic_promotion.py /opt/promotion-tests/test_automatic_promotion.py
 COPY map-platform/backend/tests/test_catalog_promotion.py /opt/promotion-tests/test_catalog_promotion.py
 COPY map-platform/deploy/promotion/test_runtime.py /opt/promotion-tests/test_runtime.py
-RUN PROMOTION_SCHEDULER_SOURCE=/opt/bicino-promotion/automatic_promotion.py python -m unittest discover -s /opt/promotion-tests
+RUN MAP_PLATFORM_PINNED_PROMOTION_COMPAT=1 PROMOTION_SCHEDULER_SOURCE=/opt/bicino-promotion/automatic_promotion.py python -m unittest discover -s /opt/promotion-tests

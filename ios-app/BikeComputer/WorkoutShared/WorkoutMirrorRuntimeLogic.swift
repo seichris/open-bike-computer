@@ -479,6 +479,7 @@ nonisolated enum WorkoutIPhoneTelemetryMerge {
             currentHeartRateZone: watch.currentHeartRateZone,
             heartRateZoneCount: watch.heartRateZoneCount,
             heartRateZoneDurations: watch.heartRateZoneDurations,
+            nativeZones: watch.nativeZones,
             location: location,
             lastCompletedSegment: watch.lastCompletedSegment,
             availability: availability,

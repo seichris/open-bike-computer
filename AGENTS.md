@@ -24,10 +24,22 @@
 
 ## Quick commands
 
+Start validation with `tools/dev-check --plan`, then `tools/dev-check` for
+affected fast checks. Use `--suite ios --level full` or
+`--suite firmware --level full --board 175` for explicit build validation after
+identifying the connected board. Local/CI check definitions and Swift source
+graphs live under `tools/development/`; do not copy compiler source lists into
+new scripts. Keep blocked prerequisites and clean/dirty source evidence distinct.
+See `docs/development-checks.md` for selection, reports and owned simulators.
+Ordinary full builds accept uncommitted edits and reuse isolated local iOS
+DerivedData. Use `--fresh --evidence` for clean-source app qualification;
+`--evidence` explicitly retains exact-build symbols. CI keeps strict evidence
+requirements. Never describe a dirty local build as clean-commit validation.
+
 ### ESP32 firmware
 
-Before the first build/upload/device-debug action in a task, ask which physical
-device is connected. Do not assume 1.75 versus 2.06.
+Before the first build/upload/device-debug action in a task, identify which
+physical device is connected. Do not assume 1.75 versus 2.06.
 
 ```sh
 cd esp32
@@ -73,14 +85,14 @@ Custom-core and firmware identities are separate. A source-only commit may
 reuse an attested project-private core key, but upload-only always revalidates
 the exact clean Git identity, source clock, runtime/core reference, generated
 state, artifacts, and flash plan. Dirty builds may consume an entry but never
-publish or upload. Cross-worktree core sharing is disabled until artifacts pass
-the documented relocatability gate.
+publish or upload. Cross-worktree core transport is verified and rebased into private state;
+cache-key/relocation changes must pass `docs/firmware-build-caching.md` qualification.
 
 Optional device nicknames are stored outside Git with
 `tools/device_registry.py`. `--device-name NAME` must resolve to one enrolled
 board family and stable serial, and the environment must match that family.
-This shorthand never guesses a board or replaces the required connected-model
-confirmation immediately before flashing.
+This shorthand never guesses a board or replaces connected-model verification
+immediately before flashing.
 
 After the locked runtime handoff, a clean pioarduino installation first
 converts content-pinned tool wrappers into the
@@ -114,7 +126,7 @@ the debugger is not a separate image and cannot be attached to arbitrary
 already-flashed firmware. Ordinary `WAVESHARE_AMOLED_*` and
 `*_PRODUCTION` profiles intentionally omit the browser service, and release
 workflows never select `*_REMOTE_DEBUG`. Therefore, choose the matching
-`*_REMOTE_DEBUG` profile for an explicitly authorized development flash when
+`*_REMOTE_DEBUG` profile for a development flash when
 browser debugging is useful, while keeping normal production/release flashes
 debugger-free. See `docs/remote-device-debugging.md` for session startup and
 security requirements.
@@ -216,8 +228,9 @@ profile-private copy. Missing, extra, truncated, symlinked, wrong-owner, or
 post-build-mutated entries fail closed and only the exact entry is quarantined.
 A source-only commit may reuse the same core key, but every build writes a new
 exact-source firmware manifest. Dirty builds may consume a verified entry but
-cannot publish, upload, or replace it. Cross-worktree core lookup remains
-disabled until the separate relocatability gate passes. Nested passes exclude
+cannot publish, upload, or replace it. Cross-worktree core transport uses a shared immutable archive and
+re-attests the receiving worktree before execution; see
+`docs/firmware-build-caching.md` for the relocatability gate. Nested passes exclude
 only recognized generated SDK configs from the Git identity.
 
 The helper accepts `PLATFORMIO_CORE_DIR` (or the legacy
@@ -309,11 +322,11 @@ When firmware is requested from current or latest GitHub `main`, fetch
 Do not let an active checkout, an unpushed commit, or unrelated local changes
 enter the artifact.
 
-Immediately before any flash write, restate the physical board model, selected
-profile, device nickname and stable serial (or the deliberately selected port
-when no serial exists), exact Git SHA, and attested artifact/flash-plan identity.
-Obtain explicit user confirmation at that point. Earlier approval to build,
-inspect, or prepare a release is not approval for the destructive write.
+Immediately before any flash write, verify and record the physical board model,
+selected profile, device nickname and stable serial (or the deliberately
+selected port when no serial exists), exact Git SHA, and attested artifact/flash
+plan identity. Follow the scope of the user's task when deciding whether to
+flash; a request only to build or inspect does not authorize a device write.
 
 Green CI, a successful build, or a merged pull request is not physical firmware
 acceptance. A production-enabled hardware-path change must retain a visible
@@ -325,7 +338,7 @@ Treat the 1.75-inch and 2.06-inch boards as separate qualification targets.
 
 Tagged releases package the production images using the attested flash plan;
 see `docs/firmware-factory-release.md`. The factory archive does not waive the
-normal device-identity, confirmation, ready-state, or readback requirements.
+normal device-identity, ready-state, or readback requirements.
 Production disables serial `BOOT_META`; use its owner-authenticated
 `boot/acceptance` checkpoint and `tools/verify_firmware_boot_acceptance.py` as
 documented in `docs/firmware-factory-release.md`. Diagnostic serial captures

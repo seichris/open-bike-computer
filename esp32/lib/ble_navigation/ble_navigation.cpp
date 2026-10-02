@@ -49,11 +49,13 @@
 #include "../maps/src/maps.hpp"
 #include "../device_transfer/device_transfer_http.hpp"
 #include "../device_debug/device_debug_http.hpp"
+#include "../boot_diagnostics/boot_diagnostics.hpp"
 #include "../display_power/display_power_policy.hpp"
 #ifdef USE_ARDUINO_GFX
 #include "../display_power/display_power.hpp"
 #endif
 #include "../firmware_metadata/firmware_metadata.hpp"
+#include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_update/firmware_update_http.hpp"
 #include "../map_transfer_http/map_transfer_http.hpp"
 #include "../map_transfer/map_stream_compiled_trust.hpp"
@@ -63,6 +65,7 @@
 #include "../ride_diagnostics/ride_diagnostics_control.hpp"
 #include "../route_overlay/route_overlay.hpp"
 #include "../speaker/speaker.hpp"
+#include "../status_json/status_json.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include "../waveshare_board/pcf85063.hpp"
@@ -91,6 +94,12 @@
 #if !defined(CONFIG_BT_NIMBLE_MAX_CONNECTIONS) || \
     CONFIG_BT_NIMBLE_MAX_CONNECTIONS != 1
 #error "Bike Computer ownership requires CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1"
+#endif
+
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+static constexpr bool kFirmwareMaintenanceSupported = true;
+#else
+static constexpr bool kFirmwareMaintenanceSupported = false;
 #endif
 
 extern Gps gps;
@@ -137,6 +146,7 @@ static std::atomic<bool> bleSessionSupportsRendererDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
+static std::atomic<bool> bleSessionSupportsWorkoutZones{false};
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 static std::atomic<bool> bleSessionSupportsWorldRadio{false};
 #endif
@@ -166,6 +176,7 @@ static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static map_transfer_status_protocol::ChunkTransmission
     pendingMapTransferStatusChunks;
 static std::atomic<bool> pendingMapTransferStatusContinuation{false};
+static std::atomic<bool> pendingMapAvailabilityStatus{false};
 static map_transfer_status_protocol::ChunkTransmission
     pendingDeviceTransferStatusChunks;
 static std::atomic<bool> pendingDeviceTransferStatusContinuation{false};
@@ -977,6 +988,7 @@ static void resetRideDeliveryTracking() {
 }
 
 static void advanceRidePayloadGeneration() {
+  bleDebugStats.updateWith([](BLEDebugStats &stats) { stats.gpsSource = {}; });
   uint32_t next = ridePayloadGeneration.fetch_add(
       1, std::memory_order_acq_rel) + 1U;
   if (next == 0) {
@@ -2301,6 +2313,7 @@ static void handleAuthPayload(const std::string &frame) {
         false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsWorkoutZones.store(false, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
@@ -2479,30 +2492,6 @@ static bool handlePowerButtonHonkCommand(const std::string &value,
   return true;
 }
 
-static std::string jsonEscape(const std::string &value) {
-  std::string out;
-  out.reserve(value.size() + 8);
-  for (char c : value) {
-    if (c == '"' || c == '\\') {
-      out.push_back('\\');
-      out.push_back(c);
-    } else if (c == '\n') {
-      out += "\\n";
-    } else if (c == '\r') {
-      out += "\\r";
-    } else if (static_cast<unsigned char>(c) < 0x20) {
-      static constexpr char kHex[] = "0123456789abcdef";
-      const unsigned char value = static_cast<unsigned char>(c);
-      out += "\\u00";
-      out.push_back(kHex[value >> 4]);
-      out.push_back(kHex[value & 0x0f]);
-    } else {
-      out.push_back(c);
-    }
-  }
-  return out;
-}
-
 struct ActivePresentationCache {
   bool available = false;
   std::string mapId;
@@ -2650,11 +2639,11 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                      (transferStatus.enabled ? "true" : "false") +
                      ",\"port\":" + std::to_string(transferStatus.port) +
                      ",\"firmwareVersion\":\"" +
-                     jsonEscape(firmware_metadata::version()) +
+                     status_json::escape(firmware_metadata::version()) +
                      "\",\"firmwareBuild\":" +
                      std::to_string(firmware_metadata::build()) +
                      ",\"firmwareGitSha\":\"" +
-                     jsonEscape(firmware_metadata::gitSha()) + "\"" +
+                     status_json::escape(firmware_metadata::gitSha()) + "\"" +
                      ",\"protocols\":" +
                      (streamSupported ? "[2]" : "[]") +
                      (streamSupported
@@ -2663,6 +2652,8 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                           : "") +
                      ",\"sdPresent\":" +
                      (storage.getSdLoaded() ? "true" : "false") +
+                     ",\"mapStateKnown\":" +
+                     (mapView.hasPublishedMapFrame() ? "true" : "false") +
                      ",\"mapFound\":" +
                      (mapView.debugIsMapFound() ? "true" : "false") +
                      ",\"mapBlocks\":" +
@@ -2673,45 +2664,45 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
           ",\"tls\":{\"identityVersion\":" +
           std::to_string(transferStatus.tlsIdentityVersion) +
           ",\"certificateSha256\":\"" +
-          jsonEscape(transferStatus.tlsCertificateSha256) + "\"}" +
+          status_json::escape(transferStatus.tlsCertificateSha256) + "\"}" +
           ",\"capabilities\":{\"secureTransferV1\":" +
           (transferStatus.secureTransferV1 ? "true" : "false") +
           ",\"signedMapStreamV1\":" +
           (transferStatus.signedMapStreamV1 ? "true" : "false") +
           ",\"legacyArchivePolicy\":\"" +
-          jsonEscape(transferStatus.legacyArchivePolicy) + "\"}";
+          status_json::escape(transferStatus.legacyArchivePolicy) + "\"}";
 
   if (!transferStatus.baseUrl.empty()) {
-    body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
+    body += ",\"baseUrl\":\"" + status_json::escape(transferStatus.baseUrl) + "\"";
   }
 
   if (!transferStatus.apSsid.empty()) {
-    body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
+    body += ",\"apSsid\":\"" + status_json::escape(transferStatus.apSsid) + "\"";
   }
   if (!transferStatus.networkTransport.empty()) {
     body += ",\"networkTransport\":\"" +
-            jsonEscape(transferStatus.networkTransport) + "\"";
+            status_json::escape(transferStatus.networkTransport) + "\"";
   }
   if (!transferStatus.networkSsid.empty()) {
     body += ",\"networkSsid\":\"" +
-            jsonEscape(transferStatus.networkSsid) + "\"";
+            status_json::escape(transferStatus.networkSsid) + "\"";
   }
   if (transferStatus.hotspotFallback) {
     body += ",\"hotspotFallback\":true";
   }
   if (!transferStatus.hotspotFallbackReason.empty()) {
     body += ",\"hotspotFallbackReason\":\"" +
-            jsonEscape(transferStatus.hotspotFallbackReason) + "\"";
+            status_json::escape(transferStatus.hotspotFallbackReason) + "\"";
   }
   if (activeMapStatus.available) {
-    body += ",\"activeMapId\":\"" + jsonEscape(activeMap.mapId) + "\"";
+    body += ",\"activeMapId\":\"" + status_json::escape(activeMap.mapId) + "\"";
     if (!activeMap.sessionId.empty()) {
       body += ",\"activeSessionId\":\"" +
-              jsonEscape(activeMap.sessionId) + "\"";
+              status_json::escape(activeMap.sessionId) + "\"";
     }
     if (!activeMap.manifestReceipt.empty()) {
       body += ",\"activeManifestReceipt\":\"" +
-              jsonEscape(activeMap.manifestReceipt) + "\"";
+              status_json::escape(activeMap.manifestReceipt) + "\"";
     }
     appendActiveMapPresentationStatus(body, activeMapStatus.presentation);
     if (activeMap.target.formatVersion != 0) {
@@ -2725,17 +2716,37 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
         if (index != 0)
           body += ",";
         body +=
-            "\"" + jsonEscape(activeMap.target.labelLanguages[index]) + "\"";
+            "\"" + status_json::escape(activeMap.target.labelLanguages[index]) + "\"";
       }
       body += "],\"fontAssetHealthy\":";
       body += activeMap.target.formatVersion >= 2 &&
                       mapView.debugStreetLabelFontHealthy()
                   ? "true"
                   : "false";
+      body += ",\"topographyProfileVersion\":" +
+              std::to_string(activeMap.target.topographyProfileVersion) +
+              ",\"topographyQualityMode\":\"" +
+              status_json::escape(activeMap.target.topographyQualityMode) +
+              "\",\"contourMinorIntervalM\":" +
+              std::to_string(activeMap.target.contourMinorIntervalM) +
+              ",\"contourIndexIntervalM\":" +
+              std::to_string(activeMap.target.contourIndexIntervalM) +
+              ",\"contourNoDataMillionths\":" +
+              std::to_string(activeMap.target.contourNoDataMillionths) +
+              ",\"containsContours\":" +
+              (activeMap.target.contourRecordCount > 0 ? "true" : "false") +
+              ",\"topographySourcePolicyReceiptPrefix\":\"" +
+              status_json::escape(
+                  activeMap.target.topographySourcePolicySha256.substr(0, 12)) +
+              "\",\"topographySectionHealthy\":";
+      body += activeMap.target.formatVersion == 4 &&
+                      activeMap.target.topographyProfileVersion == 1
+                  ? "true"
+                  : "false";
     }
   } else {
     body += ",\"activeError\":{\"code\":\"" +
-            jsonEscape(activeMapStatus.errorCode) +
+            status_json::escape(activeMapStatus.errorCode) +
             "\"}";
   }
 
@@ -2744,7 +2755,7 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
   if (!transferStatus.lastErrorCode.empty() &&
       !mapTransferHttp.activationHasError()) {
     body += ",\"lastError\":{\"code\":\"" +
-            jsonEscape(transferStatus.lastErrorCode) + "\",\"sequence\":" +
+            status_json::escape(transferStatus.lastErrorCode) + "\",\"sequence\":" +
             std::to_string(transferStatus.errorSequence) + "}";
   }
 
@@ -2759,24 +2770,35 @@ static std::string mapTransferStatusJson() {
 static std::string genericTransferStatusJson() {
   device_transfer::HttpTransferStatus transferStatus =
       deviceTransferHttp.status();
-  std::string body = std::string("{\"configured\":") +
-                     (transferStatus.configured ? "true" : "false") +
-                     ",\"enabled\":" +
-                     (transferStatus.enabled ? "true" : "false") +
-                     ",\"port\":" + std::to_string(transferStatus.port) +
-                     ",\"mode\":\"" + jsonEscape(transferStatus.mode) + "\"" +
-                     ",\"transferGeneration\":" +
-                     std::to_string(transferStatus.transferGeneration) +
-                     ",\"tls\":{\"identityVersion\":" +
-                     std::to_string(transferStatus.tlsIdentityVersion) +
-                     ",\"certificateSha256\":\"" +
-                     jsonEscape(transferStatus.tlsCertificateSha256) + "\"}" +
-                     ",\"capabilities\":{\"secureTransferV1\":" +
-                     (transferStatus.secureTransferV1 ? "true" : "false") +
-                     ",\"signedMapStreamV1\":" +
-                     (transferStatus.signedMapStreamV1 ? "true" : "false") +
-                     ",\"legacyArchivePolicy\":\"" +
-                     jsonEscape(transferStatus.legacyArchivePolicy) + "\"}";
+  std::string body;
+  body.reserve(1536);
+  body = "{\"configured\":";
+  body += transferStatus.configured ? "true" : "false";
+  status_json::appendBoolField(body, "enabled", transferStatus.enabled);
+  status_json::appendUnsignedField(body, "port", transferStatus.port);
+  status_json::appendStringField(body, "mode", transferStatus.mode);
+  status_json::appendUnsignedField(body, "transferGeneration",
+                          transferStatus.transferGeneration);
+  status_json::appendUnsignedField(body, "statusRevision",
+                          transferStatus.statusRevision);
+
+  status_json::appendFieldPrefix(body, "tls");
+  body += "{\"identityVersion\":";
+  body += std::to_string(transferStatus.tlsIdentityVersion);
+  status_json::appendStringField(body, "certificateSha256",
+                        transferStatus.tlsCertificateSha256);
+  body += "}";
+
+  status_json::appendFieldPrefix(body, "capabilities");
+  body += "{\"secureTransferV1\":";
+  body += transferStatus.secureTransferV1 ? "true" : "false";
+  status_json::appendBoolField(body, "signedMapStreamV1",
+                      transferStatus.signedMapStreamV1);
+  status_json::appendBoolField(body, "firmwareMaintenanceV1",
+                      kFirmwareMaintenanceSupported);
+  status_json::appendStringField(body, "legacyArchivePolicy",
+                        transferStatus.legacyArchivePolicy);
+  body += "}";
 
 #ifdef WAVESHARE_EPAPER_397
   const epaper::Status panelStatus = epaper::status();
@@ -2794,69 +2816,263 @@ static std::string genericTransferStatusJson() {
 #endif
   if (transferStatus.pendingTlsIdentityVersion != 0 &&
       !transferStatus.pendingTlsCertificateSha256.empty()) {
-    body += ",\"pendingTls\":{\"identityVersion\":" +
-            std::to_string(transferStatus.pendingTlsIdentityVersion) +
-            ",\"certificateSha256\":\"" +
-            jsonEscape(transferStatus.pendingTlsCertificateSha256) + "\"}";
+    status_json::appendFieldPrefix(body, "pendingTls");
+    body += "{\"identityVersion\":";
+    body += std::to_string(transferStatus.pendingTlsIdentityVersion);
+    status_json::appendStringField(body, "certificateSha256",
+                          transferStatus.pendingTlsCertificateSha256);
+    body += "}";
   }
 
-  if (!transferStatus.baseUrl.empty()) {
-    body += ",\"baseUrl\":\"" + jsonEscape(transferStatus.baseUrl) + "\"";
-  }
-  if (!transferStatus.apSsid.empty()) {
-    body += ",\"apSsid\":\"" + jsonEscape(transferStatus.apSsid) + "\"";
-  }
+  if (!transferStatus.baseUrl.empty())
+    status_json::appendStringField(body, "baseUrl", transferStatus.baseUrl);
+  if (!transferStatus.apSsid.empty())
+    status_json::appendStringField(body, "apSsid", transferStatus.apSsid);
   if (!transferStatus.apPassphrase.empty()) {
-    body += ",\"apPassphrase\":\"" +
-            jsonEscape(transferStatus.apPassphrase) + "\"";
+    body += ",\"apPassphrase\":\"";
+    body += status_json::escape(transferStatus.apPassphrase);
+    body += "\"";
   }
   if (!transferStatus.networkTransport.empty()) {
-    body += ",\"networkTransport\":\"" +
-            jsonEscape(transferStatus.networkTransport) + "\"";
+    body += ",\"networkTransport\":\"";
+    body += status_json::escape(transferStatus.networkTransport);
+    body += "\"";
   }
   if (!transferStatus.networkSsid.empty()) {
-    body += ",\"networkSsid\":\"" +
-            jsonEscape(transferStatus.networkSsid) + "\"";
+    body += ",\"networkSsid\":\"";
+    body += status_json::escape(transferStatus.networkSsid);
+    body += "\"";
   }
-  if (transferStatus.hotspotFallback) {
+  if (transferStatus.hotspotFallback)
     body += ",\"hotspotFallback\":true";
-  }
   if (!transferStatus.hotspotFallbackReason.empty()) {
-    body += ",\"hotspotFallbackReason\":\"" +
-            jsonEscape(transferStatus.hotspotFallbackReason) + "\"";
+    body += ",\"hotspotFallbackReason\":\"";
+    body += status_json::escape(transferStatus.hotspotFallbackReason);
+    body += "\"";
   }
-  if (!transferStatus.sessionToken.empty()) {
-    body += ",\"sessionToken\":\"" + jsonEscape(transferStatus.sessionToken) +
-            "\"";
-  }
+  if (!transferStatus.sessionToken.empty())
+    status_json::appendStringField(body, "sessionToken", transferStatus.sessionToken);
   if (!transferStatus.lastErrorCode.empty()) {
-    body += ",\"lastError\":{\"code\":\"" +
-            jsonEscape(transferStatus.lastErrorCode) + "\",\"message\":\"" +
-            jsonEscape(transferStatus.lastErrorMessage) +
-            "\",\"sequence\":" +
-            std::to_string(transferStatus.errorSequence) + "}";
+    status_json::appendFieldPrefix(body, "lastError");
+    body += "{\"code\":\"";
+    body += status_json::escape(transferStatus.lastErrorCode);
+    body += "\"";
+    status_json::appendStringField(body, "message", transferStatus.lastErrorMessage);
+    status_json::appendUnsignedField(body, "sequence", transferStatus.errorSequence);
+    body += "}";
   }
-  body += ",\"storage\":{\"backend\":\"" +
-          jsonEscape(storage.storageBackendName()) +
-          "\",\"powerCycleRequired\":" +
-          (storage.storagePowerCycleRequired() ? "true" : "false") + "}";
+  if (!transferStatus.networkStart.ok()) {
+    const auto &failure = transferStatus.networkStart;
+    const auto appendMemory = [&body](const char *name,
+                                      const device_transfer::NetworkMemorySnapshot &memory) {
+      status_json::appendFieldPrefix(body, name);
+      body += "{\"internalFree\":" + std::to_string(memory.internalFree);
+      status_json::appendUnsignedField(body, "internalLargest", memory.internalLargest);
+      status_json::appendUnsignedField(body, "dmaFree", memory.dmaFree);
+      status_json::appendUnsignedField(body, "dmaLargest", memory.dmaLargest);
+      body += "}";
+    };
+    status_json::appendFieldPrefix(body, "wifiStartFailure");
+    body += "{\"step\":\"";
+    body += device_transfer::networkStartCode(failure.failedStep);
+    body += "\",\"espError\":" + std::to_string(failure.espError);
+    appendMemory("before", failure.before);
+    appendMemory("after", failure.after);
+    body += "}";
+  }
+  if (transferStatus.networkStart.mode.attempted) {
+    const auto appendMemory = [&body](const char *name,
+                                      const device_transfer::NetworkMemorySnapshot &memory) {
+      status_json::appendFieldPrefix(body, name);
+      body += "{\"internalFree\":" + std::to_string(memory.internalFree);
+      status_json::appendUnsignedField(body, "internalLargest", memory.internalLargest);
+      status_json::appendUnsignedField(body, "dmaFree", memory.dmaFree);
+      status_json::appendUnsignedField(body, "dmaLargest", memory.dmaLargest);
+      body += "}";
+    };
+    const auto appendTransition = [&body, &appendMemory](
+        const char *name, const device_transfer::NetworkTransitionMemory &phase) {
+      if (!phase.attempted)
+        return;
+      status_json::appendFieldPrefix(body, name);
+      body += "{";
+      body += "\"before\":";
+      body += "{\"internalFree\":" + std::to_string(phase.before.internalFree);
+      status_json::appendUnsignedField(body, "internalLargest", phase.before.internalLargest);
+      status_json::appendUnsignedField(body, "dmaFree", phase.before.dmaFree);
+      status_json::appendUnsignedField(body, "dmaLargest", phase.before.dmaLargest);
+      body += "}";
+      appendMemory("after", phase.after);
+      body += "}";
+    };
+    status_json::appendFieldPrefix(body, "wifiStartupPhases");
+    body += "{";
+    // First member is emitted without appendFieldPrefix's comma contract.
+    body += "\"mode\":{\"before\":{\"internalFree\":" +
+            std::to_string(transferStatus.networkStart.mode.before.internalFree);
+    status_json::appendUnsignedField(body, "internalLargest",
+        transferStatus.networkStart.mode.before.internalLargest);
+    status_json::appendUnsignedField(body, "dmaFree",
+        transferStatus.networkStart.mode.before.dmaFree);
+    status_json::appendUnsignedField(body, "dmaLargest",
+        transferStatus.networkStart.mode.before.dmaLargest);
+    body += "}";
+    appendMemory("after", transferStatus.networkStart.mode.after);
+    body += "}";
+    appendTransition("ramStorage", transferStatus.networkStart.ramStorage);
+    appendTransition("accessPoint", transferStatus.networkStart.accessPoint);
+    body += "}";
+  }
+  const auto &failure = transferStatus.lastTransferFailure;
+  if (failure.reason != device_transfer::TransferFailureReason::None) {
+    status_json::appendFieldPrefix(body, "firstTransferFailure");
+    body += "{\"reason\":\"";
+    body += device_transfer::transferFailureReasonName(failure.reason);
+    body += "\"";
+    const auto appendSigned = [&body](const char *key, int32_t value) {
+      status_json::appendFieldPrefix(body, key);
+      body += std::to_string(value);
+    };
+    status_json::appendUnsignedField(body, "atMs", failure.atMs);
+    status_json::appendUnsignedField(body, "generation", failure.generation);
+    status_json::appendUnsignedField(body, "headerBytes", failure.responseHeaderBytes);
+    status_json::appendUnsignedField(body, "bodyBytes", failure.responseBodyBytes);
+    status_json::appendUnsignedField(body, "inputBytes", failure.inputBytes);
+    status_json::appendUnsignedField(body, "offsetBytes", failure.offsetBytes);
+    status_json::appendUnsignedField(body, "attemptedBytes", failure.attemptedBytes);
+    status_json::appendUnsignedField(body, "elapsedSinceProgressMs", failure.elapsedSinceProgressMs);
+    appendSigned("rawTlsResult", failure.rawTlsResult);
+    appendSigned("immediateErrno", failure.immediateErrno);
+    status_json::appendBoolField(body, "firstFatalSeen", failure.firstFatalSeen);
+    appendSigned("firstFatalTlsResult", failure.firstFatalTlsResult);
+    appendSigned("firstFatalErrno", failure.firstFatalErrno);
+    appendSigned("pollResult", failure.pollResult);
+    appendSigned("pollFlags", failure.pollFlags);
+    status_json::appendUnsignedField(body, "tlsWriteCalls", failure.tlsWriteCalls);
+    status_json::appendUnsignedField(body, "wantReadCalls", failure.wantReadCalls);
+    status_json::appendUnsignedField(body, "wantWriteCalls", failure.wantWriteCalls);
+    status_json::appendUnsignedField(body, "rawZeroCalls", failure.rawZeroCalls);
+    status_json::appendUnsignedField(body, "fatalWriteCalls", failure.fatalWriteCalls);
+    status_json::appendUnsignedField(body, "positivePartialCalls", failure.positivePartialCalls);
+    status_json::appendUnsignedField(body, "lastWriteDurationUs", failure.lastWriteDurationUs);
+    status_json::appendUnsignedField(body, "fileRequested", failure.fileRequested);
+    status_json::appendUnsignedField(body, "fileReturned", failure.fileReturned);
+    appendSigned("fileErrno", failure.fileErrno);
+    status_json::appendBoolField(body, "fileError", failure.fileError);
+    status_json::appendBoolField(body, "fileEof", failure.fileEof);
+    status_json::appendStringField(body, "fileAbortBranch",
+        device_transfer::transferFileAbortBranchName(failure.fileAbortBranch));
+    status_json::appendUnsignedField(body, "authorizationBits", failure.authorizationBits);
+    status_json::appendFieldPrefix(body, "memory");
+    body += "{\"internalFree\":" + std::to_string(failure.memory.internalFree);
+    status_json::appendUnsignedField(body, "internalLargest", failure.memory.internalLargest);
+    status_json::appendUnsignedField(body, "dmaFree", failure.memory.dmaFree);
+    status_json::appendUnsignedField(body, "dmaLargest", failure.memory.dmaLargest);
+    status_json::appendUnsignedField(body, "psramFree", failure.memory.psramFree);
+    status_json::appendUnsignedField(body, "psramLargest", failure.memory.psramLargest);
+    body += "}}";
+  }
+  if (!firmware_maintenance::active()) {
+    status_json::appendFieldPrefix(body, "storage");
+    body += "{\"backend\":\"";
+    body += status_json::escape(storage.storageBackendName());
+    body += "\"";
+    status_json::appendBoolField(body, "powerCycleRequired",
+                        storage.storagePowerCycleRequired());
+    body += "}";
+  }
+  status_json::appendFieldPrefix(body, "maintenance");
+  body += "{\"supported\":";
+  body += kFirmwareMaintenanceSupported ? "true" : "false";
+  status_json::appendBoolField(body, "active", firmware_maintenance::active());
+  status_json::appendStringField(
+      body, "stage",
+      firmware_maintenance::stageName(firmware_maintenance::stage()));
+  status_json::appendUnsignedField(body, "correlation",
+                          firmware_maintenance::correlation());
+  body += "}";
+
+  status_json::appendFieldPrefix(body, "resources");
+  body += "{\"internalFree\":";
+  body += std::to_string(transferStatus.internalFree);
+  status_json::appendUnsignedField(body, "internalLargest",
+                          transferStatus.internalLargest);
+  status_json::appendUnsignedField(body, "dmaFree", transferStatus.dmaFree);
+  status_json::appendUnsignedField(body, "dmaLargest", transferStatus.dmaLargest);
+  status_json::appendUnsignedField(body, "psramFree", transferStatus.psramFree);
+  status_json::appendUnsignedField(body, "psramLargest", transferStatus.psramLargest);
+  status_json::appendUnsignedField(body, "minimumInternalFree",
+                          transferStatus.minimumInternalFree);
+  status_json::appendUnsignedField(body, "minimumInternalLargest",
+                          transferStatus.minimumInternalLargest);
+  status_json::appendUnsignedField(body, "minimumDmaFree",
+                          transferStatus.minimumDmaFree);
+  status_json::appendUnsignedField(body, "minimumDmaLargest",
+                          transferStatus.minimumDmaLargest);
+  status_json::appendUnsignedField(body, "minimumPsramFree",
+                          transferStatus.minimumPsramFree);
+  status_json::appendUnsignedField(body, "minimumPsramLargest",
+                          transferStatus.minimumPsramLargest);
+  status_json::appendUnsignedField(body, "workerStackHighWaterBytes",
+                          transferStatus.workerStackHighWaterBytes);
+  status_json::appendUnsignedField(body, "internalOwnerStackHighWaterBytes",
+                          transferStatus.internalOwnerStackHighWaterBytes);
+  status_json::appendStringField(body, "phase", transferStatus.resourcePhase);
+  body += "}";
+
   firmware_update::FirmwareUpdateStatus firmwareStatus =
       firmwareUpdateHttp.status();
-  body += ",\"firmware\":{\"status\":\"" +
-          jsonEscape(firmwareStatus.status) + "\",\"target\":\"" +
-          jsonEscape(firmwareStatus.target) + "\",\"version\":\"" +
-          jsonEscape(firmwareStatus.runningVersion) + "\",\"build\":" +
-          std::to_string(firmwareStatus.runningBuild) +
-          ",\"gitSha\":\"" + jsonEscape(firmwareStatus.runningGitSha) + "\"" +
-          ",\"updaterProtocol\":" +
-          std::to_string(firmware_metadata::kUpdaterProtocolVersion) +
-          ",\"receivedBytes\":" +
-          std::to_string(firmwareStatus.receivedBytes) +
-          ",\"totalBytes\":" + std::to_string(firmwareStatus.totalBytes);
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  const boot_diagnostics::Snapshot bootStatus = boot_diagnostics::snapshot();
+  status_json::appendFieldPrefix(body, "bootCheckpoint");
+  body += "{\"schemaVersion\":1";
+  status_json::appendStringField(body, "target", firmwareStatus.target);
+  status_json::appendStringField(body, "profile", firmwareStatus.runningProfile);
+  status_json::appendStringField(body, "gitSha", firmwareStatus.runningGitSha);
+  status_json::appendStringField(body, "version", firmwareStatus.runningVersion);
+  status_json::appendUnsignedField(body, "build", firmwareStatus.runningBuild);
+  status_json::appendUnsignedField(body, "bootSequence", bootStatus.bootSequence);
+  status_json::appendUnsignedField(body, "bootFingerprint",
+                          bootStatus.firmwareFingerprint);
+  status_json::appendBoolField(body, "normalReady", bootStatus.ready);
+  status_json::appendBoolField(body, "maintenance", bootStatus.firmwareMaintenance);
+  status_json::appendStringField(body, "otaState", firmwareStatus.otaState);
+  body += "}";
+#endif
+  status_json::appendFieldPrefix(body, "firmware");
+  body += "{\"status\":\"";
+  body += status_json::escape(firmwareStatus.status);
+  body += "\"";
+  status_json::appendStringField(body, "target", firmwareStatus.target);
+  status_json::appendStringField(body, "version", firmwareStatus.runningVersion);
+  status_json::appendUnsignedField(body, "build", firmwareStatus.runningBuild);
+  status_json::appendStringField(body, "gitSha", firmwareStatus.runningGitSha);
+  status_json::appendUnsignedField(body, "updaterProtocol",
+                          firmware_metadata::kUpdaterProtocolVersion);
+  status_json::appendBoolField(body, "otaEligible", firmwareStatus.otaEligible);
+  status_json::appendStringField(body, "eligibilityCode",
+                        firmwareStatus.eligibilityCode);
+  status_json::appendStringField(body, "inactivePartition",
+                        firmwareStatus.inactivePartition);
+  status_json::appendStringField(body, "runningPartition",
+                        firmwareStatus.runningPartition);
+  status_json::appendStringField(body, "profile", firmwareStatus.runningProfile);
+  status_json::appendStringField(body, "otaState", firmwareStatus.otaState);
+  status_json::appendUnsignedField(body, "maxImageBytes",
+                          firmwareStatus.maxImageBytes);
+  status_json::appendUnsignedField(body, "receivedBytes",
+                          firmwareStatus.receivedBytes);
+  status_json::appendUnsignedField(body, "totalBytes", firmwareStatus.totalBytes);
+  status_json::appendUnsignedField(
+      body, "flashOwnerStackHighWaterBytes",
+      firmwareStatus.flashOwnerStackHighWaterBytes);
   if (!firmwareStatus.errorCode.empty()) {
-    body += ",\"lastError\":{\"code\":\"" +
-            jsonEscape(firmwareStatus.errorCode) + "\",\"message\":\"" +
-            jsonEscape(firmwareStatus.errorMessage) + "\"}";
+    status_json::appendFieldPrefix(body, "lastError");
+    body += "{\"code\":\"";
+    body += status_json::escape(firmwareStatus.errorCode);
+    body += "\"";
+    status_json::appendStringField(body, "message", firmwareStatus.errorMessage);
+    body += "}";
   }
   body += "}}";
   return body;
@@ -3289,6 +3505,11 @@ static void cancelDiagnosticsSessionStart() {
 static void diagnosticsSessionStartTask(void *context) {
   const uint32_t generation = static_cast<uint32_t>(
       reinterpret_cast<uintptr_t>(context));
+  // Own the retained-file snapshot before asking the writer to seal. The
+  // writer serializes pruning and sealing, so completion proves that a prune
+  // which began before this lease has finished while every later prune is
+  // suppressed for the authenticated diagnostics session.
+  ride_diagnostics::armTransferSnapshotLease();
   const ride_diagnostics::transfer_policy::StoragePreparation storageResult =
       storage.prepareDiagnosticsStorage();
   const bool storageReady =
@@ -3301,6 +3522,7 @@ static void diagnosticsSessionStartTask(void *context) {
                      ride_diagnostics::transfer_policy::sealReady(sealResult);
 
   bool stillCurrent = false;
+  bool keepSnapshotLease = false;
   if (diagnosticsSessionMutex != nullptr &&
       xSemaphoreTake(diagnosticsSessionMutex, portMAX_DELAY) == pdTRUE) {
     stillCurrent =
@@ -3311,20 +3533,38 @@ static void diagnosticsSessionStartTask(void *context) {
     if (ready && stillCurrent && !deviceTransferHttp.status().enabled) {
       const bool enabled = deviceTransferHttp.setEnabled(true, "diagnostics");
       if (!enabled) {
-        deviceTransferHttp.setLastError(
-            "diagnostics_start_failed",
-            "diagnostics storage was ready but the transfer server did not start");
+        const device_transfer::HttpTransferStatus startFailure =
+            deviceTransferHttp.status();
+        if (startFailure.lastErrorCode.empty()) {
+          deviceTransferHttp.setLastError(
+              "diagnostics_start_failed",
+              "diagnostics storage was ready but the transfer server did not start");
+        }
+      } else {
+        keepSnapshotLease = true;
+      }
+      const device_transfer::HttpTransferStatus startStatus =
+          deviceTransferHttp.status();
+      const char *startFailureCode =
+          startStatus.lastErrorCode.empty()
+              ? "diagnostics_start_failed"
+              : startStatus.lastErrorCode.c_str();
+      char fields[192] = {};
+      if (enabled) {
+        snprintf(fields, sizeof(fields), "%s",
+                 ride_diagnostics::transfer_policy::usingInternalFallback(
+                     storageResult)
+                     ? "{\"active\":true,\"mode\":\"diagnostics\",\"storage\":\"internal_ffat\"}"
+                     : "{\"active\":true,\"mode\":\"diagnostics\",\"storage\":\"removable_sd\"}");
+      } else {
+        snprintf(fields, sizeof(fields),
+                 "{\"active\":false,\"mode\":\"diagnostics\",\"code\":\"%s\"}",
+                 startFailureCode);
       }
       (void)ride_diagnostics::record(
           enabled ? ride_diagnostics::Level::Info
                   : ride_diagnostics::Level::Warning,
-          "transfer", "diagnostics_transfer_entered",
-          enabled
-              ? (ride_diagnostics::transfer_policy::usingInternalFallback(
-                     storageResult)
-                     ? "{\"active\":true,\"mode\":\"diagnostics\",\"storage\":\"internal_ffat\"}"
-                     : "{\"active\":true,\"mode\":\"diagnostics\",\"storage\":\"removable_sd\"}")
-              : "{\"active\":false,\"mode\":\"diagnostics\",\"code\":\"diagnostics_start_failed\"}");
+          "transfer", "diagnostics_transfer_entered", fields);
       Serial.printf(
           "BLE Device Transfer: diagnostics async enter applied, enabled=%d\n",
           enabled);
@@ -3349,6 +3589,8 @@ static void diagnosticsSessionStartTask(void *context) {
     }
     xSemaphoreGive(diagnosticsSessionMutex);
   }
+  if (!keepSnapshotLease)
+    ride_diagnostics::endTransferSnapshotLease();
   if (diagnosticsSessionActiveGeneration.load(std::memory_order_acquire) ==
       generation) {
     diagnosticsSessionStartInProgress.store(false,
@@ -3431,6 +3673,7 @@ static void processPendingTransferControl() {
   const bool requiresAuthenticatedTransferBinding =
       request.action == ble_transfer::Action::EnableMap ||
       request.action == ble_transfer::Action::EnableFirmware ||
+      request.action == ble_transfer::Action::PrepareFirmwareMaintenance ||
       request.action == ble_transfer::Action::EnableDebug ||
       request.action == ble_transfer::Action::EnableDiagnostics ||
       request.action == ble_transfer::Action::PrepareTlsIdentity ||
@@ -3464,6 +3707,56 @@ static void processPendingTransferControl() {
   }
 
   switch (request.action) {
+  case ble_transfer::Action::PrepareFirmwareMaintenance: {
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+    const boot_diagnostics::Snapshot boot = boot_diagnostics::snapshot();
+    const firmware_update::FirmwareUpdateStatus firmware =
+        firmwareUpdateHttp.status();
+    const device_transfer::HttpTransferStatus transfer =
+        deviceTransferHttp.status();
+    if (firmware_maintenance::active()) {
+      deviceTransferHttp.setLastError(
+          "already_in_firmware_maintenance",
+          "device is already running in firmware maintenance");
+    } else if (!boot.ready || boot.safeMode || boot.firmwareMaintenance) {
+      deviceTransferHttp.setLastError(
+          "normal_boot_not_ready",
+          "normal application readiness is required before maintenance");
+    } else if (workout_telemetry_runtime::isWorkoutActive()) {
+      deviceTransferHttp.setLastError(
+          "workout_active",
+          "end the active workout before installing firmware");
+    } else if (mapTransferHttp.activationSnapshot().running) {
+      deviceTransferHttp.setLastError(
+          "map_activation_active",
+          "wait for map activation to finish before installing firmware");
+    } else if (transfer.enabled ||
+               diagnosticsSessionStartInProgress.load(
+                   std::memory_order_acquire)) {
+      deviceTransferHttp.setLastError(
+          "transfer_busy",
+          "finish the active device transfer before installing firmware");
+    } else if (!firmware.otaEligible) {
+      deviceTransferHttp.setLastError(
+          firmware.eligibilityCode,
+          "a distinct inactive OTA partition is required");
+    } else if (!firmware_maintenance::requestNextBoot(
+                   boot.firmwareFingerprint)) {
+      deviceTransferHttp.setLastError(
+          "maintenance_request_failed",
+          "firmware maintenance reboot could not be scheduled");
+    } else {
+      deviceTransferHttp.noteStatusChanged("reboot_pending");
+      Serial.println(
+          "BLE Device Transfer: firmware maintenance reboot accepted");
+    }
+#else
+    deviceTransferHttp.setLastError(
+        "firmware_maintenance_unsupported",
+        "this hardware target does not support firmware maintenance");
+#endif
+    break;
+  }
   case ble_transfer::Action::EnableMap: {
     const device_transfer::HttpTransferStatus transferStatus =
         deviceTransferHttp.status();
@@ -3535,12 +3828,14 @@ static void processPendingTransferControl() {
       Serial.printf(
           "BLE Device Transfer: firmware enter applied, enabled=%d\n",
           enabled);
-      (void)ride_diagnostics::record(
-          enabled ? ride_diagnostics::Level::Info
-                  : ride_diagnostics::Level::Warning,
-          "transfer", "firmware_transfer_entered",
-          enabled ? "{\"active\":true,\"mode\":\"firmware\"}"
-                  : "{\"active\":false,\"mode\":\"firmware\"}");
+      if (!firmware_maintenance::active()) {
+        (void)ride_diagnostics::record(
+            enabled ? ride_diagnostics::Level::Info
+                    : ride_diagnostics::Level::Warning,
+            "transfer", "firmware_transfer_entered",
+            enabled ? "{\"active\":true,\"mode\":\"firmware\"}"
+                    : "{\"active\":false,\"mode\":\"firmware\"}");
+      }
     }
     break;
   }
@@ -3646,13 +3941,21 @@ static void processPendingTransferControl() {
   case ble_transfer::Action::DisableAll: {
     cancelDiagnosticsSessionStart();
     const bool disabled = stopActiveDeviceTransfer();
+    if (firmware_maintenance::active() && disabled &&
+        !firmware_maintenance::exitRequested()) {
+      (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
+                                     "maintenance", "exit_ble_command", "{}");
+      firmware_maintenance::requestExit();
+    }
     Serial.printf("BLE Device Transfer: exit applied, disabled=%d\n",
                   disabled);
-    (void)ride_diagnostics::record(
-        disabled ? ride_diagnostics::Level::Info
-                 : ride_diagnostics::Level::Warning,
-        "transfer", "transfer_exited",
-        disabled ? "{\"active\":false}" : "{\"active\":true}");
+    if (!firmware_maintenance::active()) {
+      (void)ride_diagnostics::record(
+          disabled ? ride_diagnostics::Level::Info
+                   : ride_diagnostics::Level::Warning,
+          "transfer", "transfer_exited",
+          disabled ? "{\"active\":false}" : "{\"active\":true}");
+    }
     break;
   }
   case ble_transfer::Action::DisableOnBleDisconnect: {
@@ -3667,6 +3970,11 @@ static void processPendingTransferControl() {
     notifyMapTransferStatus(mapTransferStatusCharacteristic);
   }
   if (request.notifications & ble_transfer::NotifyGeneric) {
+    // A status poll must finish any in-flight DSTC stream. The iPhone polls
+    // once per second while entering transfer mode; restarting a multi-chunk
+    // response on each poll can prevent it from ever receiving a complete
+    // token-bearing DSTS snapshot under BLE notification backpressure. Mode
+    // changes and disconnects reset the stream above at their auth boundary.
     notifyGenericTransferStatus(mapTransferStatusCharacteristic);
   }
   if (request.notifications & ble_transfer::NotifyRendererDiagnostics) {
@@ -3751,6 +4059,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::AUTOMATIC_DISPLAY_OFF_FEATURE;
     }
+    if (clientVersion >= device_capabilities_protocol::
+                             DISPLAY_INACTIVITY_TIMEOUTS_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE;
+    }
 #endif
     if (clientVersion >= device_capabilities_protocol::
                              EXPLICIT_INVALID_GPS_HEADING_CLIENT_VERSION) {
@@ -3805,7 +4118,7 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
                              RIDE_DIAGNOSTICS_CLIENT_VERSION) {
       featureFlags |= device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE;
     }
-#if defined(RIDE_AUTOMATION_SHADOW)
+#if defined(DETAILED_RIDE_DIAGNOSTICS) && DETAILED_RIDE_DIAGNOSTICS
     if (clientVersion >= device_capabilities_protocol::
                              DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION) {
       featureFlags |=
@@ -3851,6 +4164,15 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         featureFlags |=
             device_capabilities_protocol::SCREEN_CONFIGURATION_FEATURE;
       }
+    }
+    if (workout_zones::ENABLED && clientVersion >=
+        ride_ble_protocol_generated::WORKOUT_ZONES_V1_MINIMUM_CLIENT_VERSION) {
+      featureFlags |= ride_ble_protocol_generated::WORKOUT_ZONES_V1_FEATURE;
+    }
+    if (clientVersion >=
+        device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_CLIENT_VERSION) {
+      featureFlags |=
+          device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE;
     }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
@@ -3924,6 +4246,9 @@ static bool handleDeviceCapabilitiesCommand(const std::string &value,
     bleSessionSupportsMapNavigationOrientation =
         device_capabilities_protocol::supportsMapNavigationOrientation(
             clientVersion, map_profile_protocol::STABLE_CAMERA_ENABLED);
+    const bool supportsZones = workout_zones::ENABLED && clientVersion >=
+        ride_ble_protocol_generated::WORKOUT_ZONES_V1_MINIMUM_CLIENT_VERSION;
+    bleSessionSupportsWorkoutZones.store(supportsZones, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(
         clientVersion >=
             device_capabilities_protocol::RIDE_DELIVERY_ACK_CLIENT_VERSION,
@@ -4301,9 +4626,25 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
   }
 
   if (command == "enter|firmware") {
-    queueTransferControl(ble_transfer::Action::EnableFirmware,
-                         ble_transfer::NotifyGeneric);
-    Serial.println("BLE Device Transfer: firmware enter queued");
+    if (kFirmwareMaintenanceSupported && !firmware_maintenance::active()) {
+      deviceTransferHttp.setLastError(
+          "firmware_maintenance_required",
+          "prepare and reboot into firmware maintenance before OTA");
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    } else {
+      queueTransferControl(ble_transfer::Action::EnableFirmware,
+                           ble_transfer::NotifyGeneric);
+      Serial.println("BLE Device Transfer: firmware enter queued");
+    }
+    return;
+  }
+
+  if (command == "prepare|firmware") {
+    queueTransferControl(
+        ble_transfer::Action::PrepareFirmwareMaintenance,
+        ble_transfer::NotifyGeneric);
+    Serial.println("BLE Device Transfer: firmware maintenance prepare queued");
     return;
   }
 
@@ -4480,6 +4821,21 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     return;
   }
 
+  uint32_t hash = 0;
+  for (size_t i = 0; i < len; i++) {
+    hash = hash * 31 + data[i];
+  }
+
+  const bool hadRoute = routeOverlay.hasRoute();
+  // The checksum is only a fast prefilter: different valid packets can share
+  // it, and a collision must not bypass route validation or replace GPS alone.
+  const bool routeUnchanged = hash == lastRouteHash && len == lastRouteLen &&
+                              routeOverlay.matchesRouteData(data, len);
+  if (!routeUnchanged) {
+    if (!routeOverlay.parseRouteData(data, len))
+      return; // Rejected input must not change map position or screen entry.
+  }
+
   if (len >= 8) {
     const bool seedMapStart = !gpsReceivedFromApp;
     int32_t routeStartLat = 0;
@@ -4500,15 +4856,9 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     }
   }
 
-  uint32_t hash = 0;
-  for (size_t i = 0; i < len; i++) {
-    hash = hash * 31 + data[i];
-  }
-
-  if (hash == lastRouteHash && len == lastRouteLen) {
+  if (routeUnchanged) {
     return;
   }
-
 
   Serial.printf("BLE: %s route geometry received: %u bytes\n",
                 source == nullptr ? "unknown" : source, (unsigned)len);
@@ -4517,17 +4867,13 @@ static void handleRouteGeometryPayload(const uint8_t *data, size_t len,
     stats.lastRoutePacketMs = millis();
   });
 
-  const bool hadRoute = routeOverlay.hasRoute();
-  if (!routeOverlay.parseRouteData(data, len))
-    return; // Preserve retry admission and the previous route on resource rejection.
   lastRouteHash = hash;
   lastRouteLen = len;
   // Route geometry is a live foreground input, not part of the expensive base
   // frame. Only a transition into or out of usable route geometry forces a
   // base request; ordinary sliding-window replacement is picked up on the next
-  // UI tick and must not cancel a long 3D render. The reverse transition also
-  // covers a short/malformed replacement without leaving stale course-up
-  // semantics behind.
+  // UI tick and must not cancel a long 3D render. A valid single-point route
+  // also retires the previous usable route's course-up semantics.
   if (hadRoute != routeOverlay.hasRoute())
     requestMapRender(map_render_policy::Reason::Route);
 }
@@ -4563,25 +4909,19 @@ static void handleGpsPayload(
 #endif
 
   gpsFreshnessState.accept(arrivals);
-#ifdef WAVESHARE_EPAPER_397
+  const auto sourceSample = gps_input_freshness::sourceSampleFrom(packet, arrivals.lastPacketMs);
+  gps.presentationSample = sourceSample;
   bleDebugStats.update([&](BLEDebugStats &stats) {
+    stats.gpsSource = sourceSample;
     stats.gpsPacketCount = gpsFreshnessState.packetCount;
     stats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
     stats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
     stats.maximumGpsPacketGapMs = gpsFreshnessState.maximumGapMs;
-    stats.lastGpsCaptureAgeMs =
-        packet.hasSampleAge ? packet.sampleAgeMs : 0U;
-    stats.lastGpsCapturedAtMs = gps_position_protocol::capturedAtMs(
-        gpsFreshnessState.lastPacketMs, stats.lastGpsCaptureAgeMs);
-  });
-#else
-  bleDebugStats.updateWith([](BLEDebugStats &stats) {
-    stats.gpsPacketCount = gpsFreshnessState.packetCount;
-    stats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
-    stats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
-    stats.maximumGpsPacketGapMs = gpsFreshnessState.maximumGapMs;
-  });
+#ifdef WAVESHARE_EPAPER_397
+    stats.lastGpsCaptureAgeMs = packet.hasSampleAge ? packet.sampleAgeMs : 0U;
+    stats.lastGpsCapturedAtMs = sourceSample.capturedAtMs;
 #endif
+  });
 
   const uint32_t nowMs = millis();
   const uint32_t previousDiagnosticGpsLogMs =
@@ -4589,16 +4929,20 @@ static void handleGpsPayload(
   if (previousDiagnosticGpsLogMs == 0 ||
       static_cast<uint32_t>(nowMs - previousDiagnosticGpsLogMs) >= 30'000U) {
     lastRideDiagnosticsGpsLogMs.store(nowMs, std::memory_order_release);
-    char fields[192] = {};
+    char fields[320] = {};
     snprintf(fields, sizeof(fields),
              "{\"fixValid\":%s,\"speedAvailable\":%s,"
              "\"accuracyAvailable\":%s,\"lastGapMs\":%lu,"
-             "\"maximumGapMs\":%lu}",
+             "\"maximumGapMs\":%lu,\"sourceAgeKnown\":%s,"
+             "\"sourceAgeMs\":%lu,\"mailboxDelayMs\":%lu}",
              packet.fixValid ? "true" : "false",
              packet.hasSpeed ? "true" : "false",
              packet.hasHorizontalAccuracy ? "true" : "false",
              static_cast<unsigned long>(bleDebugStats.read().lastGpsPacketGapMs),
-             static_cast<unsigned long>(bleDebugStats.read().maximumGpsPacketGapMs));
+             static_cast<unsigned long>(bleDebugStats.read().maximumGpsPacketGapMs),
+             sourceSample.ageKnown ? "true" : "false",
+             static_cast<unsigned long>(sourceSample.ageKnown ? nowMs - sourceSample.capturedAtMs : 0),
+             static_cast<unsigned long>(nowMs - arrivals.lastPacketMs));
     ride_diagnostics::record(ride_diagnostics::Level::Info, "gps",
                              "quality_checkpoint", fields);
   }
@@ -4656,6 +5000,10 @@ handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
   power_metrics::noteBlePacket(power_metrics::BlePacketClass::Workout);
   if (!requireAuthenticated("workout telemetry")) {
     return workout_telemetry::ApplyResult::RejectedUnauthenticated;
+  }
+  if (data && len && data[0] == workout_zone_wire::FRAME_KIND &&
+      (!workout_zones::ENABLED || !bleSessionSupportsWorkoutZones.load(std::memory_order_acquire))) {
+    return workout_telemetry::ApplyResult::RejectedKind;
   }
   const workout_telemetry::ApplyResult result =
       workout_telemetry_runtime::ingestFrame(data, len, millis(), true);
@@ -4834,6 +5182,32 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.println("BLE Settings: automatic display-off unsupported on this target");
 #endif
     return;
+  case display_power::kDisplayInactivityTimeoutsSettingID: {
+#ifdef USE_ARDUINO_GFX
+    display_power::InactivityTimeouts timeouts;
+    if (!display_power::decodeInactivityTimeouts(settingValue, timeouts)) {
+      Serial.printf(
+          "BLE Settings: rejected display inactivity timeouts value %ld from %s\n",
+          (long)settingValue, source == nullptr ? "unknown" : source);
+      return;
+    }
+    if (!displayPowerManager.requestDisplayInactivityTimeouts(
+            timeouts.dimAfterSeconds, timeouts.displayOffAfterSeconds)) {
+      Serial.printf(
+          "BLE Settings: display inactivity timeout persistence failed from %s\n",
+          source == nullptr ? "unknown" : source);
+      return;
+    }
+    Serial.printf(
+        "BLE Settings: display inactivity timeouts dim=%us off=%us (saved)\n",
+        static_cast<unsigned>(timeouts.dimAfterSeconds),
+        static_cast<unsigned>(timeouts.displayOffAfterSeconds));
+#else
+    Serial.println(
+        "BLE Settings: display inactivity timeouts unsupported on this target");
+#endif
+    return;
+  }
   case 13: {
     settingValue = device_screen_protocol::applyCompatibility(
         settingValue, mapRenderSettings.enabledScreensMask);
@@ -5282,6 +5656,61 @@ public:
   }
 };
 
+static bool handleFirmwareMaintenancePayload(
+    const std::string &value, NimBLECharacteristic *statusCharacteristic,
+    bool scopedWatchSession, const char *source) {
+  if (!firmware_maintenance::active()) {
+    return false;
+  }
+
+  if (scopedWatchSession) {
+    Serial.printf(
+        "BLE maintenance: rejected transfer command from scoped Watch on %s\n",
+        source);
+    return true;
+  }
+  if (hasPrefix(value, "DTRN")) {
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
+    if (requireAuthenticated("maintenance device transfer control")) {
+      handleGenericTransferControlPayload(
+          reinterpret_cast<const uint8_t *>(value.data()) + 4,
+          value.length() - 4, statusCharacteristic);
+    }
+    return true;
+  }
+  if (hasPrefix(value, "DSTS")) {
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Transfer);
+    if (requireAuthenticated("firmware status")) {
+      // A hotspot start may have suspended this owner's HTTP token when BLE
+      // briefly disconnected. Rebinding issues a fresh token before DSTS is
+      // reported; bindAuthenticatedBleSession records any ownership conflict.
+      deviceTransferHttp.bindAuthenticatedBleSession(
+          currentAuthenticatedTransferSessionId());
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    }
+    return true;
+  }
+  if (handleDeviceCapabilitiesCommand(value, statusCharacteristic,
+                                      "maintenance device capabilities")) {
+    power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+    return true;
+  }
+  Serial.printf("BLE maintenance: rejected non-transfer payload on %s\n",
+                source);
+  return true;
+}
+
+class MyMaintenanceRejectedCharacteristicCallbacks
+    : public NimBLECharacteristicCallbacks {
+public:
+  void onWrite(NimBLECharacteristic *) override {
+    ScopedNimbleCallback callbackScope;
+    Serial.println(
+        "BLE maintenance: rejected write to inactive riding characteristic");
+  }
+};
+
 static bool resetOwnershipConnectionState() {
   if (!deviceOwnershipReady) {
     return true;
@@ -5364,6 +5793,7 @@ public:
         false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsWorkoutZones.store(false, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
@@ -5439,12 +5869,30 @@ public:
     if (activeConnHandle == BLE_HS_CONN_HANDLE_NONE && !server->connected) {
       return;
     }
-    // Revoke the session token, hotspot secret, and request generation on
-    // NimBLE's serialized host callback before a reconnect can authenticate.
-    deviceTransferHttp.clearAuthenticatedBleSession();
+    // A firmware maintenance hotspot can briefly interrupt BLE while the Wi-Fi
+    // radio starts. Revoke its HTTP token and active client immediately, but
+    // keep the listener alive so the same owner can reauthenticate and receive
+    // a fresh token without restarting the hotspot. Every other mode retains
+    // the full fail-closed teardown.
+    const bool suspendedFirmwareTransfer =
+        firmware_maintenance::active() &&
+        deviceTransferHttp.suspendFirmwareAuthenticatedBleSession();
+    if (!suspendedFirmwareTransfer)
+      deviceTransferHttp.clearAuthenticatedBleSession();
     resetScreenConfigurationTransport();
-    queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
-                         ble_transfer::NotifyNone);
+    if (!suspendedFirmwareTransfer) {
+      queueTransferControl(ble_transfer::Action::DisableOnBleDisconnect,
+                           ble_transfer::NotifyNone);
+    }
+    if (firmware_maintenance::active() && !suspendedFirmwareTransfer) {
+      // A disconnect while the listener is still starting has no session to
+      // suspend. Credentials and any partial transfer were revoked above; keep
+      // maintenance alive so the owner can reconnect and read the startup
+      // failure from DSTS instead of losing it in an immediate normal reboot.
+      (void)ride_diagnostics::record(
+          ride_diagnostics::Level::Warning, "transfer",
+          "maintenance_ble_detached", "{}");
+    }
     server->connected = false;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
@@ -5459,6 +5907,7 @@ public:
         false, std::memory_order_release);
     bleSessionSupportsRideDiagnostics.store(false,
                                             std::memory_order_release);
+    bleSessionSupportsWorkoutZones.store(false, std::memory_order_release);
     bleSessionSupportsRideDeliveryAck.store(false,
                                              std::memory_order_release);
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
@@ -5539,6 +5988,11 @@ public:
     if (!unwrapOwnerAuthenticatedPayload(
             device_ownership::AuthenticatedChannel::Navigation, frame, value,
             "navigation characteristic", &scopedWatchSession)) {
+      return;
+    }
+
+    if (handleFirmwareMaintenancePayload(value, pChar, scopedWatchSession,
+                                         "navigation characteristic")) {
       return;
     }
 
@@ -5936,12 +6390,17 @@ public:
             return;
           }
           if (hasDeliveryMember) {
-            const bool canonicalMember =
-                deliveryMember.payloadLength > 0 &&
-                deliveryMember.memberCount <= 3 &&
-                deliveryMember.memberIndex < deliveryMember.memberCount &&
-                deliveryMember.payload[0] ==
+            const bool zonesNegotiated = bleSessionSupportsWorkoutZones.load(std::memory_order_acquire);
+            const bool legacyMember = deliveryMember.memberIndex < 3 &&
+                deliveryMember.payloadLength > 0 && deliveryMember.payload[0] ==
                     static_cast<uint8_t>(deliveryMember.memberIndex + 1);
+            const bool zoneMember = zonesNegotiated && deliveryMember.memberCount == 5 &&
+                deliveryMember.memberIndex >= 3 && deliveryMember.payloadLength >= workout_zone_wire::HEADER_BYTES &&
+                deliveryMember.payload[0] == workout_zone_wire::FRAME_KIND &&
+                deliveryMember.payload[2] == deliveryMember.memberIndex - 2;
+            const bool canonicalMember =
+                (deliveryMember.memberCount <= 3 || (zonesNegotiated && deliveryMember.memberCount == 5)) &&
+                deliveryMember.memberIndex < deliveryMember.memberCount && (legacyMember || zoneMember);
             if (!canonicalMember) {
               noteRideDeliveryMember(
                   deliveryMember, ride_delivery_protocol::Result::Malformed,
@@ -5969,6 +6428,7 @@ public:
           case ApplyResult::IgnoredMotionEpoch:
           case ApplyResult::IgnoredMotionSequence:
           case ApplyResult::IgnoredLifecyclePhase:
+          case ApplyResult::IgnoredZoneSequence:
             deliveryResult = ride_delivery_protocol::Result::Stale;
             break;
           case ApplyResult::RejectedUnauthenticated:
@@ -6106,8 +6566,15 @@ public:
     ScopedNimbleCallback callbackScope;
     const std::string frame = pChar->getValue();
     std::string value;
+    bool scopedWatchSession = false;
     if (!unwrapOwnerAuthenticatedPayload(
             device_ownership::AuthenticatedChannel::Settings, frame, value,
+            "settings characteristic", &scopedWatchSession)) {
+      return;
+    }
+
+    if (handleFirmwareMaintenancePayload(
+            value, mapTransferStatusCharacteristic, scopedWatchSession,
             "settings characteristic")) {
       return;
     }
@@ -6293,37 +6760,42 @@ void BLENavigationServer::init(const char *deviceName) {
     return;
   }
 
-  // Load persisted settings from NVS
-  loadSettingsFromNVS();
+  const bool maintenanceBoot = firmware_maintenance::active();
+  bool screenConfigurationReady = false;
+  if (!maintenanceBoot) {
+    // Normal riding services own persisted render settings and their input
+    // mailboxes. Maintenance deliberately avoids these allocations.
+    loadSettingsFromNVS();
 
-  screenConfigurationMutex = xSemaphoreCreateMutexStatic(
-      &screenConfigurationMutexStorage);
-  const bool screenConfigurationReady =
-      screenConfigurationMutex != nullptr &&
-      screen_configuration::initialize(mapRenderSettings);
-  if (!screenConfigurationReady) {
-    Serial.println(
-        "BLE screens: initialization failed; capability remains disabled");
-  }
+    screenConfigurationMutex = xSemaphoreCreateMutexStatic(
+        &screenConfigurationMutexStorage);
+    screenConfigurationReady =
+        screenConfigurationMutex != nullptr &&
+        screen_configuration::initialize(mapRenderSettings);
+    if (!screenConfigurationReady) {
+      Serial.println(
+          "BLE screens: initialization failed; capability remains disabled");
+    }
 
-  if (!ensurePendingSettingInputs()) {
-    Serial.println("BLE: failed to allocate map setting mailbox in PSRAM");
-    // Settings are advertised by the normal navigation service. Do not bring
-    // up a partially functional service that will authenticate successfully
-    // and then reject every settings packet.
-    return;
-  }
+    if (!ensurePendingSettingInputs()) {
+      Serial.println("BLE: failed to allocate map setting mailbox in PSRAM");
+      // Settings are advertised by the normal navigation service. Do not bring
+      // up a partially functional service that will authenticate successfully
+      // and then reject every settings packet.
+      return;
+    }
 
-  if (pendingMapInputMutex == nullptr) {
-    pendingMapInputMutex = xSemaphoreCreateMutex();
     if (pendingMapInputMutex == nullptr) {
-      Serial.println("BLE: failed to create serialized map input mailbox");
+      pendingMapInputMutex = xSemaphoreCreateMutex();
+      if (pendingMapInputMutex == nullptr) {
+        Serial.println("BLE: failed to create serialized map input mailbox");
+      }
     }
   }
 
   Serial.println("BLE: Initializing NimBLE server...");
 
-  if (destinationCatalogReassemblerMutex == nullptr) {
+  if (!maintenanceBoot && destinationCatalogReassemblerMutex == nullptr) {
     destinationCatalogReassemblerMutex = xSemaphoreCreateMutexStatic(
         &destinationCatalogReassemblerMutexStorage);
   }
@@ -6338,7 +6810,7 @@ void BLENavigationServer::init(const char *deviceName) {
         xSemaphoreCreateMutexStatic(&notificationTransportMutexStorage);
   }
 
-  if (diagnosticsSessionMutex == nullptr) {
+  if (!maintenanceBoot && diagnosticsSessionMutex == nullptr) {
     diagnosticsSessionMutex =
         xSemaphoreCreateMutexStatic(&diagnosticsSessionMutexStorage);
   }
@@ -6365,7 +6837,8 @@ void BLENavigationServer::init(const char *deviceName) {
     Serial.printf("BLE: Ownership identity=%s claimed=%d name='%s'\n",
                   stableDeviceId.c_str(), ownershipClaimed,
                   effectiveDeviceName.c_str());
-    queueOwnershipUiUpdate();
+    if (!maintenanceBoot)
+      queueOwnershipUiUpdate();
   } else {
     portENTER_CRITICAL(&ownershipUiMux);
     ownershipUiClaimed = true;
@@ -6377,7 +6850,8 @@ void BLENavigationServer::init(const char *deviceName) {
     ownershipUiPairingGeneration = 0;
     ownershipUiUpdatePending = true;
     portEXIT_CRITICAL(&ownershipUiMux);
-    ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+    if (!maintenanceBoot)
+      ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
     Serial.println("BLE: Ownership storage unavailable; authentication locked");
   }
 
@@ -6419,48 +6893,64 @@ void BLENavigationServer::init(const char *deviceName) {
   pAuthCharacteristic->setValue("LOCKED");
   authCharacteristic = pAuthCharacteristic;
 
+  // Preserve the normal GATT handle prefix through Settings during maintenance.
+  // CoreBluetooth can retain the previously discovered handles across the
+  // intentional reboot; changing their order would silently route native
+  // transfer commands to the wrong characteristic.
   pRouteCharacteristic = pService->createCharacteristic(
       ROUTE_CHAR_UUID,
       NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
           NIMBLE_PROPERTY::NOTIFY);
-  pRouteCharacteristic->setCallbacks(new MyRouteCharacteristicCallbacks());
+  if (maintenanceBoot) {
+    pRouteCharacteristic->setCallbacks(
+        new MyMaintenanceRejectedCharacteristicCallbacks());
+  } else {
+    pRouteCharacteristic->setCallbacks(new MyRouteCharacteristicCallbacks());
+  }
 
   // Create GPS Position Characteristic (UUID 2A72)
-  NimBLECharacteristic *pGPSCharacteristic =
-      pService->createCharacteristic(
-          GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  pGPSCharacteristic->setCallbacks(new MyGPSCharacteristicCallbacks());
+  NimBLECharacteristic *pGPSCharacteristic = pService->createCharacteristic(
+      GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  if (maintenanceBoot) {
+    pGPSCharacteristic->setCallbacks(
+        new MyMaintenanceRejectedCharacteristicCallbacks());
+  } else {
+    pGPSCharacteristic->setCallbacks(new MyGPSCharacteristicCallbacks());
+  }
 
-  // Create Settings Characteristic (UUID 2A73) for runtime configuration
+  // Keep Settings active in maintenance for owner-authenticated transfer
+  // control. Its callback rejects all normal riding/settings payloads while
+  // maintenance is active.
   NimBLECharacteristic *pSettingsCharacteristic =
       pService->createCharacteristic(
           SETTINGS_CHAR_UUID,
           NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  pSettingsCharacteristic->setCallbacks(
-      new MySettingsCharacteristicCallbacks());
+  pSettingsCharacteristic->setCallbacks(new MySettingsCharacteristicCallbacks());
 
-  // Workout frames are accepted only after the same local authentication
-  // handshake as navigation traffic and remain in RAM-only telemetry state.
-  pWorkoutTelemetryCharacteristic = pService->createCharacteristic(
-      WORKOUT_TELEMETRY_CHAR_UUID,
-      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
-  pWorkoutTelemetryCharacteristic->setCallbacks(
-      new MyWorkoutTelemetryCharacteristicCallbacks());
+  if (!maintenanceBoot) {
+    // Workout frames are accepted only after the same local authentication
+    // handshake as navigation traffic and remain in RAM-only telemetry state.
+    pWorkoutTelemetryCharacteristic = pService->createCharacteristic(
+        WORKOUT_TELEMETRY_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    pWorkoutTelemetryCharacteristic->setCallbacks(
+        new MyWorkoutTelemetryCharacteristicCallbacks());
 
-  pRideAutomationCharacteristic = pService->createCharacteristic(
-      RIDE_AUTOMATION_CHAR_UUID,
-      NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
-          NIMBLE_PROPERTY::NOTIFY);
-  pRideAutomationCharacteristic->setCallbacks(
-      new MyRideAutomationCharacteristicCallbacks());
+    pRideAutomationCharacteristic = pService->createCharacteristic(
+        RIDE_AUTOMATION_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
+            NIMBLE_PROPERTY::NOTIFY);
+    pRideAutomationCharacteristic->setCallbacks(
+        new MyRideAutomationCharacteristicCallbacks());
 
-  if (screenConfigurationReady) {
-    pScreenConfigurationCharacteristic = pService->createCharacteristic(
-        SCREEN_CONFIGURATION_CHAR_UUID,
-        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
-    pScreenConfigurationCharacteristic->setCallbacks(
-        new MyScreenConfigurationCharacteristicCallbacks());
-    screenConfigurationCharacteristic = pScreenConfigurationCharacteristic;
+    if (screenConfigurationReady) {
+      pScreenConfigurationCharacteristic = pService->createCharacteristic(
+          SCREEN_CONFIGURATION_CHAR_UUID,
+          NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+      pScreenConfigurationCharacteristic->setCallbacks(
+          new MyScreenConfigurationCharacteristicCallbacks());
+      screenConfigurationCharacteristic = pScreenConfigurationCharacteristic;
+    }
   }
 
   // Start service
@@ -6506,6 +6996,36 @@ void BLENavigationServer::process() {
       queueOwnershipUiUpdate();
     }
   }
+  if (firmware_maintenance::active()) {
+    // Maintenance boot deliberately has no renderer, waiting screen, map
+    // input owner, destination picker, or screen-configuration runtime. Keep
+    // only owner authentication, transfer control/status, notification
+    // draining, and the unauthenticated-client deadline alive.
+    processPendingTransferControl();
+    pumpPendingDeviceTransferStatusChunks();
+    scheduleDeferredNotificationEvent();
+    const uint32_t unauthenticatedLimitMs =
+        ownershipPairingActiveSnapshot ? 120000 : 12000;
+    if (connected && ownershipDisconnectPending) {
+      ownershipDisconnectPending = false;
+      unauthTimeoutDisconnectRequested = true;
+      if (pServer != nullptr &&
+          activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
+        pServer->disconnect(activeConnHandle);
+      }
+    }
+    if (connected && !bleSessionAuthenticated &&
+        !unauthTimeoutDisconnectRequested &&
+        millis() - bleDebugStats.read().lastConnectMs >
+            unauthenticatedLimitMs) {
+      unauthTimeoutDisconnectRequested = true;
+      if (pServer != nullptr &&
+          activeConnHandle != BLE_HS_CONN_HANDLE_NONE) {
+        pServer->disconnect(activeConnHandle);
+      }
+    }
+    return;
+  }
   // A storage failure deliberately queues a fail-closed claimed snapshot even
   // though ownership processing itself is disabled. Apply it on the UI task so
   // a locked device never advertises the add-device Welcome experience.
@@ -6525,6 +7045,14 @@ void BLENavigationServer::process() {
   }
   processPendingTransferControl();
   pumpPendingMapTransferStatusChunks();
+  if (pendingMapAvailabilityStatus.load(std::memory_order_acquire) &&
+      !pendingMapTransferStatusChunks.active() && bleSessionAuthenticated &&
+      activeConnHandle != BLE_HS_CONN_HANDLE_NONE &&
+      mapTransferStatusCharacteristic != nullptr &&
+      pendingMapAvailabilityStatus.exchange(false,
+                                            std::memory_order_acq_rel)) {
+    notifyMapTransferStatus(mapTransferStatusCharacteristic);
+  }
   pumpPendingDeviceTransferStatusChunks();
   pumpPendingRendererDiagnosticsChunks();
   scheduleDeferredNotificationEvent();
@@ -6653,6 +7181,15 @@ void BLENavigationServer::process() {
 #endif
 }
 
+void BLENavigationServer::noteMapAvailabilityChanged() {
+  pendingMapAvailabilityStatus.store(true, std::memory_order_release);
+}
+
+void BLENavigationServer::requestDeviceTransferStatusNotification() {
+  queueTransferControl(ble_transfer::Action::None,
+                       ble_transfer::NotifyGeneric);
+}
+
 void BLENavigationServer::noteUserWake() {
 #if BLE_RADIO_CHARACTERIZATION
   radioUserWakePending.store(true, std::memory_order_release);
@@ -6711,6 +7248,10 @@ BLEDebugStats BLENavigationServer::getDebugStats() const {
       radioDebugSnapshot.requestedConnectionProfile;
   portEXIT_CRITICAL(&radioDebugMux);
   return stats;
+}
+
+bool BLENavigationServer::isAuthenticated() const {
+  return bleSessionAuthenticated.load(std::memory_order_acquire);
 }
 
 bool BLENavigationServer::supportsExplicitInvalidGpsHeading() const {

@@ -23,6 +23,8 @@ class RideStatsPreviewTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.spec = json.loads(SPEC_PATH.read_text())
+        contract = json.loads((ROOT / 'protocol/ride-ble-contract-v1.json').read_text())
+        cls.widget_ids = set(contract['ride_stats_widgets'].values())
 
     def test_generated_renderer_inputs_are_current(self):
         module_spec = importlib.util.spec_from_file_location(
@@ -44,10 +46,10 @@ class RideStatsPreviewTests(unittest.TestCase):
                 self.assertEqual((board['width'], board['height'], board['round']),
                                  (width, height, round_screen))
                 self.assertEqual(set(board['normal']),
-                                 {f'{slot}:{widget}' for slot in range(7) for widget in range(17)})
+                                 {f'{slot}:{widget}' for slot in range(7) for widget in self.widget_ids})
                 self.assertEqual(set(board['pairs']),
                                  {f'{row}:{left}:{right}' for row in range(3)
-                                  for left in range(17) for right in (7, 16)})
+                                  for left in self.widget_ids for right in (7, 16)})
                 for row in range(3):
                     for left in (1, 2, 4, 5, 6, 8, 11, 12, 13, 14, 15):
                         pair = board['pairs'][f'{row}:{left}:7']
@@ -90,6 +92,7 @@ class RideStatsPreviewTests(unittest.TestCase):
             binary = str(Path(directory) / 'spec')
             subprocess.run([
                 compiler, '-parse-as-library', '-o', binary,
+                str(ROOT / 'ios-app/BikeComputer/RideShared/RideBLEProtocol.generated.swift'),
                 str(ROOT / 'ios-app/BikeComputer/BikeComputer/Models/RideStatsPreviewSpec.swift'),
                 str(ROOT / 'tools/ride_stats_preview/spec_contract.swift')
             ], check=True, timeout=90)

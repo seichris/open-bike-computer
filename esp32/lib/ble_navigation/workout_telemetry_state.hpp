@@ -1,6 +1,7 @@
 #pragma once
 
 #include "workout_telemetry_protocol.hpp"
+#include "workout_zone_protocol.hpp"
 
 #include <array>
 #include <cstddef>
@@ -62,6 +63,7 @@ struct State {
   OptionalMetric<uint16_t> currentHeartRateBpm{};
 
   uint8_t sourceFlags = 0;
+  uint8_t committedPairGeneration = 0;
   OptionalMetric<uint16_t> averageHeartRateBpm{};
   OptionalMetric<uint16_t> activeEnergyTenthsKilocalorie{};
   OptionalMetric<uint16_t> cyclingPowerWatts{};
@@ -78,6 +80,7 @@ struct State {
       workout_telemetry_protocol::PauseOrigin::None;
   uint32_t lastOriginReceivedAtMs = 0;
   WatchMotionEvidence watchMotion{};
+  workout_zones::State zones{};
 };
 
 template <typename T>
@@ -105,6 +108,7 @@ inline bool operator==(const State &lhs, const State &rhs) {
              rhs.maximumSpeedCentimetersPerSecond &&
          lhs.currentHeartRateBpm == rhs.currentHeartRateBpm &&
          lhs.sourceFlags == rhs.sourceFlags &&
+         lhs.committedPairGeneration == rhs.committedPairGeneration &&
          lhs.averageHeartRateBpm == rhs.averageHeartRateBpm &&
          lhs.activeEnergyTenthsKilocalorie ==
              rhs.activeEnergyTenthsKilocalorie &&
@@ -119,7 +123,7 @@ inline bool operator==(const State &lhs, const State &rhs) {
          lhs.pauseOrigin == rhs.pauseOrigin &&
          lhs.lastTransitionOrigin == rhs.lastTransitionOrigin &&
          lhs.lastOriginReceivedAtMs == rhs.lastOriginReceivedAtMs &&
-         lhs.watchMotion == rhs.watchMotion;
+         lhs.watchMotion == rhs.watchMotion && lhs.zones == rhs.zones;
 }
 
 inline bool operator!=(const State &lhs, const State &rhs) {
@@ -147,6 +151,7 @@ enum class ApplyResult : uint8_t {
   IgnoredMotionEpoch,
   IgnoredMotionSequence,
   IgnoredLifecyclePhase,
+  IgnoredZoneSequence,
 };
 
 constexpr uint32_t STALE_AFTER_MS = 10000;
@@ -256,7 +261,11 @@ inline bool isStale(const State &state, uint32_t nowMs,
 
 inline Snapshot makeSnapshot(const State &state, uint32_t nowMs,
                              uint32_t staleAfterMs = STALE_AFTER_MS) {
-  return {state, isStale(state, nowMs, staleAfterMs)};
+  Snapshot result{state, isStale(state, nowMs, staleAfterMs)};
+  workout_zones::expire(result.state.zones,
+      state.sessionState == workout_telemetry_protocol::SessionState::Running,
+      result.stale || !state.originReceived, nowMs);
+  return result;
 }
 
 class Reducer {
@@ -279,6 +288,9 @@ public:
                          uint32_t receivedAtMs, bool authenticated) {
     if (!authenticated) {
       return ApplyResult::RejectedUnauthenticated;
+    }
+    if (bytes != nullptr && length > 0 && bytes[0] == workout_zone_wire::FRAME_KIND) {
+      return applyZones(bytes, length, receivedAtMs);
     }
     if (bytes == nullptr ||
         (length != workout_telemetry_protocol::FRAME_SIZE &&
@@ -383,6 +395,8 @@ private:
       next.lastTransitionOrigin = PauseOrigin::None;
       next.lastOriginReceivedAtMs = 0;
       next.watchMotion = {};
+      next.zones.heartRate.current = 0;
+      next.zones.power.current = 0;
     }
     next.sessionState = incomingState;
     next.sessionToken = token;
@@ -567,6 +581,30 @@ private:
     return ApplyResult::Applied;
   }
 
+  ApplyResult applyZones(const uint8_t *bytes, std::size_t length, uint32_t receivedAtMs) {
+    workout_zones::Packet packet{};
+    if (!workout_zones::decode(bytes, length, packet)) return ApplyResult::RejectedMetric;
+    if (!state_.coreReceived || !state_.originReceived || packet.token != state_.sessionToken ||
+        packet.sessionID != state_.sessionID) return ApplyResult::IgnoredToken;
+    if (packet.state != static_cast<uint8_t>(state_.sessionState)) return ApplyResult::IgnoredLifecyclePhase;
+    if (packet.pairGeneration == 0 || packet.pairGeneration !=
+        state_.committedPairGeneration) return ApplyResult::IgnoredPair;
+    if (packet.value.durations() && (!state_.elapsedSeconds.available ||
+        workout_zones::totalMilliseconds(packet.value) >
+            (uint64_t(state_.elapsedSeconds.value) + 1) * 1000)) return ApplyResult::RejectedMetric;
+    auto &retained = packet.metric == workout_zone_wire::METRIC_HEART_RATE
+        ? state_.zones.heartRate : state_.zones.power;
+    // Retries, reordered packets and same-sequence replays cannot renew a
+    // sensor's expiry or replace a newer definition. Reconnect resets the
+    // sequence namespace only at the authenticated resynchronization boundary.
+    if (retained.received && packet.value.sequence <= retained.sequence)
+      return packet.value.sequence == retained.sequence ? ApplyResult::Applied : ApplyResult::IgnoredZoneSequence;
+    packet.value.receivedAtMs = receivedAtMs;
+    retained = packet.value;
+    state_.zones.sessionID = packet.sessionID;
+    return ApplyResult::Applied;
+  }
+
   ApplyResult applyOrigin(const uint8_t *bytes, uint32_t receivedAtMs) {
     using namespace workout_telemetry_protocol;
     const uint8_t rawPauseOrigin = bytes[1];
@@ -598,6 +636,7 @@ private:
         wallElapsed < state_.elapsedSeconds.value)
       return ApplyResult::RejectedMetric;
 
+    if (state_.zones.sessionID != sessionID) state_.zones = {};
     state_.originReceived = true;
     state_.lastOriginReceivedAtMs = receivedAtMs;
     state_.wallElapsedSeconds = wallElapsed == UNAVAILABLE_UINT32
@@ -698,6 +737,7 @@ private:
 
   void commitExtendedState(const State &next, uint8_t generation) {
     state_ = next;
+    state_.committedPairGeneration = generation;
     if (generation != 0) {
       transactionalState_ = State{};
       transactionalCorePending_ = false;
@@ -728,6 +768,9 @@ public:
   bool resynchronizationPending() const { return resynchronizationPending_; }
 
   void beginResynchronization() {
+    State cleared = active_.state();
+    cleared.zones = {};
+    active_ = Reducer(cleared);
     staged_.reset();
     stagedCoreAccepted_ = false;
     stagedRequiresCurrentCollisionReplacement_ = false;
@@ -830,6 +873,8 @@ private:
 
 inline const char *applyResultName(ApplyResult result) {
   switch (result) {
+  case ApplyResult::IgnoredZoneSequence:
+    return "old_zone_sequence";
   case ApplyResult::Applied:
     return "applied";
   case ApplyResult::Cleared:

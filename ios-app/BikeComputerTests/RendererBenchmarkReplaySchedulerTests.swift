@@ -29,6 +29,18 @@ struct RendererBenchmarkReplaySchedulerTests {
     }
 
     @MainActor
+    static func waitForRealTime(
+        timeout: TimeInterval,
+        _ condition: @MainActor () -> Bool
+    ) async {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while !condition(), ProcessInfo.processInfo.systemUptime < deadline {
+            try! await Task.sleep(nanoseconds: 10_000_000)
+        }
+        precondition(condition(), "real async replay did not make progress before timeout")
+    }
+
+    @MainActor
     static func main() async {
         // Physical evidence exposed 30-50 ms of accumulated delay per tick.
         // Repeat a two-minute run with 40 ms wake-up jitter and 3 ms callback
@@ -129,8 +141,7 @@ struct RendererBenchmarkReplaySchedulerTests {
         let real = RendererBenchmarkReplayScheduler(interval: 0.01)
         var realTicks = 0
         real.start { _ in realTicks += 1 }
-        try! await Task.sleep(nanoseconds: 120_000_000)
-        precondition(realTicks >= 2)
+        await waitForRealTime(timeout: 2) { realTicks >= 2 }
         real.stop()
         let stoppedCount = realTicks
         try! await Task.sleep(nanoseconds: 30_000_000)

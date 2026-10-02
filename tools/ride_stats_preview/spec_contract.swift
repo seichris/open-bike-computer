@@ -16,8 +16,8 @@ struct PreviewSpecContract {
         precondition(round.tiles(for: defaults).last?.fonts[5] == 38)
         precondition(round.tiles(for: defaults).last?.fonts[6] == 38)
         for target in ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"] {
-            for widget: UInt8 in 0...16 {
-                let widgets = Array(repeating: widget, count: 7)
+            for widget in RideBLERideStatsWidgetV1.allCases {
+                let widgets = Array(repeating: widget.rawValue, count: 7)
                 let board = spec.board(firmwareTarget: target, widgets: widgets)!
                 let tiles = board.tiles(for: widgets)
                 precondition(!tiles.isEmpty)
@@ -42,6 +42,19 @@ struct PreviewSpecContract {
         let smartWithoutPower = round.pairs["2:15:16"]!.sprite
         let power = spec.board(firmwareTarget: "WAVESHARE_AMOLED_175", widgets: withPower)!
         precondition(power.pairs["2:15:16"]!.sprite != smartWithoutPower)
+        for target in ["WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"] {
+            for widget in [RideBLERideStatsWidgetV1.powerZone, .powerZoneTime, .powerZoneRange] {
+                var widgets = defaults
+                widgets[0] = widget.rawValue
+                let selected = spec.board(firmwareTarget: target, widgets: widgets)!
+                precondition(selected.normal["0:9"]!.sprite == spec.boards["\(target):1"]!.normal["0:9"]!.sprite)
+                precondition(selected.normal["0:\(widget.rawValue)"]!.sprite != nil)
+                precondition(selected.normal["0:\(widget.rawValue)"]!.sprite != spec.boards["\(target):0"]!.normal["0:\(widget.rawValue)"]!.sprite)
+                widgets[1] = RideBLERideStatsWidgetV1.cadence.rawValue
+                let combined = spec.board(firmwareTarget: target, widgets: widgets)!
+                precondition(combined.normal["0:10"]!.sprite == spec.boards["\(target):3"]!.normal["0:10"]!.sprite)
+            }
+        }
         print("Ride Stats Swift preview composition passed")
     }
 }

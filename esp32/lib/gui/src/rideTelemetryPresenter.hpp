@@ -17,12 +17,15 @@ struct LegacyRideTelemetry {
   uint32_t elapsedSeconds = 0;
   bool hasRouteRemaining = false;
   uint32_t routeRemainingMeters = 0;
+  bool gpsFresh = true;
+  bool speedAvailable = true;
 };
 
 struct ViewModel {
   bool usesWorkout = false;
   bool hasActiveNavigation = false;
   bool stale = false;
+  workout_zones::State zones{};
   SessionState sessionState = SessionState::Idle;
   uint8_t sourceFlags = 0;
 
@@ -103,6 +106,7 @@ inline ViewModel makeViewModel(
     model.stale = workout.stale;
     model.sessionState = state.sessionState;
     model.sourceFlags = state.sourceFlags;
+    model.zones = state.zones;
     if (!workout.stale) {
       model.speedTenthsKmh = speedTenths(state.speedCentimetersPerSecond);
     }
@@ -128,8 +132,10 @@ inline ViewModel makeViewModel(
     return model;
   }
 
+  model.stale = !legacy.gpsFresh;
   model.speedTenthsKmh = {
-      true, static_cast<uint32_t>(legacy.speedKilometersPerHour) * 10U};
+      legacy.gpsFresh && legacy.speedAvailable,
+      static_cast<uint32_t>(legacy.speedKilometersPerHour) * 10U};
   model.altitudeMeters = {true, legacy.altitudeMeters};
   model.distanceMeters = {true, legacy.distanceMeters};
   model.elapsedSeconds = {true, legacy.elapsedSeconds};
@@ -241,6 +247,27 @@ inline int8_t fiveZoneIndex(const ViewModel &model) {
   return static_cast<int8_t>(model.currentHeartRateZone.value - 1);
 }
 
+// A received unavailable native packet suppresses the legacy fallback. A
+// missing packet from an old app retains the established five-band display.
+inline int8_t zoneIndex(const ViewModel &model, bool power = false) {
+  const auto &zone = power ? model.zones.power : model.zones.heartRate;
+  if (!zone.received) return power ? -1 : fiveZoneIndex(model);
+  return zone.count >= 3 && zone.count <= 9 && zone.current > 0 &&
+                 zone.current <= zone.count
+             ? static_cast<int8_t>(zone.current - 1) : -1;
+}
+inline uint8_t zoneCount(const ViewModel &model, bool power = false) {
+  const auto &zone = power ? model.zones.power : model.zones.heartRate;
+  return zone.received ? zone.count : (power ? 0 : 5);
+}
+inline const char *zoneTitle(const ViewModel &model, bool power = false) {
+  const auto &zone = power ? model.zones.power : model.zones.heartRate;
+  if (!zone.received) return power ? "Power zone" : "HR zone";
+  if (!zone.count) return power ? "Power zone" : "HR zone";
+  return zone.native() ? (power ? "Power: Health" : "HR: Health")
+                       : "HR: Bicino";
+}
+
 inline void formatEnergy(const ViewModel &model, char *buffer,
                          std::size_t size) {
   if (!model.activeEnergyTenthsKilocalorie.available) {
@@ -338,6 +365,7 @@ inline void formatBottomMetric(BottomMetric metric, const ViewModel &model,
 }
 
 inline const char *statusLabel(const ViewModel &model) {
+  if (!model.usesWorkout && model.stale) return "GPS stale / unavailable";
   if (!model.usesWorkout) {
     return "LEGACY RIDE";
   }
@@ -367,6 +395,7 @@ inline const char *statusLabel(const ViewModel &model) {
 }
 
 inline bool shouldShowStatus(const ViewModel &model) {
+  if (!model.usesWorkout && model.stale) return true;
   if (!model.usesWorkout) {
     return false;
   }

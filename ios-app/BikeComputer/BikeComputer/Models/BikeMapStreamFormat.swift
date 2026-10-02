@@ -101,6 +101,41 @@ nonisolated struct BikeMapStreamTrustStore: Equatable {
 
 }
 
+nonisolated struct VerifiedBikeMapTopographySource: Codable, Equatable, Sendable {
+    let id: String
+    let release: String
+    let coverageMillionths: Int
+    let surfaceModel: String
+    let horizontalCRS: String
+    let verticalDatum: String
+    let datasetReceiptSHA256: String
+    let termsURL: String
+    let attributionURL: String
+    let accessReviewedAt: String
+}
+
+nonisolated struct VerifiedBikeMapTopography: Codable, Equatable, Sendable {
+    let profileVersion: Int
+    let qualityMode: String
+    let minorIntervalM: Int
+    let indexIntervalM: Int
+    let recordCount: Int
+    let pointCount: Int
+    let noDataMillionths: Int
+    let sourcePolicySHA256: String
+    let intermediateSHA256: String
+    let attributionSHA256: String
+    let sources: [VerifiedBikeMapTopographySource]
+
+    var qualityLabel: String {
+        switch qualityMode {
+        case "standard-20m-v1": return "Standard 20 m contours"
+        case "coarse-50m-v1": return "Coarse 50 m contours"
+        default: return qualityMode
+        }
+    }
+}
+
 nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let url: URL
     let mapID: String
@@ -123,6 +158,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let fileCount: Int
     let payloadBytes: Int64
     let rendererFormatVersion: Int
+    let topography: VerifiedBikeMapTopography?
 
     fileprivate init(
         url: URL,
@@ -145,7 +181,8 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         readerRequirements: OfflineMapReaderRequirements?,
         fileCount: Int,
         payloadBytes: Int64,
-        rendererFormatVersion: Int
+        rendererFormatVersion: Int,
+        topography: VerifiedBikeMapTopography?
     ) {
         self.url = url
         self.mapID = mapID
@@ -168,6 +205,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         self.fileCount = fileCount
         self.payloadBytes = payloadBytes
         self.rendererFormatVersion = rendererFormatVersion
+        self.topography = topography
     }
 }
 
@@ -380,6 +418,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
             let labelLanguages: [String]?
             let internationalFallback: String?
             let buildingProfileVersion: Int?
+            let topographyProfileVersion: Int?
         }
 
         struct Buildings: Decodable {
@@ -389,6 +428,33 @@ nonisolated enum BikeMapStreamArtifactValidator {
             let inheritedHeightCount: Int
             let localMedianHeightCount: Int
             let classDefaultHeightCount: Int
+        }
+
+        struct Topography: Decodable {
+            struct Source: Decodable {
+                let id: String
+                let release: String
+                let coverageMillionths: Int
+                let surfaceModel: String
+                let horizontalCrs: String
+                let verticalDatum: String
+                let datasetReceiptSha256: String
+                let termsUrl: String
+                let attributionUrl: String
+                let accessReviewedAt: String
+            }
+
+            let profileVersion: Int
+            let qualityMode: String
+            let minorIntervalM: Int
+            let indexIntervalM: Int
+            let recordCount: Int
+            let pointCount: Int
+            let noDataMillionths: Int
+            let sourcePolicySha256: String
+            let intermediateSha256: String
+            let attributionSha256: String
+            let sources: [Source]
         }
 
         struct File: Decodable {
@@ -404,6 +470,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
         let target: Target
         let files: [File]
         let buildings: Buildings?
+        let topography: Topography?
     }
 
     static func validate(
@@ -601,6 +668,8 @@ nonisolated enum BikeMapStreamArtifactValidator {
             manifestFeatures = ["street-labels"]
         case 3:
             manifestFeatures = ["3d-buildings", "street-labels"]
+        case 4:
+            manifestFeatures = ["3d-buildings", "contours", "street-labels"]
         default:
             manifestFeatures = []
         }
@@ -689,7 +758,36 @@ nonisolated enum BikeMapStreamArtifactValidator {
             readerRequirements: verifiedReaderRequirements,
             fileCount: manifest.files.count,
             payloadBytes: Int64(header.payloadBytes),
-            rendererFormatVersion: manifest.target.formatVersion
+            rendererFormatVersion: manifest.target.formatVersion,
+            topography: manifest.topography.map { topography in
+                VerifiedBikeMapTopography(
+                    profileVersion: topography.profileVersion,
+                    qualityMode: topography.qualityMode,
+                    minorIntervalM: topography.minorIntervalM,
+                    indexIntervalM: topography.indexIntervalM,
+                    recordCount: topography.recordCount,
+                    pointCount: topography.pointCount,
+                    noDataMillionths: topography.noDataMillionths,
+                    sourcePolicySHA256: topography.sourcePolicySha256,
+                    intermediateSHA256: topography.intermediateSha256,
+                    attributionSHA256: topography.attributionSha256,
+                    sources: topography.sources.map { source in
+                        VerifiedBikeMapTopographySource(
+                            id: source.id,
+                            release: source.release,
+                            coverageMillionths: source.coverageMillionths,
+                            surfaceModel: source.surfaceModel,
+                            horizontalCRS: source.horizontalCrs,
+                            verticalDatum: source.verticalDatum,
+                            datasetReceiptSHA256:
+                                source.datasetReceiptSha256,
+                            termsURL: source.termsUrl,
+                            attributionURL: source.attributionUrl,
+                            accessReviewedAt: source.accessReviewedAt
+                        )
+                    }
+                )
+            }
         )
     }
 
@@ -739,7 +837,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
             throw BikeMapStreamFormatError.invalidManifest("map ID does not match")
         }
         guard manifest.target.renderer == renderer,
-              [1, 2, 3].contains(manifest.target.formatVersion) else {
+              [1, 2, 3, 4].contains(manifest.target.formatVersion) else {
             throw BikeMapStreamFormatError.invalidManifest("renderer target is unsupported")
         }
         guard !manifest.files.isEmpty,
@@ -776,7 +874,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 throw BikeMapStreamFormatError.invalidManifest("map file SHA-256 is invalid")
             }
         }
-        if manifest.target.formatVersion == 2 || manifest.target.formatVersion == 3 {
+        if [2, 3, 4].contains(manifest.target.formatVersion) {
             guard fontAssetCount == 1, legacyTextBlockCount == 0,
                   manifest.target.labelProfileVersion == 1,
                   let languages = manifest.target.labelLanguages,
@@ -789,7 +887,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
                     "label-aware renderer metadata is invalid"
                 )
             }
-            if manifest.target.formatVersion == 3 {
+            if manifest.target.formatVersion == 3 || manifest.target.formatVersion == 4 {
                 guard manifest.target.buildingProfileVersion == 1,
                       let buildings = manifest.buildings,
                       buildings.recordCount >= 0,
@@ -805,8 +903,52 @@ nonisolated enum BikeMapStreamArtifactValidator {
                         "renderer target 3 building metadata is invalid"
                     )
                 }
+                if manifest.target.formatVersion == 4 {
+                    guard manifest.target.topographyProfileVersion == 1,
+                          let topography = manifest.topography,
+                          topography.profileVersion == 1,
+                          ["standard-20m-v1", "coarse-50m-v1"].contains(topography.qualityMode),
+                          [(20, 100), (50, 250)].contains(where: {
+                              $0.0 == topography.minorIntervalM &&
+                                $0.1 == topography.indexIntervalM
+                          }),
+                          topography.recordCount >= 0,
+                          topography.recordCount <= 1_048_576,
+                          topography.pointCount >= 0,
+                          topography.pointCount <= 16_777_216,
+                          (0...1_000_000).contains(topography.noDataMillionths),
+                          isLowercaseSHA256(topography.sourcePolicySha256),
+                          isLowercaseSHA256(topography.intermediateSha256),
+                          isLowercaseSHA256(topography.attributionSha256),
+                          !topography.sources.isEmpty,
+                          topography.sources.count <= 32,
+                          Set(topography.sources.map(\.id)).count == topography.sources.count,
+                          topography.sources.allSatisfy({ source in
+                              source.coverageMillionths > 0 &&
+                                source.coverageMillionths <= 1_000_000 &&
+                                source.surfaceModel == "dsm" &&
+                                source.horizontalCrs == "EPSG:4326" &&
+                                source.verticalDatum == "EPSG:3855" &&
+                                isLowercaseSHA256(source.datasetReceiptSha256) &&
+                                URL(string: source.termsUrl)?.scheme == "https" &&
+                                URL(string: source.attributionUrl)?.scheme == "https"
+                          }),
+                          abs(topography.sources.map(\.coverageMillionths).reduce(0, +) - 1_000_000)
+                            <= topography.sources.count else {
+                        throw BikeMapStreamFormatError.invalidManifest(
+                            "renderer target 4 topography metadata is invalid"
+                        )
+                    }
+                } else if manifest.target.topographyProfileVersion != nil ||
+                            manifest.topography != nil {
+                    throw BikeMapStreamFormatError.invalidManifest(
+                        "renderer target 3 contains topography data"
+                    )
+                }
             } else if manifest.target.buildingProfileVersion != nil ||
-                        manifest.buildings != nil {
+                        manifest.target.topographyProfileVersion != nil ||
+                        manifest.buildings != nil ||
+                        manifest.topography != nil {
                 throw BikeMapStreamFormatError.invalidManifest(
                     "renderer target 2 contains building data"
                 )
@@ -816,7 +958,9 @@ nonisolated enum BikeMapStreamArtifactValidator {
                     manifest.target.labelLanguages != nil ||
                     manifest.target.internationalFallback != nil ||
                     manifest.target.buildingProfileVersion != nil ||
-                    manifest.buildings != nil {
+                    manifest.target.topographyProfileVersion != nil ||
+                    manifest.buildings != nil ||
+                    manifest.topography != nil {
             throw BikeMapStreamFormatError.invalidManifest(
                 "renderer target 1 contains label data"
             )
@@ -864,9 +1008,11 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 )
             }
             let expectedVersions: Set<UInt8> =
-                rendererFormatVersion == 3
-                    ? [4]
-                    : (rendererFormatVersion == 2 ? [3] : [1, 2])
+                rendererFormatVersion == 4
+                    ? [5]
+                    : (rendererFormatVersion == 3
+                        ? [4]
+                        : (rendererFormatVersion == 2 ? [3] : [1, 2]))
             guard expectedVersions.contains(prefix[3]) else {
                 throw BikeMapStreamFormatError.invalidManifest(
                     "binary map block version does not match its target"

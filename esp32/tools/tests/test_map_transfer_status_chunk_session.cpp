@@ -87,7 +87,7 @@ int main() {
       "\"protocols\":[1,2],\"streamFormatVersions\":[1],"
       "\"streamTrust\":[\"production-key=" +
       std::string(64, 'a') +
-      "\"],\"sdPresent\":true,\"mapFound\":true,"
+      "\"],\"sdPresent\":true,\"mapStateKnown\":true,\"mapFound\":true,"
       "\"mapBlocks\":4294967295,"
       "\"baseUrl\":\"http://255.255.255.255:65535\","
       "\"apSsid\":\"BikeComputer-Transfer-123456789\","

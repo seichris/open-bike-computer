@@ -14,6 +14,7 @@ import WebKit
 private enum SettingsSheetDestination: Identifiable, Equatable {
     case addDeviceScreen
     case stravaRouteImport
+    case gpxRouteImport(OfflineRouteSaveDraft)
     case savedMapShare(URL)
 
     var id: String {
@@ -22,10 +23,34 @@ private enum SettingsSheetDestination: Identifiable, Equatable {
             return "add-device-screen"
         case .stravaRouteImport:
             return "strava-route-import"
+        case .gpxRouteImport(let draft):
+            return "gpx-route-import:\(draft.id.uuidString)"
         case .savedMapShare(let url):
             return "saved-map-share:\(url.absoluteString)"
         }
     }
+}
+
+private func copernicusTopographyNotice(
+    for source: VerifiedBikeMapTopographySource
+) -> String? {
+    guard source.release == "2021" else { return nil }
+    let product: String
+    switch source.id {
+    case "copernicus-glo30-public-2021":
+        product = "Copernicus WorldDEM-30"
+    case "copernicus-glo90-2021":
+        product = "Copernicus WorldDEM™-90"
+    default:
+        return nil
+    }
+    let copyright = "© DLR e.V. 2010-2014 and © Airbus Defence and " +
+        "Space GmbH 2014-2018 provided under COPERNICUS by the European " +
+        "Union and ESA; all rights reserved."
+    return "\(copyright)\n" +
+        "produced using \(product) \(copyright)\n" +
+        "The organisations in charge of the Copernicus programme by law " +
+        "or by delegation do not incur any liability for any use of the \(product)."
 }
 
 struct SettingsView: View {
@@ -47,13 +72,16 @@ struct SettingsView: View {
         RideDetectionSettingsStore
     @ObservedObject private var rideDiagnosticsRecorder:
         RideDiagnosticsRecorder
+    @ObservedObject private var destinationStore: SavedDestinationStore
     @FocusState private var focusedSavedMapFilename: String?
     @State private var presentedSheet: SettingsSheetDestination?
+    @State private var routeImportFeedback: String?
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
     let isNavigationActive: Bool
     let onRequestLocationAuthorization: () -> Void
+    let onSaveOnlineRoute: (SavedDestination?) -> Void
     let onStartTestNavigation: (String) -> Void
 
     init(
@@ -71,7 +99,9 @@ struct SettingsView: View {
             CyclingSensorDetectionCoordinator? = nil,
         rideDetectionSettingsStore: RideDetectionSettingsStore? = nil,
         rideDiagnosticsRecorder: RideDiagnosticsRecorder? = nil,
+        destinationStore: SavedDestinationStore? = nil,
         onRequestLocationAuthorization: @escaping () -> Void = {},
+        onSaveOnlineRoute: @escaping (SavedDestination?) -> Void = { _ in },
         onStartTestNavigation: @escaping (String) -> Void
     ) {
         let cyclingSensorStore =
@@ -110,6 +140,10 @@ struct SettingsView: View {
         _rideDiagnosticsRecorder = ObservedObject(
             wrappedValue: rideDiagnosticsRecorder ?? RideDiagnosticsRecorder()
         )
+        _destinationStore = ObservedObject(
+            wrappedValue: destinationStore ?? SavedDestinationStore()
+        )
+        self.onSaveOnlineRoute = onSaveOnlineRoute
         self.onStartTestNavigation = onStartTestNavigation
     }
 
@@ -161,24 +195,20 @@ struct SettingsView: View {
                     manager: offlineMapManager,
                     focusedPackFilename: $focusedSavedMapFilename
                 )
-                if OfflineMapDownloadingSectionPresentation.isVisible(
-                    isBusy: offlineMapManager.isBusy,
-                    hasPendingJob: offlineMapManager.hasPendingMapJob,
-                    hasPendingActivation: offlineMapManager.hasPendingDeviceActivation,
-                    isServerRecoveryCheckPending: offlineMapManager.isServerRecoveryCheckPending,
-                    hasCurrentJob: offlineMapManager.currentJob != nil,
-                    hasDownloadedPack: offlineMapManager.downloadedPackURL != nil,
-                    errorMessage: offlineMapManager.errorMessage
-                ) {
-                    DownloadingMapsSettingsSection(manager: offlineMapManager)
-                }
 
                 SavedRoutesSettingsSection(
                     routeLibrary: routeLibrary,
                     stravaCoordinator: stravaIntegrationCoordinator,
+                    destinationStore: destinationStore,
+                    onSaveOnlineRoute: onSaveOnlineRoute,
                     onImportFromStrava: {
                         presentedSheet = .stravaRouteImport
-                    }
+                    },
+                    onConfirmGPX: { draft in
+                        routeImportFeedback = nil
+                        presentedSheet = .gpxRouteImport(draft)
+                    },
+                    importFeedback: routeImportFeedback
                 )
 
                 Section {
@@ -214,6 +244,7 @@ struct SettingsView: View {
                             cyclingSensorStore: cyclingSensorStore,
                             cyclingSensorDetectionCoordinator:
                                 cyclingSensorDetectionCoordinator,
+                            rideDiagnosticsRecorder: rideDiagnosticsRecorder,
                             currentLocation: currentLocation,
                             isNavigationActive: isNavigationActive,
                             onStartTestNavigation: { destination in
@@ -223,14 +254,6 @@ struct SettingsView: View {
                         )
                     } label: {
                         Label("Developer Settings", systemImage: "wrench.and.screwdriver")
-                    }
-
-                    NavigationLink {
-                        RideDiagnosticsSettingsView(
-                            recorder: rideDiagnosticsRecorder
-                        )
-                    } label: {
-                        Label("Diagnostics", systemImage: "stethoscope")
                     }
                 }
 
@@ -312,6 +335,11 @@ struct SettingsView: View {
             StravaRouteImportView(
                 coordinator: stravaIntegrationCoordinator
             )
+        case .gpxRouteImport(let draft):
+            RouteSaveSheet(library: routeLibrary, draft: draft) { result in
+                routeImportFeedback = result.message
+                presentedSheet = nil
+            }
         case .savedMapShare(let url):
             SavedMapShareSheet(url: url)
                 .presentationDetents([.medium])
@@ -338,7 +366,9 @@ struct SettingsView: View {
             BikeComputersSettingsView(
                 sensorStore: cyclingSensorStore,
                 sensorDetectionCoordinator:
-                    cyclingSensorDetectionCoordinator
+                    cyclingSensorDetectionCoordinator,
+                startsBikeComputerDiscoveryOnAppear:
+                    shouldPromoteBikeComputerSettings
             )
         } label: {
             Label(
@@ -419,7 +449,6 @@ private struct RideDetectionSettingsView: View {
     let currentLocation: CLLocation?
     let onRequestLocationAuthorization: () -> Void
     @State private var showAutomaticStartWarning = false
-    @State private var showLocationUseWarning = false
 
     var body: some View {
         Form {
@@ -462,32 +491,6 @@ private struct RideDetectionSettingsView: View {
                 }
 
                 if store.settings.startMode != .off &&
-                    !store.hasAcknowledgedLocationUse {
-                    Button("Use iPhone GPS for Detection") {
-                        showLocationUseWarning = true
-                    }
-                    .alert(
-                        "Use iPhone GPS for Ride Detection?",
-                        isPresented: $showLocationUseWarning
-                    ) {
-                        Button("Continue") {
-                            store.acknowledgeLocationUse()
-                            if authorizationStatus == .notDetermined {
-                                onRequestLocationAuthorization()
-                            }
-                        }
-                    } message: {
-                        Text(
-                            "When Ride Start is enabled and your bike "
-                            + "computer is connected, Bicino keeps precise "
-                            + "location active in the background so GPS and "
-                            + "motion can detect a ride. You can turn Ride "
-                            + "Start off at any time."
-                        )
-                    }
-                }
-
-                if store.settings.startMode != .off &&
                     rideDetectionLocationStatus == .permissionNeeded {
                     Button {
                         if authorizationStatus == .notDetermined {
@@ -522,16 +525,6 @@ private struct RideDetectionSettingsView: View {
                 Text("Detect Ride Start")
             } footer: {
                 Text(rideDetectionFooterText)
-            }
-
-            Section("iPhone GPS") {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    let status = rideDetectionLocationStatus(at: context.date)
-                    LabeledContent("Status", value: status.label)
-                    Text(rideDetectionLocationStatusDetail(status))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
             }
 
             Section {
@@ -569,16 +562,18 @@ private struct RideDetectionSettingsView: View {
 
     private var rideDetectionFooterText: String {
         if RideAutomationRollout.allowsAutomaticStart {
-            return "Ride detection uses iPhone GPS in the background while "
-                + "the compatible bike computer is connected. Automatic "
-                + "start requires a separate opt-in and the bike "
-                + "computer, iPhone, and Apple Watch to be reachable."
+            return "When enabled, Bicino automatically uses iPhone GPS in "
+                + "the background while the compatible bike computer is "
+                + "connected. iOS may request location access the first "
+                + "time. Automatic start requires a separate opt-in "
+                + "and the bike computer, iPhone, and Apple Watch to be "
+                + "reachable."
         }
-        return "Ride detection uses iPhone GPS in the background while the "
-            + "compatible bike computer is connected. Ask to Start is the "
-            + "current rollout ceiling. Automatic start "
-            + "remains gated until the physical false-start validation is "
-            + "complete."
+        return "When enabled, Bicino automatically uses iPhone GPS in the "
+            + "background while the compatible bike computer is connected. "
+            + "iOS may request location access the first time. Ask to Start "
+            + "is the current rollout ceiling. Automatic start remains "
+            + "gated until the physical false-start validation is complete."
     }
 
     private var rideDetectionLocationStatus: RideDetectionLocationStatus {
@@ -590,7 +585,6 @@ private struct RideDetectionSettingsView: View {
     ) -> RideDetectionLocationStatus {
         RideDetectionLocationStatusResolver.resolve(
             startMode: store.settings.startMode,
-            locationUseAcknowledged: store.hasAcknowledgedLocationUse,
             isNavigationReady: bleManager.isNavigationReady,
             supportsRideAutomation: bleManager.supportsRideAutomation,
             supportsGPSPositionQualityV1:
@@ -600,27 +594,6 @@ private struct RideDetectionSettingsView: View {
             location: currentLocation,
             now: now
         )
-    }
-
-    private func rideDetectionLocationStatusDetail(
-        _ status: RideDetectionLocationStatus
-    ) -> String {
-        switch status {
-        case .disabled:
-            "Enable Ride Start and confirm iPhone GPS use to arm detection."
-        case .waitingForCompatibleDevice:
-            "Connect a bike computer that supports ride detection and GPS quality."
-        case .permissionNeeded:
-            "Location permission is required before iPhone GPS can be used."
-        case .foregroundOnly:
-            "Detection works while Bicino is open. Allow Always access for reliable background detection."
-        case .waitingForPreciseLocation:
-            "Waiting for a fresh precise fix with measured cycling speed."
-        case .sending:
-            "Fresh iPhone GPS and quality are being sent to the connected bike computer."
-        case .stale:
-            "The last fix is too old for detection; the device will fail closed until GPS refreshes."
-        }
     }
 
     private var locationAuthorizationLevel: LocationAuthorizationLevel {
@@ -917,6 +890,10 @@ private struct DownloadingMapsSettingsSection: View {
                 SettingsValueRow(title: "Source", value: sourceSummary)
             }
 
+            if let queueDescription = manager.currentJob?.queueDescription {
+                SettingsValueRow(title: "Queue", value: queueDescription)
+            }
+
             if let preparationEstimatePresentation {
                 SettingsValueRow(
                     title: preparationEstimatePresentation.title,
@@ -930,22 +907,32 @@ private struct DownloadingMapsSettingsSection: View {
                     .foregroundColor(.red)
             }
 
-            if manager.isMapJobProcessing, manager.hasPendingMapJob {
-                Button(role: .destructive) {
-                    manager.pausePendingMapJob()
-                } label: {
-                    Label("Pause Map Preparation", systemImage: "pause.circle")
-                }
-            } else if manager.hasPendingMapJob {
-                Button {
-                    manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
-                } label: {
-                    Label("Resume Map Preparation", systemImage: "play.circle")
+            if manager.hasPendingMapJob {
+                if !manager.hasTerminalMapJobFailure {
+                    if manager.currentJob?.mapId != nil {
+                        Button {
+                            manager.retryPendingMapJob(bleManager: bleManager)
+                        } label: {
+                            Label("Retry Map Download", systemImage: "arrow.clockwise")
+                        }
+                    } else if manager.isMapJobProcessing {
+                        Button {
+                            manager.pausePendingMapJob()
+                        } label: {
+                            Label("Pause Map Preparation", systemImage: "pause.circle")
+                        }
+                    } else {
+                        Button {
+                            manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
+                        } label: {
+                            Label("Resume Map Preparation", systemImage: "play.circle")
+                        }
+                    }
                 }
                 Button(role: .destructive) {
                     manager.forgetPendingMapJob()
                 } label: {
-                    Label("Forget Pending Map", systemImage: "trash")
+                    Label("Discard Pending Map", systemImage: "trash")
                 }
             }
         }
@@ -1114,14 +1101,25 @@ private struct SavedMapsSettingsSection: View {
     @FocusState.Binding var focusedPackFilename: String?
     var scope: SavedMapListScope = .savedMaps
     @State private var renameInteraction = SavedMapRenameInteraction()
+    @State private var isShowingPendingMapChoice = false
 
     var body: some View {
         let savedMaps = manager.savedMapListItems(
             activeDeviceMap: bleManager.activeDeviceMap,
             scope: scope
         )
+        let hasPendingMapRow = scope == .savedMaps &&
+            manager.hasPendingMapJob &&
+            !OfflineMapDownloadingSectionPresentation.isRecoveryOnly(
+                isServerRecoveryCheckPending:
+                    manager.isServerRecoveryCheckPending,
+                hasCurrentJob: manager.currentJob != nil,
+                hasDownloadedPack: manager.downloadedPackURL != nil,
+                errorMessage: manager.errorMessage
+            ) &&
+            !manager.hasLocallySavedPendingMap
         Section(header: Text(scope == .developerMaps ? "Development Maps" : "Saved Maps")) {
-            if savedMaps.isEmpty {
+            if savedMaps.isEmpty && !hasPendingMapRow {
                 Group {
                     if scope == .developerMaps {
                         Text("No development-only maps")
@@ -1143,20 +1141,41 @@ private struct SavedMapsSettingsSection: View {
                 }
             }
 
+            if hasPendingMapRow {
+                PendingSavedMapRow(
+                    manager: manager,
+                    onChooseAnotherMap: {
+                        isShowingPendingMapChoice = true
+                    }
+                )
+                .environmentObject(bleManager)
+            }
+
             if scope == .savedMaps {
                 Button {
-                    if let commit = renameInteraction.finish() {
-                        commitRename(commit)
-                    }
-                    focusedPackFilename = nil
-                    manager.beginMapAreaSelection()
-                    if manager.isMapAreaSelectionActive {
-                        dismiss()
-                    }
+                    requestNewMapSelection()
                 } label: {
                     Label("Download a new Map", systemImage: "rectangle.dashed")
                 }
             }
+        }
+        .confirmationDialog(
+            "A Map Download Is Pending",
+            isPresented: $isShowingPendingMapChoice,
+            titleVisibility: .visible
+        ) {
+            Button("Retry Existing Map") {
+                manager.retryPendingMapJob(bleManager: bleManager)
+            }
+            Button("Discard and Choose New Map", role: .destructive) {
+                beginNewMapSelection(discardPendingMap: true)
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(
+                "Retry the existing map with a fresh download link, or discard " +
+                    "its local pending state before choosing another area."
+            )
         }
         .onChange(of: focusedPackFilename) { newValue in
             scheduleRenameCommitIfNeeded(focusedFilename: newValue)
@@ -1174,6 +1193,7 @@ private struct SavedMapsSettingsSection: View {
             }
         }
         .onChange(of: bleManager.isNavigationReady) { isReady in
+            manager.reconcileLastTransfer(bleManager: bleManager)
             if isReady {
                 bleManager.requestMapTransferStatus()
             }
@@ -1199,6 +1219,9 @@ private struct SavedMapsSettingsSection: View {
         .onChange(of: bleManager.mapTransferActivationProgress) { _ in
             manager.reconcileLastTransfer(bleManager: bleManager)
         }
+        .onChange(of: bleManager.hasFreshMapTransferStatus) { _ in
+            manager.reconcileLastTransfer(bleManager: bleManager)
+        }
     }
 
     private func scheduleRenameCommitIfNeeded(focusedFilename: String?) {
@@ -1221,6 +1244,171 @@ private struct SavedMapsSettingsSection: View {
             return
         }
         manager.renameCachedPack(at: packURL, to: commit.proposedName)
+    }
+
+    private func requestNewMapSelection() {
+        if manager.hasPendingMapJob {
+            isShowingPendingMapChoice = true
+            return
+        }
+        beginNewMapSelection(discardPendingMap: false)
+    }
+
+    private func beginNewMapSelection(discardPendingMap: Bool) {
+        if let commit = renameInteraction.finish() {
+            commitRename(commit)
+        }
+        focusedPackFilename = nil
+        if discardPendingMap {
+            manager.discardPendingMapAndBeginSelection()
+        } else {
+            manager.beginMapAreaSelection()
+        }
+        if manager.isMapAreaSelectionActive {
+            dismiss()
+        }
+    }
+}
+
+private struct PendingSavedMapRow: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @ObservedObject var manager: OfflineMapManager
+    let onChooseAnotherMap: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                SavedMapThumbnail(image: nil)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(sourceSummary ?? "Pending Offline Map")
+                        .font(.body.weight(.semibold))
+                        .lineLimit(2)
+                    Text(manager.hasTerminalMapJobFailure
+                        ? "Map preparation ended"
+                        : manager.currentJob?.queueDescription != nil
+                            ? (manager.currentJob?.queueDescription ?? "Waiting in map queue")
+                        : manager.downloadProgress >= 1
+                            ? "Finishing map on this iPhone"
+                            : "Downloading to this iPhone")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if manager.errorMessage == nil,
+               let progressFraction = manager.activityProgress {
+                OfflineMapProgressRow(
+                    title: "Progress",
+                    percentage: Int((progressFraction * 100).rounded()),
+                    fraction: progressFraction,
+                    detail: nil
+                )
+            }
+
+            if let preparationEstimatePresentation {
+                Text(preparationEstimatePresentation.value)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .font(.caption)
+                    .accessibilityLabel(
+                        "Map preparation \(preparationEstimatePresentation.value)"
+                    )
+            }
+
+            if let error = manager.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            if manager.errorMessage != nil {
+                HStack(spacing: 16) {
+                    if !manager.hasTerminalMapJobFailure {
+                        Button {
+                            manager.retryPendingMapJob(bleManager: bleManager)
+                        } label: {
+                            Label("Retry Download", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    Button("Choose Another Map", role: .destructive) {
+                        onChooseAnotherMap()
+                    }
+                }
+                .font(.subheadline)
+                .buttonStyle(.borderless)
+            } else if manager.isMapJobProcessing {
+                HStack(spacing: 16) {
+                    Button {
+                        manager.pausePendingMapJob()
+                    } label: {
+                        Label("Pause", systemImage: "pause.circle")
+                    }
+                }
+                .font(.subheadline)
+                .buttonStyle(.borderless)
+            } else {
+                HStack(spacing: 16) {
+                    Button {
+                        manager.resumePendingMapJobIfNeeded(bleManager: bleManager)
+                    } label: {
+                        Label("Resume", systemImage: "play.circle")
+                    }
+                }
+                .font(.subheadline)
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var sourceSummary: String? {
+        guard let regionName = manager.currentJob?.sourceRegion?.name else { return nil }
+        if let area = manager.currentJob?.geometry?.areaKm2 {
+            return "\(regionName) \(Int(area.rounded())) km²"
+        }
+        return regionName
+    }
+
+    private var preparationEstimatePresentation:
+        OfflineMapPreparationEstimatePresentation? {
+        guard let job = manager.currentJob else { return nil }
+        return OfflineMapPreparationEstimatePresentation.presentation(for: job)
+    }
+
+}
+
+private struct OfflineMapProgressRow: View {
+    let title: String
+    let percentage: Int?
+    let fraction: Double?
+    let detail: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(title)
+                Spacer()
+                if let percentage {
+                    Text("\(percentage)%")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            if let fraction {
+                ProgressView(value: fraction)
+            } else {
+                ProgressView()
+            }
+            if let detail {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1299,6 +1487,10 @@ private struct SavedMapRow: View {
         let previewImage = manager.previewImage(for: item)
         let catalogAvailability = item.catalogMap.map(manager.catalogAvailability(for:))
         let catalogArtifactNeedsRefresh = manager.catalogArtifactNeedsRefresh(for: item)
+        let uploadProgress = packURL.flatMap(manager.mapUploadProgress(for:))
+        let activationProgress = item.localRecord?.mapID == manager.lastTransferMapId
+            ? manager.activationProgress
+            : nil
 
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -1501,6 +1693,24 @@ private struct SavedMapRow: View {
                 }
             }
 
+            if let activationProgress {
+                OfflineMapProgressRow(
+                    title: manager.lastTransferOutcome == "uploading"
+                        ? "Uploading to Bike Computer"
+                        : "Installing on Bike Computer",
+                    percentage: activationProgress.percentage,
+                    fraction: activationProgress.fraction,
+                    detail: activationProgress.label
+                )
+            } else if let uploadProgress {
+                OfflineMapProgressRow(
+                    title: "Uploading to Bike Computer",
+                    percentage: Int((uploadProgress * 100).rounded()),
+                    fraction: uploadProgress,
+                    detail: nil
+                )
+            }
+
             if let status = catalogAvailability?.statusText {
                 Label(status, systemImage: "info.circle")
                     .font(.caption)
@@ -1513,6 +1723,21 @@ private struct SavedMapRow: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .accessibilityLabel("\(displayName): Updated map available")
+            }
+
+            if let packURL,
+               let topography = SavedMapArtifactMetadataStore.load(
+                   for: packURL
+               )?.topography {
+                Label(
+                    topography.qualityLabel,
+                    systemImage: "mountain.2"
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .accessibilityLabel(
+                    "\(displayName): \(topography.qualityLabel)"
+                )
             }
 
             if let mapEntryID = item.catalogMap?.mapEntryId,
@@ -1622,6 +1847,9 @@ private struct SavedMapPreviewSheet: View {
     var body: some View {
         let image = manager.detailPreviewImage(for: preview.item) ??
             preview.fallbackImage
+        let topography = preview.item.packURL.flatMap {
+            SavedMapArtifactMetadataStore.load(for: $0)?.topography
+        }
 
         NavigationView {
             VStack(spacing: 16) {
@@ -1642,6 +1870,54 @@ private struct SavedMapPreviewSheet: View {
                             .background(.thinMaterial, in: Capsule())
                             .padding(.bottom, 12)
                     }
+                }
+
+                if let topography {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(topography.qualityLabel, systemImage: "mountain.2")
+                            .font(.headline)
+                        Text(
+                            "\(topography.minorIntervalM) m contours · " +
+                                "\(topography.indexIntervalM) m index lines"
+                        )
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        ForEach(
+                            Array(topography.sources.enumerated()),
+                            id: \.offset
+                        ) { _, source in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(source.id) · \(source.release)")
+                                    .font(.subheadline.weight(.semibold))
+                                Text(
+                                    "\(source.surfaceModel) · " +
+                                        source.verticalDatum
+                                )
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                if let attributionURL = URL(
+                                    string: source.attributionURL
+                                ) {
+                                    Link(
+                                        "Source attribution",
+                                        destination: attributionURL
+                                    )
+                                    .font(.caption)
+                                }
+                                if let notice = copernicusTopographyNotice(
+                                    for: source
+                                ) {
+                                    Text(notice)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+                    .accessibilityElement(children: .contain)
                 }
 
                 if preview.item.isAvailableInLibrary {
@@ -1848,7 +2124,7 @@ private struct DeviceScreensSettingsSection: View {
 
     var body: some View {
         Section(
-            header: Text("Device Screens"),
+            header: Text("Bicino Screens"),
             footer: Text(mapStyleFooter)
         ) {
             ForEach(bleManager.availableDeviceScreens) { screen in
@@ -2164,6 +2440,34 @@ private struct MapStyleSettingsView: View {
         binding(map: \.showOtherAreas, mapPlusNavigation: \.mapPlusNavigationShowOtherAreas)
     }
 
+    private var showContours: Binding<Bool> {
+        binding(map: \.showContours, mapPlusNavigation: \.mapPlusNavigationShowContours)
+    }
+
+    private var topographicContoursFooter: String {
+        if !bleManager.hasReceivedDeviceCapabilities {
+            return "Connect to the Bike Computer to check contour support."
+        }
+        if !bleManager.supportsTopographicContours {
+            return "Update the Bike Computer firmware to render topographic contours."
+        }
+        if bleManager.activeMapRendererFormat != 4 ||
+            bleManager.activeMapTopographyProfileVersion != 1 {
+            return "Download and install a topographic map before enabling contours."
+        }
+        if !bleManager.activeMapTopographySectionHealthy {
+            return "The active map's contour section is unavailable. Reinstall the map."
+        }
+        if !bleManager.activeMapContainsContours {
+            return "The active map is valid but contains no contour lines for this area."
+        }
+        if let minor = bleManager.activeMapContourMinorIntervalM,
+           let index = bleManager.activeMapContourIndexIntervalM {
+            return "Shows \(minor) m contours with darker \(index) m index lines below roads and routes."
+        }
+        return "Contours are drawn below roads, labels, routes, and position markers."
+    }
+
     private var birdsEyeFooter: String {
         if !bleManager.hasReceivedDeviceCapabilities {
             return "Connect to the Bike Computer to check bird's-eye view support."
@@ -2315,7 +2619,7 @@ private struct MapStyleSettingsView: View {
                     .onChange(of: showRailways.wrappedValue) { _ in sendVisibilityMask() }
             }
 
-            Section(header: Text("Places & Terrain"), footer: Text("Control background map areas and lower-priority context on this screen.")) {
+            Section(header: Text("Places & Terrain"), footer: Text(topographicContoursFooter)) {
                 Toggle("Buildings", isOn: showBuildings)
                     .onChange(of: showBuildings.wrappedValue) { _ in sendVisibilityMask() }
                 Toggle("Parks & Nature", isOn: showGreenSpace)
@@ -2324,6 +2628,11 @@ private struct MapStyleSettingsView: View {
                     .onChange(of: showWater.wrappedValue) { _ in sendVisibilityMask() }
                 Toggle("Other Areas", isOn: showOtherAreas)
                     .onChange(of: showOtherAreas.wrappedValue) { _ in sendVisibilityMask() }
+                Toggle("Topographic Contours", isOn: showContours)
+                    .disabled(!bleManager.topographicContoursAvailable)
+                    .onChange(of: showContours.wrappedValue) { _ in
+                        sendVisibilityMask()
+                    }
             }
 
             Section(header: Text("Map Rendering"), footer: Text("Feature toggles control map categories; polygon size filters tiny filled areas.")) {
@@ -2500,12 +2809,19 @@ private struct MapStyleSettingsView: View {
 private struct HardwareCustomizationSettingsView: View {
     @EnvironmentObject private var bleManager: BLEManager
 
+    private var displayInactivityFooter: String {
+        guard bleManager.supportsDisplayInactivityTimeouts else {
+            return "When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active."
+        }
+        return "When enabled, the display dims after \(bleManager.displayDimTimeout.title) and turns off after \(bleManager.displayOffTimeout.title) unless navigation, workout, transfer, or attention activity is active."
+    }
+
     var body: some View {
         Form {
             if bleManager.supportsDisplayBrightness {
                 Section(
                     header: Text("Device Brightness"),
-                    footer: Text("When enabled, the display dims after 15 seconds and turns off after 45 seconds unless navigation, workout, transfer, or attention activity is active.")
+                    footer: Text(displayInactivityFooter)
                 ) {
                     VStack(alignment: .leading) {
                         HStack {
@@ -2528,12 +2844,40 @@ private struct HardwareCustomizationSettingsView: View {
                             )
                         }
                         .disabled(!bleManager.supportsAutomaticDisplayOff)
+                    if bleManager.supportsDisplayInactivityTimeouts {
+                        Picker("Dim After", selection: $bleManager.displayDimTimeout) {
+                            ForEach(DisplayDimTimeout.allCases.filter {
+                                $0.rawValue < bleManager.displayOffTimeout.rawValue
+                            }) { timeout in
+                                Text(timeout.title).tag(timeout)
+                            }
+                        }
+                        .onChange(of: bleManager.displayDimTimeout) { _ in
+                            bleManager.sendDisplayInactivityTimeouts()
+                        }
+                        .disabled(!bleManager.automaticDisplayOffEnabled)
+
+                        Picker("Turn Off After", selection: $bleManager.displayOffTimeout) {
+                            ForEach(DisplayOffTimeout.allCases.filter {
+                                $0.rawValue > bleManager.displayDimTimeout.rawValue
+                            }) { timeout in
+                                Text(timeout.title).tag(timeout)
+                            }
+                        }
+                        .onChange(of: bleManager.displayOffTimeout) { _ in
+                            bleManager.sendDisplayInactivityTimeouts()
+                        }
+                        .disabled(!bleManager.automaticDisplayOffEnabled)
+                    }
                 }
                 .disabled(!bleManager.supportsDeviceSettings)
 
             }
             if bleManager.supportsDisconnectedSleep {
-                Section(header: Text("Power")) {
+                Section(
+                    header: Text("Power"),
+                    footer: Text("This puts the entire device into deep sleep after its phone connection is lost. It is separate from the connected display timeout above.")
+                ) {
                     Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
                         ForEach(DisconnectedSleepTimeout.allCases) { timeout in
                             Text(timeout.title).tag(timeout)
@@ -3501,16 +3845,27 @@ private struct DeveloperSettingsView: View {
     @ObservedObject var cyclingSensorStore: CyclingSensorStore
     @ObservedObject var cyclingSensorDetectionCoordinator:
         CyclingSensorDetectionCoordinator
+    @ObservedObject var rideDiagnosticsRecorder: RideDiagnosticsRecorder
     let currentLocation: CLLocation?
     let isNavigationActive: Bool
     let onStartTestNavigation: (String) -> Void
 
     var body: some View {
         Form {
-            connectionSummary
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
+            if OfflineMapDownloadingSectionPresentation.isVisible(
+                isBusy: offlineMapManager.isBusy ||
+                    offlineMapManager.isDeviceTransferBusy ||
+                    offlineMapManager.hasActiveBackgroundUpload,
+                hasPendingJob: offlineMapManager.hasPendingMapJob,
+                hasPendingActivation: offlineMapManager.hasPendingDeviceActivation,
+                isServerRecoveryCheckPending:
+                    offlineMapManager.isServerRecoveryCheckPending,
+                hasCurrentJob: offlineMapManager.currentJob != nil,
+                hasDownloadedPack: offlineMapManager.downloadedPackURL != nil,
+                errorMessage: offlineMapManager.errorMessage
+            ) {
+                DownloadingMapsSettingsSection(manager: offlineMapManager)
+            }
 
             Section(header: Text("Map Server")) {
                 SettingsValueRow(title: "Service", value: offlineMapManager.serverURLString)
@@ -3523,6 +3878,32 @@ private struct DeveloperSettingsView: View {
                 }
 #endif
             }
+
+            Section {
+                NavigationLink {
+                    RideDiagnosticsSettingsView(
+                        recorder: rideDiagnosticsRecorder
+                    )
+                } label: {
+                    Label("Diagnostics", systemImage: "stethoscope")
+                }
+            }
+
+#if DEBUG
+            RemoteDeviceDebugSettingsSection()
+            RendererBenchmarkReplaySettingsSection(
+                isNavigationActive: isNavigationActive
+            )
+#endif
+            TestNavigationSettingsSection(
+                currentLocation: currentLocation,
+                onStartNavigation: onStartTestNavigation
+            )
+
+            connectionSummary
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 8, trailing: 20))
 
             Section {
                 NavigationLink {
@@ -3567,23 +3948,13 @@ private struct DeveloperSettingsView: View {
                 Text("Workout Heart Zones")
             } footer: {
                 Text(
-                    "Bicino calculates five heart zones from this value and syncs it to the paired Watch. The default is 190 BPM."
+                    "Bicino calculates five fallback heart-rate zones from this value and syncs it to Watch. The default is 190 BPM. Apple Health zones, when available, use their own thresholds; this setting does not change them. Compatible bike firmware uses Apple Health zones when available, and these labelled Bicino fallback zones on older Watch systems. Older bike firmware retains its five-zone display."
                 )
             }
 
             OfflineMapDeviceTransferSettingsSection(manager: offlineMapManager)
             FirmwareUpdateSettingsSection(manager: firmwareUpdateManager)
             DiagnosticsTransferNetworkSettingsSection()
-#if DEBUG
-            RemoteDeviceDebugSettingsSection()
-            RendererBenchmarkReplaySettingsSection(
-                isNavigationActive: isNavigationActive
-            )
-#endif
-            TestNavigationSettingsSection(
-                currentLocation: currentLocation,
-                onStartNavigation: onStartTestNavigation
-            )
 
             Section {
                 HStack {

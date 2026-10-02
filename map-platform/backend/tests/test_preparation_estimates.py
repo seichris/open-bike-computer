@@ -4,6 +4,7 @@ import json
 import math
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -167,6 +168,74 @@ class PreparationEstimateTests(unittest.TestCase):
         self.assertLessEqual(
             first["remaining"]["lowerSeconds"],
             first["remaining"]["upperSeconds"],
+        )
+
+    def test_topography_shadow_baseline_covers_recorded_development_builds(self):
+        shadow = PreparationEstimator(
+            self.profile,
+            PreparationEstimateConfig(
+                mode=PreparationEstimateMode.SHADOW,
+                worker_class="unclassified",
+                worker_concurrency_class="single",
+            ),
+            clock=lambda: 1_786_330_000.0,
+        )
+        # Development monitoring records: a 3.79 km2 map in 25 seconds and
+        # the 420.12 km2 Sichuan map in 1,287 seconds. These are baseline
+        # inputs, not independent accuracy validation.
+        for area_km2, blocks, observed_seconds in (
+            (3.79147, 1, 25),
+            (420.1157, 42, 1287),
+        ):
+            with self.subTest(area_km2=area_km2):
+                job = build_job()
+                job.request["target"]["rendererFormatVersion"] = 4
+                job.geometry = replace(job.geometry, area_km2=area_km2)
+                context = shadow.initial_context(
+                    job,
+                    preprocessing_mode="selected",
+                    rules_sha256="a" * 64,
+                    queue_depth=0,
+                )
+                context["evidence"] = {"scope": {"outputBlockCount": blocks}}
+                estimate = shadow.estimate(job, context, revision=1)
+                self.assertEqual(estimate["state"], "available")
+                self.assertEqual(estimate["confidence"], "low")
+                self.assertLessEqual(
+                    estimate["remaining"]["lowerSeconds"], observed_seconds
+                )
+                self.assertGreaterEqual(
+                    estimate["remaining"]["upperSeconds"], observed_seconds
+                )
+
+    def test_topography_generation_remains_in_estimate_until_complete(self):
+        job = build_job()
+        job.request["target"]["rendererFormatVersion"] = 4
+        job.geometry = replace(job.geometry, area_km2=420.1157)
+        estimator = self.estimator()
+        context = self.context(estimator, job)
+        context["evidence"] = {"scope": {"outputBlockCount": 42}}
+        packaging = estimator.estimate(
+            job, context, revision=1, based_on_phase="packaging"
+        )
+        context["evidence"]["progress"] = {
+            "phase": "topography_generation",
+            "unit": "artifact_pairs",
+            "completed": 0,
+            "total": 1,
+        }
+        building = estimator.estimate(
+            job, context, revision=2, based_on_phase="topography_generation"
+        )
+        context["evidence"]["progress"]["completed"] = 1
+        completed = estimator.estimate(
+            job, context, revision=3, based_on_phase="topography_generation"
+        )
+        self.assertEqual(packaging["state"], "available")
+        self.assertEqual(building["state"], "available")
+        self.assertGreater(
+            building["remaining"]["upperSeconds"],
+            completed["remaining"]["upperSeconds"],
         )
 
     def test_profile_rejects_stale_and_negative_performance_inputs(self):
@@ -723,6 +792,32 @@ class PreparationEstimateTests(unittest.TestCase):
             self.assertEqual(
                 store.compatible(model_version="map-preparation-v1"), []
             )
+
+    def test_worker_advertises_topography_estimate_capability(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            capabilities = WorkerCapabilityStore(temporary)
+            coordinator = PreparationEstimateCoordinator(
+                None,
+                self.estimator(),
+                preprocessing_mode="selected",
+                rules_sha256="a" * 64,
+                capability_store=capabilities,
+            )
+            coordinator.publish_worker_capability("worker-one")
+            key = performance_compatibility_key(
+                profile=self.profile,
+                config=self.config,
+                renderer=4,
+                preprocessing_mode="legacy",
+                rules_sha256="a" * 64,
+            )
+            matching = capabilities.compatible(
+                model_version=self.profile.model_version,
+                performance_compatibility_key=key,
+                profile_sha256=self.profile.sha256,
+            )
+            self.assertEqual(len(matching), 1)
+            self.assertIn(4, matching[0]["rendererFormats"])
 
     def test_capability_sidecar_failure_does_not_break_worker_heartbeat(self):
         coordinator = PreparationEstimateCoordinator(

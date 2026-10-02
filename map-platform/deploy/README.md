@@ -11,6 +11,19 @@ outside Git.
 promotion advances API, maintenance, and worker together for development
 testing without modifying the production lock. It defaults to the development
 deployment/catalog channels, shadow preparation estimates, and disabled Strava.
+Its API selects generation policy v2 only after the image containing that
+policy has been promoted. Renderer format 4 is available to every development
+installation under the policy's normal admission limits. Production stays on
+policy v1 until its independent release gates and image promotion complete.
+The current development lock still forwards the legacy canary allowlist to
+its pinned image; the new backend ignores that variable. Remove the inert
+setting in the separate development lock promotion after the active map job
+finishes so this source PR does not restart the running stack.
+The checked-in v3 generation policy makes format 4 global in both channels,
+but the production Compose lock deliberately does not select it yet. The
+catalog's `TOPOGRAPHY_PROMOTION_ENABLED` remains `0` in staging and production
+until the paired-artifact and hardware qualification is recorded. This is one
+global release switch, not an installation allowlist.
 
 ## One-time GitHub configuration
 
@@ -111,10 +124,22 @@ The lock defaults `MAP_PLATFORM_DEPLOYMENT_CHANNEL` and
 `MAP_PLATFORM_CATALOG_CHANNEL` to `development`; an explicit Coolify value may
 remain as defense in depth. For estimator calibration, the development lock
 defaults `MAP_PLATFORM_PREPARATION_ESTIMATES_MODE=shadow`, while production
-defaults to `off`.
+also defaults to `shadow` so production records calibration evidence without
+publishing unvalidated estimates to clients. Hardware validation remains `off`.
 Shadow mode records bounded estimate revisions without returning them in public
 job responses; promote to `public` only after the documented sample and accuracy
 gates pass.
+For topography, merge and promote an exact image containing generation
+policy v2 and the topography pipeline through the normal development image-lock
+PR. Verify the pinned image contains that policy before merging the separate
+development-lock change selecting
+`/app/config/generation-profile-policy-v2.json`. In Bicino Dev, select the
+development map server and verify that authenticated `/v1/capabilities`
+responses for independent installations include renderer format 4. `/healthz`
+reports the loaded source-policy summary; authenticated capabilities are the
+generation gate.
+Keep the production lock and secrets unchanged. Record the canary map's exact
+source receipts and attribution before using it for hardware qualification.
 Until `/healthz` exposes the generation-policy digest, set both legacy
 compatibility flags to `1` on this new application so the pinned pre-policy API
 can generate formats 2 and 3. They become inert after the control-plane image
@@ -141,6 +166,12 @@ the allowed App ID, environment, and launch-validation categories from
 The Compose locks pass
 `MAP_PLATFORM_APP_ATTEST_CHALLENGE_TTL_SECONDS` with a `300`-second default;
 keep it between `30` and `900` seconds.
+Authenticated key replacement is limited separately by
+`MAP_PLATFORM_APP_ATTEST_ROTATION_IP_LIMIT_PER_DAY` (default `12`) and
+`MAP_PLATFORM_APP_ATTEST_ROTATION_LIMIT_PER_DAY` (default `3` per
+installation). It preserves the installation owner and is accepted only with
+the existing installation token, a scoped challenge, the exact previous key,
+and a fresh Apple attestation.
 
 Before releasing the iOS client, enable App Attest for both Apple App IDs and
 regenerate the corresponding provisioning profiles. Promote the compatible API
@@ -150,9 +181,11 @@ production build. Existing installation credentials remain usable for reads,
 but only an attested installation can request a map-creation challenge.
 
 Back up `/data/app-attest.sqlite3` with the rest of the channel's persistent
-control-plane state. Restoring a snapshot that predates a device's enrollment
-causes that app to create a new attested installation; never copy this database
-between Development, hardware validation, and Production.
+control-plane state. If a restore removes a device's key binding while its
+stateless installation credential remains valid, the app uses an authenticated,
+installation-scoped challenge to attest a fresh key while preserving the same
+owner and maps. Never copy this database between Development, hardware
+validation, and Production.
 
 ## Strava route import configuration
 

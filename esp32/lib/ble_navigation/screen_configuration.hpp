@@ -141,7 +141,6 @@ inline screen_configuration_protocol::MapProfile effectiveMapProfile(
 #endif
   return profile;
 }
-
 inline uint8_t nextEnabledInstanceOfType(const Document &document,
                                          uint8_t currentIndex,
                                          ScreenType first,

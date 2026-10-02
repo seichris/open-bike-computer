@@ -8,9 +8,12 @@ private final class ScreenStateFixture {
     var frames: [Data] = []
     var generation: UInt64 = 1
 
-    init() {
+    init(autosaveDelayNanoseconds: UInt64 = 60_000_000_000) {
         defaults = UserDefaults(suiteName: suite)!
-        controller = DeviceScreenConfigurationController(defaults: defaults)
+        controller = DeviceScreenConfigurationController(
+            defaults: defaults,
+            autosaveDelayNanoseconds: autosaveDelayNanoseconds
+        )
         connect()
         snapshot(.legacyDefault, revision: 1)
     }
@@ -59,6 +62,11 @@ private final class ScreenStateFixture {
         var instance = controller.draft!.instances[0]
         instance.name = name
         controller.update(instance: instance)
+    }
+
+    func uploadedDocument() -> DeviceScreenConfigurationDocument {
+        let document = Data(frames.flatMap { $0.dropFirst(14) })
+        return try! DeviceScreenConfigurationCodec.decode(document)
     }
 }
 
@@ -109,6 +117,51 @@ func testScreenEditsDuringSave() {
     assert(fixture.controller.draft?.instances[0].name == "Edited while saving",
            "an ACK must not discard edits made after submission")
     assert(fixture.controller.canSave)
+}
+
+@MainActor
+func testScreenAutosaveCoalescesAndCoversMapProfiles() {
+    let fixture = ScreenStateFixture()
+    defer { fixture.close() }
+
+    fixture.rename("First edit")
+    fixture.rename("Latest edit")
+    assert(fixture.controller.hasPendingAutosaveForTesting,
+           "valid edits schedule one debounced autosave")
+    fixture.controller.performPendingAutosaveForTesting()
+    assert(fixture.controller.state == .saving)
+    assert(fixture.uploadedDocument().instances[0].name == "Latest edit",
+           "autosave submits the latest coalesced draft")
+
+    var mapNavigation = fixture.controller.draft!.instances.first {
+        $0.type == .mapPlusNavigation
+    }!
+    mapNavigation.mapProfile!.zoomLevel = 4
+    fixture.controller.update(instance: mapNavigation)
+    assert(!fixture.controller.hasPendingAutosaveForTesting,
+           "edits wait while a save owns the transport")
+    fixture.acknowledgement(.applied, revision: 2)
+    assert(fixture.controller.hasPendingAutosaveForTesting,
+           "an edit made during a save is queued after acknowledgement")
+    fixture.controller.performPendingAutosaveForTesting()
+    let uploadedMapNavigation = fixture.uploadedDocument().instances.first {
+        $0.type == .mapPlusNavigation
+    }
+    assert(uploadedMapNavigation?.mapProfile?.zoomLevel == 4,
+           "Map + Navigation settings participate in autosave")
+    fixture.acknowledgement(.applied, revision: 3)
+
+    var map = fixture.controller.draft!.instances.first { $0.type == .map }!
+    map.mapProfile!.routeLineWidth = 12
+    fixture.controller.update(instance: map)
+    assert(fixture.controller.hasPendingAutosaveForTesting,
+           "Map settings schedule autosave")
+    fixture.controller.performPendingAutosaveForTesting()
+    let uploadedMap = fixture.uploadedDocument().instances.first {
+        $0.type == .map
+    }
+    assert(uploadedMap?.mapProfile?.routeLineWidth == 12,
+           "Map settings participate in autosave")
 }
 
 @MainActor

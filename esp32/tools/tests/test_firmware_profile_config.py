@@ -25,6 +25,11 @@ def inherited_option(section: str, option: str) -> str:
 
 
 prebuild_source = (project_dir / "prebuild.py").read_text()
+for section in config.sections():
+    if section.startswith("env:WAVESHARE_AMOLED_"):
+        sdk = inherited_option(section, "custom_sdkconfig")
+        assert "CONFIG_APP_COMPILE_TIME_DATE=n" in sdk, section
+        assert "CONFIG_BOOTLOADER_COMPILE_TIME_DATE=n" in sdk, section
 main_source = (project_dir / "src/main.cpp").read_text()
 main_screen_source = (project_dir / "lib/gui/src/mainScr.cpp").read_text()
 maps_source = (project_dir / "lib/maps/src/maps.cpp").read_text()
@@ -62,7 +67,7 @@ assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig
 assert "CONFIG_FREERTOS_USE_TICKLESS_IDLE=n" in waveshare_sdkconfig
 assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in waveshare_sdkconfig
 assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in waveshare_sdkconfig
-assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536" in waveshare_sdkconfig
+assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304" in waveshare_sdkconfig
 assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL" not in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=n" in waveshare_sdkconfig
 assert "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=n" in waveshare_sdkconfig
@@ -185,6 +190,8 @@ for environment, (base, board_define) in diagnostic_profiles.items():
     assert "-DRIDE_AUTOMATION_SHADOW=1" in flags
     assert "-DMAP_STABLE_CAMERA=1" in flags
     assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" in flags
+    assert "-DDETAILED_RIDE_DIAGNOSTICS=1" in flags
+    assert "-DRIDE_AUTOMATION_TRACE=1" in flags
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
     assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in flags
     assert (
@@ -217,9 +224,11 @@ for environment, target in expected_targets.items():
     assert "-DCORE_DEBUG_LEVEL=2" not in flags
     assert "-DFIRMWARE_DIAGNOSTICS=1" not in flags
     assert "-DARDUINO_USB_CDC_ON_BOOT=1" not in flags
-    assert "-DRIDE_AUTOMATION_SHADOW=1" not in flags
-    assert "-DMAP_STABLE_CAMERA=1" not in flags
-    assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" not in flags
+    assert "-DRIDE_AUTOMATION_SHADOW=1" in flags
+    assert "-DMAP_STABLE_CAMERA=1" in flags
+    assert "-DRIDE_AUTOMATION_INTERNAL_CONTROL=1" in flags
+    assert "-DDETAILED_RIDE_DIAGNOSTICS=0" in flags
+    assert "-DRIDE_AUTOMATION_TRACE=1" not in flags
     assert "-DRIDE_AUTOMATION_AUTOMATIC_START=1" not in flags
     unflags = config.get(environment, "build_unflags")
     assert "${waveshare_amoled_common.build_unflags}" in unflags
@@ -249,8 +258,27 @@ for environment, (base, target) in remote_debug_profiles.items():
     assert "-DDEVICE_REMOTE_DEBUG=1" in flags
     assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" in flags
 
+personal_profiles = {
+    "env:WAVESHARE_AMOLED_175_PERSONAL": "env:WAVESHARE_AMOLED_175_PRODUCTION",
+    "env:WAVESHARE_AMOLED_206_PERSONAL": "env:WAVESHARE_AMOLED_206_PRODUCTION",
+}
+for environment, production_profile in personal_profiles.items():
+    assert config.get(environment, "extends") == production_profile
+    assert inherited_option(environment, "custom_firmware_target") == inherited_option(
+        production_profile, "custom_firmware_target"
+    )
+    flags = config.get(environment, "build_flags")
+    assert f"${{{production_profile}.build_flags}}" in flags
+    assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" in flags
+    assert "-DDEVICE_REMOTE_DEBUG=1" not in flags
+    assert inherited_option(environment, "board_build.partitions") == "partitions.csv"
+
 for environment in config.sections():
-    if not environment.startswith("env:") or environment in remote_debug_profiles:
+    if (
+        not environment.startswith("env:")
+        or environment in remote_debug_profiles
+        or environment in personal_profiles
+    ):
         continue
     assert "-DMAP_STREAM_DEVELOPMENT_TRUST=1" not in config.get(
         environment,
@@ -316,7 +344,7 @@ for environment, (base, target) in light_sleep_profiles.items():
         assert watchdog_setting in inherited_option(environment, "custom_sdkconfig")
     assert "CONFIG_ARDUINO_LOOP_STACK_SIZE=16384" in sdkconfig
     assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in sdkconfig
-    assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536" in sdkconfig
+    assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304" in sdkconfig
     assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL" not in sdkconfig
     assert "CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=n" in sdkconfig
     assert "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=n" in sdkconfig
@@ -524,6 +552,10 @@ assert (
 )
 for environment in remote_debug_profiles:
     assert environment.removeprefix("env:") not in release_candidate_workflow
+for environment in personal_profiles:
+    profile = environment.removeprefix("env:")
+    assert profile not in release_candidate_workflow
+    assert profile not in firmware_routing
 for environment, target in expected_targets.items():
     profile = environment.removeprefix("env:")
     mapping = f"target: {target}\n            environment: {profile}"

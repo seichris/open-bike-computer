@@ -56,6 +56,7 @@ nonisolated struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
     let sessionID: UUID?
     let detectorProfileVersion: UInt16?
     let lastTransitionOrigin: WorkoutTransitionOrigin?
+    let zoneContext: WorkoutZoneDeviceContextV1?
 
     init(
         state: WorkoutDeviceSessionState,
@@ -78,7 +79,8 @@ nonisolated struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
         wallElapsedSeconds: Double? = nil,
         sessionID: UUID? = nil,
         detectorProfileVersion: UInt16? = nil,
-        lastTransitionOrigin: WorkoutTransitionOrigin? = nil
+        lastTransitionOrigin: WorkoutTransitionOrigin? = nil,
+        zoneContext: WorkoutZoneDeviceContextV1? = nil
     ) {
         self.state = state
         self.sessionToken = sessionToken
@@ -101,11 +103,12 @@ nonisolated struct WorkoutDeviceTelemetrySample: Equatable, Sendable {
         self.sessionID = sessionID
         self.detectorProfileVersion = detectorProfileVersion
         self.lastTransitionOrigin = lastTransitionOrigin
+        self.zoneContext = zoneContext
     }
 }
 
 /// Canonical, platform-neutral translation from a validated workout snapshot
-/// to the three device telemetry frames. Callers decide whether the snapshot
+/// to the legacy device telemetry frames plus an optional versioned zone context. Callers decide whether the snapshot
 /// is current and whether its numerics remain live; metric validation, source
 /// attribution, and terminal-value preservation live here for both iPhone and
 /// Watch direct-BLE paths.
@@ -136,11 +139,18 @@ nonisolated enum WorkoutDeviceTelemetrySampleMapperV1 {
         isCurrentSnapshot: Bool
     ) -> WorkoutDeviceTelemetrySample? {
         guard state != .idle, sessionToken != 0 else { return nil }
+        let zoneContext = snapshot.flatMap { snapshot in
+            sessionID.map { WorkoutZoneDeviceContextV1(
+                snapshot: snapshot, sessionID: $0, sessionToken: sessionToken,
+                state: state, isCurrent: isCurrentSnapshot && hasLiveNumerics
+            ) }
+        }
         guard hasLiveNumerics else {
             return emptySample(
                 state: state,
                 sessionToken: sessionToken,
-                isCurrentSnapshot: isCurrentSnapshot
+                isCurrentSnapshot: isCurrentSnapshot,
+                zoneContext: zoneContext
             )
         }
         guard let snapshot else { return nil }
@@ -211,14 +221,16 @@ nonisolated enum WorkoutDeviceTelemetrySampleMapperV1 {
             ),
             sessionID: sessionID,
             detectorProfileVersion: snapshot.detectorProfileVersion,
-            lastTransitionOrigin: snapshot.lastTransitionOrigin
+            lastTransitionOrigin: snapshot.lastTransitionOrigin,
+            zoneContext: zoneContext
         )
     }
 
     static func emptySample(
         state: WorkoutDeviceSessionState,
         sessionToken: UInt16,
-        isCurrentSnapshot: Bool = false
+        isCurrentSnapshot: Bool = false,
+        zoneContext: WorkoutZoneDeviceContextV1? = nil
     ) -> WorkoutDeviceTelemetrySample {
         WorkoutDeviceTelemetrySample(
             state: state,
@@ -241,7 +253,8 @@ nonisolated enum WorkoutDeviceTelemetrySampleMapperV1 {
             wallElapsedSeconds: nil,
             sessionID: nil,
             detectorProfileVersion: nil,
-            lastTransitionOrigin: nil
+            lastTransitionOrigin: nil,
+            zoneContext: zoneContext
         )
     }
 
@@ -288,6 +301,7 @@ nonisolated struct WorkoutDeviceFrames: Equatable, Sendable {
     let extended: Data
     let origin: Data
     let originAvailable: Bool
+    let zoneContext: WorkoutZoneDeviceContextV1?
     let identity: Identity
 }
 
@@ -436,6 +450,7 @@ nonisolated enum WorkoutDeviceFrameBuilder {
             extended: extended,
             origin: origin ?? Data(),
             originAvailable: origin != nil,
+            zoneContext: sample.zoneContext,
             identity: .init(
                 state: sample.state,
                 sessionToken: sample.sessionToken,
@@ -589,7 +604,9 @@ nonisolated enum WorkoutDeviceFrameBuilder {
     static func transportFrames(
         for frames: WorkoutDeviceFrames,
         generation: UInt8,
-        includeOrigin: Bool = false
+        includeOrigin: Bool = false,
+        zoneSequence: UInt32 = 0,
+        at now: Date = Date()
     ) -> [Data] {
         if frames.identity.state == .idle {
             return [frames.core]
@@ -602,6 +619,9 @@ nonisolated enum WorkoutDeviceFrameBuilder {
         var result = [stamped.core, stamped.extended]
         if includeOrigin, frames.originAvailable {
             result.append(frames.origin)
+        }
+        if includeOrigin && frames.originAvailable && zoneSequence != 0 {
+            result += WorkoutZoneDeviceCodecV1.packets(for: frames.zoneContext, sequence: zoneSequence, pairGeneration: generation, at: now)
         }
         return result
     }

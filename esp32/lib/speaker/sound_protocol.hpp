@@ -20,9 +20,13 @@ constexpr size_t POWER_BUTTON_HONK_STATUS_SIZE =
 enum class Sound : uint8_t {
   BellDing = 1,
   PlasticBicycleHorn = 2,
-  RotatingBicycleBell = 3,
   SqueezeHorn = 5,
 };
+
+// Sound ID 3 was the removed rotating-bell recording. Keep it unassigned so
+// persisted settings and older clients fail closed instead of selecting a
+// different sound.
+constexpr uint8_t RESERVED_ROTATING_BELL_SOUND_ID = 3;
 
 struct PlaybackRequest {
   Sound sound;
@@ -58,7 +62,6 @@ inline bool isKnownSound(Sound sound) {
   switch (sound) {
   case Sound::BellDing:
   case Sound::PlasticBicycleHorn:
-  case Sound::RotatingBicycleBell:
   case Sound::SqueezeHorn:
     return true;
   }

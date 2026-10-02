@@ -24,6 +24,17 @@ nonisolated enum RouteProviderPolicyV1 {
         storageScope: .activeOnly
     )
 
+    // Explicit product-policy change requested by the maintainer, 2026-09-15.
+    // Storage scope is NOT a claim of Apple licensing permission. See
+    // docs/reviews/mapkit-route-storage-2026-09-15.md before distribution.
+    // Ordinary MapKit responses above remain active-only; only a selected route
+    // captured by the phone's typed save flow receives this local scope.
+    static let mapKitSavedOnPhone = RouteProviderMetadataV1(
+        providerID: "apple.mapkit",
+        attribution: "Apple Maps",
+        storageScope: .phoneOnly
+    )
+
     static let importedGPX = RouteProviderMetadataV1(
         providerID: "user.imported-gpx",
         attribution: "User-provided GPX",
@@ -41,7 +52,7 @@ nonisolated enum RouteProviderPolicyV1 {
     ) -> Bool {
         switch metadata.providerID {
         case mapKit.providerID:
-            metadata == mapKit
+            metadata == mapKit || metadata == mapKitSavedOnPhone
         case importedGPX.providerID:
             metadata == importedGPX
         case strava.providerID:
@@ -54,10 +65,9 @@ nonisolated enum RouteProviderPolicyV1 {
     static func allowsDurableStorage(
         _ metadata: RouteProviderMetadataV1
     ) -> Bool {
-        // Durable providers are an explicit allowlist. Add an export-licensed
-        // provider here only with its reviewed attribution and retention
-        // metadata; a self-declared `.durable` flag is not sufficient.
-        metadata == importedGPX || metadata == strava
+        // Implementation admission, not a license grant. A self-declared
+        // durable scope is insufficient, and normal MapKit responses still fail.
+        metadata == importedGPX || metadata == strava || metadata == mapKitSavedOnPhone
     }
 
     static func requiresExpiry(

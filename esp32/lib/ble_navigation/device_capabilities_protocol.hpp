@@ -26,6 +26,9 @@ constexpr uint8_t RENDERER_DIAGNOSTICS_CLIENT_VERSION =
     ride_ble_protocol_generated::RENDERER_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t AUTOMATIC_DISPLAY_OFF_CLIENT_VERSION =
     ride_ble_protocol_generated::AUTOMATIC_DISPLAY_OFF_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t DISPLAY_INACTIVITY_TIMEOUTS_CLIENT_VERSION =
+    ride_ble_protocol_generated::
+        DISPLAY_INACTIVITY_TIMEOUTS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t RIDE_DIAGNOSTICS_CLIENT_VERSION =
     ride_ble_protocol_generated::RIDE_DIAGNOSTICS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION =
@@ -43,6 +46,8 @@ constexpr uint8_t RENDERER_BENCHMARK_SAMPLE_CLIENT_VERSION =
 constexpr uint8_t WATCH_GPS_MOTION_EVIDENCE_V1_CLIENT_VERSION =
     ride_ble_protocol_generated::
         WATCH_GPS_MOTION_EVIDENCE_V1_MINIMUM_CLIENT_VERSION;
+constexpr uint8_t TOPOGRAPHIC_CONTOURS_CLIENT_VERSION =
+    ride_ble_protocol_generated::TOPOGRAPHIC_CONTOURS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t CAP2_SCHEMA_VERSION =
     ride_ble_protocol_generated::CAPABILITY_SCHEMA_VERSION;
 constexpr uint32_t STREET_LABELS_FEATURE =
@@ -73,6 +78,8 @@ constexpr uint32_t RENDERER_DIAGNOSTICS_FEATURE =
 // Connected-display inactivity control (setting ID 36).
 constexpr uint32_t AUTOMATIC_DISPLAY_OFF_FEATURE =
     ride_ble_protocol_generated::AUTOMATIC_DISPLAY_OFF_FEATURE;
+constexpr uint32_t DISPLAY_INACTIVITY_TIMEOUTS_FEATURE =
+    ride_ble_protocol_generated::DISPLAY_INACTIVITY_TIMEOUTS_FEATURE;
 constexpr uint32_t RIDE_DIAGNOSTICS_FEATURE =
     ride_ble_protocol_generated::RIDE_DIAGNOSTICS_FEATURE;
 constexpr uint32_t DETAILED_RIDE_DIAGNOSTICS_FEATURE =
@@ -87,6 +94,8 @@ constexpr uint32_t RENDERER_BENCHMARK_SAMPLE_FEATURE =
     ride_ble_protocol_generated::RENDERER_BENCHMARK_SAMPLE_FEATURE;
 constexpr uint32_t WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE =
     ride_ble_protocol_generated::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE;
+constexpr uint32_t TOPOGRAPHIC_CONTOURS_FEATURE =
+    ride_ble_protocol_generated::TOPOGRAPHIC_CONTOURS_FEATURE;
 constexpr uint32_t MAP_NAVIGATION_ORIENTATION_FEATURE =
     ride_ble_protocol_generated::MAP_NAVIGATION_ORIENTATION_FEATURE;
 constexpr uint8_t MAP_NAVIGATION_ORIENTATION_CLIENT_VERSION =

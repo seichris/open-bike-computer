@@ -276,14 +276,15 @@ private:
     bool directMoving = false;
     bool wheelStopped = false;
     bool cadenceStopped = false;
-    bool allDirectStopped = false;
     bool directConflict = false;
     bool gpsKnown = false;
     bool gpsMoving = false;
     bool gpsResumeMoving = false;
     bool gpsStopped = false;
     bool gpsDisplacedForAsk = false;
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
     bool gpsDisplacedForAutomatic = false;
+#endif
     bool imuKnown = false;
     bool imuMoving = false;
     bool imuStopped = false;
@@ -450,9 +451,6 @@ private:
     result.cadenceStopped =
         result.cadenceKnown &&
         observation.cadenceRpm.value < profile_.cadenceStoppedRpm;
-    result.allDirectStopped =
-        result.hasDirect && (!result.wheelKnown || result.wheelStopped) &&
-        (!result.cadenceKnown || result.cadenceStopped);
     // A moving source always vetoes a pause. A disagreement is explicit when
     // one fresh direct source is moving and the other says stopped.
     result.directConflict =
@@ -496,11 +494,13 @@ private:
         nonnegativeFinite(observation.gpsNetDisplacementMeters.value) &&
         observation.gpsNetDisplacementMeters.value >=
                                profile_.gpsImuAskDisplacementMeters;
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
     result.gpsDisplacedForAutomatic =
         result.gpsKnown && gpsDisplacementFresh &&
         nonnegativeFinite(observation.gpsNetDisplacementMeters.value) &&
         observation.gpsNetDisplacementMeters.value >=
                                profile_.gpsImuAutomaticDisplacementMeters;
+#endif
 
     result.imuKnown = metricFresh(observation.imuMotionScore, nowMs,
                                   profile_.imuFreshnessMs) &&
@@ -605,14 +605,22 @@ private:
 
     const auto sensorCounts = startSensorWindow_.counts(
         nowMs, profile_.sensorStartWindowSeconds);
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
     const uint8_t requiredSensorSeconds =
         settings.startMode == StartMode::Automatic
             ? profile_.sensorAutomaticPositiveSeconds
             : profile_.sensorStartPositiveSeconds;
+#else
+    // Automatic start is rollout-gated out of production. Runtime settings
+    // are normalized to Ask before reaching the policy, so keep only the
+    // shipped Ask-to-Start thresholds in that image.
+    const uint8_t requiredSensorSeconds = profile_.sensorStartPositiveSeconds;
+#endif
     const bool sensorReady =
         sensorCounts.positive >= requiredSensorSeconds &&
         sensorCounts.contradictory == 0;
 
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
     const auto gpsCounts = startGpsImuWindow_.counts(
         nowMs, settings.startMode == StartMode::Automatic
                    ? profile_.gpsImuAutomaticWindowSeconds
@@ -626,6 +634,13 @@ private:
                                     evidence.gpsDisplacedForAutomatic
                               : gpsCounts.positive >= requiredGpsSeconds &&
                                     evidence.gpsDisplacedForAsk;
+#else
+    const auto gpsCounts = startGpsImuWindow_.counts(
+        nowMs, profile_.gpsImuAskWindowSeconds);
+    const uint8_t requiredGpsSeconds = profile_.gpsImuAskPositiveSeconds;
+    const bool gpsReady = gpsCounts.positive >= requiredGpsSeconds &&
+                          evidence.gpsDisplacedForAsk;
+#endif
     const uint8_t sensorProgress = progressPercent(
         sensorCounts.positive, requiredSensorSeconds);
     const uint8_t gpsProgress = progressPercent(

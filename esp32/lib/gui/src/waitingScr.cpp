@@ -104,8 +104,7 @@ lv_obj_t *createLabel(lv_obj_t *parent,
 }
 
 lv_obj_t *createBrandLockup(lv_obj_t *parent,
-                            const waiting_screen_layout::Rect &rect,
-                            const lv_font_t *font, int16_t labelY) {
+                            const waiting_screen_layout::Rect &rect) {
   lv_obj_t *lockup = lv_obj_create(parent);
   lv_obj_set_pos(lockup, rect.x, rect.y);
   lv_obj_set_size(lockup, rect.width, rect.height);
@@ -116,16 +115,10 @@ lv_obj_t *createBrandLockup(lv_obj_t *parent,
 
   lv_obj_t *logo = lv_image_create(lockup);
   lv_image_set_src(logo, &bicino_logo);
-  lv_obj_set_pos(logo, 0, static_cast<int16_t>((rect.height - 36) / 2));
-
-  lv_obj_t *wordmark = lv_label_create(lockup);
-  lv_obj_set_pos(wordmark, 45, labelY);
-  lv_obj_set_size(wordmark, static_cast<int16_t>(rect.width - 45),
-                  rect.height);
-  lv_obj_set_style_text_font(wordmark, font, 0);
-  lv_obj_set_style_text_color(wordmark, lv_color_white(), 0);
-  lv_obj_set_style_text_align(wordmark, LV_TEXT_ALIGN_LEFT, 0);
-  lv_label_set_text_static(wordmark, "Bicino");
+  lv_obj_set_pos(
+      logo,
+      static_cast<int16_t>((rect.width - bicino_logo.header.w) / 2),
+      static_cast<int16_t>((rect.height - bicino_logo.header.h) / 2));
   return lockup;
 }
 
@@ -250,10 +243,8 @@ void createWaitingScr() {
       updateWaitingBattery, ui_update_policy::kWaitingBatteryPeriodMs, NULL);
   lv_timer_pause(waitingBatteryTimer);
 
-  fullBrand = createBrandLockup(waitingScreen, layout.fullBrand,
-                                &lv_font_montserrat_38, -2);
-  compactBrand = createBrandLockup(waitingScreen, layout.compactBrand,
-                                   &lv_font_montserrat_24, 5);
+  fullBrand = createBrandLockup(waitingScreen, layout.fullBrand);
+  compactBrand = createBrandLockup(waitingScreen, layout.compactBrand);
 
   welcomeGroup = createTransparentGroup(waitingScreen);
   const pre_connection_presentation::Content welcomeContent =

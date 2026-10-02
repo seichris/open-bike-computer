@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ride_diagnostics_storage_policy.hpp"
 #include "ride_diagnostics_transfer_policy.hpp"
 
 #include <cstddef>
@@ -45,8 +46,6 @@ constexpr std::size_t kCriticalQueueCapacity = 8;
 constexpr std::size_t kQueueCapacity =
     kNormalQueueCapacity + kCriticalQueueCapacity;
 constexpr std::size_t kChunkBytes = 256 * 1024;
-constexpr std::size_t kRetentionBytes = 32 * 1024 * 1024;
-constexpr std::size_t kMinimumFreeSpaceBytes = 8 * 1024 * 1024;
 constexpr uint8_t kRetentionBoots = 20;
 constexpr uint8_t kRetentionDays = 14;
 
@@ -145,6 +144,9 @@ bool sealActiveChunk(uint32_t timeoutMs = 2000);
 bool beginStorageTransition(uint32_t timeoutMs = 2000);
 void endStorageTransition();
 bool prepareForShutdown(uint32_t timeoutMs = 2000);
+// Publish a lease before requesting a writer-owned seal. The subsequent seal
+// is the synchronization point with any retention pass already in progress.
+void armTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);
 void beginTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);
 void refreshTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);
 void endTransferSnapshotLease();

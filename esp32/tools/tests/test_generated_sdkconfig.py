@@ -170,6 +170,8 @@ class GeneratedSdkconfigTests(unittest.TestCase):
             "tools/generated_sdkconfig.py",
             "tools/pioarduino_custom_core.py",
             "tools/firmware_runtime.py",
+            "tools/firmware_compile_cache.py",
+            "tools/shared_firmware_cache.py",
         ):
             path = project / relative
             path.parent.mkdir(parents=True, exist_ok=True)

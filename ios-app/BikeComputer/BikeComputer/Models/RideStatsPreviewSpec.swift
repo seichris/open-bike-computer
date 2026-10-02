@@ -47,7 +47,14 @@ nonisolated struct RideStatsPreviewSpec: Decodable {
             ? firmwareTarget : "WAVESHARE_AMOLED_175"
         // Keep the whole example coherent: choosing a sensor widget enables
         // that sensor's sample data in all Smart fields, not only its own row.
-        let sensors = (widgets.contains(9) ? 1 : 0) | (widgets.contains(10) ? 2 : 0)
+        let selected = widgets.compactMap(RideBLERideStatsWidgetV1.init(rawValue:))
+        let hasPower = selected.contains {
+            switch $0 {
+            case .power, .powerZone, .powerZoneTime, .powerZoneRange: return true
+            default: return false
+            }
+        }
+        let sensors = (hasPower ? 1 : 0) | (selected.contains(.cadence) ? 2 : 0)
         return boards["\(target):\(sensors)"]
     }
 }

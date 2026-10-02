@@ -69,6 +69,16 @@ enum RideBLEShutdownPhaseV1: String, Equatable, Sendable {
     case disconnectTimedOut
 }
 
+enum RideBLERecoveryPhaseV1: String, Equatable, Sendable {
+    case cancelling
+    case cancellationTimedOut
+}
+
+struct RideBLERecoveryPolicyV1 {
+    static let cancellationTimeoutSeconds: TimeInterval = 5
+    static let blockedMessage = "Bicino recovery is blocked. Turn Bluetooth off and on in Settings to reconnect."
+}
+
 enum RideBLEWriterStateV1: Equatable, Sendable {
     case idle
     case waitingForWithoutResponseReadiness
@@ -105,6 +115,8 @@ enum RideBLETransportEventV1: Equatable, Sendable {
     case stopDisconnectTimedOut(generation: UInt64)
     case leaseReleased(generation: UInt64)
     case failed(generation: UInt64, reason: RideBLETransportFailureReasonV1)
+    case recoveryCancellationRequested(generation: UInt64)
+    case recoveryCancellationTimedOut(generation: UInt64)
     case disconnected(generation: UInt64)
 }
 
@@ -125,6 +137,7 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
     private(set) var generation: UInt64 = 0
     private(set) var phase: RideBLETransportPhaseV1 = .idle
     private(set) var shutdownPhase: RideBLEShutdownPhaseV1?
+    private(set) var recoveryPhase: RideBLERecoveryPhaseV1?
     private(set) var isLinkConnected = false
     private(set) var isAuthenticated = false
     private(set) var leaseGeneration: UInt32?
@@ -248,6 +261,7 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
             }
             guard phase != .stopping else { return .applied }
             phase = .stopping
+            recoveryPhase = nil
             shutdownPhase = .draining
             applied = true
 
@@ -307,6 +321,18 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
             lastFailure = reason
             applied = true
 
+        case .recoveryCancellationRequested(let eventGeneration):
+            guard eventGeneration == generation else { return .ignoredStaleGeneration }
+            guard phase == .recovering, recoveryPhase == nil else { return .rejectedInvalidTransition }
+            recoveryPhase = .cancelling
+            applied = true
+
+        case .recoveryCancellationTimedOut(let eventGeneration):
+            guard eventGeneration == generation else { return .ignoredStaleGeneration }
+            guard phase == .recovering, recoveryPhase == .cancelling else { return .rejectedInvalidTransition }
+            recoveryPhase = .cancellationTimedOut
+            applied = true
+
         case .disconnected(let eventGeneration):
             guard eventGeneration == generation else {
                 return .ignoredStaleGeneration
@@ -325,6 +351,7 @@ struct RideBLETransportStateMachineV1: Equatable, Sendable {
         phase: RideBLETransportPhaseV1
     ) {
         self.phase = phase
+        recoveryPhase = nil
         shutdownPhase = nil
         isLinkConnected = false
         isAuthenticated = false

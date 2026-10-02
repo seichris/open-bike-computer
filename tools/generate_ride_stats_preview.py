@@ -27,6 +27,11 @@ FUNCTIONS = (
     'updateConfigurableZone', 'updateConfigurableSlots',
 )
 INPUTS = (
+    'protocol/ride-ble-contract-v1.json',
+    'esp32/lib/ble_navigation/ride_ble_protocol.generated.hpp',
+    'esp32/lib/ble_navigation/screen_configuration_protocol.hpp',
+    'esp32/lib/ble_navigation/workout_zone_wire.generated.hpp',
+    'esp32/lib/ble_navigation/workout_zone_protocol.hpp',
     'esp32/lib/gui/src/rideMetricTypography.hpp',
     'esp32/lib/gui/src/rideMetricFontSelection.hpp',
     'esp32/lib/gui/src/rideTelemetryLayout.hpp',

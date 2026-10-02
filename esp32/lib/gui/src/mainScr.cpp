@@ -10,6 +10,7 @@
 #include "mainScreenRegistry.hpp"
 #include "worldRadioScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
+#include "../../ble_navigation/gps_input_freshness.hpp"
 #include "../../ble_navigation/screen_configuration.hpp"
 #ifdef WAVESHARE_EPAPER_397
 #include "../../epaper_display/epaper_display.hpp"
@@ -187,7 +188,7 @@ uint64_t navigationSignature() {
   return hash;
 }
 
-uint64_t gpsSignature() {
+uint64_t gpsSignature(uint32_t nowMs) {
   uint64_t hash = FNV_OFFSET;
 #ifdef WAVESHARE_EPAPER_397
   // Packet identity is presentation provenance. Identical coordinates from a
@@ -196,6 +197,12 @@ uint64_t gpsSignature() {
   hashScalar(hash, epaperBle.gpsPacketCount);
   hashScalar(hash, epaperBle.lastGpsCapturedAtMs);
 #endif
+  const auto sourceSample = gps_input_freshness::presentationSample(
+      gps.presentationSample, bleNavServer.getDebugStats().gpsSource);
+  // A source can expire without changing any GPSDATA field. Make that
+  // transition invalidate Ride Stats so its stale status and speed update.
+  hashScalar(hash, gps_input_freshness::presentationStatusBits(sourceSample,
+                                                                nowMs));
   hashScalar(hash, gps.gpsData.satellites);
   hashScalar(hash, gps.gpsData.fixMode);
   hashScalar(hash, isGpsFixed);
@@ -329,7 +336,7 @@ ui_update_policy::SourceSignatures captureSourceSignatures(uint32_t nowMs) {
 
   ui_update_policy::SourceSignatures signatures;
   signatures[ui_update_policy::Source::Navigation] = navigationSignature();
-  signatures[ui_update_policy::Source::Gps] = gpsSignature();
+  signatures[ui_update_policy::Source::Gps] = gpsSignature(nowMs);
   signatures[ui_update_policy::Source::Route] = routeOverlay.revision();
   signatures[ui_update_policy::Source::Workout] = cachedWorkoutSignature;
   uint64_t phoneBattery = FNV_OFFSET;
@@ -751,7 +758,8 @@ static void applyMapInstanceProfile(
   target.positionMarkerScale = source.positionMarkerScale;
   target.zoomLevel = source.zoomLevel;
   target.visibilityMask =
-      source.visibilityMask & MAP_VISIBILITY_EXTENDED_FEATURE_MASK;
+      source.visibilityMask &
+      map_profile_protocol::VISIBILITY_RENDER_FEATURE_MASK;
   target.labelDensity = source.labelDensity;
   target.labelLanguageMode = source.labelLanguageMode;
   target.labelTextSize = source.labelTextSize;
@@ -891,6 +899,11 @@ static tileName configuredDefaultTile() {
 static tileName nextEnabledTile(tileName current) {
   return main_screen_registry::nextEnabled(current,
                                            normalizedEnabledScreensMask());
+}
+
+static tileName previousEnabledTile(tileName current) {
+  return main_screen_registry::previousEnabled(
+      current, normalizedEnabledScreensMask());
 }
 
 static bool nextEnabledMapBackedTile(tileName current, tileName &next) {
@@ -2480,6 +2493,16 @@ void showNextMainScreen() {
   showMainTile(nextEnabledTile((tileName)activeTile));
 }
 
+void showPreviousMainScreen() {
+  if (screen_configuration::isReady()) {
+    const auto &document = screen_configuration::activeSnapshot().document;
+    showScreenInstance(screen_configuration::previousEnabledInstanceIndex(
+        document, activeScreenInstanceIndex));
+    return;
+  }
+  showMainTile(previousEnabledTile((tileName)activeTile));
+}
+
 void showConfiguredDefaultMainScreen() {
   if (screen_configuration::isReady()) {
     showScreenInstance(screen_configuration::defaultInstanceIndex(
@@ -2558,6 +2581,16 @@ void toggleNavigationScreen() {
   }
 
   showNextMainScreen();
+}
+
+void togglePreviousNavigationScreen() {
+  if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
+      !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      !mapGuidanceOverlay) {
+    return;
+  }
+
+  showPreviousMainScreen();
 }
 
 /**

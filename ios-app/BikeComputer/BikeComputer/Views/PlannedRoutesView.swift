@@ -1,11 +1,16 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import CoreLocation
 
 struct SavedRoutesSettingsSection: View {
     @ObservedObject var routeLibrary: PhoneRouteLibrary
     @ObservedObject var stravaCoordinator: StravaIntegrationCoordinator
+    @ObservedObject var destinationStore: SavedDestinationStore
     @Environment(\.savedRouteMapAction) private var mapAction
+    let onSaveOnlineRoute: (SavedDestination?) -> Void
     let onImportFromStrava: () -> Void
+    let onConfirmGPX: (OfflineRouteSaveDraft) -> Void
+    let importFeedback: String?
     @FocusState private var focusedRouteID: UUID?
     @State private var renameInteraction = SavedRouteRenameInteraction()
     @State private var errorMessage: String?
@@ -14,6 +19,7 @@ struct SavedRoutesSettingsSection: View {
     var body: some View {
         Section {
             if routeLibrary.routes.isEmpty &&
+                destinationStore.favoriteDestinations.isEmpty &&
                 routeLibrary.expiredStravaBookmarks.isEmpty {
                 Label(
                     "No Saved Routes",
@@ -25,10 +31,22 @@ struct SavedRoutesSettingsSection: View {
                 ForEach(routeLibrary.routes) { route in
                     routeRow(route)
                 }
+                ForEach(unlinkedFavorites) { favorite in
+                    unlinkedFavoriteRow(favorite)
+                }
                 ForEach(routeLibrary.expiredStravaBookmarks) { bookmark in
                     expiredStravaRow(bookmark)
                 }
             }
+
+            Button {
+                finishRenaming()
+                focusedRouteID = nil
+                onSaveOnlineRoute(nil)
+            } label: {
+                Label("Save an Online Route", systemImage: "magnifyingglass")
+            }
+            .accessibilityIdentifier("saveOnlineRoute")
 
             Button {
                 finishRenaming()
@@ -52,6 +70,12 @@ struct SavedRoutesSettingsSection: View {
                 }
             }
 
+            if let importFeedback {
+                Label(importFeedback, systemImage: "checkmark.circle")
+                    .font(.caption)
+                    .accessibilityIdentifier("offlineRouteSaveSuccess")
+            }
+
             if let error = stravaCoordinator.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
@@ -60,9 +84,7 @@ struct SavedRoutesSettingsSection: View {
         } header: {
             Text("Saved Routes")
         } footer: {
-            Text(
-                "Preview saved routes on the map, or send them to Apple Watch for offline navigation."
-            )
+            Text("Choose an online route to save or preview a saved route. Watch-supported routes are queued automatically.")
         }
         .alert(
             "Saved Route Error",
@@ -103,11 +125,16 @@ struct SavedRoutesSettingsSection: View {
                   byteCount <= GPXRouteImporterV1.maximumInputBytes else {
                 throw GPXRouteImporterError.fileTooLarge
             }
-            _ = try routeLibrary.importGPX(
-                Data(contentsOf: url, options: .mappedIfSafe),
-                fileName: url.lastPathComponent
-            )
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: GPXRouteImporterV1.maximumInputBytes + 1) ?? Data()
+            // The parser rechecks the bound even if the file grew after stat.
+            onConfirmGPX(try OfflineRouteSaveDraft.gpx(
+                data: data, fileName: url.lastPathComponent, now: Date()
+            ))
         } catch {
+            let cocoa = error as NSError
+            if cocoa.domain == NSCocoaErrorDomain && cocoa.code == NSUserCancelledError { return }
             errorMessage = (error as? LocalizedError)?.errorDescription ??
                 "The GPX route could not be imported."
         }
@@ -124,6 +151,7 @@ struct SavedRoutesSettingsSection: View {
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
+                favoriteButton(for: route, displayName: displayName)
                 routeName(route, displayName: displayName)
 
                 Spacer()
@@ -135,11 +163,13 @@ struct SavedRoutesSettingsSection: View {
                     displayName: displayName
                 )
 
-                watchStatusControl(
-                    status,
-                    route: route,
-                    displayName: displayName
-                )
+                if route.providerID != RouteProviderPolicyV1.mapKit.providerID {
+                    watchStatusControl(
+                        status,
+                        route: route,
+                        displayName: displayName
+                    )
+                }
 
                 if route.providerID ==
                     RouteProviderPolicyV1.strava.providerID {
@@ -158,7 +188,7 @@ struct SavedRoutesSettingsSection: View {
                         try routeLibrary.delete(route)
                     } catch {
                         errorMessage =
-                            "The route was kept because deletion could not be completed safely."
+                            "Deletion could not be completed safely. Reopen Saved Routes to retry cleanup."
                     }
                 } label: {
                     Image(systemName: "trash")
@@ -185,12 +215,81 @@ struct SavedRoutesSettingsSection: View {
         .padding(.vertical, 4)
     }
 
+    private var unlinkedFavorites: [SavedDestination] {
+        let installedRouteIDs = Set(routeLibrary.routes.map(\.id))
+        return destinationStore.favoriteDestinations.filter { favorite in
+            guard let routeID = favorite.savedRouteID else { return true }
+            return !installedRouteIDs.contains(routeID)
+        }
+    }
+
+    private func unlinkedFavoriteRow(
+        _ favorite: SavedDestination
+    ) -> some View {
+        HStack(spacing: 12) {
+            Button {
+                destinationStore.removeFavorite(favorite)
+            } label: {
+                Image(systemName: "star.fill")
+                    .foregroundStyle(.yellow)
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Remove \(favorite.name) from favorites")
+
+            Text(favorite.name)
+                .font(.headline)
+                .lineLimit(2)
+
+            Spacer()
+
+            Button("Choose Route") {
+                onSaveOnlineRoute(favorite)
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Choose a route for \(favorite.name)")
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func favoriteButton(
+        for route: PlannedRouteSummaryV1,
+        displayName: String
+    ) -> some View {
+        let favorite = destinationStore.favorite(savedRouteID: route.id)
+        return Button {
+            if let favorite {
+                destinationStore.removeFavorite(favorite)
+            } else {
+                destinationStore.addFavorite(
+                    SavedDestination(
+                        name: route.destination.label,
+                        coordinate: CLLocationCoordinate2D(
+                            latitude: route.destination.coordinate.latitude,
+                            longitude: route.destination.coordinate.longitude
+                        )
+                    ),
+                    savedRouteID: route.id
+                )
+            }
+        } label: {
+            Image(systemName: favorite == nil ? "star" : "star.fill")
+                .foregroundStyle(favorite == nil ? Color.secondary : .yellow)
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel(
+            favorite == nil
+                ? "Add \(displayName) to favorites"
+                : "Remove \(displayName) from favorites"
+        )
+    }
+
     private func mapPreviewButton(
         route: PlannedRouteSummaryV1,
         displayName: String
     ) -> some View {
-        // This is a local read, independent of Watch transfer state. Keep it
-        // beside the Watch upload action so each route's controls stay together.
+        // This is a local read, independent of Watch transfer state.
         Button {
             finishRenaming()
             focusedRouteID = nil
@@ -207,7 +306,7 @@ struct SavedRoutesSettingsSection: View {
                 .frame(width: 32, height: 32)
         }
         .buttonStyle(.borderless)
-        .disabled(mapAction == nil || mapAction?.isNavigationActive == true)
+        .disabled(mapAction == nil || mapAction?.isNavigationActive == true || !routeLibrary.isAvailableOffline(route))
         .accessibilityLabel("Show \(displayName) on map")
         .accessibilityHint(
             mapAction?.isNavigationActive == true
@@ -370,34 +469,22 @@ struct SavedRoutesSettingsSection: View {
                 .frame(width: 32, height: 32)
                 .accessibilityLabel("\(displayName) is saved on Apple Watch")
         case .transferring:
-            cancelSendButton(route, displayName: displayName)
+            EmptyView()
         case .deleting:
             ProgressView()
                 .controlSize(.small)
                 .frame(width: 32, height: 32)
                 .accessibilityLabel("Deleting \(displayName) from Apple Watch")
         case .localOnly:
-            sendButton(
-                route,
-                displayName: displayName,
-                systemImage: "arrow.up.circle",
-                color: .primary
-            )
+            EmptyView()
         case .rejected:
-            sendButton(
-                route,
-                displayName: displayName,
-                systemImage: "arrow.clockwise.circle",
-                color: .red
-            )
+            retrySendButton(route, displayName: displayName)
         }
     }
 
-    private func sendButton(
+    private func retrySendButton(
         _ route: PlannedRouteSummaryV1,
-        displayName: String,
-        systemImage: String,
-        color: Color
+        displayName: String
     ) -> some View {
         Button {
             finishRenaming()
@@ -408,32 +495,12 @@ struct SavedRoutesSettingsSection: View {
                 errorMessage = error.localizedDescription
             }
         } label: {
-            Image(systemName: systemImage)
-                .foregroundStyle(color)
+            Image(systemName: "arrow.clockwise.circle")
+                .foregroundStyle(.red)
                 .frame(width: 32, height: 32)
         }
         .buttonStyle(.borderless)
-        .accessibilityLabel("Send \(displayName) to Apple Watch")
-    }
-
-    private func cancelSendButton(
-        _ route: PlannedRouteSummaryV1,
-        displayName: String
-    ) -> some View {
-        Button(role: .destructive) {
-            finishRenaming()
-            focusedRouteID = nil
-            if !routeLibrary.cancelSendToWatch(route) {
-                errorMessage =
-                    "The queued Watch transfer is no longer cancellable. " +
-                    "Keep the iPhone and Watch nearby so its final status can arrive."
-            }
-        } label: {
-            Image(systemName: "xmark.circle")
-                .frame(width: 32, height: 32)
-        }
-        .buttonStyle(.borderless)
-        .accessibilityLabel("Cancel sending \(displayName) to Apple Watch")
+        .accessibilityLabel("Retry sending \(displayName) to Apple Watch")
     }
 
     private func transientStatus(

@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from PIL import Image
-from shapely import Polygon, box, set_precision
+from shapely import Point, Polygon, box, set_precision
 from shapely.ops import unary_union
 
 
@@ -303,6 +303,35 @@ class GenericGeometryTests(unittest.TestCase):
                 box(0, 0, 60, 60),
                 max_pieces_per_block=8,
             )
+
+    def test_dense_polygon_with_hole_fits_source_budget_without_area_loss(self):
+        # A detailed outer ring plus one hole needs over 2,048 triangles, even
+        # though the encoded polygon data still fits comfortably in one block.
+        shell = Point(2048, 2048).buffer(1600, quad_segs=600)
+        source = Polygon(
+            shell.exterior.coords,
+            [[(2000, 2000), (2100, 2000), (2100, 2100),
+              (2000, 2100), (2000, 2000)]],
+        )
+        block = box(0, 0, 4095, 4096)
+        with self.assertRaises(GenericGeometryLimitError):
+            clip_polygons(
+                [styled_feature(source)], block,
+                max_pieces_per_source=2048,
+            )
+
+        pieces = clip_polygons([styled_feature(source)], block)
+        self.assertGreater(len(pieces), 2048)
+        self.assertLessEqual(len(pieces), 4096)
+        self.assertTrue(all(not item["geom"].interiors for item in pieces))
+        expected = set_precision(source, 1.0, mode="valid_output")
+        merged = unary_union([item["geom"] for item in pieces])
+        self.assertLess(expected.symmetric_difference(merged).area, 1e-7)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = pathlib.Path(tmp) / "dense.fmb"
+            write_fmb(output, pieces, [], 0, 0)
+            self.assertLess(output.stat().st_size, 2 * 1024 * 1024)
 
     def test_explicit_debug_render_keeps_hole_transparent(self):
         source = Polygon(

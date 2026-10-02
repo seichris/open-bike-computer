@@ -1,6 +1,6 @@
 # Bicino Privacy Policy
 
-Effective date: August 27, 2026
+Effective date: September 16, 2026
 
 Bicino is a cycling navigation and workout companion. This policy
 explains what information the iPhone app, Apple Watch app, compatible bike
@@ -14,36 +14,49 @@ use third-party analytics SDKs.
 
 ## Health and fitness
 
-When you explicitly start an outdoor cycling workout in Bike Computer, the
-Apple Watch app owns and records that workout. With your Health authorization,
-it can read live cycling measurements such as heart rate, active energy,
-distance, speed, cycling power, and cadence, and can save one completed workout
-and its permitted route to HealthKit.
+When you explicitly start an outdoor cycling workout, the selected recorder is
+Apple Watch or, on iOS 26 and later, iPhone. With your Health authorization, that
+recorder owns the session and saves the completed workout and permitted route to
+HealthKit. Watch recording can collect heart rate, energy, distance, speed, power,
+and cadence. Phone recording uses GPS for route/distance/speed, collects available
+HealthKit energy, and can collect heart rate from a compatible external monitor.
+It does not use the Watch as a hidden second recorder.
 
-Live workout information is mirrored through Apple's paired Watch/iPhone
-workout connection so it can appear in the iPhone app. If you connect a
-compatible bike computer, the iPhone can also relay current workout values over
-the existing authenticated local Bluetooth connection. The bike computer keeps
-these values in memory only and clears them when the workout returns to idle or
-the device restarts.
+For Watch-owned rides, live workout information is mirrored through Apple's
+paired workout connection. Phone-owned rides are recorded locally on iPhone.
+Either selected source can appear in the iPhone app and Live Activity and be
+relayed to an authenticated compatible bike computer. The bike computer keeps
+these live values in memory only and clears them when the workout returns to
+idle or the device restarts.
+
+The iPhone keeps a protected, device-local recovery record containing the
+recording owner, random session identifier, lifecycle timestamps and state, and
+save/discard outcome bookkeeping. It contains no heart-rate measurements or GPS
+coordinates, is excluded from backup, and is cleared when you acknowledge a
+resolved ride. Unresolved start/save records are retained to prevent unintended
+second recordings or duplicate save attempts. Phone route and health samples are
+held by the native HealthKit workout builder rather than a second local archive.
 
 We do not upload HealthKit workouts, heart rate, energy, cycling sensor values,
 or workout routes to our servers. Apple controls HealthKit storage and access.
 You can review or delete saved workouts in Apple's Health or Fitness apps and
 change Bike Computer's Health access in system settings.
 
-Starting a Bike Computer workout may replace another app's active workout on
-Apple Watch. The Bike Computer Watch app shows a warning and requires
-confirmation before it tries to start; cancelling that warning does not create
-a Bike Computer workout. An iPhone-initiated start instead proceeds directly
-after checking for a paired Watch and installed Bike Computer companion because
-public APIs do not reveal whether another workout app is active.
+Starting a Watch workout may replace another app's active Watch workout under
+Apple's session rules. Public APIs do not let Bicino enumerate another app's
+active workouts. The selected recorder does not change merely because a
+connection drops. If independent Bicino recordings are started on disconnected
+devices, neither is silently stopped, discarded, or merged when they reconnect;
+the iPhone surfaces the conflict for you to review.
 
 ## Location
 
 The iPhone app uses location to show your position, calculate cycling routes,
 provide turn-by-turn navigation, and track route progress while navigation is
-active. The Apple Watch app uses location to drive navigation and send the
+active. For iPhone-owned workouts it also records the permitted GPS route and
+cycling distance independently of navigation. A foreground-started phone workout
+can continue using location with the visible system background indicator;
+unattended background GPS restart requires Always location permission. The Apple Watch app uses location to drive navigation and send the
 current position and guidance to an authenticated compatible bike computer. It
 also uses location during an outdoor workout to record the permitted workout
 route and to provide speed and elevation when a cycling sensor does not supply

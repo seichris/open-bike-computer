@@ -1,0 +1,82 @@
+# Pinned 2021 Copernicus DEM source review
+
+Review date: 2026-09-25. Scope: only `copernicus-glo30-public-2021` and
+`copernicus-glo90-2021` from `map-platform/config/topography-source-policy-v1.json`.
+The maintainer accepted use of these exact public sources on 2026-09-25. This
+record does not approve the newer registered Copernicus releases.
+
+## Terms and notices
+
+- GLO-30 Public: [WorldDEM-30 free and open licence](https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/DEM/resources/license/License-COPDEM-30.pdf),
+  retrieved 2026-09-25, SHA-256
+  `9cd37d37ea654bbcaf0a2e059e6a3a5b5f76072824d8dd860ccf274ada8951bd`.
+  The reviewed copy is [retained here](licenses/License-COPDEM-30.pdf).
+- GLO-90: [Copernicus DEM licence collection](https://dataspace.copernicus.eu/sites/default/files/media/files/2025-06/copernicus_contributing_mission_data_access_v2_cop_dem_licenses.pdf),
+  pages 19–20 for the GLO-90 free and open licence, retrieved 2026-09-25,
+  SHA-256 `bb4a01dcd7f61acefa81c9ccd76af975e12096158169acf0d7b5c44c26c8701f`.
+  The reviewed copy is [retained here](licenses/copernicus_contributing_mission_data_access_v2_cop_dem_licenses.pdf).
+- Both free and open licences grant reproduction, distribution, public
+  communication and adaptation without a fee or geographic/time limit.
+  Article 6 requires the original source notice, an adapted-data notice, and
+  a programme liability notice. The exact product-specific text is emitted
+  into each map archive's `LICENSES/Elevation-Sources.txt` and
+  `ATTRIBUTION.txt` by `topography_notices.py`; the iPhone map details show it
+  for these two source IDs. Topographic share pages display both possible
+  pinned-source notices and direct readers to the archive for the exact
+  contributing source. Unknown sources fail notice generation.
+- [Copernicus DEM collection](https://dataspace.copernicus.eu/explore-data/data-collections/copernicus-contributing-missions/collections-description/COP-DEM)
+  identifies GLO-30/GLO-90 as digital surface models and gives their datum,
+  resolution, coverage and public-source attribution guidance.
+
+Before approving a source-policy change or production release, run
+`python3 tools/check_topography_terms.py --upstream` from the repository root.
+It verifies the retained files and current official downloads against the
+reviewed hashes. A mismatch requires reviewing the new terms and source access;
+it must not silently replace these pinned copies.
+
+## Exact public input boundary
+
+The [public COG bucket readme](https://copernicus-dem-90m.s3.amazonaws.com/readme.html)
+describes anonymous GLO-30 Public and GLO-90 COGs and says that some GLO-30
+countries are absent. The configured adapter uses only the two fixed S3
+origins and pinned 2021 tile indices. The index SHA-256 values are
+`10604e3052c98a09e9216f1a8f0a555a04148419757575f783d4937fd44316dc`
+for GLO-30 Public and
+`e5a5efe088e70506bc1007d22006bdcb09b0ec03177b62f9652363c13f49ed97`
+for GLO-90. GLO-90 fills unavailable GLO-30 cells. These are DSM heights in
+metres, horizontal EPSG:4326 and vertical EPSG:3855. The resulting contours
+are not surveyed bare-earth terrain.
+
+## Live public-source boundary sample
+
+On 2026-09-25, the operator sampler selected W/S/E/N
+`42.975 / 40.50 / 43.025 / 40.55`, crossing the 43°E boundary from a public
+GLO-30 cell `(42, 40)` into a fallback GLO-90 cell `(43, 40)`. The pinned
+catalog planned both cells with complete coverage. Both raw raster audits
+reported EPSG:4326, pixel registration `Point`, zero invalid pixels and the
+expected 3600×3600 / 1200×1200 dimensions. Their fetched TIFF SHA-256 values
+were `2b2c0cac572cc67d9d2732c019e76d6d46359b8a0d60cd8fe764bc32596965d8`
+and `528af41185c235fc0777187d01b669ab046378a824bbf528a1652308d6621fa0`.
+The 58×72 working grid contained 2,096 GLO-30 and 2,080 GLO-90 pixels with
+zero no-data pixels. It selected the region-wide 90 m / 50 m contour profile,
+producing 19 records and 398 points. Two runs under macOS arm64, Python
+3.11.13, rasterio 1.4.4, GDAL 3.10.3, PROJ 9.7.1, contourpy 1.3.2 and
+NumPy 1.26.4 produced identical 13,777-byte evidence with SHA-256
+`e46c49b2b11655375c4af6466652ed52c3b92877576ced5be2aaae6fe3565fa4`.
+This verifies one mixed-source acquisition and deterministic processing path;
+it does not establish visual seam quality, water masks or a production-ready
+artifact. The public height-only inputs did not include those quality masks.
+
+## Still required before production approval
+
+- Verify regional source boundaries, water/no-data behavior, high latitudes,
+  representative raw/derived checksums and exact-input retention under the
+  production cache policy.
+- Confirm notice visibility on deployed catalog/share pages and the physical
+  1.75-inch device. The 2.06-inch device is unavailable for its separate gate.
+- Record app/device resource and rendering measurements, signed production
+  artifact transfer, rollback and the final reviewer decision.
+
+`productionApproved` remains false until these checks are recorded. A map made
+under the current unapproved policy cannot be promoted under an approved
+policy because the source-policy digest must match.

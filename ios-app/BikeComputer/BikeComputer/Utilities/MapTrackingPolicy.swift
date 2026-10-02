@@ -34,6 +34,14 @@ enum MapTrackingPolicy {
     }
 }
 
+enum MainMapSearchLayoutPolicy {
+    static func showsSupplementaryMapChrome(
+        isSearchPanelExpanded: Bool
+    ) -> Bool {
+        !isSearchPanelExpanded
+    }
+}
+
 enum RideSheetLayoutPolicy {
     static let standardBottomPadding: CGFloat = 12
     static let standardCompactHeight: CGFloat = 280

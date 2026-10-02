@@ -129,6 +129,28 @@ constexpr tileName nextEnabled(tileName current, uint8_t enabledMask) {
       static_cast<uint8_t>(DeviceScreenId::MapPlusNavigation), normalized));
 }
 
+constexpr tileName previousEnabled(tileName current, uint8_t enabledMask) {
+  const uint8_t normalized = normalizedMask(enabledMask);
+  std::size_t currentIndex = 0;
+  const uint8_t currentDeviceScreen = deviceScreenForTile(current);
+  for (std::size_t index = 0; index < SCREENS.size(); ++index) {
+    if (static_cast<uint8_t>(SCREENS[index].deviceScreen) ==
+        currentDeviceScreen) {
+      currentIndex = index;
+      break;
+    }
+  }
+  for (std::size_t offset = 1; offset <= SCREENS.size(); ++offset) {
+    const Descriptor &candidate =
+        SCREENS[(currentIndex + SCREENS.size() - offset) % SCREENS.size()];
+    if ((normalized & screenBit(candidate.deviceScreen)) != 0) {
+      return candidate.tile;
+    }
+  }
+  return tileForDeviceScreen(normalizedDefault(
+      static_cast<uint8_t>(DeviceScreenId::MapPlusNavigation), normalized));
+}
+
 constexpr bool nextEnabledMapBacked(tileName current, uint8_t enabledMask,
                                     tileName &next) {
   const uint8_t normalized = normalizedMask(enabledMask);

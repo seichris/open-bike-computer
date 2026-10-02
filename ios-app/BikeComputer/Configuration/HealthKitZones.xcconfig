@@ -1,0 +1,6 @@
+// SDK gating is separate from @available runtime gating. Do not infer SDK
+// contents from the Swift compiler version: CI may select an older Apple SDK.
+BICINO_HEALTHKIT_ZONE_FLAGS =
+BICINO_HEALTHKIT_ZONE_FLAGS[sdk=watchos27*] = BICINO_HEALTHKIT_WORKOUT_ZONES
+BICINO_HEALTHKIT_ZONE_FLAGS[sdk=watchsimulator27*] = BICINO_HEALTHKIT_WORKOUT_ZONES
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(BICINO_HEALTHKIT_ZONE_FLAGS)

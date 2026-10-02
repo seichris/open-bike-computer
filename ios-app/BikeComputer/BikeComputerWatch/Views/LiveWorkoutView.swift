@@ -227,6 +227,17 @@ struct LiveWorkoutView: View {
                     )
                 }
 
+                Text(
+                    manager.snapshot.nativeZones?.heartRate?.configuration.source.label
+                        ?? "Bicino zones · configured maximum heart rate"
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+                if let native = manager.snapshot.nativeZones?.cyclingPower {
+                    WorkoutNativeZoneCard(group: native)
+                }
+
                 HStack(spacing: 12) {
                     workoutTime(
                         "Elapsed",
@@ -433,6 +444,9 @@ struct LiveWorkoutView: View {
     }
 
     private var heartRateZoneValue: String {
+        if let native = manager.snapshot.nativeZones?.heartRate {
+            return native.currentZone.map { "Z\($0)" } ?? "--"
+        }
         guard let zone = manager.snapshot.currentHeartRateZone else {
             return "--"
         }
@@ -440,6 +454,9 @@ struct LiveWorkoutView: View {
     }
 
     private var heartRateZoneUnit: String {
+        if let native = manager.snapshot.nativeZones?.heartRate {
+            return "OF \(native.configuration.ranges.count)"
+        }
         guard let count = manager.snapshot.heartRateZoneCount else {
             return "ZONE"
         }

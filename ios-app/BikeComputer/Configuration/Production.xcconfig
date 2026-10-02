@@ -1,3 +1,5 @@
+#include "HealthKitZones.xcconfig"
+
 // Production identities must stay aligned with the App Store record and its
 // embedded Apple Watch and WidgetKit products.
 BICINO_IOS_BUNDLE_IDENTIFIER = LetItRide.BikeComputer

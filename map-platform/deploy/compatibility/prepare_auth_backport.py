@@ -122,12 +122,22 @@ app_attest_store = AppAttestStore(
     app_attest_verifier or production_app_attest_verifier(deployment_channel),
     challenge_ttl_seconds=int(os.environ.get("MAP_PLATFORM_APP_ATTEST_CHALLENGE_TTL_SECONDS", "300")),
 )
-''').body[0]
+app_attest_rotation_ip_policy = RateLimitPolicy(
+    "app-attest-rotation-ip",
+    int(os.environ.get("MAP_PLATFORM_APP_ATTEST_ROTATION_IP_LIMIT_PER_DAY", "12")),
+    86_400,
+)
+app_attest_rotation_installation_policy = RateLimitPolicy(
+    "app-attest-rotation-installation",
+    int(os.environ.get("MAP_PLATFORM_APP_ATTEST_ROTATION_LIMIT_PER_DAY", "3")),
+    86_400,
+)
+''').body
     channel_indices = [i for i, n in enumerate(old_factory.body)
                        if isinstance(n, ast.Assign) and ast.unparse(n).startswith("deployment_channel =")]
     if len(channel_indices) != 1:
         raise ValueError("base deployment channel changed")
-    old_factory.body.insert(channel_indices[0] + 1, setup)
+    old_factory.body[channel_indices[0] + 1:channel_indices[0] + 1] = setup
     app_state_index = next(i for i, n in enumerate(old_factory.body)
                            if ast.unparse(n).startswith("app.state.installation_store ="))
     old_factory.body.insert(app_state_index + 1, ast.parse("app.state.app_attest_store = app_attest_store").body[0])

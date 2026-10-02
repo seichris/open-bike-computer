@@ -345,6 +345,13 @@ nonisolated enum OfflineMapCatalogAvailabilityPolicy {
               ) else {
             return false
         }
+        if map.rendererFormatVersion == 4,
+           OfflineMapTopographyCompanionPolicy.compatibleCompanion(
+            for: map,
+            deliveryTier: artifact.deliveryTier
+           ) == nil {
+            return false
+        }
         return true
     }
 }
@@ -405,8 +412,8 @@ nonisolated struct OfflineMapReaderCapabilities: Codable, Equatable, Sendable {
         renderers: [
             Renderer(
                 renderer: "esp32-fmb",
-                formatVersions: [1, 2, 3],
-                features: ["3d-buildings", "street-labels"]
+                formatVersions: [1, 2, 3, 4],
+                features: ["3d-buildings", "contours", "street-labels"]
             ),
         ]
     )
@@ -419,6 +426,17 @@ nonisolated struct OfflineMapReaderRequirements: Codable, Equatable, Sendable {
     let renderer: String
     let rendererFormatVersion: Int
     let requiredFeatures: [String]
+}
+
+nonisolated struct OfflineMapTopographyCompanionRequirements: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let role: String
+    let mapContentReceipt: String
+    let mapId: String
+    let profileVersion: Int
+    let intermediateSha256: String
+    let sourcePolicySha256: String
+    let attributionSha256: String
 }
 
 nonisolated enum OfflineMapReaderCompatibilityPolicy {
@@ -470,6 +488,52 @@ nonisolated enum OfflineMapReaderCompatibilityPolicy {
         (allowsEmpty || !values.isEmpty) &&
             values.count <= 32 &&
             Set(values).count == values.count
+    }
+}
+
+nonisolated enum OfflineMapTopographyCompanionPolicy {
+    static let format = "topography-ios-v1"
+    static let mediaType = "application/vnd.bicino.topography+sqlite3"
+
+    static func compatibleCompanion(
+        for map: OfflineMapCatalogMap,
+        deliveryTier: String
+    ) -> OfflineMapCatalogArtifact? {
+        guard map.rendererFormatVersion == 4,
+              map.features == ["3d-buildings", "contours", "street-labels"],
+              let contentReceipt = map.contentReceipt,
+              isSHA256(contentReceipt) else {
+            return nil
+        }
+        let preferredTier = deliveryTier.lowercased()
+        guard ["development", "production"].contains(preferredTier) else {
+            return nil
+        }
+        let candidates = map.artifacts.filter { artifact in
+            guard artifact.format == format,
+                  artifact.mediaType == mediaType,
+                  artifact.filename.hasSuffix(".btopo"),
+                  artifact.bytes > 0,
+                  artifact.bytes <= 256 * 1024 * 1024,
+                  isSHA256(artifact.sha256),
+                  artifact.deliveryTier.lowercased() == preferredTier,
+                  let requirements = artifact.companionRequirements else {
+                return false
+            }
+            return requirements.schemaVersion == 1 &&
+                requirements.role == format &&
+                requirements.profileVersion == 1 &&
+                requirements.mapContentReceipt == contentReceipt &&
+                requirements.mapId == map.mapId &&
+                isSHA256(requirements.intermediateSha256) &&
+                isSHA256(requirements.sourcePolicySha256) &&
+                isSHA256(requirements.attributionSha256)
+        }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
+    private static func isSHA256(_ value: String) -> Bool {
+        value.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil
     }
 }
 
@@ -677,6 +741,7 @@ nonisolated struct OfflineMapCatalogArtifact: Codable, Equatable, Sendable {
     let requiredFirmwareGitSha: String?
     let deliveryTier: String
     var readerRequirements: OfflineMapReaderRequirements? = nil
+    var companionRequirements: OfflineMapTopographyCompanionRequirements? = nil
 
     var platformArtifact: OfflineMapArtifact {
         OfflineMapArtifact(
@@ -697,7 +762,11 @@ nonisolated struct OfflineMapCatalogArtifact: Codable, Equatable, Sendable {
             requiredIosBuildSha256: requiredIosBuildSha256,
             requiredFirmwareVersion: requiredFirmwareVersion,
             requiredFirmwareBuild: requiredFirmwareBuild,
-            requiredFirmwareGitSha: requiredFirmwareGitSha
+            requiredFirmwareGitSha: requiredFirmwareGitSha,
+            mapContentReceipt: companionRequirements?.mapContentReceipt,
+            intermediateSha256: companionRequirements?.intermediateSha256,
+            sourcePolicySha256: companionRequirements?.sourcePolicySha256,
+            attributionSha256: companionRequirements?.attributionSha256
         )
     }
 }
@@ -706,6 +775,7 @@ nonisolated struct OfflineMapCatalogMap: Codable, Equatable, Sendable, Identifia
     var id: String { mapEntryId }
     let mapEntryId: String
     let mapId: String
+    var contentReceipt: String? = nil
     var alias: String
     let aliasSource: String
     let aliasRevision: Int
@@ -773,6 +843,13 @@ nonisolated struct OfflineMapLibraryLinkCode: Codable, Equatable, Sendable {
 }
 
 nonisolated struct OfflineMapCatalogDownloadGrant: Codable, Equatable, Sendable {
+    let downloadURL: URL
+    let expiresAt: String
+    let artifact: OfflineMapCatalogArtifact
+    let companion: OfflineMapCatalogCompanionDownloadGrant?
+}
+
+nonisolated struct OfflineMapCatalogCompanionDownloadGrant: Codable, Equatable, Sendable {
     let downloadURL: URL
     let expiresAt: String
     let artifact: OfflineMapCatalogArtifact

@@ -22,15 +22,15 @@ class WorldRadioContractReuseTests(unittest.TestCase):
         })
         self.assertEqual(generator.SWIFT_OUTPUT.read_text(), generator.render_swift(contract))
         self.assertEqual(generator.CPP_OUTPUT.read_text(), generator.render_cpp(contract))
-        capabilities = contract["capabilities"]
-        self.assertEqual(capabilities["current_client_version"], 26)
+        # Freeze this feature's wire requirement, not the latest client version:
+        # adding an unrelated capability must not invalidate World Radio.
+        radio = contract["capabilities"]["features"]["world_radio"]
+        self.assertEqual(radio, {"bit": 27, "minimum_client_version": 25})
+        self.assertGreaterEqual(contract["capabilities"]["current_client_version"],
+                                radio["minimum_client_version"])
         self.assertEqual(
-            capabilities["features"]["world_radio"],
-            {"bit": 27, "minimum_client_version": 25},
-        )
-        self.assertEqual(
-            capabilities["features"]["board_display_metadata"],
-            {"bit": 28, "minimum_client_version": 26},
+            contract["capabilities"]["features"]["board_display_metadata"],
+            {"bit": 31, "minimum_client_version": 29},
         )
 
     def test_invalid_screen_assignments_fail_closed(self):

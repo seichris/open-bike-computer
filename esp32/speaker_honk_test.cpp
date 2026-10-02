@@ -19,7 +19,6 @@ constexpr uint32_t PLAYBACK_FINISH_TIMEOUT_MS = 15000;
 constexpr Sound TEST_SOUNDS[] = {
     Sound::BellDing,
     Sound::PlasticBicycleHorn,
-    Sound::RotatingBicycleBell,
     Sound::SqueezeHorn,
 };
 
@@ -71,7 +70,7 @@ void setup() {
     return;
   }
 
-  Serial.printf("Speaker test: cycling sound IDs 1, 2, 3, 5 at %u%% volume\n",
+  Serial.printf("Speaker test: cycling sound IDs 1, 2, 5 at %u%% volume\n",
                 TEST_VOLUME_PERCENT);
   Serial.println(
       "Speaker test: first complete cycle must finish before boot readiness");

@@ -29,10 +29,11 @@ nonisolated struct WorkoutServiceActivityTracker: Sendable {
     }
 }
 
-/// Main-actor publication boundary for all Watch-owned workout state shown on
-/// iPhone. The store never writes HealthKit data or persists raw health metrics.
+/// Main-actor publication boundary for the selected recorder on iPhone. The store never writes HealthKit data or persists raw health metrics.
 @MainActor
 final class WorkoutMetricsStore: ObservableObject {
+    @Published var recordingOwner: WorkoutRecordingOwner = .watch
+    @Published var recordingMessage: String?
     @Published private(set) var presentation: WorkoutMirrorPresentationV1
     @Published private(set) var shouldMaintainWorkoutServices: Bool
     @Published private(set) var currentHeartRateZoneElapsedTime: TimeInterval?
@@ -100,6 +101,25 @@ final class WorkoutMetricsStore: ObservableObject {
                 at: referenceDate
             )
         self.workoutServiceActivityTracker = workoutServiceActivityTracker
+    }
+
+    /// An isolated local recorder reuses the validated snapshot/presentation
+    /// reducer without sharing a transport or state with Watch mirroring.
+    func beginLocalWorkout() {
+        reducer = WorkoutMirrorStateReducer()
+        reducer.attachMirroredSession(at: now())
+        recordingOwner = .iphone
+        publish()
+    }
+
+    /// The coordinator's output store retains its own navigation context. Only
+    /// the selected recorder's reducer is copied; late data from another owner
+    /// never enters this store or the bike-computer telemetry path.
+    func followWorkoutState(from source: WorkoutMetricsStore, owner: WorkoutRecordingOwner) {
+        recordingOwner = owner
+        recordingMessage = source.recordingMessage
+        reducer = source.reducer
+        publish()
     }
 
     @discardableResult
@@ -379,6 +399,10 @@ final class WorkoutMetricsStore: ObservableObject {
         }
 
         var normalized = iPhoneTelemetry
+        if recordingOwner == .iphone {
+            normalized.navigationDistanceMeters = nil
+            return normalized
+        }
         guard iPhoneTelemetry.isNavigating,
               let currentDistance = validNavigationDistance(
                   iPhoneTelemetry.navigationDistanceMeters

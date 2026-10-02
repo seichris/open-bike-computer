@@ -13,6 +13,8 @@ import sys
 from building_source_index import (
     BuildingSourceIndex,
     BuildingSourceIndexError,
+    _building_tags,
+    _eligible_building_parent,
     canonical_json,
     file_sha256,
     initialize_source_index_database,
@@ -75,12 +77,8 @@ def scan_source(path: Path, spool_path: Path) -> None:
                     for member in relation.members
                     if member.type in {"n", "w", "r"}
                 ]
-                seed = (
-                    tags.get("type") == "building"
-                    or tags.get("building") not in (None, "", "no")
-                    or tags.get("building:part") not in (None, "", "no")
-                )
-                eligible_parent = seed or tags.get("type") == "multipolygon"
+                seed = _building_tags(tags)
+                eligible_parent = _eligible_building_parent(tags)
                 connection.execute(
                     "INSERT INTO raw_relations VALUES (?, ?, ?, ?, ?)",
                     (
@@ -291,6 +289,8 @@ def main() -> None:
     parser.add_argument("--cache-root", type=Path, required=True)
     parser.add_argument("--result-json", type=Path)
     parser.add_argument("--cleanup-unpublished", action="store_true")
+    parser.add_argument("--require-ready", action="store_true",
+                        help="read an existing sealed index; never scan the source")
     parser.add_argument("--lock-timeout-seconds", type=float)
     args = parser.parse_args()
     index = BuildingSourceIndex(args.cache_root, args.source_sha256)
@@ -299,22 +299,23 @@ def main() -> None:
             lock_timeout_seconds=args.lock_timeout_seconds
         )
         return
-    if args.source_pbf is None:
-        parser.error("--source-pbf is required unless --cleanup-unpublished is used")
+    if args.source_pbf is None and not args.require_ready:
+        parser.error("--source-pbf is required unless --require-ready or --cleanup-unpublished is used")
     print(
         'BUILDING_PREPROCESS_PROGRESS:{"completed":0,"indeterminate":true,"unit":"source_index"}',
         flush=True,
     )
-    try:
-        source_before = file_sha256(args.source_pbf)
-    except OSError as exc:
-        raise BuildingSourceIndexError(
-            "building_source_snapshot_changed", "source snapshot is unavailable"
-        ) from exc
-    if source_before != args.source_sha256:
-        raise BuildingSourceIndexError(
-            "building_source_snapshot_changed", "source changed before indexing"
-        )
+    if not args.require_ready:
+        try:
+            source_before = file_sha256(args.source_pbf)
+        except OSError as exc:
+            raise BuildingSourceIndexError(
+                "building_source_snapshot_changed", "source snapshot is unavailable"
+            ) from exc
+        if source_before != args.source_sha256:
+            raise BuildingSourceIndexError(
+                "building_source_snapshot_changed", "source changed before indexing"
+            )
     def scanner(spool_path):
         scan_source(args.source_pbf, spool_path)
         if file_sha256(args.source_pbf) != args.source_sha256:
@@ -322,8 +323,11 @@ def main() -> None:
                 "building_source_snapshot_changed", "source changed during indexing"
             )
 
-    manifest = index.build_with_scanner(scanner)
-    if file_sha256(args.source_pbf) != args.source_sha256:
+    manifest = (
+        index.validate_ready() if args.require_ready
+        else index.build_with_scanner(scanner)
+    )
+    if not args.require_ready and file_sha256(args.source_pbf) != args.source_sha256:
         raise BuildingSourceIndexError(
             "building_source_snapshot_changed",
             "source changed before source-index result publication",

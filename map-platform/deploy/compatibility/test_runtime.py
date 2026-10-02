@@ -98,6 +98,49 @@ class CompatibilityRuntimeTests(unittest.TestCase):
         self.assertEqual(rejected.status_code, 401, rejected.text)
         self.assertEqual(self.app.state.app_attest_store.key_id_for_installation(old_id), migrated["appAttestKeyId"])
 
+    def test_rotation_and_missing_binding_recovery_preserve_identity(self):
+        original = self.attest.issue_installation(self.client)
+        rotated = self.attest.rotate_installation(
+            self.client,
+            credential=original,
+        )
+        self.assertIsInstance(rotated, dict)
+        self.assertEqual(
+            rotated["clientInstallationId"],
+            original["clientInstallationId"],
+        )
+        self.assertEqual(
+            rotated["clientInstallationToken"],
+            original["clientInstallationToken"],
+        )
+        self.assertNotEqual(
+            rotated["appAttestKeyId"],
+            original["appAttestKeyId"],
+        )
+
+        with self.app.state.app_attest_store._connect() as connection:
+            connection.execute(
+                "DELETE FROM app_attest_keys WHERE installation_id = ?",
+                (rotated["clientInstallationId"],),
+            )
+        rebound = self.attest.rotate_installation(
+            self.client,
+            credential=rotated,
+        )
+        self.assertIsInstance(rebound, dict)
+        self.assertEqual(
+            rebound["clientInstallationId"],
+            original["clientInstallationId"],
+        )
+        self.assertEqual(
+            rebound["clientInstallationToken"],
+            original["clientInstallationToken"],
+        )
+        self.assertNotEqual(
+            rebound["appAttestKeyId"],
+            rotated["appAttestKeyId"],
+        )
+
     def test_migration_requires_the_existing_owner_token(self):
         old_id, _ = self.app.state.installation_store.issue()
         _, other_token = self.app.state.installation_store.issue()

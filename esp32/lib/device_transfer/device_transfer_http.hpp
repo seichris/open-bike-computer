@@ -7,9 +7,11 @@
 #include <freertos/task.h>
 
 #include <array>
+#include <cstdint>
 #include <string>
 
 #include "device_transfer_network_protocol.hpp"
+#include "device_transfer_network_owner.hpp"
 #include "device_transfer_tls.hpp"
 
 namespace device_transfer {
@@ -32,6 +34,7 @@ struct HttpTransferStatus {
   std::string pendingTlsCertificateSha256;
   uint32_t pendingTlsIdentityVersion = 0;
   uint32_t transferGeneration = 0;
+  uint32_t statusRevision = 0;
   bool secureTransferV1 = false;
   bool signedMapStreamV1 = false;
   std::string legacyArchivePolicy;
@@ -40,6 +43,23 @@ struct HttpTransferStatus {
   uint32_t errorSequence = 0;
   uint32_t lastUsefulTrafficMs = 0;
   bool authorizedRequestInProgress = false;
+  uint32_t internalFree = 0;
+  uint32_t internalLargest = 0;
+  uint32_t dmaFree = 0;
+  uint32_t dmaLargest = 0;
+  uint32_t psramFree = 0;
+  uint32_t psramLargest = 0;
+  uint32_t minimumInternalFree = 0;
+  uint32_t minimumInternalLargest = 0;
+  uint32_t minimumDmaFree = 0;
+  uint32_t minimumDmaLargest = 0;
+  uint32_t minimumPsramFree = 0;
+  uint32_t minimumPsramLargest = 0;
+  uint32_t workerStackHighWaterBytes = 0;
+  uint32_t internalOwnerStackHighWaterBytes = 0;
+  std::string resourcePhase;
+  NetworkStartResult networkStart;
+  TransferFailureRecord lastTransferFailure;
 };
 
 struct HttpRequest {
@@ -73,11 +93,15 @@ public:
 
 class HttpTransferServer {
 public:
+  using StatusChangedCallback = void (*)();
+
   void configure(uint16_t port = 8080,
                  std::string apSsid = "BikeComputer-Transfer");
   void configure(HttpRequestHandler *handler, uint16_t port = 8080,
                  std::string apSsid = "BikeComputer-Transfer");
   bool registerHandler(std::string pathPrefix, HttpRequestHandler *handler);
+  void setStatusChangedCallback(StatusChangedCallback callback);
+  void setNetworkOperationOwner(NetworkOperationOwner *owner);
   bool setEnabled(bool enabled);
   bool setEnabled(bool enabled, std::string mode);
   bool setPreferredNetwork(const LanCredentials &credentials);
@@ -85,14 +109,20 @@ public:
   void clearPreferredNetwork();
   bool bindAuthenticatedBleSession(uint64_t sessionId);
   void clearAuthenticatedBleSession();
+  bool suspendFirmwareAuthenticatedBleSession();
   bool prepareTlsIdentityRotation();
   bool commitTlsIdentityRotation(
       const std::string &expectedCertificateSha256);
   bool cancelTlsIdentityRotation();
   void setLastError(const std::string &code, const std::string &message);
+  void noteStatusChanged(const char *resourcePhase);
+  void sampleResources(const char *resourcePhase);
   void process();
   HttpTransferStatus status() const;
   bool isRequestAuthorized(const HttpRequest &request);
+  void noteDiagnosticsModeDecision(bool matches);
+  bool beginAuthorizedCommit(const HttpRequest &request);
+  void endAuthorizedCommit();
   bool waitUntilStopped(uint32_t timeoutMs);
 
 private:
@@ -122,7 +152,21 @@ private:
   uint32_t lastUsefulTrafficMs_ = 0;
   bool requestInProgress_ = false;
   bool currentRequestAuthorized_ = false;
+  uint8_t currentAuthorizationBits_ = 0;
+  TransferFailureRecord lastTransferFailure_;
+  bool commitInProgress_ = false;
   uint32_t transferGeneration_ = 0;
+  uint32_t statusRevision_ = 1;
+  StatusChangedCallback statusChangedCallback_ = nullptr;
+  uint32_t minimumInternalFree_ = UINT32_MAX;
+  uint32_t minimumInternalLargest_ = UINT32_MAX;
+  uint32_t minimumDmaFree_ = UINT32_MAX;
+  uint32_t minimumDmaLargest_ = UINT32_MAX;
+  uint32_t minimumPsramFree_ = UINT32_MAX;
+  uint32_t minimumPsramLargest_ = UINT32_MAX;
+  uint32_t workerStackHighWaterBytes_ = 0;
+  std::string resourcePhase_ = "unobserved";
+  NetworkStartResult networkStart_;
   bool powerLockHeld_ = false;
   struct HandlerRegistration {
     std::string pathPrefix;
@@ -132,6 +176,7 @@ private:
   size_t handlerCount_ = 0;
   TaskHandle_t workerTask_ = nullptr;
   TransferClient *activeClient_ = nullptr;
+  NetworkOperationOwner *networkOperationOwner_ = nullptr;
 
   bool handleClient(TransferClient &client, size_t requestIndex);
   void runWorker();
@@ -143,6 +188,8 @@ private:
   void sendError(TransferClient &client, int status, const std::string &code,
                  const std::string &message);
   void rememberError(const std::string &code, const std::string &message);
+  void observeResources(const char *phase);
+  void signalStatusChanged();
   void lockState() const;
   void unlockState() const;
   void lockTlsIdentity() const;
@@ -160,11 +207,13 @@ bool sendHttpHead(TransferClient &client, int status,
                   const char *contentType = nullptr,
                   const HttpResponseHeader *additionalHeaders = nullptr,
                   size_t additionalHeaderCount = 0);
+// Bound sustained TLS records and yield between them so Wi-Fi/AES DMA buffers
+// can drain before the next allocation on the AMOLED board's internal heap.
 bool writeHttpBytes(TransferClient &client, const uint8_t *data,
                     size_t length,
                     uint32_t timeoutMs = 5000,
-                    size_t maximumChunkBytes = 4096,
-                    uint32_t interChunkDelayMs = 0);
+                    size_t maximumChunkBytes = 1024,
+                    uint32_t interChunkDelayMs = 2);
 bool sendHttpJson(TransferClient &client, int status,
                   const std::string &body);
 bool sendHttpError(TransferClient &client, int status,

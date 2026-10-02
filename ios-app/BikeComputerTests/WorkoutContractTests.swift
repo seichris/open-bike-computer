@@ -144,6 +144,7 @@ private struct WorkoutContractTestSuite {
         testWorkoutDiscardDisclosureRequiresFinalConfirmation()
         testIPhoneStartsUseWatchAvailabilityAndWatchStartsDirectly()
         testWatchOfflineNavigationUIFlow()
+        testWatchConnectivityBackgroundDeliveryLifecycle()
         testHeartRateZoneConfigurationLivesInIPhoneDeveloperSettings()
         testEveryDiscardSurfaceRequiresFinalConfirmation()
         testWorkoutUICompositionRetainsPhaseThreeExitCriteria()
@@ -7610,6 +7611,52 @@ private struct WorkoutContractTestSuite {
         )
     }
 
+    private mutating func testWatchConnectivityBackgroundDeliveryLifecycle() {
+        let watchDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("BikeComputer/BikeComputerWatch")
+        let delegateURL = watchDirectory.appendingPathComponent(
+            "WatchAppDelegate.swift"
+        )
+        let coordinatorURL = watchDirectory.appendingPathComponent(
+            "Managers/WatchConnectivityCoordinator.swift"
+        )
+        guard let delegateSource = try? String(
+            contentsOf: delegateURL,
+            encoding: .utf8
+        ), let coordinatorSource = try? String(
+            contentsOf: coordinatorURL,
+            encoding: .utf8
+        ) else {
+            expect(false, "WatchConnectivity background sources must exist")
+            return
+        }
+        expect(
+            delegateSource.contains(
+                "func handle(_ backgroundTasks: Set<WKRefreshBackgroundTask>)"
+            )
+                && delegateSource.contains(
+                    "WKWatchConnectivityRefreshBackgroundTask"
+                )
+                && delegateSource.contains(
+                    "completeWatchConnectivityBackgroundTasksIfPossible()"
+                )
+                && delegateSource.contains(
+                    "task.setTaskCompletedWithSnapshot(false)"
+                ),
+            "WatchConnectivity wakes must retain and complete their WatchKit background tasks"
+        )
+        expect(
+            coordinatorSource.contains("session.hasContentPending")
+                && coordinatorSource.contains("backgroundWorkTracker.hasWork")
+                && coordinatorSource.contains(
+                    "onBackgroundContentStateChanged?()"
+                ),
+            "Watch background completion must wait until WCSession drains its pending content"
+        )
+    }
+
     private mutating func testHeartRateZoneConfigurationLivesInIPhoneDeveloperSettings() {
         let iosAppDirectory = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -7872,10 +7919,10 @@ private struct WorkoutContractTestSuite {
                 && source.contains("connectionState == .disconnected")
                 && source.contains("connectionState == .ended")
                 && source.contains("Waiting for the final saved or discarded result")
-                && source.contains("Saved by Apple Watch")
+                && source.contains("Saved by \\(store.recordingOwner.displayName)")
                 && source.contains("Not saved to Health")
-                && source.contains("Finished on Apple Watch"),
-            "dashboard must retain unsupported, disconnected, final-wait, and terminal summary states"
+                && source.contains("Finished on \\(store.recordingOwner.displayName)"),
+            "dashboard must retain unsupported, disconnected, final-wait, and recorder-labelled terminal summary states"
         )
 
         let compactSource = source.filter { !$0.isWhitespace }
@@ -7958,9 +8005,25 @@ private struct WorkoutContractTestSuite {
                     "WorkoutDiscardDisclosureV1.perform(.confirmDiscard,expectedSessionID:sessionID,currentSessionID:store.presentation.sessionID,discard:onDiscard)"
                 )
                 && compactSource.contains(
-                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard){Label(\"End\""
+                    "Button(action:onEndAndSave){Label(\"End\",systemImage:\"stop.fill\")}"
+                )
+                && !compactSource.contains(
+                    "WorkoutFinishButton(store:store,onEndAndSave:onEndAndSave,onDiscard:onDiscard)"
+                )
+                && compactNavigationDetailsViewSource.contains(
+                    "Button(action:onEndAndSaveWorkout){RideControlLabel(\"Endworkout\",systemImage:\"stop.fill\")}"
+                )
+                && !compactNavigationDetailsViewSource.contains(
+                    "WorkoutFinishButton(store:workoutStore,onEndAndSave:onEndAndSaveWorkout,onDiscard:onDiscardWorkout)"
                 ),
-            "dashboard labels must remain bound to the matching control closures"
+            "live workout end controls must save immediately while recovery retains explicit discard handling"
+        )
+        expect(
+            !source.contains("Bicino zones · configured maximum heart rate")
+                && !navigationDetailsViewSource.contains(
+                    "Bicino zones · configured maximum heart rate"
+                ),
+            "live workout zone strips must not show the maximum-heart-rate configuration caption"
         )
         expect(
             compactSource.contains(
@@ -8004,6 +8067,15 @@ private struct WorkoutContractTestSuite {
             ),
             "capture age must remain bound to the TimelineView's current date"
         )
+        expect(
+            compactSource.contains(
+                "ifletrecordingCoordinator,recordingCoordinator.record?.phase!=.finished{WorkoutRecordingStatusView"
+            )
+                && compactSource.contains(
+                    "ifstore.presentation.connectionState==.ended{Image(systemName:store.recordingOwner==.watch?\"applewatch\":\"iphone\")"
+                ),
+            "finished summaries must fold recorder identity into the saved banner without a duplicate ownership card"
+        )
 
         let compactContentView = contentViewSource.filter { !$0.isWhitespace }
         let compactAppSource = appSource.filter { !$0.isWhitespace }
@@ -8027,12 +8099,12 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             compactContentView.contains(
-                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()},onOpen:{presentedSheet=.workoutDashboard})"
+                "WorkoutCompactCard(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onOpen:{presentedSheet=.workoutDashboard})"
             )
                 && compactContentView.contains(
-                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()},onPause:workoutMirrorManager.pause,onResume:workoutMirrorManager.resume,onMarkSegment:workoutMirrorManager.markSegment,onEndAndSave:workoutMirrorManager.endAndSave,onDiscard:workoutMirrorManager.discard,onDone:workoutMirrorManager.resetTerminalPresentation)"
+                    "case.workoutDashboard:WorkoutDashboardView(store:workoutStore,watchAvailability:watchAvailability,onStart:{_=workoutSessionCoordinator.requestStart()},onPause:workoutSessionCoordinator.pause,onResume:workoutSessionCoordinator.resume,onMarkSegment:workoutSessionCoordinator.markSegment,onEndAndSave:workoutSessionCoordinator.endAndSave,onDone:workoutSessionCoordinator.resetTerminalPresentation)"
                 ),
-            "ContentView must present the dashboard from its exact state and inject each production manager action"
+            "ContentView must present the dashboard from its exact state and route every production action through the selected recording owner"
         )
 
         let compactLiveWatchView = liveWatchViewSource.filter {
@@ -8229,6 +8301,31 @@ private struct WorkoutContractTestSuite {
                 && !route.contains("Search for a destination"),
             "all destination search surfaces must use the concise label"
         )
+        let compactRoute = route.filter { !$0.isWhitespace }
+        expect(
+            compactRoute.contains(
+                "}elseif!hasSelectedDestination{Spacer(minLength:0)}"
+            ),
+            "a selected destination must not stretch the route panel with an empty spacer"
+        )
+        expect(
+            compactContent.contains(
+                "ifshowsSupplementaryMapChrome{HStack{Spacer()mapControlCluster}"
+            )
+                && compactContent.contains(
+                    "ifshouldShowOfflineMapStatusChip,showsSupplementaryMapChrome{offlineMapStatusChip"
+                )
+                && compactContent.contains(
+                    "ifshowsSupplementaryMapChrome&&coordinator.bleManager.deviceSoundsEnabled&&"
+                )
+                && compactContent.contains(
+                    ".layoutPriority(isSearchPanelExpanded?1:0)"
+                )
+                && compactContent.contains(
+                    "MainMapSearchLayoutPolicy.showsSupplementaryMapChrome(isSearchPanelExpanded:isSearchPanelExpanded)"
+                ),
+            "expanded destination search must own the keyboard-safe layout ahead of supporting map chrome"
+        )
         expect(
             compactContent.contains(
                 "HStack(alignment:.bottom,spacing:8){RouteSearchPanel("
@@ -8237,15 +8334,15 @@ private struct WorkoutContractTestSuite {
                     "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\")"
                 )
                 && compactContent.contains(
-                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutMirrorManager.startOutdoorCyclingOnWatch()})"
+                    "WorkoutStartButton(watchAvailability:watchAvailability,action:{_=workoutSessionCoordinator.requestStart()})"
                 )
                 && compactContent.contains(
                     "Label(\"StartWorkout\",systemImage:\"figure.outdoor.cycle\").labelStyle(.titleAndIcon)"
                 )
                 && compactContent.contains(
-                    ".buttonStyle(.plain).fixedSize(horizontal:true,vertical:false).layoutPriority(1).accessibilityLabel(\"StartworkoutonAppleWatch\")"
+                    ".buttonStyle(.plain).fixedSize(horizontal:true,vertical:false).layoutPriority(1).accessibilityLabel(\"Startworkoutwiththeselectedrecorder\")"
                 ),
-            "the collapsed destination row must keep the full blue Watch-gated Start Workout label visible"
+            "the collapsed destination row must keep the full blue Start Workout label visible and honor recording ownership"
         )
         expect(
             compactContent.contains(
@@ -8262,6 +8359,9 @@ private struct WorkoutContractTestSuite {
                 )
                 && compactContent.contains(
                     ".sheet(item:$presentedSheet,onDismiss:handleSheetDismissal){destinationinpresentedSheetContent(for:destination)}"
+                )
+                && compactContent.contains(
+                    "ifdismissedDestination==.workoutDashboard{workoutSessionCoordinator.dismissNotice()}"
                 )
                 && compactContent.contains(
                     "SensorSettingsRoutingPolicy.openDecision("
@@ -8575,7 +8675,6 @@ private struct WorkoutContractTestSuite {
             "onPauseWorkout",
             "onResumeWorkout",
             "onEndAndSaveWorkout",
-            "onDiscardWorkout",
         ] {
             expect(
                 compactNavigation.contains(control),
@@ -8590,7 +8689,7 @@ private struct WorkoutContractTestSuite {
                     "presentation.pendingControl==nil"
                 )
                 && compactContent.contains(
-                    "onMarkSegment:workoutMirrorManager.markSegment"
+                    "onMarkSegment:workoutSessionCoordinator.markSegment"
                 ),
             "the ride sheet must expose the numbered segment action with safe production wiring"
         )

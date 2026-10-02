@@ -14,6 +14,10 @@ class RendererReplayTransportContractTests(unittest.TestCase):
         self.assertRegex(BLE, re.compile(
             r"pGPSCharacteristic\s*=\s*pService->createCharacteristic\(\s*"
             r"GPS_CHAR_UUID, NIMBLE_PROPERTY::WRITE \| NIMBLE_PROPERTY::WRITE_NR\);"
+            # Maintenance rejects both write modes; normal riding still uses
+            # the same authenticated GPS callback for both modes.
+            r"\s*if \(maintenanceBoot\) \{\s*pGPSCharacteristic->setCallbacks\(\s*"
+            r"new MyMaintenanceRejectedCharacteristicCallbacks\(\)\);\s*\} else \{"
             r"\s*pGPSCharacteristic->setCallbacks\(new MyGPSCharacteristicCallbacks\(\)\);"
         ))
         callback = BLE.split("class MyGPSCharacteristicCallbacks", 1)[1].split(

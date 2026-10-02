@@ -32,6 +32,7 @@
 #include "mapBuildingRenderer.hpp"
 #include "mapLabelBlock.hpp"
 #include "mapBuildingBlock.hpp"
+#include "mapContourBlock.hpp"
 #include "mapLabelLayout.hpp"
 #include "mapVars.h"
 #include <Arduino.h>
@@ -139,6 +140,7 @@ private:
     std::vector<Polygon, PsramAllocator<Polygon>> polygons;
     map_label_block::Block labelData;
     map_building_block::Block buildingData;
+    map_contour_block::Block contourData;
 
     // Spatial grid for polygon culling: grid[cellIndex] = list of polygon
     // indices
@@ -209,6 +211,9 @@ private:
   static constexpr uint32_t MAP_RENDER_DECLARED_SLICE_US = 50000;
 
   struct RasterDiagnostics {
+    uint32_t candidateContours = 0;
+    uint32_t renderedContourSegments = 0;
+    uint32_t suppressedContours = 0;
     uint32_t candidateBuildings = 0;
     uint32_t selectedBuildings = 0;
     uint32_t extrudedBuildings = 0;
@@ -523,8 +528,6 @@ private:
   RenderResult visibleRenderResult{};
   map_camera::Lag cameraLag;
   uint32_t lastCameraRequestMs = 0;
-  bool stableCameraHidden = false;
-  lv_obj_t *cameraStatusLabel = nullptr;
   renderer_diagnostics::CameraSample cameraEvidence{};
 #ifdef WAVESHARE_EPAPER_397
   double epaperCameraHeadingDegrees_ = 0.0;

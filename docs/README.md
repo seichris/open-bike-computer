@@ -19,24 +19,32 @@
 - [Waveshare AMOLED 2.06 audio bring-up](waveshare-amoled-206-audio-bringup.md)
 - [App Store privacy disclosures](app-store-privacy-disclosures.md)
 
-## Implementation plans
+## Open plans and investigations
 
-| Plan | Status |
+These documents still contain unfinished work. Completed software plans have
+been removed; their design history remains available in Git.
+
+| Plan | Remaining scope |
 | --- | --- |
-| [Bluetooth reliability implementation and bundle review](plans/bluetooth-reliability-implementation-2026-09-07.md) | Merged in [#423](https://github.com/seichris/open-bike-computer/pull/423); software fixes for R1–R3 are on main; physical qualification remains separate |
-| [Bluetooth reliability reassessment — 2026-09-06](plans/bluetooth-reliability-reassessment-2026-09-06.md) | Historical analysis at `fe73e434`; its R1–R3 findings were implemented by [#423](https://github.com/seichris/open-bike-computer/pull/423). Preserve the original baseline evidence; broader follow-ups and physical acceptance remain open |
-| [iPhone MapKit appearance switcher](plans/iphone-mapkit-appearance-switcher-implementation-plan.md) | Implemented in software; redesigned control rail pending physical validation |
-| [Opportunistic Bicino discovery and single-session BLE scanning](plans/opportunistic-bicino-discovery-implementation-plan.md) | Implemented in software; physical validation pending |
-| [Geofabrik/OSM 3D buildings](plans/geofabrik-osm-3d-buildings-implementation-plan.md) | Implemented; physical rendering validated on the 1.75-inch device |
-| [Cycling sensor settings and workout tile gating](plans/cycling-sensor-settings-implementation-plan.md) | Implemented slice; direct ESP32 sensor support remains in [issue #85](https://github.com/seichris/open-bike-computer/issues/85) |
-| [iPhone interactive workout Live Activity](plans/iphone-workout-live-activity-implementation-plan.md) | Implemented |
-| [Two-finger map zoom](plans/two-finger-map-zoom-implementation-plan.md) | Implemented; physical two-contact acceptance remains documented in the plan |
-| [Watch + Bicino online and offline navigation](plans/watch-bicino-online-offline-navigation-implementation-plan.md) | Implemented in software; physical and provider-policy release gates remain open; tracks [issue #106](https://github.com/seichris/open-bike-computer/issues/106) |
-| [Watch + Bicino navigation release notes](watch-bicino-navigation-release-notes.md) | Draft release copy and release blockers |
-| [watchOS workout companion](plans/watchos-workout-companion-implementation-plan.md) | Implemented |
-| [Firmware runtime, core cache, SD, and maintenance hardening](plans/firmware-runtime-cache-sd-hardening-implementation-plan.md) | Software implementation split across [#222](https://github.com/seichris/open-bike-computer/pull/222), [#223](https://github.com/seichris/open-bike-computer/pull/223), [#228](https://github.com/seichris/open-bike-computer/pull/228), [#229](https://github.com/seichris/open-bike-computer/pull/229), [#231](https://github.com/seichris/open-bike-computer/pull/231), and [#232](https://github.com/seichris/open-bike-computer/pull/232); physical SD/audio acceptance remains open |
-| [Pioarduino first-run Python supply-chain hardening reconciliation](plans/pioarduino-wheelhouse-hardening.md) | Mandatory wheelhouse gap implemented by [#228](https://github.com/seichris/open-bike-computer/pull/228) and [#229](https://github.com/seichris/open-bike-computer/pull/229); document tracks the as-built boundary and long-term maintenance gates |
-| [Bicino real-device browser debugging](plans/bicino-real-device-browser-debugging-implementation-plan.md) | Implemented in branch; two-target physical validation pending |
+| [Topographic map support](plans/issue-190-topographic-map-support-implementation-plan.md) | Provider acquisition, datum verification, source approval and production/physical qualification; development implementation is documented in [the pipeline guide](topography-pipeline.md) |
+| [Reusable map preparation](plans/issue-508-map-reuse-implementation-plan.md) | Worldwide source-preparation and measured acceptance; exact reuse and local source shards are on main |
+| [Bluetooth data reliability architecture](plans/bluetooth-data-reliability-and-architecture-plan.md) | Further adapter migration, optional protocol extensions and measured tuning; DATA-01–04 repairs are on main |
+| [Bluetooth reliability follow-ups](plans/bluetooth-reliability-follow-ups-2026-09-07.md) | Broader callback-identity audits, transport measurements and physical qualification |
+| [Map-transfer Wi-Fi reliability](plans/map-transfer-wifi-startup-reliability-implementation-plan.md) | Retained physical failure/repair evidence and outstanding activation, resource-margin and both-board qualification |
+
+## Implementation and validation records
+
+- [Bluetooth data reliability implementation](plans/bluetooth-data-reliability-implementation.md)
+- [Bluetooth reliability implementation and bundle review](plans/bluetooth-reliability-implementation-2026-09-07.md)
+- [Historical Bluetooth reassessment](plans/bluetooth-reliability-reassessment-2026-09-06.md)
+- [Stable map camera and qualification](map-stable-camera.md)
+- [Watch navigation validation](watch-bicino-navigation-validation.md)
+- [Watch navigation release notes and blockers](watch-bicino-navigation-release-notes.md)
+- [Ride automation traces](ride-automation-traces.md)
+- [Ride diagnostics format](ride-diagnostics-format.md)
+- [Firmware OTA hardware validation](firmware-ota-hardware-validation.md)
+- [Cloudflare R2 map library runbook](runbooks/cloudflare-r2-final-map-library.md)
+- [Shanghai 3D orchestration runbook](runbooks/shanghai-3d-map-orchestration.md)
 
 ## Releases
 

@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import io
 import json
@@ -15,7 +14,7 @@ from tools import generate_preconnection_assets as assets
 
 
 EXPECTED_LOGO_ALPHA_SHA256 = (
-    "f94e70c64e0847fa4d4b0cb1a0a968fdc414ffadac31a8d83fe6e7458258b771"
+    "f01b41fdac97a6ac925c7b64e539006db5dd23ea8f9f10b61c9230bb4dc0a854"
 )
 
 
@@ -55,20 +54,7 @@ def _asset_descriptor(
 
 def _expected_logo_alpha(source: bytes) -> bytes:
     original = Image.open(io.BytesIO(source)).convert("RGBA")
-    alpha_bounds = original.getchannel("A").getbbox()
-    if alpha_bounds is None:
-        raise AssertionError("canonical logo has no visible alpha")
-    mark = original.crop(alpha_bounds)
-    mark.thumbnail((assets.LOGO_SIZE, assets.LOGO_SIZE), Image.Resampling.LANCZOS)
-    expected = Image.new("L", (assets.LOGO_SIZE, assets.LOGO_SIZE), 0)
-    expected.paste(
-        mark.getchannel("A"),
-        (
-            (assets.LOGO_SIZE - mark.width) // 2,
-            (assets.LOGO_SIZE - mark.height) // 2,
-        ),
-    )
-    return expected.tobytes()
+    return original.getchannel("A").tobytes()
 
 
 class PreconnectionAssetTests(unittest.TestCase):
@@ -85,17 +71,25 @@ class PreconnectionAssetTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(content).hexdigest(), expected_hash)
 
     def test_logo_matches_pinned_source_and_brand_color(self) -> None:
-        source = base64.b64decode(assets.SOURCE_B64.read_text())
+        source_svg = assets.SOURCE_SVG.read_bytes()
         self.assertEqual(
-            hashlib.sha256(source).hexdigest(), assets.LOGO_SOURCE_SHA256
+            hashlib.sha256(source_svg).hexdigest(),
+            assets.LOGO_SOURCE_SVG_SHA256,
+        )
+        source_png = assets.SOURCE_PNG.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(source_png).hexdigest(),
+            assets.LOGO_SOURCE_PNG_SHA256,
         )
         self.assertEqual(
-            self.manifest["logo"]["source_commit"], assets.LOGO_SOURCE_COMMIT
+            self.manifest["logo"]["source_svg_sha256"],
+            assets.LOGO_SOURCE_SVG_SHA256,
         )
         self.assertEqual(
-            self.manifest["logo"]["source_sha256"], assets.LOGO_SOURCE_SHA256
+            self.manifest["logo"]["source_png_sha256"],
+            assets.LOGO_SOURCE_PNG_SHA256,
         )
-        self.assertEqual(self.manifest["logo"]["color_rgb888"], "#FF372E")
+        self.assertEqual(self.manifest["logo"]["color_rgb888"], "#F5F5F5")
 
         source_path = assets.OUTPUT / "bicino_logo.c"
         self.assertEqual(
@@ -105,9 +99,9 @@ class PreconnectionAssetTests(unittest.TestCase):
                     "LV_IMAGE_HEADER_MAGIC",
                     "LV_COLOR_FORMAT_RGB565A8",
                     "0",
-                    "36",
-                    "36",
-                    "72",
+                    "128",
+                    "37",
+                    "256",
                     "0",
                 ),
                 "sizeof(bicino_logo_map)",
@@ -116,12 +110,12 @@ class PreconnectionAssetTests(unittest.TestCase):
             ),
         )
         data = _asset_bytes(source_path, "bicino_logo")
-        pixel_count = assets.LOGO_SIZE * assets.LOGO_SIZE
+        pixel_count = assets.LOGO_WIDTH * assets.LOGO_HEIGHT
         self.assertEqual(len(data), pixel_count * 3)
         rgb565 = (
-            ((assets.BRAND_RED[0] >> 3) << 11)
-            | ((assets.BRAND_RED[1] >> 2) << 5)
-            | (assets.BRAND_RED[2] >> 3)
+            ((assets.LOGO_COLOR[0] >> 3) << 11)
+            | ((assets.LOGO_COLOR[1] >> 2) << 5)
+            | (assets.LOGO_COLOR[2] >> 3)
         )
         self.assertEqual(
             data[: pixel_count * 2],
@@ -130,7 +124,7 @@ class PreconnectionAssetTests(unittest.TestCase):
         alpha = data[pixel_count * 2 :]
         self.assertIn(0, alpha)
         self.assertGreater(max(alpha), 0)
-        self.assertEqual(alpha, _expected_logo_alpha(source))
+        self.assertEqual(alpha, _expected_logo_alpha(source_png))
         self.assertEqual(
             hashlib.sha256(alpha).hexdigest(), EXPECTED_LOGO_ALPHA_SHA256
         )

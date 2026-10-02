@@ -16,7 +16,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable
 
-from .admission import AdmissionCapacityError, AdmissionPolicy
+from .admission import AdmissionCapacityError, QueueAdmissionPolicy, is_waiting
 from .artifacts import ArtifactRecord
 from .generation_profiles import GenerationProfilePolicy
 from .geometry import GeometryError, normalize_geometry
@@ -97,7 +97,7 @@ class JobStore:
         root: str | Path,
         *,
         lock_stale_seconds: float = 300.0,
-        admission_policy: AdmissionPolicy | None = None,
+        admission_policy: QueueAdmissionPolicy | None = None,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -1056,8 +1056,10 @@ class JobStore:
                     or build_cache_key in job.build_cache_aliases
                 )
                 and job.map_id
-                and job.pack_path
-                and Path(job.pack_path).is_file()
+                and (
+                    (job.pack_path and Path(job.pack_path).is_file())
+                    or any(artifact.format == "zip-stored-v1" for artifact in job.artifacts)
+                )
             ]
             return max(candidates, key=lambda value: value.created_at) if candidates else None
 
@@ -1110,8 +1112,10 @@ class JobStore:
                 )
                 or source.build_compatibility_key != build_compatibility_key
                 or not source.map_id
-                or not source.pack_path
-                or not Path(source.pack_path).is_file()
+                or not (
+                    (source.pack_path and Path(source.pack_path).is_file())
+                    or any(artifact.format == "zip-stored-v1" for artifact in source.artifacts)
+                )
             ):
                 return None
             immediate_source_metrics = deepcopy(source.artifact_metrics or {})
@@ -1176,7 +1180,7 @@ class JobStore:
                 job_id,
                 JobStatus.READY,
                 map_id=source.map_id,
-                pack_path=source.pack_path,
+                pack_path=(source.pack_path if source.pack_path and Path(source.pack_path).is_file() else None),
                 pack_bytes=source.pack_bytes,
                 artifacts=source.artifacts,
                 artifact_metrics=artifact_metrics,
@@ -1496,6 +1500,33 @@ class JobStore:
                     return claimed
             return None
 
+    def queue_position(self, job_id: str) -> int | None:
+        """Estimate a one-based position among durable waiting jobs.
+
+        A yielded parent can be temporarily ineligible for worker resources,
+        so the next actual claim may skip ahead of this waiting order.
+        """
+        with self._queue_lock():
+            jobs = self._admission_jobs_unlocked()
+            waiting = [job for job in jobs if is_waiting(job)]
+            # Initial requests and yielded chunked jobs take turns by their
+            # durable wait timestamp; retries follow those two classes.
+            first_pass = sorted(
+                (job for job in waiting if job.scheduler_yielded or job.attempts == 0),
+                key=lambda job: (
+                    job.updated_at if job.scheduler_yielded else job.created_at,
+                    job.job_id,
+                ),
+            )
+            retries = sorted(
+                (job for job in waiting if not job.scheduler_yielded and job.attempts > 0),
+                key=lambda job: (job.updated_at, job.job_id),
+            )
+            for position, job in enumerate((*first_pass, *retries), start=1):
+                if job.job_id == job_id:
+                    return position
+            return None
+
     def yield_chunked_job(self, job_id: str, *, worker_id: str) -> MapJob:
         """Release one active public parent without consuming a retry."""
 
@@ -1745,7 +1776,7 @@ class MapJobService:
         if self.generation_profile_policy is not None:
             canary_profiles = frozenset()
             if client_installation_id in self.building_target3_allowlist:
-                canary_profiles = frozenset({
+                canary_profiles = canary_profiles | frozenset({
                     self.generation_profile_policy.profile_id_for_renderer_format(3)
                 })
             return [
@@ -1772,7 +1803,7 @@ class MapJobService:
             raise RuntimeError("generation profile policy is not configured")
         canary_profiles = frozenset()
         if client_installation_id in self.building_target3_allowlist:
-            canary_profiles = frozenset({
+            canary_profiles = canary_profiles | frozenset({
                 self.generation_profile_policy.profile_id_for_renderer_format(3)
             })
         profiles = self.generation_profile_policy.available_profiles(
@@ -1819,14 +1850,6 @@ class MapJobService:
             install_on_device=install_on_device,
         )
         if self.store.admission_policy is not None:
-            admission = self.store.admission_policy.estimate(
-                request,
-                geometry,
-                source,
-            )
-            job.admission_cost = admission.units
-            job.admission_policy_version = admission.policy_version
-            job.admission_cost_inputs = admission.inputs
             job.admission_partition = admission_partition
         with self.store.lock_job_creation():
             if client_installation_id and client_request_id:
@@ -1847,18 +1870,13 @@ class MapJobService:
                         )
                     return existing
             if self.store.admission_policy is not None:
-                jobs = self.store._admission_jobs_unlocked(
-                    installation_id=job.client_installation_id,
-                )
+                jobs = self.store._admission_jobs_unlocked()
                 self.store.admission_policy.validate_create(job, jobs)
-                active_jobs = [
-                    existing_job
-                    for existing_job in jobs
-                    if existing_job.status in ACTIVE_STATUSES
-                ]
+                active_jobs = [existing_job for existing_job in jobs if existing_job.status in ACTIVE_STATUSES]
             else:
                 active_jobs = self.store.list_active()
-            self.limits.validate_active_jobs(active_jobs)
+            if self.store.admission_policy is None:
+                self.limits.validate_active_jobs(active_jobs)
             if self.estimate_coordinator is not None:
                 try:
                     self.estimate_coordinator.prepare_initial(job, active_jobs)
@@ -2125,6 +2143,7 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
         MAX_PREFERRED_LANGUAGES,
         normalize_language_tag,
     )
+    from .topography_artifacts import TOPOGRAPHY_RENDERER_FORMAT_VERSION
 
     unexpected = sorted(set(request) - _MAP_JOB_REQUEST_FIELDS)
     if unexpected:
@@ -2155,9 +2174,10 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
                     1,
                     LABEL_RENDERER_FORMAT_VERSION,
                     BUILDING_RENDERER_FORMAT_VERSION,
+                    TOPOGRAPHY_RENDERER_FORMAT_VERSION,
                 }
             ):
-                raise ValueError("target rendererFormatVersion must be 1, 2, or 3")
+                raise ValueError("target rendererFormatVersion must be 1, 2, 3, or 4")
             normalized_target["rendererFormatVersion"] = renderer_format_version
         if "firmwareVersion" in target:
             firmware_version = target["firmwareVersion"]
@@ -2172,6 +2192,7 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
     if renderer_format_version in {
         LABEL_RENDERER_FORMAT_VERSION,
         BUILDING_RENDERER_FORMAT_VERSION,
+        TOPOGRAPHY_RENDERER_FORMAT_VERSION,
     } and request.get("target", {}).get("renderer") != "esp32-fmb":
         raise ValueError(
             f"renderer format {renderer_format_version} requires explicit esp32-fmb target"
@@ -2208,13 +2229,14 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
     if renderer_format_version in {
         LABEL_RENDERER_FORMAT_VERSION,
         BUILDING_RENDERER_FORMAT_VERSION,
+        TOPOGRAPHY_RENDERER_FORMAT_VERSION,
     }:
         if "labels" not in request:
             raise ValueError(
                 f"renderer format {renderer_format_version} requires labels"
             )
     elif "labels" in request:
-        raise ValueError("labels require renderer format 2 or 3")
+        raise ValueError("labels require renderer format 2, 3, or 4")
 
 
 def _validate_identifier(value: str, key: str) -> str:

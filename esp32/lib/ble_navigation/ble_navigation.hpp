@@ -16,6 +16,7 @@
 #include <Arduino.h>
 #include <atomic>
 #include "ble_radio_policy.hpp"
+#include "gps_input_freshness.hpp"
 #include "destination_picker_protocol.hpp"
 #include "map_profile_protocol.hpp"
 #include "renderer_diagnostics_ble_protocol.hpp"
@@ -51,7 +52,8 @@ enum class WorkoutStartRequestPresentation : uint8_t {
  * state. IDs 25-26 control the Map + Navigation bird's-eye projection and
  * perspective. IDs 27-34 configure street labels for Map and Map + Navigation,
  * and ID 35 controls OSM 3D buildings in bird's-eye navigation. ID 36
- * controls automatic connected-display inactivity.
+ * controls automatic connected-display inactivity, and ID 38 configures its
+ * dim and panel-off delays as one atomic value.
  * Legacy ID 4 is ignored because display rotation is selected by the hardware
  * target.
  */
@@ -220,6 +222,7 @@ struct BLEDebugStats {
   uint32_t navPacketCount = 0;
   uint32_t routePacketCount = 0;
   uint32_t gpsPacketCount = 0;
+  gps_input_freshness::SourceSample gpsSource{};
   uint32_t settingsPacketCount = 0;
   uint32_t rejectedUnauthenticatedCount = 0;
   uint32_t lastConnectMs = 0;
@@ -267,10 +270,20 @@ public:
    */
   bool isConnected() const { return connected; }
 
+  /** True when the current BLE connection completed owner authentication. */
+  bool isAuthenticated() const;
+
   /**
    * @brief Process any pending BLE events (call from main loop)
    */
   void process();
+
+  /** Queue a fresh map-status snapshot after the renderer learns whether the
+   * current location is covered by the active map. */
+  void noteMapAvailabilityChanged();
+
+  /** Queue a fresh owner-authenticated device-transfer status snapshot. */
+  void requestDeviceTransferStatusNotification();
 
   /** Record physical input that should reopen the fast-advertising window. */
   void noteUserWake();

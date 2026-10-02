@@ -4,8 +4,9 @@
 
 namespace world_radio_config {
 
-// Keep the preview in development profiles until physical qualification and
-// release-size budgeting are complete. Production's 3 MiB OTA layout is fixed.
+// Keep the preview in development profiles while the interaction and phone
+// playback lifecycle are physically qualified. Its former heavyweight map,
+// multilingual font, and flags are no longer part of the size decision.
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 inline constexpr bool ENABLED = true;
 #else

@@ -8,7 +8,9 @@
 import AppIntents
 import Combine
 import CoreLocation
+import HealthKit
 import SwiftUI
+import UIKit
 
 @main
 struct BikeComputerApp: App {
@@ -19,7 +21,7 @@ struct BikeComputerApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(
-                workoutMirrorManager: appDelegate.workoutMirrorManager,
+                workoutSessionCoordinator: appDelegate.workoutSessionCoordinator,
                 cyclingSensorStore: appDelegate.cyclingSensorStore,
                 cyclingSensorDetectionCoordinator:
                     appDelegate.cyclingSensorDetectionCoordinator,
@@ -49,6 +51,7 @@ struct BikeComputerApp: App {
 @MainActor
 class AppDelegate: NSObject, UIApplicationDelegate {
     let workoutMirrorManager: WorkoutMirrorManager
+    let workoutSessionCoordinator: WorkoutSessionCoordinator
     let cyclingSensorStore: CyclingSensorStore
     let cyclingSensorDetectionCoordinator:
         CyclingSensorDetectionCoordinator
@@ -59,7 +62,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     let bicinoServiceSession: BicinoServiceSession
     let stravaIntegrationCoordinator: StravaIntegrationCoordinator
     let destinationStore: SavedDestinationStore
-    let locationManager = CurrentLocationManager()
+    let locationManager: CurrentLocationManager
     let rideDiagnosticsRecorder: RideDiagnosticsRecorder
     let workoutLiveActivityDiagnostics =
         WorkoutLiveActivityDiagnosticStore()
@@ -69,13 +72,13 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     lazy var coordinator = BikeComputerCoordinator(
         destinationStore: destinationStore,
-        workoutMetricsStore: workoutMirrorManager.store,
+        workoutMetricsStore: workoutSessionCoordinator.store,
         locationManager: locationManager,
         rideDetectionSettingsStore: rideDetectionSettingsStore
     )
     lazy var rideAutomationCoordinator = RideAutomationCoordinator(
         bleManager: coordinator.bleManager,
-        workoutManager: workoutMirrorManager,
+        workoutManager: workoutSessionCoordinator,
         settingsStore: rideDetectionSettingsStore,
         watchAvailability: watchAvailability
     )
@@ -98,6 +101,35 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             connectivityCoordinator: watchConnectivityCoordinator,
             rideDetectionSettingsStore: rideDetectionSettingsStore
         )
+        let locationManager = CurrentLocationManager()
+        let recordingStore = WorkoutRecordingStore()
+        let phoneRecorder: (any PhoneWorkoutRecording)?
+        if #available(iOS 26.0, *) {
+            phoneRecorder = PhoneWorkoutRecorder(
+                persistence: recordingStore,
+                locations: locationManager.$currentLocation.eraseToAnyPublisher(),
+                onRecoveredMirror: { [weak workoutMirrorManager] session in
+                    workoutMirrorManager?.acceptMirroredSession(session)
+                },
+                canStartAfterAuthorization: { [weak workoutMirrorManager] in
+                    guard let presentation = workoutMirrorManager?.store.presentation else { return false }
+                    return !presentation.isWorkoutActive
+                        && presentation.connectionState != .awaitingFirstSnapshot
+                        && presentation.connectionState != .launchingWatch
+                },
+                requestLocationAuthorization: { [weak locationManager] in
+                    locationManager?.requestWhenInUseAuthorization()
+                }
+            )
+        } else {
+            phoneRecorder = nil
+        }
+        let workoutSessionCoordinator = WorkoutSessionCoordinator(
+            watch: workoutMirrorManager, watchAvailability: watchAvailability,
+            persistence: recordingStore, phone: phoneRecorder
+        )
+        self.locationManager = locationManager
+        self.workoutSessionCoordinator = workoutSessionCoordinator
         self.workoutMirrorManager = workoutMirrorManager
         self.cyclingSensorStore = cyclingSensorStore
         self.cyclingSensorDetectionCoordinator =
@@ -150,12 +182,12 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             }
             .store(in: &cancellables)
         cyclingSensorDetectionCoordinator.bind(
-            to: workoutMirrorManager.store,
+            to: workoutSessionCoordinator.store,
             watchObservations: watchConnectivityCoordinator
                 .$cyclingSensorObservation.eraseToAnyPublisher()
         )
         locationManager.bindWorkoutMetricsStore(
-            workoutMirrorManager.store
+            workoutSessionCoordinator.store
         )
     }
     
@@ -176,7 +208,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             rideDiagnosticsRecorder
         locationManager.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.diagnosticsRecorder = rideDiagnosticsRecorder
-        workoutMirrorManager.store.diagnosticsRecorder = rideDiagnosticsRecorder
+        workoutSessionCoordinator.store.diagnosticsRecorder = rideDiagnosticsRecorder
+        workoutMirrorManager.diagnosticsRecorder = rideDiagnosticsRecorder
         rideAutomationCoordinator.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.firmwareUpdateManager.diagnosticsRecorder = rideDiagnosticsRecorder
         rideDiagnosticsRecorder.$captureBinding
@@ -190,7 +223,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             .store(in: &cancellables)
         Publishers.CombineLatest(
             coordinator.$isNavigating.removeDuplicates(),
-            workoutMirrorManager.store.$presentation
+            workoutSessionCoordinator.store.$presentation
                 .map(\.isWorkoutActive)
                 .removeDuplicates()
         )
@@ -229,6 +262,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             return bleManager.handleWatchDirectRidePreparationRequest(
                 request,
                 phoneNavigationActive: self.coordinator.isNavigating
+                    || self.workoutSessionCoordinator.blocksBikeComputerHandoff
             )
         }
         watchConnectivityCoordinator.$state
@@ -246,16 +280,20 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             .store(in: &cancellables)
         watchConnectivityCoordinator.activate()
         workoutMirrorManager.installMirroringHandler()
+        workoutSessionCoordinator.recoverIfNeeded()
         if #available(iOS 17.0, *) {
             let controller = WorkoutLiveActivityController(
-                store: workoutMirrorManager.store,
+                store: workoutSessionCoordinator.store,
                 diagnostics: workoutLiveActivityDiagnostics
             )
             controller.start(
                 isApplicationForeground: application.applicationState == .active
             )
             let commandRouter = WorkoutLiveActivityCommandRouter(
-                manager: workoutMirrorManager
+                store: workoutSessionCoordinator.store,
+                markSegment: { [workoutSessionCoordinator] in workoutSessionCoordinator.markSegment() },
+                pause: { [workoutSessionCoordinator] in workoutSessionCoordinator.pause() },
+                resume: { [workoutSessionCoordinator] in workoutSessionCoordinator.resume() }
             )
             let dispatcher = WorkoutLiveActivityIntentDispatcher {
                 [weak commandRouter, weak controller] action, sessionID in

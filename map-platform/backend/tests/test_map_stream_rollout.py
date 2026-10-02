@@ -47,6 +47,14 @@ def approval(promotion_id: str) -> MapStreamPromotionApproval:
 
 
 class MapStreamRolloutPolicyTests(unittest.TestCase):
+    def test_checked_in_approval_registry_passes_runtime_validation(self):
+        registry = (
+            Path(__file__).resolve().parents[2]
+            / "config"
+            / "map-stream-rollout-approvals.json"
+        )
+        load_approved_promotions(registry)
+
     def policy(
         self,
         *,

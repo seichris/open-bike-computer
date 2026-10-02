@@ -15,6 +15,7 @@ import tempfile
 import time
 import unicodedata
 import urllib.request
+import urllib.error
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
@@ -639,6 +640,23 @@ def _safe_project_subtree(
 
 
 def download_verified(artifact: Artifact, destination: Path, *, opener: Callable[..., object] = urllib.request.urlopen) -> None:
+    for attempt in range(3):
+        try:
+            _download_verified_once(artifact, destination, opener=opener)
+            return
+        except FirmwareRuntimeError as error:
+            cause = error.__cause__
+            if (
+                attempt == 2 or not isinstance(cause, urllib.error.HTTPError)
+                or cause.code not in {429, 500, 502, 503, 504}
+            ):
+                raise
+            # Retry only transport failures, against the same immutable URL.
+            # Size/digest/permission errors never receive a retry or fallback.
+            time.sleep(attempt + 1)
+
+
+def _download_verified_once(artifact: Artifact, destination: Path, *, opener: Callable[..., object]) -> None:
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary: str | None = None
     digest = hashlib.sha256()

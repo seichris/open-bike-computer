@@ -19,25 +19,9 @@ extension RideBLEScreenTypeV1: Identifiable {
     }
 }
 
-enum RideStatsWidget: UInt8, CaseIterable, Codable, Identifiable, Sendable {
-    case empty = 0
-    case speed = 1
-    case heartRate = 2
-    case heartRateZone = 3
-    case distance = 4
-    case movingTime = 5
-    case elapsedTime = 6
-    case altitude = 7
-    case routeRemaining = 8
-    case power = 9
-    case cadence = 10
-    case averageSpeed = 11
-    case maximumSpeed = 12
-    case calories = 13
-    case averageHeartRate = 14
-    case smartMetric1 = 15
-    case smartMetric2 = 16
+typealias RideStatsWidget = RideBLERideStatsWidgetV1
 
+extension RideBLERideStatsWidgetV1: Identifiable {
     var id: UInt8 { rawValue }
     var bit: UInt32 { 1 << UInt32(rawValue) }
 
@@ -60,6 +44,11 @@ enum RideStatsWidget: UInt8, CaseIterable, Codable, Identifiable, Sendable {
         case .averageHeartRate: return "Average Heart Rate"
         case .smartMetric1: return "Smart Metric 1"
         case .smartMetric2: return "Smart Metric 2"
+        case .powerZone: return "Power Zone"
+        case .heartRateZoneTime: return "Time in Current HR Zone"
+        case .powerZoneTime: return "Time in Current Power Zone"
+        case .heartRateZoneRange: return "Current HR Zone Range"
+        case .powerZoneRange: return "Current Power Zone Range"
         }
     }
 }
@@ -134,7 +123,10 @@ struct DeviceScreenConfigurationCapabilities: Equatable, Sendable {
 }
 
 struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
-    static let allowedVisibilityMask: UInt32 = 0x0fff
+    static let defaultVisibilityMask: UInt32 = 0x0fff
+    static let contoursVisibilityMask: UInt32 = 1 << 13
+    static let allowedVisibilityMask: UInt32 =
+        defaultVisibilityMask | contoursVisibilityMask
 
     var minimumPolygonSize: UInt8 = 0
     var detailLevel: UInt8 = 2
@@ -142,7 +134,7 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
     var streetLineWidth: UInt8 = 4
     var positionMarkerScale: UInt8 = 2
     var zoomLevel: UInt8 = 3
-    var visibilityMask: UInt32 = allowedVisibilityMask
+    var visibilityMask: UInt32 = defaultVisibilityMask
     var labelDensity: UInt8 = 2
     var labelLanguageMode: UInt8 = 2
     var labelTextSize: UInt8 = 0

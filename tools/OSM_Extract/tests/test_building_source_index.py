@@ -128,6 +128,24 @@ class BuildingSourceIndexTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "building_object_limit_exceeded")
 
+    def test_other_feature_multipolygon_is_not_a_building_parent(self):
+        nodes, ways, relations = records()
+        relations.append({
+            "objectKey": "r21",
+            "tags": {"type": "multipolygon", "power": "plant"},
+            "members": [{"type": "w", "key": "w10", "role": "outer"}],
+        })
+        with tempfile.TemporaryDirectory() as root:
+            index = BuildingSourceIndex(root, "1" * 64)
+            index.build(nodes=nodes, ways=ways, relations=relations)
+            closure = index.closure_for_bounds(
+                [(0, 0, 500, 500)],
+                maximum_objects=100,
+                calibration_cell_size_meters=8192,
+                calibration_halo_cells=1,
+            )
+            self.assertEqual(closure["requiredRelationKeys"], ["r20"])
+
     def test_workload_scan_returns_exact_counts_and_stable_closure_identity(self):
         nodes, ways, relations = records()
         with tempfile.TemporaryDirectory() as root:

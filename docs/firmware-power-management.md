@@ -42,8 +42,8 @@ peripheral transaction part of the correctness boundary.
 | State | Entry policy | What remains active | Exit |
 | --- | --- | --- | --- |
 | Connected, active display | Default connected state, meaningful activity, navigation, workout, transfer, pairing, or audio attention | Display at saved brightness, BLE, UI scheduler, required peripherals | Inactivity can dim the display |
-| Connected, dimmed display | 15 seconds without meaningful activity | BLE and touch remain available; display brightness is capped at 20%; UI work is throttled | Meaningful activity restores the saved brightness; continued inactivity turns the display off |
-| Connected, display off | 45 seconds without meaningful activity | BLE remains connected; the display and ordinary LVGL timer work are stopped; touch wake detection remains available | Touch, BLE/UI activity, or another wake reason restores the display and forces one full refresh |
+| Connected, dimmed display | Configured dim delay without meaningful activity (15 seconds by default) | BLE and touch remain available; display brightness is capped at 20%; UI work is throttled | Meaningful activity restores the saved brightness; continued inactivity turns the display off |
+| Connected, display off | Configured panel-off delay without meaningful activity (45 seconds by default) | BLE remains connected; the display and ordinary LVGL timer work are stopped; touch wake detection remains available | Touch, BLE/UI activity, or another wake reason restores the display and forces one full refresh |
 | Transfer or attention hold | Device transfer, activation, pairing, or audio needs immediate feedback | Display stays awake and required PM locks protect the operation | Hold ends when the operation ends |
 | Disconnected countdown | BLE is disconnected and the configured timeout is nonzero | Firmware remains available for reconnection | Reconnection cancels the countdown; expiry enters deep sleep |
 | Deep sleep | Disconnected timeout expires | Panel is commanded off; buses and radio stop; firmware does not turn off or rewrite AXP2101 output rails | BOOT/PWR button on GPIO0 |
@@ -72,8 +72,8 @@ This path is independent of the connected light-sleep experiment.
 
 ## Display inactivity policy
 
-The connected display state machine lives in the UI task. Its fixed thresholds
-are:
+The connected display state machine lives in the UI task. Its default
+thresholds are:
 
 - dim after 15 seconds;
 - display off after 45 seconds; and
@@ -87,6 +87,11 @@ Automatic connected-display inactivity is controlled by BLE setting `36` and is
 stored in NVS under `deviceSettings`, key `autoDisplayOff`. It defaults to
 enabled. When disabled, the connected display remains active outside the
 navigation, workout, transfer, and attention holds.
+
+BLE setting `38` configures the dim and panel-off delays as one packed value,
+so a dropped write cannot leave a half-updated pair. Firmware persists it under
+`deviceSettings/idleTimeouts`, defaults to 15/45 seconds, and requires the
+panel-off delay to remain at least five seconds later than the dim delay.
 
 Navigation, workout, transfer, and attention states deliberately hold the
 display awake:

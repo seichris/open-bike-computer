@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include "mapContourFormat.hpp"
 
 namespace map_block_format {
 
@@ -113,7 +114,8 @@ private:
     uint32_t length = 0;
     uint32_t crc32 = 0;
   };
-  V3Section v3Sections_[4] = {};
+  V3Section v3Sections_[5] = {};
+  map_contour_format::Validator contourValidator_;
   uint8_t v3Directory_[16] = {};
   size_t v3DirectorySize_ = 0;
   uint8_t v3SectionCount_ = 0;

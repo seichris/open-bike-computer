@@ -228,6 +228,7 @@ enum RemoteDeviceDebugError: LocalizedError, Equatable {
     case unsupportedFirmware
     case transferCommandNotSent
     case rejected(code: String, message: String)
+    case missingDiagnosticsSession
     case missingSession
 
     var errorDescription: String? {
@@ -240,6 +241,8 @@ enum RemoteDeviceDebugError: LocalizedError, Equatable {
             return "The remote-debug request could not be sent."
         case .rejected(_, let message):
             return message
+        case .missingDiagnosticsSession:
+            return "The device did not return a fresh diagnostics session."
         case .missingSession:
             return "The device did not return a fresh remote-debug session."
         }
@@ -251,7 +254,30 @@ enum RemoteDeviceDebugError: LocalizedError, Equatable {
         case .unsupportedFirmware: return "unsupported_firmware"
         case .transferCommandNotSent: return "transfer_command_not_sent"
         case .rejected(let code, _): return code
+        case .missingDiagnosticsSession: return "missing_session"
         case .missingSession: return "missing_session"
+        }
+    }
+}
+
+enum DeviceDiagnosticsHotspotFallbackPolicy {
+    static let maximumAttemptCount = 2
+
+    static func shouldRetry(error: Error) -> Bool {
+        guard let remoteError = error as? RemoteDeviceDebugError else {
+            return false
+        }
+        switch remoteError {
+        case .missingDiagnosticsSession:
+            return true
+        case .rejected(let code, _):
+            return [
+                "diagnostics_worker_stopping",
+                "http_worker_stopping",
+                "transfer_stopping",
+            ].contains(code)
+        default:
+            return false
         }
     }
 }
@@ -361,6 +387,11 @@ enum RemoteDeviceDebugSessionPolicy {
 
 enum DeviceTransferHandshakePolicy {
     static let attemptCount = 32
+    // Starting Wi-Fi in firmware maintenance can temporarily drop BLE. Keep
+    // the transfer-entry handshake alive long enough for the accessory to
+    // finish network startup and for CoreBluetooth to reconnect.
+    static let firmwareAttemptCount = 120
+    static let firmwareRetryIntervalNanoseconds: UInt64 = 500_000_000
     static let remoteDebugAttemptCount = 64
     static let retryIntervalNanoseconds: UInt64 = 250_000_000
     static let remoteDebugExitAttemptCount = 32
@@ -542,7 +573,10 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
 enum DeviceNetworkJoinPolicy {
     static let applyAttemptCount = 2
     static let configurationSettleDelayNanoseconds: UInt64 = 500_000_000
-    static let configurationApplyTimeout: TimeInterval = 20
+    // iOS can leave its accessory Wi-Fi confirmation visible while an XCTest
+    // screen capture is stalled. Give the foreground user time to answer while
+    // retaining a bounded window below firmware's 90-second inactivity limit.
+    static let configurationApplyTimeout: TimeInterval = 60
     static let currentNetworkFetchTimeout: TimeInterval = 2
     static let associationObservationTimeout: TimeInterval = 12
     static let associationObservationRetryNanoseconds: UInt64 = 250_000_000
@@ -1004,6 +1038,21 @@ final class DeviceTransferManager {
         if failure.code == "sd_unavailable" {
             return .deviceSDCardUnavailable
         }
+        if failure.code.hasPrefix("wifi_") {
+            let step: String
+            switch failure.code {
+            case "wifi_owner_create": step = "device memory"
+            case "wifi_owner_dispatch": step = "device transfer service"
+            case "wifi_memory": step = "device memory"
+            case "wifi_mode": step = "Wi-Fi mode"
+            case "wifi_ram_storage": step = "Wi-Fi configuration"
+            case "wifi_softap": step = "device hotspot"
+            default: step = "Wi-Fi"
+            }
+            return .deviceMapTransferRejected(
+                "\(step) could not start. The map is still on your iPhone. Restart your Bike Computer before retrying."
+            )
+        }
         return .deviceMapTransferRejected(failure.message)
     }
 
@@ -1026,37 +1075,163 @@ final class DeviceTransferManager {
         }
         let initialDeviceTransferStatusRevision =
             bleManager.deviceTransferStatusRevision
+        let initialDeviceTransferErrorSequence =
+            bleManager.deviceTransferLastErrorSequence
+        let expectedDeviceID = bleManager.connectedDeviceID
+        var enterWasQueued = false
 
-        guard bleManager.requestDeviceTransferMode(.firmware) else {
-            throw FirmwareUpdateError.transferCommandNotSent
-        }
+        do {
+            guard bleManager.requestDeviceTransferMode(.firmware) else {
+                throw FirmwareUpdateError.transferCommandNotSent
+            }
+            enterWasQueued = true
 
-        for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
-            if bleManager.deviceTransferStatusRevision !=
-                   initialDeviceTransferStatusRevision,
-               let session = try secureSession(
-                mode: .firmware,
-                bleManager: bleManager
-               ) {
-                do {
+            var sawDisconnect = false
+            for attempt in 0..<DeviceTransferHandshakePolicy.firmwareAttemptCount {
+                let hasFreshDeviceStatus =
+                    bleManager.deviceTransferStatusRevision !=
+                    initialDeviceTransferStatusRevision
+                if hasFreshDeviceStatus,
+                   let session = try secureSession(
+                    mode: .firmware,
+                    bleManager: bleManager
+                   ) {
                     try await joinDeviceNetworkIfNeeded(
                         session: session,
                         statusPath: "firmware-update/status",
                         status: status
                     )
-                } catch {
-                    exitFirmwareTransfer(bleManager: bleManager)
-                    throw error
+                    record(
+                        mode: .firmware,
+                        event: "transfer_ready",
+                        fields: [
+                            "networkTransport": session.networkTransport ?? "unknown",
+                            "fallback": String(session.hotspotFallback),
+                        ]
+                    )
+                    return session
                 }
-                record(
-                    mode: .firmware,
-                    event: "transfer_ready",
-                    fields: [
-                        "networkTransport": session.networkTransport ?? "unknown",
-                        "fallback": String(session.hotspotFallback),
-                    ]
+
+                if hasFreshDeviceStatus,
+                   let failure = DeviceTransferFreshFailurePolicy.failure(
+                    after: initialDeviceTransferErrorSequence,
+                    currentSequence:
+                        bleManager.deviceTransferLastErrorSequence,
+                    code: bleManager.deviceTransferLastErrorCode,
+                    message: bleManager.deviceTransferLastErrorMessage
+                   ) {
+                    throw FirmwareUpdateError.deviceTransferRejected(
+                        code: failure.code,
+                        message: failure.message
+                    )
+                }
+
+                if !bleManager.isNavigationReady {
+                    sawDisconnect = true
+                    if attempt % 8 == 0 {
+                        bleManager.reconnectToLastDevice()
+                    }
+                } else if expectedDeviceID == nil ||
+                            bleManager.connectedDeviceID == expectedDeviceID {
+                    if sawDisconnect {
+                        _ = bleManager.requestDeviceTransferStatus(
+                            forMaintenanceReconnect: true
+                        )
+                    } else if DeviceTransferHandshakePolicy.shouldRequestStatus(
+                        attempt: attempt
+                    ) {
+                        _ = bleManager.requestDeviceTransferStatus()
+                    }
+                }
+                try await Task.sleep(
+                    nanoseconds:
+                        DeviceTransferHandshakePolicy
+                            .firmwareRetryIntervalNanoseconds
                 )
-                return session
+            }
+            throw FirmwareUpdateError.missingTransferSession
+        } catch {
+            if enterWasQueued {
+                exitFirmwareTransfer(bleManager: bleManager)
+                _ = await bleManager.waitForNavigationWritesToDrain(
+                    timeoutSeconds: 2
+                )
+            }
+            record(
+                mode: .firmware,
+                event: "transfer_entry_failed",
+                fields: ["error": String(describing: error)]
+            )
+            throw error
+        }
+    }
+
+    func requireFirmwareMaintenanceEligibility(
+        bleManager: BLEManager
+    ) async throws {
+        guard bleManager.isNavigationReady else {
+            throw FirmwareUpdateError.deviceNotReady
+        }
+        let initialRevision = bleManager.deviceTransferStatusRevision
+        guard bleManager.requestDeviceTransferStatus() else {
+            throw FirmwareUpdateError.transferCommandNotSent
+        }
+        for _ in 0..<DeviceTransferHandshakePolicy.attemptCount {
+            if bleManager.deviceTransferStatusRevision != initialRevision {
+                guard bleManager.supportsFirmwareMaintenanceV1 else {
+                    throw FirmwareUpdateError.firmwareMaintenanceUnsupported
+                }
+                guard bleManager.firmwareOTAEligible == true else {
+                    throw FirmwareUpdateError.otaIneligible(
+                        bleManager.firmwareOTAEligibilityCode ??
+                            "inactive_ota_partition_missing"
+                    )
+                }
+                return
+            }
+            try await Task.sleep(
+                nanoseconds:
+                    DeviceTransferHandshakePolicy.retryIntervalNanoseconds
+            )
+        }
+        throw FirmwareUpdateError.firmwareMaintenanceUnsupported
+    }
+
+    func prepareFirmwareMaintenance(
+        bleManager: BLEManager,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws -> UInt32 {
+        guard bleManager.isNavigationReady else {
+            throw FirmwareUpdateError.deviceNotReady
+        }
+        let expectedDeviceID = bleManager.connectedDeviceID
+        let initialRevision = bleManager.deviceTransferStatusRevision
+        let initialErrorSequence = bleManager.deviceTransferLastErrorSequence
+        status("requesting firmware maintenance")
+        guard bleManager.requestFirmwareMaintenancePreparation() else {
+            throw FirmwareUpdateError.transferCommandNotSent
+        }
+
+        var expectedCorrelation: UInt32?
+        for attempt in 0..<DeviceTransferHandshakePolicy.attemptCount {
+            if bleManager.deviceTransferStatusRevision != initialRevision {
+                if bleManager.firmwareMaintenanceStage == "reboot_pending" {
+                    expectedCorrelation =
+                        bleManager.firmwareMaintenanceCorrelation
+                    break
+                }
+                if let failure = DeviceTransferFreshFailurePolicy.failure(
+                    after: initialErrorSequence,
+                    currentSequence:
+                        bleManager.deviceTransferLastErrorSequence,
+                    code: bleManager.deviceTransferLastErrorCode,
+                    message: bleManager.deviceTransferLastErrorMessage
+                ) {
+                    throw FirmwareUpdateError.deviceTransferRejected(
+                        code: failure.code,
+                        message: failure.message
+                    )
+                }
             }
             if DeviceTransferHandshakePolicy.shouldRequestStatus(
                 attempt: attempt
@@ -1068,7 +1243,35 @@ final class DeviceTransferManager {
                     DeviceTransferHandshakePolicy.retryIntervalNanoseconds
             )
         }
-        throw FirmwareUpdateError.missingTransferSession
+        guard let expectedCorrelation, expectedCorrelation != 0 else {
+            throw FirmwareUpdateError.maintenanceReconnectFailed
+        }
+
+        status("waiting for firmware maintenance")
+        var sawDisconnect = !bleManager.isNavigationReady
+        for attempt in 0..<120 {
+            if !bleManager.isNavigationReady {
+                sawDisconnect = true
+                if attempt % 8 == 0 {
+                    bleManager.reconnectToLastDevice()
+                }
+            } else if sawDisconnect,
+                      expectedDeviceID == nil ||
+                        bleManager.connectedDeviceID == expectedDeviceID {
+                _ = bleManager.requestDeviceTransferStatus(
+                    forMaintenanceReconnect: true
+                )
+                try await Task.sleep(nanoseconds: 250_000_000)
+                if bleManager.firmwareMaintenanceActive,
+                   bleManager.firmwareMaintenanceCorrelation ==
+                    expectedCorrelation {
+                    status("firmware maintenance ready")
+                    return expectedCorrelation
+                }
+            }
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        throw FirmwareUpdateError.maintenanceReconnectFailed
     }
 
     func exitFirmwareTransfer(bleManager: BLEManager) {
@@ -1117,19 +1320,9 @@ final class DeviceTransferManager {
                 if !probeResult.isReady {
                     status("switching to device hotspot")
                     try await stopDiagnostics(bleManager: bleManager)
-                    enterWasQueued = false
-                    let fallbackRevision = bleManager.deviceTransferStatusRevision
-                    guard bleManager.requestDeviceTransferMode(
-                        .diagnostics,
-                        remoteDebugHotspotFallbackReason: .endpointUnreachable
-                    ) else {
-                        throw RemoteDeviceDebugError.transferCommandNotSent
-                    }
-                    enterWasQueued = true
-                    session = try await waitForDiagnosticsSession(
+                    session = try await enterDiagnosticsHotspotFallback(
                         bleManager: bleManager,
-                        afterRevision: fallbackRevision,
-                        attemptCount: DeviceTransferHandshakePolicy.attemptCount
+                        status: status
                     )
                 }
             }
@@ -1173,6 +1366,50 @@ final class DeviceTransferManager {
             }
             throw error
         }
+    }
+
+    private func enterDiagnosticsHotspotFallback(
+        bleManager: BLEManager,
+        status: @escaping @MainActor (String) -> Void
+    ) async throws -> DeviceTransferSession {
+        for attempt in 0..<DeviceDiagnosticsHotspotFallbackPolicy
+            .maximumAttemptCount {
+            let fallbackRevision = bleManager.deviceTransferStatusRevision
+            guard bleManager.requestDeviceTransferMode(
+                .diagnostics,
+                remoteDebugHotspotFallbackReason: .endpointUnreachable
+            ) else {
+                throw RemoteDeviceDebugError.transferCommandNotSent
+            }
+            do {
+                return try await waitForDiagnosticsSession(
+                    bleManager: bleManager,
+                    afterRevision: fallbackRevision,
+                    attemptCount: DeviceTransferHandshakePolicy.attemptCount
+                )
+            } catch {
+                let hasRetry = attempt + 1 <
+                    DeviceDiagnosticsHotspotFallbackPolicy.maximumAttemptCount
+                guard hasRetry,
+                      DeviceDiagnosticsHotspotFallbackPolicy.shouldRetry(
+                        error: error
+                      ) else {
+                    throw error
+                }
+                status("retrying device hotspot")
+                record(
+                    mode: .diagnostics,
+                    event: "hotspot_fallback_retry"
+                )
+                // Build 98 and earlier can publish the empty exit status
+                // before their LAN worker has actually stopped. By the time
+                // the first bounded hotspot handshake expires, a compensating
+                // exit gives that worker a deterministic cleanup boundary and
+                // makes one fresh retry safe.
+                try? await stopDiagnostics(bleManager: bleManager)
+            }
+        }
+        throw RemoteDeviceDebugError.missingDiagnosticsSession
     }
 
     private func waitForDiagnosticsSession(
@@ -1224,7 +1461,7 @@ final class DeviceTransferManager {
                 )
             )
         }
-        throw RemoteDeviceDebugError.missingSession
+        throw RemoteDeviceDebugError.missingDiagnosticsSession
     }
 
 #if HOST_TESTING
@@ -1532,6 +1769,16 @@ final class DeviceTransferManager {
             )
 
             if networkObservation == .other {
+                if let applyError,
+                   !DeviceNetworkJoinPolicy.shouldRetry(
+                    domain: applyError.domain,
+                    code: applyError.code
+                   ) {
+                    // A timed-out apply can still be showing its system
+                    // prompt. Keep the typed failure and never overlap it
+                    // with another configuration request.
+                    break
+                }
                 lastDiagnostic =
                     "accessory Wi-Fi association was not confirmed"
                 lastApplyError = nil

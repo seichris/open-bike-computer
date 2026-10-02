@@ -10,11 +10,10 @@ enum WatchDirectBLEProtocolV1 {
     static let workoutUUID = RideBLEGeneratedProtocolV1.workoutUUID
     static let rideAutomationUUID = RideBLEGeneratedProtocolV1
         .rideAutomationUUID
-    // Watch direct BLE does not implement the iPhone-hosted World Radio
-    // feature, so keep its negotiated client version at the last capability
-    // it actually understands.
+    // Version 27 understands zone sidecars. Unrelated owner-only capabilities
+    // remain ignored; scoped authentication still authorizes only ride traffic.
     static let capabilityClientVersion = RideBLEGeneratedProtocolV1
-        .watchGpsMotionEvidenceV1MinimumClientVersion
+        .workoutZonesV1MinimumClientVersion
     static let scopedControllerFeature = RideBLEGeneratedProtocolV1
         .scopedWatchControllerFeature
     static let workoutTelemetryFeature = RideBLEGeneratedProtocolV1
@@ -317,6 +316,11 @@ struct WatchDeviceCapabilitiesV1: Equatable {
     var supportsRideDeliveryAcknowledgement: Bool {
         featureFlags &
             WatchDirectBLEProtocolV1.rideDeliveryAcknowledgementFeature != 0
+    }
+
+    var supportsWorkoutZonesV1: Bool {
+        supportsWorkoutTelemetry && supportsRideAutomation && supportsRideDeliveryAcknowledgement
+            && featureFlags & RideBLEGeneratedProtocolV1.workoutZonesV1Feature != 0
     }
 
     var supportsWatchGPSMotionEvidenceV1: Bool {
@@ -687,25 +691,34 @@ struct RideBLEMotionDispatch: Equatable, Sendable {
     }
 }
 
+
 struct WatchBLEOutboundWriteV1: Equatable, Sendable {
     let target: WatchBLEOutboundTargetV1
     let payload: Data
-    let gpsSampleTimestamp: Date?
+    let gpsDispatch: RideGPSDispatch?
     let protection: WatchBLEOutboundProtectionV1
     let motionDispatch: RideBLEMotionDispatch?
+    let zoneDispatch: RideBLEZoneDispatch?
+    let navigationSnapshot: NavigationSnapshotV1?
 
     init(
         target: WatchBLEOutboundTargetV1,
         payload: Data,
         gpsSampleTimestamp: Date? = nil,
+        gpsSampleClock: RideGPSSampleClock? = nil,
         protection: WatchBLEOutboundProtectionV1 = .protected,
-        motionDispatch: RideBLEMotionDispatch? = nil
+        motionDispatch: RideBLEMotionDispatch? = nil,
+        zoneDispatch: RideBLEZoneDispatch? = nil,
+        navigationSnapshot: NavigationSnapshotV1? = nil
     ) {
         self.target = target
         self.payload = payload
-        self.gpsSampleTimestamp = gpsSampleTimestamp
+        self.gpsDispatch = gpsSampleClock.map { RideGPSDispatch(frame: payload, sampleClock: $0) }
+            ?? gpsSampleTimestamp.map { RideGPSDispatch(frame: payload, sampleClock: RideGPSSampleClock(timestamp: $0)) }
         self.protection = protection
         self.motionDispatch = motionDispatch
+        self.zoneDispatch = zoneDispatch
+        self.navigationSnapshot = navigationSnapshot
     }
 }
 
@@ -1065,6 +1078,13 @@ struct WatchBLEOutboundQueueV1: Equatable {
         entries.removeAll(keepingCapacity: true)
     }
 
+    mutating func removeReplaceableGroups(coalescingKeys: Set<String>) {
+        entries.removeAll {
+            $0.group.disposition == .replaceable &&
+                $0.group.coalescingKey.map(coalescingKeys.contains) == true
+        }
+    }
+
     private mutating func reject(
         _ group: WatchBLEOutboundGroupV1
     ) -> WatchBLEGroupAdmissionV1 {
@@ -1105,64 +1125,17 @@ enum WatchRidePacketEncoderV1 {
         includeRideDetectionQuality: Bool = false,
         now: Date = Date()
     ) -> Data {
-        var result = Data()
-        result.appendInt32LE(Int32(sample.coordinate.latitude * 1_000_000))
-        result.appendInt32LE(Int32(sample.coordinate.longitude * 1_000_000))
-        let heading: UInt16 = if sample.courseDegrees.isFinite,
-            (0..<360).contains(sample.courseDegrees) {
-            UInt16(sample.courseDegrees.rounded()) % 360
-        } else {
-            .max
-        }
-        result.appendUInt16LE(heading)
-        let seconds = sample.timestamp.timeIntervalSince1970
-        result.appendUInt32LE(UInt32(max(min(seconds, Double(UInt32.max)), 0)))
-        let speed: UInt16 = sample.speedMetersPerSecond >= 0
-            ? UInt16(min(
-                (sample.speedMetersPerSecond * 100).rounded(),
-                Double(UInt16.max - 1)
-            ))
-            : UInt16.max
-        result.appendUInt16LE(speed)
-        result.appendInt16LE(Int16(max(
-            min(sample.altitudeMeters.rounded(), Double(Int16.max)),
-            Double(Int16.min)
-        )))
-        result.appendUInt32LE(Self.nonnegativeUInt32(distanceTraveledMeters))
-        result.appendUInt32LE(Self.nonnegativeUInt32(elapsedSeconds))
-        result.appendUInt32LE(snapshot.map {
-            Self.nonnegativeUInt32($0.routeRemainingDistanceMeters)
-        } ?? UInt32.max)
-        if includeRideDetectionQuality {
-            let validCoordinate =
-                sample.coordinate.latitude.isFinite &&
-                sample.coordinate.longitude.isFinite &&
-                (-90...90).contains(sample.coordinate.latitude) &&
-                (-180...180).contains(sample.coordinate.longitude)
-            let accuracyAvailable = sample.horizontalAccuracyMeters.isFinite &&
-                sample.horizontalAccuracyMeters >= 0
-            let ageSeconds = now.timeIntervalSince(sample.timestamp)
-            let timestampAvailable = ageSeconds.isFinite && ageSeconds >= -1
-            let speedAvailable = sample.speedMetersPerSecond.isFinite &&
-                sample.speedMetersPerSecond >= 0
-            var flags: UInt8 = 0
-            if validCoordinate && accuracyAvailable && timestampAvailable &&
-                speedAvailable {
-                flags |= 1 << 0
-            }
-            if accuracyAvailable { flags |= 1 << 1 }
-            result.append(1)
-            result.append(flags)
-            result.appendUInt16LE(accuracyAvailable ? UInt16(min(
-                (sample.horizontalAccuracyMeters * 10).rounded(),
-                Double(UInt16.max - 1)
-            )) : UInt16.max)
-            result.appendUInt16LE(timestampAvailable ? UInt16(min(
-                max((ageSeconds * 1_000).rounded(), 0),
-                Double(UInt16.max - 1)
-            )) : UInt16.max)
-        }
-        return result
+        let clock = RideGPSSampleClock(timestamp: sample.timestamp, now: now, uptime: 0)
+        return RideGPSPacketEncoder.data(
+            lat: sample.coordinate.latitude, lon: sample.coordinate.longitude,
+            heading: (0..<360).contains(sample.courseDegrees) ? sample.courseDegrees : nil,
+            unixTime: RideGPSPacketEncoder.unixTime(now),
+            speed: sample.speedMetersPerSecond, altitude: sample.altitudeMeters,
+            distance: distanceTraveledMeters, elapsed: elapsedSeconds,
+            remaining: snapshot?.routeRemainingDistanceMeters,
+            accuracy: sample.horizontalAccuracyMeters,
+            sampleAgeMs: clock.ageMilliseconds(at: 0), includeQuality: includeRideDetectionQuality
+        )
     }
 
     static func refreshingQualityAge(
@@ -1170,28 +1143,11 @@ enum WatchRidePacketEncoderV1 {
         sampleTimestamp: Date,
         now: Date = Date()
     ) -> Data {
-        guard packet.count >= 36, packet[30] == 1 else { return packet }
-        var result = packet
-        let ageSeconds = now.timeIntervalSince(sampleTimestamp)
-        guard ageSeconds.isFinite, ageSeconds >= -1 else {
-            result[31] &= ~(1 << 0)
-            result[34] = 0xFF
-            result[35] = 0xFF
-            return result
-        }
-        let ageMs = UInt16(min(
-            max((ageSeconds * 1_000).rounded(), 0),
-            Double(UInt16.max - 1)
-        ))
-        result[34] = UInt8(ageMs & 0xFF)
-        result[35] = UInt8((ageMs >> 8) & 0xFF)
-        return result
+        RideGPSDispatch(frame: packet, sampleClock:
+            RideGPSSampleClock(timestamp: sampleTimestamp, now: now, uptime: 0)
+        ).payload(now: now, uptime: 0)
     }
 
-    private static func nonnegativeUInt32(_ value: Double?) -> UInt32 {
-        guard let value, value.isFinite, value >= 0 else { return 0 }
-        return UInt32(min(value.rounded(), Double(UInt32.max - 1)))
-    }
 }
 
 private extension Data {

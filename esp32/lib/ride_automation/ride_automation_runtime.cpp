@@ -11,11 +11,14 @@
 #include "gps_ride_observation.hpp"
 #include "ble_navigation.hpp"
 #include "qmi8658.hpp"
+#if defined(RIDE_AUTOMATION_TRACE)
 #include "ride_automation_trace.hpp"
+#endif
 #include "ride_automation_protocol.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "speaker.hpp"
 #include "workout_telemetry_runtime.hpp"
+#include "../gui/src/mapRenderPolicy.hpp"
 
 #include <Arduino.h>
 #include <Preferences.h>
@@ -28,7 +31,9 @@
 namespace {
 
 ride_automation::ShadowRuntime runtime;
+#if defined(RIDE_AUTOMATION_TRACE)
 const ride_automation::CyclingMotionSource *cyclingMotionSource = nullptr;
+#endif
 uint32_t lastTraceMs = 0;
 bool traceInitialized = false;
 ride_automation_protocol::Frame lastInboundFrame;
@@ -297,27 +302,6 @@ void playConfirmedTransitionAlert() {
       waveshare_board::speaker::Sound::BellDing, 55);
 }
 
-double degreesToRadians(double degrees) {
-  return degrees * 0.017453292519943295;
-}
-
-float distanceMeters(double latitudeA, double longitudeA, double latitudeB,
-                     double longitudeB) {
-  constexpr double kEarthRadiusMeters = 6'371'000.0;
-  const double latitudeDelta = degreesToRadians(latitudeB - latitudeA);
-  const double longitudeDelta = degreesToRadians(longitudeB - longitudeA);
-  const double a = std::sin(latitudeDelta / 2.0) *
-                       std::sin(latitudeDelta / 2.0) +
-                   std::cos(degreesToRadians(latitudeA)) *
-                       std::cos(degreesToRadians(latitudeB)) *
-                       std::sin(longitudeDelta / 2.0) *
-                       std::sin(longitudeDelta / 2.0);
-  const double boundedA = std::max(0.0, std::min(1.0, a));
-  return static_cast<float>(
-      kEarthRadiusMeters * 2.0 *
-      std::atan2(std::sqrt(boundedA), std::sqrt(1.0 - boundedA)));
-}
-
 ride_automation::ConfirmedLifecycle confirmedLifecycle(
     const workout_telemetry::Snapshot &workout,
     ride_automation::ConfirmedLifecycle fallback) {
@@ -479,8 +463,8 @@ void appendGpsEvidence(uint32_t nowMs,
   if (gpsWindow.count == 0)
     return;
   const GpsWindow::Point &oldest = gpsWindow.at(0);
-  const float displacement = distanceMeters(oldest.latitude, oldest.longitude,
-                                            value.latitude, value.longitude);
+  const float displacement = static_cast<float>(map_render_policy::distanceMeters(
+      {oldest.latitude, oldest.longitude}, {value.latitude, value.longitude}));
   out.gpsNetDisplacementMeters = {
       true, displacement, value.capturedAtMs,
       ride_automation::kRideDetectionProfile.gpsFreshnessMs};
@@ -493,8 +477,9 @@ void appendGpsEvidence(uint32_t nowMs,
       continue;
     stationaryDisplacement = std::max(
         stationaryDisplacement,
-        distanceMeters(point.latitude, point.longitude, value.latitude,
-                       value.longitude));
+        static_cast<float>(map_render_policy::distanceMeters(
+            {point.latitude, point.longitude},
+            {value.latitude, value.longitude})));
   }
   const float stationaryRadiusMeters =
       fmaxf(8.0F, value.horizontalUncertaintyMeters * 2.0F);
@@ -561,6 +546,7 @@ bool processInboundTransportFrame(
           pendingFrameKind == ride_automation_protocol::Kind::Decision) {
         pendingFrameValid = false;
       }
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
       const bool quietAskDecline =
           frame.kind == ride_automation_protocol::Kind::Confirmation &&
           outstandingDecision.transition ==
@@ -568,6 +554,15 @@ bool processInboundTransportFrame(
           outstandingDecision.startMode ==
               static_cast<uint8_t>(ride_automation::StartMode::Ask) &&
           frame.result == ride_automation_protocol::Result::Rejected;
+#else
+      // Production accepts only Ask-to-Start. A rejected start is therefore a
+      // normal rider decline; pause/resume rejections still surface errors.
+      const bool quietAskDecline =
+          frame.kind == ride_automation_protocol::Kind::Confirmation &&
+          outstandingDecision.transition ==
+              ride_automation_protocol::Transition::Start &&
+          frame.result == ride_automation_protocol::Result::Rejected;
+#endif
       if (!quietAskDecline)
         showTransportError(frame.result, receivedAtMs);
       if (frame.kind == ride_automation_protocol::Kind::Confirmation &&
@@ -683,7 +678,11 @@ namespace ride_automation_runtime {
 
 void setCyclingMotionSource(
     const ride_automation::CyclingMotionSource *source) {
+#if defined(RIDE_AUTOMATION_TRACE)
   cyclingMotionSource = source;
+#else
+  (void)source;
+#endif
 }
 
 void beginFirmwareShadow() {
@@ -722,10 +721,10 @@ void beginFirmwareShadow() {
   decisionAcknowledged = false;
   outstandingDecisionBeganAtMs = 0;
   lastAcknowledgedDecisionRetryAtMs = 0;
-#if defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
+#if defined(RIDE_AUTOMATION_TRACE) && defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
   Serial.println(
-      "Ride automation: internal control enabled; production remains gated");
-#else
+      "Ride automation: internal control enabled");
+#elif defined(RIDE_AUTOMATION_TRACE)
   Serial.println("Ride automation: shadow trace enabled; controls disabled");
 #endif
 }
@@ -734,8 +733,12 @@ void processFirmwareShadow(uint32_t nowMs) {
   InboundTransportFrame inbound;
   while (inboundTransportQueue != nullptr &&
          xQueueReceive(inboundTransportQueue, &inbound, 0) == pdTRUE) {
+#if defined(RIDE_AUTOMATION_TRACE)
     if (!processInboundTransportFrame(inbound.frame, inbound.receivedAtMs))
       Serial.println("BLE Ride Automation: rejected queued frame");
+#else
+    (void)processInboundTransportFrame(inbound.frame, inbound.receivedAtMs);
+#endif
   }
   if (traceInitialized && nowMs - lastTraceMs < 1'000)
     return;
@@ -744,8 +747,10 @@ void processFirmwareShadow(uint32_t nowMs) {
 
   ride_automation::RideEvidenceObservation observation;
   appendWorkoutSensorEvidence(nowMs, observation);
+#if defined(RIDE_AUTOMATION_TRACE)
   if (cyclingMotionSource != nullptr)
     cyclingMotionSource->appendEvidence(nowMs, observation);
+#endif
   GpsRideObservation gpsObservation = currentGpsRideObservation(
       nowMs, ride_automation::kRideDetectionProfile.gpsFreshnessMs);
   if (gpsObservation.source == RidePositionSource::None) {
@@ -822,6 +827,7 @@ void processFirmwareShadow(uint32_t nowMs) {
       retainedLifecycle;
   const ride_automation::ConfirmedLifecycle lifecycle =
       confirmedLifecycle(workout, retainedLifecycle);
+#if defined(RIDE_AUTOMATION_TRACE)
   if (!workout.stale && workout.state.coreReceived) {
     // A detailed capture is consented for one ride. End it from the device's
     // own confirmed workout lifecycle as well as from the BLE command so a
@@ -842,6 +848,10 @@ void processFirmwareShadow(uint32_t nowMs) {
         ride_diagnostics::detailedCaptureLease();
     (void)ride_diagnostics::clearCaptureIfMatches(lease);
   }
+#else
+  if (!workout.stale && workout.state.coreReceived)
+    retainedLifecycle = lifecycle;
+#endif
   // Every newly observed running session receives a conservative startup
   // grace. Manual provenance may arrive one telemetry frame later, while an
   // automatic start safely tolerates the same brief pause suppression.
@@ -910,9 +920,15 @@ void processFirmwareShadow(uint32_t nowMs) {
     lastAcknowledgedDecisionRetryAtMs = nowMs;
     promptResponded = false;
     promptAccepted = false;
-    if (frame.transition == ride_automation_protocol::Transition::Start &&
-        configuredSettings.startMode == ride_automation::StartMode::Ask &&
-        configuredAlertMode == 0) {
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
+    const bool shouldAlertStart =
+        frame.transition == ride_automation_protocol::Transition::Start &&
+        configuredSettings.startMode == ride_automation::StartMode::Ask;
+#else
+    const bool shouldAlertStart =
+        frame.transition == ride_automation_protocol::Transition::Start;
+#endif
+    if (shouldAlertStart && configuredAlertMode == 0) {
       waveshare_board::speaker::requestPlay(
           waveshare_board::speaker::Sound::BellDing, 55);
     }
@@ -965,6 +981,7 @@ void processFirmwareShadow(uint32_t nowMs) {
   if (suppressionIsActive != persistedStartSuppression)
     persistStartSuppression(suppressionIsActive);
 
+#if defined(RIDE_AUTOMATION_TRACE)
   ride_automation::TraceRecord trace;
   trace.timestampMs = nowMs;
   trace.lifecycle = lifecycle;
@@ -1004,6 +1021,7 @@ void processFirmwareShadow(uint32_t nowMs) {
     ride_diagnostics::record(ride_diagnostics::Level::Debug,
                              "rideAutomation", "detailed_sample", fields);
   }
+#endif
 #if !defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
   if (decision)
     runtime.policy().rejectPending(nowMs);
@@ -1040,7 +1058,9 @@ UiSnapshot uiSnapshot(uint32_t nowMs) {
     const uint32_t sequence = outstandingDecision.decisionSequence;
     switch (outstandingDecision.transition) {
     case ride_automation_protocol::Transition::Start:
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
       if (configuredSettings.startMode == ride_automation::StartMode::Ask) {
+#endif
         if (!promptResponded) {
           return {UiPhase::StartPrompt, UiError::None, 100, sequence,
                   static_cast<uint8_t>(
@@ -1052,7 +1072,9 @@ UiSnapshot uiSnapshot(uint32_t nowMs) {
         }
         if (!promptAccepted)
           return {};
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
       }
+#endif
       return {UiPhase::Starting, UiError::None, 100, sequence};
     case ride_automation_protocol::Transition::Pause:
       return {UiPhase::AwaitingPause, UiError::None, 100, sequence};
@@ -1091,8 +1113,11 @@ bool respondToStartPrompt(bool accept, uint32_t nowMs) {
 #if defined(RIDE_AUTOMATION_INTERNAL_CONTROL)
   if (!hasOutstandingDecision || promptResponded ||
       outstandingDecision.transition !=
-          ride_automation_protocol::Transition::Start ||
-      configuredSettings.startMode != ride_automation::StartMode::Ask) {
+          ride_automation_protocol::Transition::Start
+#if defined(RIDE_AUTOMATION_AUTOMATIC_START)
+      || configuredSettings.startMode != ride_automation::StartMode::Ask
+#endif
+  ) {
     return false;
   }
   ride_automation_protocol::Frame response = outstandingDecision;

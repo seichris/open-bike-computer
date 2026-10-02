@@ -198,3 +198,11 @@ images. The sole whole-object exclusion remains
 compared because they embed the exact Git identity and source timestamp. Record
 both source identities, preprocessing and normalization commands, evidence JSON
 files, exclusions, object counts, and all four results in the pull request.
+## Shared dependency caches
+
+See [firmware build caching](firmware-build-caching.md) for shared core transport,
+source-only compiler reuse, CI cache boundaries, and the required native-host
+relocation qualification. `FIRMWARE_SHARED_CORE_CACHE schema=1` records a miss,
+publication, or verified restore (`status=hit` with `restoreMs`). A restore is
+never firmware/upload acceptance; the normal exact-source build provenance
+remains authoritative.
