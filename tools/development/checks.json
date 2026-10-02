@@ -573,19 +573,19 @@
       "name": "Verified firmware build",
       "component": "firmware_build",
       "cwd": "esp32",
-      "command": "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py WAVESHARE_AMOLED_{board}\npython3 ../tools/build_evidence.py firmware --environment WAVESHARE_AMOLED_{board}",
+      "command": "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py WAVESHARE_AMOLED_{board}\nif test \"${BICINO_COLLECT_BUILD_EVIDENCE:-0}\" = 1; then\n  python3 ../tools/build_evidence.py firmware --environment WAVESHARE_AMOLED_{board}\nfi",
       "tools": [
         "python3"
       ],
       "requiresBoard": true,
       "level": "full",
       "timeoutSeconds": 7200,
-      "requiresCleanSource": true
+      "evidenceBuild": true
     },
     {
       "id": "ios-simulator",
       "name": "iOS and Watch simulator contracts",
-      "component": "ios",
+      "component": "ios_native",
       "cwd": "ios-app",
       "command": "./scripts/run-workout-platform-tests.sh ios\n./scripts/run-workout-platform-tests.sh watchos",
       "tools": [
@@ -665,7 +665,7 @@
     {
       "id": "ios-build-containers",
       "name": "Build and validate Debug/Release iOS containers",
-      "component": "ios",
+      "component": "ios_native",
       "cwd": "ios-app",
       "host": [
         "Darwin"
@@ -676,7 +676,7 @@
         "python3"
       ],
       "timeoutSeconds": 3600,
-      "command": "export BICINO_REQUIRE_BUILD_EVIDENCE=1\nfor configuration in Debug Release; do\n  derived=\"$TMPDIR/containers/$configuration\"\n  ./scripts/xcodebuild-cli.sh -project BikeComputer/BikeComputer.xcodeproj -scheme BikeComputer -configuration \"$configuration\" -destination 'generic/platform=iOS' -derivedDataPath \"$derived\" CODE_SIGNING_ALLOWED=NO DEBUG_INFORMATION_FORMAT=dwarf-with-dsym build\n  app=\"$derived/Build/Products/$configuration-iphoneos/BikeComputer.app\"\n  if test \"$configuration\" = Debug; then\n    bash ./scripts/verify-development-container.sh \"$app\"\n  else\n    bash ./scripts/verify-release-container.sh \"$app\"\n    if LC_ALL=C grep -aFq 'Start Remote Debugging' \"$app/BikeComputer\"; then\n      echo 'Release app contains Debug-only remote device settings' >&2\n      exit 1\n    fi\n  fi\ndone",
+      "command": "python3 ../tools/development/ios_build.py",
       "probes": [
         {
           "command": [
@@ -686,7 +686,8 @@
           ]
         }
       ],
-      "requiresCleanSource": true
+      "evidenceBuild": true,
+      "persistentBuildState": true
     }
   ]
 }

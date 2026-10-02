@@ -23,6 +23,7 @@ def load(name, path):
 runner = load("dev_check", ROOT / "tools/dev_check.py")
 swift = load("swift_sources", ROOT / "tools/development/swift_compile.py")
 simulator = load("simulator_session", ROOT / "tools/development/simulator_session.py")
+ios_build = load("ios_build", ROOT / "tools/development/ios_build.py")
 
 
 class DevelopmentChecksTests(unittest.TestCase):
@@ -89,6 +90,45 @@ class DevelopmentChecksTests(unittest.TestCase):
             result=json.loads(report.read_text())["checks"][0]
             self.assertEqual(result["status"],"blocked")
             self.assertNotIn("exitCode",result)
+
+    def test_dirty_builds_run_normally_but_evidence_mode_blocks_before_build(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(runner, "source_identity", return_value={"commit":"a"*40,"dirty":True}), contextlib.redirect_stdout(io.StringIO()):
+            for evidence, expected in ((False, "passed"), (True, "blocked")):
+                report = Path(temporary) / (str(evidence) + '.json')
+                code = runner.run_checks([{"id":"build", "name":"Build", "command":"true", "evidenceBuild":True}],report,evidence=evidence)
+                result = json.loads(report.read_text())
+                self.assertEqual(result['checks'][0]['status'],expected)
+                self.assertEqual(code, int(evidence))
+                self.assertTrue(result['source']['dirty'])
+                self.assertEqual(result['evidenceRequested'],evidence)
+
+    def test_persistent_builds_do_not_inherit_disposable_module_caches(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stdout(io.StringIO()):
+            for fresh in (False, True):
+                command = ('test -n "${CLANG_MODULE_CACHE_PATH:-}"' if fresh else
+                           'test -z "${CLANG_MODULE_CACHE_PATH:-}"; test -z "${SWIFT_MODULE_CACHE_PATH:-}"')
+                report = Path(temporary) / (str(fresh) + '.json')
+                self.assertEqual(runner.run_checks([{'id':'build','name':'Build','command':command,'persistentBuildState':True}],report,fresh=fresh),0)
+
+    def test_dirty_firmware_recipe_builds_without_collecting_symbols(self):
+        check = next(c for c in json.loads(runner.REGISTRY.read_text())['checks'] if c['id']=='firmware-build')
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'esp32/tools').mkdir(parents=True);(root/'tools').mkdir()
+            (root/'esp32/tools/build_firmware.py').write_text('from pathlib import Path\nPath("built").touch()\n')
+            (root/'tools/build_evidence.py').write_text('raise SystemExit("dirty build must not collect")\n')
+            with patch.object(runner,'ROOT',root), patch.object(runner,'source_identity',return_value={'commit':'a'*40,'dirty':True}), contextlib.redirect_stdout(io.StringIO()), \
+                 patch.dict(os.environ,{'BICINO_COLLECT_BUILD_EVIDENCE':'0','BICINO_REQUIRE_BUILD_EVIDENCE':'0'}):
+                self.assertEqual(runner.run_checks([check],root/'results.json',board='175'),0)
+            self.assertTrue((root/'esp32/built').exists())
+
+    def test_scenario_auto_selection_includes_host_checks_and_excludes_native_checks(self):
+        with patch.object(runner,'changed_paths',return_value=['protocol/scenarios/workout-delivery.json']), \
+             patch.object(runner,'run_checks',return_value=0) as run:
+            self.assertEqual(runner.main(['--level','full','--report','/private/tmp/scenario-plan-not-written.json']),0)
+        ids={c['id'] for c in run.call_args.args[0]}
+        self.assertIn('ios-fast-run-swift-helper-tests',ids)
+        self.assertNotIn('ios-build-containers',ids)
+        self.assertNotIn('ios-simulator',ids)
 
     def test_success_retains_commit_and_logs(self):
         code, report = self.run_checks([{"id": "good", "name": "Good", "command": "echo checked"}])
@@ -177,6 +217,42 @@ class SimulatorOwnershipTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "already leased"):
                     with simulator.lease(self.identifier):
                         self.fail("overlapping simulator lease was admitted")
+
+
+class IOSBuildStateTests(unittest.TestCase):
+    def test_persistent_state_reuses_configuration_paths_and_cannot_overlap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve() / 'DerivedData'
+            def fake_run(command, **kwargs):
+                if '-derivedDataPath' in command:
+                    derived = Path(command[command.index('-derivedDataPath')+1])
+                    derived.mkdir(parents=True,exist_ok=True)
+                    app = derived / 'Build/Products/Release-iphoneos/BikeComputer.app'
+                    app.mkdir(parents=True,exist_ok=True);(app/'BikeComputer').write_bytes(b'production')
+            with patch.object(ios_build.subprocess,'run',side_effect=fake_run) as commands:
+                ios_build.build_containers(root);ios_build.build_containers(root)
+            paths=[c.args[0][c.args[0].index('-derivedDataPath')+1] for c in commands.call_args_list if '-derivedDataPath' in c.args[0]]
+            self.assertEqual(paths,[str(root/'Debug'),str(root/'Release')]*2)
+            self.assertTrue((root/'Debug').is_dir())
+            with ios_build.build_state(root):
+                with self.assertRaisesRegex(RuntimeError,'another build'):
+                    with ios_build.build_state(root): self.fail('overlapping build admitted')
+
+    def test_fresh_state_is_disposable_and_does_not_touch_persistent_state(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(ios_build,'ROOT',Path(temporary)), \
+             patch.dict(os.environ,{'BICINO_FRESH_BUILD':'1'}):
+            paths=[]
+            def fake_build(root): paths.append(root);(root/'sentinel').touch()
+            with patch.object(ios_build,'build_containers',side_effect=fake_build):
+                self.assertEqual(ios_build.main(),0)
+            self.assertFalse(paths[0].exists())
+            self.assertFalse((Path(temporary)/'ios-app/DerivedData').exists())
+
+    def test_unsafe_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);(root/'real').mkdir();(root/'link').symlink_to(root/'real')
+            with self.assertRaisesRegex(RuntimeError,'symlink'):
+                with ios_build.build_state(root/'link/Debug'): self.fail('symlink accepted')
 
 
 if __name__ == "__main__":

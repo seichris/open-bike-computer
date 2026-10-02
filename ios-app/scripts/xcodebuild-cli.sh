@@ -29,8 +29,13 @@ for ((index=0; index<${#args[@]}; index++)); do
     esac
 done
 evidence="$script_dir/../../tools/build_evidence.py"
-if [[ "$scheme" == BikeComputer && "$action" == build && -n "$derived" ]]; then
+if [[ "$scheme" == BikeComputer && "$action" == build && -n "$derived" &&
+      ( "${BICINO_COLLECT_BUILD_EVIDENCE:-0}" == 1 || "${BICINO_REQUIRE_BUILD_EVIDENCE:-0}" == 1 ) ]]; then
     before="$(python3 "$evidence" source)"
+    if ! python3 -c 'import json,sys; sys.exit(bool(json.loads(sys.argv[1])["dirty"]))' "$before"; then
+        echo 'Exact-build evidence requires clean committed source; use an ordinary build for local edits.' >&2
+        exit 1
+    fi
     "$xcodebuild_path" CC="$clang_wrapper" DEBUG_INFORMATION_FORMAT=dwarf-with-dsym "$@"
     if ! python3 "$evidence" ios --derived-data "$derived" \
         --configuration "$configuration" --source-before "$before"; then

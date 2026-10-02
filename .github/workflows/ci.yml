@@ -65,6 +65,7 @@ jobs:
       firmware_targets: ${{ steps.components.outputs.firmware_targets }}
       heavy_ci: ${{ steps.policy.outputs.heavy_ci }}
       ios: ${{ steps.components.outputs.ios }}
+      ios_native: ${{ steps.components.outputs.ios_native }}
       map_backend: ${{ steps.components.outputs.map_backend }}
       osm: ${{ steps.components.outputs.osm }}
     steps:
@@ -349,7 +350,7 @@ jobs:
     name: iOS Simulator Tests
     needs: changes
     if: >-
-      needs.changes.outputs.ios == 'true' &&
+      needs.changes.outputs.ios_native == 'true' &&
       needs.changes.outputs.heavy_ci == 'true'
     runs-on: macos-latest
     steps:
@@ -370,7 +371,7 @@ jobs:
     name: iOS App Builds
     needs: changes
     if: >-
-      needs.changes.outputs.ios == 'true' &&
+      needs.changes.outputs.ios_native == 'true' &&
       needs.changes.outputs.heavy_ci == 'true'
     runs-on: macos-latest
     env:
@@ -380,7 +381,7 @@ jobs:
       - name: Configure exact-build symbol retention
         run: echo "BICINO_BUILD_EVIDENCE_DIR=$RUNNER_TEMP/bicino-build-symbols" >> "$GITHUB_ENV"
       - name: Build and validate Debug and Release app containers
-        run: python3 tools/dev_check.py --check ios-build-containers --report "$RUNNER_TEMP/dev-checks/ios-build-containers/results.json"
+        run: python3 tools/dev_check.py --check ios-build-containers --fresh --evidence --report "$RUNNER_TEMP/dev-checks/ios-build-containers/results.json"
       - name: Retain check evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -532,6 +533,7 @@ jobs:
           HOST_RESULT: ${{ needs.esp32-host.result }}
           HEAVY_CI: ${{ needs.changes.outputs.heavy_ci }}
           IOS_CHANGED: ${{ needs.changes.outputs.ios }}
+          IOS_NATIVE_CHANGED: ${{ needs.changes.outputs.ios_native }}
           IOS_FAST_RESULT: ${{ needs.ios-fast.result }}
           IOS_RESULT: ${{ needs.ios.result }}
           IOS_PLATFORM_RESULT: ${{ needs.ios-platform.result }}
@@ -575,7 +577,7 @@ jobs:
             require_result "iOS fast tests" "$IOS_FAST_RESULT" skipped
           fi
 
-          if test "$IOS_CHANGED" = true && test "$HEAVY_CI" = true; then
+          if test "$IOS_NATIVE_CHANGED" = true && test "$HEAVY_CI" = true; then
             require_result "iOS app builds" "$IOS_RESULT" success
             require_result "iOS simulator tests" "$IOS_PLATFORM_RESULT" success
           else

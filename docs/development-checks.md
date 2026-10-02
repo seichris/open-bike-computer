@@ -12,18 +12,30 @@ tools/dev-check
 tools/dev-check --suite ios --level full
 tools/dev-check --suite firmware --level full --board 175
 tools/dev-check --suite all --level full --board 175
+tools/dev-check --suite ios --level full --fresh --evidence
 ```
 
 Automatic selection uses the merge base with `origin/main`, commits since that
 base, staged/unstaged edits, and nonignored untracked files. `--base REF` changes
 the comparison. The default fast level selects affected host checks and always
 checks the development registry and CI policy. Full adds simulator contracts,
-unsigned Debug/Release app containers and a verified firmware build. Exact-build
-symbol retention requires clean committed source; full native build checks report
-dirty source as blocked before compilation. Identify
+unsigned Debug/Release app containers and a firmware build through the locked
+wrapper. Ordinary builds accept uncommitted edits and record their dirty-source
+fingerprint. `--evidence` requires clean committed source before builds and retains
+exact-build symbols; `--fresh` uses disposable iOS build state. CI explicitly uses
+both for app qualification. Dirty firmware builds retain the wrapper's existing
+prohibition on cache publication and upload. Identify
 the connected board before selecting its build environment; this command never
 flashes, installs apps, or deploys services. CI-only image/service qualification
 continues to use the existing deployment scripts and required aggregate gate.
+
+Scenario fixtures and host-only Swift source graphs select host checks without
+selecting native app/simulator builds, even at the full level. App/protocol changes
+continue to select native validation. Check-registry recipe edits are compared
+with the base version and select their old/new consumers; unavailable baselines
+or unknown registry metadata conservatively select all consumers. Shared runner
+changes also validate every consumer. Development unit tests do not select
+product builds. Explicit `--suite ios --level full` always includes native checks.
 
 `--check ID` selects an exact registered check; repeat it for several checks.
 CI uses this form to keep each existing check visible as a named step. Use
@@ -55,7 +67,13 @@ backend and extractor; native crypto checks also need compatible MbedTLS headers
 and libraries. The plan reports missing prerequisites without installing into an
 ambient interpreter or modifying the firmware runtime.
 
-Each check receives its own temporary directory and compiler module caches.
+Host checks receive their own temporary directories and compiler module caches.
+Local app-container checks keep Debug/Release DerivedData under this worktree's
+ignored `ios-app/DerivedData/development-checks/`, with an exclusive lease spanning
+builds and container verification. Concurrent builds in the same worktree fail
+with an ownership message; separate worktrees have separate state. Xcode retains
+its module caches for incremental reuse. `--fresh` creates disposable state,
+without deleting the persistent local directories.
 Standalone Swift scripts also create their own temporary namespace. Simulator
 contracts select a runtime compatible with the active Xcode SDK, create a fresh
 simulator, exclusively lease it through completion and

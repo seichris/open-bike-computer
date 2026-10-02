@@ -55,14 +55,16 @@ def changed_paths(base):
                    for p in subprocess.check_output(["git", *command], cwd=ROOT).split(b"\0") if p})
 
 
-def components(paths):
+def components(paths, base="origin/main"):
     spec = importlib.util.spec_from_file_location("changed_components", ROOT / ".github/scripts/changed_components.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    result = module.classify_paths(paths)
-    if any(p.startswith(("tools/development/", "tools/dev_check.py")) for p in paths):
-        result = dict.fromkeys(result, True)
-    return {key for key, value in result.items() if value}
+    affected = module.registry_changed_components(base) if module.CHECK_REGISTRY in paths else None
+    result = module.classify_paths(paths, registry_components=affected)
+    selected = {key for key, value in result.items() if value}
+    if module.native_ios_required(paths, registry_components=affected):
+        selected.add("ios_native")
+    return selected
 
 
 def prerequisites(check):
@@ -105,13 +107,14 @@ def run_checks(checks, report_path, **options):
         os.close(descriptor)
 
 
-def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selection=None, skipped=None):
+def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selection=None, skipped=None,
+                evidence=False, fresh=False):
     before = source_identity()
     results = []
     report = {"schema": 1, "source": before, "base": base, "host": platform.system(),
               "architecture": platform.machine(), "python": sys.executable, "pythonVersion": sys.version,
               "board": board, "planOnly": plan, "selection": selection, "checks": results,
-              "skippedChecks": skipped or []}
+              "skippedChecks": skipped or [], "evidenceRequested": evidence, "freshBuildRequested": fresh}
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
     def save():
@@ -123,7 +126,7 @@ def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selec
     readiness = {check["id"]: prerequisites(check) for check in checks}
     for check in checks:
         reasons = readiness[check["id"]]
-        if check.get("requiresCleanSource") and before["dirty"]:
+        if (check.get("requiresCleanSource") or (evidence and check.get("evidenceBuild"))) and before["dirty"]:
             reasons.append("exact-build symbol retention requires clean committed source")
         if check.get("requiresBoard") and board is None:
             reasons.append("select the identified board with --board 175 or --board 206")
@@ -145,6 +148,15 @@ def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selec
                                 "SWIFT_MODULE_CACHE_PATH": temporary + "/swift-modules",
                                 "DEV_CHECK_ARTIFACTS": str(report_path.parent),
                                 "PATH": str(Path(sys.executable).parent) + os.pathsep + environment.get("PATH", "")})
+            environment["BICINO_FRESH_BUILD"] = "1" if fresh else "0"
+            if evidence:
+                environment["BICINO_COLLECT_BUILD_EVIDENCE"] = "1"
+                environment["BICINO_REQUIRE_BUILD_EVIDENCE"] = "1"
+            if check.get("persistentBuildState") and not fresh:
+                # Xcode owns module caches within persistent per-worktree DerivedData.
+                # Per-run environment paths would defeat incremental command reuse.
+                environment.pop("CLANG_MODULE_CACHE_PATH", None)
+                environment.pop("SWIFT_MODULE_CACHE_PATH", None)
             command = check["command"].replace("{board}", board or "")
             with log.open("w") as stream:
                 child = None
@@ -198,16 +210,21 @@ def main(argv=None):
     parser.add_argument("--board", choices=("175", "206"))
     parser.add_argument("--plan", action="store_true")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--evidence", action="store_true",
+                        default=(os.environ.get("BICINO_REQUIRE_BUILD_EVIDENCE") == "1" or
+                                 os.environ.get("BICINO_COLLECT_BUILD_EVIDENCE") == "1"),
+                        help="require clean source and retain exact-build symbols")
+    parser.add_argument("--fresh", action="store_true", help="use fresh disposable iOS build state")
     args = parser.parse_args(argv)
     registry = json.loads(REGISTRY.read_text())
     checks = registry["checks"]
     ids = {c["id"] for c in checks}
     if set(args.check) - ids:
         parser.error("unknown checks: " + ", ".join(sorted(set(args.check) - ids)))
-    selected_components = components(changed_paths(args.base)) if args.suite == "auto" and not args.check else set()
+    selected_components = components(changed_paths(args.base), args.base) if args.suite == "auto" and not args.check else set()
     if args.suite == "auto" and not args.check:
         selected_components.add("development")
-    suites = {"firmware": {"firmware_host", "firmware_build"}, "ios": {"ios"},
+    suites = {"firmware": {"firmware_host", "firmware_build"}, "ios": {"ios", "ios_native"},
               "map": {"map_backend", "osm"}, "development": {"development"}}
     if args.check:
         selected = [c for c in checks if c["id"] in args.check]
@@ -218,6 +235,7 @@ def main(argv=None):
     path = args.report or Path(git("rev-parse", "--git-path", "development-checks")) / str(uuid.uuid4()) / "results.json"
     try:
         return run_checks(selected, path.resolve(), plan=args.plan, board=args.board, base=args.base,
+            evidence=args.evidence, fresh=args.fresh,
             selection={"suite": args.suite, "level": args.level, "explicitChecks": args.check},
             skipped=[{"id": c["id"], "status": "skipped", "reason": "outside the requested component/check/level selection"}
                      for c in checks if c not in selected])

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import unittest
+import json
 from pathlib import Path
 
 
@@ -18,12 +19,51 @@ class ChangedComponentsTests(unittest.TestCase):
             result = changed_components.classify_paths([path])
             self.assertTrue(result["firmware_build"])
             self.assertTrue(result["firmware_host"])
-            self.assertTrue(result["ios"])
+            self.assertEqual(result["ios"], path == "tools/build_evidence.py")
         for path in ("protocol/scenarios/reconnect.json", "tools/replay_scenario.py"):
             result = changed_components.classify_paths([path])
             self.assertTrue(result["ios"])
             self.assertTrue(result["firmware_host"])
         self.assertTrue(changed_components.classify_paths(["tools/incident_bundle.py"])["firmware_host"])
+
+    def test_host_scenarios_and_source_lists_skip_native_builds(self):
+        for path in (*changed_components.IOS_FAST_ONLY_PATHS, "protocol/scenarios/reconnect.json", "ios-app/scripts/tests/test_xcodebuild_evidence_mode.py"):
+            with self.subTest(path=path):
+                self.assertTrue(changed_components.classify_paths([path])["ios"])
+                self.assertFalse(changed_components.native_ios_required([path]))
+        for path in ("ios-app/BikeComputer/App.swift", "tools/development/simulator_session.py",
+                     "tools/development/ios_build.py", "tools/build_evidence.py"):
+            self.assertTrue(changed_components.native_ios_required([path]), path)
+        self.assertTrue(changed_components.native_ios_required(["protocol/scenarios/reconnect.json", "ios-app/BikeComputer/App.swift"]))
+
+    def test_registry_changes_scope_old_and_new_consumers(self):
+        before = {"schema":1, "checks":[{"id":"host", "component":"ios", "command":"old"},
+                                       {"id":"native", "component":"ios_native", "command":"build"}]}
+        after = json.loads(json.dumps(before)); after["checks"][0]["command"] = "new"
+        affected = changed_components.registry_affected_components(json.dumps(before),json.dumps(after))
+        self.assertEqual(affected, {"ios"})
+        paths = [changed_components.CHECK_REGISTRY]
+        selected = changed_components.classify_paths(paths, registry_components=affected)
+        self.assertEqual({key for key,value in selected.items() if value}, {"ios"})
+        self.assertFalse(changed_components.native_ios_required(paths, registry_components=affected))
+        after["checks"][0]["component"] = "firmware_host"
+        self.assertEqual(changed_components.registry_affected_components(json.dumps(before),json.dumps(after)), {"ios","firmware_host"})
+        after["checks"] = []
+        affected = changed_components.registry_affected_components(json.dumps(before),json.dumps(after))
+        self.assertEqual(affected,{"ios","ios_native"})
+        self.assertTrue(changed_components.native_ios_required(paths, registry_components=affected))
+
+    def test_registry_unknown_inputs_fall_back_to_all_consumers(self):
+        valid = json.dumps({"schema":1,"checks":[]})
+        for value in ('invalid', '{"schema":2,"checks":[]}',
+                      '{"schema":1,"checks":[{"id":"a","component":"unknown"}]}'):
+            self.assertIsNone(changed_components.registry_affected_components(valid,value))
+        self.assertTrue(all(changed_components.classify_paths([changed_components.CHECK_REGISTRY]).values()))
+        self.assertTrue(changed_components.native_ios_required([changed_components.CHECK_REGISTRY]))
+
+    def test_development_unit_tests_do_not_select_product_builds(self):
+        self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))
+        self.assertFalse(changed_components.native_ios_required(["tools/development/tests/test_development_checks.py"]))
 
     def test_cache_qualification_runs_for_core_inputs_without_rebuilding_for_app_edits(self):
         for path in (

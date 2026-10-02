@@ -4,12 +4,15 @@
 locked firmware build and retains its matching ELF, final linker map and build
 manifest. Identify the actual board first. It does not flash the device.
 
-Successful device app builds through `ios-app/scripts/xcodebuild-cli.sh` retain
-Debug/Release dSYMs when an explicit DerivedData path and BikeComputer scheme
-are supplied. The app code image UUIDs must match its dSYM. Debug builds may put that code
+Ordinary builds through `ios-app/scripts/xcodebuild-cli.sh` use the caller's
+debug-information settings and perform no symbol collection. Request evidence
+with `tools/dev-check --check ios-build-containers --evidence`, or set
+`BICINO_COLLECT_BUILD_EVIDENCE=1` for an explicit DerivedData path and BikeComputer
+scheme build. Evidence mode requires clean source before compilation and retains
+Debug/Release dSYMs. The app code image UUIDs must match its dSYM. Debug builds may put that code
 in `BikeComputer.debug.dylib`; the executable launcher is identified separately. The checkout must remain
-clean at the same commit throughout the build. Dirty builds still work locally,
-but report symbol retention as blocked. CI sets `BICINO_REQUIRE_BUILD_EVIDENCE=1`
+clean at the same commit throughout the build. Ordinary dirty builds still work
+locally. CI uses `--fresh --evidence` and sets `BICINO_REQUIRE_BUILD_EVIDENCE=1`
 so missing or mismatched symbols fail validation. Simulator contract builds keep
 their existing separate lifecycle.
 
@@ -21,6 +24,12 @@ files are hashed before and after copying. Existing records are verified and
 never overwritten. `python3 tools/build_evidence.py verify /absolute/path/HASH`
 checks the complete record. Retention is local and deliberate; no pruning,
 public uploading, device installation or deployment occurs.
+
+Use evidence collection for release/qualification builds and builds chosen for
+device debugging. Distinct symbol records accumulate without automatic pruning;
+ordinary local builds add no records. `tools/build-and-record-firmware` remains
+the explicit firmware build-and-record command; `tools/dev-check --suite firmware
+--level full --board 175 --evidence` provides the same strict retention mode.
 
 Firmware observations record actual `coreCache` status and phase timings from
 the successful build manifest. Each profile's latest observation is the default

@@ -337,9 +337,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("--check ios-build-containers", general_ci)
         registry = json.loads((REPO_ROOT / "tools/development/checks.json").read_text())
         containers = next(c for c in registry["checks"] if c["id"] == "ios-build-containers")
-        self.assertIn("Debug Release", containers["command"])
-        self.assertIn("./scripts/verify-release-container.sh", containers["command"])
-        self.assertIn("./scripts/verify-development-container.sh", containers["command"])
+        self.assertIn("ios_build.py", containers["command"])
+        helper = (REPO_ROOT / "tools/development/ios_build.py").read_text()
+        self.assertIn('("Debug", "Release")', helper)
+        self.assertIn("verify-release-container.sh", helper)
+        self.assertIn("verify-development-container.sh", helper)
 
     def test_ios_platform_tests_share_only_job_scoped_derived_data(self) -> None:
         general_ci = workflow_source("ci.yml")
@@ -387,7 +389,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {
             **os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "false",
-            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "false", "IOS_CHANGED": "false",
+            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "false", "IOS_CHANGED": "false", "IOS_NATIVE_CHANGED": "false",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
             **{name: "skipped" for name in ("ESP32_RESULT", "HOST_RESULT", "IOS_FAST_RESULT", "IOS_RESULT", "IOS_PLATFORM_RESULT", "MAP_RESULT")},
         }
@@ -407,7 +409,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("- ios-platform", gate)
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {**os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "false",
-            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "true", "IOS_CHANGED": "true",
+            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "true", "IOS_CHANGED": "true", "IOS_NATIVE_CHANGED": "true",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false", "FIRMWARE_CACHE_QUALIFICATION": "false",
             "CACHE_RESULT": "skipped", "ESP32_RESULT": "skipped", "HOST_RESULT": "skipped",
             "MAP_RESULT": "skipped", "IOS_FAST_RESULT": "success", "IOS_RESULT": "success", "IOS_PLATFORM_RESULT": "success"}
@@ -417,6 +419,18 @@ class WorkflowPolicyTests(unittest.TestCase):
                 with self.subTest(key=key, value=value):
                     self.assertNotEqual(subprocess.run(["bash", "-c", script],
                         env={**environment, key: value}, capture_output=True).returncode, 0)
+        fast_only = {**environment, "IOS_NATIVE_CHANGED":"false", "IOS_RESULT":"skipped", "IOS_PLATFORM_RESULT":"skipped"}
+        self.assertEqual(subprocess.run(["bash", "-c", script],env=fast_only,capture_output=True).returncode,0)
+        for key in ("IOS_RESULT","IOS_PLATFORM_RESULT"):
+            self.assertNotEqual(subprocess.run(["bash", "-c", script],env={**fast_only,key:"success"},capture_output=True).returncode,0)
+
+    def test_native_build_ci_still_requires_fresh_exact_evidence(self):
+        ci = workflow_source("ci.yml")
+        app = mapping_block(ci,"ios",indent=2)
+        simulator = mapping_block(ci,"ios-platform",indent=2)
+        self.assertIn("--fresh --evidence",app)
+        self.assertIn('BICINO_REQUIRE_BUILD_EVIDENCE: "1"',app)
+        for job in (app,simulator): self.assertIn("needs.changes.outputs.ios_native == 'true'",job)
 
     def test_draft_prs_keep_fast_checks_and_skip_heavy_jobs(self) -> None:
         general_ci = workflow_source("ci.yml")
@@ -439,7 +453,7 @@ class WorkflowPolicyTests(unittest.TestCase):
             gate,
         )
         self.assertIn(
-            'test "$IOS_CHANGED" = true && test "$HEAVY_CI" = true',
+            'test "$IOS_NATIVE_CHANGED" = true && test "$HEAVY_CI" = true',
             gate,
         )
 
