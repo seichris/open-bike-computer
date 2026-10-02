@@ -24,7 +24,9 @@ jobs:
           - WAVESHARE_AMOLED_206
           - WAVESHARE_AMOLED_206_PRODUCTION
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    # Native macOS runs need about 45 minutes before the relocated application
+    # compilation. Leave room for that final build and evidence cleanup.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Qualify cold, warm, source-only and relocated builds
