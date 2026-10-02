@@ -2922,9 +2922,9 @@ bool Maps::readVectorMap(
           minY = std::min(minY, int(p.y));
           maxY = std::max(maxY, int(p.y));
         }
-        const size_t area = size_t(std::max(0, std::min(surface.width, maxX) -
+        const size_t area = size_t(std::max(0, std::min(int(surface.width), maxX) -
                                                    std::max(0, minX))) *
-                            size_t(std::max(0, std::min(surface.height, maxY) -
+                            size_t(std::max(0, std::min(int(surface.height), maxY) -
                                                    std::max(0, minY)));
         if (pixels + area > 600000)
           continue;
