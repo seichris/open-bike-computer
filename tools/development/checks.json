@@ -299,6 +299,17 @@
       ]
     },
     {
+      "id": "esp32-host-usb-recovery-status",
+      "name": "USB recovery status request tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror tools/tests/test_usb_recovery_status.cpp -o ${TMPDIR}/test_usb_recovery_status\n${TMPDIR}/test_usb_recovery_status",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
       "id": "esp32-host-screen-configuration-protocol-and-ride-stats-widget-host-tests",
       "name": "Screen configuration protocol and Ride Stats widget host tests",
       "component": "firmware_host",

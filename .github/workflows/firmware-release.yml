@@ -282,6 +282,15 @@ jobs:
               --build "${firmware_build}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
               --output "${release_assets}/${target}.factory-release.json"
+            python tools/web_flasher_manifest.py \
+              --bundle "${release_assets}/${target}.factory.tar.gz" \
+              --bundle-manifest "${release_assets}/${target}.factory-bundle.json" \
+              --target "${target}" \
+              --git-sha "${GIT_SHA}" \
+              --version "${firmware_version}" \
+              --build "${firmware_build}" \
+              --tag "${RELEASE_TAG}" \
+              --output-dir "${release_assets}"
           done
       - name: Require immutable releases
         uses: ./.github/actions/require-immutable-releases
