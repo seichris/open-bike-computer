@@ -2504,7 +2504,11 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
     }
     lv_obj_clear_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
   }
-  lv_obj_move_foreground(nearby.overlay);
+  // Keep a tapped group chooser above its markers while position/camera
+  // refreshes continue behind it.
+  if (nearby.chooser == nullptr ||
+      lv_obj_has_flag(nearby.chooser, LV_OBJ_FLAG_HIDDEN))
+    lv_obj_move_foreground(nearby.overlay);
 }
 
 static void serviceNearbyScreen(uint32_t nowMs) {

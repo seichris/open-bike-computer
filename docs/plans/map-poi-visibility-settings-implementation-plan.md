@@ -32,18 +32,20 @@ OSM POI categories. The user's October 2 UX decision expands the original
 visibility-only issue to include offline category-based Nearby discovery, but
 not text search, business details, routing, editing, or OSM account integration.
 
-This revision supersedes the earlier POI-only target-5 proposal. The combined
-layers and Nearby behavior below are planned work, not implemented behavior in
-the current draft PR.
+This revision supersedes the earlier POI-only target-5 proposal. The original
+draft PR reflected an older implementation; this branch integrates the newer
+topography baseline and Nearby flow. Its new code is not production-qualified
+or enabled merely because it exists in the branch.
 
 ## Baseline
 
 This plan was refreshed against freshly fetched GitHub `main` at
-`0f6fc8c6f0238d5508df199f2a50b1482b62ca1d` (2026-10-02, Asia/Singapore),
-83 commits after the September 26 baseline. The original
-implementation branch and PR #378 predate the topography work and are **not**
-compatible with that main without a protocol/format migration. The refresh is
-a design update, not a claim that the branch has been rebased or validated.
+`f935ede97cd4232357c5b8aafa704c58bffe6ab3` (2026-10-03,
+Asia/Singapore), 85 commits after the September 26 baseline. The original
+implementation branch and PR #378 predated the topography work. The local
+branch has now merged this SHA and migrated the POI wire/format allocation,
+but full builds, CI, hardware qualification, and PR publication remain
+separate evidence gates.
 
 Current `main` already provides most of the cross-device settings path:
 
@@ -105,22 +107,32 @@ queried for this planning update.
 | Active-map pointer readback and journal rollback (#540) | Carry POI target/profile/health metadata through candidate, previous-map, readback, and recovery records. Test rollback from target 5 to both standard and topographic maps. |
 | Worldwide signed-map approval for build 101 | Existing approval is bound to specific firmware, app, worker, and producer identities. It does not approve a future POI worker, format, or board build. |
 | Shared development checks, Swift source graphs, build evidence and scenario replay (#555, #557, #558) | Register POI checks in the existing runner; use its isolated test state and retained reports, and validate release builds with symbols when required. Cache benchmarks are a separate manual workflow. |
+| Signed USB recovery packages and firmware build 102 (#567, #568) | This changes release/recovery inputs, not the POI data model. The build-101 map approval does not cover build 102 or any new POI firmware; requalify exact new images and keep the POI runtime gate closed meanwhile. |
+
+### Local integration checkpoint
+
+The branch now carries target 5/FMB v6 section 6 and FPI1 production
+code across extractor, backend, installer, iPhone validation, firmware query,
+and bike-computer Nearby presentation. Host checks cover index trust,
+nearest-ten ranking, cancellation/corruption, layout, and the screen feature
+gate. The feature remains **off by default** with
+`MAP_POIS_RUNTIME_ENABLED=0`, and CAP2 bit 31 is not advertised. Source review,
+full firmware builds, CI, and physical acceptance on both board families are
+still required. The connected ESP32's board family has not been identified,
+so no board-specific build or flash is evidence for this checkpoint.
 
 The September allocation remains available in code: target 5/FMB v6,
 visibility bits 14-18, and CAP2 bit 31/client 29. The topography plan's
 unimplemented hillshade reservations still need the coordinated documentation
 change described below; the runtime protocol alone is not that coordination.
 
-The missing pieces are:
-
-- the conversion step does not read OSM point features;
-- there is no exact POI classification or block-ownership policy;
-- neither FMB v4 nor topographic FMB v5 has a POI point-record section;
-- the backend, firmware, and iPhone have no POI-capable renderer profile;
-- the renderer has no bounded icon-placement or edge-indicator pass;
-- there is no offline nearest-POI lookup outside the loaded viewport; and
-- the capability, layer settings, and screen registry do not expose POIs or
-  the Nearby category picker.
+At the recorded `main` baseline, the missing pieces were point extraction,
+exact category and block ownership, a noncolliding POI section and renderer
+profile, bounded icon placement, offline nearest-neighbor lookup, and the
+capability/settings/screen path. The local branch implements these paths, but
+the feature gate remains closed while build, CI, and physical qualification
+are pending. A signed map with POIs and the matching app/firmware must all be
+available before the end-to-end experience can be exercised.
 
 ### Collision with the original PR
 
