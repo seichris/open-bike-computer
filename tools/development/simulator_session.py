@@ -46,13 +46,21 @@ def selected_type(platform):
     family = "iPhone" if platform == "ios" else "Apple Watch"
     fragment = ".iOS-" if platform == "ios" else ".watchOS-"
     runtimes = simctl("list", "runtimes", "--json", json_result=True)["runtimes"]
-    candidates = sorted((r for r in runtimes if r.get("isAvailable") and fragment in r["identifier"]),
-                        key=lambda r: tuple(int(v) for v in r["version"].split(".")), reverse=True)
+    sdk = "iphonesimulator" if platform == "ios" else "watchsimulator"
+    sdk_version = subprocess.check_output(["xcrun", "--sdk", sdk, "--show-sdk-version"], text=True).strip()
+    def version(value):
+        parts = tuple(int(component) for component in value.split("."))
+        return parts + (0,) * (3 - len(parts))
+    # An installed beta runtime can be newer than the selected Xcode toolchain.
+    # Prefer the SDK's runtime, then the newest compatible older runtime.
+    candidates = sorted((r for r in runtimes if r.get("isAvailable") and fragment in r["identifier"]
+                         and version(r["version"]) <= version(sdk_version)),
+                        key=lambda r: version(r["version"]), reverse=True)
     for runtime in candidates:
         device_types = [t for t in runtime.get("supportedDeviceTypes", []) if t.get("productFamily") == family]
         if device_types:
             return device_types[0]["identifier"], runtime["identifier"]
-    raise RuntimeError(f"no available {platform} simulator runtime/device type is installed")
+    raise RuntimeError(f"no available {platform} simulator runtime/device type compatible with SDK {sdk_version} is installed")
 
 
 def create(platform):

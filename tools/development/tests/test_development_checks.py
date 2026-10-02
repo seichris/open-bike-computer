@@ -120,6 +120,18 @@ class DevelopmentChecksTests(unittest.TestCase):
 class SimulatorOwnershipTests(unittest.TestCase):
     identifier = "00000000-0000-0000-0000-000000000001"
 
+    def test_owned_runtime_matches_the_active_sdk_instead_of_a_newer_beta(self):
+        def runtime(version):
+            return {"isAvailable":True,"identifier":"com.apple.CoreSimulator.SimRuntime.watchOS-"+version.replace(".","-"),
+                    "version":version,"supportedDeviceTypes":[{"productFamily":"Apple Watch","identifier":"watch-"+version}]}
+        with patch.object(simulator,"simctl",return_value={"runtimes":[runtime("27.0"),runtime("26.5")]}), \
+             patch.object(simulator.subprocess,"check_output",return_value="26.5"):
+            self.assertEqual(simulator.selected_type("watchos"),("watch-26.5","com.apple.CoreSimulator.SimRuntime.watchOS-26-5"))
+        with patch.object(simulator,"simctl",return_value={"runtimes":[runtime("27.0")]}), \
+             patch.object(simulator.subprocess,"check_output",return_value="26.5"):
+            with self.assertRaisesRegex(RuntimeError,"compatible with SDK"):
+                simulator.selected_type("watchos")
+
     def test_explicit_simulator_is_never_shutdown_or_deleted(self):
         devices = {"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
             {"udid": self.identifier, "isAvailable": True, "state": "Booted"}]}}

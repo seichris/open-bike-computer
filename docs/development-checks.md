@@ -57,7 +57,8 @@ ambient interpreter or modifying the firmware runtime.
 
 Each check receives its own temporary directory and compiler module caches.
 Standalone Swift scripts also create their own temporary namespace. Simulator
-contracts create a fresh simulator, exclusively lease it through completion and
+contracts select a runtime compatible with the active Xcode SDK, create a fresh
+simulator, exclusively lease it through completion and
 cleanup, then delete only that owned simulator. To use a deliberately selected
 existing simulator, set `BICINO_SIMULATOR_UDID`; it must match the platform and
 cannot be concurrently leased by another check. Borrowed simulators are never
@@ -68,7 +69,7 @@ CI runs simulator contracts and Debug/Release app builds as separate jobs. The
 protected CI Gate requires both when heavy iOS validation is selected, and
 requires both to be skipped otherwise. App container validation and release
 debug-feature exclusion remain mandatory. Check reports/logs are retained on
-both success and failure.
+both success and failure, including native `.xcresult` bundles.
 
 The durable download coordinator and zone delivery clock policy live in small
 production compilation units. Host tests compile those files directly with

@@ -46,6 +46,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+RESULT_BUNDLE_ARGS=()
+if [[ -n "${DEV_CHECK_ARTIFACTS:-}" ]]; then
+  mkdir -p "${DEV_CHECK_ARTIFACTS}"
+  RESULT_DIR="$(mktemp -d "${DEV_CHECK_ARTIFACTS}/platform-${SCHEME}.XXXXXX")"
+  RESULT_BUNDLE_ARGS=(-resultBundlePath "${RESULT_DIR}/tests.xcresult")
+fi
+
 cd "${IOS_APP_DIR}"
 python3 "${IOS_APP_DIR}/../tools/development/simulator_session.py" --platform "$1" -- \
   "${SCRIPT_DIR}/xcodebuild-cli.sh" \
@@ -54,6 +61,7 @@ python3 "${IOS_APP_DIR}/../tools/development/simulator_session.py" --platform "$
   -scheme "${SCHEME}" \
   -destination "id={simulator}" \
   -derivedDataPath "${DERIVED_DATA}" \
+  "${RESULT_BUNDLE_ARGS[@]}" \
   CODE_SIGNING_ALLOWED=NO \
   ${ONLY_TESTING:+-only-testing:"${ONLY_TESTING}"} \
   test
