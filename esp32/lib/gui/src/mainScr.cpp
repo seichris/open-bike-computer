@@ -2523,7 +2523,7 @@ static void serviceNearbyScreen(uint32_t nowMs) {
       nearby.haveResults = true;
       nearby.wasOnMap.fill(false);
       nearby.lastLayoutMs = 0;
-    } else {
+    } else if (replacement.status != map_nearby_storage::Status::Cancelled) {
       nearby.haveResults = false;
       nearby.result = {};
       for (auto &marker : nearby.markers)
@@ -2555,6 +2555,10 @@ static void serviceNearbyScreen(uint32_t nowMs) {
       lv_label_set_text(nearby.status, "Not enough memory for Nearby");
       break;
     case map_nearby_storage::Status::Cancelled:
+      nearby.querySequence = 0;
+      lv_label_set_text(nearby.status,
+          nearby.haveResults ? "Search interrupted - retrying; results stale"
+                             : "Search interrupted - retrying");
       break;
     }
   }
@@ -2982,7 +2986,8 @@ void createMainScr() {
   lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
 
   createMapGuidanceOverlay();
-  createNearbyScreen();
+  if (map_profile_protocol::POIS_RUNTIME_ENABLED)
+    createNearbyScreen();
 
   // Set tilesScreen to same as mapTile for compatibility
   tilesScreen = mapTile;

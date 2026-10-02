@@ -6233,14 +6233,18 @@ bool Maps::processPendingNearbySearch() {
     result.status = map_nearby_storage::Status::ResourceRejected;
     ESP_LOGE(TAG, "MAP_RESOURCE_REJECTED: Nearby search");
   }
-  if (result.status == map_nearby_storage::Status::Cancelled) return true;
   if (xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
     if (request.sequence ==
-        nearbySearchGeneration.load(std::memory_order_acquire) &&
-        !pendingVectorMapActivationValid && pendingStorageControl_ == nullptr) {
-      nearbyPoiIndexHealthy.store(
-          result.status == map_nearby_storage::Status::Ok,
-          std::memory_order_release);
+        nearbySearchGeneration.load(std::memory_order_acquire)) {
+      // A newer render or storage operation can interrupt the search without
+      // superseding its Nearby request. Publish a typed cancellation so the UI
+      // can retry; silently dropping it would leave the spinner stuck forever.
+      if (pendingVectorMapActivationValid || pendingStorageControl_ != nullptr)
+        result.status = map_nearby_storage::Status::Cancelled;
+      if (result.status != map_nearby_storage::Status::Cancelled)
+        nearbyPoiIndexHealthy.store(
+            result.status == map_nearby_storage::Status::Ok,
+            std::memory_order_release);
       readyNearbySearch = {request.sequence, result};
       readyNearbySearchValid = true;
     }
