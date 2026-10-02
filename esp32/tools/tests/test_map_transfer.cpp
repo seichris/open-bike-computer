@@ -1651,8 +1651,20 @@ int main() {
   testTargetThreeBuildingContractValidation();
   testActivationStateTracksAttemptsAndCompactStatus();
   testRejectsUnsafeManifestPath();
+#if MAP_POIS_RUNTIME_ENABLED
   testTargetFiveRequiresCompletePoiSummary();
   testTargetFiveIndexMatchesSignedBlocks();
+#else
+  {
+    MapTransferInstaller installer("/tmp/map-transfer-disabled-pois");
+    MapManifest parsed;
+    const auto disabled = installer.validateManifestText(
+        "{\"schemaVersion\":1,\"mapId\":\"map-pois\",\"target\":"
+        "{\"renderer\":\"esp32-fmb\",\"formatVersion\":5}}",
+        parsed);
+    assert(!disabled.ok && disabled.code == "manifest_target");
+  }
+#endif
   testParsesOptionalActiveMapPresentationMetadata();
   testIgnoresInvalidOptionalActiveMapPresentationMetadata();
   testBindsActivePresentationToManifestReceipt();

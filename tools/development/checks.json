@@ -521,7 +521,7 @@
       "name": "Map transfer host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapPoiBlock.cpp \\\n  lib/maps/src/mapBuildingBlock.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  tools/tests/test_map_transfer.cpp \\\n  -o ${TMPDIR}/test_map_transfer\n${TMPDIR}/test_map_transfer",
+      "command": "for poi_runtime in 0 1; do\n  g++ -std=c++17 -DMAP_POIS_RUNTIME_ENABLED=${poi_runtime} \\\n    lib/map_transfer/map_transfer.cpp \\\n    lib/maps/src/mapBlockFormat.cpp \\\n    lib/maps/src/mapPoiBlock.cpp \\\n    lib/maps/src/mapBuildingBlock.cpp \\\n    lib/maps/src/mapLabelBlock.cpp \\\n    lib/maps/src/mapFontAsset.cpp \\\n    lib/maps/src/mapFontAssetFormat.cpp \\\n    tools/tests/test_map_transfer.cpp \\\n    -o ${TMPDIR}/test_map_transfer_${poi_runtime}\n  ${TMPDIR}/test_map_transfer_${poi_runtime}\ndone",
       "tools": [
         "python3",
         "g++"

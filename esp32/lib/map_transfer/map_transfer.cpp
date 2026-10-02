@@ -1,5 +1,6 @@
 #include "map_transfer.hpp"
 #include "map_file_io.hpp"
+#include "../ble_navigation/map_profile_protocol.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 #include "../maps/src/mapFontAsset.hpp"
 #include "../maps/src/mapBuildingBlock.hpp"
@@ -1219,6 +1220,12 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
     return fail("manifest_schema", "unsupported manifest schema version");
   if (!safeMapId(manifest.mapId))
     return fail("manifest_map_id", "mapId contains unsafe characters");
+#if !MAP_POIS_RUNTIME_ENABLED
+  // Disabled firmware must reject target-5 maps instead of accepting a map
+  // whose POI companion it cannot present or query.
+  if (manifest.formatVersion == 5)
+    return fail("manifest_target", "POI map target is not enabled");
+#endif
 
   uint32_t fontAssetCount = 0;
   uint32_t poiIndexCount = 0;
@@ -3530,20 +3537,26 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
 
   uint64_t buildingRecords = 0;
   std::array<uint64_t, 5> buildingProvenance = {};
+#if MAP_POIS_RUNTIME_ENABLED
   uint64_t poiRecords = 0;
   std::array<uint64_t, 5> poiCategories = {};
+#endif
   uint64_t contourRecords = 0;
   uint64_t contourPoints = 0;
+#if MAP_POIS_RUNTIME_ENABLED
   std::vector<map_poi_index::Entry> expectedPoiIndex;
   const ManifestFile *poiIndexFile = nullptr;
+#endif
 
   for (const ManifestFile &file : manifest.files) {
+#if MAP_POIS_RUNTIME_ENABLED
     if (file.path == std::string(kVectMapPrefix) + manifest.mapId +
                          "/assets/nearby-pois.fpi") {
       if (poiIndexFile != nullptr)
         return fail("poi_index_contract", "duplicate Nearby index asset");
       poiIndexFile = &file;
     }
+#endif
     if (file.path.size() < 4 ||
         file.path.compare(file.path.size() - 4, 4, ".fmb") != 0)
       continue;
@@ -3588,6 +3601,7 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       for (size_t index = 0; index < buildingProvenance.size(); ++index)
         buildingProvenance[index] += buildings.stats.provenance[index];
     }
+#if MAP_POIS_RUNTIME_ENABLED
     if (manifest.formatVersion == 5) {
       int32_t blockX = 0, blockY = 0;
       if (!map_poi_index::blockFromPath(manifest.mapId, file.path,
@@ -3616,6 +3630,7 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
         expectedPoiIndex.push_back(entry);
       }
     }
+#endif
     if (manifest.formatVersion >= 4) {
       map_contour_block::Block contours;
       if (!map_contour_block::decode(bytes.data(), bytes.size(), contours))
@@ -3639,6 +3654,7 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
       if (buildingProvenance[index] != manifest.buildingProvenanceCounts[index])
         return fail("building_block_contract", "FMB building counts do not match manifest");
   }
+#if MAP_POIS_RUNTIME_ENABLED
   if (manifest.formatVersion == 5) {
     if (poiRecords != manifest.poiRecordCount)
       return fail("poi_block_contract", "FMB POI counts do not match manifest");
@@ -3692,6 +3708,7 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     if (!validator.finish() || context.next != expectedPoiIndex.size())
       return fail("poi_index_contract", "Nearby index is incomplete or corrupt");
   }
+#endif
   if ((manifest.formatVersion == 4 || manifest.contoursIncluded) &&
       (contourRecords != manifest.contourRecordCount ||
        contourPoints != manifest.contourPointCount))
