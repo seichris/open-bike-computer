@@ -2,6 +2,7 @@
 
 #include "mapBlockFormat.hpp"
 #include "mapFontAssetFormat.hpp"
+#include "mapTerrain.hpp"
 
 #include <string>
 
@@ -17,23 +18,32 @@ inline bool isFontAssetPath(const std::string &path) {
 class StreamValidator {
 public:
   explicit StreamValidator(const std::string &path)
-      : fontAsset_(isFontAssetPath(path)),
+      : terrain_(path.size() >= 4 && path.substr(path.size() - 4) == ".fme"),
+        fontAsset_(isFontAssetPath(path)),
         blockValidator_(fontAsset_ ? std::string() : path) {}
 
   bool feed(const uint8_t *data, size_t size) {
+    if (terrain_)
+      return terrainValidator_.feed(data, size);
     return fontAsset_ ? fontValidator_.feed(data, size)
                       : blockValidator_.feed(data, size);
   }
 
   bool finish() {
+    if (terrain_)
+      return terrainValidator_.finish();
     return fontAsset_ ? fontValidator_.finish() : blockValidator_.finish();
   }
 
   bool failed() const {
+    if (terrain_)
+      return terrainValidator_.failed();
     return fontAsset_ ? fontValidator_.failed() : blockValidator_.failed();
   }
 
 private:
+  bool terrain_ = false;
+  map_terrain::StreamValidator terrainValidator_;
   bool fontAsset_ = false;
   map_block_format::StreamValidator blockValidator_;
   map_font_asset_format::StreamValidator fontValidator_;

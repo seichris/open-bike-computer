@@ -140,6 +140,14 @@ class TopographyGeometryTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             assemble_topographic_pack(source, output, "test-map", compiled, self.sample, b"Test notices\n")
 
+    def test_generated_terrain_receipt_survives_full_packaging(self):
+        import base64
+        from map_platform.terrain import ALGORITHM, encode_grid
+        self.sample["terrainAlgorithm"] = ALGORITHM
+        self.sample["terrainGrids"] = [base64.b64encode(encode_grid(0, 0, [(100, 180, 0)] * 1089)).decode()]
+        self.test_generated_topography_receipt_survives_full_packaging()
+        self.assertEqual(len(list((self.root / "pair/device").rglob("*.fme"))), 1)
+
     def test_generated_topography_receipt_survives_full_packaging(self):
         self.sample["sources"] = [{
             "sourceId": "fixture", "datasetRelease": "test-release",

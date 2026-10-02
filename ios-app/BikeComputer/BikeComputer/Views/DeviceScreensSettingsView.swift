@@ -195,6 +195,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
 
 // The stable Settings root owns presentation; the sheet dismisses only itself.
 struct AddDeviceScreenSheet: View {
+    @EnvironmentObject private var bleManager: BLEManager
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var controller: DeviceScreenConfigurationController
     @State private var errorMessage: String?
@@ -204,6 +205,18 @@ struct AddDeviceScreenSheet: View {
             List {
                 if let errorMessage {
                     Text(errorMessage).foregroundStyle(.red)
+                }
+                if bleManager.supportsTerrainExperiments {
+                    Section("Terrain Experiments") {
+                        ForEach([TerrainMapStyle.hillshade, .elevationTint, .terrain3D]) { style in
+                            Button(style == .elevationTint ? "Tint & Slope" : style.title) {
+                                do { try controller.addTerrainScreen(style); dismiss() }
+                                catch { errorMessage = String(describing: error) }
+                            }
+                        }
+                        Text("Independent Map screens. Download a new topographic map for terrain data. 3D is a terrain-only exploration, without navigation overlays.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
                 ForEach(supportedScreenTypes) { type in
                     Button(type.title) {
@@ -284,7 +297,8 @@ private struct DeviceScreenInstanceEditorView: View {
                     type: instance.type,
                     supportsNavigationOrientation: bleManager.supportsMapNavigationOrientation,
                     topographicContoursAvailable:
-                        bleManager.topographicContoursAvailable
+                        bleManager.topographicContoursAvailable,
+                    supportsTerrainExperiments: bleManager.supportsTerrainExperiments
                 )
             }
 
@@ -369,6 +383,7 @@ private struct DeviceScreenMapProfileEditor: View {
     let type: ConfiguredDeviceScreenType
     let supportsNavigationOrientation: Bool
     let topographicContoursAvailable: Bool
+    let supportsTerrainExperiments: Bool
 
     private let visibilityOptions: [(String, UInt32)] = [
         ("Buildings", 1 << 0), ("Green Space", 1 << 1),
@@ -426,6 +441,21 @@ private struct DeviceScreenMapProfileEditor: View {
             }
         }
 
+        if supportsTerrainExperiments && type == .map {
+            Section("Terrain Experiment") {
+                Picker("Terrain", selection: Binding(
+                    get: { TerrainMapStyle(rawValue: profile.visibilityMask & DeviceScreenMapProfile.terrainVisibilityMask) ?? .none },
+                    set: { value in
+                        profile.visibilityMask = (profile.visibilityMask & ~DeviceScreenMapProfile.terrainVisibilityMask) | value.rawValue
+                        if value == .terrain3D { profile.visibilityMask = DeviceScreenMapProfile.defaultVisibilityMask | value.rawValue; profile.labelDensity = 0 }
+                    }
+                )) {
+                    ForEach(TerrainMapStyle.allCases) { Text($0.title).tag($0) }
+                }
+                Text("Tint includes subtle hillshade. Slope uses a separate color scale. 3D shows the height surface only; it is not a navigation view.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
         if type == .map || supportsNavigationOrientation {
             Section("Orientation") {
                 Picker("Rotation", selection: $profile.rotationMode) {

@@ -6825,6 +6825,10 @@ struct NavigationProtocolTests {
             sideLengthKm: 22.264
         )
         let request = OfflineMapJobRequest.customBBox(bounds)
+        let terrainRequest = request.withTopography(true, terrain: true).forDevice(firmwareVersion: "1.0.0")
+        assertEqual(terrainRequest.target?.rendererFormatVersion, 4, "terrain needs renderer 4")
+        assertEqual(terrainRequest.target?.terrainProfileVersion, 1, "device request retains terrain opt-in")
+        assertEqual(request.withTopography(true).target?.terrainProfileVersion, nil, "legacy topography does not opt in to terrain")
         assertEqual(request.mode, "custom_bbox", "custom cut-out uses backend bbox mode")
         assert(request.bbox != nil, "custom cut-out includes bbox")
         assert(abs((request.bbox?[1] ?? 0) - 34.9) < 0.001, "bbox min latitude uses requested size")

@@ -446,6 +446,7 @@ struct MapViewContainer: UIViewRepresentable {
                 uiView.removeAnnotations(existingSimAnnotations)
             }
         }
+        context.coordinator.refreshContourLabels(on: uiView)
     }
     
     func makeCoordinator() -> Coordinator {
@@ -462,6 +463,7 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
+        private let contourLabels = BicinoContourLabels()
         private var displayedTopographyOverlay: MKTileOverlay?
 
         func updateTopographyOverlay(_ overlay: MKTileOverlay?, on mapView: MKMapView) {
@@ -471,11 +473,17 @@ struct MapViewContainer: UIViewRepresentable {
                     .cancelPendingLoads()
                 mapView.removeOverlay(displayedTopographyOverlay)
             }
+            contourLabels.clear(on: mapView)
             displayedTopographyOverlay = overlay
+            contourLabels.update(on: mapView, overlay: overlay as? BicinoTopographyTileOverlay)
             if let overlay { mapView.insertOverlay(overlay, at: 0, level: .aboveRoads) }
             // Navigation and saved-route overlays retain their own ownership.
             // No camera, tracking, selection or route state changes here.
         }
+        func refreshContourLabels(on mapView: MKMapView) {
+            contourLabels.update(on: mapView, overlay: displayedTopographyOverlay as? BicinoTopographyTileOverlay)
+        }
+
         typealias AddressResolver = @MainActor (CLLocation) async -> String?
 
         var lastRoute: MKRoute?
@@ -1083,6 +1091,7 @@ struct MapViewContainer: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            contourLabels.update(on: mapView, overlay: displayedTopographyOverlay as? BicinoTopographyTileOverlay)
             controlState?.updatePitch(from: mapView)
             updateOfflineMapSelectionBounds()
         }
@@ -1339,6 +1348,7 @@ struct MapViewContainer: UIViewRepresentable {
 
         
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            if let label = annotation as? BicinoContourLabelAnnotation { return BicinoContourLabelAnnotation.view(on: mapView, annotation: label) }
             // Use default view for user location
             if annotation is MKUserLocation {
                 return nil

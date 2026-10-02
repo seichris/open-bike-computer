@@ -1113,8 +1113,13 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
       return fail("manifest_path", "manifest may not overwrite active map");
     const bool isFontAsset = isFontAssetPath(file.path, manifest.mapId);
     const bool isBlock = file.path.size() >= 4 &&
-                         (file.path.rfind(".fmb") == file.path.size() - 4 ||
+                         (file.path.rfind(".fme") == file.path.size() - 4 ||
+                          file.path.rfind(".fmb") == file.path.size() - 4 ||
                           file.path.rfind(".fmp") == file.path.size() - 4);
+    if (file.path.size() >= 4 &&
+        file.path.compare(file.path.size() - 4, 4, ".fme") == 0 &&
+        (manifest.formatVersion != 4 || file.bytes != map_terrain::BYTES))
+      return fail("manifest_terrain", "terrain requires renderer 4 and a complete grid");
     if (!isBlock && !isFontAsset)
       return fail("manifest_path", "manifest contains an unsupported map file");
     if (file.bytes == 0 ||
@@ -1371,7 +1376,8 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     const bool isManifest = path == "manifest.json";
     const bool isMapFile =
         startsWith(path, kVectMapPrefix) && safeRelativePath(path) &&
-        ((path.size() >= 4 && (path.rfind(".fmb") == path.size() - 4 ||
+        ((path.size() >= 4 && (path.rfind(".fme") == path.size() - 4 ||
+                            path.rfind(".fmb") == path.size() - 4 ||
                                path.rfind(".fmp") == path.size() - 4)) ||
          map_renderer_format::isFontAssetPath(path));
     const bool isMetadata =
@@ -1491,7 +1497,8 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     const uint64_t dataOffset = offset + 30 + nameLength + extraLength;
     const bool isMapFile = startsWith(path, kVectMapPrefix) &&
                            safeRelativePath(path) && path.size() >= 4 &&
-                           (path.rfind(".fmb") == path.size() - 4 ||
+                           (path.rfind(".fme") == path.size() - 4 ||
+                            path.rfind(".fmb") == path.size() - 4 ||
                             path.rfind(".fmp") == path.size() - 4 ||
                             isFontAssetPath(path, manifest.mapId));
     if (isMapFile) {

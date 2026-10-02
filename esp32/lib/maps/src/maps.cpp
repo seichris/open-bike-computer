@@ -447,11 +447,15 @@ static inline bool isLineVisible(uint8_t typeId, uint16_t color, uint8_t width,
 }
 
 static inline bool isRouteOverlayVisible(const MapRenderSettings &settings) {
-  return (settings.navigationOverlayVisibilityMask & (1 << 8)) != 0;
+  return (currentMapStyleSettings().visibilityMask & map_terrain::HEIGHT) ==
+             0 &&
+         (settings.navigationOverlayVisibilityMask & (1 << 8)) != 0;
 }
 
 static inline bool isCurrentPositionVisible(const MapRenderSettings &settings) {
-  return (settings.navigationOverlayVisibilityMask & (1 << 9)) != 0;
+  return (currentMapStyleSettings().visibilityMask & map_terrain::HEIGHT) ==
+             0 &&
+         (settings.navigationOverlayVisibilityMask & (1 << 9)) != 0;
 }
 
 static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
@@ -1339,6 +1343,34 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       const uint32_t parseStartMs = MAPIO_TIME_MS();
       delete mblock; // readMapBlockBinary creates a new one
       mblock = readMapBlockBinary(file, fileSize);
+      // Optional signed terrain sidecar. Legacy maps have no such file.
+      const std::string terrainPath = std::string(fileName.c_str()) + ".fme";
+      const int terrainFD = ::open(terrainPath.c_str(), O_RDONLY);
+      if (terrainFD >= 0) {
+        struct TerrainFileGuard {
+          int fd;
+          ~TerrainFileGuard() { ::close(fd); }
+        } terrainFileGuard{terrainFD};
+        struct stat terrainStat{};
+        std::vector<uint8_t, PsramAllocator<uint8_t>> bytes;
+        if (::fstat(terrainFD, &terrainStat) == 0 &&
+            terrainStat.st_size == map_terrain::BYTES) {
+          bytes.resize(map_terrain::BYTES);
+          size_t received = 0;
+          while (received < bytes.size() && !shouldCancelMapRenderWork()) {
+            const auto n = ::read(terrainFD, bytes.data() + received,
+                                  bytes.size() - received);
+            if (n <= 0)
+              break;
+            received += size_t(n);
+          }
+          if (received == bytes.size()) {
+            mblock->terrain.resize(1);
+            if (!mblock->terrain[0].decode(bytes.data(), bytes.size()))
+              mblock->terrain.clear();
+          }
+        }
+      }
       const uint32_t parseGridMs = MAPIO_TIME_MS() - parseStartMs;
       MAPIO_LOG("MAPIO: block ok=1 file=%s format=binary size=%u "
                 "openMs=%lu statMs=%lu readMs=%lu parseGridMs=%lu "
@@ -2026,6 +2058,11 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
     if (Maps::isMapFound.load(std::memory_order_acquire)) {
       newBlock->inView = true;
       newBlock->offset = req;
+      if (!newBlock->terrain.empty() &&
+          (newBlock->terrain[0].bx * 4096 != req.x ||
+           newBlock->terrain[0].by * 4096 != req.y)) {
+        newBlock->terrain.clear();
+      }
       newBlock->mercatorScale = map_projection::mercatorScaleForLatitude(
           Maps::mercatorY2lat(static_cast<double>(req.y) +
                               (1 << (MAPBLOCK_SIZE_BITS - 1))));
@@ -2069,13 +2106,242 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
   return true;
 }
 
+bool Maps::admitContours(ViewPort &viewPort, MemCache &memCache, uint8_t zoom,
+                         std::array<ContourCandidate, 128> &admitted,
+                         size_t &admittedCount, uint32_t &candidates) {
+  const auto less = [](const ContourCandidate &a, const ContourCandidate &b) {
+    if (a.index != b.index)
+      return a.index > b.index;
+    if (a.distance != b.distance)
+      return a.distance < b.distance;
+    if (a.block->offset.y != b.block->offset.y)
+      return a.block->offset.y < b.block->offset.y;
+    if (a.block->offset.x != b.block->offset.x)
+      return a.block->offset.x < b.block->offset.x;
+    return a.record < b.record;
+  };
+  candidates = 0;
+  admittedCount = 0;
+  for (MapBlock *block : memCache.blocks) {
+    if (!block || !block->inView)
+      continue;
+    const BBox local = viewPort.bbox - block->offset;
+    for (size_t number = 0; number < block->contourData.records.size();
+         ++number) {
+      if (shouldCancelMapRenderWork())
+        return false;
+      const auto &record = block->contourData.records[number];
+      const bool isIndex = (record.flags & 1U) != 0;
+      if (zoom > (isIndex ? 6 : 3) || record.maxX < local.min.x ||
+          record.minX > local.max.x || record.maxY < local.min.y ||
+          record.minY > local.max.y)
+        continue;
+      ++candidates;
+      const double dx =
+          double(record.minX + record.maxX) - double(local.min.x + local.max.x);
+      const double dy =
+          double(record.minY + record.maxY) - double(local.min.y + local.max.y);
+      ContourCandidate value{block, static_cast<uint16_t>(number), isIndex,
+                             dx * dx + dy * dy};
+      size_t position = 0;
+      while (position < admittedCount && !less(value, admitted[position]))
+        ++position;
+      if (position == admitted.size())
+        continue;
+      if (admittedCount < admitted.size())
+        ++admittedCount;
+      for (size_t move = admittedCount - 1; move > position; --move)
+        admitted[move] = admitted[move - 1];
+      admitted[position] = value;
+    }
+  }
+  return true;
+}
+
+bool Maps::drawContourLabels(
+    ViewPort &viewPort, MemCache &memCache, map_surface::LabelSurface surface,
+    uint8_t zoom, double rotation, const RenderContext &context,
+    const map_projection::Projection *projection,
+    const MapLabelLayoutVector<map_label_layout::Placement> &streets) {
+  using namespace map_contour_labels;
+  if (!(context.style.visibilityMask &
+        map_profile_protocol::VISIBILITY_CONTOURS) ||
+      zoom > 4 || !surface.valid())
+    return true;
+  const int width = surface.color.width, height = surface.color.height;
+  // Conservative occupancy includes navigation, road strokes and street labels.
+  // Its fixed 32x32 size bounds work and memory even in very dense maps.
+  std::array<uint8_t, 1024> occupied{};
+  const float cw = width / 32.f, ch = height / 32.f;
+  const auto reserve = [&](Box b) {
+    for (int y = std::max(0, int(std::floor((b.y - b.h / 2) / ch)));
+         y <= std::min(31, int((b.y + b.h / 2) / ch)); ++y)
+      for (int x = std::max(0, int(std::floor((b.x - b.w / 2) / cw)));
+           x <= std::min(31, int((b.x + b.w / 2) / cw)); ++x)
+        occupied[y * 32 + x] = 1;
+  };
+  const auto project = [&](double x, double y) {
+    if (projection) {
+      auto p = projection->projectWorld({x, y});
+      p.x -= context.labelGutter;
+      p.y -= context.labelGutter;
+      return p;
+    }
+    const auto p = map_transform::worldToScreen(
+        {x - viewPort.center.x, y - viewPort.center.y}, zoom, rotation);
+    return map_projection::ProjectedPoint{p.x + mapAnchorXForWidth(width),
+                                          p.y + mapAnchorYForHeight(height), 1,
+                                          true};
+  };
+  const auto reserveSegment = [&](map_projection::ProjectedPoint a,
+                                  map_projection::ProjectedPoint b,
+                                  float margin) {
+    if (!a.valid || !b.valid)
+      return;
+    // Clip to screen before sampling, preventing unbounded off-screen walks.
+    float ax = a.x, ay = a.y, bx = b.x, by = b.y;
+    const float dx = bx - ax, dy = by - ay;
+    float lo = 0, hi = 1;
+    const float ps[] = {-dx, dx, -dy, dy},
+                qs[] = {ax + margin, width + margin - ax, ay + margin,
+                        height + margin - ay};
+    for (int i = 0; i < 4; ++i) {
+      if (ps[i] == 0) {
+        if (qs[i] < 0)
+          return;
+      } else {
+        float t = qs[i] / ps[i];
+        if (ps[i] < 0)
+          lo = std::max(lo, t);
+        else
+          hi = std::min(hi, t);
+        if (lo > hi)
+          return;
+      }
+    }
+    bx = ax + hi * dx;
+    by = ay + hi * dy;
+    ax += lo * dx;
+    ay += lo * dy;
+    int steps = std::min(192, 1 + int(std::hypot(bx - ax, by - ay) /
+                                      std::max(1.f, std::min(cw, ch) * .5f)));
+    for (int i = 0; i <= steps; ++i)
+      reserve({ax + (bx - ax) * i / steps, ay + (by - ay) * i / steps,
+               margin * 2, margin * 2});
+  };
+  for (const auto &p : streets) {
+    const auto &o = p.option;
+    float c = std::abs(std::cos(o.angleRadians)),
+          s = std::abs(std::sin(o.angleRadians));
+    reserve({o.centerX, o.centerY, c * o.width + s * o.height + 6,
+             s * o.width + c * o.height + 6});
+  }
+  if (context.showCurrentPosition) {
+    auto p = project(context.presentedWorld.x, context.presentedWorld.y);
+    if (p.valid)
+      reserve({float(p.x), float(p.y), float(32 * context.markerScale),
+               float(32 * context.markerScale)});
+  }
+  if (context.guidanceScreenActive)
+    reserve({width / 2.f, 34, float(width), 68});
+  size_t segments = 0;
+  for (const auto *block : memCache.blocks)
+    if (block && block->inView)
+      for (const auto &road : block->polylines) {
+        if (zoom > road.maxZoom)
+          continue;
+        for (size_t i = 1; i < road.points.size(); ++i) {
+          if (shouldCancelMapRenderWork())
+            return false;
+          if (++segments > 4096)
+            return true;
+          auto a = road.points[i - 1], b = road.points[i];
+          reserveSegment(
+              project(double(block->offset.x) + a.x,
+                      double(block->offset.y) + a.y),
+              project(double(block->offset.x) + b.x,
+                      double(block->offset.y) + b.y),
+              std::max(4.f, float(context.style.streetLineWidth) / 2 + 3));
+        }
+      }
+  const auto route = routeOverlay.snapshot();
+  for (size_t i = 1; i < route.count; ++i) {
+    const auto &a = route.points[i - 1], &b = route.points[i];
+    reserveSegment(project(lon2x(a.lon / 1e6), lat2y(a.lat / 1e6)),
+                   project(lon2x(b.lon / 1e6), lat2y(b.lat / 1e6)),
+                   context.style.routeLineWidth / 2.f + 5);
+  }
+  std::array<ContourCandidate, 128> admitted{};
+  size_t admittedCount = 0;
+  uint32_t candidates = 0;
+  if (!admitContours(viewPort, memCache, zoom, admitted, admittedCount,
+                     candidates))
+    return false;
+  size_t considered = 0, placed = 0, segmentsVisited = 0;
+  const double spacing = 256.0 * std::max(1, int(zoom));
+  for (size_t candidate = 0; candidate < admittedCount; ++candidate) {
+    const auto *block = admitted[candidate].block;
+    const auto &record = block->contourData.records[admitted[candidate].record];
+    if (!(record.flags & 1))
+      continue;
+    for (size_t i = 1; i < record.pointCount; ++i) {
+      if (shouldCancelMapRenderWork())
+        return false;
+      if (++segmentsVisited > 8192)
+        return true;
+      auto a = block->contourData.points[record.pointOffset + i - 1],
+           b = block->contourData.points[record.pointOffset + i];
+      double ax = double(block->offset.x) + a.x,
+             ay = double(block->offset.y) + a.y,
+             bx = double(block->offset.x) + b.x,
+             by = double(block->offset.y) + b.y;
+      bool horizontal = std::abs(bx - ax) >= std::abs(by - ay);
+      double start = horizontal ? ax : ay, end = horizontal ? bx : by;
+      if (start == end)
+        continue;
+      double gridLine = std::ceil(std::min(start, end) / spacing) * spacing;
+      for (; gridLine < std::max(start, end); gridLine += spacing) {
+        double t = (gridLine - start) / (end - start);
+        auto p = project(ax + (bx - ax) * t, ay + (by - ay) * t);
+        if (!p.valid)
+          continue;
+        char text[16];
+        snprintf(text, sizeof(text), "%d m", int(record.elevationM));
+        Box box{float(p.x), float(p.y), float(strlen(text) * 12 + 8), 22};
+        if (box.x - box.w / 2 < 6 || box.y - 11 < 6 ||
+            box.x + box.w / 2 > width - 6 || box.y + 11 > height - 6)
+          continue;
+        if (++considered > 256 || placed == 16)
+          return true;
+        if (MAP_RENDER_ROUND_VIEWPORT &&
+            std::hypot(std::abs(box.x - width / 2.f) + box.w / 2,
+                       std::abs(box.y - height / 2.f) + 11) >
+                std::min(width, height) / 2.f - 6)
+          continue;
+        bool hit = false;
+        for (int y = int((box.y - 11) / ch); y <= int((box.y + 11) / ch); ++y)
+          for (int x = int((box.x - box.w / 2) / cw);
+               x <= int((box.x + box.w / 2) / cw); ++x)
+            hit |= occupied[y * 32 + x] != 0;
+        if (hit)
+          continue;
+        draw(surface, int(p.x), int(p.y), record.elevationM);
+        reserve({box.x, box.y, box.w + 52, box.h + 42});
+        ++placed;
+      }
+    }
+  }
+  return true;
+}
+
 bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
                             map_surface::LabelSurface surface, uint8_t zoom,
                             double rotation, const RenderContext &context,
                             const map_projection::Projection *projection) {
   const ScreenMapRenderSettings &style = context.style;
   if (style.labelDensity == 0 || !labelFontAsset.healthy())
-    return true;
+    return drawContourLabels(viewPort, memCache, surface, zoom, rotation,
+                             context, projection);
   const uint32_t labelStartMs = MAPIO_TIME_MS();
   const uint32_t cacheHitsBefore = labelFontAsset.cacheHits();
   const uint32_t cacheMissesBefore = labelFontAsset.cacheMisses();
@@ -2335,7 +2601,8 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
   }
 
   if (options.empty())
-    return true;
+    return drawContourLabels(viewPort, memCache, surface, zoom, rotation,
+                             context, projection);
   std::vector<map_label_layout::ReservedRegion> reserved;
   if (markerVisible) {
     const float markerSize = static_cast<float>(
@@ -2498,7 +2765,8 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
       (unsigned long)(labelFontAsset.cacheMisses() - cacheMissesBefore),
       (unsigned long)(labelFontAsset.cacheEvictions() - cacheEvictionsBefore),
       (unsigned)labelFontAsset.cachedBytes(), (unsigned)peakDecodedLabelBytes);
-  return true;
+  return drawContourLabels(viewPort, memCache, surface, zoom, rotation, context,
+                           projection, placements);
 }
 
 bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
@@ -2555,6 +2823,112 @@ bool Maps::readVectorMap(
               (unsigned)memCache.blocks.size(),
               (unsigned long)(MAPIO_TIME_MS() - drawStartMs));
     return true;
+  }
+
+  if (style.visibilityMask & map_terrain::HEIGHT) {
+    struct Face {
+      std::array<Point16, 4> points;
+      uint16_t color;
+      float depth;
+    };
+    std::vector<Face, PsramAllocator<Face>> faces;
+    faces.reserve(512);
+    map_terrain::Node origin{};
+    for (const auto *b : memCache.blocks)
+      if (b && !b->terrain.empty() &&
+          b->terrain[0].sample(viewPort.center.x, viewPort.center.y, origin))
+        break;
+    const double heightScale =
+        map_transform::worldToScreenScale(zoom) *
+        map_projection::mercatorScaleForLatitude(
+            (std::atan(std::sinh(viewPort.center.y / 6378137.0)) * 180.0 /
+             3.141592653589793));
+    for (const auto *block : memCache.blocks)
+      if (block && !block->terrain.empty()) {
+        const auto &grid = block->terrain[0];
+        for (int y = 0; y < 32; ++y)
+          for (int x = 0; x < 32; ++x) {
+            if (shouldCancelMapRenderWork())
+              return false;
+            const int xs[] = {x, x + 1, x + 1, x}, ys[] = {y, y, y + 1, y + 1};
+            Face face{};
+            bool valid = true;
+            float depth = 0;
+            for (int i = 0; i < 4; ++i) {
+              const auto &n = grid.nodes[ys[i] * 33 + xs[i]];
+              if (n.height == map_terrain::NO_DATA) {
+                valid = false;
+                break;
+              }
+              const auto p = projection.projectWorld(
+                  {double(grid.bx) * 4096 + xs[i] * 128,
+                   double(grid.by) * 4096 + ys[i] * 128});
+              if (!p.valid) {
+                valid = false;
+                break;
+              }
+              depth += p.y;
+              const double py = projection.anchorY() +
+                                (p.y - projection.anchorY()) * .65 -
+                                (n.height - origin.height) * heightScale * .76;
+              if (std::abs(p.x) > 16000 || std::abs(py) > 16000) {
+                valid = false;
+                break;
+              }
+              face.points[i] = Point16(int16_t(p.x), int16_t(py));
+            }
+            if (!valid)
+              continue;
+            int minX = 16000, maxX = -16000, minY = 16000, maxY = -16000;
+            for (auto p : face.points) {
+              minX = std::min(minX, int(p.x));
+              maxX = std::max(maxX, int(p.x));
+              minY = std::min(minY, int(p.y));
+              maxY = std::max(maxY, int(p.y));
+            }
+            if (maxX < 0 || maxY < 0 || minX >= surface.width ||
+                minY >= surface.height)
+              continue;
+            if (faces.size() == 512)
+              continue;
+            face.depth = depth;
+            face.color = map_terrain::color(grid.nodes[y * 33 + x],
+                                            map_terrain::HEIGHT, 0xffff);
+            faces.push_back(face);
+          }
+      }
+    if (!faces.empty()) {
+      std::sort(faces.begin(), faces.end(),
+                [](const Face &a, const Face &b) { return a.depth < b.depth; });
+      Polygon polygon;
+      polygon.points.reserve(5);
+      std::vector<int16_t, PsramAllocator<int16_t>> nodes;
+      nodes.reserve(5);
+      size_t pixels = 0;
+      for (const auto &face : faces) {
+        polygon.points.assign(face.points.begin(), face.points.end());
+        polygon.points.push_back(face.points[0]);
+        polygon.color = face.color;
+        int minX = 16000, maxX = -16000, minY = 16000, maxY = -16000;
+        for (auto p : face.points) {
+          minX = std::min(minX, int(p.x));
+          maxX = std::max(maxX, int(p.x));
+          minY = std::min(minY, int(p.y));
+          maxY = std::max(maxY, int(p.y));
+        }
+        const size_t area = size_t(std::max(0, std::min(surface.width, maxX) -
+                                                   std::max(0, minX))) *
+                            size_t(std::max(0, std::min(surface.height, maxY) -
+                                                   std::max(0, minY)));
+        if (pixels + area > 600000)
+          continue;
+        pixels += area;
+        polygon.bbox = BBox(Point32(minX, minY), Point32(maxX, maxY));
+        if (!fillPolygon(polygon, surface, nodes))
+          return false;
+      }
+      return true;
+    }
   }
 
   Polygon projectedPolygon;
@@ -2696,46 +3070,43 @@ bool Maps::readVectorMap(
 
   }
 
+  // Terrain is composited before roads, contours, labels and navigation.
+  if (style.visibilityMask & map_terrain::MASK) {
+    for (int y = 0; y < surface.height; y += 2) {
+      if (shouldCancelMapRenderWork())
+        return false;
+      for (int x = 0; x < surface.width; x += 2) {
+        const auto world =
+            projection.worldForGround(projection.groundForScreen(x, y));
+        map_terrain::Node node{};
+        bool found = false;
+        for (const auto *block : memCache.blocks)
+          if (block && !block->terrain.empty() &&
+              block->terrain[0].sample(world.x, world.y, node)) {
+            found = true;
+            break;
+          }
+        if (!found)
+          continue;
+        for (int dy = 0; dy < 2 && y + dy < surface.height; ++dy)
+          for (int dx = 0; dx < 2 && x + dx < surface.width; ++dx) {
+            auto &pixel =
+                surface.pixels[(y + dy) * surface.stridePixels + x + dx];
+            pixel = map_terrain::color(node, style.visibilityMask, pixel);
+          }
+      }
+    }
+  }
+
   // Contours share the accepted camera, raw surface, worker and semantic
   // cancellation policy. Draw after every area's fill, before any road/route.
   if ((style.visibilityMask & map_profile_protocol::VISIBILITY_CONTOURS) != 0) {
-    struct Candidate {
-      MapBlock *block = nullptr;
-      uint16_t record = 0;
-      bool index = false;
-      double distance = 0;
-    };
-    std::array<Candidate, 128> admitted{};
+    std::array<ContourCandidate, 128> admitted{};
     size_t admittedCount = 0;
-    const auto less = [](const Candidate &a, const Candidate &b) {
-      if (a.index != b.index) return a.index > b.index;
-      if (a.distance != b.distance) return a.distance < b.distance;
-      if (a.block->offset.y != b.block->offset.y) return a.block->offset.y < b.block->offset.y;
-      if (a.block->offset.x != b.block->offset.x) return a.block->offset.x < b.block->offset.x;
-      return a.record < b.record;
-    };
     uint32_t candidates = 0;
-    for (MapBlock *block : memCache.blocks) {
-      if (!block || !block->inView) continue;
-      const BBox local = viewPort.bbox - block->offset;
-      for (size_t number = 0; number < block->contourData.records.size(); ++number) {
-        if (shouldCancelMapRenderWork()) return false;
-        const auto &record = block->contourData.records[number];
-        const bool isIndex = (record.flags & 1U) != 0;
-        if (zoom > (isIndex ? 6 : 3) || record.maxX < local.min.x || record.minX > local.max.x ||
-            record.maxY < local.min.y || record.minY > local.max.y) continue;
-        ++candidates;
-        const double dx = double(record.minX + record.maxX) - double(local.min.x + local.max.x);
-        const double dy = double(record.minY + record.maxY) - double(local.min.y + local.max.y);
-        Candidate value{block, static_cast<uint16_t>(number), isIndex, dx * dx + dy * dy};
-        size_t position = 0;
-        while (position < admittedCount && !less(value, admitted[position])) ++position;
-        if (position == admitted.size()) continue;
-        if (admittedCount < admitted.size()) ++admittedCount;
-        for (size_t move = admittedCount - 1; move > position; --move) admitted[move] = admitted[move - 1];
-        admitted[position] = value;
-      }
-    }
+    if (!admitContours(viewPort, memCache, zoom, admitted, admittedCount,
+                       candidates))
+      return false;
     if (diagnostics) {
       diagnostics->candidateContours = candidates;
       diagnostics->suppressedContours = candidates - admittedCount;
@@ -6568,8 +6939,9 @@ bool Maps::renderRollingForeground() {
   lv_obj_center(Maps::canvasForeground);
 
   const ScreenMapRenderSettings &style = currentMapStyleSettings();
-  if (style.labelDensity != 0 &&
-      streetLabelFontHealthy.load(std::memory_order_acquire)) {
+  if ((style.labelDensity != 0 &&
+       streetLabelFontHealthy.load(std::memory_order_acquire)) ||
+      (style.visibilityMask & map_profile_protocol::VISIBILITY_CONTOURS)) {
     if (!Maps::getMapBlocks(Maps::viewPort.bbox, Maps::memCache) ||
         !drawStreetLabels(Maps::viewPort, Maps::memCache,
                           Maps::canvasForeground, rollingRasterWindow.zoom,

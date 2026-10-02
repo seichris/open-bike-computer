@@ -250,7 +250,8 @@
         "ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DurableMapDownloadCoordinator.swift",
-        "ios-app/BikeComputer/RideShared/RideBLEZoneDispatch.swift"
+        "ios-app/BikeComputer/RideShared/RideBLEZoneDispatch.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TerrainMapStyle.swift"
       ]
     },
     "common-2": {
@@ -274,7 +275,8 @@
         "ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
         "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
-        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift"
+        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TerrainMapStyle.swift"
       ]
     },
     "common-4": {
