@@ -42,6 +42,7 @@ on:
         options:
           - "175"
           - "206"
+          - "397"
           - all
 
 permissions:
@@ -62,6 +63,7 @@ jobs:
       firmware_build: ${{ steps.components.outputs.firmware_build }}
       firmware_host: ${{ steps.components.outputs.firmware_host }}
       firmware_targets: ${{ steps.components.outputs.firmware_targets }}
+      amoled_equivalence_targets: ${{ steps.components.outputs.amoled_equivalence_targets }}
       heavy_ci: ${{ steps.policy.outputs.heavy_ci }}
       ios: ${{ steps.components.outputs.ios }}
       ios_native: ${{ steps.components.outputs.ios_native }}
@@ -171,7 +173,7 @@ jobs:
         run: |
           set -euo pipefail
           factory_args=()
-          if [[ "${BUILD_ENVIRONMENT}" == *_PRODUCTION ]]; then
+          if [[ "${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION ]]; then
             factory_target="${BUILD_ENVIRONMENT%_PRODUCTION}"
             factory_args=(
               --factory-output-dir
@@ -212,7 +214,7 @@ jobs:
           fi
           "${nm_bin}" --print-size --size-sort --radix=d "${elf}" | tail -n 120
       - name: Verify production factory bundle packaging
-        if: endsWith(matrix.target, '_PRODUCTION')
+        if: endsWith(matrix.target, '_PRODUCTION') && startsWith(matrix.target, 'WAVESHARE_AMOLED_')
         env:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
         run: |
@@ -297,6 +299,115 @@ jobs:
           if b"map-dev-2026-08\0" not in firmware:
               raise SystemExit("Missing remote-debug development map signer")
           PY
+
+  amoled-equivalence:
+    name: AMOLED isolation (${{ matrix.target }})
+    needs: changes
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.base.ref == 'feature/waveshare-epaper-397' &&
+      needs.changes.outputs.firmware_build == 'true' &&
+      needs.changes.outputs.heavy_ci == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.amoled_equivalence_targets) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - name: Restore pinned PlatformIO downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: esp32/.pio/open-bike-build/downloads
+          key: esp32-pinned-downloads-${{ runner.os }}-${{ hashFiles('esp32/tools/generated_sdkconfig.py') }}
+      - name: Preserve qualification tools and select baseline
+        env:
+          BASELINE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/amoled-tools"
+          cp esp32/tools/compare_amoled_artifacts.py \
+            esp32/tools/qualify_amoled_equivalence.py \
+            "${RUNNER_TEMP}/amoled-tools/"
+          git checkout --detach "${BASELINE_SHA}"
+      - name: Capture baseline evidence
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/amoled-evidence"
+          env -u LD_LIBRARY_PATH \
+            PYTHONPATH="${RUNNER_TEMP}/amoled-tools:${GITHUB_WORKSPACE}/esp32/tools" \
+            python3 "${RUNNER_TEMP}/amoled-tools/qualify_amoled_equivalence.py" \
+            --project-dir esp32 \
+            --environment "${BUILD_ENVIRONMENT}" \
+            --preprocessing-dir \
+              "${RUNNER_TEMP}/baseline-preprocessed-${BUILD_ENVIRONMENT}" \
+            --output \
+              "${RUNNER_TEMP}/amoled-evidence/baseline-${BUILD_ENVIRONMENT}.json" \
+            --commands-output \
+              "${RUNNER_TEMP}/amoled-evidence/baseline-commands-${BUILD_ENVIRONMENT}.json"
+      - name: Reclaim baseline state and select candidate
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          downloads="${RUNNER_TEMP}/pinned-downloads"
+          if test -d esp32/.pio/open-bike-build/downloads; then
+            mv esp32/.pio/open-bike-build/downloads "${downloads}"
+          fi
+          # The verified host runtime is intentionally read-only. This is an
+          # ephemeral runner path with an exact target, so restore owner-write
+          # before reclaiming only this job's generated PlatformIO state.
+          chmod -R u+w -- esp32/.pio
+          rm -rf -- esp32/.pio
+          rm -f -- \
+            esp32/compile_commands.json \
+            esp32/sdkconfig.defaults \
+            "esp32/sdkconfig.${BUILD_ENVIRONMENT}"
+          git checkout --detach "${CANDIDATE_SHA}"
+          if test -d "${RUNNER_TEMP}/pinned-downloads"; then
+            mkdir -p esp32/.pio/open-bike-build
+            mv "${RUNNER_TEMP}/pinned-downloads" \
+              esp32/.pio/open-bike-build/downloads
+          fi
+      - name: Capture candidate evidence
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          env -u LD_LIBRARY_PATH \
+            PYTHONPATH="${RUNNER_TEMP}/amoled-tools:${GITHUB_WORKSPACE}/esp32/tools" \
+            python3 "${RUNNER_TEMP}/amoled-tools/qualify_amoled_equivalence.py" \
+            --project-dir esp32 \
+            --environment "${BUILD_ENVIRONMENT}" \
+            --preprocessing-dir \
+              "${RUNNER_TEMP}/candidate-preprocessed-${BUILD_ENVIRONMENT}" \
+            --output \
+              "${RUNNER_TEMP}/amoled-evidence/candidate-${BUILD_ENVIRONMENT}.json" \
+            --commands-output \
+              "${RUNNER_TEMP}/amoled-evidence/candidate-commands-${BUILD_ENVIRONMENT}.json"
+      - name: Compare AMOLED evidence
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          python3 "${RUNNER_TEMP}/amoled-tools/compare_amoled_artifacts.py" compare \
+            --baseline \
+              "${RUNNER_TEMP}/amoled-evidence/baseline-${BUILD_ENVIRONMENT}.json" \
+            --candidate \
+              "${RUNNER_TEMP}/amoled-evidence/candidate-${BUILD_ENVIRONMENT}.json" \
+            --output \
+              "${RUNNER_TEMP}/amoled-evidence/report-${BUILD_ENVIRONMENT}.json"
+      - name: Upload AMOLED evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: amoled-equivalence-${{ matrix.target }}
+          path: ${{ runner.temp }}/amoled-evidence/*.json
+          if-no-files-found: warn
 
   ios-fast:
     name: iOS Fast Tests
@@ -419,6 +530,16 @@ jobs:
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-verify-generated-pre-connection-assets --report "$RUNNER_TEMP/dev-checks/esp32-host-verify-generated-pre-connection-assets/results.json"
       - name: GUI layout host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-gui-layout-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-gui-layout-host-tests/results.json"
+      - name: Fetch pinned LVGL for actual e-paper workout replay
+        run: |
+          git init "$RUNNER_TEMP/epaper-lvgl"
+          git -C "$RUNNER_TEMP/epaper-lvgl" fetch --depth=1 \
+            https://github.com/lvgl/lvgl.git 7f07a129e8d77f4984fff8e623fd5be18ff42e74
+          git -C "$RUNNER_TEMP/epaper-lvgl" checkout --detach FETCH_HEAD
+      - name: Actual e-paper workout renderer replay
+        env:
+          EPAPER_LVGL_SOURCE: ${{ runner.temp }}/epaper-lvgl
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check epaper-workout-lvgl --report "$RUNNER_TEMP/dev-checks/epaper-workout-lvgl/results.json"
       - name: Power metrics host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-power-metrics-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-power-metrics-host-tests/results.json"
       - name: Display power and redraw policy host tests
@@ -506,6 +627,7 @@ jobs:
     needs:
       - changes
       - esp32
+      - amoled-equivalence
       - esp32-host
       - ios-fast
       - ios
@@ -517,6 +639,12 @@ jobs:
       - name: Require every selected component
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
+          AMOLED_EQUIVALENCE_REQUIRED: >-
+            ${{ github.event_name == 'pull_request' &&
+            github.event.pull_request.base.ref == 'feature/waveshare-epaper-397' &&
+            needs.changes.outputs.firmware_build == 'true' &&
+            needs.changes.outputs.heavy_ci == 'true' }}
+          AMOLED_EQUIVALENCE_RESULT: ${{ needs.amoled-equivalence.result }}
           ESP32_RESULT: ${{ needs.esp32.result }}
           FIRMWARE_BUILD_CHANGED: ${{ needs.changes.outputs.firmware_build }}
           FIRMWARE_HOST_CHANGED: ${{ needs.changes.outputs.firmware_host }}
@@ -542,6 +670,12 @@ jobs:
           }
 
           require_result "CI component selection" "$CHANGES_RESULT" success
+
+          if test "$AMOLED_EQUIVALENCE_REQUIRED" = true; then
+            require_result "AMOLED isolation" "$AMOLED_EQUIVALENCE_RESULT" success
+          else
+            require_result "AMOLED isolation" "$AMOLED_EQUIVALENCE_RESULT" skipped
+          fi
 
           if test "$FIRMWARE_BUILD_CHANGED" = true && test "$HEAVY_CI" = true; then
             require_result "ESP32 builds" "$ESP32_RESULT" success

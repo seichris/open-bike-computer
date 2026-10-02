@@ -1,0 +1,134 @@
+menu "ESP32 S3 e-Paper-3.97"
+    help
+        ESP32-S3 electronic paper display system configuration
+
+        The system supports multiple font sizes (12pt to 48pt) and encodings.
+        The format includes comprehensive support for ASCII, UTF-8 and GBK.
+
+        The system also supports loading GUI images from embedded resources
+        or from a TF/SD card (selectable below).
+
+    # Font system configuration for ESP32-S3 e-Paper display
+    # Supports multiple font sizes and encoding formats (ASCII, UTF-8, GBK)
+    # Choose between embedded fonts (faster) or TF/SD card fonts (smaller firmware)
+
+    menu "Font Options"
+        help
+            Font selection and embedded font options.
+            Select which font sizes to embed in firmware. Embedding increases
+            firmware size but gives the fastest access. Use TF/SD card option
+            to save flash space and load fonts at runtime.
+
+        config FONT12_EMBEDDED
+            bool "Embed Font12 in firmware"
+            default n
+            help
+                Embed 12pt fonts in firmware for faster access.
+                Approximate embedded size: 1.15MB.
+
+        config FONT16_EMBEDDED
+            bool "Embed Font16 in firmware"
+            default n
+            help
+                Embed 16pt fonts in firmware.
+                Approximate embedded size: 2.3MB.
+
+        config FONT18_EMBEDDED
+            bool "Embed Font18 in firmware"
+            default y
+            help
+                Embed 18pt fonts in firmware (recommended default).
+                Approximate embedded size: 2.5MB.
+
+        config FONT24_EMBEDDED
+            bool "Embed Font24 in firmware"
+            default n
+            help
+                Embed 24pt fonts in firmware.
+                Approximate embedded size: 4.5MB.
+
+        config FONT28_EMBEDDED
+            bool "Embed Font28 in firmware"
+            default n
+            help
+                Embed 28pt fonts in firmware.
+                Approximate embedded size: 6.5MB.
+
+        config FONT36_EMBEDDED
+            bool "Embed Font36 in firmware"
+            default n
+            help
+                Embed 36pt fonts in firmware.
+                Approximate embedded size: 10.2MB.
+                Warning: large, ensure sufficient flash.
+
+        config FONT48_EMBEDDED
+            bool "Embed Font48 in firmware"
+            default n
+            help
+                Embed 48pt fonts in firmware.
+                Approximate embedded size: 18.1MB.
+                Warning: very large, may require big flash.
+
+        config Auxiliary_Font_EMBEDDED
+            bool "Embed Auxiliary Font in firmware"
+            default n
+            help
+                Embed auxiliary fonts in the firmware. (Only ASCII)
+                Approximately embedded size: 354KB.
+
+        config FONT_ENABLE_TFCARD
+            bool "Enable TF card font support"
+            default y
+            help
+                Enable reading font files from TF/SD card.
+                When enabled, system will fall back to TF/SD card if embedded
+                fonts are not available. Useful for development or to save firmware space.
+
+        config FONT_ENABLE_SDCARD
+            bool "Enable SD card font support (alias)"
+            default y
+            help
+                Alias for FONT_ENABLE_TFCARD for compatibility with code using
+                CONFIG_FONT_ENABLE_SDCARD. Keep enabled if you use SD/TF card fonts.
+
+        config FONT_DEBUG_ENABLED
+            bool "Enable font debugging logs"
+            default n
+            help
+                Enable detailed logging for font loading and character processing.
+    endmenu
+
+    # Image resource configuration (embedded vs TF/SD card)
+    menu "Image Resources"
+        help
+            Configure where UI images / pre-rendered bitmaps are loaded from.
+
+        choice
+            prompt "Image resource source"
+            default IMG_SOURCE_EMBEDDED
+            help
+                Choose whether images are embedded in firmware (fast, no FS)
+                or loaded from TF/SD card (saves firmware flash, requires FS).
+
+            config IMG_SOURCE_EMBEDDED
+                bool "Embedded images (compiled-in bitmaps)"
+                help
+                    Use images compiled into firmware (pre-rendered bitmaps or
+                    C arrays). Best for simplest deployment and fastest access.
+
+            config IMG_SOURCE_TFCARD
+                bool "TF/SD card images"
+                help
+                    Load images (bitmaps) from TF/SD card or storage at runtime.
+        endchoice
+
+        # config IMG_FALLBACK_TO_TFCARD
+        #     bool "Fallback to TF/SD card if embedded image missing"
+        #     default y
+        #     help
+        #         If enabled and an embedded image is missing, attempt to load the
+        #         image from TF/SD card.
+    endmenu
+
+endmenu

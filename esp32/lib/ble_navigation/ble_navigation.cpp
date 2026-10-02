@@ -1,3 +1,7 @@
+#include "board_traits.hpp"
+#ifdef WAVESHARE_EPAPER_397
+#include "epaper_display.hpp"
+#endif
 /**
  * @file ble_navigation.cpp
  * @brief BLE navigation server implementation
@@ -63,7 +67,7 @@
 #include "../speaker/speaker.hpp"
 #include "../status_json/status_json.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include "../waveshare_board/pcf85063.hpp"
 #endif
 #include <NimBLEDevice.h>
@@ -565,11 +569,17 @@ static void applyPendingOwnershipUiUpdate() {
         [](uint32_t generation) {
           portENTER_CRITICAL(&ownershipUiMux);
           ownershipComparisonRenderGate.request(generation);
+#ifdef WAVESHARE_EPAPER_397
+          epaper::setPairingGeneration(generation);
+#endif
           portEXIT_CRITICAL(&ownershipUiMux);
         },
         [] {
           portENTER_CRITICAL(&ownershipUiMux);
           ownershipComparisonRenderGate.cancel();
+#ifdef WAVESHARE_EPAPER_397
+          epaper::setPairingGeneration(0);
+#endif
           portEXIT_CRITICAL(&ownershipUiMux);
         });
   }
@@ -1182,7 +1192,7 @@ static bool queueMapInput(PendingMapInputType type, const uint8_t *data,
   ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
   return true;
 }
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 static uint32_t lastBleRtcSyncMs = 0;
 constexpr uint32_t BLE_RTC_SYNC_INTERVAL_MS = 10UL * 60UL * 1000UL;
 #endif
@@ -2790,6 +2800,20 @@ static std::string genericTransferStatusJson() {
                         transferStatus.legacyArchivePolicy);
   body += "}";
 
+#ifdef WAVESHARE_EPAPER_397
+  const epaper::Status panelStatus = epaper::status();
+  body += ",\"display\":{\"kind\":\"epaper\",\"queued\":" +
+      std::to_string(panelStatus.queued) + ",\"transmitted\":" +
+      std::to_string(panelStatus.transmitted) + ",\"presented\":" +
+      std::to_string(panelStatus.presented) + ",\"completedAtMs\":" +
+      std::to_string(panelStatus.completedAtMs) + ",\"fullCount\":" +
+      std::to_string(panelStatus.fullCount) + ",\"partialCount\":" +
+      std::to_string(panelStatus.partialCount) + ",\"failures\":" +
+      std::to_string(panelStatus.failures) + ",\"discarded\":" +
+      std::to_string(panelStatus.discarded) + ",\"busy\":" +
+      (panelStatus.busy ? "true" : "false") + ",\"fault\":" +
+      (panelStatus.fault ? "true" : "false") + "}";
+#endif
   if (transferStatus.pendingTlsIdentityVersion != 0 &&
       !transferStatus.pendingTlsCertificateSha256.empty()) {
     status_json::appendFieldPrefix(body, "pendingTls");
@@ -4001,7 +4025,7 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
   }
   const bool useCap2 =
       clientVersion >= device_capabilities_protocol::CAP2_CLIENT_VERSION;
-  const uint8_t extendedCapabilityFlags =
+  const uint8_t extendedCapabilityFlags = board_traits::epaper ? 0 :
       map_profile_protocol::extendedCapabilityFlagsForClient(clientVersion);
   if (useCap2) {
     bool scopedWatchControllerReady = false;
@@ -4107,6 +4131,25 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::RIDE_DELIVERY_ACK_FEATURE;
     }
+    if (board_traits::epaper) {
+      featureFlags &= ~(device_capabilities_protocol::BIRDS_EYE_MAP_NAVIGATION_FEATURE |
+                        device_capabilities_protocol::BIRDS_EYE_PERSPECTIVE_FEATURE |
+                        device_capabilities_protocol::BIRDS_EYE_STRONGER_PERSPECTIVE_FEATURE |
+                        device_capabilities_protocol::OSM_3D_BUILDINGS_FEATURE |
+                        device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
+                        device_capabilities_protocol::AUTOMATIC_DISPLAY_OFF_FEATURE);
+    }
+    const bool includeDisplay = clientVersion >=
+        ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_MINIMUM_CLIENT_VERSION;
+    uint8_t displayMetadata[] = {
+        ride_ble_protocol_generated::BOARD_DISPLAY_VERSION,
+        uint8_t(board_traits::epaper ? 2 : 1),
+        uint8_t(board_traits::touch ? 3 : 1),
+        uint8_t(board_traits::width), uint8_t(board_traits::width >> 8),
+        uint8_t(board_traits::height), uint8_t(board_traits::height >> 8),
+        uint8_t(board_traits::epaper ? 0 : 29)};
+    if (includeDisplay)
+      featureFlags |= ride_ble_protocol_generated::BOARD_DISPLAY_METADATA_FEATURE;
     if (world_radio_config::supportsClient(clientVersion)) {
       featureFlags |= device_capabilities_protocol::WORLD_RADIO_FEATURE;
     }
@@ -4135,7 +4178,7 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
         sizeof(response), screenConfigurationTLV,
-        screenConfigurationTLVLength);
+        screenConfigurationTLVLength, includeDisplay ? displayMetadata : nullptr);
     if (responseSize == 0) {
       Serial.println("BLE Capabilities: CAP2 encoding failed");
       return;
@@ -4847,7 +4890,7 @@ static void handleGpsPayload(
     return;
   }
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   bool rtcTimestampSynced = false;
   if (packet.hasUnixTime) {
     const uint32_t now = millis();
@@ -4868,12 +4911,16 @@ static void handleGpsPayload(
   gpsFreshnessState.accept(arrivals);
   const auto sourceSample = gps_input_freshness::sourceSampleFrom(packet, arrivals.lastPacketMs);
   gps.presentationSample = sourceSample;
-  bleDebugStats.update([sourceSample](BLEDebugStats &stats) {
+  bleDebugStats.update([&](BLEDebugStats &stats) {
     stats.gpsSource = sourceSample;
     stats.gpsPacketCount = gpsFreshnessState.packetCount;
     stats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
     stats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
     stats.maximumGpsPacketGapMs = gpsFreshnessState.maximumGapMs;
+#ifdef WAVESHARE_EPAPER_397
+    stats.lastGpsCaptureAgeMs = packet.hasSampleAge ? packet.sampleAgeMs : 0U;
+    stats.lastGpsCapturedAtMs = sourceSample.capturedAtMs;
+#endif
   });
 
   const uint32_t nowMs = millis();
@@ -4928,7 +4975,7 @@ static void handleGpsPayload(
                 "gapMs=%lu maxGapMs=%lu\n",
                 source == nullptr ? "unknown" : source,
                 (unsigned)gps.gpsData.heading,
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
                 rtcTimestampSynced,
 #else
                 0,
@@ -4996,6 +5043,10 @@ handleWorkoutTelemetryPayload(const uint8_t *data, size_t len,
 
 static void handleMapSetting(uint8_t settingId, int32_t settingValue,
                              const char *source) {
+  if (board_traits::epaper && (settingId == 4 || settingId == 6 ||
+      settingId == 11 || settingId == 12 || settingId == 15 ||
+      settingId == 25 || settingId == 26 || settingId == 35 ||
+      settingId == 36 || settingId == 37)) return;
   bleDebugStats.updateWith([](BLEDebugStats &stats) {
     ++stats.settingsPacketCount;
     stats.lastSettingsPacketMs = millis();
@@ -6657,6 +6708,13 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.mapNavigationRotationMode =
       map_profile_persistence::loadNavigationRotation(prefs);
   mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
+  if (board_traits::epaper) {
+    mapRenderSettings.mapNavigationBirdsEyeEnabled = 0;
+    mapRenderSettings.mapNavigation3DBuildingsEnabled = 0;
+    mapRenderSettings.mapRotationMode = 0;
+    mapRenderSettings.mapNavigationRotationMode = 0;
+    mapRenderSettings.tapToSwitchScreens = 0;
+  }
   uint8_t storedScreenMask =
       prefs.getUChar("screenMask", DEVICE_SCREEN_DEFAULT_MASK);
   if (!prefs.getBool("batteryScrV1", false)) {
@@ -7257,6 +7315,22 @@ bool BLENavigationServer::forgetOwner() {
   return true;
 }
 
+bool BLENavigationServer::cancelOwnershipPairing() {
+  if (!deviceOwnershipReady || !deviceOwnershipMutex ||
+      xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(50)) != pdTRUE)
+    return false;
+  const bool cancelled = deviceOwnership.cancelPairingOnDevice();
+  xSemaphoreGive(deviceOwnershipMutex);
+  if (cancelled) queueOwnershipUiUpdate();
+  return cancelled;
+}
+
+void BLENavigationServer::noteOwnershipDisplayGenerationCompleted(uint32_t generation) {
+  portENTER_CRITICAL(&ownershipUiMux);
+  ownershipComparisonRenderGate.displayGenerationCompleted(generation);
+  portEXIT_CRITICAL(&ownershipUiMux);
+}
+
 void BLENavigationServer::noteOwnershipDisplayFlushCompleted() {
   portENTER_CRITICAL(&ownershipUiMux);
   ownershipComparisonRenderGate.displayFlushed();
@@ -7310,6 +7384,9 @@ bool BLENavigationServer::isOwnershipClaimed() {
 }
 
 bool BLENavigationServer::confirmOwnershipPairing() {
+#ifdef WAVESHARE_EPAPER_397
+  if (!epaper::pairingPresented()) return false;
+#endif
   bool confirmed = false;
   std::string stableDeviceId;
   if (deviceOwnershipReady && deviceOwnershipMutex != nullptr &&

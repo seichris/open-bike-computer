@@ -5,7 +5,7 @@
 
 #pragma once
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 
 #include <Arduino.h>
 
@@ -18,6 +18,7 @@ constexpr uint8_t FT3168_ADDR = 0x38;
 constexpr uint8_t PCF85063_ADDR = 0x51;
 constexpr uint8_t QMI8658_ADDR_PRIMARY = 0x6B;
 constexpr uint8_t QMI8658_ADDR_FALLBACK = 0x6A;
+constexpr uint8_t SHTC3_ADDR = 0x70;
 
 void recoverI2CBus();
 void initializePowerManagement();

@@ -233,3 +233,15 @@ constexpr uint8_t WAVESHARE_LEGACY_SD_MOSI = GPIO_NUM_1;
 constexpr uint8_t WAVESHARE_LEGACY_SD_MISO = GPIO_NUM_3;
 constexpr uint8_t WAVESHARE_LEGACY_SD_CLK = GPIO_NUM_2;
 #endif // WAVESHARE_AMOLED_175 || WAVESHARE_AMOLED_206
+
+#if defined(WAVESHARE_EPAPER_397)
+#include "board_traits.hpp"
+#define I2C_SDA_PIN GPIO_NUM_41
+#define I2C_SCL_PIN GPIO_NUM_42
+constexpr uint8_t BOARD_BOOT_PIN = GPIO_NUM_0;
+constexpr int WAVESHARE_SDMMC_CLK = board_traits::sdClock;
+constexpr int WAVESHARE_SDMMC_CMD = board_traits::sdCommand;
+constexpr int WAVESHARE_SDMMC_D0 = board_traits::sdData;
+extern uint8_t GPS_TX;
+extern uint8_t GPS_RX;
+#endif

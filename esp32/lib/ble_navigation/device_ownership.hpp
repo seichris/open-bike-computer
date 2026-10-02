@@ -53,6 +53,11 @@ public:
   CommandResult handle(const std::string &payload, uint32_t nowMs);
   bool armPairingConfirmation(uint32_t pairingGeneration);
   bool confirmPairingOnDevice();
+  bool cancelPairingOnDevice() {
+    if (!pairingActive_) return false;
+    clearPairing();
+    return true;
+  }
   bool clearOwner();
   bool unwrapAuthenticatedPayload(AuthenticatedChannel channel,
                                   const std::string &frame,

@@ -13,6 +13,14 @@ from collections.abc import Iterable, Sequence
 
 COMPONENTS = ("firmware_build", "firmware_host", "ios", "map_backend", "osm")
 FIRMWARE_TARGETS = {
+    "397": (
+        "WAVESHARE_EPAPER_397",
+        "WAVESHARE_EPAPER_397_DISPLAY_TEST",
+        "WAVESHARE_EPAPER_397_POWER_METRICS",
+        "WAVESHARE_EPAPER_397_IMU_DIAGNOSTICS",
+        "WAVESHARE_EPAPER_397_LIGHT_SLEEP",
+        "WAVESHARE_EPAPER_397_PRODUCTION",
+    ),
     "175": (
         "WAVESHARE_AMOLED_175",
         "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
@@ -24,6 +32,12 @@ FIRMWARE_TARGETS = {
         "WAVESHARE_AMOLED_206_PRODUCTION",
     ),
 }
+AMOLED_EQUIVALENCE_TARGETS = (
+    "WAVESHARE_AMOLED_175",
+    "WAVESHARE_AMOLED_175_PRODUCTION",
+    "WAVESHARE_AMOLED_206",
+    "WAVESHARE_AMOLED_206_PRODUCTION",
+)
 FULL_CI_PATHS = {
     ".github/scripts/changed_components.py",
     ".github/workflows/ci.yml",
@@ -369,7 +383,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--firmware-hardware",
-        choices=("175", "206", "all"),
+        choices=("175", "206", "397", "all"),
         default="175",
     )
     args = parser.parse_args()
@@ -393,6 +407,11 @@ def main() -> int:
         separators=(",", ":"),
     )
     print(f"firmware_targets={firmware_targets}")
+    amoled_equivalence_targets = json.dumps(
+        AMOLED_EQUIVALENCE_TARGETS,
+        separators=(",", ":"),
+    )
+    print(f"amoled_equivalence_targets={amoled_equivalence_targets}")
     print(f"ios_native={'true' if native_ios else 'false'}")
     return 0
 

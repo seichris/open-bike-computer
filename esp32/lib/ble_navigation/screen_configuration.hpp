@@ -130,6 +130,17 @@ inline uint8_t previousEnabledInstanceIndex(const Document &document,
   return defaultInstanceIndex(document);
 }
 
+inline screen_configuration_protocol::MapProfile effectiveMapProfile(
+    screen_configuration_protocol::MapProfile profile) {
+#ifdef WAVESHARE_EPAPER_397
+  // Apply to both stored documents and new writes, including older clients.
+  profile.rotationMode = 0;
+  profile.birdsEyeEnabled = false;
+  profile.birdsEyePerspective = 0;
+  profile.buildings3DEnabled = false;
+#endif
+  return profile;
+}
 inline uint8_t nextEnabledInstanceOfType(const Document &document,
                                          uint8_t currentIndex,
                                          ScreenType first,

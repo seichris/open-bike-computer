@@ -1297,7 +1297,7 @@ Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
 Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
 configurable display inactivity timeouts. Version `27` requests bit `29`,
 versioned workout zones. Version `28` requests bit `30`, topographic contours.
-The current iPhone client negotiates version `28`; older direct Watch clients
+The current iPhone client negotiates version `29`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
@@ -1308,6 +1308,39 @@ navigation characteristic; stream discovery and playback run on the iPhone.
 See [World Radio](world-radio.md) and the bounded codecs in
 `esp32/lib/world_radio/world_radio_protocol.hpp` and
 `ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift`.
+
+Version `29` requests bit `31`, board display/input metadata. The experimental
+pre-merge allocation at bit 28/version 26 is superseded: bit 28 belongs to
+published display inactivity timeouts. Update experimental e-paper firmware
+and its companion together; do not interpret bit 28 as board metadata.
+
+Bit `31` requires exactly one TLV type `3`, length `8`:
+
+| Value offset | Encoding | Meaning |
+| --- | --- | --- |
+| 0 | UInt8, `1` | Metadata version |
+| 1 | UInt8 | `1` color display, `2` monochrome e-paper |
+| 2 | UInt8 bitmask | bit 0 physical buttons, bit 1 touch |
+| 3–4 | UInt16LE | Logical display width |
+| 5–6 | UInt16LE | Logical display height |
+| 7 | UInt8 bitmask | bit 0 brightness, 1 display rotation, 2 tap-to-cycle, 3 continuous camera, 4 disconnected sleep |
+
+The 3.97 board sends kind `2`, buttons `1`, dimensions `480 × 800`, settings
+`0`. AMOLED boards send kind `1`, buttons/touch `3`, their existing dimensions,
+and settings `29`. Older clients receive their existing CAPS/CAP2 shape without
+this record. The encoder's maximum response is 40 bytes including the optional
+PWR configuration, screen configuration and display records. A record without its feature bit, a bit
+without its record, unknown metadata version, invalid dimensions, duplicate or
+truncated records invalidate negotiation. Unknown unrelated TLV types remain
+skippable. Existing UUIDs and route/GPS/ride payloads are unchanged.
+
+E-paper firmware normalizes or rejects unsupported brightness, touch,
+automatic sleep, course-up, bird's-eye and 3D settings even when written by an
+older companion. Current iOS hides those controls and names the board from
+metadata or its exact canonical firmware target. The authenticated `DSTS`
+response additionally reports display queue/transmit/presented generations,
+completion time, full/partial counts, discarded frames, failures and busy/fault
+state. SPI/LVGL flush completion alone never establishes pairing visibility.
 Production builds now advertise bit `15` because the RAUT control path is
 enabled; physical ride-detection gates remain outstanding. Firmware sets bit
 `16` only in
@@ -1330,7 +1363,8 @@ therefore unavailable in production.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
-carries the 14-byte screen-configuration limits and support masks. Types are unique;
+carries the 14-byte screen-configuration limits and support masks. TLV type `3`
+carries the eight-byte display/input metadata. Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
 well-formed types are skipped. Firmware sends legacy `CAPS` to clients below
 version `10`, preserving the version `7...9` extended-byte contract, and current
@@ -1374,6 +1408,9 @@ Application-confirmed ride delivery, CAP2 schema 1, only feature bit 22:
 
 Configurable screens, CAP2 schema 1, feature bit 26 and TLV type 2:
 43 41 50 32 01 00 00 00 04 02 0e 01 10 18 07 1f 00 00 00 ff ff 01 00 00 10
+
+Monochrome e-paper, 480 x 800 portrait, buttons only, feature bit 27 and TLV type 3:
+43 41 50 32 01 00 00 00 08 03 08 01 02 01 e0 01 20 03 00
 
 Atomic renderer replay sample, CAP2 schema 1, only feature bit 23:
 43 41 50 32 01 00 00 80 00

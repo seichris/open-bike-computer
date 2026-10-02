@@ -2504,7 +2504,7 @@ private struct MapStyleSettingsView: View {
 
     var body: some View {
         Form {
-            if screen == .map {
+            if screen == .map && bleManager.supportsContinuousCamera {
                 Section(header: Text("Map Mode")) {
                     Picker("Rotation", selection: $bleManager.mapRotationMode) {
                         Text("North Up").tag(0)
@@ -2517,7 +2517,7 @@ private struct MapStyleSettingsView: View {
                 }
             }
 
-            if screen == .mapPlusNavigation {
+            if screen == .mapPlusNavigation && !bleManager.isEPaperDevice {
                 Section(header: Text("Map Mode"), footer: Text(
                     bleManager.supportsMapNavigationOrientation
                         ? "Course Up follows your direction of travel. North Up keeps the map bearing fixed. Label orientation is configured separately."
@@ -2818,86 +2818,97 @@ private struct HardwareCustomizationSettingsView: View {
 
     var body: some View {
         Form {
-            Section(
-                header: Text("Device Brightness"),
-                footer: Text(displayInactivityFooter)
-            ) {
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Brightness")
-                        Spacer()
-                        Text("\(Int(bleManager.deviceBrightnessPercent))%")
-                            .foregroundColor(.secondary)
-                    }
-                    Slider(value: $bleManager.deviceBrightnessPercent, in: 5...100, step: 5)
-                        .onChange(of: bleManager.deviceBrightnessPercent) { newValue in
-                            bleManager.sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(newValue))
+            if bleManager.supportsDisplayBrightness {
+                Section(
+                    header: Text("Device Brightness"),
+                    footer: Text(displayInactivityFooter)
+                ) {
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Brightness")
+                            Spacer()
+                            Text("\(Int(bleManager.deviceBrightnessPercent))%")
+                                .foregroundColor(.secondary)
                         }
-                }
+                        Slider(value: $bleManager.deviceBrightnessPercent, in: 5...100, step: 5)
+                            .onChange(of: bleManager.deviceBrightnessPercent) { newValue in
+                                bleManager.sendSetting(id: DeviceBLEProtocol.brightnessSettingID, value: Int32(newValue))
+                            }
+                    }
 
-                Toggle("Automatic Display Off", isOn: $bleManager.automaticDisplayOffEnabled)
-                    .onChange(of: bleManager.automaticDisplayOffEnabled) { newValue in
+                    Toggle("Automatic Display Off", isOn: $bleManager.automaticDisplayOffEnabled)
+                        .onChange(of: bleManager.automaticDisplayOffEnabled) { newValue in
+                            bleManager.sendSetting(
+                                id: DeviceBLEProtocol.automaticDisplayOffSettingID,
+                                value: newValue ? 1 : 0
+                            )
+                        }
+                        .disabled(!bleManager.supportsAutomaticDisplayOff)
+                    if bleManager.supportsDisplayInactivityTimeouts {
+                        Picker("Dim After", selection: $bleManager.displayDimTimeout) {
+                            ForEach(DisplayDimTimeout.allCases.filter {
+                                $0.rawValue < bleManager.displayOffTimeout.rawValue
+                            }) { timeout in
+                                Text(timeout.title).tag(timeout)
+                            }
+                        }
+                        .onChange(of: bleManager.displayDimTimeout) { _ in
+                            bleManager.sendDisplayInactivityTimeouts()
+                        }
+                        .disabled(!bleManager.automaticDisplayOffEnabled)
+
+                        Picker("Turn Off After", selection: $bleManager.displayOffTimeout) {
+                            ForEach(DisplayOffTimeout.allCases.filter {
+                                $0.rawValue > bleManager.displayDimTimeout.rawValue
+                            }) { timeout in
+                                Text(timeout.title).tag(timeout)
+                            }
+                        }
+                        .onChange(of: bleManager.displayOffTimeout) { _ in
+                            bleManager.sendDisplayInactivityTimeouts()
+                        }
+                        .disabled(!bleManager.automaticDisplayOffEnabled)
+                    }
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
+
+            }
+            if bleManager.supportsDisconnectedSleep {
+                Section(
+                    header: Text("Power"),
+                    footer: Text("This puts the entire device into deep sleep after its phone connection is lost. It is separate from the connected display timeout above.")
+                ) {
+                    Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
+                        ForEach(DisconnectedSleepTimeout.allCases) { timeout in
+                            Text(timeout.title).tag(timeout)
+                        }
+                    }
+                    .onChange(of: bleManager.disconnectedSleepTimeout) { newValue in
                         bleManager.sendSetting(
-                            id: DeviceBLEProtocol.automaticDisplayOffSettingID,
-                            value: newValue ? 1 : 0
+                            id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
+                            value: newValue.settingValue
                         )
                     }
-                    .disabled(!bleManager.supportsAutomaticDisplayOff)
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
 
-                if bleManager.supportsDisplayInactivityTimeouts {
-                    Picker("Dim After", selection: $bleManager.displayDimTimeout) {
-                        ForEach(DisplayDimTimeout.allCases.filter {
-                            $0.rawValue < bleManager.displayOffTimeout.rawValue
-                        }) { timeout in
-                            Text(timeout.title).tag(timeout)
+            }
+            if bleManager.supportsTapToCycle {
+                Section(header: Text("Screen Navigation")) {
+                    Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
+                        .onChange(of: bleManager.tapToSwitchScreens) { newValue in
+                            bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
                         }
-                    }
-                    .onChange(of: bleManager.displayDimTimeout) { _ in
-                        bleManager.sendDisplayInactivityTimeouts()
-                    }
-                    .disabled(!bleManager.automaticDisplayOffEnabled)
+                }
+                .disabled(!bleManager.supportsDeviceSettings)
 
-                    Picker("Turn Off After", selection: $bleManager.displayOffTimeout) {
-                        ForEach(DisplayOffTimeout.allCases.filter {
-                            $0.rawValue > bleManager.displayDimTimeout.rawValue
-                        }) { timeout in
-                            Text(timeout.title).tag(timeout)
-                        }
-                    }
-                    .onChange(of: bleManager.displayOffTimeout) { _ in
-                        bleManager.sendDisplayInactivityTimeouts()
-                    }
-                    .disabled(!bleManager.automaticDisplayOffEnabled)
+            }
+            if bleManager.isEPaperDevice {
+                Section("E-paper controls") {
+                    Text("Up and down change screens. Press the center key for actions; hold it to return from screen controls.")
+                    Text("The display keeps its image without power. Check the connection and GPS status before relying on displayed guidance.")
                 }
             }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(
-                header: Text("Power"),
-                footer: Text("This puts the entire device into deep sleep after its phone connection is lost. It is separate from the connected display timeout above.")
-            ) {
-                Picker("Disconnected Sleep After", selection: $bleManager.disconnectedSleepTimeout) {
-                    ForEach(DisconnectedSleepTimeout.allCases) { timeout in
-                        Text(timeout.title).tag(timeout)
-                    }
-                }
-                .onChange(of: bleManager.disconnectedSleepTimeout) { newValue in
-                    bleManager.sendSetting(
-                        id: DeviceBLEProtocol.disconnectedSleepTimeoutSettingID,
-                        value: newValue.settingValue
-                    )
-                }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
-            Section(header: Text("Screen Navigation")) {
-                Toggle("Tap to Switch Screens", isOn: $bleManager.tapToSwitchScreens)
-                    .onChange(of: bleManager.tapToSwitchScreens) { newValue in
-                        bleManager.sendSetting(id: 11, value: newValue ? 1 : 0)
-                    }
-            }
-            .disabled(!bleManager.supportsDeviceSettings)
-
             DeviceSoundsSettingsSection()
         }
         .navigationTitle("Hardware Customization")

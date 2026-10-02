@@ -37,6 +37,7 @@ INPUTS = (
     'esp32/lib/gui/src/rideTelemetryLayout.hpp',
     'esp32/lib/gui/src/rideTelemetryPresenter.hpp',
     'esp32/lib/gui/src/ride_stats_widget.hpp',
+    'esp32/lib/gui/src/epaperRideStats.hpp',
     'esp32/lib/gui/src/rideValueFont56.c',
     'esp32/lib/gui/src/rideValueFont64.c',
     'esp32/lib/gui/src/rideSpeedFont84.c',
@@ -77,7 +78,7 @@ def lvgl_source_digest(lvgl: Path) -> str:
     return digest.hexdigest()
 
 
-def emit(lvgl: Path, build: Path, output: Path) -> None:
+def emit(lvgl: Path, build: Path, output: Path, epaper_only: bool = False) -> None:
     build.mkdir(parents=True, exist_ok=True)
     (build / 'renderer_helpers.inc').write_text(renderer_helpers())
     cmake = f'''cmake_minimum_required(VERSION 3.16)
@@ -92,12 +93,19 @@ add_executable(emit_preview "{ROOT}/tools/ride_stats_preview/emit_preview.cpp"
  "{GUI}/rideValueFont56.c" "{GUI}/rideValueFont64.c" "{GUI}/rideSpeedFont84.c")
 target_include_directories(emit_preview PRIVATE "{GUI}" "{build}")
 target_link_libraries(emit_preview PRIVATE lvgl m)
+add_executable(test_epaper_workout "{ROOT}/tools/tests/test_epaper_workout_rendering.cpp"
+ "{GUI}/rideValueFont56.c" "{GUI}/rideValueFont64.c" "{GUI}/rideSpeedFont84.c")
+target_compile_definitions(test_epaper_workout PRIVATE WAVESHARE_EPAPER_397=1)
+target_include_directories(test_epaper_workout PRIVATE "{GUI}" "{build}")
+target_link_libraries(test_epaper_workout PRIVATE lvgl m)
 '''
     (build / 'CMakeLists.txt').write_text(cmake)
     subprocess.run(['cmake', '-S', str(build), '-B', str(build / 'out'),
                     '-DCMAKE_BUILD_TYPE=Debug'], check=True)
     subprocess.run(['cmake', '--build', str(build / 'out'), '-j', '4'], check=True)
-    subprocess.run([str(build / 'out/emit_preview'), str(output)], check=True)
+    subprocess.run([str(build / 'out/test_epaper_workout')], check=True)
+    if not epaper_only:
+        subprocess.run([str(build / 'out/emit_preview'), str(output)], check=True)
 
 
 def pack(output: Path) -> tuple[bytes, bytes]:
@@ -144,6 +152,8 @@ def main() -> None:
     parser.add_argument('--lvgl-source', required=True, type=Path)
     parser.add_argument('--build-dir', type=Path)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--test-epaper', action='store_true',
+                        help='Run the actual 480x800 e-paper renderer replay without changing assets')
     args = parser.parse_args()
     lvgl = args.lvgl_source.resolve()
     if not (lvgl / 'src/font/lv_font_montserrat_38.c').is_file():
@@ -160,7 +170,9 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix='ride-preview-') as temporary:
         output = Path(temporary) / 'rendered'
         build = args.build_dir.resolve() if args.build_dir else Path(temporary) / 'build'
-        emit(lvgl, build, output)
+        emit(lvgl, build, output, args.test_epaper)
+        if args.test_epaper:
+            return
         spec, png = pack(output)
         products = {
             ASSETS/'RideStatsPreview.dataset/preview.json': spec,

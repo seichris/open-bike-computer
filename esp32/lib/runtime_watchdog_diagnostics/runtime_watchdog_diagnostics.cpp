@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #include <esp_task_wdt.h>
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include <esp_attr.h>
 #endif
 
@@ -13,7 +13,7 @@
 namespace runtime_watchdog_diagnostics {
 namespace {
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 RTC_NOINIT_ATTR policy::RetainedState retainedState;
 #else
 policy::RetainedState retainedState = {};
@@ -139,7 +139,7 @@ void captureTaskWatchdogFromIsr(uint32_t watchdogUptimeMs,
 
 } // namespace runtime_watchdog_diagnostics
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 namespace {
 
 void discardTaskWatchdogMessage(void *, const char *) {}

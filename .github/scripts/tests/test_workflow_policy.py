@@ -292,6 +292,24 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertIn(f'"{target}"', router)
         self.assertEqual(DIAGNOSTIC_FIRMWARE_TARGETS, diagnostic_targets)
 
+    def test_epaper_stack_requires_amoled_equivalence_gate(self) -> None:
+        general_ci = workflow_source("ci.yml")
+
+        self.assertIn("amoled-equivalence:", general_ci)
+        self.assertIn(
+            "target: ${{ fromJSON(needs.changes.outputs.amoled_equivalence_targets) }}",
+            general_ci,
+        )
+        self.assertIn(
+            "github.event.pull_request.base.ref == 'feature/waveshare-epaper-397'",
+            general_ci,
+        )
+        self.assertIn("- amoled-equivalence", general_ci)
+        self.assertIn(
+            'require_result "AMOLED isolation" "$AMOLED_EQUIVALENCE_RESULT" success',
+            general_ci,
+        )
+
     def test_pull_request_remote_debug_builds_verify_metrics_routes(self) -> None:
         general_ci = workflow_source("ci.yml")
 
@@ -430,6 +448,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {
             **os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "true",
+            "AMOLED_EQUIVALENCE_REQUIRED": "false", "AMOLED_EQUIVALENCE_RESULT": "skipped",
             "FIRMWARE_HOST_CHANGED": "true", "HEAVY_CI": "true", "IOS_CHANGED": "false", "IOS_NATIVE_CHANGED": "false",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
             "ESP32_RESULT": "success", "HOST_RESULT": "success",
@@ -447,11 +466,23 @@ class WorkflowPolicyTests(unittest.TestCase):
                         completed.stdout + completed.stderr,
                     )
 
+        # Stacked e-paper changes additionally require actual AMOLED isolation
+        # evidence. Do not weaken that gate while reconciling main's fixtures.
+        for result in ("success", "failure", "cancelled", "skipped", ""):
+            with self.subTest(isolation=result):
+                completed = subprocess.run(["bash", "-c", script],
+                    capture_output=True, text=True, env={**environment,
+                        "AMOLED_EQUIVALENCE_REQUIRED": "true",
+                        "AMOLED_EQUIVALENCE_RESULT": result})
+                self.assertEqual(0 if result == "success" else 1,
+                                 completed.returncode)
+
     def test_each_ios_job_failure_blocks_the_gate(self):
         gate = mapping_block(workflow_source("ci.yml"), "gate", indent=2)
         self.assertIn("- ios-platform", gate)
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {**os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "false",
+            "AMOLED_EQUIVALENCE_REQUIRED": "false", "AMOLED_EQUIVALENCE_RESULT": "skipped",
             "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "true", "IOS_CHANGED": "true", "IOS_NATIVE_CHANGED": "true",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
             "ESP32_RESULT": "skipped", "HOST_RESULT": "skipped",
@@ -708,6 +739,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("tools/package_factory_firmware.py", general_ci)
         self.assertIn("tar -xzf", general_ci)
         self.assertIn("sha256sum --check SHA256SUMS", general_ci)
+        self.assertIn('"${BUILD_ENVIRONMENT}" == WAVESHARE_AMOLED_*_PRODUCTION', general_ci)
+        self.assertIn("startsWith(matrix.target, 'WAVESHARE_AMOLED_')", general_ci)
 
     def test_promotion_contract_requires_the_aggregate_gate(self) -> None:
         agent_instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")

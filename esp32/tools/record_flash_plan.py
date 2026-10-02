@@ -53,7 +53,7 @@ def require_fresh_final_link(environment) -> None:
     """Retain linker side evidence after the platform resolves PROGNAME."""
     if os.environ.get("OPEN_BIKE_DETERMINISTIC_BUILD") != "1":
         return
-    if not environment.subst("$PIOENV").startswith("WAVESHARE_AMOLED_"):
+    if not environment.subst("$PIOENV").startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
         return
     # In pre: scripts PROGNAME is still "program", not "firmware". Unlike
     # PlatformIO's action hooks, NoCache resolves its target immediately.
@@ -65,7 +65,7 @@ def require_fresh_final_link(environment) -> None:
 def record_flash_plan(environment) -> None:
     """Persist the exact command after PlatformIO has loaded the framework."""
     profile = environment.subst("$PIOENV")
-    if not profile.startswith("WAVESHARE_AMOLED_"):
+    if not profile.startswith(("WAVESHARE_AMOLED_", "WAVESHARE_EPAPER_397")):
         return
 
     plan_environment = environment.Clone()

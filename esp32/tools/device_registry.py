@@ -18,7 +18,7 @@ from typing import Sequence
 
 SCHEMA = 1
 BOARD_FAMILIES = frozenset(
-    {"WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206"}
+    {"WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206", "WAVESHARE_EPAPER_397"}
 )
 NICKNAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SERIAL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$")

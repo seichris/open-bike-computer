@@ -3,6 +3,9 @@
 #include "rideMetricTypography.hpp"
 #include "rideTelemetryLayout.hpp"
 #include "ride_stats_widget.hpp"
+#ifdef WAVESHARE_EPAPER_397
+#include "epaperRideStats.hpp"
+#endif
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -158,6 +161,7 @@ static void verifyLivePairing() {
   }
 }
 
+#ifndef RIDE_STATS_PREVIEW_NO_MAIN
 int main(int argc,char **argv) {
   if(argc!=2) return 2;
   const std::filesystem::path output=argv[1];
@@ -219,4 +223,6 @@ int main(int argc,char **argv) {
   lv_display_delete(display);
   lv_deinit();
   std::cerr << "Actual LVGL snapshots and live altitude font pairing passed\n";
+  return 0;
 }
+#endif

@@ -1,0 +1,2 @@
+# Preserve the original downloaded source bytes and identify upstream code.
+vendor/** -text linguist-vendored

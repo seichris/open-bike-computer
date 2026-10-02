@@ -85,6 +85,23 @@ int main() {
 
     const uint8_t malicious = updated ^ 0x01;
     assert(!isDisplayEnableOnlyTransition206(current, malicious));
+
+    const uint8_t epaperEnable = withEpaperAldo3Enabled(current);
+    assert((epaperEnable & EPAPER_ALDO3_ENABLE_MASK) != 0);
+    assert((epaperEnable & ~EPAPER_ALDO3_ENABLE_MASK) ==
+           (current & ~EPAPER_ALDO3_ENABLE_MASK));
+    assert(isEpaperAldo3EnableOnlyTransition(current, epaperEnable));
+    assert(!isEpaperAldo3EnableOnlyTransition(current,
+                                              epaperEnable ^ uint8_t{0x01}));
+
+    const uint8_t epaperVoltage = withEpaperAldo3At3300mV(current);
+    assert((epaperVoltage & EPAPER_ALDO3_VOLTAGE_MASK) ==
+           EPAPER_ALDO3_3300MV_VALUE);
+    assert((epaperVoltage & ~EPAPER_ALDO3_VOLTAGE_MASK) ==
+           (current & ~EPAPER_ALDO3_VOLTAGE_MASK));
+    assert(isEpaperAldo3VoltageOnlyTransition(current, epaperVoltage));
+    assert(!isEpaperAldo3VoltageOnlyTransition(current,
+                                               epaperVoltage ^ uint8_t{0x20}));
   }
 
   // This device policy must not interfere with normal writes to other I2C

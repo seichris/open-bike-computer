@@ -96,7 +96,8 @@ class ChangedComponentsTests(unittest.TestCase):
                 ), redirect_stdout(output):
                     self.assertEqual(0, changed_components.main())
                 selected = dict(line.split("=", 1) for line in output.getvalue().splitlines())
-                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets", "ios_native"}, set(selected))
+                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets",
+                                  "ios_native", "amoled_equivalence_targets"}, set(selected))
                 self.assertEqual("true" if native_ios else "false", selected["ios_native"])
 
     def test_docs_only_change_skips_product_jobs(self) -> None:
@@ -354,11 +355,32 @@ class ChangedComponentsTests(unittest.TestCase):
             changed_components.select_firmware_targets("206"),
         )
         self.assertEqual(
+            (
+                "WAVESHARE_EPAPER_397",
+                "WAVESHARE_EPAPER_397_DISPLAY_TEST",
+                "WAVESHARE_EPAPER_397_POWER_METRICS",
+                "WAVESHARE_EPAPER_397_IMU_DIAGNOSTICS",
+                "WAVESHARE_EPAPER_397_LIGHT_SLEEP",
+                "WAVESHARE_EPAPER_397_PRODUCTION",
+            ),
+            changed_components.select_firmware_targets("397"),
+        )
+        self.assertEqual(
             targets_175 + targets_206,
             changed_components.select_firmware_targets("all"),
         )
         with self.assertRaisesRegex(ValueError, "unsupported firmware hardware"):
             changed_components.select_firmware_targets("unknown")
+
+        self.assertEqual(
+            (
+                "WAVESHARE_AMOLED_175",
+                "WAVESHARE_AMOLED_175_PRODUCTION",
+                "WAVESHARE_AMOLED_206",
+                "WAVESHARE_AMOLED_206_PRODUCTION",
+            ),
+            changed_components.AMOLED_EQUIVALENCE_TARGETS,
+        )
 
     def test_map_scope_runs_only_map_components(self) -> None:
         selected = changed_components.select_scope("map")

@@ -9,7 +9,7 @@
 
 #include "battery.hpp"
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
 #include "axp2101.hpp"
 #endif
 
@@ -105,7 +105,7 @@ bool Battery::readBatteryStatus(uint8_t &percentage, bool &charging) {
   bool latestCharging = false;
   bool readSucceeded = false;
 
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   readSucceeded = waveshare_board::axp2101::readBatteryStatus(
       latestPercentage, latestCharging);
 #elif defined(ADC1) || defined(ADC2)
@@ -135,7 +135,7 @@ bool Battery::readBatteryPercent(uint8_t &percentage) {
 }
 
 float Battery::readBattery() {
-#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) || defined(WAVESHARE_EPAPER_397)
   uint8_t percentage = 0;
   return readBatteryPercent(percentage) ? static_cast<float>(percentage)
                                         : 0.0f;

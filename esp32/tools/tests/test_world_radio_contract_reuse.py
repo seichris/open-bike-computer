@@ -28,6 +28,10 @@ class WorldRadioContractReuseTests(unittest.TestCase):
         self.assertEqual(radio, {"bit": 27, "minimum_client_version": 25})
         self.assertGreaterEqual(contract["capabilities"]["current_client_version"],
                                 radio["minimum_client_version"])
+        self.assertEqual(
+            contract["capabilities"]["features"]["board_display_metadata"],
+            {"bit": 31, "minimum_client_version": 29},
+        )
 
     def test_invalid_screen_assignments_fail_closed(self):
         for values in ({"map": 0, "radio": 0}, {"map": -1}, {"map": 8},

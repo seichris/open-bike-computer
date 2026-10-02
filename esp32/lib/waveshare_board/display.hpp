@@ -9,7 +9,12 @@
 
 namespace waveshare_board::display {
 
-#ifdef WAVESHARE_AMOLED_206
+#if defined(WAVESHARE_EPAPER_397)
+constexpr uint16_t LOGICAL_WIDTH = 480;
+constexpr uint16_t LOGICAL_HEIGHT = 800;
+constexpr uint16_t ACTIVE_WIDTH = 480;
+constexpr uint16_t ACTIVE_HEIGHT = 800;
+#elif defined(WAVESHARE_AMOLED_206)
 constexpr uint16_t LOGICAL_WIDTH = 410;
 constexpr uint16_t LOGICAL_HEIGHT = 502;
 constexpr uint16_t ACTIVE_WIDTH = 410;

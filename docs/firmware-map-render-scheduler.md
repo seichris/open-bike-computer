@@ -222,6 +222,35 @@ Publication independently proves the physical viewport remains covered.
 Overscan is geometry capacity, not a promise that a slow render may block the
 UI.
 
+### Waveshare 3.97-inch e-paper policy
+
+`WAVESHARE_EPAPER_397` uses a separate, allocation-free admission policy while
+retaining the same worker and immutable-request contract. The UI owner services
+publication, marker, route foreground, and guidance on every 30 ms tick. Only a
+new base request is cadence-limited: at least one second between submissions,
+six projected pixels of recentering, ten degrees of filtered course change, or
+a two-second maximum moving deferral. One active compatible render is allowed
+to finish and the worker retains at most one latest successor.
+
+Camera age is not a visibility deadline on e-paper. A compatible accepted base
+remains visible while its rider marker and route foreground advance against the
+accepted projection. The base is hidden only for an incompatible semantic
+epoch, a rider outside the safely covered viewport, or a bounded recovery
+state; missing map coverage is rendered as an explicit `No map here` state.
+Routine route-window revisions and same-maneuver distance changes are soft
+content revisions. Screen/layout, map/style/zoom, route-session, pairing,
+history-loss, and display-recovery changes remain hard context fences and must
+request a successor composition.
+
+Course-up presentation uses a circular 1.5-second time filter only in the
+3.97-inch build. Rotation holds below 4 km/h and resumes at or above 6 km/h;
+raw GPS and BLE protocol values remain unchanged. Each base request records the
+captured GPS and camera sequence. LVGL composition carries those identities
+through the one-bit mailbox, and the display status adopts them only when the
+frame is already visible or its SSD1677 waveform succeeds. Diagnostic profiles
+emit per-fix terminal dispositions and bounded counters; production retains the
+compact existing logging policy.
+
 ## Diagnostics
 
 `MAPIO` diagnostics report:
