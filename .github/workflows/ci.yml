@@ -33,7 +33,6 @@ on:
           - all
           - firmware
           - ios
-      - ios-platform
           - map
       firmware_hardware:
         description: Firmware hardware families to build
