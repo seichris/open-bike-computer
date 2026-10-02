@@ -144,9 +144,9 @@ static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
 static std::atomic<bool> bleSessionSupportsWorkoutZones{false};
+static std::atomic<bool> bleSessionSupportsGroupRiders{false};
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 static std::atomic<bool> bleSessionSupportsWorldRadio{false};
-static std::atomic<bool> bleSessionSupportsGroupRiders{false};
 #endif
 // Captured while the ownership mutex is held by the accepted ride write. The
 // application ACK path runs in the same NimBLE callback and must never fall
