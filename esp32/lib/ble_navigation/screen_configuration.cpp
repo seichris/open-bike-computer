@@ -429,7 +429,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     if (importMask)
       instance.enabled = (mask & (1U << rawType)) != 0;
   }
-  for (uint8_t rawType = 0; rawType < 6 &&
+  for (uint8_t rawType = 0; rawType < 7 &&
                             document.instanceCount <
                                 screen_configuration_protocol::MAX_INSTANCES;
        ++rawType) {

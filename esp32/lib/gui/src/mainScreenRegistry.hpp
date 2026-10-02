@@ -50,6 +50,10 @@ constexpr uint8_t supportedMask() {
 }
 
 inline constexpr uint8_t SUPPORTED_MASK = supportedMask();
+inline constexpr uint8_t DEFAULT_MASK = static_cast<uint8_t>(
+    SUPPORTED_MASK &
+    ~(screenBit(DeviceScreenId::WorldRadio) |
+      screenBit(DeviceScreenId::Nearby)));
 
 constexpr const Descriptor *descriptorForTile(tileName tile) {
   for (const Descriptor &screen : SCREENS) {
@@ -90,7 +94,7 @@ constexpr tileName tileForDeviceScreen(uint8_t deviceScreen,
 
 constexpr uint8_t normalizedMask(uint8_t mask) {
   const uint8_t supported = static_cast<uint8_t>(mask & SUPPORTED_MASK);
-  return supported == 0 ? SUPPORTED_MASK : supported;
+  return supported == 0 ? DEFAULT_MASK : supported;
 }
 
 constexpr bool isEnabled(tileName tile, uint8_t enabledMask) {

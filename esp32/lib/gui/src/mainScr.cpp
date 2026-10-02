@@ -808,6 +808,8 @@ static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::Battery
                   DEVICE_SCREEN_BATTERY_STATUS);
 static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::WorldRadio) ==
                   DEVICE_SCREEN_WORLD_RADIO);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::Nearby) ==
+                  DEVICE_SCREEN_NEARBY);
 static_assert(main_screen_registry::SUPPORTED_MASK ==
                   DEVICE_SCREEN_SUPPORTED_MASK);
 static bool configuredInstance(uint8_t index,
@@ -2487,15 +2489,17 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
       const double uy = dy / length;
       const double px = -uy;
       const double py = ux;
-      marker.arrowPoints[0] = {
-          static_cast<lv_point_precise_t>(std::lround(48 - ux * 8 + px * 4)),
-          static_cast<lv_point_precise_t>(std::lround(13 - uy * 8 + py * 4))};
-      marker.arrowPoints[1] = {
-          static_cast<lv_point_precise_t>(std::lround(48 + ux * 3)),
-          static_cast<lv_point_precise_t>(std::lround(13 + uy * 3))};
-      marker.arrowPoints[2] = {
-          static_cast<lv_point_precise_t>(std::lround(48 - ux * 8 - px * 4)),
-          static_cast<lv_point_precise_t>(std::lround(13 - uy * 8 - py * 4))};
+      const auto arrowPoint = [](double x, double y) {
+        lv_point_precise_t point{};
+        point.x = static_cast<decltype(point.x)>(std::lround(x));
+        point.y = static_cast<decltype(point.y)>(std::lround(y));
+        return point;
+      };
+      marker.arrowPoints[0] = arrowPoint(
+          48 - ux * 8 + px * 4, 13 - uy * 8 + py * 4);
+      marker.arrowPoints[1] = arrowPoint(48 + ux * 3, 13 + uy * 3);
+      marker.arrowPoints[2] = arrowPoint(
+          48 - ux * 8 - px * 4, 13 - uy * 8 - py * 4);
       lv_line_set_points(marker.arrow, marker.arrowPoints, 3);
       lv_obj_clear_flag(marker.arrow, LV_OBJ_FLAG_HIDDEN);
     } else {
@@ -2561,6 +2565,18 @@ static void serviceNearbyScreen(uint32_t nowMs) {
                              : "Search interrupted - retrying");
       break;
     }
+  }
+  if (nearby.querying &&
+      static_cast<uint32_t>(nowMs - nearby.lastQueryMs) >= 15000U) {
+    // Map activation can supersede a worker query without returning a result
+    // to this screen. Retire that sequence and retry after a short interval.
+    mapView.cancelNearbySearch();
+    nearby.querying = false;
+    nearby.querySequence = 0;
+    nearby.lastQueryMs = nowMs;
+    lv_label_set_text(nearby.status,
+        nearby.haveResults ? "Search interrupted - retrying; results stale"
+                           : "Search interrupted - retrying");
   }
   const bool canExpand = nearby.radiusM < 25000.0 &&
       !nearby.querying && nearby.haveResults && nearby.result.count < 10;

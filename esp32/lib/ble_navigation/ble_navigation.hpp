@@ -70,15 +70,20 @@ enum DeviceScreenSetting : uint8_t {
       static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::BatteryStatus),
   DEVICE_SCREEN_WORLD_RADIO =
       static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::WorldRadio),
+  DEVICE_SCREEN_NEARBY =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::Nearby),
 };
 
 static constexpr uint8_t DEVICE_SCREEN_SUPPORTED_MASK =
     (1 << DEVICE_SCREEN_MAP) | (1 << DEVICE_SCREEN_NAVIGATION) |
     (1 << DEVICE_SCREEN_RIDE_STATS) | (1 << DEVICE_SCREEN_MAP_PLUS_NAVIGATION) |
     (1 << DEVICE_SCREEN_BATTERY_STATUS) |
-    (world_radio_config::ENABLED ? (1 << DEVICE_SCREEN_WORLD_RADIO) : 0);
+    (world_radio_config::ENABLED ? (1 << DEVICE_SCREEN_WORLD_RADIO) : 0) |
+    (map_profile_protocol::POIS_RUNTIME_ENABLED ? (1 << DEVICE_SCREEN_NEARBY)
+                                                : 0);
 static constexpr uint8_t DEVICE_SCREEN_DEFAULT_MASK =
-    DEVICE_SCREEN_SUPPORTED_MASK & ~(1 << DEVICE_SCREEN_WORLD_RADIO);
+    DEVICE_SCREEN_SUPPORTED_MASK &
+    ~((1 << DEVICE_SCREEN_WORLD_RADIO) | (1 << DEVICE_SCREEN_NEARBY));
 
 static constexpr uint32_t MAP_VISIBILITY_BUILDINGS =
     map_profile_protocol::VISIBILITY_BUILDINGS;

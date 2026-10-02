@@ -31,6 +31,9 @@ int main() {
   assert(nextEnabled(NAV, SUPPORTED_MASK) == BATTERY_STATUS);
 #endif
   static_assert(isMapBacked(MAP));
+  static_assert(DEFAULT_MASK == 0x1F);
+  static_assert(normalizedMask(0) == DEFAULT_MASK);
+  static_assert((DEFAULT_MASK & screenBit(DeviceScreenId::Nearby)) == 0);
   static_assert(isMapBacked(NEARBY) ==
                 map_profile_protocol::POIS_RUNTIME_ENABLED);
   static_assert(tileForDeviceScreen(6) ==

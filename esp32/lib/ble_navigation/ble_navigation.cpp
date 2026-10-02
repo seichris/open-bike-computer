@@ -812,18 +812,18 @@ bool BLENavigationServer::requestWorkoutStart() {
 }
 
 static uint8_t deviceScreenBit(uint8_t screen) {
-  return (screen <= DEVICE_SCREEN_WORLD_RADIO) ? (1 << screen) : 0;
+  return (screen <= DEVICE_SCREEN_NEARBY) ? (1 << screen) : 0;
 }
 
 static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
   uint8_t mask = (uint8_t)rawMask & DEVICE_SCREEN_SUPPORTED_MASK;
-  return mask == 0 ? DEVICE_SCREEN_SUPPORTED_MASK : mask;
+  return mask == 0 ? DEVICE_SCREEN_DEFAULT_MASK : mask;
 }
 
 static uint8_t normalizedDefaultScreen(int32_t rawDefault,
                                        uint8_t enabledScreensMask) {
   uint8_t defaultScreen =
-      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_WORLD_RADIO
+      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_NEARBY
           ? (uint8_t)rawDefault
           : (uint8_t)DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   if (enabledScreensMask & deviceScreenBit(defaultScreen)) {
@@ -840,6 +840,9 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NAVIGATION)) {
     return DEVICE_SCREEN_NAVIGATION;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NEARBY)) {
+    return DEVICE_SCREEN_NEARBY;
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_WORLD_RADIO)) {
     return DEVICE_SCREEN_WORLD_RADIO;

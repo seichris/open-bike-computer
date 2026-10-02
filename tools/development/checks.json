@@ -510,7 +510,7 @@
       "name": "Nearby POI feature gate host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_screen_configuration_protocol.cpp -o ${TMPDIR}/test_nearby_screen_configuration\n${TMPDIR}/test_nearby_screen_configuration\ng++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_main_screen_registry.cpp -o ${TMPDIR}/test_nearby_screen_registry\n${TMPDIR}/test_nearby_screen_registry",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_screen_configuration_protocol.cpp -o ${TMPDIR}/test_nearby_screen_configuration\n${TMPDIR}/test_nearby_screen_configuration\ng++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_main_screen_registry.cpp -o ${TMPDIR}/test_nearby_screen_registry\n${TMPDIR}/test_nearby_screen_registry\ng++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_map_profile_protocol.cpp -o ${TMPDIR}/test_nearby_map_profile\n${TMPDIR}/test_nearby_map_profile",
       "tools": [
         "python3",
         "g++"
