@@ -3663,6 +3663,9 @@ bool Maps::readVectorMap(
     return false;
   }
 
+  // Disabled profiles still parse compatible map blocks, but must not link
+  // the POI renderer or spend their production image reserve on it.
+#if MAP_POIS_RUNTIME_ENABLED
   map_poi_layout::Diagnostics poiDiagnostics{};
   uint32_t decodedPoiRecords = 0;
   uint32_t decodedPoiBytes = 0;
@@ -3810,6 +3813,7 @@ bool Maps::readVectorMap(
       (unsigned)poiDiagnostics.acceptedCategories[2],
       (unsigned)poiDiagnostics.acceptedCategories[3],
       (unsigned)poiDiagnostics.acceptedCategories[4]);
+#endif
 
   if (drawLabels) {
     map_surface::LabelSurface labelSurface;
