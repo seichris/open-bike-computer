@@ -116,7 +116,7 @@ jobs:
             tests/test_map_format.py \
             tests/test_target3_cli.py
       - name: YAML/config tests
-        run: python -m unittest discover -s tests
+        run: python "${{ github.workspace }}/tools/dev_check.py" --check osm-tests --report "$RUNNER_TEMP/dev-checks/osm-tests/results.json"
       - name: Shell syntax
         run: bash -n scripts/pbf_to_geojson.sh
       - name: Shellcheck
@@ -166,9 +166,7 @@ jobs:
           python tools/generate_map_stream_trust.py --check
           python tools/check_map_stream_hardware_gate.py --validate-requirements
       - name: Unit tests
-        run: |
-          python -m unittest discover -s tests
-          python -m unittest discover -s ../deploy/tests
+        run: python "${{ github.workspace }}/tools/dev_check.py" --check map-backend-tests --check map-deploy-tests --report "$RUNNER_TEMP/dev-checks/map-backend-tests/results.json"
       - name: Production promotion scheduler image
         working-directory: .
         run: >-

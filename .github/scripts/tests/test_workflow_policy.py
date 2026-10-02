@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import json
 import os
 import subprocess
 import sys
@@ -322,21 +323,27 @@ class WorkflowPolicyTests(unittest.TestCase):
 
         self.assertNotIn("Run ride diagnostics XCTest target", general_ci)
         self.assertNotIn("run-ride-diagnostics-xctest.sh", general_ci)
-        self.assertIn("Run workout contract tests on iOS", general_ci)
-        self.assertIn("./scripts/run-workout-platform-tests.sh ios", general_ci)
+        self.assertIn("--check ios-simulator", general_ci)
+        registry = json.loads((REPO_ROOT / "tools/development/checks.json").read_text())
+        simulator = next(c for c in registry["checks"] if c["id"] == "ios-simulator")
+        self.assertIn("./scripts/run-workout-platform-tests.sh ios", simulator["command"])
+        self.assertIn("./scripts/run-workout-platform-tests.sh watchos", simulator["command"])
 
     def test_release_container_owns_watch_build_validation(self) -> None:
         general_ci = workflow_source("ci.yml")
 
         self.assertNotIn("Build watch app", general_ci)
         self.assertNotIn("-target BikeComputerWatch", general_ci)
-        self.assertIn("Build Release app container", general_ci)
-        self.assertIn("Validate Release app container", general_ci)
-        self.assertIn("./scripts/verify-release-container.sh", general_ci)
+        self.assertIn("--check ios-build-containers", general_ci)
+        registry = json.loads((REPO_ROOT / "tools/development/checks.json").read_text())
+        containers = next(c for c in registry["checks"] if c["id"] == "ios-build-containers")
+        self.assertIn("Debug Release", containers["command"])
+        self.assertIn("./scripts/verify-release-container.sh", containers["command"])
+        self.assertIn("./scripts/verify-development-container.sh", containers["command"])
 
     def test_ios_platform_tests_share_only_job_scoped_derived_data(self) -> None:
         general_ci = workflow_source("ci.yml")
-        ios = mapping_block(general_ci, "ios", indent=2)
+        ios = mapping_block(general_ci, "ios-platform", indent=2)
 
         self.assertIn(
             'CI_DERIVED_DATA_PATH=$RUNNER_TEMP/BikeComputerDerivedData',
@@ -382,7 +389,7 @@ class WorkflowPolicyTests(unittest.TestCase):
             **os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "false",
             "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "false", "IOS_CHANGED": "false",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
-            **{name: "skipped" for name in ("ESP32_RESULT", "HOST_RESULT", "IOS_FAST_RESULT", "IOS_RESULT", "MAP_RESULT")},
+            **{name: "skipped" for name in ("ESP32_RESULT", "HOST_RESULT", "IOS_FAST_RESULT", "IOS_RESULT", "IOS_PLATFORM_RESULT", "MAP_RESULT")},
         }
         for selected, result, expected in (
             ("true", "success", 0), ("true", "failure", 1),
@@ -394,6 +401,22 @@ class WorkflowPolicyTests(unittest.TestCase):
                     env={**environment, "FIRMWARE_CACHE_QUALIFICATION": selected, "CACHE_RESULT": result},
                 )
                 self.assertEqual(completed.returncode, expected, completed.stdout + completed.stderr)
+
+    def test_each_ios_job_failure_blocks_the_gate(self):
+        gate = mapping_block(workflow_source("ci.yml"), "gate", indent=2)
+        self.assertIn("- ios-platform", gate)
+        script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+        environment = {**os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "false",
+            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "true", "IOS_CHANGED": "true",
+            "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false", "FIRMWARE_CACHE_QUALIFICATION": "false",
+            "CACHE_RESULT": "skipped", "ESP32_RESULT": "skipped", "HOST_RESULT": "skipped",
+            "MAP_RESULT": "skipped", "IOS_FAST_RESULT": "success", "IOS_RESULT": "success", "IOS_PLATFORM_RESULT": "success"}
+        self.assertEqual(subprocess.run(["bash", "-c", script], env=environment, capture_output=True).returncode, 0)
+        for key in ("IOS_RESULT", "IOS_PLATFORM_RESULT"):
+            for value in ("failure", "cancelled", "skipped"):
+                with self.subTest(key=key, value=value):
+                    self.assertNotEqual(subprocess.run(["bash", "-c", script],
+                        env={**environment, key: value}, capture_output=True).returncode, 0)
 
     def test_draft_prs_keep_fast_checks_and_skip_heavy_jobs(self) -> None:
         general_ci = workflow_source("ci.yml")
@@ -641,7 +664,11 @@ class WorkflowPolicyTests(unittest.TestCase):
 
         self.assertNotIn("actions/setup-python", host_job)
         self.assertIn("python3-cryptography", host_job)
-        self.assertIn("python3 -m unittest discover -s tools/tests", host_job)
+        self.assertIn("--check esp32-host-firmware-manifest-tests", host_job)
+        registry = json.loads((REPO_ROOT / "tools/development/checks.json").read_text())
+        check = next(c for c in registry["checks"] if c["id"] == "esp32-host-firmware-manifest-tests")
+        self.assertEqual(check["command"], "python3 -m unittest discover -s tools/tests")
+        self.assertEqual(check["cwd"], ".")
 
     def test_runtime_refresh_reads_the_wrapped_candidate_contract(self) -> None:
         runtime_refresh = workflow_source("firmware-runtime-refresh.yml")

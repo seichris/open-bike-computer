@@ -64,6 +64,9 @@ def main() -> int:
     contract = args.contract_source or shared / 'WatchDirectBLEContract.swift'
     preparation = args.preparation_source or shared / 'WatchControllerContract.swift'
     generated = args.generated_source or shared / 'RideBLEProtocol.generated.swift'
+    zone = shared / 'RideBLEZoneDispatch.swift'
+    standalone_zone = zone.is_file() and args.contract_source is None
+    types = [name for name in TYPES if not (standalone_zone and name == 'RideBLEZoneDispatch')]
     adapter = args.source_root / 'ios-app/BikeComputer/BikeComputerWatch/Managers/WatchDeviceLink.swift'
     with tempfile.TemporaryDirectory(prefix='watch-link-host-') as temporary:
         build = Path(temporary)
@@ -75,7 +78,7 @@ def main() -> int:
                             '-o', str(build / f'lib{name}{extension}')], check=True)
         pure = build / 'ProductionContracts.swift'
         pure.write_text('import Foundation\ntypealias WatchAuthenticatedBLEChannelV1 = RideBLEGeneratedProtectedChannelV1\n' +
-                        '\n\n'.join(declaration(contract.read_text(), name) for name in TYPES) + '\n\n' +
+                        '\n\n'.join(declaration(contract.read_text(), name) for name in types) + '\n\n' +
                         '\n\n'.join(declaration(preparation.read_text(), name) for name in PREPARATION_TYPES))
         fixture = build / 'WatchDeviceLink.swift'
         fixture.write_text(adapter.read_text() + '\n' + (HERE / 'AdapterFixture.swift.inc').read_text())
@@ -88,6 +91,8 @@ def main() -> int:
         command += [str(generated), str(pure), str(shared / 'RideBLETransportStateMachine.swift'), str(shared / 'RideGPSPacket.swift'),
                     str(HERE / 'BoundaryDoubles.swift'), str(HERE / 'ManualClock.swift'),
                     str(fixture), str(HERE / 'Tests.swift'), '-o', str(executable)]
+        if standalone_zone:
+            command[command.index("-o"):command.index("-o")] = [str(zone)]
         subprocess.run(command, check=True)
         for iteration in range(args.repeat):
             if args.repeat > 1:
