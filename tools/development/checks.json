@@ -2,6 +2,16 @@
   "schema": 1,
   "checks": [
     {
+      "id": "epaper-workout-lvgl",
+      "name": "Actual e-paper workout renderer replay",
+      "component": "firmware_host",
+      "cwd": ".",
+      "level": "full",
+      "command": "python3 tools/generate_ride_stats_preview.py --lvgl-source \"${EPAPER_LVGL_SOURCE:?Set EPAPER_LVGL_SOURCE to the pinned LVGL checkout}\" --test-epaper",
+      "tools": ["python3", "cmake", "g++"],
+      "probes": [{"command": ["bash", "-c", "test -f \"${EPAPER_LVGL_SOURCE:-}/lvgl.h\" || { echo 'Set EPAPER_LVGL_SOURCE to the pinned LVGL checkout' >&2; exit 1; }"]}]
+    },
+    {
       "id": "ios-fast-test-generated-app-build-identity",
       "name": "Test generated app build identity",
       "component": "ios",
@@ -292,7 +302,7 @@
       "name": "Device capabilities protocol host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_capabilities_protocol.cpp \\\n  -o ${TMPDIR}/test_device_capabilities_protocol\n${TMPDIR}/test_device_capabilities_protocol\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_epaper_display.cpp -o ${TMPDIR}/test_epaper_display\n${TMPDIR}/test_epaper_display",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_capabilities_protocol.cpp \\\n  -o ${TMPDIR}/test_device_capabilities_protocol\n${TMPDIR}/test_device_capabilities_protocol\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_epaper_display.cpp -o ${TMPDIR}/test_epaper_display\n${TMPDIR}/test_epaper_display\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ssd1677_addressing.cpp -o ${TMPDIR}/test_ssd1677_addressing\n${TMPDIR}/test_ssd1677_addressing",
       "tools": [
         "python3",
         "g++"

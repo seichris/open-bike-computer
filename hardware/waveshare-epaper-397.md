@@ -55,11 +55,14 @@ pixels. New submissions replace only the pending slot. The worker compares
 against the last successful visible image, aligns partial windows to bytes,
 and records completion only after observing BUSY assert and deassert.
 
-The SSD1677 adapter follows Waveshare's full-refresh data-entry, window and RAM
-counter sequence, including its descending full-frame Y window. Partial updates
-retain that mode and use the vendor's byte-start X endpoint. Address orientation
-and differential base retention still require the edge-pattern and
-repeated-partial physical tests below. A failed operation retries once with full
+The SSD1677 adapter retains Waveshare's waveforms but uses one address mapping
+for full and partial writes: software row `y` maps to RAM row `479-y`, in
+X-increasing/Y-decreasing mode. Every window reasserts that mode after reset,
+uses inclusive X endpoints, and starts the counter at its first streamed row.
+An independent RAM-address model checks asymmetric, off-center and edge windows
+against full-frame writes. Physical orientation and differential base retention
+still require the pattern and repeated-partial tests below. These new addressing
+changes are **not yet physically qualified**. A failed operation retries once with full
 initialization/base history, then latches a fault.
 Controller waits are individually limited to 10 seconds; the worker yields
 throughout. A permanently low BUSY signal also fails completion. BLE/UI code
@@ -67,8 +70,11 @@ never waits for that worker. A waveform already started cannot be cancelled;
 its actual pixels remain the comparison base, but its old semantic generation
 cannot authorize the new screen or pairing code.
 
-Candidate scheduling defaults are one second between routine presentations,
-250 ms minimum rest for priority changes, and a full cleaning after 20 successful
+Candidate scheduling defaults are one second **start-to-start** between routine
+presentations, with at least 250 ms rest after a partial waveform and one second
+after a full waveform. Priority changes may bypass the routine interval but not
+the rest floor. Slow panels extend the interval rather than losing their rest.
+There is still a full cleaning after 20 successful
 partial waveforms. The vendor documentation does not specify an elapsed-time
 cleaning interval, so static content does not trigger a cleaning waveform. These
 are **unqualified values**, not panel lifetime or visible-latency promises. The
@@ -106,6 +112,14 @@ code; the next boot must replace it. A display fault can also retain the old
 image, so the authenticated `DSTS` display object and serial `EPAPER_FAULT`
 records provide independent fault evidence.
 
+Workout stats have a board-specific 480 × 800 grid, right-aligned tabular values,
+fixed widget-format font choices, a reserved altitude sign column and a fixed
+heart-icon column. Missing sensors do not resize the cell. Distance and remaining
+distance stay in kilometres with one decimal and a stationary unit caption.
+Altitude no longer inherits a changing neighbour's font. The AMOLED layouts and
+their row-pairing behavior remain unchanged. Normal map recentering is silent;
+coverage, connectivity, stale-GPS and actual recovery states remain visible.
+
 ## Profiles and qualification procedure
 
 Build through `python3 esp32/tools/build_firmware.py <profile>` from the repo
@@ -130,8 +144,10 @@ after a static minute. Changed content wakes it, invalidates differential histor
 and requires a full base frame.
 
 In `DISPLAY_TEST`, boot presents a high-contrast checkerboard. Up/down clicks
-select white, black, checkerboard, one-pixel edges, or the normal monochrome UI
-(for text and QR inspection). Hold up to sleep; hold down to wake and re-present.
+select white, black, checkerboard, one-pixel edges, the normal monochrome UI
+(for text and QR inspection), an asymmetric ruler base, then left, center and
+right square updates. The last four patterns share fixed landmarks so a shifted
+partial window cannot hide in a symmetric image. Hold up to sleep; hold down to wake and re-present.
 Hold center to inject a BUSY timeout; click center to clear injection and
 reinitialize. Serial output identifies the pattern, BUSY timing and completed
 generation. This profile never attests pairing and must not be used for
@@ -139,6 +155,16 @@ onboarding or rides. Use ordinary firmware for pairing/BLE qualification. Fault
 injection is not compiled into ordinary or production profiles. A fault request
 needs changed pixels or a due cleaning waveform; advance a pattern after
 requesting it if the current image is unchanged.
+
+`DISPLAY_TEST` and `POWER_METRICS` emit `EPAPER_FRAME schema=1` records with
+`reason=startup|partial|cleaning|wake|recovery`, generation, submit/start/finish
+timestamps, duration, changed-byte count, native dirty bounds (exclusive end),
+and partials since full. Submit time is LVGL-to-mailbox submission, **not** phone
+sample time or proof of when the glass became readable. The final attempt's
+timing is recorded after recovery; `EPAPER_BUSY` provides diagnostic BUSY edges.
+An unchanged full-cleaning frame has zero dirty bounds and changed bytes; the
+actual waveform still covers the whole panel. Use the
+[refresh qualification checklist](../docs/epaper-refresh-qualification.md).
 
 The LVGL buffer and three packed frames total 912,000 raw bytes in PSRAM.
 The proposed full map/foreground surfaces bring the estimated total to

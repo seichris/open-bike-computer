@@ -73,6 +73,7 @@ int main() {
   std::vector<uint8_t> packed(frameBytes), shown(frameBytes, 0xFF);
   packPortrait(rgb.data(), packed.data());
   assert(dirtyWindow(packed.data(), shown.data()).empty());
+  assert(compareFrames(packed.data(), shown.data()).changedBytes == 0);
   for (const auto point : {Point{0, 0}, Point{479, 0}, Point{0, 799}, Point{479, 799}})
     rgb[point.y * logicalWidth + point.x] = 0;
   packPortrait(rgb.data(), packed.data());
@@ -84,6 +85,7 @@ int main() {
   packed[100 * stride + 0] = 0xFE;
   packed[101 * stride + 1] = 0x7F;
   window = dirtyWindow(packed.data(), shown.data());
+  assert(compareFrames(packed.data(), shown.data()).changedBytes == 2);
   assert(window.x == 0 && window.right == 16 && window.y == 100 && window.bottom == 102);
   FakeTransport io;
   Ssd1677<FakeTransport> panel(io);
@@ -94,20 +96,20 @@ int main() {
   assert((io.dataByCommand[0x45] ==
           std::vector<uint8_t>{0xDF, 0x01, 0x00, 0x00}));
   assert(io.dataByCommand[0x4E] == std::vector<uint8_t>({0x00, 0x00}));
-  assert(io.dataByCommand[0x4F] == std::vector<uint8_t>({0x00, 0x00}));
+  assert(io.dataByCommand[0x4F] == std::vector<uint8_t>({0xDF, 0x01}));
   assert(io.dataByCommand[0x24] == packed && io.dataByCommand[0x26] == packed &&
          io.completedWaveforms == 1);
   io.clearWrites();
   assert(panel.present(packed.data(), window, false));
-  assert(io.dataByCommand[0x11].empty());
+  assert(io.dataByCommand[0x11] == std::vector<uint8_t>{0x01});
   assert((io.dataByCommand[0x44] ==
-          std::vector<uint8_t>{0x00, 0x00, 0x08, 0x00}));
+          std::vector<uint8_t>{0x00, 0x00, 0x0F, 0x00}));
   assert((io.dataByCommand[0x45] ==
-          std::vector<uint8_t>{0x65, 0x00, 0x64, 0x00}));
+          std::vector<uint8_t>{0x7B, 0x01, 0x7A, 0x01}));
   assert((io.dataByCommand[0x4E] ==
           std::vector<uint8_t>{0x00, 0x00}));
   assert((io.dataByCommand[0x4F] ==
-          std::vector<uint8_t>{0x64, 0x00}));
+          std::vector<uint8_t>{0x7B, 0x01}));
   assert((io.dataByCommand[0x24] ==
           std::vector<uint8_t>{0xFE, 0xFF, 0xFF, 0x7F}));
   assert(io.dataByCommand[0x26].empty());
@@ -121,16 +123,16 @@ int main() {
   mailbox.bind(a, b, c);
   assert(mailbox.beginWrite() == a);
   assert(!mailbox.claim().pixels); // Cannot observe incomplete conversion.
-  assert(mailbox.publish(7, 1, {11, 21, 31}) == 1);
+  assert(mailbox.publish(7, 1, {11, 21, 31, 41}) == 1);
   const auto first = mailbox.claim();
   assert(first.pixels == a && first.pairing == 7 && first.context == 1 &&
          first.provenance.composition == 11 &&
          first.provenance.acceptedGps == 21 &&
-         first.provenance.baseCamera == 31);
+         first.provenance.baseCamera == 31 && first.provenance.submittedAtMs == 41);
   assert(mailbox.beginWrite() == b);
   assert(mailbox.publish(8) == 2);
   assert(mailbox.beginWrite() == b); // Latest frame replaces the pending one.
-  assert(mailbox.publish(9, 2, {12, 22, 32}) == 3);
+  assert(mailbox.publish(9, 2, {12, 22, 32, 42}) == 3);
   assert(!mailbox.claim().pixels); // Only one immutable flight.
   mailbox.finish(true);
   assert(mailbox.shown() == a);
@@ -138,21 +140,30 @@ int main() {
   assert(latest.pixels == b && latest.generation == 3 && latest.pairing == 9 &&
          latest.context == 2 && latest.provenance.composition == 12 &&
          latest.provenance.acceptedGps == 22 &&
-         latest.provenance.baseCamera == 32);
+         latest.provenance.baseCamera == 32 && latest.provenance.submittedAtMs == 42);
   mailbox.finish(false);
   assert(mailbox.shown() == a); // Timeout never advances visible history.
 
   PresentationPolicy policy;
   assert(policy.fullRequired(0) && policy.ready(0, false));
-  policy.start(); assert(!policy.ready(5000, true));
+  assert(policy.nextReason() == RefreshReason::Startup);
+  policy.start(0); assert(!policy.ready(5000, true));
   policy.complete(100, true);
-  assert(!policy.ready(349, true) && policy.ready(350, true));
+  assert(!policy.ready(1099, true) && policy.ready(1100, true));
   assert(!policy.ready(1099, false) && policy.ready(1100, false));
+  assert(policy.nextReason() == RefreshReason::Partial);
   for (unsigned i = 0; i < partialLimit; ++i) {
-    assert(!policy.fullRequired(1100 + i * 1000));
-    policy.start(); policy.complete(1100 + i * 1000, false);
+    const uint32_t start = 1100 + i * 1000;
+    assert(!policy.fullRequired(start) && policy.ready(start, false));
+    policy.start(start); policy.complete(start + 510, false);
+    assert(!policy.ready(start + 759, true));
+    assert(policy.ready(start + 760, true));
+    assert(!policy.ready(start + 999, false));
+    assert(policy.ready(start + 1000, false));
   }
   assert(policy.fullRequired(22000));
+  assert(policy.nextReason() == RefreshReason::Cleaning);
+  policy.start(27510);
   policy.complete(30000, true);
   assert(!policy.fullRequired(90000)); // Static glass does not force cleaning.
   assert(!policy.shouldSleep(89999));
@@ -162,10 +173,21 @@ int main() {
   assert(!policy.ready(90000, true));
   assert(policy.ready(90000, true, true));
   policy.wake();
-  assert(policy.fail()); assert(!policy.fail() && policy.fault());
+  assert(policy.nextReason() == RefreshReason::Wake);
+  assert(policy.fail());
+  assert(policy.nextReason() == RefreshReason::Recovery);
+  assert(!policy.fail() && policy.fault());
   assert(!policy.ready(99999, true));
   policy.wake(); assert(policy.fullRequired(0));
   policy.sleep(); assert(!policy.ready(0, true));
+
+  PresentationPolicy slow;
+  slow.start(0); slow.complete(1200, false);
+  assert(!slow.ready(1449, false) && slow.ready(1450, false));
+  PresentationPolicy wrapped;
+  wrapped.start(UINT32_MAX - 600); wrapped.complete(UINT32_MAX - 100, false);
+  assert(!wrapped.ready(148, true) && wrapped.ready(149, true));
+  assert(!wrapped.ready(398, false) && wrapped.ready(399, false));
 
   constexpr uint8_t crcVector[] = {0xBE, 0xEF};
   static_assert(waveshare_board::shtc3_protocol::crc8(crcVector, 2) == 0x92);

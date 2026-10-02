@@ -12,6 +12,7 @@ public:
     uint32_t composition;
     uint32_t acceptedGps;
     uint32_t baseCamera;
+    uint32_t submittedAtMs = 0;
   };
   struct Frame {
     uint8_t *pixels;

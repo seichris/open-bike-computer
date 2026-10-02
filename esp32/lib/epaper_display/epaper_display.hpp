@@ -1,6 +1,7 @@
 #pragma once
 
 #include "epaper_raster.hpp"
+#include "epaper_policy.hpp"
 
 namespace epaper {
 struct Status {
@@ -11,6 +12,10 @@ struct Status {
   uint32_t sleepCount = 0, wakeCount = 0, sleepFailures = 0;
   uint32_t lastWaveformMs = 0, lastWaveformDurationMs = 0;
   uint32_t maxFullDurationMs = 0, maxPartialDurationMs = 0;
+  uint32_t lastSubmittedAtMs = 0, lastStartedAtMs = 0;
+  uint32_t lastChangedBytes = 0;
+  Window lastDirtyWindow{};
+  RefreshReason lastRefreshReason = RefreshReason::Startup;
 #ifdef WAVESHARE_EPAPER_397
   uint32_t compositionGeneration = 0;
   uint32_t acceptedGpsSequence = 0;

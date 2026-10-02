@@ -217,14 +217,6 @@ void process() {
   const bool mapActive = isMapScreenActive() || isMapGuidanceScreenActive();
   const bool noCoverage =
       mapActive && camera.hasBase && !camera.mapCoverageAvailable;
-  const bool recentering =
-      mapActive && camera.hasBase && camera.baseCompatible &&
-      camera.mapCoverageAvailable && camera.riderProjected &&
-      camera.riderInsideViewport &&
-      (camera.riderOffsetPixels >=
-           epaper_navigation_policy::kMarkerDeadbandPixels ||
-       camera.headingDeltaDegrees >=
-           epaper_navigation_policy::kHeadingThresholdDegrees / 2.0);
   const bool incompatible =
       mapActive && camera.hasBase &&
       (!camera.baseCompatible || !camera.riderProjected ||
@@ -238,7 +230,6 @@ void process() {
       camera.recoveryPending ? "Map update failed - retrying" :
       noCoverage ? "No map here - install coverage for this area" :
       incompatible ? "Map unavailable - recentering" :
-      recentering ? "Recentering - current map remains visible" :
       "Up/down: screen   Center: actions";
   if (std::strcmp(lv_label_get_text(statusLabel), message) != 0) {
     lv_label_set_text(statusLabel, message); epaper::prioritize();

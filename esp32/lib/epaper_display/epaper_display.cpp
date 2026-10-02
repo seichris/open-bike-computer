@@ -3,6 +3,9 @@
 #include "epaper_policy.hpp"
 #include "frame_mailbox.hpp"
 #include "ssd1677.hpp"
+#ifdef EPAPER_DISPLAY_TEST
+#include "diagnostic_patterns.hpp"
+#endif
 #include "epaper_ui.hpp"
 #include "waitingScr.hpp"
 #include "board_traits.hpp"
@@ -202,7 +205,8 @@ void displayWorker(void *) {
       portEXIT_CRITICAL(&mux);
       continue;
     }
-    Window dirty = dirtyWindow(flight, mailbox.shown());
+    const auto difference = compareFrames(flight, mailbox.shown());
+    const Window dirty = difference.window;
     const bool wasSleeping = policy.sleeping();
     if (wasSleeping && !dirty.empty()) {
       policy.wake();
@@ -215,24 +219,27 @@ void displayWorker(void *) {
     // sleeping glass. Do not wake merely to rebuild controller RAM. A changed
     // frame, or the first frame after boot, must establish a full base.
     bool full = !wasSleeping || !dirty.empty() ? policy.fullRequired(now) : false;
+    RefreshReason reason = policy.nextReason();
     bool ok = true;
-    uint32_t waveformDurationMs = 0;
+    uint32_t waveformDurationMs = 0, waveformStartedMs = 0, waveformFinishedMs = 0;
     if (full || !dirty.empty()) {
       power_management::ScopedLock powerLock(power_management::LockDomain::Display);
       for (uint8_t attempt = 0; attempt < 2; ++attempt) {
-        policy.start();
+        waveformStartedMs = millis();
+        policy.start(waveformStartedMs);
         portENTER_CRITICAL(&mux);
         snapshot.transmitted = generation;
         portEXIT_CRITICAL(&mux);
-        const uint32_t waveformStartedMs = millis();
         ok = panel.present(flight, full ? Window{0, 0, width, height} : dirty, full);
-        waveformDurationMs = millis() - waveformStartedMs;
+        waveformFinishedMs = millis();
+        waveformDurationMs = waveformFinishedMs - waveformStartedMs;
         if (ok) break;
         portENTER_CRITICAL(&mux); ++snapshot.failures; portEXIT_CRITICAL(&mux);
         if (!policy.fail()) break;
         full = true; // Controller/base history is now uncertain.
+        reason = RefreshReason::Recovery;
       }
-      if (ok) { policy.complete(millis(), full); policy.recovered(); }
+      if (ok) { policy.complete(waveformFinishedMs, full); policy.recovered(); }
     }
     portENTER_CRITICAL(&mux);
     snapshot.busy = false;
@@ -250,8 +257,13 @@ void displayWorker(void *) {
       snapshot.lastPresentationHadWaveform = full || !dirty.empty();
       if (snapshot.lastPresentationHadWaveform) {
         snapshot.lastWaveformFull = full;
-        snapshot.lastWaveformMs = snapshot.completedAtMs;
+        snapshot.lastWaveformMs = waveformFinishedMs;
         snapshot.lastWaveformDurationMs = waveformDurationMs;
+        snapshot.lastSubmittedAtMs = provenance.submittedAtMs;
+        snapshot.lastStartedAtMs = waveformStartedMs;
+        snapshot.lastChangedBytes = difference.changedBytes;
+        snapshot.lastDirtyWindow = dirty;
+        snapshot.lastRefreshReason = reason;
         if (full) {
           ++snapshot.fullCount;
           snapshot.maxFullDurationMs =
@@ -270,6 +282,22 @@ void displayWorker(void *) {
       snapshot.pairingGeneration = 0;
     }
     portEXIT_CRITICAL(&mux);
+#if POWER_METRICS || defined(EPAPER_DISPLAY_TEST)
+    if (full || !dirty.empty()) {
+      Serial.printf(
+          "EPAPER_FRAME schema=1 generation=%lu reason=%s ok=%u "
+          "submitMs=%lu startMs=%lu finishMs=%lu durationMs=%lu "
+          "dirty=%u,%u,%u,%u changedBytes=%lu partials=%u\n",
+          static_cast<unsigned long>(generation), refreshReasonName(reason),
+          ok ? 1U : 0U, static_cast<unsigned long>(provenance.submittedAtMs),
+          static_cast<unsigned long>(waveformStartedMs),
+          static_cast<unsigned long>(waveformFinishedMs),
+          static_cast<unsigned long>(waveformDurationMs),
+          dirty.x, dirty.y, dirty.right, dirty.bottom,
+          static_cast<unsigned long>(difference.changedBytes),
+          policy.partialsSinceFull());
+    }
+#endif
     ui_scheduler::notify(ui_scheduler::WakeReason::Display);
   }
 }
@@ -293,22 +321,14 @@ bool submit(const uint16_t *rgb) {
   uint8_t *target = mailbox.beginWrite();
   portEXIT_CRITICAL(&mux);
   if (!target) return false;
+  const uint32_t submittedAtMs = millis();
   packPortrait(rgb, target);
   uint32_t pairing = isWaitingPairingComparisonVisible() ? currentPairing.load() : 0;
 #ifdef EPAPER_DISPLAY_TEST
   // Pattern 4 shows the ordinary monochrome UI (text/QR). Diagnostic patterns
   // never attest pairing, even if the underlying LVGL screen contains a code.
   pairing = 0;
-  if (testPattern < 4) {
-    for (uint16_t y = 0; y < height; ++y)
-      for (uint16_t x = 0; x < stride; ++x) {
-        target[size_t(y) * stride + x] = testPattern == 0 ? 0xFF :
-            testPattern == 1 ? 0x00 : testPattern == 2 ?
-            ((y / 8 + x) % 2 ? 0xAA : 0x55) :
-            (y == 0 || y == height - 1 ? 0 : x == 0 ? 0x7F :
-             x == stride - 1 ? 0xFE : 0xFF);
-      }
-  }
+  diagnostic::paint(testPattern, target);
 #endif
   static uint32_t compositionGeneration = 0;
   if (++compositionGeneration == 0)
@@ -317,6 +337,7 @@ bool submit(const uint16_t *rgb) {
       compositionGeneration,
       currentAcceptedGpsSequence.load(std::memory_order_acquire),
       currentBaseCameraSequence.load(std::memory_order_acquire),
+      submittedAtMs,
   };
   portENTER_CRITICAL(&mux);
   snapshot.queued =
@@ -378,10 +399,12 @@ void wake() {
 }
 #ifdef EPAPER_DISPLAY_TEST
 void diagnosticPattern(int delta) {
-  testPattern = (testPattern + 5 + delta) % 5;
+  testPattern = (static_cast<int>(testPattern) + diagnostic::patternCount +
+                 delta % diagnostic::patternCount) % diagnostic::patternCount;
   invalidateContext();
   lv_obj_invalidate(lv_screen_active());
-  Serial.printf("EPAPER_TEST pattern=%u (white,black,checker,edges,UI)\n", testPattern);
+  Serial.printf("EPAPER_TEST pattern=%u name=%s\n", testPattern,
+                diagnostic::name(testPattern));
 }
 void diagnosticFault(bool enabled) {
   injectBusyFault.store(enabled);

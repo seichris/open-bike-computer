@@ -155,7 +155,8 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         )[0]
         self.assertNotIn("cameraLag.expired", epaper_branch)
         self.assertNotIn("submitRenderRequest", epaper_branch)
-        self.assertIn("Recentering...", epaper_branch)
+        self.assertNotIn("lv_label_set_text", epaper_branch)
+        self.assertNotIn('"Recentering - current map remains visible"', EPAPER_UI_SOURCE)
         self.assertIn("baseCompatible", epaper_branch)
         self.assertIn("epaperArmedRenderReasons", MAIN_SCREEN_SOURCE)
 

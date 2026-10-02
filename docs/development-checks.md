@@ -67,6 +67,15 @@ backend and extractor; native crypto checks also need compatible MbedTLS headers
 and libraries. The plan reports missing prerequisites without installing into an
 ambient interpreter or modifying the firmware runtime.
 
+The actual e-paper workout replay is the full-level `epaper-workout-lvgl` check.
+Set `EPAPER_LVGL_SOURCE` to LVGL commit
+`7f07a129e8d77f4984fff8e623fd5be18ff42e74`, then run
+`tools/dev-check --check epaper-workout-lvgl`. The generator verifies both the
+commit and the locked source-tree digest before compiling. CI fetches that exact
+commit into runner temporary storage and executes the same registered check.
+No firmware runtime or connected board is needed. AMOLED preview regeneration
+also runs this replay before emitting its existing assets.
+
 Host checks receive their own temporary directories and compiler module caches.
 Local app-container checks keep Debug/Release DerivedData under this worktree's
 ignored `ios-app/DerivedData/development-checks/`, with an exclusive lease spanning

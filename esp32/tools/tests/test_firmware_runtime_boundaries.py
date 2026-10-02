@@ -49,6 +49,11 @@ void process() {
   sample = {true, 0.1F, clockMs, 3000};
 }
 }
+namespace waveshare_board::shtc3 {
+// The experimental e-paper profile can acquire another sensor before the
+// shadow evaluation. Its delay must also precede the evaluation's clock read.
+void process() { clockMs += sampleDelayMs; }
+}
 namespace ride_automation_runtime {
 void processFirmwareShadow(uint32_t nowMs) {
   assert(ride_automation::metricFresh(sample, nowMs, 3000));

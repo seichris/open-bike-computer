@@ -20045,7 +20045,8 @@ struct NavigationProtocolTests {
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
 
-        let epaperHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 16])
+        // Wire bytes exercise the high bit as well as the generated constant.
+        let epaperHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 128])
         let epaperMetadata = Data([3, 8, 1, 2, 1, 0xE0, 1, 0x20, 3, 0])
         let epaperCapabilities = epaperHeader + epaperMetadata
         assert(manager.handleDeviceCapabilitiesNotification(epaperCapabilities),
@@ -20061,7 +20062,7 @@ struct NavigationProtocolTests {
                "future unknown TLVs are consumed")
         assert(manager.hasReceivedDeviceCapabilities, "unknown TLVs are skipped")
         let screenMetadata = Data([2, 14, 1, 16, 24, 7, 31, 0, 0, 0, 255, 255, 1, 0, 0, 16])
-        let combinedHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 20])
+        let combinedHeader = Data("CAP2".utf8) + Data([1, 0, 0, 0, 132])
         for metadata in [screenMetadata + epaperMetadata, epaperMetadata + screenMetadata] {
             assert(manager.handleDeviceCapabilitiesNotification(combinedHeader + metadata),
                    "screen configuration and e-paper metadata coexist in either TLV order")
@@ -20070,6 +20071,7 @@ struct NavigationProtocolTests {
                    "screen capabilities retain the independent display restrictions")
         }
         let malformedDisplays = [
+            Data("CAP2".utf8) + Data([1, 0, 0, 0, 16]) + epaperMetadata, // Retired experimental bit 28.
             epaperHeader, // Feature requires its record.
             cap2 + epaperMetadata, // Record requires its feature.
             Data(epaperCapabilities.dropLast()),

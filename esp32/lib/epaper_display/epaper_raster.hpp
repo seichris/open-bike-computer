@@ -25,12 +25,19 @@ struct Window {
   size_t rowBytes() const { return (right - x) / 8; }
 };
 
-inline Window dirtyWindow(const uint8_t *next, const uint8_t *shown) {
+struct FrameDifference {
+  Window window{};
+  uint32_t changedBytes = 0;
+};
+
+inline FrameDifference compareFrames(const uint8_t *next, const uint8_t *shown) {
   Window result{width, height, 0, 0};
+  uint32_t changed = 0;
   for (uint16_t y = 0; y < height; ++y) {
     for (uint16_t byte = 0; byte < stride; ++byte) {
       const size_t offset = size_t(y) * stride + byte;
       if (next[offset] == shown[offset]) continue;
+      ++changed;
       const uint16_t x = byte * 8;
       if (x < result.x) result.x = x;
       if (y < result.y) result.y = y;
@@ -38,7 +45,11 @@ inline Window dirtyWindow(const uint8_t *next, const uint8_t *shown) {
       if (y + 1 > result.bottom) result.bottom = y + 1;
     }
   }
-  return result;
+  return {changed ? result : Window{}, changed};
+}
+
+inline Window dirtyWindow(const uint8_t *next, const uint8_t *shown) {
+  return compareFrames(next, shown).window;
 }
 
 // Deterministic binary threshold: no temporal dithering, especially for QR/code.

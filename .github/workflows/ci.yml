@@ -530,6 +530,16 @@ jobs:
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-verify-generated-pre-connection-assets --report "$RUNNER_TEMP/dev-checks/esp32-host-verify-generated-pre-connection-assets/results.json"
       - name: GUI layout host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-gui-layout-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-gui-layout-host-tests/results.json"
+      - name: Fetch pinned LVGL for actual e-paper workout replay
+        run: |
+          git init "$RUNNER_TEMP/epaper-lvgl"
+          git -C "$RUNNER_TEMP/epaper-lvgl" fetch --depth=1 \
+            https://github.com/lvgl/lvgl.git 7f07a129e8d77f4984fff8e623fd5be18ff42e74
+          git -C "$RUNNER_TEMP/epaper-lvgl" checkout --detach FETCH_HEAD
+      - name: Actual e-paper workout renderer replay
+        env:
+          EPAPER_LVGL_SOURCE: ${{ runner.temp }}/epaper-lvgl
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check epaper-workout-lvgl --report "$RUNNER_TEMP/dev-checks/epaper-workout-lvgl/results.json"
       - name: Power metrics host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-power-metrics-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-power-metrics-host-tests/results.json"
       - name: Display power and redraw policy host tests

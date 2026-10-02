@@ -381,6 +381,17 @@ constexpr ZonePresentation makeZonePresentation(
 }
 
 constexpr Layout makeLayout(int32_t width, int32_t height) {
+#ifdef WAVESHARE_EPAPER_397
+  if (width == 480 && height == 800) {
+    // A dedicated portrait layout: fixed cells leave clear row spacing and
+    // the bottom status/controls area free. AMOLED geometry is unchanged.
+    return {width, height, {0, 0, width, height}, {24, 12, 432, 24},
+            {24, 60, 432, 96}, {24, 164, 432, 24},
+            {{{16, 236, 216, 104}, {248, 236, 216, 104},
+              {16, 376, 216, 104}, {248, 376, 216, 104},
+              {16, 516, 216, 104}, {248, 516, 216, 104}}}};
+  }
+#endif
   constexpr int32_t columnGap = 12;
   const bool round = usesRoundScreenSafeArea(width, height);
   const int32_t metricFirstY = round ? 126 : 136;
