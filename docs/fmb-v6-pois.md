@@ -92,6 +92,20 @@ iPhone companion. The included variant keeps the target-4 topography source
 and companion requirements. In either variant, `pois` gives total records and
 the five category counts, which must match the blocks and FPI1.
 
+Target 5 also requires signed `nearbyCoverage` with `profileVersion: 1`,
+`blockSizeMeters: 4096`, and `blocks`: a nonempty, strictly lexicographically
+ordered array of `[x, y]` signed block-grid coordinates. The array has at most
+1,024 entries and each coordinate is within `-4893...4893`. It is the exact
+complete-block selection used by extraction, including selected blocks that
+emitted no FMB because they had no rendered features. Every FMB block must be
+in this set. The FPI1 index is deliberately sparse and must never be used to
+infer coverage. Polygon holes and route corridors therefore remain holes in
+the selected block set rather than being filled by the bounding box. Firmware
+warns when the rider's Nearby search circle could reach a block outside this
+signed selection; it only says no matching places within the radius when the
+circle is fully covered. Search results always remain limited to the
+downloaded map, never an online POI lookup.
+
 FMB v1–v5 and renderer targets 1–4 retain their existing interpretations.
 Readers must not treat an unsupported or malformed newer block as an empty
 legacy block. The indexed Nearby search and all POI visibility controls remain

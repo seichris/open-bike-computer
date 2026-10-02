@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "../maps/src/mapNearbyCoverage.hpp"
+
 namespace map_transfer {
 
 struct ManifestFile {
@@ -20,6 +22,7 @@ struct MapPresentationMetadata {
   std::string displayName;
   std::array<int32_t, 4> boundsE7 = {};
   bool hasBoundsE7 = false;
+  std::vector<map_nearby_coverage::Block> nearbyCoverageBlocks;
 };
 
 struct MapPresentationRevision {
@@ -34,6 +37,7 @@ struct MapManifest {
   std::string displayName;
   std::array<int32_t, 4> boundsE7 = {};
   bool hasBoundsE7 = false;
+  std::vector<map_nearby_coverage::Block> nearbyCoverageBlocks;
   std::string renderer;
   uint32_t formatVersion = 0;
   uint32_t labelProfileVersion = 0;

@@ -2,6 +2,7 @@
 
 #include "mapBlockFormat.hpp"
 #include "mapNearbyQuery.hpp"
+#include "mapNearbyCoverage.hpp"
 
 #include <array>
 #include <cstdio>
@@ -22,6 +23,7 @@ struct SearchResult {
   uint8_t count = 0;
   uint32_t candidateBlocks = 0;
   uint32_t searchedBlocks = 0;
+  bool coverageComplete = false;
 };
 
 inline bool cancelled(Cancel callback, void *context) {
@@ -50,6 +52,37 @@ inline bool fileSize(std::FILE *file, uint32_t &length) {
   if (value < 0 || static_cast<unsigned long>(value) > UINT32_MAX ||
       std::fseek(file, 0, SEEK_SET) != 0) return false;
   length = static_cast<uint32_t>(value);
+  return true;
+}
+
+inline bool readCoverage(const std::string &root,
+                         std::vector<map_nearby_coverage::Block> &blocks,
+                         Status &status) {
+  blocks.clear();
+  File file = open(root + "/.manifest.json");
+  if (!file) {
+    status = Status::Unavailable;
+    return false;
+  }
+  uint32_t size = 0;
+  if (!fileSize(file.get(), size)) {
+    status = Status::ReadFailed;
+    return false;
+  }
+  if (size == 0 || size > 2U * 1024U * 1024U) {
+    status = Status::Corrupt;
+    return false;
+  }
+  std::string manifest(size, '\0');
+  if (!readExact(file.get(), &manifest[0], size)) {
+    status = Status::ReadFailed;
+    return false;
+  }
+  if (!map_nearby_coverage::decodeManifest(manifest, blocks)) {
+    status = Status::Corrupt;
+    return false;
+  }
+  status = Status::Ok;
   return true;
 }
 
@@ -242,7 +275,8 @@ inline Status consumeBlock(const std::string &root,
 inline SearchResult search(const std::string &root,
                            map_nearby_query::Position rider,
                            uint32_t selectedMask, double radiusM,
-                           Cancel cancel = nullptr, void *context = nullptr) {
+                           Cancel cancel = nullptr, void *context = nullptr,
+                           const std::vector<map_nearby_coverage::Block> *coverage = nullptr) {
   SearchResult result;
   if (!map_nearby_query::valid(rider) || selectedMask == 0 ||
       (selectedMask & ~0x1fU) != 0 || !std::isfinite(radiusM) ||
@@ -286,6 +320,8 @@ inline SearchResult search(const std::string &root,
   for (size_t index = 0; index < nearest.size(); ++index)
     result.places[index] = nearest[index];
   result.status = Status::Ok;
+  result.coverageComplete = coverage != nullptr &&
+      map_nearby_coverage::completeWithinRadius(*coverage, rider, radiusM);
   return result;
 }
 } // namespace map_nearby_storage

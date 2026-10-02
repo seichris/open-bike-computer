@@ -1,6 +1,7 @@
 // Arduino.h defines this macro before firmware includes the query helper.
 #define radians(deg) ((deg) * 0.017453292519943295)
 #include "../../lib/maps/src/mapNearbyQuery.hpp"
+#include "../../lib/maps/src/mapNearbyCoverage.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,6 +18,37 @@ int main() {
   assert(distanceMeters({80.0, 179.99}, {80.0, -179.99}) < 400.0);
   assert(!valid({NAN, 0.0}));
   assert(!valid({0.0, 181.0}));
+
+  std::vector<map_nearby_coverage::Block> signedCoverage;
+  assert(map_nearby_coverage::decodeManifest(
+      "{\"nearbyCoverage\":{\"blockSizeMeters\":4096,"
+      "\"blocks\":[[-1,0],[0,0],[1,0]],\"profileVersion\":1}}",
+      signedCoverage));
+  assert(signedCoverage.size() == 3);
+  assert(map_nearby_coverage::contains(signedCoverage, {0, 0}));
+  assert(!map_nearby_coverage::contains(signedCoverage, {0, 1}));
+  assert(!map_nearby_coverage::decodeManifest(
+      "{\"nearbyCoverage\":{\"blockSizeMeters\":4096,"
+      "\"blocks\":[[0,0],[0,0]],\"profileVersion\":1}}",
+      signedCoverage));
+  for (int x = -10; x <= 10; ++x)
+    for (int y = -10; y <= 10; ++y)
+      signedCoverage.push_back({x, y});
+  std::sort(signedCoverage.begin(), signedCoverage.end(),
+            map_nearby_coverage::less);
+  signedCoverage.erase(std::unique(signedCoverage.begin(), signedCoverage.end(),
+      [](auto left, auto right) {
+        return left.x == right.x && left.y == right.y;
+      }), signedCoverage.end());
+  assert(map_nearby_coverage::completeWithinRadius(signedCoverage, origin,
+                                                   10000.0));
+  signedCoverage.erase(std::lower_bound(signedCoverage.begin(),
+      signedCoverage.end(), map_nearby_coverage::Block{0, 0},
+      map_nearby_coverage::less));
+  assert(!map_nearby_coverage::completeWithinRadius(signedCoverage, origin,
+                                                    10000.0));
+  assert(!map_nearby_coverage::completeWithinRadius(signedCoverage,
+                                                    {80.0, 0.0}, 25000.0));
 
   map_poi_index::Entry near{};
   near.blockX = 0;

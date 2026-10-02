@@ -5975,6 +5975,7 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
       power_management::LockDomain::Storage);
 #if MAP_POIS_RUNTIME_ENABLED
   bool poiIndexReady = false;
+  std::vector<map_nearby_coverage::Block> candidateCoverage;
   try {
     MapNearbyVector<map_poi_index::Entry> entries;
     map_nearby_storage::Status indexStatus;
@@ -5982,6 +5983,11 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
     while (!root.empty() && root.back() == '/') root.pop_back();
     poiIndexReady = map_nearby_storage::readIndex(
         root, entries, nullptr, nullptr, indexStatus);
+    if (poiIndexReady) {
+      map_nearby_storage::Status coverageStatus;
+      poiIndexReady = map_nearby_storage::readCoverage(
+          root, candidateCoverage, coverageStatus);
+    }
   } catch (const std::bad_alloc &) {
     ESP_LOGE(TAG, "MAP_RESOURCE_REJECTED: Nearby index activation");
   }
@@ -5996,6 +6002,7 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
   streetLabelFontHealthy.store(labelFontAsset.healthy(),
                                std::memory_order_release);
 #if MAP_POIS_RUNTIME_ENABLED
+  nearbyCoverageBlocks = std::move(candidateCoverage);
   nearbyPoiIndexHealthy.store(poiIndexReady, std::memory_order_release);
 #endif
   labelLayoutCache.clear();
@@ -6239,9 +6246,14 @@ bool Maps::processPendingNearbySearch() {
   try {
     power_management::ScopedLock powerLock(
         power_management::LockDomain::Storage);
-    result = map_nearby_storage::search(
-        std::string(vectorMapFolder.c_str()), request.rider,
-        request.selectedMask, request.radiusM, shouldCancel, &cancellation);
+    if (nearbyCoverageBlocks.empty()) {
+      result.status = map_nearby_storage::Status::Unavailable;
+    } else {
+      result = map_nearby_storage::search(
+          std::string(vectorMapFolder.c_str()), request.rider,
+          request.selectedMask, request.radiusM, shouldCancel, &cancellation,
+          &nearbyCoverageBlocks);
+    }
   } catch (const std::bad_alloc &) {
     result.status = map_nearby_storage::Status::ResourceRejected;
     ESP_LOGE(TAG, "MAP_RESOURCE_REJECTED: Nearby search");

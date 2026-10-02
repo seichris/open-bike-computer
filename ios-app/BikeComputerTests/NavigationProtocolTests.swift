@@ -9185,6 +9185,8 @@ struct NavigationProtocolTests {
             "{\"bytes\":4,\"path\":\"VECTMAP/poi-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}]," +
             "\"layers\":{\"contours\":\"not-included\"}," +
             "\"mapId\":\"poi-map\"," +
+            "\"nearbyCoverage\":{\"blockSizeMeters\":4096,\"blocks\":[[0,0]]," +
+            "\"profileVersion\":1}," +
             "\"pois\":{\"bicycleServicesCount\":1,\"gasStationsCount\":1," +
             "\"publicToiletsCount\":1,\"recordCount\":5," +
             "\"restaurantsAndCafesCount\":1,\"shopsCount\":1}," +
@@ -9213,6 +9215,34 @@ struct NavigationProtocolTests {
                         "target-5 manifest carries the signed POI profile")
         } catch {
             assert(false, "valid target-5 manifest is accepted: \(error)")
+        }
+
+        for (old, replacement) in [
+            ("\"blocks\":[[0,0]]", "\"blocks\":[]"),
+            ("\"blocks\":[[0,0]]", "\"blocks\":[[1,0]]"),
+            ("\"blocks\":[[0,0]]", "\"blocks\":[[0,0],[0,0]]"),
+            ("\"profileVersion\":1", "\"profileVersion\":2"),
+        ] {
+            let changed = Data(String(data: poiManifest, encoding: .utf8)!
+                .replacingOccurrences(of: old, with: replacement).utf8)
+            do {
+                _ = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                    changed,
+                    expectedMapID: "poi-map",
+                    header: BikeMapStreamFormat.Header(
+                        formatVersion: 1, flags: 0,
+                        manifestBytes: UInt32(changed.count),
+                        signatureEnvelopeBytes: 80,
+                        fileCount: 3, payloadBytes: 12
+                    )
+                )
+                assert(false, "invalid Nearby coverage must be rejected")
+            } catch {
+                guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                    assert(false, "invalid Nearby coverage reports a manifest failure")
+                    return
+                }
+            }
         }
 
         let nonCanonicalLanguage = Data(

@@ -115,12 +115,17 @@ The branch now carries target 5/FMB v6 section 6 and FPI1 production
 code across extractor, backend, installer, iPhone validation, firmware query,
 and bike-computer Nearby presentation. Host checks cover index trust,
 nearest-ten ranking, cancellation/corruption, layout, and the screen feature
-gate. The feature remains **off by default** with
+gate. Target-5 manifests now also sign the complete selected block set,
+including empty blocks; backend, iPhone, and firmware validators reject
+missing or out-of-scope coverage, and Nearby warns when the requested radius
+reaches undownloaded geography rather than reporting a false empty search.
+The feature remains **off by default** with
 `MAP_POIS_RUNTIME_ENABLED=0` in ordinary and production profiles. Both
 `*_REMOTE_DEBUG` development profiles opt in for hardware qualification and
 advertise CAP2 bit 31 only when the configurable-screen subsystem is ready
-for client version 29 or newer. Source review, full firmware builds, CI, and
-physical acceptance on both board families are still required. The connected
+for client version 29 or newer. Prior exact-head iOS qualification and 1.75-inch
+CI builds passed; the coverage change requires new exact-head checks, and
+physical acceptance on both board families is still required. The connected
 ESP32's board family has not been identified, so no board-specific local build
 or flash is evidence for this checkpoint.
 

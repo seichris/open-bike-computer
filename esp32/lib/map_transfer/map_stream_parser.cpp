@@ -1,6 +1,7 @@
 #include "map_stream_parser.hpp"
 #include "../maps/src/mapBlockFormat.hpp"
 #include "../maps/src/mapFontAssetFormat.hpp"
+#include "../maps/src/mapNearbyCoverage.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -64,6 +65,7 @@ public:
     bool haveTopography = false;
     bool havePois = false;
     bool haveLayers = false;
+    bool haveCoverage = false;
     uint64_t schema = 0;
     skipWhitespace();
     if (!consume('{'))
@@ -106,6 +108,12 @@ public:
         if (haveLayers || !parseLayers(manifest))
           return false;
         haveLayers = true;
+      } else if (key == "nearbyCoverage") {
+        if (haveCoverage || !skipValue(0) ||
+            !map_nearby_coverage::decodeManifest(
+                text_, manifest.nearbyCoverageBlocks))
+          return false;
+        haveCoverage = true;
       } else if (key == "target") {
         if (haveTarget || !parseTarget(manifest))
           return false;
@@ -133,7 +141,8 @@ public:
           (manifest.formatVersion == 5 && manifest.contoursIncluded)) !=
          haveTopography) ||
         ((manifest.formatVersion == 5) != havePois) ||
-        ((manifest.formatVersion == 5) != haveLayers)) {
+        ((manifest.formatVersion == 5) != haveLayers) ||
+        ((manifest.formatVersion == 5) != haveCoverage)) {
       return false;
     }
     manifest.schemaVersion = static_cast<uint32_t>(schema);

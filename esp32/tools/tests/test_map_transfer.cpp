@@ -214,6 +214,8 @@ static void testTargetFiveIndexMatchesSignedBlocks() {
            "\"buildingProfileVersion\":1,\"poiProfileVersion\":1,"
            "\"poiIndexProfileVersion\":1,\"requestedFeatures\":["
            "\"3d-buildings\",\"map-pois\",\"street-labels\"]},"
+           "\"nearbyCoverage\":{\"profileVersion\":1,\"blockSizeMeters\":4096,"
+           "\"blocks\":[[0,0]]},"
            "\"layers\":{\"contours\":\"not-included\"},"
            "\"buildings\":{\"recordCount\":0,\"explicitHeightCount\":0,"
            "\"levelsHeightCount\":0,\"inheritedHeightCount\":0,"
@@ -633,6 +635,8 @@ static void testTargetFiveRequiresCompletePoiSummary() {
       "\"internationalFallback\":\"en\",\"buildingProfileVersion\":1,"
       "\"poiProfileVersion\":1,\"poiIndexProfileVersion\":1,"
       "\"requestedFeatures\":[\"3d-buildings\",\"map-pois\",\"street-labels\"]},"
+      "\"nearbyCoverage\":{\"profileVersion\":1,\"blockSizeMeters\":4096,"
+      "\"blocks\":[[1,0]]},"
       "\"layers\":{\"contours\":\"not-included\"},"
       "\"buildings\":{\"recordCount\":0,\"explicitHeightCount\":0,"
       "\"levelsHeightCount\":0,\"inheritedHeightCount\":0,"
@@ -641,7 +645,7 @@ static void testTargetFiveRequiresCompletePoiSummary() {
       "\"restaurantsAndCafesCount\":0,\"publicToiletsCount\":0,"
       "\"gasStationsCount\":0,\"bicycleServicesCount\":0},";
   const std::string files =
-      "\"files\":[{\"path\":\"VECTMAP/map-4/+0000+0000/1.fmb\","
+      "\"files\":[{\"path\":\"VECTMAP/map-4/+000+000/1_0.fmb\","
       "\"bytes\":1,\"sha256\":\"" + std::string(64, '0') +
       "\"},{\"path\":\"VECTMAP/map-4/assets/nearby-pois.fpi\","
       "\"bytes\":16,\"sha256\":\"" + std::string(64, '2') +
@@ -650,6 +654,18 @@ static void testTargetFiveRequiresCompletePoiSummary() {
   const std::string valid =
       "{\"schemaVersion\":1,\"mapId\":\"map-4\"," + target + files;
   assert(installer.validateManifestText(valid, manifest).ok);
+  for (const std::string &replacement : {
+           std::string("\"blocks\":[]"),
+           std::string("\"blocks\":[[0,0]]"),
+           std::string("\"blocks\":[[1,0],[1,0]]")}) {
+    std::string changed = valid;
+    const std::string original = "\"blocks\":[[1,0]]";
+    const size_t offset = changed.find(original);
+    assert(offset != std::string::npos);
+    changed.replace(offset, original.size(), replacement);
+    const auto invalid = installer.validateManifestText(changed, manifest);
+    assert(!invalid.ok && invalid.code == "manifest_poi_coverage");
+  }
 
   std::string missingCategory = valid;
   const std::string field = "\"shopsCount\":0,";

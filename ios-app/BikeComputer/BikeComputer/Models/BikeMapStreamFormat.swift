@@ -689,6 +689,12 @@ nonisolated enum BikeMapStreamArtifactValidator {
             let contours: String
         }
 
+        struct NearbyCoverage: Decodable {
+            let profileVersion: Int
+            let blockSizeMeters: Int
+            let blocks: [[Int]]
+        }
+
         struct File: Decodable {
             let path: String
             let bytes: Int64
@@ -705,6 +711,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
         let topography: Topography?
         let pois: POIs?
         let layers: Layers?
+        let nearbyCoverage: NearbyCoverage?
     }
 
     static func validate(
@@ -1233,6 +1240,29 @@ nonisolated enum BikeMapStreamArtifactValidator {
             if manifest.target.formatVersion == 5 {
                 let required = Set(["3d-buildings", "map-pois", "street-labels"])
                 let requested = manifest.target.requestedFeatures ?? []
+                guard let coverage = manifest.nearbyCoverage,
+                      coverage.profileVersion == 1,
+                      coverage.blockSizeMeters == 4096,
+                      (1...1024).contains(coverage.blocks.count),
+                      coverage.blocks.allSatisfy({ pair in
+                          pair.count == 2 && pair.allSatisfy { (-4893...4893).contains($0) }
+                      }),
+                      zip(coverage.blocks, coverage.blocks.dropFirst()).allSatisfy({ left, right in
+                          left[0] < right[0] || (left[0] == right[0] && left[1] < right[1])
+                      }) else {
+                    throw BikeMapStreamFormatError.invalidManifest(
+                        "renderer target 5 Nearby coverage is invalid"
+                    )
+                }
+                let selected = Set(coverage.blocks.map { "\($0[0]),\($0[1])" })
+                for file in manifest.files where file.path.hasSuffix(".fmb") {
+                    guard let block = mapBlockCoordinates(file.path),
+                          selected.contains("\(block.0),\(block.1)") else {
+                        throw BikeMapStreamFormatError.invalidManifest(
+                            "rendered block lies outside Nearby coverage"
+                        )
+                    }
+                }
                 guard manifest.target.poiProfileVersion == 1,
                       manifest.target.poiIndexProfileVersion == 1,
                       poiIndexCount == 1,
@@ -1258,7 +1288,8 @@ nonisolated enum BikeMapStreamArtifactValidator {
             } else if manifest.target.poiProfileVersion != nil ||
                         manifest.target.poiIndexProfileVersion != nil ||
                         manifest.target.requestedFeatures != nil ||
-                        manifest.pois != nil || manifest.layers != nil || poiIndexCount != 0 {
+                        manifest.pois != nil || manifest.layers != nil ||
+                        manifest.nearbyCoverage != nil || poiIndexCount != 0 {
                 throw BikeMapStreamFormatError.invalidManifest(
                     "legacy renderer target contains POI data"
                 )
@@ -1274,7 +1305,8 @@ nonisolated enum BikeMapStreamArtifactValidator {
                     manifest.target.requestedFeatures != nil ||
                     manifest.buildings != nil ||
                     manifest.topography != nil || manifest.pois != nil ||
-                    manifest.layers != nil || poiIndexCount != 0 {
+                    manifest.layers != nil || manifest.nearbyCoverage != nil ||
+                    poiIndexCount != 0 {
             throw BikeMapStreamFormatError.invalidManifest(
                 "renderer target 1 contains label data"
             )
@@ -1283,6 +1315,25 @@ nonisolated enum BikeMapStreamArtifactValidator {
             throw BikeMapStreamFormatError.invalidManifest("payload size does not match")
         }
         return manifest
+    }
+
+    private static func mapBlockCoordinates(_ path: String) -> (Int, Int)? {
+        let components = path.split(separator: "/")
+        guard components.count == 4,
+              components[0] == "VECTMAP",
+              components[3].hasSuffix(".fmb") else { return nil }
+        let folder = String(components[2])
+        guard let secondSign = folder.dropFirst().firstIndex(where: { $0 == "+" || $0 == "-" }),
+              let folderX = Int(folder[..<secondSign]),
+              let folderY = Int(folder[secondSign...]) else { return nil }
+        let name = components[3].dropLast(4).split(separator: "_", omittingEmptySubsequences: false)
+        guard name.count == 2,
+              let localX = Int(name[0]), let localY = Int(name[1]),
+              (-306...306).contains(folderX), (-306...306).contains(folderY),
+              (0..<16).contains(localX), (0..<16).contains(localY),
+              folder == String(format: "%+04d%+04d", folderX, folderY),
+              components[3] == "\(localX)_\(localY).fmb" else { return nil }
+        return (folderX * 16 + localX, folderY * 16 + localY)
     }
 
     private static func isSafeMapID(_ value: String) -> Bool {

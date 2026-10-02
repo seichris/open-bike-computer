@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .building_scope import GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS, selection_output_blocks
 from .map_artifact_validation import (
     summarize_fmb_buildings,
     validate_fmb5,
@@ -33,6 +34,7 @@ from .preview import (
     DEFAULT_PREVIEW_WIDTH,
     render_boundary_preview,
 )
+from .reuse import MAP_BLOCK_SIZE_METERS, block_from_pack_path
 from .topography_artifacts import (
     TOPOGRAPHY_PROFILE_VERSION,
     TOPOGRAPHY_RENDERER_FORMAT_VERSION,
@@ -298,6 +300,16 @@ def build_manifest(
     elif building_preprocessing is not None:
         raise ValueError("building preprocessing metadata requires renderer target 3 or 4")
     if format_version == 5:
+        coverage_blocks = selection_output_blocks(job, GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS)
+        coverage_set = set(coverage_blocks)
+        for entry in files:
+            if entry["path"].endswith(".fmb") and block_from_pack_path(entry["path"]) not in coverage_set:
+                raise ValueError("rendered block is outside the selected Nearby coverage")
+        manifest["nearbyCoverage"] = {
+            "profileVersion": 1,
+            "blockSizeMeters": MAP_BLOCK_SIZE_METERS,
+            "blocks": [[block.x, block.y] for block in coverage_blocks],
+        }
         manifest["target"]["poiProfileVersion"] = POI_PROFILE_VERSION
         manifest["target"]["poiIndexProfileVersion"] = POI_INDEX_PROFILE_VERSION
         manifest["target"]["requestedFeatures"] = list(requested_poi_features(job.request))

@@ -281,6 +281,7 @@ private:
   map_font_asset::Asset labelFontAsset;
   std::atomic<bool> streetLabelFontHealthy{false};
   std::atomic<bool> nearbyPoiIndexHealthy{false};
+  std::vector<map_nearby_coverage::Block> nearbyCoverageBlocks;
   std::atomic<map_font_asset::RuntimeError> streetLabelRuntimeFailure{
       map_font_asset::RuntimeError::None};
   map_building_renderer::FailureRetryCooldown buildingFailureRetryCooldown;

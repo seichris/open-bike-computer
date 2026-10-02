@@ -1279,6 +1279,25 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
        manifest.formatVersion != 3 && manifest.formatVersion != 4 &&
        manifest.formatVersion != 5))
     return fail("manifest_target", "manifest renderer target is unsupported");
+  if (manifest.formatVersion == 5) {
+    if (!map_nearby_coverage::decodeManifest(
+            manifestText, manifest.nearbyCoverageBlocks))
+      return fail("manifest_poi_coverage", "Nearby coverage is missing or invalid");
+    for (const ManifestFile &file : manifest.files) {
+      if (file.path.size() < 4 ||
+          file.path.compare(file.path.size() - 4, 4, ".fmb") != 0)
+        continue;
+      int32_t x = 0, y = 0;
+      if (!map_poi_index::blockFromPath(manifest.mapId, file.path, x, y) ||
+          !map_nearby_coverage::contains(
+              manifest.nearbyCoverageBlocks, {x, y}))
+        return fail("manifest_poi_coverage",
+                    "rendered block lies outside Nearby coverage");
+    }
+  } else if (manifestText.find("\"nearbyCoverage\"") != std::string::npos) {
+    return fail("manifest_poi_coverage",
+                "Nearby coverage requires renderer target 5");
+  }
   if (((manifest.formatVersion == 2 || manifest.formatVersion == 3 ||
         manifest.formatVersion == 4 || manifest.formatVersion == 5) &&
        (fontAssetCount != 1 || legacyTextBlockCount != 0)) ||
@@ -3036,6 +3055,10 @@ InstallStatus MapTransferInstaller::readActiveMapPresentation(
         jsonPresentationStringValue(manifestText, "displayName");
     presentation.hasBoundsE7 =
         jsonPresentationBoundsE7(manifestText, presentation.boundsE7);
+    if (selection.target.formatVersion == 5 &&
+        !map_nearby_coverage::decodeManifest(
+            manifestText, presentation.nearbyCoverageBlocks))
+      return fail("installed_poi_coverage", "installed Nearby coverage is invalid");
     return {true, "ok", ""};
   }
   MapManifest manifest;
@@ -3045,6 +3068,7 @@ InstallStatus MapTransferInstaller::readActiveMapPresentation(
   presentation.displayName = manifest.displayName;
   presentation.boundsE7 = manifest.boundsE7;
   presentation.hasBoundsE7 = manifest.hasBoundsE7;
+  presentation.nearbyCoverageBlocks = manifest.nearbyCoverageBlocks;
   return status;
 }
 
@@ -3465,6 +3489,9 @@ MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
       value += std::to_string(count) + "\n";
     for (const std::string &feature : manifest.requestedFeatures)
       value += feature + "\n";
+    for (const auto &block : manifest.nearbyCoverageBlocks)
+      value += std::to_string(block.x) + "," +
+               std::to_string(block.y) + "\n";
   }
   if (manifest.formatVersion == 4 ||
       (manifest.formatVersion == 5 && manifest.contoursIncluded)) {

@@ -2599,13 +2599,23 @@ static void serviceNearbyScreen(uint32_t nowMs) {
     switch (replacement.status) {
     case map_nearby_storage::Status::Ok:
       if (replacement.count == 0) {
-        lv_label_set_text_fmt(nearby.status,
-            "No matching places within %.0f km in this map",
-            nearby.radiusM / 1000.0);
+        if (replacement.coverageComplete)
+          lv_label_set_text_fmt(nearby.status,
+              "No matching places within %.0f km in this map",
+              nearby.radiusM / 1000.0);
+        else
+          lv_label_set_text_fmt(nearby.status,
+              "No matches in downloaded area (%.0f km)\nMap edge nearby",
+              nearby.radiusM / 1000.0);
       } else {
-        lv_label_set_text_fmt(nearby.status,
-            "%u places - %.0f km - downloaded area only",
-            replacement.count, nearby.radiusM / 1000.0);
+        if (replacement.coverageComplete)
+          lv_label_set_text_fmt(nearby.status,
+              "%u places - %.0f km", replacement.count,
+              nearby.radiusM / 1000.0);
+        else
+          lv_label_set_text_fmt(nearby.status,
+              "%u places - %.0f km\nDownloaded area only; map edge nearby",
+              replacement.count, nearby.radiusM / 1000.0);
       }
       break;
     case map_nearby_storage::Status::Unavailable:
