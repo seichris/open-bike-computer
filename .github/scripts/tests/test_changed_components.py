@@ -16,59 +16,24 @@ SPEC.loader.exec_module(changed_components)
 
 
 class ChangedComponentsTests(unittest.TestCase):
-    def test_core_toolchain_board_and_production_inputs_require_full_qualification(self):
+    def test_cache_and_core_changes_keep_regular_builds_and_fast_tests(self):
         for path in (
-            "esp32/platformio.ini", "esp32/prebuild.py", "esp32/sdkconfig",
-            "esp32/sdkconfig.defaults", "esp32/sdkconfig.WAVESHARE_AMOLED_206_PRODUCTION",
-            "esp32/tools/firmware_runtime.py", "esp32/tools/generated_sdkconfig.py",
-            "esp32/tools/pioarduino_custom_core.py",
-            "esp32/tools/build_firmware_bootstrap.sh",
-            "esp32/tools/firmware-runtime/lock-v1.json",
-            "esp32/tools/firmware-runtime/refresh-inputs.json",
-            "esp32/partitions.csv", "esp32/partitions_production.csv",
-            "esp32/components/custom/idf_component.yml", "esp32/dependencies.lock",
-            "esp32/lib/custom/dependencies.lock", "esp32/idf_component.yml",
-            "esp32/boards/waveshare-esp32-s3-amoled-1.75.json",
-        ):
-            with self.subTest(path=path):
-                self.assertEqual("full", changed_components.cache_qualification_mode([path]))
-
-    def test_cache_implementation_changes_require_only_macos_qualification(self):
-        for path in (
-            "esp32/tools/build_firmware.py", "esp32/tools/shared_firmware_cache.py",
-            "esp32/tools/firmware_compile_cache.py", "esp32/tools/benchmark_firmware_cache.py",
+            "esp32/tools/shared_firmware_cache.py", "esp32/tools/firmware_compile_cache.py",
+            "esp32/tools/build_firmware.py", "esp32/tools/firmware_runtime.py",
+            "esp32/platformio.ini", "esp32/tools/firmware-runtime/lock-v1.json",
             ".github/actions/firmware-build-cache/action.yml",
-            ".github/workflows/firmware-cache-qualification.yml",
         ):
             with self.subTest(path=path):
-                self.assertEqual("macos", changed_components.cache_qualification_mode([path]))
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["firmware_build"])
+                self.assertTrue(selected["firmware_host"])
 
-    def test_app_tests_docs_and_general_ci_edits_skip_cache_qualification(self):
-        for path in (
-            "esp32/src/main.cpp", "esp32/lib/gui/gui.cpp", "README.md",
-            "esp32/tools/tests/test_build_firmware.py",
-            "esp32/tools/firmware-runtime/README.md",
-            ".github/workflows/ci.yml", ".github/scripts/changed_components.py",
-            ".github/scripts/tests/test_changed_components.py",
-        ):
-            with self.subTest(path=path):
-                self.assertEqual("none", changed_components.cache_qualification_mode([path]))
-        self.assertEqual("none", changed_components.cache_qualification_mode([]))
-
-    def test_full_qualification_wins_for_mixed_changes_in_any_order(self):
-        paths = ["esp32/tools/shared_firmware_cache.py", "esp32/platformio.ini"]
-        for ordered in (paths, list(reversed(paths))):
-            with self.subTest(paths=ordered):
-                self.assertEqual("full", changed_components.cache_qualification_mode(iter(ordered)))
-
-    def test_cli_outputs_consistent_cache_selection_and_mode(self):
-        for scope, paths, mode in (
-            ("auto", ["esp32/tools/shared_firmware_cache.py"], "macos"),
-            ("auto", ["esp32/platformio.ini"], "full"),
-            ("auto", ["esp32/src/main.cpp"], "none"),
-            ("auto", None, "full"),
-            ("firmware", [], "full"), ("all", [], "full"),
-            ("ios", [], "none"), ("map", [], "none"),
+    def test_cli_emits_only_regular_ci_components_and_targets(self):
+        for scope, paths in (
+            ("auto", ["esp32/tools/shared_firmware_cache.py"]),
+            ("auto", ["esp32/platformio.ini"]),
+            ("auto", ["esp32/src/main.cpp"]), ("auto", None),
+            ("firmware", []), ("all", []), ("ios", []), ("map", []),
         ):
             with self.subTest(scope=scope, paths=paths):
                 output = io.StringIO()
@@ -77,8 +42,7 @@ class ChangedComponentsTests(unittest.TestCase):
                 ), redirect_stdout(output):
                     self.assertEqual(0, changed_components.main())
                 selected = dict(line.split("=", 1) for line in output.getvalue().splitlines())
-                self.assertEqual(mode, selected["firmware_cache_qualification_mode"])
-                self.assertEqual("false" if mode == "none" else "true", selected["firmware_cache_qualification"])
+                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets"}, set(selected))
 
     def test_docs_only_change_skips_product_jobs(self) -> None:
         self.assertEqual(

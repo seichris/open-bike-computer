@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
 import re
 import subprocess
@@ -89,46 +88,6 @@ SHARED_MAP_STREAM_FIXTURE_PATH = (
 )
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 ZERO_SHA = "0" * 40
-
-MACOS_CACHE_QUALIFICATION_PATHS = {
-    ".github/workflows/firmware-cache-qualification.yml",
-    *(f"esp32/tools/{name}.py" for name in (
-        "build_firmware", "shared_firmware_cache", "firmware_compile_cache",
-        "benchmark_firmware_cache",
-    )),
-}
-FULL_CACHE_QUALIFICATION_PATHS = {
-    "esp32/prebuild.py", "esp32/platformio.ini", "esp32/sdkconfig",
-    "esp32/idf_component.yml", "esp32/dependencies.lock",
-    "esp32/tools/build_firmware_bootstrap.sh",
-    "esp32/tools/firmware-runtime/lock-v1.json",
-    "esp32/tools/firmware-runtime/refresh-inputs.json",
-    *(f"esp32/tools/{name}.py" for name in (
-        "firmware_runtime", "pioarduino_custom_core", "generated_sdkconfig",
-    )),
-}
-
-
-def cache_qualification_mode(paths: Iterable[str]) -> str:
-    """Select no qualification, one macOS job, or all native board profiles."""
-    mode = "none"
-    for path in paths:
-        if (
-            path in FULL_CACHE_QUALIFICATION_PATHS
-            or path.startswith("esp32/boards/")
-            or any(fnmatch.fnmatch(path, pattern) for pattern in (
-                "esp32/sdkconfig.*", "esp32/*.csv",
-                "esp32/**/idf_component.yml", "esp32/**/dependencies.lock",
-            ))
-        ):
-            return "full"
-        if (
-            path in MACOS_CACHE_QUALIFICATION_PATHS
-            or path.startswith(".github/actions/firmware-build-cache/")
-        ):
-            mode = "macos"
-    return mode
-
 
 def classify_paths(paths: Iterable[str], *, run_all: bool = False) -> dict[str, bool]:
     """Return the CI components affected by a collection of Git paths."""
@@ -345,11 +304,9 @@ def main() -> int:
 
     try:
         selected = select_scope(args.scope)
-        qualification_mode = "full" if args.scope in {"all", "firmware"} else "none"
         if selected is None:
             paths = changed_paths(args.event, args.base, args.head)
             selected = classify_paths(paths or (), run_all=paths is None)
-            qualification_mode = "full" if paths is None else cache_qualification_mode(paths)
     except (subprocess.CalledProcessError, ValueError) as error:
         parser.error(str(error))
 
@@ -361,8 +318,6 @@ def main() -> int:
         separators=(",", ":"),
     )
     print(f"firmware_targets={firmware_targets}")
-    print(f"firmware_cache_qualification={'false' if qualification_mode == 'none' else 'true'}")
-    print(f"firmware_cache_qualification_mode={qualification_mode}")
     return 0
 
 

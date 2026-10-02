@@ -386,38 +386,51 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(["WAVESHARE_AMOLED_175"], axes["environment"][0])
         self.assertEqual({"ubuntu-24.04", "macos-15"}, set(axes["runner"][1]))
         self.assertEqual(CORE_FIRMWARE_TARGETS, set(axes["environment"][1]))
-        for trigger in ("workflow_call", "workflow_dispatch"):
-            self.assertIn("default: full", mapping_block(source, trigger, indent=2))
+        self.assertIn("default: full", mapping_block(source, "workflow_dispatch", indent=2))
         self.assertIn("benchmark_firmware_cache.py", source)
         self.assertIn("if: always()", source)
 
-    def test_cache_qualification_failure_blocks_protected_ci_gate(self) -> None:
+    def test_cache_benchmarks_are_manual_only_and_pr_ci_keeps_fast_tests(self) -> None:
+        benchmark_names = ("firmware-cache-qualification.yml", "firmware-runtime-performance.yml")
+        for filename in benchmark_names:
+            trigger = mapping_block(workflow_source(filename), "on", indent=0)
+            self.assertEqual(["  workflow_dispatch:"], re.findall(r"(?m)^  [a-z_]+:$", trigger))
+            for caller, source in workflow_sources():
+                with self.subTest(benchmark=filename, caller=caller):
+                    self.assertNotIn(f"uses: ./.github/workflows/{filename}", source)
         source = workflow_source("ci.yml")
-        job = mapping_block(source, "firmware-cache", indent=2)
-        gate = mapping_block(source, "gate", indent=2)
-        self.assertIn("- firmware-cache", gate)
-        self.assertIn("uses: ./.github/workflows/firmware-cache-qualification.yml", job)
-        self.assertNotIn("heavy_ci", job)
-        self.assertIn("qualification: ${{ needs.changes.outputs.firmware_cache_qualification_mode }}", job)
-        self.assertIn("firmware_cache_qualification_mode: ${{ steps.components.outputs.firmware_cache_qualification_mode }}", source)
-        self.assertIn("  workflow_call:", workflow_source("firmware-cache-qualification.yml"))
+        self.assertNotIn("firmware-cache", source)
+        self.assertNotIn("FIRMWARE_CACHE_QUALIFICATION", source)
+        self.assertNotIn("CACHE_RESULT", source)
+        host = mapping_block(source, "esp32-host", indent=2)
+        for suite in ("test_shared_firmware_cache", "test_firmware_compile_cache", "test_firmware_download_cache"):
+            self.assertIn(f"tools.tests.{suite}", host)
+        self.assertIn("python3 -m unittest discover -s tools/tests", host)
+        esp32 = mapping_block(source, "esp32", indent=2)
+        self.assertIn("uses: ./.github/actions/firmware-build-cache", esp32)
+        self.assertIn("tools/build_firmware.py", esp32)
+
+    def test_regular_firmware_failures_still_block_ci_gate(self) -> None:
+        gate = mapping_block(workflow_source("ci.yml"), "gate", indent=2)
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {
-            **os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "false",
-            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "false", "IOS_CHANGED": "false",
+            **os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "true",
+            "FIRMWARE_HOST_CHANGED": "true", "HEAVY_CI": "true", "IOS_CHANGED": "false",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
-            **{name: "skipped" for name in ("ESP32_RESULT", "HOST_RESULT", "IOS_FAST_RESULT", "IOS_RESULT", "MAP_RESULT")},
+            "ESP32_RESULT": "success", "HOST_RESULT": "success",
+            **{name: "skipped" for name in ("IOS_FAST_RESULT", "IOS_RESULT", "MAP_RESULT")},
         }
-        for selected, result, expected in (
-            ("true", "success", 0), ("true", "failure", 1),
-            ("true", "cancelled", 1), ("true", "skipped", 1), ("false", "skipped", 0),
-        ):
-            with self.subTest(selected=selected, result=result):
-                completed = subprocess.run(
-                    ["bash", "-c", script], capture_output=True, text=True,
-                    env={**environment, "FIRMWARE_CACHE_QUALIFICATION": selected, "CACHE_RESULT": result},
-                )
-                self.assertEqual(completed.returncode, expected, completed.stdout + completed.stderr)
+        for component in ("ESP32_RESULT", "HOST_RESULT"):
+            for result in ("success", "failure", "cancelled", "skipped"):
+                with self.subTest(component=component, result=result):
+                    completed = subprocess.run(
+                        ["bash", "-c", script], capture_output=True, text=True,
+                        env={**environment, component: result},
+                    )
+                    self.assertEqual(
+                        0 if result == "success" else 1, completed.returncode,
+                        completed.stdout + completed.stderr,
+                    )
 
     def test_draft_prs_keep_fast_checks_and_skip_heavy_jobs(self) -> None:
         general_ci = workflow_source("ci.yml")

@@ -1,13 +1,6 @@
 name: Firmware cache qualification
 
 on:
-  workflow_call:
-    inputs:
-      qualification:
-        description: Cache qualification coverage (macos or full)
-        type: string
-        default: full
-        required: false
   workflow_dispatch:
     inputs:
       qualification:
@@ -22,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: firmware-cache-qualification-${{ github.event.pull_request.number || github.ref }}
+  group: firmware-cache-qualification-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
