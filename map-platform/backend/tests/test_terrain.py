@@ -23,6 +23,7 @@ class TerrainTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _validate_map_job_fields(request)
         request = {"target": {"renderer": "esp32-fmb", "rendererFormatVersion": 4, "terrainProfileVersion": 1}}
+        request["labels"] = {"profileVersion": 1, "preferredLanguages": ["en"], "internationalFallback": "en"}
         _validate_map_job_fields(request)
         self.assertEqual(request["target"]["terrainProfileVersion"], 1)
 
