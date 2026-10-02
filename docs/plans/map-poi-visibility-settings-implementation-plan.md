@@ -26,7 +26,8 @@ OpenStreetMap account integration.
 ## Baseline
 
 This plan was refreshed against freshly fetched GitHub `main` at
-`eaee846393a1cd44214e23d9d9088a5c193a6b49` (2026-09-26). The original
+`0f6fc8c6f0238d5508df199f2a50b1482b62ca1d` (2026-10-02, Asia/Singapore),
+83 commits after the September 26 baseline. The original
 implementation branch and PR #378 predate the topography work and are **not**
 compatible with that main without a protocol/format migration. The refresh is
 a design update, not a claim that the branch has been rebased or validated.
@@ -62,6 +63,40 @@ Current `main` already provides most of the cross-device settings path:
 10. The extractor now allows up to 4,096 clipped generic-polygon pieces per
     source in a dense-area fixture. POI normalization must retain its own
     point/area count and block-byte bounds, not reuse that polygon-piece limit.
+11. Selected map extraction can read sealed one-degree source shards, with a
+    pinned-source fallback outside prepared coverage. Building indexes and
+    calibration can be prepared once, and missing building closure can be
+    exported from the verified index. This preparation is not a general POI
+    index and cannot supply missing tagged nodes or arbitrary POI relations.
+12. Configurable screen instances are the primary settings path on current
+    firmware. Their document validation, autosave controller, and renderer
+    mask must carry POIs as well as the legacy setting-8/20 path.
+13. `tools/dev-check` now selects local/CI checks from a shared registry and
+    Swift source graph. Ordinary local builds and clean-source qualification
+    have distinct evidence modes; firmware dependency caches can be shared
+    through verified transport across worktrees.
+
+### Changes since the September 26 refresh
+
+These are source findings at the recorded SHA. Deployment locks and release
+records are checked-in evidence; live services and physical devices were not
+queried for this planning update.
+
+| Current-main change | Consequence for the POI implementation |
+| --- | --- |
+| Reusable building preparation and regional source shards (#528, #532, #535) | Extract POIs from the selected general OSM PBF, retain the shard/source verification and fallback rules, and prove identical POI records across full-source, prepared, and shard-boundary paths. |
+| Nonbuilding multipolygon parents excluded from the building index | A shop or amenity area must survive independently of building membership. Building closure and calibration caches are not a POI data source. |
+| Durable queue admission and public `queuePosition` | Preserve queued jobs, current typed queue-full errors, idempotency, cancellation, and the app's queue status. Do not restore the PR's obsolete cost-budget admission model. |
+| `VISIBILITY_RENDER_FEATURE_MASK` now feeds configurable-screen rendering | Extend both wire-document allowed masks and the runtime render mask; merely accepting POI bits in setting 8/20 can still silently strip them when a screen instance is selected. |
+| GPS presentation now uses source capture age | POI ranking and marker reservations use the captured render context. Delayed BLE delivery must not refresh a stale rider position or restart prediction. |
+| Active-map pointer readback and journal rollback (#540) | Carry POI target/profile/health metadata through candidate, previous-map, readback, and recovery records. Test rollback from target 5 to both standard and topographic maps. |
+| Worldwide signed-map approval for build 101 | Existing approval is bound to specific firmware, app, worker, and producer identities. It does not approve a future POI worker, format, or board build. |
+| Shared development checks, Swift source graphs, build evidence and scenario replay (#555, #557, #558) | Register POI checks in the existing runner; use its isolated test state and retained reports, and validate release builds with symbols when required. Cache benchmarks are a separate manual workflow. |
+
+The September allocation remains available in code: target 5/FMB v6,
+visibility bits 14-18, and CAP2 bit 31/client 29. The topography plan's
+unimplemented hillshade reservations still need the coordinated documentation
+change described below; the runtime protocol alone is not that coordination.
 
 The missing pieces are:
 
@@ -125,7 +160,9 @@ with holes never place their icon outside the source feature.
   current low-clutter guidance default.
 - Existing saved Map and Map + Navigation feature choices are preserved. New
   POI keys receive the defaults above only because the user has never made a
-  POI choice before.
+  POI choice before in the legacy UserDefaults path. Existing configurable
+  screen documents retain their stored masks exactly; do not interpret missing
+  POI bits as permission to rewrite an existing screen profile.
 - A fresh firmware profile mirrors the same defaults. Existing firmware NVS
   masks are not rewritten to add POI bits; the authenticated iPhone profile
   synchronization applies the user's saved choices after capability
@@ -216,8 +253,9 @@ interactive POI format without coupling this issue to a much larger product.
    topographic map: target-4 contours and `.btopo` companions remain separate.
    This keeps ordinary POI generation independent of elevation-source approval.
 4. Keep the outer BIKEMAP1 stream format and install protocol unchanged.
-5. Reuse visibility setting IDs `8` and `20` and unused 32-bit mask bits 14-18.
-   Do not allocate five new setting IDs.
+5. Use 32-bit visibility bits 14-18 in each configurable screen's map profile.
+   Reuse setting IDs `8` and `20` for the legacy profile path. Do not allocate
+   five new setting IDs or maintain a second authoritative per-instance store.
 6. Reserve CAP2 bit 31 / minimum client version 29 for the complete target-5
    reader/render/settings
    contract. Capability presence means the firmware can validate, install, and
@@ -239,12 +277,13 @@ interactive POI format without coupling this issue to a much larger product.
     contour+POI format requires a separately versioned contract; this issue
     does not make contour bytes or companion metadata optional in target 4.
 
-Current [topography plan](https://github.com/seichris/open-bike-computer/blob/main/docs/plans/issue-190-topographic-map-support-implementation-plan.md)
-mentions target 5 as a possible future hillshade format. No target-5 hillshade
-bytes or deployed contract exist on this main, but the reservation conflicts
-with this allocation. Update that prospective note when rebasing the PR; any
-future hillshade format must take the next unallocated target. Do not ship two
-different target-5 meanings.
+The [topography plan at this baseline](https://github.com/seichris/open-bike-computer/blob/0f6fc8c6f0238d5508df199f2a50b1482b62ca1d/docs/plans/issue-190-topographic-map-support-implementation-plan.md)
+proposes target 5/FMB v6/section 6 and visibility bit 14 for future hillshade.
+No implementation of that contract exists in the inspected main, but both
+reservations conflict with this POI proposal. Update the prospective hillshade
+format and visibility reservations together in the implementation PR, taking
+the next unallocated identifiers then available. Recheck main before landing
+either feature. Do not ship two different target-5 or visibility-bit meanings.
 
 ## Versioning and compatibility model
 
@@ -309,10 +348,10 @@ Geofabrik PBF / bounded source PBF
   -> POI regions reserved from street-label layout
   -> route and position marker composed above POIs
 
-iPhone UserDefaults
-  -> Map / Map + Navigation POI switches
-  -> full visibility mask (setting 8 or 20)
-  -> firmware NVS profile
+iPhone configurable screen document / legacy UserDefaults
+  -> Map / Map + Navigation POI switches for the selected screen
+  -> revisioned document autosave / legacy full mask (setting 8 or 20)
+  -> firmware screen-profile persistence and render mask
   -> render semantic invalidation
 ```
 
@@ -333,6 +372,42 @@ The selected-area OGR profile must expose `amenity`, `shop`, and `name` as
 attributes or retain them losslessly in `other_tags` for both points and
 multipolygons. Add a real fixture test because the default and selected OGR
 profiles can otherwise diverge silently.
+
+### Prepared sources, shards, and area completeness
+
+Integrate with current `MapPipeline._extract_pbf()` and
+`map_platform/source_shards.py`; use the same pinned source snapshot, source
+rectangles, checksum validation, cancellation, and resource reservations as
+the ordinary map extraction. Respect all three shard modes:
+
+- `disabled`: extract from the verified source PBF;
+- `prefer-prepared`: use a sealed generation when it covers the complete
+  request; only missing coverage may fall back to the pinned source PBF; and
+- `prepared-only`: preserve the existing required-preparation failure behavior.
+
+A corrupt or changed shard is an error, never a reason to bypass its checksum
+with a source fallback. Preserve the request bounds of 64 cells / 8 GiB and
+the 16 GiB free-space reserve; POI support does not justify raising them.
+Keep the original source snapshot in artifact identity; record shard manifest
+and selected-input digests in preparation evidence. If retaining POI geometry
+requires a different shard algorithm, version that identity and regenerate its
+sealed outputs rather than relabeling existing shards.
+
+Extract tagged nodes and POI polygons from the general selected PBF. The
+building index contains a specialized subset and its exported closure does
+not retain arbitrary POI node tags. The recent exclusion of nonbuilding
+multipolygon parents must remain valid for buildings without excluding a
+shop/amenity polygon from the POI path. Any extra POI dependency closure must
+be explicit, bounded, and tied to the original snapshot; it must not add an
+unbounded country-source scan to a ready-preparation request.
+
+Before enabling target 5, use real Osmium/OGR fixtures to compare normalized
+records and section bytes from full-source and prepared inputs. Include
+tagged nodes, nonbuilding amenity areas, concave polygons/holes, and relations
+crossing both one-degree source-shard and 4,096-metre render-block boundaries.
+Compute area anchors from the complete semantic geometry before block
+ownership, and collapse duplicate OSM objects from merged shards. Byte-identical
+output and counts are required regardless of the eligible source path.
 
 ### `poi_pipeline.py`
 
@@ -390,7 +465,7 @@ artifact counts with independently parsed FMB v6 sections.
 
 Replace the PR's conflicting `docs/fmb-v5.md` with `docs/fmb-v6-pois.md` as the
 normative byte-level POI contract before landing the writer and readers. The
-current-main [topography artifact contract](https://github.com/seichris/open-bike-computer/blob/main/docs/topography-artifact-format.md)
+current-main [topography artifact contract](https://github.com/seichris/open-bike-computer/blob/0f6fc8c6f0238d5508df199f2a50b1482b62ca1d/docs/topography-artifact-format.md)
 continues to own FMB v5 and contour section 5.
 
 ### Compatibility shape
@@ -408,10 +483,12 @@ continues to own FMB v5 and contour section 5.
 - A target-5 block with no POIs still has a valid zero-count section 6.
 - FMP remains legacy/developer-only and gets no POI representation.
 
-Extend the format-neutral extension-directory helpers from current main to
-v6. Preserve the v3-v5 golden vectors and contour validator unchanged. Keep
-the change limited to the map format/parser boundary; do not refactor the
-renderer generally.
+The current OSM writer emits FMB v2-v4, while
+`map_platform/topography_artifacts.py` upgrades FMB v4 to v5 for target 4.
+Extend the shared directory encoding/validation boundary to v6 without
+changing the target-4 upgrade path. Preserve v3-v5 golden vectors and the
+contour validator. Some firmware helpers still use `V3*` names; do not assume
+the whole parser has already been made format-neutral.
 
 ### Logical section-6 layout
 
@@ -479,6 +556,15 @@ source/rules identity matches. POI bytes are composed separately and are part
 of the target-5 artifact identity. Final target-3, target-4, and target-5
 artifacts are not interchangeable reuse candidates.
 
+Extend both the early finished-map lookup and the final artifact key. Include
+POI profile/category configuration, extraction/normalization algorithm,
+source snapshot and producer identity before accepting a hit. A target-3
+building cache hit must still run POI extraction/composition. A target-4
+topography pair receipt cannot satisfy a POI request. Verify reused POI section
+bytes and counts against their immutable receipt; a warm cache must not skip
+the new validation. Preserve current installation ownership and typed misses
+when candidate bytes or identities disagree.
+
 ### Validation and manifest construction
 
 Extend `map_artifact_validation.py` to parse FMB v6 independently of the
@@ -503,8 +589,17 @@ through the existing target/build-identity paths.
 
 ### Rollout policy
 
-Extend generation-policy v2 (or introduce v3, preserving v1/v2 readers) with
-format 5 and an exact `map-pois-v1` feature tuple. Initially:
+Introduce generation-policy schema 3 with formats 1-5 and an exact
+`map-pois-v1` feature tuple. Keep schema 1's formats 1-3 and schema 2's formats
+1-4 unchanged: current `GenerationProfilePolicy.load()` enforces those exact
+sets, so appending target 5 to the existing v2 file would fail startup. Carry
+forward disjoint global/canary/disabled lists and explicit deployment config
+selection. Use a new policy file, provisionally
+`generation-profile-policy-v4.json`: the existing
+`generation-profile-policy-v3.json` still has
+schema 2 and prepares a distinct topography rollout. The production Compose
+lock selects v1 and development selects v2 at this baseline; the v3 file's
+presence is not evidence of global topography activation. Initially:
 
 - an explicit installation allowlist/canary in development;
 - disabled in production until complete qualification, then a distinct
@@ -516,9 +611,18 @@ must keep its request ID/idempotency identity and return the existing typed
 renderer-capability error. Promote target 5 globally before releasing an iPhone
 build that makes it the only new-map target.
 
+Keep current durable queue admission, public `queuePosition`, typed
+`map_queue_full` / `installation_queue_full` responses, request idempotency,
+and cancellation. Historical map-cost metadata is not an active budget model.
+Add a measured target-5 preparation-estimate cohort only after recording POI
+stage costs; do not label a target-3 estimate as validated POI performance.
+
 Backend code changes follow the digest-pinned image promotion workflow in
 `AGENTS.md`. If the signed worker moves, update and satisfy the map-stream
 hardware gate before production promotion.
+The checked-in worldwide build-101 approval is bound to its existing worker,
+producer, app, and firmware identities. It provides no approval for target 5;
+retain that production lock until the new POI identities pass their own gates.
 
 ## Firmware parsing and block cache
 
@@ -540,6 +644,14 @@ New firmware accepts FMB v1-v6. It never treats an unknown/newer block as an
 empty legacy block. Target 5 requires label profile 1, building profile 1, POI
 profile 1, canonical empty contours, and the exact target-5 manifest roles.
 Target 4 continues to require its contour profile and source receipts.
+
+Extend `targetMetadataMatches`, active-pointer serialization/readback, and the
+stream activation journal with the POI fields. Preserve main's recovery of the
+verified previous map when the active pointer is missing, unreadable, or fails
+readback. POI section failure must retain the previous map and its exact
+profile/receipt identity, whether that map is target 3, 4, or 5. The app's
+fresh authenticated reconciliation must decide completion/retry; a successful
+background upload alone does not prove activation.
 
 ### Bounded placement and drawing
 
@@ -567,6 +679,12 @@ or screen-profile change cannot reuse stale icons or label collisions.
 POI allocation failure must preserve the last complete frame and use the same
 semantic render invalidation/cancellation model as the current renderer. It must
 not publish a partially drawn replacement frame.
+
+Use the render context's presented position for ranking and collision
+reservations. Current main derives prediction from the GPS source's capture
+time, freezes expired/unknown samples, and dims the stale marker. POI layout
+must not observe the BLE arrival time as a new fix or force a new camera pose
+while the last complete map remains displayed.
 
 ### Diagnostics
 
@@ -617,23 +735,45 @@ No setting packet changes are needed: IDs 8 and 20 already carry signed 32-bit
 values. Add the new masks to protocol/persistence/redraw host tests and ensure
 both profile changes invalidate map semantics immediately.
 
+For configurable screens, update all three masks together:
+
+- firmware `screen_configuration_protocol::ALLOWED_VISIBILITY_MASK`;
+- Swift `DeviceScreenMapProfile.allowedVisibilityMask`; and
+- firmware `map_profile_protocol::VISIBILITY_RENDER_FEATURE_MASK`, used by
+  `screen_configuration.cpp::applyProfile()`.
+
+The existing document already stores `UInt32` visibility per instance. Preserve
+its revision, CRC, validation, autosave, conflict, and acknowledgement protocol.
+Test that selecting each of two instances of the same screen type keeps its
+own POI choices; accepting the document without rendering its bits is a failure.
+
 ### Firmware NVS
 
-Continue storing complete masks in `visMask` and `navVis`. Replace magic default
-values with named default masks. Do not add five independent NVS keys or a
-one-time rewrite of existing masks.
+Continue storing legacy complete masks in `visMask` and `navVis`, and
+configurable instance masks in the existing screen document persistence.
+Replace magic default values with named default masks. Do not add five
+independent NVS keys or a one-time rewrite of existing masks.
 
 Fresh NVS defaults include all five POI bits for Map and none for Map +
 Navigation. Existing stored masks remain unchanged until the owner app sends a
-new negotiated profile.
+new negotiated profile. New configurable instances follow the same Map-on /
+Map + Navigation-off defaults; reading an existing instance preserves its mask.
 
 ## iPhone model, settings UI, and transfer compatibility
 
 ### State and persistence
 
-Add five `@Published` Boolean properties and UserDefaults keys for each screen
-profile in `BLEManager.swift`. Persist them with the existing profile state.
-Defaults are all on for Map and all off for Map + Navigation.
+The primary path is `DeviceScreenConfigurationController` plus the selected
+instance's `DeviceScreenMapProfile.visibilityMask`. Add controls to
+`DeviceScreensSettingsView.swift` using its existing binding/controller update
+path. The controller remains the only authority for document revisions,
+autosave, reconnect, conflicts, and saved-state feedback.
+
+For the legacy screen-settings path, add five `@Published` Boolean properties
+and UserDefaults keys per screen type in `BLEManager.swift`. Defaults are all
+on for Map and all off for Map + Navigation only when those keys are absent.
+Do not broadcast the legacy defaults over a device's existing configurable
+screen instances during capability negotiation.
 
 When constructing setting 8 or 20:
 
@@ -642,10 +782,13 @@ When constructing setting 8 or 20:
 - retain the user's Boolean choices when an old device is connected;
 - set the existing extended marker for every current extended mask; and
 - trigger one full profile resend when POI capability first becomes available
-  on a connection.
+  on a legacy-profile connection. Configurable devices follow the document
+  controller's current revision/reconciliation flow instead.
 
 Old firmware receives the same road/terrain mask it receives today. A capability
 downgrade clears only connection support state, not saved POI preferences.
+Apply the same capability gate to serialized configurable documents: old
+firmware must not receive unsupported POI bits or enter an autosave retry loop.
 
 ### UI
 
@@ -666,9 +809,10 @@ companion; do not imply that both layers are bundled or that the saved
 topographic map/companion is deleted. The iPhone's separately selected saved
 topographic overlay follows its own current-main lifecycle.
 
-The UI sends the full profile visibility mask after any toggle rather than
-incremental bit commands. This keeps iPhone, BLE, NVS, reconnect, and screen
-switch behavior convergent.
+Each configurable-screen toggle updates the selected instance and uses the
+existing document autosave flow. The legacy UI sends its full setting-8/20
+mask. Both routes must converge after acknowledgement, reconnect, and screen
+switch without duplicating or clobbering per-instance preferences.
 
 ### Map requests and saved artifacts
 
@@ -695,10 +839,12 @@ Treat an inconsistent capability response as incompatible instead of assuming
 the newest bit implies missing older bits. The transfer is rejected before
 opening the device-hosted upload session.
 
-Track `activeMapPoiProfileVersion` (and a POI-data health flag if status framing
-needs to distinguish it) from device status. Clear it on disconnect, activation
-failure, map removal, or legacy-map activation so stale target-5 UI cannot stay
-enabled.
+Track `activeMapPoiProfileVersion` and `activeMapPoiDataHealthy` from the
+authenticated device status. Enable controls only when capability, active
+target 5, POI profile 1, and health all agree. Clear connection availability on
+disconnect, candidate activation failure, removal, or activation of another
+format; reconcile it from the verified active map so rollback cannot leave
+stale target-5 UI enabled. Zero records in valid sections remain healthy.
 
 ## Reintegrating the existing PR with current main
 
@@ -708,17 +854,22 @@ plan. It is not completed by this documentation refresh.
 1. Fetch and merge the exact current `origin/main` into the PR branch in its
    isolated worktree. Preserve the topography implementation wherever it
    conflicts with the old POI target-4 path; preserve unrelated main changes
-   such as configurable screens, firmware OTA, and offline-map recovery.
+   such as configurable screens, firmware OTA, source-shard preparation,
+   current queue admission, and active-pointer readback/recovery. Do not
+   resurrect the implemented plan documents removed from main in #545.
 2. Remove the PR's conflicting POI `docs/fmb-v5.md` and target-4/section-5
    golden artifacts. Keep current main's FMB v5 contour contract, schema-v2
    generation policy, generated BLE mappings, and target-4 companion path.
 3. Migrate the existing POI extractor, writer, backend, firmware, iPhone, and
    tests to target 5/FMB v6/section 6, bits 14-18, CAP2 bit 31/client 29.
-   Audit every numeric `>= 4` or `== 4` format check for feature meaning.
-4. Coordinate the unimplemented target-5 hillshade reservation in the
-   topography plan. Do not overwrite either target-4 topography or a future
-   deployed target-5 contract during conflict resolution.
-5. Run the exact-head tests below, inspect the fresh PR CI Gate, and keep
+   Audit every numeric `>= 4` or `== 4` format check for feature meaning,
+   every configurable-screen allowed/render mask, and all early reuse paths.
+4. Coordinate the unimplemented target-5/section-6/visibility-bit-14 hillshade
+   reservations in the topography plan. Preserve target-4 topography and
+   recheck for any newer deployed contract before resolving conflicts.
+5. Register POI tests and Swift dependencies in `tools/development/`; preserve
+   main's shared runner, CI routing, report isolation, and evidence workflow.
+6. Run the implementation tests below, inspect the fresh PR CI Gate, and keep
    production/physical qualification separate. Do not promote the service,
    flash a board, or mark the draft PR ready merely because merge conflicts
    are resolved.
@@ -742,8 +893,10 @@ section bytes, counts, target version, visibility bits, and capability bit.
 1. Add the target-5 point-layer conversion and `poi_pipeline.py`.
 2. Add FMB v6 writing with explicit target selection and POI statistics.
 3. Add backend FMB v6 parsing, summary recomputation, manifest validation, and
-   target-5 generation profile behind development/canary policy.
+   schema-3 target-5 generation policy behind development/canary controls.
 4. Prove target-1 through target-4 artifact bytes/fixtures remain unchanged.
+5. Prove full-source/prepared-shard POI equivalence, nonbuilding area retention,
+   and warm/cold reuse identity without adding country scans to ready inputs.
 
 Exit criterion: a deterministic target-5 pack built from the fixture contains
 the expected five category counts and independently validates; corruption and
@@ -756,6 +909,7 @@ limit fixtures fail with typed errors.
    diagnostics.
 3. Add visibility bits, NVS defaults, render invalidation, and CAP2 bit 31
    without changing contour bit 13 or configurable-screen bit 26.
+   Include the screen-document allowed mask and runtime render mask.
 4. Build ordinary and production firmware for both board targets through the
    repository build/CI paths.
 
@@ -765,7 +919,8 @@ surface tests. This is not yet physical acceptance.
 
 ### Phase 4 - iPhone settings and target-5 delivery
 
-1. Add capability parsing, per-screen persistence, mask composition, and UI.
+1. Add capability parsing, per-instance document autosave, legacy-profile
+   persistence, mask composition, and UI in both settings paths.
 2. Add active-map availability/status handling and regeneration UX.
 3. Add target-5 requests, saved-map/catalog validation, and pre-transfer
    compatibility gates.
@@ -791,6 +946,34 @@ and map source snapshot.
 
 ## Test and validation matrix
 
+### Shared check entry point
+
+After integrating main, start at the repository root with:
+
+```sh
+tools/dev-check --plan
+tools/dev-check
+tools/dev-check --suite ios --level full --fresh --evidence
+tools/dev-check --suite firmware --level full --board 175 --evidence
+tools/dev-check --suite firmware --level full --board 206 --evidence
+```
+
+Identify the connected board before build/device actions under the current
+`AGENTS.md`; the full qualification matrix names both targets. The full iOS
+suite covers simulator contracts and unsigned Debug/Release app containers.
+Evidence mode requires clean committed source and retains corresponding
+symbols; retain the check reports and final linker size/partition evidence.
+Ordinary development builds can use the runner's incremental local state.
+
+Register new POI checks in `tools/development/checks.json` and add Swift
+dependencies to `tools/development/swift-sources.json`, which are shared by
+local execution and CI. Do not recreate compiler lists in the old PR workflow.
+The backend/deploy/extractor suite IDs are `map-backend-tests`,
+`map-deploy-tests`, and `osm-tests`; the commands below are their existing
+focused entry points. Missing prerequisites are blocked checks, not passes.
+Neither the presence of this section nor a documentation refresh proves any
+of these implementation checks has run.
+
 ### Extractor and format tests
 
 - Exact classification for every issue tag.
@@ -805,6 +988,11 @@ and map source snapshot.
   and oversized-block rejection.
 - FMB v2/v3/v4/v5 golden regressions remain byte-identical, including the
   nonempty contour section and the separate iPhone `.btopo` companion.
+- Full-source versus one/multiple shard extraction produces identical POIs.
+  Missing shard coverage uses the existing allowed fallback; corrupt/changed
+  shards fail. Prepared building closure does not discard a nonbuilding POI
+  area or duplicate a tagged node; missing extraction dependencies must not be
+  reported as harmless malformed source geometry.
 
 Run at minimum:
 
@@ -825,6 +1013,13 @@ python -m unittest discover -s tools/OSM_Extract/tests
 - Target-1 through target-4 API, artifact, companion, and catalog compatibility.
 - Target-5 promotion discovery, manual conversion, grants, and catalog publish
   reject unauthorized profiles without weakening the target-4 topo gate.
+- Exact/subset/cache lookup never returns a target-3/4 pack for target 5 or
+  ignores changed POI rules/source identities; ready preparation avoids a new
+  full-source scan, and restored inputs are verified before use.
+- Schema-1/2 policies keep their exact accepted profile sets; schema 3 rejects
+  duplicate formats or profiles, wrong features, and overlapping channel lists.
+- Queue status, full-queue errors, cancellation, and idempotent retry remain
+  consistent across target-3/4/5 requests.
 
 Run the repository backend/deploy suites from `map-platform/backend`:
 
@@ -838,6 +1033,9 @@ python -m unittest discover -s ../deploy/tests
 - Stream and runtime FMB v6 parsers accept the same golden bytes.
 - All section/count/reference/CRC/bounds failures reject before activation.
 - Visibility normalization and NVS fresh/existing-profile behavior.
+- Configurable-screen allowed-mask, document round-trip, and runtime render
+  mask preserve POI bits independently for multiple instances and contour bit
+  13; existing profiles are not overwritten by new defaults.
 - CAP2 client-version gating and feature-vector tests.
 - Per-category icon selection, projection, near-plane clipping, collision,
   rank, capacity, label reservations, and stable ordering.
@@ -846,6 +1044,11 @@ python -m unittest discover -s ../deploy/tests
 - Flat, rotated, and every supported bird's-eye perspective.
 - FMB v1-v5 parser/render regressions, including target-4 contour visibility
   and active-map status.
+- Source-age expiry and delayed/repeated GPS input keep the marker and POI
+  reservations consistent with the accepted camera.
+- Failed active-pointer readback, truncated pointers, interrupted activation,
+  and corrupt POI metadata restore the verified prior target-3/4/5 map through
+  main's transaction journal; rejected writes do not report completion.
 
 Build through the repository wrapper, not raw PlatformIO:
 
@@ -873,6 +1076,11 @@ profiles. A build is source evidence, not physical device evidence.
 - Saved target-1 through target-5 and inconsistent-capability transfer matrix.
 - Manifest/catalog/FMB v6 validation and active-map status reset; target-4
   companion association and MapKit contour overlays remain unchanged.
+- Configurable-screen autosave acknowledgement, revision conflict, reconnect,
+  fresh-instance defaults, existing-document preservation, and two same-type
+  instances with different POI masks. Legacy resends must not overwrite them.
+- Interrupted transfer and fresh device-status reconciliation distinguish a
+  completed target-5 activation from a successful upload followed by rollback.
 
 Run:
 
@@ -888,9 +1096,10 @@ cd ios-app
 
 ### Physical acceptance
 
-Treat the 1.75-inch and 2.06-inch boards as separate gates. Immediately before
-any flash, re-identify the board by stable serial and obtain fresh confirmation
-naming the artifact, Git SHA, serial, and environment.
+Treat the 1.75-inch and 2.06-inch boards as separate gates. Follow current
+`AGENTS.md`: immediately before an authorized flash, identify the board by
+stable serial and verify the artifact, Git SHA, serial, and environment. A
+planning or build-only task does not include a device write.
 
 For each board:
 
@@ -903,7 +1112,7 @@ For each board:
    marker stay visually dominant.
 5. Verify zoom 0-5, north-up, course-up, and supported bird's-eye perspectives.
 6. Reconnect the app and cold/warm reboot the device; confirm both profiles
-   retain their choices.
+   and multiple configured instances retain their independent choices.
 7. Activate target-3 and target-4 maps and confirm legacy/topographic rendering,
    the regeneration UI, and contour/POI setting separation; then reactivate
    target 5.
@@ -943,14 +1152,16 @@ compatible app rollback; silent target downgrade is intentionally forbidden.
 | Layer | Primary files/modules |
 | --- | --- |
 | OSM conversion | `tools/OSM_Extract/scripts/pbf_to_geojson.sh`, selected OGR config |
+| Source preparation | `map_platform/source_shards.py`, `prepared_source_catalog.py`, `pipeline.py`, `export_building_closure.py`, full-source/shard equivalence fixtures |
 | POI normalization | new `tools/OSM_Extract/scripts/poi_pipeline.py`, new POI config and fixtures |
 | FMB writer | `tools/OSM_Extract/scripts/map_format.py`, `extract_features.py`, `docs/fmb-v6-pois.md` |
 | Backend | `generation_profiles.py`, new POI contract module, `pipeline.py`, `map_artifact_validation.py`, `manifest.py`, build/reuse identity and tests |
-| Generation policy | v2/v3 generation profile policy, rollout/hardware-gate configuration, target-4 topo gate preservation |
+| Generation policy | schema-3 policy in `generation-profile-policy-v4.json`, v1/v2 schema compatibility, rollout/hardware gates, target-4 topo gate preservation |
 | Firmware format/install | `mapBlockFormat.*`, `map_stream_parser.cpp`, `map_transfer.*`, parser/install tests |
 | Firmware render | new POI block/layout/icon helpers, `maps.hpp`, `maps.cpp`, renderer diagnostics/tests |
-| BLE/profile | `protocol/ride-ble-contract-v1.json`, generated protocol files, `map_profile_protocol.hpp`, persistence/redraw tests, `ble_navigation.*`, `docs/ble-protocol.md` |
-| iPhone | `BLEManager.swift`, `SettingsView.swift`, offline-map request/manifest/catalog/manager models, `NavigationProtocolTests.swift` |
+| BLE/profile | `protocol/ride-ble-contract-v1.json`, generated protocol files, `map_profile_protocol.hpp`, `screen_configuration_protocol.hpp`, `screen_configuration.cpp`, persistence/redraw tests, `ble_navigation.*`, `docs/ble-protocol.md` |
+| iPhone | `DeviceScreenConfiguration.swift`, `DeviceScreenConfigurationController.swift`, `DeviceScreensSettingsView.swift`, legacy `BLEManager.swift`/`SettingsView.swift`, offline-map models/manager, screen-configuration and navigation tests |
+| Shared validation | `tools/development/checks.json`, `swift-sources.json`, `protocol/scenarios/` where relevant, development reports and build evidence |
 | Map docs | `docs/map-stream-format-v1.md`, offline-map build/install and rollout documentation |
 
 Exact helper filenames may change during implementation, but the separation
@@ -969,7 +1180,9 @@ The feature is complete only when all of the following are true:
    manifest exactly.
 4. New firmware reads targets 1-5; old firmware is prevented from receiving
    target 5 before transfer, while target-4 topography still works.
-5. Map and Map + Navigation persist independent choices for all five groups.
+5. Map and Map + Navigation persist independent choices for all five groups,
+   including multiple configurable instances of each type and the legacy
+   profile path. Existing stored masks remain intact.
 6. Old firmware never receives visibility bits 14-18, while capable firmware
    receives one convergent full profile after negotiation/reconnect.
 7. The renderer uses the shared projection, bounded placement, deterministic
@@ -989,3 +1202,8 @@ The feature is complete only when all of the following are true:
     complete before target 5 becomes globally available.
 14. The production iPhone target-5 request path ships only after production
     generation is globally available.
+15. Prepared/full-source paths, shard boundaries, and cold/warm reuse produce
+    the same POI records without bypassing checksums or silently losing areas.
+16. Active-map readback/recovery preserves the verified previous map after
+    failed POI activation, and iPhone state converges to the authenticated
+    active target and health.
