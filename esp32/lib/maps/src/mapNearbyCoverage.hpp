@@ -60,12 +60,11 @@ inline bool integer(std::string_view text, size_t &cursor, int32_t &value) {
   return true;
 }
 
-inline bool memberInteger(std::string_view object, const char *name,
+inline bool memberInteger(std::string_view object, std::string_view name,
                           int32_t &value) {
-  const std::string needle = std::string("\"") + name + "\"";
-  size_t cursor = object.find(needle);
+  size_t cursor = object.find(name);
   if (cursor == std::string::npos) return false;
-  cursor += needle.size();
+  cursor += name.size();
   return consume(object, cursor, ':') && integer(object, cursor, value) &&
          (cursor == object.size() || object[cursor] == ',' ||
           object[cursor] == '}' || object[cursor] == ' ' ||
@@ -75,7 +74,7 @@ inline bool memberInteger(std::string_view object, const char *name,
 inline bool decodeManifestInto(std::string_view manifest,
                                std::vector<Block> &blocks) {
   blocks.clear();
-  const std::string needle = "\"nearbyCoverage\"";
+  constexpr std::string_view needle = "\"nearbyCoverage\"";
   size_t cursor = manifest.find(needle);
   if (cursor == std::string::npos) return false;
   cursor += needle.size();
@@ -87,8 +86,8 @@ inline bool decodeManifestInto(std::string_view manifest,
   if (end == std::string::npos) return false;
   const std::string_view object = manifest.substr(start, end - start + 1);
   int32_t profile = 0, size = 0;
-  if (!memberInteger(object, "profileVersion", profile) || profile != 1 ||
-      !memberInteger(object, "blockSizeMeters", size) || size != 4096)
+  if (!memberInteger(object, "\"profileVersion\"", profile) || profile != 1 ||
+      !memberInteger(object, "\"blockSizeMeters\"", size) || size != 4096)
     return false;
   cursor = object.find("\"blocks\"");
   if (cursor == std::string::npos) return false;
@@ -131,12 +130,10 @@ inline bool decodeManifestInto(std::string_view manifest,
 
 inline bool decodeManifest(std::string_view manifest,
                            std::vector<Block> &blocks) {
-  std::vector<Block> decoded;
-  if (!decodeManifestInto(manifest, decoded)) {
+  if (!decodeManifestInto(manifest, blocks)) {
     blocks.clear();
     return false;
   }
-  blocks = std::move(decoded);
   return true;
 }
 
