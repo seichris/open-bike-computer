@@ -8,7 +8,16 @@ namespace epaper {
 // memory crosses the mailbox; there is exactly one replaceable pending frame.
 class FrameMailbox {
 public:
-  struct Frame { uint8_t *pixels; uint32_t generation, pairing, context; };
+  struct Provenance {
+    uint32_t composition;
+    uint32_t acceptedGps;
+    uint32_t baseCamera;
+  };
+  struct Frame {
+    uint8_t *pixels;
+    uint32_t generation, pairing, context;
+    Provenance provenance;
+  };
   void bind(uint8_t *desired, uint8_t *flight, uint8_t *shown) {
     desired_ = desired; flight_ = flight; shown_ = shown;
   }
@@ -18,18 +27,24 @@ public:
     return desired_;
   }
   uint32_t publish(uint32_t pairing, uint32_t context = 0) {
+    return publish(pairing, context, {0, 0, 0});
+  }
+  uint32_t publish(uint32_t pairing, uint32_t context,
+                   Provenance provenance) {
     if (!writing_) return 0;
     if (++generation_ == 0) ++generation_;
     pairing_ = pairing;
     context_ = context;
+    provenance_ = provenance;
     writing_ = false; pending_ = true;
     return generation_;
   }
   Frame claim() {
-    if (writing_ || !pending_ || inFlight_) return {nullptr, 0, 0, 0};
+    if (writing_ || !pending_ || inFlight_)
+      return {nullptr, 0, 0, 0, {0, 0, 0}};
     std::swap(desired_, flight_);
     inFlight_ = true; pending_ = false;
-    return {flight_, generation_, pairing_, context_};
+    return {flight_, generation_, pairing_, context_, provenance_};
   }
   void finish(bool visible) {
     if (!inFlight_) return;
@@ -40,6 +55,7 @@ public:
 private:
   uint8_t *desired_ = nullptr, *flight_ = nullptr, *shown_ = nullptr;
   uint32_t generation_ = 0, pairing_ = 0, context_ = 0;
+  Provenance provenance_{0, 0, 0};
   bool writing_ = false, pending_ = false, inFlight_ = false;
 };
 } // namespace epaper

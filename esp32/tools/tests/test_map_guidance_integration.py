@@ -12,6 +12,12 @@ MAP_RENDERER_SOURCE = (
 MAP_HEADER_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "maps.hpp"
 ).read_text(encoding="utf-8")
+EPAPER_UI_SOURCE = (
+    ESP32_ROOT / "lib" / "gui" / "src" / "epaper_ui.cpp"
+).read_text(encoding="utf-8")
+EPAPER_DISPLAY_SOURCE = (
+    ESP32_ROOT / "lib" / "epaper_display" / "epaper_display.cpp"
+).read_text(encoding="utf-8")
 MAP_PRESENTATION_SOURCE = (
     ESP32_ROOT / "lib" / "maps" / "src" / "mapPresentation.hpp"
 ).read_text(encoding="utf-8")
@@ -120,6 +126,59 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         marker = function_body(MAP_RENDERER_SOURCE, "void Maps::updatePositionOverlay")
         self.assertIn("map_camera::markerAngle(visibleProjection, rider", marker)
         self.assertIn("visibleProjection.projectWorld(rider)", marker)
+
+    def test_epaper_services_publication_and_foreground_without_blanket_gate(self):
+        prepare = function_body(
+            MAIN_SCREEN_SOURCE, "static bool prepareVisibleMapUpdate"
+        )
+        self.assertNotIn("lastPresentationMs", prepare)
+        self.assertNotIn("nowMs - lastPresentationMs < 4000", prepare)
+        self.assertLess(
+            prepare.index("mapView.serviceRenderPipeline(nowMs)"),
+            prepare.index("epaperNavigationScheduler.evaluate"),
+        )
+        self.assertLess(
+            prepare.index("mapView.updatePositionOverlay()"),
+            prepare.index("epaperNavigationScheduler.evaluate"),
+        )
+        self.assertIn("mapView.takeFramePublication(publication)", MAIN_SCREEN_SOURCE)
+        self.assertIn("publication.capturedFixSequence", MAIN_SCREEN_SOURCE)
+
+    def test_epaper_camera_keeps_compatible_base_and_has_one_submitter(self):
+        presenter = function_body(MAP_RENDERER_SOURCE, "void Maps::serviceStableCamera")
+        epaper_branch = presenter.split("#ifdef WAVESHARE_EPAPER_397", 1)[1].split(
+            "#else", 1
+        )[0]
+        self.assertNotIn("cameraLag.expired", epaper_branch)
+        self.assertNotIn("submitRenderRequest", epaper_branch)
+        self.assertIn("Recentering...", epaper_branch)
+        self.assertIn("baseCompatible", epaper_branch)
+        self.assertIn("epaperArmedRenderReasons", MAIN_SCREEN_SOURCE)
+
+    def test_epaper_route_windows_are_soft_and_hard_invalidations_recompose(self):
+        process = function_body(EPAPER_UI_SOURCE, "void process()")
+        self.assertNotIn("routeOverlay.revision()", process)
+        self.assertIn("routeActive != lastRouteActive", process)
+        self.assertIn("maneuverChanged", process)
+        invalidate = function_body(EPAPER_DISPLAY_SOURCE, "void invalidateContext()")
+        poll = function_body(EPAPER_DISPLAY_SOURCE, "void poll()")
+        self.assertIn("contextCompositionPending.store", invalidate)
+        self.assertIn("contextCompositionPending.exchange", poll)
+        self.assertIn("lv_obj_invalidate(screen)", poll)
+
+    def test_epaper_provenance_reaches_successful_panel_completion(self):
+        worker = function_body(EPAPER_DISPLAY_SOURCE, "void displayWorker(void *)")
+        submit = function_body(EPAPER_DISPLAY_SOURCE, "bool submit(const uint16_t *rgb)")
+        self.assertIn("frame.provenance", worker)
+        self.assertIn("snapshot.acceptedGpsSequence", worker)
+        self.assertIn("currentAcceptedGpsSequence.load", submit)
+        self.assertIn("currentBaseCameraSequence.load", submit)
+        self.assertIn("epaper::setFrameProvenance(", MAIN_SCREEN_SOURCE)
+        self.assertNotIn('#include "mainScr.hpp"', EPAPER_DISPLAY_SOURCE)
+        self.assertLess(
+            worker.index("mailbox.finish(true)"),
+            worker.index("snapshot.acceptedGpsSequence"),
+        )
 
     def test_frame_capture_uses_narrow_gui_owner_interface(self):
         capture = (ESP32_ROOT / "lib/device_debug/device_debug_frame_store.cpp").read_text()

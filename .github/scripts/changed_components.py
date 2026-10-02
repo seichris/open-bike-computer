@@ -31,6 +31,12 @@ FIRMWARE_TARGETS = {
         "WAVESHARE_AMOLED_206_PRODUCTION",
     ),
 }
+AMOLED_EQUIVALENCE_TARGETS = (
+    "WAVESHARE_AMOLED_175",
+    "WAVESHARE_AMOLED_175_PRODUCTION",
+    "WAVESHARE_AMOLED_206",
+    "WAVESHARE_AMOLED_206_PRODUCTION",
+)
 FULL_CI_PATHS = {
     ".github/scripts/changed_components.py",
     ".github/workflows/ci.yml",
@@ -321,6 +327,11 @@ def main() -> int:
         separators=(",", ":"),
     )
     print(f"firmware_targets={firmware_targets}")
+    amoled_equivalence_targets = json.dumps(
+        AMOLED_EQUIVALENCE_TARGETS,
+        separators=(",", ":"),
+    )
+    print(f"amoled_equivalence_targets={amoled_equivalence_targets}")
     return 0
 
 

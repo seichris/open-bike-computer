@@ -4563,12 +4563,25 @@ static void handleGpsPayload(
 #endif
 
   gpsFreshnessState.accept(arrivals);
+#ifdef WAVESHARE_EPAPER_397
+  bleDebugStats.update([&](BLEDebugStats &stats) {
+    stats.gpsPacketCount = gpsFreshnessState.packetCount;
+    stats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
+    stats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
+    stats.maximumGpsPacketGapMs = gpsFreshnessState.maximumGapMs;
+    stats.lastGpsCaptureAgeMs =
+        packet.hasSampleAge ? packet.sampleAgeMs : 0U;
+    stats.lastGpsCapturedAtMs = gps_position_protocol::capturedAtMs(
+        gpsFreshnessState.lastPacketMs, stats.lastGpsCaptureAgeMs);
+  });
+#else
   bleDebugStats.updateWith([](BLEDebugStats &stats) {
     stats.gpsPacketCount = gpsFreshnessState.packetCount;
     stats.lastGpsPacketMs = gpsFreshnessState.lastPacketMs;
     stats.lastGpsPacketGapMs = gpsFreshnessState.lastGapMs;
     stats.maximumGpsPacketGapMs = gpsFreshnessState.maximumGapMs;
   });
+#endif
 
   const uint32_t nowMs = millis();
   const uint32_t previousDiagnosticGpsLogMs =

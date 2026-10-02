@@ -231,6 +231,12 @@ struct BLEDebugStats {
   uint32_t lastGpsPacketMs = 0;
   uint32_t lastGpsPacketGapMs = 0;
   uint32_t maximumGpsPacketGapMs = 0;
+#ifdef WAVESHARE_EPAPER_397
+  // Presentation-only provenance. These fields do not alter the BLE payload
+  // contract and are absent from every AMOLED build.
+  uint32_t lastGpsCapturedAtMs = 0;
+  uint32_t lastGpsCaptureAgeMs = 0;
+#endif
   uint32_t lastSettingsPacketMs = 0;
   uint32_t lastRejectedUnauthenticatedMs = 0;
   bool connectionParametersValid = false;

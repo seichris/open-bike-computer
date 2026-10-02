@@ -285,6 +285,16 @@ class ChangedComponentsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported firmware hardware"):
             changed_components.select_firmware_targets("unknown")
 
+        self.assertEqual(
+            (
+                "WAVESHARE_AMOLED_175",
+                "WAVESHARE_AMOLED_175_PRODUCTION",
+                "WAVESHARE_AMOLED_206",
+                "WAVESHARE_AMOLED_206_PRODUCTION",
+            ),
+            changed_components.AMOLED_EQUIVALENCE_TARGETS,
+        )
+
     def test_map_scope_runs_only_map_components(self) -> None:
         selected = changed_components.select_scope("map")
 
