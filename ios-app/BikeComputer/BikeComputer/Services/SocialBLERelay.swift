@@ -23,6 +23,7 @@ final class SocialBLERelay {
         ble.onSocialAcknowledgement = { [weak self] in self?.acknowledgement = $0 }
         social.session.$generation.sink { [weak self] _ in self?.restart() }.store(in: &observers)
         social.live.$ride.map { $0?.id }.removeDuplicates().sink { [weak self] _ in self?.restart() }.store(in: &observers)
+        social.$capabilities.removeDuplicates().sink { [weak self] _ in self?.restart() }.store(in: &observers)
         ble.$supportsGroupRiders.combineLatest(ble.$isNavigationReady).sink { [weak self] _ in self?.restart() }.store(in: &observers)
         restart()
     }
@@ -69,7 +70,7 @@ final class SocialBLERelay {
     }
 
     private func update(expected: UInt32) async {
-        guard let social, social.live.ride != nil, social.session.state == .signedIn else {
+        guard let social, social.capabilities.hardware, social.live.ride != nil, social.session.state == .signedIn else {
             if !slots.isEmpty { for slot in slots.indices { guard await send(packet(2, slot: slot), slot: slot, opcode: 2, expected: expected) else { return } }; slots=[];loaded=[:] }
             return
         }

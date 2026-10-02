@@ -11,12 +11,14 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import and_, delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import HTTPConnection
 
 from ..request_limits import RequestBodyLimitMiddleware
 from ..user_auth import FirebaseIdentity
 from .database import (Database, accounts, blocks, content, devices, friendships, invites,
                        links, media, members, messages, replays, rides)
 from .media import S3Media
+from .features import SocialFeatures
 from .models import (ActivityUpload, Consent, ContentEdit, Deletion, DeviceBinding, Join,
                      LiveState, ProfileEdit, QuickMessage, RideCreate, RideInvitation,
                      RouteUpload, ShareInput, Target, WebsiteDeletion)
@@ -27,14 +29,35 @@ def public_content(item):
     return {k: v for k, v in item.items() if k != "source"}
 
 
-def create_app(*, service=None, identity=None):
+def create_app(*, service=None, identity=None, features=None):
     if service is None:
         db = Database(os.environ["BICINO_SOCIAL_DATABASE_URL"])
         db.check_schema()
         service = SocialService(db, S3Media())
     if identity is None:
         identity = FirebaseIdentity(os.environ["BICINO_FIREBASE_PROJECT_ID"])
-    app = FastAPI(title="Bicino social", version="1")
+    async def rollout(request: HTTPConnection):
+        if request.scope["type"] != "http":
+            return  # The socket handler checks the flag before every snapshot.
+        parts = request.url.path.removeprefix(request.scope.get("root_path", "")).strip("/").split("/")
+        # Rollback must retain deletion, revocation and explicit stop operations.
+        if request.method == "DELETE":
+            return
+        if parts[0] in {"group-rides", "ride-invites"}:
+            if request.method == "POST" and parts[-1] in {"leave", "end", "decline"}:
+                return
+            if request.method == "POST" and parts[-1] == "consent":
+                body = await request.json()
+                if isinstance(body, dict) and body.get("location") is False and body.get("stats", False) is False:
+                    return
+            app.state.features.require("groups")
+        elif parts[0] in {"routes", "activities", "media"}:
+            app.state.features.require(parts[0])
+        elif parts == ["me", "avatar"]:
+            app.state.features.require("media")
+
+    app = FastAPI(title="Bicino social", version="1", dependencies=[Depends(rollout)])
+    app.state.features = features if features is not None else SocialFeatures.from_environment()
     app.state.service = service
     app.add_middleware(RequestBodyLimitMiddleware, max_body_bytes=5*1024*1024)
 
@@ -84,7 +107,13 @@ def create_app(*, service=None, identity=None):
                 if old:
                     if old["digest"] != fingerprint:
                         raise SocialError("idempotency_conflict", 409)
-                    return service.replay(c, actor, old["response"])
+                    result = service.replay(c, actor, old["response"])
+                    if result.get("kind") in {"route", "activity"}:
+                        app.state.features.require_content(result["kind"])
+                    if "url" in result:
+                        link = row(c, links, links.c.id == result["id"])
+                        app.state.features.require_content(service.content_read(c, actor, link["content"])["kind"])
+                    return result
                 result = callback(c, actor)
                 retained = dict(result)
                 if "riders" in retained:
@@ -132,6 +161,10 @@ def create_app(*, service=None, identity=None):
     def me(auth=Depends(authenticate)):
         with service.db.transaction() as c:
             return service.profile(c, auth[0], auth[0], True)
+
+    @app.get("/capabilities")
+    def capabilities(auth=Depends(authenticate)):
+        return app.state.features.document()
 
     @app.patch("/me")
     async def edit_me(data: ProfileEdit, request: Request, auth=Depends(authenticate)):
@@ -277,12 +310,17 @@ def create_app(*, service=None, identity=None):
     @app.get("/activities/{content_id}")
     def read_content(content_id: str, auth=Depends(authenticate)):
         with service.db.transaction() as c:
-            return public_content(service.content_read(c, auth[0], content_id))
+            item = service.content_read(c, auth[0], content_id)
+            app.state.features.require_content(item["kind"])
+            return public_content(item)
 
     @app.patch("/routes/{content_id}")
     @app.patch("/activities/{content_id}")
     async def edit_content(content_id: str, data: ContentEdit, request: Request, auth=Depends(authenticate)):
-        return await operation(request, auth, lambda c, a: public_content(service.edit_content(c, a, content_id, data)))
+        def perform(c, actor):
+            app.state.features.require_content(service.content_read(c, actor, content_id)["kind"])
+            return public_content(service.edit_content(c, actor, content_id, data))
+        return await operation(request, auth, perform)
 
     @app.delete("/routes/{content_id}")
     @app.delete("/activities/{content_id}")
@@ -291,7 +329,10 @@ def create_app(*, service=None, identity=None):
 
     @app.post("/share-links")
     async def share(data: ShareInput, request: Request, auth=Depends(authenticate)):
-        return await operation(request, auth, lambda c, a: service.share(c, a, data))
+        def perform(c, actor):
+            app.state.features.require_content(service.content_read(c, actor, data.contentID)["kind"])
+            return service.share(c, actor, data)
+        return await operation(request, auth, perform)
 
     @app.delete("/share-links/{link_id}")
     async def revoke_link(link_id: str, request: Request, auth=Depends(authenticate)):
@@ -305,7 +346,9 @@ def create_app(*, service=None, identity=None):
         actor = authenticate(authorization)[0] if authorization else None
         with service.db.transaction() as c:
             link = row(c, links, and_(links.c.digest == digest(secret), links.c.expires > service.now()))
-            return public_content(service.content_read(c, actor, link["content"], capability=True))
+            item = service.content_read(c, actor, link["content"], capability=True)
+            app.state.features.require_content(item["kind"])
+            return public_content(item)
 
     @app.post("/group-rides")
     async def create_ride(data: RideCreate, request: Request, auth=Depends(authenticate)):
@@ -504,6 +547,7 @@ def create_app(*, service=None, identity=None):
         header = websocket.headers.get("authorization", "")
         await websocket.accept()
         try:
+            app.state.features.require("groups")
             auth = await run_in_threadpool(authenticate, header)
             actor = auth[0]
             service.rate(actor, "sockets", 20, 60)
@@ -513,6 +557,7 @@ def create_app(*, service=None, identity=None):
             # processes. A two-second bounded read interval avoids process-local
             # broadcast authority and reconnect resumes from the latest state.
             while time.monotonic()-started < 300:
+                app.state.features.require("groups")
                 loop_start = time.monotonic()
                 if loop_start-last_identity_check >= 30:
                     try:
@@ -524,6 +569,7 @@ def create_app(*, service=None, identity=None):
                     with service.db.transaction() as c:
                         value = service.ride_read(c, actor, ride_id)
                         value.pop("route", None)
+                        value["capabilities"] = app.state.features.document()
                         return value
                 value = await run_in_threadpool(snapshot)
                 await asyncio.wait_for(websocket.send_json(value), timeout=10)

@@ -27,6 +27,45 @@ and recent-auth deletion before enabling either production surface.
 
 ## Runtime
 
+### Staged feature activation
+
+The global `BICINO_SOCIAL_ENABLED` switch mounts social in the existing map API;
+the isolated social server is controlled by its deployment. Once the service is
+reachable, accounts, profiles, friends, blocking and account deletion are always
+available. All five additional features default to **false**. Set these exact
+environment variables to `true` in the shared API/worker runtime environment:
+
+| Variable | Enables |
+| --- | --- |
+| `BICINO_SOCIAL_FEATURE_MEDIA` | Picture upload and authenticated picture reads |
+| `BICINO_SOCIAL_FEATURE_ROUTES` | Route publication, lists, detail and share links |
+| `BICINO_SOCIAL_FEATURE_ACTIVITIES` | Completed-ride publication, lists, detail and links |
+| `BICINO_SOCIAL_FEATURE_GROUPS` | Invitations, sessions, consent and live positions; also requires routes |
+| `BICINO_SOCIAL_FEATURE_HARDWARE` | Phone-to-device rider relay; also requires groups and routes |
+
+Use lowercase `true`/`false`; invalid values fail startup. The authenticated
+`GET /v1/social/capabilities` response drives native feature availability. Live
+snapshots carry the same capabilities so a connected phone clears portrait caches
+or its BLE rider slots when those features are disabled. Firmware must still
+advertise the diagnostic Group Riders capability; this flag cannot qualify a
+production board by itself.
+
+Enable media with profiles, then routes, activities, groups and finally hardware.
+For a fully enabled **development test environment**, set all five to `true`;
+retain the separate native build and firmware diagnostic gates. Provider, S3 and
+database configuration must still be supplied; disabling media does not remove
+its cleanup configuration. Restart every API replica and worker together when
+changing flags. Do not run mixed rollout settings across replicas.
+
+Disabling a feature returns `503 feature_unavailable` for affected reads/writes,
+including share links, alternate content paths and idempotent retries. Disabling
+groups also closes live sockets and denies new state. Stop sharing, leave/end,
+invitation decline/cancel, blocks, content/link deletion, photo removal and account
+deletion remain available. The worker continues cleanup and holds invitation
+notifications until groups are enabled again. Turning a flag back on does not
+renew expired live consent. Keep API/worker revocation services running during a
+rollback instead of taking the whole social service offline.
+
 `map-platform/deploy/compose.social.yaml` provides PostgreSQL 17, an API, an
 explicit migration job, and an outbox worker. It does not change the deployed map
 worker or promote an image. Set `BICINO_SOCIAL_IMAGE` to the CI-produced immutable

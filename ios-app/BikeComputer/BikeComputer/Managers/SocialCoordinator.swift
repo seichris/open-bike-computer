@@ -10,6 +10,7 @@ final class SocialCoordinator: ObservableObject {
     let client: BicinoSocialClient
     let live: LiveRideService
     @Published private(set) var profile: SocialProfile?
+    @Published private(set) var capabilities = SocialCapabilities()
     @Published private(set) var friends: [SocialProfile] = []
     @Published private(set) var requests: [SocialFriendRequest] = []
     @Published private(set) var blocked: [SocialProfile] = []
@@ -57,9 +58,14 @@ final class SocialCoordinator: ObservableObject {
         live.onRidersChanged = { [weak self] riders in
             Task { @MainActor [weak self] in await self?.loadPhotos(riders.map(\.profile)) }
         }
+        live.onCapabilitiesChanged = { [weak self] capabilities in
+            self?.capabilities = capabilities
+            if !capabilities.media { self?.photos = [:] }
+        }
     }
 
     func clear() {
+        capabilities = SocialCapabilities()
         profile = nil; friends = []; requests = []; invitations = []; sentInvitations = []
         routes = []; activities = []; photos = [:]; rides = []; blocked = []
         live.reset()
@@ -67,13 +73,17 @@ final class SocialCoordinator: ObservableObject {
 
     func refresh() async throws {
         let expected = session.generation
+        let capabilities = try JSONDecoder().decode(SocialCapabilities.self, from: await client.request("capabilities"))
+        guard expected == session.generation else { return }
+        self.capabilities = capabilities
+        if !capabilities.groups { await live.stopSharing(); live.reset() }
+        if !capabilities.media { photos = [:] }
         let me = try JSONDecoder().decode(SocialProfile.self, from: await client.request("me"))
         let friends: [SocialProfile] = try await pages("friends")
         let requests: [SocialFriendRequest] = try await pages("friend-requests")
-        let invites = try JSONDecoder().decode(SocialPage<SocialInvite>.self, from: await client.request("ride-invites")).items
-        let sent = try JSONDecoder().decode(SocialPage<SocialInvite>.self,
-            from: await client.request("ride-invites", query: [URLQueryItem(name: "sent", value: "true")])).items
-        let rooms = try JSONDecoder().decode(SocialPage<SocialGroupRide>.self, from: await client.request("group-rides")).items
+        let invites: [SocialInvite] = capabilities.groups ? try await pages("ride-invites") : []
+        let sent: [SocialInvite] = capabilities.groups ? try await pages("ride-invites", query: [URLQueryItem(name: "sent", value: "true")]) : []
+        let rooms: [SocialGroupRide] = capabilities.groups ? try await pages("group-rides") : []
         let blocked = try JSONDecoder().decode(SocialPage<SocialProfile>.self, from: await client.request("blocks")).items
         let routes = try await content(kind: "routes")
         let activities = try await content(kind: "activities")
@@ -98,17 +108,19 @@ final class SocialCoordinator: ObservableObject {
     }
 
     func content(kind: String, owner: String? = nil) async throws -> [SocialContent] {
+        guard kind == "routes" ? capabilities.routes : capabilities.activities else { return [] }
         let query = owner.map { [URLQueryItem(name: "owner", value: $0)] } ?? []
         return try await pages(kind, query: query)
     }
 
     func loadPhotos(_ profiles: [SocialProfile]) async {
+        guard capabilities.media else { return }
         let expected = session.generation
         if photos.count > 128 { photos = [:] }
         for profile in profiles {
             guard let asset = profile.avatarID, photos[asset] == nil else { continue }
             if let data = try? await client.request("media/\(asset)/marker"),
-               data.count <= 512000, let image = UIImage(data: data), expected == session.generation {
+               data.count <= 512000, let image = UIImage(data: data), expected == session.generation, capabilities.media {
                 photos[asset] = image
             }
         }

@@ -96,16 +96,20 @@ struct SocialHubView: View {
                         }
                     }
                 }
-                Section("Shared routes") {
-                    NavigationLink("Publish a saved route") { SocialRoutePublisher(store: store, routeLibrary: routeLibrary) }
-                    ForEach(store.routes) { route in
-                        NavigationLink(route.title) { SocialContentDetail(store: store, item: route, routeLibrary: routeLibrary) }
+                if store.capabilities.routes {
+                    Section("Shared routes") {
+                        NavigationLink("Publish a saved route") { SocialRoutePublisher(store: store, routeLibrary: routeLibrary) }
+                        ForEach(store.routes) { route in
+                            NavigationLink(route.title) { SocialContentDetail(store: store, item: route, routeLibrary: routeLibrary) }
+                        }
                     }
                 }
-                Section("Completed rides") {
-                    NavigationLink("Share a completed ride") { SocialActivityPublisher(store: store) }
-                    ForEach(store.activities) { activity in
-                        NavigationLink(activity.title) { SocialContentDetail(store: store, item: activity, routeLibrary: routeLibrary) }
+                if store.capabilities.activities {
+                    Section("Completed rides") {
+                        NavigationLink("Share a completed ride") { SocialActivityPublisher(store: store) }
+                        ForEach(store.activities) { activity in
+                            NavigationLink(activity.title) { SocialContentDetail(store: store, item: activity, routeLibrary: routeLibrary) }
+                        }
                     }
                 }
                 if !store.blocked.isEmpty {
@@ -115,9 +119,11 @@ struct SocialHubView: View {
                         }
                     }
                 }
-                Section("Join a Group Ride") {
-                    TextField("Ride code", text: $joinCode).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    Button("Join") { perform { try await store.join(joinCode.trimmingCharacters(in: .whitespacesAndNewlines)) } }
+                if store.capabilities.groups {
+                    Section("Join a Group Ride") {
+                        TextField("Ride code", text: $joinCode).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        Button("Join") { perform { try await store.join(joinCode.trimmingCharacters(in: .whitespacesAndNewlines)) } }
+                    }
                 }
                 Section {
                     Button("Link another Google sign-in") { perform { try await store.session.signInWithGoogle(link: true) } }
@@ -196,10 +202,12 @@ private struct SocialProfileEditor: View {
             Section {
                 TextField("Display name", text: $name)
                 TextField("Username", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
-                PhotosPicker("Choose photo", selection: $selected, matching: .images)
-                if let photo, let image = UIImage(data: photo) {
-                    Image(uiImage: image).resizable().scaledToFill().frame(width: 160, height: 160).clipShape(Circle())
-                    Button("Use this photo") { run { try await store.setPhoto(photo); self.photo = nil } }
+                if store.capabilities.media {
+                    PhotosPicker("Choose photo", selection: $selected, matching: .images)
+                    if let photo, let image = UIImage(data: photo) {
+                        Image(uiImage: image).resizable().scaledToFill().frame(width: 160, height: 160).clipShape(Circle())
+                        Button("Use this photo") { run { try await store.setPhoto(photo); self.photo = nil } }
+                    }
                 }
                 Button("Remove photo", role: .destructive) { run { try await store.removePhoto() } }
             } header: { Text("Profile") } footer: {
@@ -338,10 +346,12 @@ struct SocialContentDetail: View {
                     do { try store.save(item, to: routeLibrary, duplicate: true); saved = true }
                     catch { store.error = error.localizedDescription }
                 }
-                Toggle("Schedule for later", isOn: $schedule)
-                if schedule { DatePicker("Starts", selection: $startsAt, in: Date()...Date().addingTimeInterval(29 * 86400)) }
-                Button("Ride together") {
-                    Task { do { try await store.createRide(route: item, title: item.title, startsAt: schedule ? startsAt : nil) } catch { store.error = error.localizedDescription } }
+                if store.capabilities.groups {
+                    Toggle("Schedule for later", isOn: $schedule)
+                    if schedule { DatePicker("Starts", selection: $startsAt, in: Date()...Date().addingTimeInterval(29 * 86400)) }
+                    Button("Ride together") {
+                        Task { do { try await store.createRide(route: item, title: item.title, startsAt: schedule ? startsAt : nil) } catch { store.error = error.localizedDescription } }
+                    }
                 }
                 Text("A saved copy stays in your library even if the owner later stops sharing.").font(.caption)
             }

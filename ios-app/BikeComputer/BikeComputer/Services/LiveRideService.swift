@@ -12,6 +12,7 @@ final class LiveRideService: ObservableObject {
     @Published private(set) var messages: [SocialQuickMessage] = []
     var prepareLocation: (() -> Bool)?
     var onRidersChanged: (([SocialRider]) -> Void)?
+    var onCapabilitiesChanged: ((SocialCapabilities) -> Void)?
     private let client: BicinoSocialClient
     private var stream: Task<Void, Never>?
     private var publisher: Task<Void, Never>?
@@ -81,6 +82,10 @@ final class LiveRideService: ObservableObject {
                         let next = try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: document))
                         guard epoch == self.localEpoch, next.id == ride.id else { break }
                         if let current = self.ride, next.serverTime < current.serverTime { continue }
+                        if let capabilities = document["capabilities"] {
+                            self.onCapabilitiesChanged?(try JSONDecoder().decode(SocialCapabilities.self,
+                                from: JSONSerialization.data(withJSONObject: capabilities)))
+                        }
                         self.ride = next
                         self.riders = next.riders.filter { $0.age(at: Date()) < 60 }
                         if !next.sharing { self.isSharing = false }
@@ -98,7 +103,7 @@ final class LiveRideService: ObservableObject {
                     do {
                         _ = try await self.client.request("group-rides/\(ride.id)")
                     } catch SocialFailure.server(let code) {
-                        if ["ride_ended", "membership_required", "not_found", "account_unavailable"].contains(code) {
+                        if ["ride_ended", "membership_required", "not_found", "account_unavailable", "feature_unavailable"].contains(code) {
                             self.reset()
                             return
                         }

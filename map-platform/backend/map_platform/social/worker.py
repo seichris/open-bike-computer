@@ -6,6 +6,7 @@ import os
 import time
 from sqlalchemy import and_, delete, or_, select, update
 from ..user_auth import FirebaseIdentity
+from .features import SocialFeatures
 from .database import (Database, accounts, blocks, content, devices, friendships, invites,
                        limits, links, media, members, messages, outbox, replays, rides)
 from .media import S3Media, reconcile_orphans
@@ -57,8 +58,9 @@ def cleanup_account(c, actor, identity, media_store):
               project="deleted", state="deleted", username=None, name="Deleted rider", privacy={}, avatar=None))
 
 
-def run_once(database, identity, media_store, notifications, now=None):
+def run_once(database, identity, media_store, notifications, now=None, features=None):
     now = time.time() if now is None else now
+    features = features if features is not None else SocialFeatures.from_environment()
     # Each event is independently committed. Remote operations are idempotent;
     # a crash between delivery and commit may redeliver the same collapse ID.
     for _ in range(100):
@@ -67,6 +69,10 @@ def run_once(database, identity, media_store, notifications, now=None):
                 .order_by(outbox.c.created).with_for_update(skip_locked=True).limit(1)).mappings().first()
             if event is None:
                 break
+            if event["kind"] == "ride_invite" and not features.document()["groups"]:
+                # Keep pending invitations for re-enable, without delaying cleanup.
+                c.execute(update(outbox).where(outbox.c.id == event["id"]).values(next_attempt=now+60))
+                continue
             try:
                 with c.begin_nested():
                     if event["kind"] == "delete_account":

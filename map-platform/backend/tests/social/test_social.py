@@ -7,6 +7,7 @@ from PIL import Image
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from map_platform.social.api import create_app
+from map_platform.social.features import SocialFeatures
 from map_platform.social.database import Database, accounts, content, media, members, outbox
 from map_platform.social.media import MemoryMedia, sanitize_avatar
 from map_platform.social.service import SocialService
@@ -36,7 +37,7 @@ class SocialTest(unittest.TestCase):
             metadata.drop_all(self.db.engine)
         self.db.migrate()
         self.media=MemoryMedia();self.service=SocialService(self.db,self.media,lambda:self.clock)
-        self.client=TestClient(create_app(service=self.service,identity=Identity()))
+        self.client=TestClient(create_app(service=self.service,identity=Identity(),features=SocialFeatures(True,True,True,True,True)))
         self.counter=0
         self.ids={u:self.call(u,'GET','/me').json()['id'] for u in ('alice','bob','carol')}
     def tearDown(self):
@@ -78,6 +79,50 @@ class SocialTest(unittest.TestCase):
         self.assertEqual(profile['privacy']['zones'],[])
         self.assertNotIn('uid',profile);self.assertNotIn('email',profile)
         self.assertNotEqual(profile['id'],'alice')
+
+    def test_rollout_defaults_keep_accounts_and_cleanup_available(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, {}, clear=True):
+            features = SocialFeatures.from_environment()
+        self.assertEqual(features.document(), dict(media=False, routes=False, activities=False, groups=False, hardware=False))
+        self.client.app.state.features = features
+        self.assertEqual(self.call('alice', 'GET', '/capabilities').json(), features.document())
+        self.assertEqual(self.call('alice', 'GET', '/me').status_code, 200)
+        self.friend()
+        self.assertEqual(self.call('alice', 'POST', '/routes', self.route()).status_code, 503)
+        self.assertEqual(self.call('alice', 'GET', '/activities').status_code, 503)
+        self.assertEqual(self.call('alice', 'GET', '/group-rides').status_code, 503)
+        self.assertEqual(self.call('alice', 'DELETE', '/me/avatar').status_code, 200)
+        self.assertEqual(self.call('alice', 'POST', '/me/deletion', {'expectedProfileID': self.ids['alice']}).status_code, 200)
+        with patch.dict(os.environ, {'BICINO_SOCIAL_FEATURE_ROUTES': 'tru'}, clear=True):
+            with self.assertRaises(ValueError): SocialFeatures.from_environment()
+
+    def test_rollout_blocks_links_aliases_and_idempotent_replay(self):
+        item = self.call('alice', 'POST', '/routes', self.route('link')).json()
+        link = self.call('alice', 'POST', '/share-links', {'contentID': item['id']}, key='rollout-link').json()
+        self.client.app.state.features = SocialFeatures(activities=True, groups=True, hardware=True)
+        caps = self.call('alice', 'GET', '/capabilities').json()
+        self.assertFalse(caps['groups']); self.assertFalse(caps['hardware'])
+        for path in ['/routes/' + item['id'], '/activities/' + item['id'], '/shared/' + link['url'].split('/')[-1]]:
+            self.assertEqual(self.call('alice', 'GET', path).status_code, 503, path)
+        self.assertEqual(self.call('alice', 'POST', '/share-links', {'contentID': item['id']}, key='rollout-link').status_code, 503)
+        self.assertEqual(self.call('alice', 'POST', '/share-links', {'contentID': item['id']}).status_code, 503)
+        self.assertEqual(self.call('alice', 'DELETE', '/share-links/' + link['id']).status_code, 200)
+        self.assertEqual(self.call('alice', 'DELETE', '/routes/' + item['id']).status_code, 200)
+
+    def test_rollout_closes_existing_socket_and_preserves_stop_and_leave(self):
+        from starlette.websockets import WebSocketDisconnect
+        room = self.ride(); rid = room['id']
+        self.call('bob', 'POST', f'/group-rides/{rid}/consent', {'location': True, 'stats': True})
+        with self.client.websocket_connect(f'/group-rides/{rid}/live', headers={'Authorization': 'Bearer bob'}) as socket:
+            self.assertTrue(socket.receive_json()['capabilities']['hardware'])
+            self.client.app.state.features = SocialFeatures(routes=True)
+            with self.assertRaises(WebSocketDisconnect) as closed: socket.receive_json()
+            self.assertEqual(closed.exception.code, 4003)
+        self.assertEqual(self.call('bob', 'POST', f'/group-rides/{rid}/consent', {'location': True, 'stats': False}).status_code, 503)
+        self.assertEqual(self.call('bob', 'POST', f'/group-rides/{rid}/consent', {'location': False, 'stats': False}).status_code, 200)
+        self.assertEqual(self.call('bob', 'POST', f'/group-rides/{rid}/leave').status_code, 200)
+        self.assertEqual(self.call('alice', 'POST', f'/group-rides/{rid}/end').status_code, 200)
     def test_requests_require_recipient_acceptance_and_block_revokes(self):
         r=self.call('alice','POST','/friend-requests',{'profileID':self.ids['bob']})
         key=r.json()['id']
@@ -208,7 +253,7 @@ class SocialTest(unittest.TestCase):
         from map_platform.social.database import friendships
         body={'profileID':self.ids['bob']}
         def send(index):
-            with TestClient(create_app(service=self.service,identity=Identity())) as client:
+            with TestClient(create_app(service=self.service,identity=Identity(),features=SocialFeatures(True,True,True,True,True))) as client:
                 return client.post('/friend-requests',json=body,headers={'Authorization':'Bearer alice','Idempotency-Key':'concurrent-request'}).status_code
         with ThreadPoolExecutor(max_workers=4) as executor:
             results=list(executor.map(send,range(4)))
@@ -273,6 +318,25 @@ class SocialTest(unittest.TestCase):
         notifier = RecordingNotifications()
         run_once(self.db,Identity(),self.media,notifier,now=self.clock)
         self.assertEqual(notifier.sent,[])
+
+    def test_group_rollout_holds_invite_push_without_blocking_deletion(self):
+        from map_platform.social.database import devices
+        room = self.ride()
+        self.call('alice', 'POST', '/ride-invites', {'rideID': room['id'], 'profileID': self.ids['bob']})
+        self.call('carol', 'POST', '/me/deletion', {'expectedProfileID': self.ids['carol']})
+        with self.db.transaction() as c:
+            c.execute(devices.insert().values(id='phone', owner=self.ids['bob'], token='a'*64, environment='development'))
+        class RecordingNotifications:
+            def __init__(self): self.sent = []
+            def send(self, *args): self.sent.append(args); return True
+        notifier = RecordingNotifications()
+        run_once(self.db, Identity(), self.media, notifier, now=self.clock, features=SocialFeatures())
+        self.assertEqual(notifier.sent, [])
+        with self.db.transaction() as c:
+            self.assertEqual(c.scalar(select(accounts.c.state).where(accounts.c.id == self.ids['carol'])), 'deleted')
+            self.assertEqual(len(c.execute(select(outbox).where(outbox.c.kind == 'ride_invite')).all()), 1)
+        run_once(self.db, Identity(), self.media, notifier, now=self.clock+61, features=SocialFeatures(routes=True, groups=True))
+        self.assertEqual(len(notifier.sent), 1)
 
     def test_removed_member_cannot_preview_old_code_and_invites_can_be_cancelled(self):
         room = self.ride(); rid = room['id']

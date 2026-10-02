@@ -1,6 +1,14 @@
 import CoreLocation
 import Foundation
 
+struct SocialCapabilities: Codable, Equatable {
+    var media = false
+    var routes = false
+    var activities = false
+    var groups = false
+    var hardware = false
+}
+
 struct SocialProfile: Codable, Identifiable, Equatable {
     let id: String
     let username: String?
