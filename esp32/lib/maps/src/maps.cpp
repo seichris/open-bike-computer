@@ -4923,7 +4923,9 @@ void Maps::renderWorkerLoop() {
       if (processPendingStorageControl() || processPendingVectorMapActivation())
         break;
     }
+#if MAP_POIS_RUNTIME_ENABLED
     (void)processPendingNearbySearch();
+#endif
   }
 
   if (renderStateMutex != nullptr &&
@@ -5299,6 +5301,7 @@ void Maps::updatePresentedFrameTransform() {
   lastFramePresentationSignature = presentationSignature;
 }
 
+#if MAP_POIS_RUNTIME_ENABLED
 bool Maps::projectNearbyResult(
     const map_nearby_query::Result &place,
     map_nearby_layout::Input &output) const {
@@ -5370,6 +5373,7 @@ bool Maps::projectNearbyResult(
   output.y = shown.y;
   return true;
 }
+#endif
 
 void Maps::renderLiveForeground() {
   if (canvasForeground == nullptr) {
@@ -5965,6 +5969,7 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
 
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
+#if MAP_POIS_RUNTIME_ENABLED
   bool poiIndexReady = false;
   try {
     MapNearbyVector<map_poi_index::Entry> entries;
@@ -5977,6 +5982,7 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
     ESP_LOGE(TAG, "MAP_RESOURCE_REJECTED: Nearby index activation");
   }
   cancelNearbySearch();
+#endif
   for (MapBlock *block : memCache.blocks)
     delete block;
   memCache.blocks.clear();
@@ -5985,7 +5991,9 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
   labelFontAsset = std::move(candidateFont);
   streetLabelFontHealthy.store(labelFontAsset.healthy(),
                                std::memory_order_release);
+#if MAP_POIS_RUNTIME_ENABLED
   nearbyPoiIndexHealthy.store(poiIndexReady, std::memory_order_release);
+#endif
   labelLayoutCache.clear();
   streetLabelRuntimeFailure.store(map_font_asset::RuntimeError::None,
                                   std::memory_order_release);
@@ -6143,6 +6151,7 @@ bool Maps::requestStorageControl(void (*work)(void *), void *context) {
   return true;
 }
 
+#if MAP_POIS_RUNTIME_ENABLED
 uint32_t Maps::requestNearbySearch(map_nearby_query::Position rider,
                                    uint32_t selectedMask, double radiusM) {
   if (!map_nearby_query::valid(rider) || selectedMask == 0 ||
@@ -6252,6 +6261,7 @@ bool Maps::processPendingNearbySearch() {
   }
   return true;
 }
+#endif
 
 bool Maps::processPendingStorageControl() {
   if (xSemaphoreTake(renderStateMutex, portMAX_DELAY) != pdTRUE)
@@ -8337,6 +8347,7 @@ void Maps::centerOnGps(double lat, double lon) {
   ESP_LOGI(TAG, "centerOnGps: map center updated");
 }
 
+#if MAP_POIS_RUNTIME_ENABLED
 void Maps::centerOnCoordinate(double lat, double lon) {
   if (!map_nearby_query::valid({lat, lon})) return;
   followGps = false;
@@ -8345,6 +8356,7 @@ void Maps::centerOnCoordinate(double lat, double lon) {
   isPosMoved = true;
   redrawMap = true;
 }
+#endif
 
 /**
  * @brief Smooth scroll current map

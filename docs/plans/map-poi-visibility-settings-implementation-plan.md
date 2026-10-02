@@ -1202,9 +1202,10 @@ plan. It is not completed by this documentation refresh.
    Implement the combined/no-elevation discriminated contract, FPI1 index,
    requested-feature policy, and Nearby screen type 6 as new work: these are
    not supplied by renumbering the original visibility-only implementation.
-4. Coordinate the unimplemented target-5/section-6/visibility-bit-14 hillshade
-   reservations in the topography plan. Preserve target-4 topography and
-   recheck for any newer deployed contract before resolving conflicts.
+4. Keep the coordinated prospective hillshade reservation update in the
+   topography plan: target 6/FMB v7/section 7 and visibility bit 19. Preserve
+   target-4 topography and recheck for any newer deployed contract before
+   resolving conflicts.
 5. Register POI tests and Swift dependencies in `tools/development/`; preserve
    main's shared runner, CI routing, report isolation, and evidence workflow.
 6. Run the implementation tests below, inspect the fresh PR CI Gate, and keep

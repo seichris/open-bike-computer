@@ -104,6 +104,7 @@ static uint32_t activeScreenPayloadSignature = 0;
 static uint32_t mapRenderInstanceID = 0;
 static uint8_t mapRenderInstanceType = DEVICE_SCREEN_MAP;
 static uint32_t mapRenderProfileSignature = 0;
+#if MAP_POIS_RUNTIME_ENABLED
 struct NearbyMarkerView {
   lv_obj_t *button = nullptr;
   lv_obj_t *icon = nullptr;
@@ -139,6 +140,7 @@ struct NearbyView {
 };
 static NearbyView nearby;
 static std::array<std::array<uint16_t, 14 * 14>, 5> nearbyIconPixels{};
+#endif
 struct DestinationRowContext {
   uint32_t generation = 0;
   uint16_t token = 0;
@@ -160,10 +162,12 @@ static constexpr lv_point_precise_t DESTINATION_STAR_POINTS[] = {
     {3, 18}, {5, 11}, {0, 7},  {7, 6},   {9, 0}};
 
 static void refreshDestinationPickersAsync(void *userData);
+#if MAP_POIS_RUNTIME_ENABLED
 static void createNearbyScreen();
 static void showNearbyPicker();
 static void hideNearbyScreen();
 static void serviceNearbyScreen(uint32_t nowMs);
+#endif
 
 namespace {
 
@@ -454,7 +458,11 @@ static map_pinch_zoom::Controller mapPinchController;
 
 static bool standaloneMapAcceptsMultiTouch() {
   return isMainScreen &&
-         (activeTile == MAP || (activeTile == NEARBY && nearby.showingMap)) &&
+         (activeTile == MAP
+#if MAP_POIS_RUNTIME_ENABLED
+          || (activeTile == NEARBY && nearby.showingMap)
+#endif
+          ) &&
          mapSet.vectorMap;
 }
 
@@ -1369,7 +1377,9 @@ void updateMainScreen(lv_timer_t *t) {
   const uint32_t nowMs = millis();
   (void)uiChangeTracker.observe(captureSourceSignatures(nowMs));
   const bool navigationOverlayChanged = prepareVisibleMapUpdate(nowMs);
+#if MAP_POIS_RUNTIME_ENABLED
   serviceNearbyScreen(nowMs);
+#endif
 
   if (isScrolled && isMainScreen) {
     switch (activeTile) {
@@ -2046,6 +2056,7 @@ static void createMapGuidanceOverlay() {
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 }
 
+#if MAP_POIS_RUNTIME_ENABLED
 static bool nearbyFreshPosition(uint32_t nowMs,
                                 map_nearby_query::Position &position) {
   const auto sample = gps_input_freshness::presentationSample(
@@ -2605,6 +2616,7 @@ static void serviceNearbyScreen(uint32_t nowMs) {
   }
   refreshNearbyMarkers(nowMs);
 }
+#endif
 
 static void showMainTile(tileName tile) {
   if (!mapTile || !navTile || !rideStatsTile || !batteryStatusTile ||
@@ -2615,7 +2627,9 @@ static void showMainTile(tileName tile) {
 
   lv_obj_add_flag(mapGuidanceOverlay, LV_OBJ_FLAG_HIDDEN);
 
+#if MAP_POIS_RUNTIME_ENABLED
   if (tile != NEARBY) hideNearbyScreen();
+#endif
 
   activeTile = tile;
   canScrollMap = tile == MAP || tile == NEARBY;
@@ -2686,11 +2700,13 @@ static void showMainTile(tileName tile) {
   }
 
   switch (tile) {
+#if MAP_POIS_RUNTIME_ENABLED
   case NEARBY:
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
     showNearbyPicker();
     log_i("UI: switched to Nearby screen");
     break;
+#endif
   case MAP_GUIDANCE:
     uiChangeTracker.mark(ui_update_policy::Source::Navigation);
     updateMapGuidanceOverlay();
@@ -3002,8 +3018,9 @@ void createMainScr() {
   lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
 
   createMapGuidanceOverlay();
-  if (map_profile_protocol::POIS_RUNTIME_ENABLED)
-    createNearbyScreen();
+#if MAP_POIS_RUNTIME_ENABLED
+  createNearbyScreen();
+#endif
 
   // Set tilesScreen to same as mapTile for compatibility
   tilesScreen = mapTile;
