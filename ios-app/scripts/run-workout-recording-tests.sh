@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+DEV_SWIFT_COMPILER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/development/swift_compile.py"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bicino-recording-tests.XXXXXX")"
@@ -10,11 +12,8 @@ if command -v xcrun >/dev/null 2>&1; then
 else
   SWIFTC=(swiftc)
 fi
-"${SWIFTC[@]}" -parse-as-library -default-isolation MainActor \
-  ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift \
-  ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift \
-  ios-app/BikeComputer/BikeComputer/Managers/WorkoutRecordingStore.swift \
-  ios-app/BikeComputerTests/WorkoutRecordingOwnershipTests.swift \
+python3 "${DEV_SWIFT_COMPILER}" workout-recording-1 -- \
+  -parse-as-library -default-isolation MainActor \
   -o "${OUT_DIR}/ownership"
 "${OUT_DIR}/ownership"
 

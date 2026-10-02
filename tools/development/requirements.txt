@@ -1,0 +1,2 @@
+-r ../../esp32/tools/preconnection-assets-requirements.txt
+cryptography==50.0.0
