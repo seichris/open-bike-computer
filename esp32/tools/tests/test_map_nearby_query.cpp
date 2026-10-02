@@ -2,6 +2,8 @@
 #define radians(deg) ((deg) * 0.017453292519943295)
 #include "../../lib/maps/src/mapNearbyQuery.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -88,6 +90,55 @@ int main() {
   }
   assert(distanceMeters({80.0, 179.99}, {80.0, -179.99}) <
          distanceMeters({80.0, 179.99}, {80.0, 179.90}));
+
+  // Compare the bounded accumulator with a brute-force scan of every record.
+  // Feed the distant block first so insertion order cannot mask rank errors.
+  const std::array<int32_t, 4> blockXs{{8, 1, -1, 0}};
+  std::array<map_poi_index::Entry, 4> denseIndex{};
+  std::array<std::vector<uint8_t>, 4> denseRecords{};
+  std::vector<Result> expected;
+  constexpr uint32_t selectedCategories = (1U << 0) | (1U << 2) | (1U << 4);
+  NearestTen denseSearch(origin, selectedCategories, 25000.0);
+  for (size_t block = 0; block < denseIndex.size(); ++block) {
+    auto &entry = denseIndex[block];
+    entry.blockX = blockXs[block];
+    entry.blockY = 0;
+    entry.sectionOffset = 112;
+    for (uint16_t ordinal = 0; ordinal < 30; ++ordinal) {
+      const uint16_t localX = static_cast<uint16_t>((ordinal * 137U) % 4096U);
+      const uint16_t localY = static_cast<uint16_t>((ordinal * 211U) % 4096U);
+      const uint8_t category = static_cast<uint8_t>((ordinal + block) % 5U + 1U);
+      denseRecords[block].insert(denseRecords[block].end(), {
+          static_cast<uint8_t>(localX), static_cast<uint8_t>(localX >> 8U),
+          static_cast<uint8_t>(localY), static_cast<uint8_t>(localY >> 8U),
+          category, 5, 0, 0});
+      ++entry.categoryCounts[category - 1U];
+      entry.categoryMask |= 1U << (category - 1U);
+      Position position;
+      assert(mercatorPosition(double(entry.blockX) * kBlockSizeM + localX,
+                              double(entry.blockY) * kBlockSizeM + localY,
+                              position));
+      const double distance = distanceMeters(origin, position);
+      if ((selectedCategories & (1U << (category - 1U))) != 0 &&
+          distance <= 25000.0)
+        expected.push_back({position, distance, entry.blockX, entry.blockY,
+                            ordinal, category});
+    }
+    entry.sectionBytes = static_cast<uint32_t>(8U + denseRecords[block].size());
+    assert(denseSearch.consume(entry, 0, denseRecords[block].data(), 30));
+  }
+  std::sort(expected.begin(), expected.end(), better);
+  assert(denseSearch.size() == kMaximumResults);
+  for (size_t index = 0; index < denseSearch.size(); ++index) {
+    assert(denseSearch[index].blockX == expected[index].blockX);
+    assert(denseSearch[index].recordOrdinal == expected[index].recordOrdinal);
+    assert(denseSearch[index].category == expected[index].category);
+    assert(std::fabs(denseSearch[index].directDistanceM -
+                     expected[index].directDistanceM) < 1e-6);
+  }
+  assert(prepareFrontier(denseIndex.data(), denseIndex.size(), origin,
+                         selectedCategories, 25000.0, frontier));
+  assert(frontier.size() == 3);
 
   std::cout << "Nearby query geometry and bounded nearest-ten tests passed\n";
 }

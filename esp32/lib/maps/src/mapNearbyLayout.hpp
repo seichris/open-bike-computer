@@ -38,6 +38,21 @@ struct Layout {
   size_t count = 0;
 };
 
+// Results arrive nearest-first. A mixed group keeps its category=0 marker for
+// chooser semantics, but still needs a recognizable icon on the map.
+inline uint8_t displayCategory(const Placement &placement,
+                               const Input *inputs, size_t inputCount) {
+  if (placement.category >= 1 && placement.category <= 5)
+    return placement.category;
+  if (inputs == nullptr || inputCount > kMaximumResults) return 0;
+  for (size_t index = 0; index < inputCount; ++index) {
+    if ((placement.members & (1U << index)) != 0 &&
+        inputs[index].category >= 1 && inputs[index].category <= 5)
+      return inputs[index].category;
+  }
+  return 0;
+}
+
 inline bool pinFits(double x, double y, double width, double height,
                     bool round, double topInset, double bottomInset,
                     bool wasOnMap) {

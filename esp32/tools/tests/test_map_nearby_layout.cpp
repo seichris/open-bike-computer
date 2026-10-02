@@ -19,9 +19,13 @@ int main() {
   assert(round.count == 3);
   assert(round.placements[0].count == 2 && !round.placements[0].edge);
   assert(round.placements[0].category == 0);
+  assert(map_nearby_layout::displayCategory(
+             round.placements[0], places.data(), places.size()) == 1);
   assert(round.placements[0].nearestDistanceM == 120);
   assert(round.placements[1].count == 2 && round.placements[1].edge);
   assert(round.placements[1].category == 3);
+  assert(map_nearby_layout::displayCategory(
+             round.placements[1], places.data(), places.size()) == 3);
   assert(round.placements[1].members == (1U << 2 | 1U << 3));
   for (size_t index = 0; index < round.count; ++index) {
     const auto &placed = round.placements[index];

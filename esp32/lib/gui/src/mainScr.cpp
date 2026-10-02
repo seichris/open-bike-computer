@@ -2471,9 +2471,11 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
         (nearby.highlightedResult < nearby.result.count &&
          (placed.members & (1U << nearby.highlightedResult)) != 0)
             ? lv_color_hex(0xFFE269) : lv_color_white(), 0);
-    if (placed.category != 0) {
+    const uint8_t displayCategory = map_nearby_layout::displayCategory(
+        placed, projected.data(), nearby.result.count);
+    if (displayCategory != 0) {
       lv_canvas_set_buffer(marker.icon,
-                           nearbyIconPixels[placed.category - 1U].data(),
+                           nearbyIconPixels[displayCategory - 1U].data(),
                            14, 14, LV_COLOR_FORMAT_RGB565);
       lv_obj_set_pos(marker.icon, placed.edge ? 10 : 8,
                      placed.edge ? 7 : 8);
