@@ -4,6 +4,11 @@ This document defines how a tagged production build becomes a portable
 factory-flash artifact without bypassing the repository-owned firmware runtime
 or its upload attestation.
 
+The protected publisher also derives signed, preservation-scoped web recovery
+assets from supported factory bundles. See [USB recovery](usb-firmware-recovery.md)
+for the `/update` contract and separate consumer qualification gate. A factory
+release signature does not itself enable browser flashing.
+
 ## Source and qualification boundary
 
 `open-bike-computer` is the production firmware source of truth. Build both
