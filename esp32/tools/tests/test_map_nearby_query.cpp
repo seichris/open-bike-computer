@@ -43,6 +43,10 @@ int main() {
       "{\"nearbyCoverage\":{\"blockSizeMeters\":4096,"
       "\"blocks\":[[0,0],[0,0]],\"profileVersion\":1}}",
       signedCoverage));
+  assert(!map_nearby_coverage::decodeManifest(
+      "{\"nearbyCoverage\":{\"profileVersion\":1,"
+      "\"blockSizeMeters\":4096,\"blocks\":[[0,0]]}}",
+      signedCoverage));
   for (int x = -10; x <= 10; ++x)
     for (int y = -10; y <= 10; ++y)
       signedCoverage.push_back({x, y});

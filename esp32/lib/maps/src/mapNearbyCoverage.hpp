@@ -57,15 +57,12 @@ inline bool integer(std::string_view text, size_t &cursor, int32_t &value) {
   return true;
 }
 
-inline bool memberInteger(std::string_view object, std::string_view name,
-                          int32_t &value) {
-  size_t cursor = object.find(name);
-  if (cursor == std::string_view::npos) return false;
+inline bool field(std::string_view text, size_t &cursor,
+                  std::string_view name) {
+  skipSpace(text, cursor);
+  if (text.substr(cursor, name.size()) != name) return false;
   cursor += name.size();
-  return consume(object, cursor, ':') && integer(object, cursor, value) &&
-         (cursor == object.size() || object[cursor] == ',' ||
-          object[cursor] == '}' || object[cursor] == ' ' ||
-          object[cursor] == '\n');
+  return consume(text, cursor, ':');
 }
 
 inline bool decodeManifestInto(std::string_view manifest,
@@ -77,52 +74,53 @@ inline bool decodeManifestInto(std::string_view manifest,
   cursor += needle.size();
   if (!consume(manifest, cursor, ':') || !consume(manifest, cursor, '{'))
     return false;
-  const size_t start = cursor - 1;
-  // This profile has only primitive members and arrays, never nested objects.
-  const size_t end = manifest.find('}', cursor);
-  if (end == std::string_view::npos) return false;
-  const std::string_view object = manifest.substr(start, end - start + 1);
-  int32_t profile = 0, size = 0;
-  if (!memberInteger(object, "\"profileVersion\"", profile) || profile != 1 ||
-      !memberInteger(object, "\"blockSizeMeters\"", size) || size != 4096)
-    return false;
-  cursor = object.find("\"blocks\"");
-  if (cursor == std::string_view::npos) return false;
-  cursor += sizeof("\"blocks\"") - 1;
-  if (!consume(object, cursor, ':') || !consume(object, cursor, '['))
+  // Both the archive producer and the signed stream serialize sorted keys.
+  // Requiring that order keeps the device reader small and fail-closed.
+  int32_t size = 0;
+  if (!field(manifest, cursor, "\"blockSizeMeters\"") ||
+      !integer(manifest, cursor, size) || size != 4096 ||
+      !consume(manifest, cursor, ',') ||
+      !field(manifest, cursor, "\"blocks\"") ||
+      !consume(manifest, cursor, '['))
     return false;
   bool afterComma = false;
   while (true) {
-    skipSpace(object, cursor);
-    if (cursor >= object.size()) return false;
-    if (object[cursor] == ']') {
+    skipSpace(manifest, cursor);
+    if (cursor >= manifest.size()) return false;
+    if (manifest[cursor] == ']') {
       if (afterComma) return false;
       ++cursor;
       break;
     }
-    if (blocks.size() >= kMaximumBlocks || !consume(object, cursor, '['))
+    if (blocks.size() >= kMaximumBlocks || !consume(manifest, cursor, '['))
       return false;
     Block block;
-    if (!integer(object, cursor, block.x) || !consume(object, cursor, ',') ||
-        !integer(object, cursor, block.y) || !consume(object, cursor, ']') ||
+    if (!integer(manifest, cursor, block.x) ||
+        !consume(manifest, cursor, ',') ||
+        !integer(manifest, cursor, block.y) ||
+        !consume(manifest, cursor, ']') ||
         block.x < -4893 || block.x > 4893 ||
         block.y < -4893 || block.y > 4893 ||
         (!blocks.empty() && !less(blocks.back(), block))) return false;
     blocks.push_back(block);
     afterComma = false;
-    skipSpace(object, cursor);
-    if (cursor < object.size() && object[cursor] == ',') {
+    skipSpace(manifest, cursor);
+    if (cursor < manifest.size() && manifest[cursor] == ',') {
       ++cursor;
       afterComma = true;
       continue;
     }
-    if (cursor < object.size() && object[cursor] == ']') {
+    if (cursor < manifest.size() && manifest[cursor] == ']') {
       ++cursor;
       break;
     }
     return false;
   }
-  return !blocks.empty();
+  int32_t profile = 0;
+  return !blocks.empty() && consume(manifest, cursor, ',') &&
+         field(manifest, cursor, "\"profileVersion\"") &&
+         integer(manifest, cursor, profile) && profile == 1 &&
+         consume(manifest, cursor, '}');
 }
 
 inline bool decodeManifest(std::string_view manifest,

@@ -95,8 +95,11 @@ the five category counts, which must match the blocks and FPI1.
 Target 5 also requires signed `nearbyCoverage` with `profileVersion: 1`,
 `blockSizeMeters: 4096`, and `blocks`: a nonempty, strictly lexicographically
 ordered array of `[x, y]` signed block-grid coordinates. The array has at most
-1,024 entries and each coordinate is within `-4893...4893`. It is the exact
-complete-block selection used by extraction, including selected blocks that
+1,024 entries and each coordinate is within `-4893...4893`. The archive and
+stream serialize the coverage object's keys in sorted order
+(`blockSizeMeters`, `blocks`, `profileVersion`); firmware rejects other orders.
+The array is the exact complete-block selection used by extraction, including
+selected blocks that
 emitted no FMB because they had no rendered features. Every FMB block must be
 in this set. The FPI1 index is deliberately sparse and must never be used to
 infer coverage. Polygon holes and route corridors therefore remain holes in
