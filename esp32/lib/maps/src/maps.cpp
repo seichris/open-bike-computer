@@ -1343,6 +1343,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
       const uint32_t parseStartMs = MAPIO_TIME_MS();
       delete mblock; // readMapBlockBinary creates a new one
       mblock = readMapBlockBinary(file, fileSize);
+#if FIRMWARE_DIAGNOSTICS
       // Optional signed terrain sidecar. Legacy maps have no such file.
       try {
         const std::string terrainPath = std::string(fileName.c_str()) + ".fme";
@@ -1377,6 +1378,7 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
         // nor prevent a usable flat map when PSRAM is under pressure.
         mblock->terrain.clear();
       }
+#endif
       const uint32_t parseGridMs = MAPIO_TIME_MS() - parseStartMs;
       MAPIO_LOG("MAPIO: block ok=1 file=%s format=binary size=%u "
                 "openMs=%lu statMs=%lu readMs=%lu parseGridMs=%lu "
@@ -2064,11 +2066,13 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
     if (Maps::isMapFound.load(std::memory_order_acquire)) {
       newBlock->inView = true;
       newBlock->offset = req;
+#if FIRMWARE_DIAGNOSTICS
       if (!newBlock->terrain.empty() &&
           (newBlock->terrain[0].bx * 4096 != req.x ||
            newBlock->terrain[0].by * 4096 != req.y)) {
         newBlock->terrain.clear();
       }
+#endif
       newBlock->mercatorScale = map_projection::mercatorScaleForLatitude(
           Maps::mercatorY2lat(static_cast<double>(req.y) +
                               (1 << (MAPBLOCK_SIZE_BITS - 1))));
@@ -2831,6 +2835,7 @@ bool Maps::readVectorMap(
     return true;
   }
 
+#if FIRMWARE_DIAGNOSTICS
   if (style.visibilityMask & map_terrain::HEIGHT) {
     struct Face {
       std::array<Point16, 4> points;
@@ -2936,6 +2941,7 @@ bool Maps::readVectorMap(
       return true;
     }
   }
+#endif
 
   Polygon projectedPolygon;
   std::vector<int16_t, PsramAllocator<int16_t>> polygonScanlineNodes;
@@ -3077,6 +3083,7 @@ bool Maps::readVectorMap(
   }
 
   // Terrain is composited before roads, contours, labels and navigation.
+#if FIRMWARE_DIAGNOSTICS
   if (style.visibilityMask & map_terrain::MASK) {
     for (int y = 0; y < surface.height; y += 2) {
       if (shouldCancelMapRenderWork())
@@ -3103,6 +3110,7 @@ bool Maps::readVectorMap(
       }
     }
   }
+#endif
 
   // Contours share the accepted camera, raw surface, worker and semantic
   // cancellation policy. Draw after every area's fill, before any road/route.
