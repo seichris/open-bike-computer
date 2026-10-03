@@ -63,7 +63,11 @@ enum RideDiagnosticsHostTests {
             originals.append(try recorder.importDeviceChunk(deviceDigest: device, bootSequence: UInt32(boot),
                 chunk: 1, data: data, sha256: hash, enforceRetention: false))
         }
-        _ = try await store.inventory(job.id, deviceDigest: device, index: Data(), chunks: expected)
+        let index: [String: Any] = ["schema": 1, "source": "firmware", "bootSequence": 39,
+            "activeChunk": 2, "stats": ["enqueued": 39, "written": 39, "dropped": 0, "storageErrors": 0],
+            "chunks": try JSONSerialization.jsonObject(with: JSONEncoder().encode(expected))]
+        let indexData = try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
+        _ = try await store.inventory(job.id, deviceDigest: device, index: indexData, chunks: expected)
         for (receipt, data) in zip(expected, bodies) {
             try await store.verified(job.id, receipt: receipt, data: data)
         }
@@ -81,6 +85,38 @@ enum RideDiagnosticsHostTests {
             precondition(bytes.range(of: Data("device/\(relative)".utf8)) != nil)
             precondition(bytes.range(of: body) != nil, "every original chunk must be present byte-for-byte")
         }
+        let receiptName = "acquisitions/\(job.id.uuidString.lowercased()).json"
+        let envelope: [String: Any] = ["schema": 2, "eventFormatSchema": 1,
+            "registryDigest": DiagnosticsSchema.digest, "evidenceArchive": "evidence-v1.zip",
+            "evidenceSha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            "acquisitions": [receiptName], "privacy": "diagnostic-no-raw-payloads"]
+        var entries: [(String, Data)] = [
+            ("manifest.json", try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])),
+            ("evidence-v1.zip", bytes), (receiptName, try JSONEncoder().encode(snapshot.manifests[0]))]
+        let checksums = entries.map { name, data in
+            "\(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())  \(name)\n"
+        }.joined()
+        entries.append(("checksums.sha256", Data(checksums.utf8)))
+        let portable = base.appendingPathComponent("retained-acquisition.zip")
+        try RideDiagnosticsStoredZipWriter.write(entries: entries, to: portable)
+        // Exercise the real host consumer, including its closed envelope schema,
+        // manifest validation and independently hashed delivery inventory.
+        let verify = Process()
+        verify.executableURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("tools/bicino")
+        verify.arguments = ["diag", "verify", portable.path, "--acquisition", job.id.uuidString.lowercased(),
+            "--require", "firmware", "--require-complete", "--json"]
+        let output = Pipe()
+        verify.standardOutput = output
+        try verify.run()
+        let result = output.fileHandleForReading.readDataToEndOfFile()
+        verify.waitUntilExit()
+        guard verify.terminationStatus == 0 else {
+            throw RideDiagnosticsError.unavailable("Retention export failed host verification: \(String(decoding: result, as: UTF8.self))")
+        }
+        let report = try JSONSerialization.jsonObject(with: result) as! [String: Any]
+        let delivery = (report["delivery"] as! [[String: Any]])[0]
+        precondition(delivery["expectedChunks"] as? Int == 39 && delivery["state"] as? String == "complete")
         let stillPruned = originals.filter { !FileManager.default.fileExists(atPath: $0.path) }
         precondition(!stillPruned.isEmpty, "export must not resurrect evidence into ordinary retention")
     }
