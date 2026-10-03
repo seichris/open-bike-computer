@@ -593,6 +593,38 @@
         "ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift",
         "ios-app/BikeComputer/RideShared/RideBLEZoneDispatch.swift"
       ]
+    },
+    "workout-recording-coordinator-1": {
+      "sources": [
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMetricUnits.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutHeartRateZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutNativeZones.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/RideAutomationRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutDeviceFrames.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift",
+        "ios-app/BikeComputer/WorkoutShared/WatchWorkoutLaunchRequest.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/RideDetectionSettingsStore.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutWatchAvailability.swift",
+        "ios-app/BikeComputer/WorkoutShared/WorkoutRecordingOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutRecordingStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/WorkoutSessionCoordinator.swift",
+        "ios-app/BikeComputerTests/WorkoutSessionCoordinatorTests.swift"
+      ],
+      "groups": [
+        "common-4"
+      ]
     }
   }
 }

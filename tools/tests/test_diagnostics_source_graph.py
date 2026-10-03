@@ -47,6 +47,23 @@ class DiagnosticsSourceGraphTests(unittest.TestCase):
                                   f"{path.name}: BLE module missing {relative}")
         self.assertGreaterEqual(checked, 3)
 
+    def test_every_recorder_harness_has_acquisition_evidence_types(self):
+        groups = json.loads((ROOT / "tools/development/swift-sources.json").read_text())["groups"]
+        checked = 0
+        for path in (ROOT / "ios-app/scripts").glob("*.sh"):
+            commands = path.read_text().replace("\\\n", " ").splitlines()
+            for command in commands:
+                sources = set(re.findall(r"ios-app/[^\s\\\"]+\.swift", command))
+                registered = re.search(r'\$\{DEV_SWIFT_COMPILER\}"\s+([a-z0-9-]+)', command)
+                if registered:
+                    sources.update(swift_compile.sources(registered[1], groups))
+                if PREFIX + "Utilities/RideDiagnostics.swift" not in sources:
+                    continue
+                checked += 1
+                self.assertIn(PREFIX + "Managers/DiagnosticsAcquisitionStore.swift", sources,
+                              f"{path.name}: recorder module missing acquisition evidence types")
+        self.assertGreaterEqual(checked, 4)
+
     def test_policy_forwarding_is_explicit_and_phone_collection_does_not_use_radio(self):
         app = (ROOT / PREFIX / "BikeComputerApp.swift").read_text()
         self.assertNotIn("rideDiagnosticsRecorder.$runtimeCapturePolicy", app)
