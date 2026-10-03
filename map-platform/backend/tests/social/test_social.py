@@ -3,15 +3,17 @@ import json
 import unittest
 import os
 from io import BytesIO
+from unittest.mock import patch
 from PIL import Image
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from map_platform.social.api import create_app
 from map_platform.social.features import SocialFeatures
 from map_platform.social.database import Database, accounts, content, media, members, outbox
 from map_platform.social.media import MemoryMedia, sanitize_avatar
 from map_platform.social.service import SocialService
-from map_platform.social.worker import run_once
+from map_platform.social.worker import cleanup_account, run_once
 from map_platform.social.geometry import distance, sanitize_track, route_progress
 from map_platform.user_auth import AccountPrincipal
 
@@ -219,9 +221,24 @@ class SocialTest(unittest.TestCase):
         run_once(self.db,Identity(),self.media,Notifications(),now=self.clock+100)
         with self.db.transaction() as c:
             self.assertEqual(c.scalar(select(accounts.c.state).where(accounts.c.id==self.ids['alice'])),'deleted')
+    def test_serialization_failure_retries_entire_cleanup_transaction(self):
+        self.call('alice','POST','/me/deletion',{'expectedProfileID':self.ids['alice']})
+        attempts=[]
+        class SerializationFailure(Exception):
+            sqlstate='40001'
+        def transient(*args):
+            attempts.append(1)
+            if len(attempts)==1:
+                raise OperationalError('DELETE social_media', {}, SerializationFailure())
+            return cleanup_account(*args)
+        with patch('map_platform.social.worker.cleanup_account', side_effect=transient):
+            run_once(self.db,Identity(),self.media,Notifications(),now=self.clock)
+        self.assertEqual(len(attempts),2)
+        with self.db.transaction() as c:
+            self.assertEqual(c.scalar(select(accounts.c.state).where(accounts.c.id==self.ids['alice'])),'deleted')
+            self.assertEqual(c.scalar(select(outbox.c.id)),None)
     def test_website_deletion_proof_and_replay(self):
         import hmac
-        from unittest.mock import patch
         secret='x'*40
         body={'uid':'alice','project':'test','authTime':int(self.clock),'issuedAt':int(self.clock),'nonce':'00000000-0000-4000-8000-000000000001'}
         raw=json.dumps(body).encode()

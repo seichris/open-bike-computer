@@ -5,6 +5,7 @@ import argparse
 import os
 import time
 from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy.exc import OperationalError
 from ..user_auth import FirebaseIdentity
 from .features import SocialFeatures
 from .database import (Database, accounts, blocks, content, devices, friendships, invites,
@@ -63,47 +64,53 @@ def run_once(database, identity, media_store, notifications, now=None, features=
     features = features if features is not None else SocialFeatures.from_environment()
     # Each event is independently committed. Remote operations are idempotent;
     # a crash between delivery and commit may redeliver the same collapse ID.
+    def process_event(c):
+        event = c.execute(select(outbox).where(outbox.c.next_attempt <= now)
+            .order_by(outbox.c.created).with_for_update(skip_locked=True).limit(1)).mappings().first()
+        if event is None:
+            return False
+        if event["kind"] == "ride_invite" and not features.document()["groups"]:
+            # Keep pending invitations for re-enable, without delaying cleanup.
+            c.execute(update(outbox).where(outbox.c.id == event["id"]).values(next_attempt=now+60))
+            return True
+        try:
+            with c.begin_nested():
+                if event["kind"] == "delete_account":
+                    cleanup_account(c, event["owner"], identity, media_store)
+                elif event["kind"] == "delete_media":
+                    asset = c.execute(select(media).where(media.c.id == event["body"]["assetID"])).mappings().first()
+                    if asset:
+                        for variant in asset["variants"].values():
+                            media_store.delete(variant["key"])
+                        c.execute(delete(media).where(media.c.id == asset["id"]))
+                else:
+                    account = c.execute(select(accounts).where(accounts.c.id == event["owner"])).mappings().first()
+                    valid = False
+                    if event["kind"] == "friend_request":
+                        valid = c.scalar(select(friendships.c.id).where(and_(
+                            friendships.c.id == event["body"]["requestID"], friendships.c.status == "pending"))) is not None
+                    elif event["kind"] == "ride_invite":
+                        valid = c.scalar(select(invites.c.id).where(and_(invites.c.ride == event["body"]["rideID"],
+                            invites.c.recipient == event["owner"], invites.c.status == "pending", invites.c.expires > now))) is not None
+                    category = "friendNotifications" if event["kind"] == "friend_request" else "rideNotifications"
+                    if valid and account and account["state"] == "active" and account["privacy"].get("notifications", True) and account["privacy"].get(category, True):
+                        for binding in c.execute(select(devices).where(devices.c.owner == event["owner"])).mappings():
+                            if not notifications.send(binding, event["kind"], event["id"]):
+                                c.execute(delete(devices).where(devices.c.id == binding["id"]))
+                c.execute(delete(outbox).where(outbox.c.id == event["id"]))
+        except Exception as error:
+            if isinstance(error, OperationalError) and getattr(error.orig, "sqlstate", None) in {"40001", "40P01"}:
+                raise  # A serialization failure invalidates the whole transaction.
+            __import__("logging").warning("Social outbox retry: kind=%s attempt=%d", event["kind"], event["attempts"]+1)
+            # No exception payload: providers can include identifiers/tokens.
+            c.execute(update(outbox).where(outbox.c.id == event["id"]).values(
+                attempts=event["attempts"]+1, next_attempt=now+min(3600, 2**min(12, event["attempts"]+4))))
+        return True
+
     for _ in range(100):
-        with database.transaction() as c:
-            event = c.execute(select(outbox).where(outbox.c.next_attempt <= now)
-                .order_by(outbox.c.created).with_for_update(skip_locked=True).limit(1)).mappings().first()
-            if event is None:
-                break
-            if event["kind"] == "ride_invite" and not features.document()["groups"]:
-                # Keep pending invitations for re-enable, without delaying cleanup.
-                c.execute(update(outbox).where(outbox.c.id == event["id"]).values(next_attempt=now+60))
-                continue
-            try:
-                with c.begin_nested():
-                    if event["kind"] == "delete_account":
-                        cleanup_account(c, event["owner"], identity, media_store)
-                    elif event["kind"] == "delete_media":
-                        asset = c.execute(select(media).where(media.c.id == event["body"]["assetID"])).mappings().first()
-                        if asset:
-                            for variant in asset["variants"].values():
-                                media_store.delete(variant["key"])
-                            c.execute(delete(media).where(media.c.id == asset["id"]))
-                    else:
-                        account = c.execute(select(accounts).where(accounts.c.id == event["owner"])).mappings().first()
-                        valid = False
-                        if event["kind"] == "friend_request":
-                            valid = c.scalar(select(friendships.c.id).where(and_(
-                                friendships.c.id == event["body"]["requestID"], friendships.c.status == "pending"))) is not None
-                        elif event["kind"] == "ride_invite":
-                            valid = c.scalar(select(invites.c.id).where(and_(invites.c.ride == event["body"]["rideID"],
-                                invites.c.recipient == event["owner"], invites.c.status == "pending", invites.c.expires > now))) is not None
-                        category = "friendNotifications" if event["kind"] == "friend_request" else "rideNotifications"
-                        if valid and account and account["state"] == "active" and account["privacy"].get("notifications", True) and account["privacy"].get(category, True):
-                            for binding in c.execute(select(devices).where(devices.c.owner == event["owner"])).mappings():
-                                if not notifications.send(binding, event["kind"], event["id"]):
-                                    c.execute(delete(devices).where(devices.c.id == binding["id"]))
-                    c.execute(delete(outbox).where(outbox.c.id == event["id"]))
-            except Exception:
-                __import__("logging").warning("Social outbox retry: kind=%s attempt=%d", event["kind"], event["attempts"]+1)
-                # No exception payload: providers can include identifiers/tokens.
-                c.execute(update(outbox).where(outbox.c.id == event["id"]).values(
-                    attempts=event["attempts"]+1, next_attempt=now+min(3600, 2**min(12, event["attempts"]+4))))
-    with database.transaction() as c:
+        if not database.run(process_event):
+            break
+    def maintain(c):
         c.execute(update(members).where(or_(members.c.received < now-60, members.c.lease <= now)).values(live=None, sharing=False, stats=False))
         expired = select(rides.c.id).where(rides.c.expires <= now)
         c.execute(update(members).where(members.c.ride.in_(expired)).values(live=None, sharing=False, stats=False))
@@ -114,6 +121,7 @@ def run_once(database, identity, media_store, notifications, now=None, features=
         c.execute(delete(replays).where(replays.c.created < now-86400))
         c.execute(delete(limits).where(limits.c.expires < now))
 
+    database.run(maintain)
 
 def reconcile_accounts(database, identity, media_store, cursor=""):
     """Bounded external-identity reconciliation; cursor advances across batches."""
