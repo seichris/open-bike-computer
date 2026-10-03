@@ -29,6 +29,12 @@ test = [
 object-storage = [
   "boto3>=1.37,<2"
 ]
+social = [
+  "SQLAlchemy>=2.0,<3",
+  "psycopg[binary]>=3.2,<4",
+  "firebase-admin>=6.6,<8",
+  "httpx[http2]>=0.27,<1"
+]
 topography = [
   "numpy==1.26.4",
   "rasterio==1.4.4",
@@ -39,9 +45,10 @@ topography = [
 [project.scripts]
 map-platform = "map_platform.cli:main"
 map-topography = "map_platform.topography_cli:main"
+bicino-social = "map_platform.social.worker:main"
 
-[tool.setuptools]
-packages = ["map_platform"]
+[tool.setuptools.packages.find]
+include = ["map_platform", "map_platform.*"]
 
 [tool.setuptools.package-data]
 map_platform = ["data/*.pem"]

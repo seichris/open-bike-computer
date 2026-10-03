@@ -274,7 +274,9 @@
         "ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
         "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
-        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift"
+        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/SocialMapLayer.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SocialModels.swift"
       ]
     },
     "common-4": {

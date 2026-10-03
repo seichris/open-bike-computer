@@ -36,6 +36,9 @@
 		57A00B012F00000100000001 /* RideAutomationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00B002F00000100000001 /* RideAutomationCoordinator.swift */; };
 		57A00C012F00000100000001 /* RideDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C002F00000100000001 /* RideDiagnostics.swift */; };
 		57A00C032F00000100000001 /* RideDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C022F00000100000001 /* RideDiagnosticsTests.swift */; };
+		580380010000000000000001 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 580380020000000000000001 /* FirebaseCore */; };
+		580380010000000000000002 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 580380020000000000000002 /* FirebaseAuth */; };
+		580380010000000000000003 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 580380020000000000000003 /* GoogleSignIn */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -220,6 +223,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				580380010000000000000001 /* FirebaseCore in Frameworks */,
+				580380010000000000000002 /* FirebaseAuth in Frameworks */,
+				580380010000000000000003 /* GoogleSignIn in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -350,6 +356,9 @@
 			);
 			name = BikeComputer;
 			packageProductDependencies = (
+				580380020000000000000001 /* FirebaseCore */,
+				580380020000000000000002 /* FirebaseAuth */,
+				580380020000000000000003 /* GoogleSignIn */,
 			);
 			productName = BikeComputer;
 			productReference = 83E6EF972EED853C00AE5F9B /* BikeComputer.app */;
@@ -511,6 +520,7 @@
 			mainGroup = 83E6EF8E2EED853C00AE5F9B;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
+			packageReferences = (580380030000000000000001, 580380030000000000000002);
 			productRefGroup = 83E6EF982EED853C00AE5F9B /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -1231,6 +1241,15 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+/* Begin XCRemoteSwiftPackageReference section */
+        580380030000000000000001 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/firebase/firebase-ios-sdk.git"; requirement = {kind = exactVersion; version = 12.2.0; }; };
+        580380030000000000000002 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/google/GoogleSignIn-iOS.git"; requirement = {kind = exactVersion; version = 9.0.0; }; };
+/* End XCRemoteSwiftPackageReference section */
+/* Begin XCSwiftPackageProductDependency section */
+        580380020000000000000001 = {isa = XCSwiftPackageProductDependency; package = 580380030000000000000001; productName = FirebaseCore; };
+        580380020000000000000002 = {isa = XCSwiftPackageProductDependency; package = 580380030000000000000001; productName = FirebaseAuth; };
+        580380020000000000000003 = {isa = XCSwiftPackageProductDependency; package = 580380030000000000000002; productName = GoogleSignIn; };
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 83E6EF8F2EED853C00AE5F9B /* Project object */;
 }

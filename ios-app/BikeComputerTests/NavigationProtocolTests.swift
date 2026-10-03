@@ -4772,6 +4772,21 @@ struct NavigationProtocolTests {
         let coldClient = TestLocationManagerClient(authorizationLevel: .whenInUse)
         let coldManager = CurrentLocationManager(locationManager: coldClient,
             applicationIsActive: { false })
+        foreground = true
+        manager.setSocialRideSharing(true)
+        assertEqual(client.startUpdatingLocationCallCount, 2,
+                    "Explicit social consent starts the existing GPS manager")
+        foreground = false
+        manager.applicationStateDidChange()
+        assertEqual(client.stopUpdatingLocationCallCount, 1,
+                    "Social sharing continues a foreground-started stream while locked")
+        manager.setSocialRideSharing(false)
+        assertEqual(client.stopUpdatingLocationCallCount, 2,
+                    "Stopping social sharing releases its location demand")
+        coldManager.setSocialRideSharing(true)
+        assertEqual(coldClient.startUpdatingLocationCallCount, 0,
+                    "Social consent cannot cold-start When-In-Use GPS in background")
+        coldManager.setSocialRideSharing(false)
         coldManager.setWorkoutActive(true, phoneOwned: true)
         assertEqual(coldClient.startUpdatingLocationCallCount, 0,
                     "Cold background recovery does not pretend When-In-Use is Always")
@@ -17935,7 +17950,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 28, "capability version negotiates signed topographic contours alongside existing capabilities")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 29, "capability version negotiates group riders alongside existing capabilities")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1Feature, 1 << 29, "CAP2 bit 29 advertises versioned workout zones without reusing the display inactivity capability")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1MinimumClientVersion, 27, "zone negotiation requires protocol 27, independent of the iOS version")
         assertEqual(DeviceBLEProtocol.topographicContoursCapabilityMask, 1 << 30, "CAP2 bit 30 advertises signed topographic contour support")

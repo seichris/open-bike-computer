@@ -204,3 +204,29 @@ for those records.
 For privacy questions or requests, contact:
 
 privacy@bicino.com
+
+
+## Optional Friends and Group Riding
+
+If you sign in and enable social features, we process your Bicino user ID, chosen
+name, username, sanitized profile photo, friendships, invitations, and content you
+explicitly publish. These use the same Firebase account as bicino.com. Social
+photos and routes are stored in private object storage and the social database.
+
+A completed workout is uploaded only after you select it and consent. The server
+removes the start/finish areas and configured private zones before others can
+receive its geometry. Raw tracks are not retained. Full-ride basic times may be
+shared; heart rate, calories, power, cadence, and other Health data are excluded.
+Privacy trimming reduces exposure and cannot guarantee location anonymity.
+
+Joining a Group Ride does not start sharing. Live location and optional basic
+statistics require explicit consent for each ride. Samples expire after 60
+seconds without an update. Stopping sharing, leaving, blocking, and deletion
+revoke access. Sessions expire within 24 hours of their scheduled start. Generic
+push notifications are optional. Social and Health data are not used for ads.
+
+Account deletion disables social access immediately and queues retryable cleanup
+of publications and photos, including Firebase account deletion. Saved copies on
+another person's device cannot be recalled. Your private Apple Health workouts
+and local route library are not deleted. See the social operations document for
+retention and backup handling before enabling a deployment.

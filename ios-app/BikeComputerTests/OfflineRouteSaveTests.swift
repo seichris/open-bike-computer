@@ -228,6 +228,7 @@ struct OfflineRouteSaveTests {
 
     static func main() throws {
         try sourceAndValidation()
+        try socialCopyKeepsProviderAndProvenance()
         try saveIdentityRestartAndDuplicates()
         try interactionCancellationAndStorageFailure()
         try corruptionDeletionAndReplacement()
@@ -242,6 +243,25 @@ struct OfflineRouteSaveTests {
         try selectedMapKitSaving()
         try uiWiring()
         print("Offline route save/navigation: \(checks) checks passed")
+    }
+
+    static func socialCopyKeepsProviderAndProvenance() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let original = try draft(f).archive
+        let data = try original.encoded(purpose: .offlineNavigation, now: f.now)
+        let saved = try f.library.importSocialArchive(data, socialID: "social-route", owner: "rider", revision: 3, duplicate: false)
+        let copy = try f.library.importSocialArchive(data, socialID: "social-route", owner: "rider", revision: 3, duplicate: true)
+        check(saved.id == original.routeID && copy.id != original.routeID, "Only Duplicate creates a new local identity")
+        let restored = try f.library.offlineArchive(for: copy)
+        check(restored.route.provider == original.route.provider && restored.createdAt == original.createdAt && restored.deleteAfter == original.deleteAfter,
+              "Copy preserves provider and retention")
+        let sidecar = f.root.appendingPathComponent("social-provenance").appendingPathComponent(copy.id.uuidString + ".json")
+        let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: sidecar)) as! [String: Any]
+        check(metadata["sourceHash"] as? String == original.contentHash, "Copy retains original hash provenance outside navigation archive")
+        check(metadata["socialRevision"] as? Int == 3, "Social revision is retained")
+        let strava = try NavigationRouteArchiveV1.create(route: changedProvider(original.route, RouteProviderPolicyV1.strava), createdAt: f.now,
+            deleteAfter: f.now.addingTimeInterval(60), purpose: .offlineNavigation)
+        failure { _ = try f.library.importSocialArchive(strava.encoded(purpose: .offlineNavigation, now: f.now), socialID: "restricted", owner: "rider", revision: 1, duplicate: true) }
     }
 
     static func sourceAndValidation() throws {

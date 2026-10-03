@@ -180,6 +180,35 @@ final class PhoneRouteLibrary: ObservableObject {
         return record.summary
     }
 
+    /// Social provenance is a phone-side sidecar; navigation hashes retain their original meaning.
+    @discardableResult
+    func importSocialArchive(_ data: Data, socialID: String, owner: String,
+                             revision: Int, duplicate: Bool) throws -> PlannedRouteSummaryV1 {
+        let original = try NavigationRouteArchiveV1.decode(data, purpose: .offlineNavigation, now: now())
+        guard original.route.provider == RouteProviderPolicyV1.importedGPX else {
+            throw NavigationRouteArchiveError.durableStorageNotAllowed(providerID: original.providerID)
+        }
+        let r = original.route
+        let archive: NavigationRouteArchiveV1
+        if duplicate {
+            let route = NavigationRouteV1(id: UUID(), revision: 1, provider: r.provider,
+                sourceReference: r.sourceReference, localeIdentifier: r.localeIdentifier,
+                transportType: r.transportType, source: r.source, destination: r.destination,
+                bounds: r.bounds, distanceMeters: r.distanceMeters, expectedTravelTimeSeconds: r.expectedTravelTimeSeconds,
+                name: r.name, points: r.points, steps: r.steps, normalizationVersion: r.normalizationVersion)
+            archive = try NavigationRouteArchiveV1.create(route: route, createdAt: original.createdAt,
+                deleteAfter: original.deleteAfter, purpose: .offlineNavigation)
+        } else { archive = original }
+        let directory = store.rootDirectory.appendingPathComponent("social-provenance", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let metadata: [String: Any] = ["schema": 1, "socialID": socialID, "owner": owner,
+            "socialRevision": revision, "sourceRouteID": original.routeID.uuidString,
+            "sourceRevision": original.revision, "sourceHash": original.contentHash]
+        let encoded = try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys])
+        try encoded.write(to: directory.appendingPathComponent(archive.routeID.uuidString + ".json"), options: .atomic)
+        return try importArchive(archive.encoded(purpose: .offlineNavigation, now: now()))
+    }
+
     @discardableResult
     func importGPX(
         _ data: Data,
