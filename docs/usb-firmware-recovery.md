@@ -24,18 +24,29 @@ byte-for-byte with the website; it must never be admitted as a real release.
 
 Each payload binds the model, production profile, full SHA, version/build, chip,
 16 MiB capacity, exact binary table and bootloader hashes, complete flash region
-inventory, ordered writes and erase spans, factory archive/descriptor provenance,
-and explicit deny policy for unknown installed builds. A signature proves origin;
-`qualificationRequired=true` does not claim that physical testing has occurred.
+inventory, ordered writes and erase spans, and factory archive/descriptor provenance.
+New packages sign `minFlasherVersion=2`, `unknownBuildPolicy="rescue"`, and
+`qualificationRequired=false` together. The website automatically admits these
+packages from immutable published GitHub releases after checking signatures and
+asset digests. Legacy version-1 deny packages, including release 9, retain their
+qualification requirement and cannot be changed in place. A signature proves
+origin; automatic availability is not physical qualification. The original
+`test-vector.json` remains the legacy fixture; `rescue-test-vector.json` binds
+the new policy using the same public test key.
 
 The implemented recipe supports the existing dual-3-MiB layout only. It writes
 and verifies app0 before replacing OTA selection with the pinned Arduino app0
 bootstrap. It preserves bootloader/table, app1, NVS, FFat, coredump, and SD. This
 deliberately uses a named deterministic ROM rescue recipe rather than pretending
 that factory bootstrap replay is an inactive-slot OTA transaction. Both initial
-active-slot states require physical qualification. Unknown source images,
-different bootloaders, unsupported tables, encryption/security flags, downgrades,
-and partially written images are blocked by the consumer planner.
+active-slot states still need physical evidence for a qualification claim. The
+rescue planner accepts unknown development images, stale app1, partial/erased
+application slots and partial OTA selection, allowing a fresh-session retry after
+interruption. It never writes app1. Exact bootloader/table, chip/capacity/security,
+model confirmation, signed write bounds and every image readback remain required.
+Known wrong-model/newer/conflicting builds are blocked; unidentified firmware
+cannot provide downgrade protection and the user must acknowledge that risk.
+Fully blank chips and damaged bootloader/table remain incompatible.
 
 The new producer rejects unsupported layouts/bootstrap bytes rather than silently
 emitting unsafe packages. Future partition/toolchain changes must update and test
@@ -74,27 +85,36 @@ owner-app boot confirmation when production firmware does not answer the protoco
 
 ## Consumer admission and remaining gates
 
-The website's reviewed package catalog starts empty. Importing signed immutable
-assets verifies and stages them without admitting them. Qualification must bind the
-exact website commit, manifest digest, artifact hashes, board model/identity,
-source/destination layout, flash/readback result, fresh boot identity, real cold
-boot, and preservation checks. Chrome/Edge on each claimed desktop OS and both
-boards need independent records. Measure time instead of inventing an estimate.
+The maintainer explicitly accepted automatic signed rescue admission and the
+unknown-source/interruption risks on 2026-10-03. Build 103 publishes that policy;
+release 9 (build 102) stays immutable with its original deny policy. This change
+modifies packaging/planning, not the firmware's production hardware paths or the
+validation-only USB status rollout.
+
+The website rechecks the still-published immutable release, pinned signature and
+manifest digest immediately before writing, with an explicit revocation denylist.
+No per-release qualification entry or website asset import is needed for the new
+policy. Automatic admission must not be described as completed physical testing.
+Qualification still binds exact website/firmware commits, manifest/image hashes,
+board identity, flash/readback, fresh ready boot, real cold boot and preservation.
+Only 1.75-inch hardware is available; its valid development app0 and stale app1
+have been inspected read-only. No new rescue write or physical interruption test
+has passed, and 2.06-inch physical validation remains pending.
 
 Still required to close #483:
 
 - Physical recovery from the reported 0.3.4 build-95 OTA-entry failure on both
   targets, including ownership/TLS/settings/maps preservation.
 - Qualification and production rollout of the request-only status protocol.
-- Fresh-session recovery of interrupted app/table/metadata writes, including
-  unknown partial-image states. The current writer stops safely on errors but
-  the generic planner blocks unknown partial images; this is not full retry
-  qualification.
+- Physical interruption/retry evidence for app erase/write and OTA metadata.
+  Mock browser tests cover fresh-session retry of unknown partial/erased slots;
+  damaged bootloader/table remain blocked and require a separate procedure.
 - #461's measured layout decision and matching developer layout, followed by a
   distinct migration recipe with overlap/erase analysis, FFat restore policy,
   and representative power-loss tests. No larger-slot OTA release before that.
 - Separately qualified first-install and factory-reset operations if exposed.
 
-Until these gates are complete, do not add a consumer catalog entry or describe
-the website as a physically qualified recovery path. Development tests and a
-merged PR do not replace those records.
+Keep these per-target hardware gates visible until their evidence is complete.
+Do not describe automatically available releases as a physically qualified
+recovery path or factory/golden images. Development tests and merged PRs do not
+replace physical records.
