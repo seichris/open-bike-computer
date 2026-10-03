@@ -188,7 +188,7 @@
       "name": "Ride diagnostics and watchdog host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "for test in \\\n  test_ride_diagnostics_format \\\n  test_capture_policy_v2 \\\n  test_diagnostics_catalog_v2 \\\n  test_diagnostics_live_tail_v2 \\\n  test_lifecycle_resource_event \\\n  test_runtime_watchdog_policy \\\n  test_ride_diagnostics_queue_policy \\\n  test_ride_diagnostics_control \\\n  test_ride_diagnostics_http_policy \\\n  test_sd_mount_retry_policy \\\n  test_storage_mount_policy; do\n  g++ -std=c++17 -Wall -Wextra -Werror \\\n    \"tools/tests/${test}.cpp\" -o \"${TMPDIR}/${test}\"\n  \"${TMPDIR}/${test}\"\ndone\npython3 tools/tests/test_lifecycle_resources.py\npython3 tools/tests/test_watchdog_scheduler_contract.py",
+      "command": "for test in \\\n  test_ride_diagnostics_format \\\n  test_capture_policy_v2 \\\n  test_diagnostics_catalog_v2 \\\n  test_diagnostics_live_tail_v2 \\\n  test_lifecycle_resource_event \\\n  test_runtime_watchdog_policy \\\n  test_ride_diagnostics_queue_policy \\\n  test_ride_diagnostics_control \\\n  test_ride_diagnostics_http_policy \\\n  test_sd_mount_retry_policy \\\n  test_storage_mount_policy; do\n  g++ -std=c++17 -Wall -Wextra -Werror \\\n    \"tools/tests/${test}.cpp\" -o \"${TMPDIR}/${test}\"\n  \"${TMPDIR}/${test}\"\ndone\npython3 tools/tests/test_lifecycle_resources.py\npython3 tools/tests/test_watchdog_scheduler_contract.py\npython3 -m unittest tools.tests.test_ride_diagnostics_session_contract tools.tests.test_ride_diagnostics_storage_contract",
       "tools": [
         "python3",
         "g++"

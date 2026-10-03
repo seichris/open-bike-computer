@@ -343,6 +343,7 @@
     },
     "ride-diagnostics-1": {
       "sources": [
+        "ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
         "ios-app/BikeComputerTests/RideDiagnosticsHostTests.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",

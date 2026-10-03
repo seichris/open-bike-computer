@@ -1,4 +1,11 @@
+import CryptoKit
 import Foundation
+
+nonisolated enum DiagnosticsAcquisitionEvidencePolicy {
+    // Recorder + acquisition evidence + manifests stay within the existing
+    // 100 MiB archive-reader bound (ordinary recorder retention is 50 MiB).
+    static let maximumBytes = 32 * 1024 * 1024
+}
 
 nonisolated struct DiagnosticsChunkReceipt: Codable, Equatable, Sendable {
     let bootSequence: UInt32
@@ -34,6 +41,8 @@ nonisolated struct DiagnosticsAcquisitionManifest: Codable, Equatable, Sendable 
     var expected: [DiagnosticsChunkReceipt]
     var verified: [String]
     var failureCode: String?
+    // Absent in pre-cache receipts, whose claims still need archive validation.
+    var evidenceRetained: Bool? = nil
 
     func canResumeAutomatically(postRideEnabled: Bool) -> Bool {
         phase.canResumeAutomatically && (origin != .postRide || postRideEnabled)
@@ -46,7 +55,7 @@ nonisolated struct DiagnosticsAcquisitionManifest: Codable, Equatable, Sendable 
 }
 
 /// Disk I/O is actor isolated, never performed on the UI executor. Only a
-/// bounded, redacted device index and receipts are persisted; never transport
+/// bounded, redacted device index, receipts and exact verified chunks are persisted; never transport
 /// tokens, SSIDs, URLs or BLE identifiers. Atomic replacement supports process
 /// recovery; physical power durability is not claimed by this store.
 actor DiagnosticsAcquisitionStore {
@@ -54,8 +63,14 @@ actor DiagnosticsAcquisitionStore {
     private let root: URL
     private let maximumJobs = 20
     private let maximumManifestBytes = 256 * 1024
+    private let maximumEvidenceBytes: Int
+    private var evidenceRoot: URL { root.appendingPathComponent("evidence", isDirectory: true) }
 
-    init(root: URL) { self.root = root }
+    init(root: URL, maximumEvidenceBytes: Int = DiagnosticsAcquisitionEvidencePolicy.maximumBytes) {
+        precondition(maximumEvidenceBytes > 0 && maximumEvidenceBytes <= DiagnosticsAcquisitionEvidencePolicy.maximumBytes)
+        self.root = root
+        self.maximumEvidenceBytes = maximumEvidenceBytes
+    }
 
     private func prepare() throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -131,8 +146,9 @@ actor DiagnosticsAcquisitionStore {
     func manifests() throws -> [DiagnosticsAcquisitionManifest] {
         try prepare()
         let paths = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
-        guard paths.count <= maximumJobs else { throw Failure.storageFull }
-        return try paths.filter { $0.pathExtension == "json" }.map { url in
+        let receipts = paths.filter { $0.pathExtension == "json" }
+        guard receipts.count <= maximumJobs else { throw Failure.storageFull }
+        return try receipts.map { url in
             guard let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else {
                 throw Failure.invalidManifest
             }
@@ -163,6 +179,7 @@ actor DiagnosticsAcquisitionStore {
             try FileManager.default.removeItem(at: path(old.id))
         }
         try save(value)
+        try pruneUnreferencedEvidence()
         return value
     }
 
@@ -184,11 +201,95 @@ actor DiagnosticsAcquisitionStore {
         return value
     }
 
-    func verified(_ id: UUID, receipt: DiagnosticsChunkReceipt) throws {
+    private func evidenceName(device: String, receipt: DiagnosticsChunkReceipt) -> String {
+        "\(device)-\(receipt.bootSequence)-\(receipt.chunk)-\(receipt.sha256).jsonl"
+    }
+
+    private func prepareEvidence() throws {
+        try prepare()
+        try FileManager.default.createDirectory(at: evidenceRoot, withIntermediateDirectories: true)
+        guard try evidenceRoot.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else {
+            throw Failure.invalidManifest
+        }
+        #if os(iOS)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+            ofItemAtPath: evidenceRoot.path)
+        #endif
+    }
+
+    private func evidenceFiles() throws -> [URL] {
+        try prepareEvidence()
+        let files = try FileManager.default.contentsOfDirectory(at: evidenceRoot,
+            includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey])
+        guard files.count <= maximumJobs * 256 else { throw Failure.storageFull }
+        for file in files {
+            let values = try file.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey])
+            guard values.isSymbolicLink != true, values.isRegularFile == true,
+                  let size = values.fileSize, size > 0, size <= 256 * 1024 else {
+                throw Failure.invalidManifest
+            }
+        }
+        return files
+    }
+
+    private func pruneUnreferencedEvidence() throws {
+        let referenced = Set(try manifests().flatMap { value in
+            value.expected.map { evidenceName(device: value.deviceDigest, receipt: $0) }
+        })
+        for file in try evidenceFiles() where !referenced.contains(file.lastPathComponent) {
+            try FileManager.default.removeItem(at: file)
+        }
+    }
+
+    private func matches(_ data: Data, receipt: DiagnosticsChunkReceipt) -> Bool {
+        data.count == receipt.bytes &&
+            SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() == receipt.sha256
+    }
+
+    private func cached(device: String, receipt: DiagnosticsChunkReceipt) throws -> Data? {
+        try prepareEvidence()
+        let url = evidenceRoot.appendingPathComponent(evidenceName(device: device, receipt: receipt))
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey])
+        guard values.isSymbolicLink != true, values.isRegularFile == true,
+              values.fileSize == receipt.bytes else { throw Failure.invalidManifest }
+        let data = try Data(contentsOf: url)
+        guard matches(data, receipt: receipt) else { throw Failure.invalidManifest }
+        return data
+    }
+
+    func chunkData(_ id: UUID, receipt: DiagnosticsChunkReceipt) throws -> Data? {
+        let value = try load(id)
+        guard value.expected.contains(receipt) else { throw Failure.inventoryChanged }
+        return try cached(device: value.deviceDigest, receipt: receipt)
+    }
+
+    func verified(_ id: UUID, receipt: DiagnosticsChunkReceipt, data: Data) throws {
         var value = try load(id)
         guard value.phase == .collecting, value.expected.contains(receipt) else {
             throw Failure.inventoryChanged
         }
+        guard matches(data, receipt: receipt) else { throw Failure.invalidManifest }
+        // Persist exact bytes before publishing a receipt. Ordinary v1 capture
+        // retention has no ownership of this bounded, deduplicated store.
+        try pruneUnreferencedEvidence()
+        let url = evidenceRoot.appendingPathComponent(evidenceName(device: value.deviceDigest, receipt: receipt))
+        let files = try evidenceFiles()
+        let retainedBytes = try files.reduce(0) { total, file in
+            total + (try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+        }
+        let replacedBytes = FileManager.default.fileExists(atPath: url.path)
+            ? (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) : 0
+        guard retainedBytes - replacedBytes + data.count <= maximumEvidenceBytes else { throw Failure.storageFull }
+        try data.write(to: url, options: .atomic)
+        #if os(iOS)
+        try FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: url.path)
+        #endif
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.synchronize()
         if !value.verified.contains(receipt.key) { value.verified.append(receipt.key) }
         value.updatedAt = Date()
         try save(value)
@@ -199,10 +300,42 @@ actor DiagnosticsAcquisitionStore {
         guard value.indexData != nil, Set(value.verified) == Set(value.expected.map(\.key)) else {
             throw Failure.inventoryChanged
         }
+        for receipt in value.expected {
+            guard try cached(device: value.deviceDigest, receipt: receipt) != nil else {
+                throw Failure.inventoryChanged
+            }
+        }
         value.phase = .complete
+        value.evidenceRetained = true
         value.updatedAt = Date()
         value.failureCode = nil
         try save(value)
+    }
+
+    /// Actor-isolated immutable Data prevents eviction racing recorder snapshot
+    /// creation. At most 32 MiB; every returned chunk is rehashed on export.
+    func exportSnapshot() throws -> (manifests: [DiagnosticsAcquisitionManifest], chunks: [String: Data]) {
+        let entries = try manifests()
+        var chunks: [String: Data] = [:]
+        var bytes = 0
+        for value in entries {
+            for receipt in value.expected where value.verified.contains(receipt.key) {
+                guard let data = try cached(device: value.deviceDigest, receipt: receipt) else {
+                    if value.evidenceRetained == true { throw Failure.invalidManifest }
+                    continue // Legacy receipt: the v1 recorder may still contain it.
+                }
+                let name = String(format: "events-%06u-%@.jsonl", receipt.chunk, String(receipt.sha256.prefix(16)))
+                let relative = "\(value.deviceDigest)/\(receipt.bootSequence)/\(name)"
+                if let existing = chunks[relative] {
+                    guard existing == data else { throw Failure.inventoryChanged }
+                } else {
+                    bytes += data.count
+                    guard bytes <= maximumEvidenceBytes else { throw Failure.storageFull }
+                    chunks[relative] = data
+                }
+            }
+        }
+        return (entries, chunks)
     }
 
     func interrupt(_ id: UUID, cancelled: Bool = false, code: String = "interrupted") throws {

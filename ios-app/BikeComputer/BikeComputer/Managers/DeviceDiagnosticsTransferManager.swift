@@ -263,12 +263,18 @@ final class DeviceDiagnosticsTransferManager {
                       chunk.sha256.allSatisfy({ $0.isHexDigit }) else {
                     throw DeviceDiagnosticsTransferError.invalidIndex
                 }
-                let cached = await recorder.importedDeviceChunkDataAsync(
+                let receipt = DiagnosticsChunkReceipt(bootSequence: chunk.bootSequence,
+                    chunk: chunk.chunk, bytes: chunk.bytes, sha256: chunk.sha256.lowercased())
+                var cached: Data?
+                if let acquisitionStore, let acquisitionID {
+                    cached = try await acquisitionStore.chunkData(acquisitionID, receipt: receipt)
+                }
+                if cached == nil { cached = await recorder.importedDeviceChunkDataAsync(
                     deviceDigest: deviceDigest,
                     bootSequence: chunk.bootSequence,
                     chunk: chunk.chunk,
                     sha256: chunk.sha256
-                )
+                ) }
                 let cachedInspection: ChunkInspection? = if let cached {
                     await Self.inspectChunkOffMain(cached)
                 } else {
@@ -339,8 +345,7 @@ final class DeviceDiagnosticsTransferManager {
                 }
                 if let acquisitionStore, let acquisitionID {
                     try await acquisitionStore.verified(acquisitionID,
-                        receipt: DiagnosticsChunkReceipt(bootSequence: chunk.bootSequence,
-                            chunk: chunk.chunk, bytes: chunk.bytes, sha256: chunk.sha256.lowercased()))
+                        receipt: receipt, data: data)
                 }
             }
             if let acquisitionStore, let acquisitionID {

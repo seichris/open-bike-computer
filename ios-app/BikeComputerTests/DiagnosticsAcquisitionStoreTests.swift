@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 @main enum DiagnosticsAcquisitionStoreTests {
@@ -18,10 +19,15 @@ import Foundation
             _ = try await store.create(deviceDigest: "fedcba9876543210", captureID: job.captureID, id: job.id)
             fatalError("request identity was reused for another device")
         } catch DiagnosticsAcquisitionStore.Failure.inventoryChanged {}
-        let first = DiagnosticsChunkReceipt(bootSequence: 1, chunk: 1, bytes: 10, sha256: String(repeating: "a", count: 64))
-        let second = DiagnosticsChunkReceipt(bootSequence: 1, chunk: 2, bytes: 20, sha256: String(repeating: "b", count: 64))
+        let firstData = Data(repeating: 97, count: 10)
+        let secondData = Data(repeating: 98, count: 20)
+        func digest(_ data: Data) -> String {
+            SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        }
+        let first = DiagnosticsChunkReceipt(bootSequence: 1, chunk: 1, bytes: firstData.count, sha256: digest(firstData))
+        let second = DiagnosticsChunkReceipt(bootSequence: 1, chunk: 2, bytes: secondData.count, sha256: digest(secondData))
         _ = try await store.inventory(job.id, deviceDigest: job.deviceDigest, index: Data("original".utf8), chunks: [first, second])
-        try await store.verified(job.id, receipt: first)
+        try await store.verified(job.id, receipt: first, data: firstData)
         do { try await store.finish(job.id); fatalError("partial collection completed") }
         catch DiagnosticsAcquisitionStore.Failure.inventoryChanged {}
         try await store.interrupt(job.id)
@@ -38,9 +44,15 @@ import Foundation
             _ = try await restored.inventory(job.id, deviceDigest: "fedcba9876543210", index: Data(), chunks: [])
             fatalError("wrong device accepted")
         } catch DiagnosticsAcquisitionStore.Failure.inventoryChanged {}
-        try await restored.verified(job.id, receipt: first)
-        try await restored.verified(job.id, receipt: first)
-        try await restored.verified(job.id, receipt: second)
+        let replayBytes = try await restored.chunkData(job.id, receipt: first)
+        precondition(replayBytes == firstData, "exact bytes must survive process restart")
+        do {
+            try await restored.verified(job.id, receipt: second, data: firstData)
+            fatalError("receipt accepted mismatching bytes")
+        } catch DiagnosticsAcquisitionStore.Failure.invalidManifest {}
+        try await restored.verified(job.id, receipt: first, data: firstData)
+        try await restored.verified(job.id, receipt: first, data: firstData)
+        try await restored.verified(job.id, receipt: second, data: secondData)
         try await restored.finish(job.id)
         try await restored.interrupt(job.id, code: "cleanup_failed")
         let complete = try await restored.load(job.id)
@@ -71,6 +83,25 @@ import Foundation
         } catch DiagnosticsAcquisitionStore.Failure.invalidManifest {}
         let originalReceipt = try await restored.load(job.id)
         precondition(originalReceipt.deliveryComplete, "invalid admission must not prune a completed receipt")
+        let exported = try await restored.exportSnapshot()
+        precondition(exported.chunks.count == 2 && Set(exported.chunks.values) == Set([firstData, secondData]))
+        let cacheFiles = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("evidence"), includingPropertiesForKeys: nil)
+        try Data(repeating: 99, count: 10).write(to: cacheFiles.first { $0.lastPathComponent.contains(first.sha256) }!)
+        do { _ = try await restored.exportSnapshot(); fatalError("corrupt evidence exported as complete") }
+        catch DiagnosticsAcquisitionStore.Failure.invalidManifest {}
+
+        let boundedRoot = root.appendingPathComponent("bounded")
+        let bounded = DiagnosticsAcquisitionStore(root: boundedRoot, maximumEvidenceBytes: 10)
+        let limited = try await bounded.create(deviceDigest: job.deviceDigest, captureID: nil)
+        _ = try await bounded.inventory(limited.id, deviceDigest: job.deviceDigest, index: Data(), chunks: [first, second])
+        try await bounded.verified(limited.id, receipt: first, data: firstData)
+        try await bounded.verified(limited.id, receipt: first, data: firstData)
+        do { try await bounded.verified(limited.id, receipt: second, data: secondData); fatalError("evidence budget exceeded") }
+        catch DiagnosticsAcquisitionStore.Failure.storageFull {}
+        let boundedReceipt = try await bounded.load(limited.id)
+        let boundedBytes = try await bounded.chunkData(limited.id, receipt: first)
+        precondition(boundedReceipt.verified == [first.key] && boundedBytes == firstData,
+            "a full evidence store must preserve existing bytes and partial receipts")
         print("Diagnostics acquisition persistence, cutoff, identity and completeness tests passed")
     }
 }

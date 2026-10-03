@@ -128,6 +128,21 @@ explicit cancellation preserves the evidence. Network retrieval waits until the
 app is active and neither navigation nor workout is active. The existing shared
 operation coordinator prevents diagnostic cleanup from displacing maps or OTA.
 
+Verified acquisition chunks are stored before their receipts in a separate,
+deduplicated evidence cache (32 MiB total, 256 KiB per chunk, at most 20 jobs
+with 256 chunks each). This is additional to ordinary recorder retention.
+Completing a collection revalidates every retained body. Ordinary capture/age/
+byte pruning cannot remove these acquisition bytes. When the job journal evicts
+a completed or cancelled job, only cache files no remaining job references are
+removed; incomplete jobs are never evicted to admit another request. A full
+cache leaves the collection partial and preserves earlier verified bodies.
+Restart and export rehash cached bytes. Export combines them with the recorder
+snapshot under their original device/boot/chunk paths, through the existing v1
+validator; it does not restore them into ordinary recorder retention. Receipts
+from older app versions have no guaranteed cache and still require actual
+archive bytes to prove delivery. This protects retrieval evidence, not physical
+card durability or completeness of the original recording.
+
 Firmware writes an optional checksummed `.cat2` descriptor when a chunk is sealed,
 containing its byte/hash/sequence identities. It avoids rehashing every retained
 payload merely to list them. Missing/corrupt descriptor caches use the legacy

@@ -68,6 +68,11 @@ inline bool snapshotLeaseActive(uint32_t nowMs, uint32_t deadlineMs) {
          static_cast<int32_t>(deadlineMs - nowMs) > 0;
 }
 
+inline bool maintenanceMustYield(uint32_t nowMs, uint32_t deadlineMs,
+                                 bool sealing) {
+  return sealing || snapshotLeaseActive(nowMs, deadlineMs);
+}
+
 inline bool shouldPruneAfterWrite(uint32_t writtenCount,
                                   bool alreadyPrunedThisBoot) {
   return !alreadyPrunedThisBoot || (writtenCount % 16U) == 0U;

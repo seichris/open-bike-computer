@@ -209,7 +209,17 @@ struct ChunkFileScan {
   std::size_t storedCount = 0;
   std::size_t totalCount = 0;
   std::size_t pruneCandidateCount = 0;
+  bool interrupted = false;
 };
+
+// A snapshot can arrive after a maintenance pass has started. Check at every
+// filesystem boundary, not just on entry; an incomplete inventory cannot be
+// used to delete files. The current SD transaction still has to return.
+bool retentionScanInterrupted() {
+  return retention_policy::maintenanceMustYield(
+      millis(), retentionLeaseDeadlineMs.load(std::memory_order_acquire),
+      sealRequested.load(std::memory_order_acquire));
+}
 
 bool chunkFileOlder(const ChunkFile &left, const ChunkFile &right) {
   if (left.boot != right.boot)
@@ -234,7 +244,7 @@ void considerFilePruneCandidate(const ChunkFile &file,
 }
 
 bool removeChunkFile(const ChunkFile &file) {
-  if (storage == nullptr)
+  if (storage == nullptr || retentionScanInterrupted())
     return false;
   char path[224] = {};
   snprintf(path, sizeof(path),
@@ -250,7 +260,7 @@ bool removeChunkFile(const ChunkFile &file) {
 }
 
 void removeEmptyBootDirectories() {
-  if (storage == nullptr)
+  if (storage == nullptr || retentionScanInterrupted())
     return;
   char bootsRoot[192] = {};
   snprintf(bootsRoot, sizeof(bootsRoot),
@@ -259,17 +269,22 @@ void removeEmptyBootDirectories() {
   if (boots == nullptr)
     return;
   const uint32_t currentBoot = bootSequence.load();
-  while (struct dirent *entry = readdir(boots)) {
+  while (!retentionScanInterrupted()) {
+    struct dirent *entry = readdir(boots);
+    if (entry == nullptr || retentionScanInterrupted()) break;
     uint32_t boot = 0;
     if (!parseUnsigned(entry->d_name, boot) || boot == currentBoot)
       continue;
     char path[224] = {};
     snprintf(path, sizeof(path), "%s/%s", bootsRoot, entry->d_name);
+    if (retentionScanInterrupted()) break;
     DIR *directory = opendir(path);
     if (directory == nullptr)
       continue;
     bool empty = true;
-    while (struct dirent *child = readdir(directory)) {
+    while (!retentionScanInterrupted()) {
+      struct dirent *child = readdir(directory);
+      if (child == nullptr) break;
       if (strcmp(child->d_name, ".") != 0 &&
           strcmp(child->d_name, "..") != 0) {
         empty = false;
@@ -277,7 +292,7 @@ void removeEmptyBootDirectories() {
       }
     }
     closedir(directory);
-    if (empty)
+    if (empty && !retentionScanInterrupted())
       (void)storage->rmdir(path);
   }
   closedir(boots);
@@ -641,6 +656,14 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
                                 ChunkFile *pruneCandidates,
                                 std::size_t pruneCandidateCapacity) {
   ChunkFileScan scan;
+  auto shouldStop = [&scan]() {
+    scan.interrupted = scan.interrupted || retentionScanInterrupted();
+    return scan.interrupted;
+  };
+  if (shouldStop()) {
+    scan.interrupted = true;
+    return scan;
+  }
   if (files == nullptr || capacity == 0 || storage == nullptr ||
       !storage->getDiagnosticsSdLoaded()) {
     return scan;
@@ -654,17 +677,22 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
 
   const uint32_t selectedBoot = bootSequence.load();
   const uint32_t selectedActiveChunk = activeChunk;
-  while (struct dirent *bootEntry = readdir(boots)) {
+  while (!shouldStop()) {
+    struct dirent *bootEntry = readdir(boots);
+    if (bootEntry == nullptr || shouldStop()) break;
     uint32_t boot = 0;
     if ((bootEntry->d_type == DT_DIR || bootEntry->d_type == DT_UNKNOWN) &&
         parseUnsigned(bootEntry->d_name, boot)) {
       char bootPath[192] = {};
       snprintf(bootPath, sizeof(bootPath),
                "%s/%s", bootsRoot, bootEntry->d_name);
+      if (shouldStop()) break;
       DIR *bootDirectory = opendir(bootPath);
       if (bootDirectory == nullptr)
         continue;
-      while (struct dirent *chunkEntry = readdir(bootDirectory)) {
+      while (!shouldStop()) {
+        struct dirent *chunkEntry = readdir(bootDirectory);
+        if (chunkEntry == nullptr || shouldStop()) break;
         const char *name = chunkEntry->d_name;
         if (strncmp(name, "events-", 7) != 0 ||
             strlen(name) < 14 ||
@@ -685,6 +713,7 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
         char path[224] = {};
         snprintf(path, sizeof(path), "%s/%s", bootPath, name);
         file.bytes = static_cast<uint32_t>(storage->size(path));
+        if (shouldStop()) break;
         struct stat metadata = {};
         file.modifiedAt = ::stat(path, &metadata) == 0 ? metadata.st_mtime : 0;
         if (scan.storedCount < capacity)
@@ -702,23 +731,23 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
     }
   }
   closedir(boots);
+  (void)shouldStop();
   std::sort(files, files + scan.storedCount, chunkFileOlder);
   return scan;
 }
 
 void pruneRetention() {
   SemaphoreGuard retentionGuard(retentionMutex);
-  const uint32_t leaseDeadline =
-      retentionLeaseDeadlineMs.load(std::memory_order_acquire);
-  if (retention_policy::snapshotLeaseActive(millis(), leaseDeadline))
+  if (retentionScanInterrupted())
     return;
-  if (leaseDeadline != 0)
-    retentionLeaseDeadlineMs.store(0, std::memory_order_release);
+  // Do not clear an expired deadline here: a concurrent snapshot may have
+  // installed a newer lease since the read.
   std::size_t count = 0;
   while (true) {
     const ChunkFileScan scan = collectChunkFiles(
         retentionFiles, kMaximumRetainedFiles, filePruneCandidates,
         kFilePruneBatch);
+    if (scan.interrupted || retentionScanInterrupted()) return;
     if (scan.totalCount <= kMaximumRetainedFiles) {
       count = scan.storedCount;
       break;
@@ -726,8 +755,10 @@ void pruneRetention() {
     const std::size_t deleteCount = std::min(
         scan.totalCount - kMaximumRetainedFiles, scan.pruneCandidateCount);
     bool removedAny = false;
-    for (std::size_t index = 0; index < deleteCount; ++index)
+    for (std::size_t index = 0; index < deleteCount; ++index) {
+      if (retentionScanInterrupted()) return;
       removedAny = removeChunkFile(filePruneCandidates[index]) || removedAny;
+    }
     if (!removedAny)
       return;
     vTaskDelay(1);
@@ -749,6 +780,7 @@ void pruneRetention() {
     totalBytes += retentionFiles[index].bytes;
 
   for (std::size_t index = 0; index < count; ++index) {
+    if (retentionScanInterrupted()) return;
     const ChunkFile &file = retentionFiles[index];
     const bool isActive = file.boot == bootSequence.load() &&
                           file.chunk == activeChunk;

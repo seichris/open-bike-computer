@@ -3620,6 +3620,10 @@ static bool startDiagnosticsSessionAsync() {
       1;
   diagnosticsSessionActiveGeneration.store(generation,
                                            std::memory_order_release);
+  // The next DSTS revision represents this attempt, even while its worker is
+  // sealing. A previous attempt's rejection must not cancel an admitted retry.
+  // Clear before task creation so a fast failure from the new worker survives.
+  deviceTransferHttp.setLastError("", "");
   if (xTaskCreatePinnedToCore(
           diagnosticsSessionStartTask, "diagnostics_start", 6144,
           reinterpret_cast<void *>(static_cast<uintptr_t>(generation)), 1,

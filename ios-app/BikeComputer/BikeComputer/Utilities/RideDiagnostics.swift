@@ -1317,12 +1317,12 @@ final class RideDiagnosticsRecorder:
         }
     }
 
-    func exportBundle() throws -> URL {
-        let prepared = try queue.sync { try prepareExportOnQueue() }
+    func exportBundle(additionalDeviceChunks: [String: Data] = [:]) throws -> URL {
+        let prepared = try queue.sync { try prepareExportOnQueue(additionalDeviceChunks: additionalDeviceChunks) }
         return try Self.writePreparedExport(prepared)
     }
 
-    func exportBundleAsync() async throws -> URL {
+    func exportBundleAsync(additionalDeviceChunks: [String: Data] = [:]) async throws -> URL {
         let prepared: PreparedExport = try await withCheckedThrowingContinuation {
             continuation in
             let workItem = DispatchWorkItem { [weak self] in
@@ -1336,7 +1336,7 @@ final class RideDiagnosticsRecorder:
                 }
                 do {
                     continuation.resume(
-                        returning: try self.prepareExportOnQueue()
+                        returning: try self.prepareExportOnQueue(additionalDeviceChunks: additionalDeviceChunks)
                     )
                 } catch {
                     continuation.resume(throwing: error)
@@ -1902,7 +1902,7 @@ final class RideDiagnosticsRecorder:
         return entries.sorted { $0.0 < $1.0 }
     }
 
-    private func prepareExportOnQueue() throws -> PreparedExport {
+    private func prepareExportOnQueue(additionalDeviceChunks: [String: Data] = [:]) throws -> PreparedExport {
         guard flushOnQueue() else {
             throw RideDiagnosticsError.unavailable(
                 "Diagnostic files could not be synchronized for export."
@@ -1976,6 +1976,35 @@ final class RideDiagnosticsRecorder:
                         // simulator/filesystem configurations.
                         try fileManager.copyItem(at: file, to: destination)
                     }
+                }
+            }
+            // Acquisition evidence has independent ownership and survives v1
+            // capture retention. Merge into the same immutable snapshot so it
+            // passes the normal event, privacy, checksum and sequence validator.
+            guard additionalDeviceChunks.count <= 20 * 256,
+                  additionalDeviceChunks.values.reduce(0, { $0 + $1.count }) <= 32 * 1024 * 1024 else {
+                throw RideDiagnosticsError.unavailable("Acquisition evidence exceeds its storage bound.")
+            }
+            for (relative, data) in additionalDeviceChunks {
+                let components = relative.split(separator: "/", omittingEmptySubsequences: false)
+                guard components.count == 3,
+                      Self.isValidDeviceDigest(String(components[0])),
+                      let boot = UInt32(components[1]), boot > 0,
+                      String(boot) == components[1],
+                      !data.isEmpty, data.count <= 256 * 1024,
+                      components[2].range(of: "^events-[0-9]{6,10}-[0-9a-f]{16}\\.jsonl$", options: .regularExpression) != nil else {
+                    throw RideDiagnosticsError.unavailable("Invalid acquisition evidence path or size.")
+                }
+                let destination = snapshotRoot.appendingPathComponent("imported-device")
+                    .appendingPathComponent(relative)
+                try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if fileManager.fileExists(atPath: destination.path) {
+                    guard try Data(contentsOf: destination) == data else {
+                        throw RideDiagnosticsError.unavailable("Acquisition evidence conflicts with a retained chunk.")
+                    }
+                } else {
+                    try data.write(to: destination, options: .atomic)
+                    applyFileProtection(to: destination)
                 }
             }
         } catch {

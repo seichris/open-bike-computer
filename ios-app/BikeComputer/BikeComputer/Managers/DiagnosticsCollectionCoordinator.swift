@@ -239,9 +239,10 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     /// receipts. The v1 reader remains supported; the v2 CLI independently checks
     /// receipt claims against actual archive bytes before reporting completeness.
     func exportForCodex(recorder: RideDiagnosticsRecorder) async throws -> URL {
-        let evidenceURL = try await recorder.exportBundleAsync()
+        let snapshot = try await store.exportSnapshot()
+        let evidenceURL = try await recorder.exportBundleAsync(additionalDeviceChunks: snapshot.chunks)
         defer { try? FileManager.default.removeItem(at: evidenceURL) }
-        let acquisitions = try await store.manifests()
+        let acquisitions = snapshot.manifests
         let output = FileManager.default.temporaryDirectory
             .appendingPathComponent("bicino-diagnostics-\(UUID().uuidString).zip")
         return try await Task.detached(priority: .utility) {

@@ -41,7 +41,52 @@ enum RideDiagnosticsHostTests {
         precondition(before.fields["emissionSequence"] != after.fields["emissionSequence"])
     }
 
-    static func main() throws {
+    /// Reproduce a complete multi-boot acquisition followed by the ordinary
+    /// 20-capture prune, then export the original cutoff after a store restart.
+    static func acquisitionSurvivesCaptureRetention() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let recorder = RideDiagnosticsRecorder(rootURL: base.appendingPathComponent("v1"))
+        let storeRoot = base.appendingPathComponent("v2")
+        let store = DiagnosticsAcquisitionStore(root: storeRoot)
+        let device = "0123456789abcdef"
+        let job = try await store.create(deviceDigest: device, captureID: nil)
+        var expected: [DiagnosticsChunkReceipt] = []
+        var bodies: [Data] = []
+        var originals: [URL] = []
+        for boot in 1...39 {
+            let capture = String(format: "00000000-0000-0000-0000-%012d", boot)
+            let data = Data("{\"schema\":1,\"source\":\"firmware\",\"sequence\":0,\"level\":\"info\",\"category\":\"boot\",\"event\":\"test\",\"captureId\":\"\(capture)\",\"fields\":{\"bootSequence\":\(boot),\"firmwareFingerprint\":\"A1B2C3D4\"}}\n".utf8)
+            let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            expected.append(DiagnosticsChunkReceipt(bootSequence: UInt32(boot), chunk: 1, bytes: data.count, sha256: hash))
+            bodies.append(data)
+            originals.append(try recorder.importDeviceChunk(deviceDigest: device, bootSequence: UInt32(boot),
+                chunk: 1, data: data, sha256: hash, enforceRetention: false))
+        }
+        _ = try await store.inventory(job.id, deviceDigest: device, index: Data(), chunks: expected)
+        for (receipt, data) in zip(expected, bodies) {
+            try await store.verified(job.id, receipt: receipt, data: data)
+        }
+        try await store.finish(job.id)
+        try recorder.enforceRetention()
+        precondition(originals.contains { !FileManager.default.fileExists(atPath: $0.path) },
+            "fixture must actually prune original acquired chunks")
+        let restarted = DiagnosticsAcquisitionStore(root: storeRoot)
+        let snapshot = try await restarted.exportSnapshot()
+        precondition(snapshot.manifests.first?.deliveryComplete == true && snapshot.chunks.count == 39)
+        let archive = try recorder.exportBundle(additionalDeviceChunks: snapshot.chunks)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        let bytes = try Data(contentsOf: archive)
+        for (relative, body) in snapshot.chunks {
+            precondition(bytes.range(of: Data("device/\(relative)".utf8)) != nil)
+            precondition(bytes.range(of: body) != nil, "every original chunk must be present byte-for-byte")
+        }
+        let stillPruned = originals.filter { !FileManager.default.fileExists(atPath: $0.path) }
+        precondition(!stillPruned.isEmpty, "export must not resurrect evidence into ordinary retention")
+    }
+
+    static func main() async throws {
+        try await acquisitionSurvivesCaptureRetention()
         try occurrenceTimeSurvivesWriterDelay()
         precondition(RideDiagnosticsFieldPolicy.isAllowed("recorderReady"))
         precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
