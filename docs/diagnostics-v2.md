@@ -152,6 +152,7 @@ receipts record path, byte count and hash. Export and the CLI verify the actual
 bytes and original capture/process identity before accepting those receipts.
 Cache pressure prevents network collection until evidence admission succeeds.
 This snapshot preserves already-recorded capture context, not future events.
+Bounded crash tails are preserved byte-for-byte and still degrade recording coverage.
 Older requests whose iOS chunks have already expired remain missing-source
 results; retries cannot manufacture history or remove recorded sequence gaps.
 

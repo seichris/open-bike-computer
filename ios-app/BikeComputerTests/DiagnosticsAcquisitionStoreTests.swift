@@ -16,7 +16,7 @@ import Foundation
         let other = try await store.create(deviceDigest: job.deviceDigest, captureID: UUID())
         do { try await store.retainAppEvidence(other.id, chunks: [path: bytes]); fatalError("foreign capture retained") }
         catch DiagnosticsAcquisitionStore.Failure.inventoryChanged {}
-        do { try await store.retainAppEvidence(job.id, chunks: [path: bytes.dropLast()]); fatalError("mutable/truncated chunk retained") }
+        do { try await store.retainAppEvidence(job.id, chunks: [path: Data("not-json\n".utf8)]); fatalError("invalid complete record retained") }
         catch DiagnosticsAcquisitionStore.Failure.invalidManifest {}
         try await store.retainAppEvidence(job.id, chunks: [path: bytes])
         let shared = try await store.create(deviceDigest: job.deviceDigest, captureID: capture)

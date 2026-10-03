@@ -281,13 +281,21 @@ actor DiagnosticsAcquisitionStore {
         }
         var receipts: [DiagnosticsAppChunkReceipt] = []
         for (path, data) in chunks {
-            guard DiagnosticsAppChunkReceipt.validPath(path), data.last == 10,
+            guard DiagnosticsAppChunkReceipt.validPath(path), !data.isEmpty,
                   data.count <= 256 * 1024 else { throw Failure.invalidManifest }
-            let lines = data.split(separator: 10)
+            let lines = data.split(separator: 10, omittingEmptySubsequences: false)
             var matchesCapture = false
-            for line in lines {
-                guard let event = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                      event["source"] as? String == "ios",
+            for (index, line) in lines.enumerated() {
+                if index == lines.count - 1, line.isEmpty, data.last == 10 { continue }
+                guard !line.isEmpty, line.count <= 8 * 1024 else { throw Failure.invalidManifest }
+                guard let event = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any] else {
+                    // A previous process may have crashed mid-record. Preserve
+                    // its exact bounded tail; export still reports degraded
+                    // coverage. Only complete events establish source identity.
+                    guard index == lines.count - 1, data.last != 10 else { throw Failure.invalidManifest }
+                    continue
+                }
+                guard event["source"] as? String == "ios",
                       (event["processId"] as? String)?.lowercased() == path.split(separator: "/").first.map(String.init) else {
                     throw Failure.invalidManifest
                 }

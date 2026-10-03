@@ -46,17 +46,23 @@ enum RideDiagnosticsHostTests {
     static func acquisitionSurvivesCaptureRetention() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: base) }
-        let recorder = RideDiagnosticsRecorder(rootURL: base.appendingPathComponent("v1"))
+        let sourceRecorder = RideDiagnosticsRecorder(rootURL: base.appendingPathComponent("v1"))
         let storeRoot = base.appendingPathComponent("v2")
         let store = DiagnosticsAcquisitionStore(root: storeRoot)
         let device = "0123456789abcdef"
-        recorder.record(category: .ble, event: "retained_capture")
-        recorder.flush()
-        let originalCapture = try require(recorder.currentCaptureID)
-        let appEvidence = try await recorder.appEvidenceSnapshot(captureID: originalCapture)
+        sourceRecorder.record(category: .ble, event: "retained_capture")
+        sourceRecorder.flush()
+        let originalCapture = try require(sourceRecorder.currentCaptureID)
+        var appEvidence = try await sourceRecorder.appEvidenceSnapshot(captureID: originalCapture)
         precondition(!appEvidence.isEmpty)
+        // Simulate a previous process ending mid-record. Cache/export must
+        // preserve the raw tail and its degraded-coverage result, not discard it.
+        let crashedPath = appEvidence.keys.sorted()[0]
+        appEvidence[crashedPath]!.append(Data("{\"schema".utf8))
+        try appEvidence[crashedPath]!.write(to: base.appendingPathComponent("v1/app").appendingPathComponent(crashedPath))
         let job = try await store.create(deviceDigest: device, captureID: originalCapture)
         try await store.retainAppEvidence(job.id, chunks: appEvidence)
+        let recorder = RideDiagnosticsRecorder(rootURL: base.appendingPathComponent("v1"))
         var expected: [DiagnosticsChunkReceipt] = []
         var bodies: [Data] = []
         var originals: [URL] = []
@@ -131,6 +137,7 @@ enum RideDiagnosticsHostTests {
         let delivery = (report["delivery"] as! [[String: Any]])[0]
         precondition(delivery["expectedChunks"] as? Int == 39 && delivery["state"] as? String == "complete")
         precondition((report["missingRequiredSources"] as? [String])?.isEmpty == true)
+        precondition(report["recoverableTails"] as? Int == 1 && report["recordingCoverage"] as? String == "degraded")
         let stillPruned = originals.filter { !FileManager.default.fileExists(atPath: $0.path) }
         precondition(!stillPruned.isEmpty, "export must not resurrect evidence into ordinary retention")
     }
