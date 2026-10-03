@@ -32,12 +32,16 @@ def integer(value: Any, minimum: int = 0, maximum: int = 2**32-1) -> bool:
 
 def validate_acquisition(value: dict) -> dict:
     required = {'schema', 'id', 'deviceDigest', 'createdAt', 'updatedAt', 'phase', 'expected', 'verified'}
-    if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - {'captureID', 'indexData', 'failureCode', 'origin'}:
+    if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - {'captureID', 'indexData', 'failureCode', 'origin', 'evidenceRetained'}:
         raise EvidenceError('invalid acquisition fields')
     if type(value['schema']) is not int or value['schema'] != 2 or value['phase'] not in ('requested', 'collecting', 'partial', 'complete', 'cancelled'):
         raise EvidenceError('invalid acquisition state')
     if value.get('origin') not in (None, 'manual', 'post_ride'):
         raise EvidenceError('invalid acquisition origin')
+    if value.get('evidenceRetained') is not None and type(value['evidenceRetained']) is not bool:
+        raise EvidenceError('invalid acquisition cache provenance')
+    # This records app-side cache provenance only. Delivery below still checks
+    # actual archived bytes against the original inventory, never this flag.
     try:
         uuid.UUID(value['id'])
         if value.get('captureID') is not None:

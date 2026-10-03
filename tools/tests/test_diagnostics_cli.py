@@ -88,6 +88,25 @@ class DiagnosticsCLITests(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceError, 'origin'):
             validate_acquisition(dict(self.acquisition, origin='remote_arbitrary'))
 
+    def test_cache_provenance_is_optional_boolean_and_never_delivery_proof(self):
+        from bicino_diagnostics.bundle import validate_acquisition
+        for flag in (True, False, None):
+            validate_acquisition(dict(self.acquisition, evidenceRetained=flag))
+        for flag in (1, 'true', []):
+            with self.assertRaisesRegex(EvidenceError, 'cache provenance'):
+                validate_acquisition(dict(self.acquisition, evidenceRetained=flag))
+        for include_device in (True, False):
+            v1_fixture(self.inner, include_device=include_device)
+            acquisition = v2_fixture(self.bundle, self.inner, self.chunk)
+            with zipfile.ZipFile(self.bundle) as archive:
+                members = {name: archive.read(name) for name in archive.namelist() if name != 'checksums.sha256'}
+            acquisition['evidenceRetained'] = True
+            members['acquisitions/' + acquisition['id'] + '.json'] = json.dumps(acquisition).encode()
+            write_zip(self.bundle, members)
+            status, result = self.invoke('verify', self.bundle, '--require-complete')
+            self.assertEqual(status, 0 if include_device else 3, result)
+            self.assertEqual(result['delivery'][0]['state'], 'complete' if include_device else 'incomplete')
+
     def test_false_receipt_does_not_make_missing_evidence_complete(self):
         v1_fixture(self.inner,include_device=False)
         v2_fixture(self.bundle,self.inner,self.chunk,claims_complete=True)
