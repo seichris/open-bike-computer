@@ -18,7 +18,6 @@
 #error "remote renderer debugging requires firmware diagnostics"
 #endif
 #include <SPI.h>
-#include <Network.h>
 #include <WiFi.h>
 #include <Wire.h>
 #include <esp_bt.h>
@@ -1559,13 +1558,6 @@ static void processDisconnectedShutdown() {
  */
 void setup() {
   usb_recovery_status::begin();
-#if defined(WAVESHARE_AMOLED_175)
-  // TCP/IP and Arduino event tasks live for the whole boot. Allocate their
-  // internal stacks before display/BLE setup and temporary transfer owners,
-  // rather than letting the first Wi-Fi session split those owners' free space.
-  // This initializes the network runtime only; the Wi-Fi radio remains off.
-  (void)Network.begin();
-#endif
   power.setShutdownDeferredCallback(showShutdownDeferredNotice);
   power.configureShutdown(
       []() { deviceTransferHttp.beginShutdown(); return true; },
