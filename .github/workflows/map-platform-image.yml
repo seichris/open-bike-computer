@@ -32,6 +32,7 @@ on:
           - standard
           - production-auth-compatibility
           - production-map-promotion
+          - production-map-client-compatibility
       pending_worker:
         description: How to handle an open worker-moving promotion
         required: true
@@ -93,19 +94,29 @@ jobs:
           docker build --platform linux/amd64 --target validation \
             -f map-platform/deploy/promotion/Dockerfile .
 
+      - name: Validate production client compatibility candidate
+        if: inputs.release_profile == 'production-map-client-compatibility'
+        env:
+          SOURCE_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          test "$SOURCE_REF" = "refs/heads/$DEFAULT_BRANCH"
+          docker build --platform linux/amd64 --target validation \
+            -f map-platform/deploy/client-compatibility/Dockerfile .
+
       - id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/open-bike-computer-map-platform
-          tags: type=raw,value=${{ github.sha }}${{ inputs.release_profile == 'production-auth-compatibility' && '-auth-compat' || inputs.release_profile == 'production-map-promotion' && '-map-promotion' || '' }}
+          tags: type=raw,value=${{ github.sha }}${{ inputs.release_profile == 'production-auth-compatibility' && '-auth-compat' || inputs.release_profile == 'production-map-promotion' && '-map-promotion' || inputs.release_profile == 'production-map-client-compatibility' && '-map-client-compat' || '' }}
 
       - id: image
         name: Build and publish image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          file: ${{ inputs.release_profile == 'production-auth-compatibility' && 'map-platform/deploy/compatibility/Dockerfile' || inputs.release_profile == 'production-map-promotion' && 'map-platform/deploy/promotion/Dockerfile' || 'map-platform/backend/Dockerfile' }}
-          target: ${{ (inputs.release_profile == 'production-auth-compatibility' || inputs.release_profile == 'production-map-promotion') && 'runtime' || '' }}
+          file: ${{ inputs.release_profile == 'production-auth-compatibility' && 'map-platform/deploy/compatibility/Dockerfile' || inputs.release_profile == 'production-map-promotion' && 'map-platform/deploy/promotion/Dockerfile' || inputs.release_profile == 'production-map-client-compatibility' && 'map-platform/deploy/client-compatibility/Dockerfile' || 'map-platform/backend/Dockerfile' }}
+          target: ${{ (inputs.release_profile == 'production-auth-compatibility' || inputs.release_profile == 'production-map-promotion' || inputs.release_profile == 'production-map-client-compatibility') && 'runtime' || '' }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.metadata.outputs.tags }}

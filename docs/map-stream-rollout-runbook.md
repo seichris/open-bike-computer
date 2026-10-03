@@ -219,6 +219,25 @@ artifact tells iOS the exact approved firmware identity, and iOS rejects
 installation when the connected device differs. A rotation or later untested binary therefore
 cannot silently reuse an older hardware result.
 
+### Coexisting App Store client builds
+
+An app upgrade must retain the existing approved client. Record a separate
+approval for the new archive's exact build, Git source and component digest.
+Compatible app approvals must match all eight rollout bindings: candidate source,
+producer digest, worker image digest, firmware version/build/source, requirements
+hash, and the complete approved signing-key set. The selected promotion remains
+the hardware and cohort anchor. Each artifact response carries the exact identity
+of its approved requester; unknown or mixed app identities are rejected.
+
+For Bicino 1.9, builds 24 and 25 coexist under
+`msr-20261001-worldwide-build101`. Build 25 is bound to the clean signed archive
+from merged PR #570, source `1c2c36d85d89489a259d4ccc9f8e2aedd4d4b95c`, with its
+own public report digest. The new report retains the maintainer's recorded
+remaining physical risks and contains no measured matrix runs. Publish the
+isolated controller compatibility profile and verify `approvedIosBuilds` reports
+`24,25` before submitting build 25 for automatic App Store release. This does not
+qualify a new firmware or worker image.
+
 Recommended sequence:
 
 1. Keep generation on and delivery on the hardware-test allowlist.
