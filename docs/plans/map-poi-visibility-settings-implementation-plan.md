@@ -161,15 +161,23 @@ enforced: the maximum verified `firmware.bin` size is 3,080,192 bytes in a
 3,145,728-byte slot. PlatformIO's Flash estimate excludes image overhead;
 the build helper's verified binary size determines acceptance.
 
-The previous image at `809902f75` was 3,080,615 bytes, 423 bytes over that
+The previous build at `809902f75` failed the verified reserve check. Its
+linker reported 3,080,615 bytes before binary padding, already over that
 limit. The POI path codec now formats a complete relative path once and
 parses bounded string views with 32-bit arithmetic, removing temporary
 strings and 64-bit conversions while preserving canonical-path, signed
 coordinate, traversal, and overflow rejection. Tests cover negative tile
 boundaries, both int32 extremes, invalid aliases, and malformed paths.
-The updated firmware matrix must establish the final binary size before this
-budget gate is marked passed. Runtime enablement and physical qualification
-remain separate from application-size acceptance.
+The [1.75-inch firmware matrix](https://github.com/seichris/open-bike-computer/actions/runs/37085993954)
+passed ordinary, production, POI-enabled remote-debug, host tests, and
+production factory-package verification at implementation commit
+`32a3d90be34558c2cccad1d8a7248edfbdb500b2`. The attested production
+`firmware.bin` is **3,079,200 bytes**, including padding, with SHA-256
+`17cf1d9a501b9e83a6201f2bf9c55ed3b3264edaa0293170b444425911c76579`.
+It leaves **66,528 bytes** in the application slot: the required reserve plus
+**992 bytes** of additional margin. [PR CI](https://github.com/seichris/open-bike-computer/actions/runs/37085995290)
+also passed at that commit. Runtime enablement and physical qualification
+remain separate from this passed application-size gate.
 
 ## Product contract
 
