@@ -1,4 +1,5 @@
 #include "map_stream_install.hpp"
+#include "map_file_io.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 
 #include <algorithm>
@@ -8,9 +9,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
-#include <fstream>
 #include <new>
-#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -272,12 +271,10 @@ bool readText(const std::string &path, std::string &value,
   uint64_t bytes = 0;
   if (!regularFileSize(path, bytes) || bytes > maximumBytes)
     return false;
-  std::ifstream input(path, std::ios::binary);
+  MapReadFile input(path);
   if (!input)
     return false;
-  value.assign(std::istreambuf_iterator<char>(input),
-               std::istreambuf_iterator<char>());
-  return input.good() || input.eof();
+  return input.readAll(value, maximumBytes);
 }
 
 std::string jsonEscape(const std::string &value) {

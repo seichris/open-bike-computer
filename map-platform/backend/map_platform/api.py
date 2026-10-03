@@ -61,6 +61,7 @@ from .map_buildings import (
     building_preprocessing_scope_mode,
     building_target3_generation_allowlist,
 )
+from .map_pois import poi_target5_generation_allowlist, poi_contours_generation_allowlist
 from .map_signing import map_stream_generation_enabled
 from .map_stream_hardware_requirements import load_hardware_requirements
 from .map_stream_rollout import (
@@ -382,6 +383,8 @@ def create_app(
         job_store,
         limits=limits,
         building_target3_allowlist=building_target3_generation_allowlist(),
+        poi_target5_allowlist=poi_target5_generation_allowlist(),
+        poi_contours_allowlist=poi_contours_generation_allowlist(),
         generation_profile_policy=generation_profile_policy,
         deployment_channel=deployment_channel,
         estimate_coordinator=estimate_coordinator,

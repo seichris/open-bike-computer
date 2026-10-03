@@ -401,6 +401,8 @@ enum DeviceBLEProtocol {
         RideBLEGeneratedProtocolV1.birdsEyeStrongerPerspectiveFeature
     static let osm3DBuildingsCapabilityMask =
         RideBLEGeneratedProtocolV1.osm3DBuildingsFeature
+    static let mapPoisCapabilityMask =
+        RideBLEGeneratedProtocolV1.mapPoisFeature
     static let explicitInvalidGPSHeadingCapabilityMask =
         RideBLEGeneratedProtocolV1.explicitInvalidGpsHeadingFeature
     static let scopedWatchControllerCapabilityMask =
@@ -459,6 +461,11 @@ enum DeviceBLEProtocol {
     static let tracksVisibilityMask: Int32 = 1 << 11
     static let extendedVisibilityMarker: Int32 = 1 << 12
     static let contoursVisibilityMask: Int32 = 1 << 13
+    static let poiShopsVisibilityMask: Int32 = 1 << 14
+    static let poiRestaurantsAndCafesVisibilityMask: Int32 = 1 << 15
+    static let poiPublicToiletsVisibilityMask: Int32 = 1 << 16
+    static let poiGasStationsVisibilityMask: Int32 = 1 << 17
+    static let poiBicycleServicesVisibilityMask: Int32 = 1 << 18
     static let defaultStreetWidth: Int32 = 4
 
     static let brightnessSettingID: UInt8 = 12
@@ -1058,6 +1065,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsRideAutomation: Bool = false
     @Published private(set) var supportsStreetLabels: Bool = false
     @Published private(set) var supports3DBuildings: Bool = false
+    @Published private(set) var supportsMapPois: Bool = false
     @Published private(set) var supportsMapNavigationOrientation = false
     @Published private(set) var supportsTopographicContours = false
     @Published private(set) var supportsExplicitInvalidGPSHeading: Bool = false
@@ -1136,8 +1144,13 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeMapLabelProfileVersion: Int?
     @Published private(set) var activeMapLabelLanguages: [String] = []
     @Published private(set) var activeMapFontAssetHealthy: Bool = false
+    @Published private(set) var activeMapPoiProfileVersion: Int?
+    @Published private(set) var activeMapPoiIndexProfileVersion: Int?
+    @Published private(set) var activeMapPoiDataHealthy = false
+    @Published private(set) var activeMapPoiIndexHealthy = false
     @Published private(set) var activeMapTopographyProfileVersion: Int?
     @Published private(set) var activeMapTopographySectionHealthy = false
+    @Published private(set) var activeMapContourLayerIncluded = false
     @Published private(set) var activeMapTopographyQualityMode = ""
     @Published private(set) var activeMapContourMinorIntervalM: Int?
     @Published private(set) var activeMapContourIndexIntervalM: Int?
@@ -1146,7 +1159,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeMapTopographySourcePolicyReceiptPrefix = ""
     var topographicContoursAvailable: Bool {
         supportsTopographicContours &&
-            activeMapRendererFormat == 4 &&
+            (activeMapRendererFormat == 4 ||
+             (activeMapRendererFormat == 5 && activeMapContourLayerIncluded)) &&
             activeMapTopographyProfileVersion == 1 &&
             activeMapTopographySectionHealthy
     }
@@ -1275,6 +1289,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var showRailways: Bool = true
     @Published var showOtherAreas: Bool = true
     @Published var showContours = false
+    @Published var showPOIShops = true
+    @Published var showPOIRestaurantsAndCafes = true
+    @Published var showPOIPublicToilets = true
+    @Published var showPOIGasStations = true
+    @Published var showPOIBicycleServices = true
     @Published var mapPlusNavigationShowBuildings = MapPlusNavigationDefaults.showBuildings {
         didSet {
             if !isLoadingSettings && oldValue != mapPlusNavigationShowBuildings {
@@ -1300,6 +1319,11 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapPlusNavigationShowRailways = MapPlusNavigationDefaults.showRailways
     @Published var mapPlusNavigationShowOtherAreas = MapPlusNavigationDefaults.showOtherAreas
     @Published var mapPlusNavigationShowContours = MapPlusNavigationDefaults.showContours
+    @Published var mapPlusNavigationShowPOIShops = false
+    @Published var mapPlusNavigationShowPOIRestaurantsAndCafes = false
+    @Published var mapPlusNavigationShowPOIPublicToilets = false
+    @Published var mapPlusNavigationShowPOIGasStations = false
+    @Published var mapPlusNavigationShowPOIBicycleServices = false
     @Published var showRouteOverlay: Bool = true
     @Published var showCurrentPosition: Bool = true
     
@@ -1598,6 +1622,15 @@ class BLEManager: NSObject, ObservableObject {
         static let mapPlusNavigationShowRailways = "mapPlusNavigationSettings.showRailways"
         static let mapPlusNavigationShowOtherAreas = "mapPlusNavigationSettings.showOtherAreas"
         static let mapPlusNavigationShowContours = "mapPlusNavigationSettings.showContours"
+        static let mapPlusNavigationShowPOIShops = "mapPlusNavigationSettings.showPOIShops"
+        static let mapPlusNavigationShowPOIRestaurantsAndCafes =
+            "mapPlusNavigationSettings.showPOIRestaurantsAndCafes"
+        static let mapPlusNavigationShowPOIPublicToilets =
+            "mapPlusNavigationSettings.showPOIPublicToilets"
+        static let mapPlusNavigationShowPOIGasStations =
+            "mapPlusNavigationSettings.showPOIGasStations"
+        static let mapPlusNavigationShowPOIBicycleServices =
+            "mapPlusNavigationSettings.showPOIBicycleServices"
         static let mapPlusNavigationProfileMigrated = "mapPlusNavigationSettings.migrated.v1"
         static let recommendedMapDefaultsMigrated = "mapSettings.recommendedDefaults.v2"
         static let streetLabelDefaultsMigrated = "streetLabels.defaults.v1"
@@ -1630,6 +1663,11 @@ class BLEManager: NSObject, ObservableObject {
         static let showRailways = "mapSettings.showRailways"
         static let showOtherAreas = "mapSettings.showOtherAreas"
         static let showContours = "mapSettings.showContours"
+        static let showPOIShops = "mapSettings.showPOIShops"
+        static let showPOIRestaurantsAndCafes = "mapSettings.showPOIRestaurantsAndCafes"
+        static let showPOIPublicToilets = "mapSettings.showPOIPublicToilets"
+        static let showPOIGasStations = "mapSettings.showPOIGasStations"
+        static let showPOIBicycleServices = "mapSettings.showPOIBicycleServices"
         static let showRouteOverlay = "mapSettings.showRouteOverlay"
         static let showCurrentPosition = "mapSettings.showCurrentPosition"
         static let legacyShowNature = "mapSettings.showNature"
@@ -1895,6 +1933,19 @@ class BLEManager: NSObject, ObservableObject {
         showRailways = defaults.object(forKey: SettingsKeys.showRailways) as? Bool ?? true
         showOtherAreas = defaults.object(forKey: SettingsKeys.showOtherAreas) as? Bool ?? true
         showContours = defaults.object(forKey: SettingsKeys.showContours) as? Bool ?? false
+        showPOIShops = defaults.object(forKey: SettingsKeys.showPOIShops) as? Bool ?? true
+        showPOIRestaurantsAndCafes = defaults.object(
+            forKey: SettingsKeys.showPOIRestaurantsAndCafes
+        ) as? Bool ?? true
+        showPOIPublicToilets = defaults.object(
+            forKey: SettingsKeys.showPOIPublicToilets
+        ) as? Bool ?? true
+        showPOIGasStations = defaults.object(
+            forKey: SettingsKeys.showPOIGasStations
+        ) as? Bool ?? true
+        showPOIBicycleServices = defaults.object(
+            forKey: SettingsKeys.showPOIBicycleServices
+        ) as? Bool ?? true
         let persistedMapProfileKeys = [
             SettingsKeys.minPolygonSize,
             SettingsKeys.detailLevel,
@@ -2018,6 +2069,21 @@ class BLEManager: NSObject, ObservableObject {
                 forKey: SettingsKeys.mapPlusNavigationShowContours
             ) as? Bool ?? MapPlusNavigationDefaults.showContours
         }
+        mapPlusNavigationShowPOIShops = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationShowPOIShops
+        ) as? Bool ?? false
+        mapPlusNavigationShowPOIRestaurantsAndCafes = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationShowPOIRestaurantsAndCafes
+        ) as? Bool ?? false
+        mapPlusNavigationShowPOIPublicToilets = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationShowPOIPublicToilets
+        ) as? Bool ?? false
+        mapPlusNavigationShowPOIGasStations = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationShowPOIGasStations
+        ) as? Bool ?? false
+        mapPlusNavigationShowPOIBicycleServices = defaults.object(
+            forKey: SettingsKeys.mapPlusNavigationShowPOIBicycleServices
+        ) as? Bool ?? false
         mapPlusNavigationBirdsEyeViewEnabled = defaults.object(
             forKey: SettingsKeys.mapPlusNavigationBirdsEyeViewEnabled
         ) as? Bool ?? true
@@ -2184,6 +2250,14 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(showRailways, forKey: SettingsKeys.showRailways)
         defaults.set(showOtherAreas, forKey: SettingsKeys.showOtherAreas)
         defaults.set(showContours, forKey: SettingsKeys.showContours)
+        defaults.set(showPOIShops, forKey: SettingsKeys.showPOIShops)
+        defaults.set(showPOIRestaurantsAndCafes,
+                     forKey: SettingsKeys.showPOIRestaurantsAndCafes)
+        defaults.set(showPOIPublicToilets,
+                     forKey: SettingsKeys.showPOIPublicToilets)
+        defaults.set(showPOIGasStations, forKey: SettingsKeys.showPOIGasStations)
+        defaults.set(showPOIBicycleServices,
+                     forKey: SettingsKeys.showPOIBicycleServices)
         defaults.set(mapPlusNavigationShowBuildings, forKey: SettingsKeys.mapPlusNavigationShowBuildings)
         defaults.set(mapPlusNavigationShowGreenSpace, forKey: SettingsKeys.mapPlusNavigationShowGreenSpace)
         defaults.set(mapPlusNavigationShowPaths, forKey: SettingsKeys.mapPlusNavigationShowPaths)
@@ -2195,6 +2269,16 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapPlusNavigationShowRailways, forKey: SettingsKeys.mapPlusNavigationShowRailways)
         defaults.set(mapPlusNavigationShowOtherAreas, forKey: SettingsKeys.mapPlusNavigationShowOtherAreas)
         defaults.set(mapPlusNavigationShowContours, forKey: SettingsKeys.mapPlusNavigationShowContours)
+        defaults.set(mapPlusNavigationShowPOIShops,
+                     forKey: SettingsKeys.mapPlusNavigationShowPOIShops)
+        defaults.set(mapPlusNavigationShowPOIRestaurantsAndCafes,
+                     forKey: SettingsKeys.mapPlusNavigationShowPOIRestaurantsAndCafes)
+        defaults.set(mapPlusNavigationShowPOIPublicToilets,
+                     forKey: SettingsKeys.mapPlusNavigationShowPOIPublicToilets)
+        defaults.set(mapPlusNavigationShowPOIGasStations,
+                     forKey: SettingsKeys.mapPlusNavigationShowPOIGasStations)
+        defaults.set(mapPlusNavigationShowPOIBicycleServices,
+                     forKey: SettingsKeys.mapPlusNavigationShowPOIBicycleServices)
         defaults.set(true, forKey: SettingsKeys.mapPlusNavigationProfileMigrated)
         defaults.set(showRouteOverlay, forKey: SettingsKeys.showRouteOverlay)
         defaults.set(showCurrentPosition, forKey: SettingsKeys.showCurrentPosition)
@@ -5506,6 +5590,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsMapPois = false
         supportsMapNavigationOrientation = false
         supportsTopographicContours = false
         supportsRideAutomation = false
@@ -5573,6 +5658,21 @@ class BLEManager: NSObject, ObservableObject {
             if topographicContoursAvailable && showContours {
                 mask |= DeviceBLEProtocol.contoursVisibilityMask
             }
+            if supportsMapPois {
+                if showPOIShops { mask |= DeviceBLEProtocol.poiShopsVisibilityMask }
+                if showPOIRestaurantsAndCafes {
+                    mask |= DeviceBLEProtocol.poiRestaurantsAndCafesVisibilityMask
+                }
+                if showPOIPublicToilets {
+                    mask |= DeviceBLEProtocol.poiPublicToiletsVisibilityMask
+                }
+                if showPOIGasStations {
+                    mask |= DeviceBLEProtocol.poiGasStationsVisibilityMask
+                }
+                if showPOIBicycleServices {
+                    mask |= DeviceBLEProtocol.poiBicycleServicesVisibilityMask
+                }
+            }
             settingID = 8
         case .mapPlusNavigation:
             if mapPlusNavigationShowBuildings { mask |= (1 << 0) }
@@ -5590,6 +5690,23 @@ class BLEManager: NSObject, ObservableObject {
             }
             if topographicContoursAvailable && mapPlusNavigationShowContours {
                 mask |= DeviceBLEProtocol.contoursVisibilityMask
+            }
+            if supportsMapPois {
+                if mapPlusNavigationShowPOIShops {
+                    mask |= DeviceBLEProtocol.poiShopsVisibilityMask
+                }
+                if mapPlusNavigationShowPOIRestaurantsAndCafes {
+                    mask |= DeviceBLEProtocol.poiRestaurantsAndCafesVisibilityMask
+                }
+                if mapPlusNavigationShowPOIPublicToilets {
+                    mask |= DeviceBLEProtocol.poiPublicToiletsVisibilityMask
+                }
+                if mapPlusNavigationShowPOIGasStations {
+                    mask |= DeviceBLEProtocol.poiGasStationsVisibilityMask
+                }
+                if mapPlusNavigationShowPOIBicycleServices {
+                    mask |= DeviceBLEProtocol.poiBicycleServicesVisibilityMask
+                }
             }
             settingID = DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
         case .navigation, .rideStats, .batteryStatus, .worldRadio:
@@ -6729,6 +6846,11 @@ class BLEManager: NSObject, ObservableObject {
         activeMapLabelProfileVersion = nil
         activeMapLabelLanguages = []
         activeMapFontAssetHealthy = false
+        activeMapPoiProfileVersion = nil
+        activeMapPoiIndexProfileVersion = nil
+        activeMapPoiDataHealthy = false
+        activeMapPoiIndexHealthy = false
+        activeMapContourLayerIncluded = false
         activeMapTopographyProfileVersion = nil
         activeMapTopographySectionHealthy = false
         activeMapTopographyQualityMode = ""
@@ -6818,6 +6940,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsMapPois = false
         supportsMapNavigationOrientation = false
         supportsTopographicContours = false
         supportsRideAutomation = false
@@ -10184,6 +10307,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsDestinationPicker = false
         supportsStreetLabels = false
         supports3DBuildings = false
+        supportsMapPois = false
         supportsMapNavigationOrientation = false
         supportsTopographicContours = false
         supportsRideAutomation = false
@@ -10339,6 +10463,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.osm3DBuildingsCapabilityMask != 0
         let hasTopographicContours =
             flags & DeviceBLEProtocol.topographicContoursCapabilityMask != 0
+        let hasMapPois =
+            flags & DeviceBLEProtocol.mapPoisCapabilityMask != 0 &&
+            hasExtendedMapVisibility && hasStreetLabels && has3DBuildings &&
+            hasTopographicContours
         let hasRideAutomation =
             flags & DeviceBLEProtocol.rideAutomationCapabilityMask != 0
         let hasExplicitInvalidGPSHeading =
@@ -10437,6 +10565,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         if hasReceivedDeviceCapabilities && !supports3DBuildings && has3DBuildings {
             hasSentMapNavigationProfileForConnection = false
         }
+        if hasReceivedDeviceCapabilities && !supportsMapPois && hasMapPois {
+            hasSentMapProfileForConnection = false
+            hasSentMapNavigationProfileForConnection = false
+        }
         if hasReceivedDeviceCapabilities && !supportsMapNavigationOrientation &&
             flags & RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature != 0 {
             hasSentMapNavigationProfileForConnection = false
@@ -10475,6 +10607,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsDestinationPicker = hasDestinationPicker
         supportsStreetLabels = hasStreetLabels
         supports3DBuildings = has3DBuildings
+        supportsMapPois = hasMapPois
         supportsMapNavigationOrientation = flags &
             RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature != 0
         supportsTopographicContours = hasTopographicContours
@@ -11226,6 +11359,16 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         mapTransferActiveMapId = status.activeMapId ?? ""
         mapTransferActiveSessionId = status.activeSessionId ?? ""
         activeMapManifestReceipt = status.activeManifestReceipt ?? ""
+        activeMapRendererFormat = status.activeRendererFormat
+        activeMapLabelProfileVersion = status.labelProfileVersion
+        activeMapLabelLanguages = status.labelLanguages ?? []
+        activeMapFontAssetHealthy = status.fontAssetHealthy ?? false
+        activeMapPoiProfileVersion = status.poiProfileVersion
+        activeMapPoiIndexProfileVersion = status.poiIndexProfileVersion
+        activeMapPoiDataHealthy = status.poiDataHealthy ?? false
+        activeMapPoiIndexHealthy = status.poiIndexHealthy ?? false
+        activeMapContourLayerIncluded = status.contourLayerIncluded ?? false
+        normalizeActiveMapPoiStatus()
         if let mapID = status.activeMapId {
             activeDeviceMap = DeviceActiveMapDescriptor(
                 mapID: mapID,
@@ -11268,6 +11411,20 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         hasFreshMapTransferStatus = true
     }
 
+    private func normalizeActiveMapPoiStatus() {
+        guard !mapTransferActiveMapId.isEmpty,
+              activeMapRendererFormat == 5,
+              activeMapPoiProfileVersion == 1,
+              activeMapPoiIndexProfileVersion == 1 else {
+            activeMapPoiProfileVersion = nil
+            activeMapPoiIndexProfileVersion = nil
+            activeMapPoiDataHealthy = false
+            activeMapPoiIndexHealthy = false
+            activeMapContourLayerIncluded = false
+            return
+        }
+    }
+
     private func applyMapTransferStatusBody(_ body: Data) -> Bool {
         guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
             mapTransferStatusDescription = "invalid status"
@@ -11292,6 +11449,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             (object["labelProfileVersion"] as? NSNumber)?.intValue
         activeMapLabelLanguages = object["labelLanguages"] as? [String] ?? []
         activeMapFontAssetHealthy = object["fontAssetHealthy"] as? Bool ?? false
+        activeMapPoiProfileVersion =
+            (object["poiProfileVersion"] as? NSNumber)?.intValue
+        activeMapPoiIndexProfileVersion =
+            (object["poiIndexProfileVersion"] as? NSNumber)?.intValue
+        activeMapPoiDataHealthy = object["poiDataHealthy"] as? Bool ?? false
+        activeMapPoiIndexHealthy = object["poiIndexHealthy"] as? Bool ?? false
+        activeMapContourLayerIncluded = object["contourLayerIncluded"] as? Bool ?? false
         activeMapTopographyProfileVersion =
             (object["topographyProfileVersion"] as? NSNumber)?.intValue
         activeMapTopographySectionHealthy =
@@ -11333,6 +11497,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferActivationProgress = nil
             mapTransferActivationError = nil
         }
+        normalizeActiveMapPoiStatus()
         deviceHasSDCard = object["sdPresent"] as? Bool
         deviceMapStateKnown = object["mapStateKnown"] as? Bool ?? false
         deviceMapFoundForCurrentLocation = object["mapFound"] as? Bool

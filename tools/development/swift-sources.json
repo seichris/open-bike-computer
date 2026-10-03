@@ -214,6 +214,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift",
         "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyContourSection.swift",
         "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
         "ios-app/BikeComputer/BikeComputer/Services/ManagedAppAttestClient.swift",

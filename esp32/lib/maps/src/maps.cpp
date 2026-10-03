@@ -18,6 +18,7 @@
 #include "mapLabelRasterizer.hpp"
 #include "mapLabelSelection.hpp"
 #include "mapLineStyle.hpp"
+#include "mapPoiIcon.hpp"
 #include "mapTransform.hpp"
 #include "map_projection.hpp"
 #include "../../ble_navigation/ble_navigation.hpp"
@@ -280,7 +281,8 @@ bool Maps::LabelLayoutCacheKey::operator==(
          screenWidth == other.screenWidth && screenHeight == other.screenHeight &&
          fontFingerprint == other.fontFingerprint &&
          visibilityMask == other.visibilityMask &&
-         blockSignature == other.blockSignature && zoom == other.zoom &&
+         blockSignature == other.blockSignature &&
+         poiSignature == other.poiSignature && zoom == other.zoom &&
          density == other.density && languageMode == other.languageMode &&
          textSize == other.textSize && orientation == other.orientation &&
          markerX == other.markerX && markerY == other.markerY &&
@@ -1710,6 +1712,16 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
       return new MapBlock();
     }
   }
+  if (version >= 6) {
+    std::string poiError;
+    if (!map_poi_block::decode(reinterpret_cast<const uint8_t *>(file),
+                               fileSize, mblock->poiData, &poiError)) {
+      ESP_LOGE(TAG, "Could not decode FMB v6 POIs: %s", poiError.c_str());
+      Maps::isMapFound = false;
+      delete mblock;
+      return new MapBlock();
+    }
+  }
 
   // Build spatial grid for polygon culling optimization
   const uint32_t gridStartMs = MAPIO_TIME_MS();
@@ -1726,7 +1738,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
   const uint32_t gridMs = MAPIO_TIME_MS() - gridStartMs;
   MAPIO_LOG("MAPIO: vector-parse format=binary size=%u version=%u "
             "polygons=%u lines=%u buildingRecords=%u buildingRings=%u "
-            "buildingPoints=%u heightExplicit=%u heightLevels=%u "
+            "buildingPoints=%u poiRecords=%u heightExplicit=%u heightLevels=%u "
             "heightInherited=%u heightLocalMedian=%u heightClassDefault=%u "
             "parseMs=%lu gridMs=%lu totalMs=%lu\n",
             (unsigned)fileSize, version, (unsigned)mblock->polygons.size(),
@@ -1734,6 +1746,7 @@ Maps::MapBlock *Maps::readMapBlockBinary(char *file, size_t fileSize) {
             (unsigned)mblock->buildingData.stats.records,
             (unsigned)mblock->buildingData.stats.rings,
             (unsigned)mblock->buildingData.stats.points,
+            (unsigned)mblock->poiData.stats.records,
             (unsigned)mblock->buildingData.stats.provenance[0],
             (unsigned)mblock->buildingData.stats.provenance[1],
             (unsigned)mblock->buildingData.stats.provenance[2],
@@ -2150,6 +2163,7 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
     mixSignature(block->formatVersion);
     mixSignature(block->labelData.profileFingerprint);
     mixSignature(static_cast<uint32_t>(block->labelData.labels.size()));
+    mixSignature(static_cast<uint32_t>(block->poiData.records.size()));
   }
   const bool guidance = context.guidanceScreenActive;
   const LabelLayoutCacheKey cacheKey{
@@ -2161,6 +2175,7 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
       labelFontAsset.profileFingerprint(),
       style.visibilityMask,
       blockSignature,
+      poiLayoutSignature,
       zoom,
       style.labelDensity,
       style.labelLanguageMode,
@@ -2336,7 +2351,8 @@ bool Maps::drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
 
   if (options.empty())
     return true;
-  std::vector<map_label_layout::ReservedRegion> reserved;
+  MapLabelLayoutVector<map_label_layout::ReservedRegion> reserved =
+      poiReservedRegions;
   if (markerVisible) {
     const float markerSize = static_cast<float>(
         navigation_visual_style::POSITION_MARKER_BASE_SIZE *
@@ -2548,6 +2564,8 @@ bool Maps::readVectorMap(
   const bool mapNavigationActive = context.guidanceScreenActive;
   const uint32_t drawStartMs = MAPIO_TIME_MS();
   surface.clear(BACKGROUND_COLOR);
+  poiReservedRegions.clear();
+  poiLayoutSignature = 1469598103934665603ULL;
 
   if (!Maps::isMapFound.load(std::memory_order_acquire) ||
       memCache.blocks.empty()) {
@@ -3645,6 +3663,158 @@ bool Maps::readVectorMap(
     return false;
   }
 
+  // Disabled profiles still parse compatible map blocks, but must not link
+  // the POI renderer or spend their production image reserve on it.
+#if MAP_POIS_RUNTIME_ENABLED
+  map_poi_layout::Diagnostics poiDiagnostics{};
+  uint32_t decodedPoiRecords = 0;
+  uint32_t decodedPoiBytes = 0;
+  uint32_t poiGatherMs = 0;
+  uint32_t poiLayoutMs = 0;
+  uint32_t poiDrawMs = 0;
+  try {
+    const uint32_t poiGatherStartMs = MAPIO_TIME_MS();
+    // POIs and street labels must share visible-crop coordinates. The stable
+    // camera projects into an overscanned backing surface, not the viewport.
+    auto poiSurface = surface;
+    int32_t poiGutter = 0;
+    if (map_profile_protocol::STABLE_CAMERA_ENABLED &&
+        context.labelViewportWidth > 0 && context.labelViewportHeight > 0) {
+      poiGutter = context.labelGutter;
+      if (poiGutter * 2 + context.labelViewportWidth > surface.width ||
+          poiGutter * 2 + context.labelViewportHeight > surface.height)
+        return false;
+      poiSurface.pixels += poiGutter * surface.stridePixels + poiGutter;
+      poiSurface.width = context.labelViewportWidth;
+      poiSurface.height = context.labelViewportHeight;
+    }
+    MapPoiLayoutVector<map_poi_layout::Candidate> poiCandidates;
+    poiCandidates.reserve(map_poi_layout::kMaximumCandidates);
+    MapLabelLayoutVector<map_label_layout::ReservedRegion> poiReserved;
+    if (context.showCurrentPosition) {
+      const auto projectedMarker = projection.projectWorld(
+          map_profile_protocol::STABLE_CAMERA_ENABLED
+              ? context.presentedWorld : context.measuredGpsWorld);
+      if (projectedMarker.valid) {
+        const float markerSize = static_cast<float>(
+            navigation_visual_style::POSITION_MARKER_BASE_SIZE *
+            std::max<uint8_t>(1, context.markerScale));
+        poiReserved.push_back(
+            {static_cast<float>(projectedMarker.x - poiGutter),
+             static_cast<float>(projectedMarker.y - poiGutter),
+             markerSize, markerSize});
+      }
+    }
+    if (context.guidanceScreenActive) {
+      poiReserved.push_back({poiSurface.width * 0.5F, 34.0F,
+                             static_cast<float>(poiSurface.width), 68.0F});
+    }
+
+    for (size_t blockIndex = 0; blockIndex < memCache.blocks.size();
+         ++blockIndex) {
+      MapBlock *block = memCache.blocks[blockIndex];
+      if (block == nullptr || !block->inView || block->formatVersion < 6)
+        continue;
+      decodedPoiRecords += block->poiData.stats.records;
+      decodedPoiBytes += static_cast<uint32_t>(block->poiData.decodedBytes());
+      for (size_t recordIndex = 0;
+           recordIndex < block->poiData.records.size(); ++recordIndex) {
+        if ((recordIndex & 0x3fU) == 0 && shouldCancelMapRenderWork())
+          return false;
+        const auto &record = block->poiData.records[recordIndex];
+        if (zoom > record.maximumZoom ||
+            (style.visibilityMask &
+             map_poi_layout::visibilityBit(record.category)) == 0) {
+          continue;
+        }
+        const map_transform::WorldPoint world{
+            static_cast<double>(block->offset.x + record.localX),
+            static_cast<double>(block->offset.y + record.localY)};
+        const auto projected = projection.projectWorld(world);
+        if (!projected.valid) {
+          ++poiDiagnostics.offscreen;
+          continue;
+        }
+        const double riderX = world.x - context.presentedWorld.x;
+        const double riderY = world.y - context.presentedWorld.y;
+        map_poi_layout::retainBounded(
+            poiCandidates,
+            {static_cast<float>(projected.x - poiGutter),
+             static_cast<float>(projected.y - poiGutter),
+             riderX * riderX + riderY * riderY,
+             record.category, static_cast<uint16_t>(blockIndex),
+             static_cast<uint16_t>(recordIndex), record.rank},
+            context.guidanceScreenActive, &poiDiagnostics);
+      }
+    }
+    poiGatherMs = MAPIO_TIME_MS() - poiGatherStartMs;
+    const uint32_t poiLayoutStartMs = MAPIO_TIME_MS();
+    auto poiPlacements = map_poi_layout::place(
+        std::move(poiCandidates),
+        {static_cast<float>(poiSurface.width),
+         static_cast<float>(poiSurface.height)},
+        context.guidanceScreenActive, poiReserved, &poiDiagnostics);
+    poiLayoutMs = MAPIO_TIME_MS() - poiLayoutStartMs;
+    const uint32_t poiDrawStartMs = MAPIO_TIME_MS();
+    const auto mixPoiSignature = [&](uint32_t value) {
+      poiLayoutSignature ^= value;
+      poiLayoutSignature *= 1099511628211ULL;
+    };
+    for (const auto &placement : poiPlacements) {
+      const int32_t x = map_transform::quantizePixel(placement.candidate.x);
+      const int32_t y = map_transform::quantizePixel(placement.candidate.y);
+      map_poi_icon::draw(poiSurface, x, y, placement.candidate.category);
+      poiReservedRegions.push_back(
+          {static_cast<float>(x), static_cast<float>(y),
+           map_poi_layout::kIconSize + 2.0F * map_poi_layout::kIconPadding,
+           map_poi_layout::kIconSize + 2.0F * map_poi_layout::kIconPadding});
+      mixPoiSignature(static_cast<uint32_t>(x));
+      mixPoiSignature(static_cast<uint32_t>(y));
+      mixPoiSignature(static_cast<uint32_t>(placement.candidate.category));
+    }
+    poiDrawMs = MAPIO_TIME_MS() - poiDrawStartMs;
+  } catch (const std::bad_alloc &) {
+    // The worker publishes only complete frames. Returning false preserves the
+    // prior frame and lets the latest semantic request retry.
+    return false;
+  }
+
+  if (diagnostics != nullptr) {
+    diagnostics->candidatePois = static_cast<uint32_t>(poiDiagnostics.gathered);
+    diagnostics->acceptedPois = static_cast<uint32_t>(poiDiagnostics.accepted);
+    diagnostics->collisionRejectedPois =
+        static_cast<uint32_t>(poiDiagnostics.collisionRejected);
+    diagnostics->offscreenPois = static_cast<uint32_t>(poiDiagnostics.offscreen);
+    diagnostics->capacityDeferredPois =
+        static_cast<uint32_t>(poiDiagnostics.capacityDeferred);
+    diagnostics->decodedPoiRecords = decodedPoiRecords;
+    diagnostics->decodedPoiBytes = decodedPoiBytes;
+    diagnostics->poiGatherMs = poiGatherMs;
+    diagnostics->poiLayoutMs = poiLayoutMs;
+    diagnostics->poiDrawMs = poiDrawMs;
+    for (size_t index = 0; index < poiDiagnostics.acceptedCategories.size();
+         ++index) {
+      diagnostics->acceptedPoiCategories[index] =
+          static_cast<uint32_t>(poiDiagnostics.acceptedCategories[index]);
+    }
+  }
+  MAPIO_LOG(
+      "MAPIO: pois candidates=%u accepted=%u collision=%u offscreen=%u "
+      "capacity=%u decodedRecords=%u decodedBytes=%u gatherMs=%lu "
+      "layoutMs=%lu drawMs=%lu categories=%u,%u,%u,%u,%u\n",
+      (unsigned)poiDiagnostics.gathered, (unsigned)poiDiagnostics.accepted,
+      (unsigned)poiDiagnostics.collisionRejected,
+      (unsigned)poiDiagnostics.offscreen,
+      (unsigned)poiDiagnostics.capacityDeferred, (unsigned)decodedPoiRecords,
+      (unsigned)decodedPoiBytes, (unsigned long)poiGatherMs,
+      (unsigned long)poiLayoutMs, (unsigned long)poiDrawMs,
+      (unsigned)poiDiagnostics.acceptedCategories[0],
+      (unsigned)poiDiagnostics.acceptedCategories[1],
+      (unsigned)poiDiagnostics.acceptedCategories[2],
+      (unsigned)poiDiagnostics.acceptedCategories[3],
+      (unsigned)poiDiagnostics.acceptedCategories[4]);
+#endif
+
   if (drawLabels) {
     map_surface::LabelSurface labelSurface;
     labelSurface.color = surface;
@@ -4390,6 +4560,8 @@ bool Maps::startRenderWorker() {
                                                std::memory_order_release);
   renderJobs.reset();
   latestRenderRequestValid = false;
+  pendingNearbySearchValid = false;
+  readyNearbySearchValid = false;
   lastTakenRenderSequence = 0;
   readyRenderResultValid = false;
   renderFailurePending = false;
@@ -4642,6 +4814,9 @@ void Maps::renderWorkerLoop() {
         diagnosticsSample.buildingProjectionMs =
             result.raster.buildingProjectionMs;
         diagnosticsSample.buildingDrawMs = result.raster.buildingDrawMs;
+        diagnosticsSample.poiGatherMs = result.raster.poiGatherMs;
+        diagnosticsSample.poiLayoutMs = result.raster.poiLayoutMs;
+        diagnosticsSample.poiDrawMs = result.raster.poiDrawMs;
         diagnosticsSample.buildings = {
             result.raster.candidateBuildings,
             result.raster.selectedBuildings,
@@ -4654,6 +4829,16 @@ void Maps::renderWorkerLoop() {
             result.raster.extrudedFarthestDistancePx,
             result.raster.buildingLimiterFlags,
             result.raster.allocationFallback,
+        };
+        diagnosticsSample.pois = {
+            result.raster.candidatePois,
+            result.raster.acceptedPois,
+            result.raster.collisionRejectedPois,
+            result.raster.offscreenPois,
+            result.raster.capacityDeferredPois,
+            result.raster.decodedPoiRecords,
+            result.raster.decodedPoiBytes,
+            result.raster.acceptedPoiCategories,
         };
         renderer_diagnostics::noteRenderForWindow(
             request.context.rendererDiagnosticsWindowId,
@@ -4742,6 +4927,9 @@ void Maps::renderWorkerLoop() {
       if (processPendingStorageControl() || processPendingVectorMapActivation())
         break;
     }
+#if MAP_POIS_RUNTIME_ENABLED
+    (void)processPendingNearbySearch();
+#endif
   }
 
   if (renderStateMutex != nullptr &&
@@ -4756,6 +4944,8 @@ void Maps::renderWorkerLoop() {
     renderJobs.cancelActive();
     readyRenderResultValid = false;
     latestRenderRequestValid = false;
+    pendingNearbySearchValid = false;
+    readyNearbySearchValid = false;
     renderWorkerTaskHandle = nullptr;
     xSemaphoreGive(renderStateMutex);
   } else {
@@ -5114,6 +5304,80 @@ void Maps::updatePresentedFrameTransform() {
   }
   lastFramePresentationSignature = presentationSignature;
 }
+
+#if MAP_POIS_RUNTIME_ENABLED
+bool Maps::projectNearbyResult(
+    const map_nearby_query::Result &place,
+    map_nearby_layout::Input &output) const {
+  output = {};
+  if (!publishedMapFrame || !hasVisibleProjection || canvasMap == nullptr ||
+      !map_nearby_query::valid(place.position) ||
+      place.category < 1 || place.category > 5)
+    return false;
+  constexpr double pi = 3.14159265358979323846;
+  constexpr double worldWidth = 2.0 * pi * EARTH_RADIUS;
+  map_transform::WorldPoint world{
+      map_nearby_query::degreesToRadians(place.position.longitude) * EARTH_RADIUS,
+      std::log(std::tan(pi / 4.0 +
+                        map_nearby_query::degreesToRadians(place.position.latitude) /
+                            2.0)) * EARTH_RADIUS};
+  if (!std::isfinite(world.x) || !std::isfinite(world.y)) return false;
+  world.x += std::round((visibleProjection.config().worldOrigin.x - world.x) /
+                        worldWidth) * worldWidth;
+  const map_transform::WorldPoint pivotWorld =
+      visibleRenderResult.followPosition && hasPresentedPose
+          ? map_transform::WorldPoint{presentedPose.position.x,
+                                      presentedPose.position.y}
+          : visibleRenderResult.center;
+  const auto point = visibleProjection.projectWorld(world);
+  const auto pivot = visibleProjection.projectWorld(pivotWorld);
+  const auto ground = visibleProjection.groundForWorld(world);
+  if (!pivot.valid) return false;
+
+  double rotationDelta = 0.0;
+  if (!map_profile_protocol::STABLE_CAMERA_ENABLED) {
+    double desiredRotation = visibleRenderResult.rotationRad;
+    if (rotationMode == ROT_COURSE_UP && hasPresentedPose &&
+        presentedPose.headingValid)
+      desiredRotation = -presentedPose.headingDegrees * pi / 180.0;
+    else if (rotationMode == ROT_NORTH_UP)
+      desiredRotation = 0.0;
+    rotationDelta = map_presentation::signedHeadingDelta(
+        visibleRenderResult.rotationRad * 180.0 / pi,
+        desiredRotation * 180.0 / pi) * pi / 180.0;
+  }
+  const double cosine = std::cos(rotationDelta);
+  const double sine = std::sin(rotationDelta);
+  output.directionX = cosine * ground.lateral + sine * ground.forward;
+  output.directionY = sine * ground.lateral - cosine * ground.forward;
+  output.category = place.category;
+  output.directDistanceM = place.directDistanceM;
+  output.projected = point.valid;
+  if (!point.valid) return true;
+
+  if (map_profile_protocol::STABLE_CAMERA_ENABLED) {
+    output.x = (lv_obj_get_width(mapTile) - visibleRenderResult.renderWidth) /
+                   2.0 + point.x;
+    output.y = (lv_obj_get_height(mapTile) - visibleRenderResult.renderHeight) /
+                   2.0 + point.y;
+    return true;
+  }
+  const double originX = gui_layout::centeredViewportOrigin(
+      lv_obj_get_width(mapTile), visibleRenderResult.viewportWidth);
+  const double originY = gui_layout::centeredViewportOrigin(
+      lv_obj_get_height(mapTile), visibleRenderResult.viewportHeight);
+  const map_presentation::ScreenPoint anchor{
+      originX + visibleRenderResult.projection.anchorX() -
+          visibleRenderResult.overscanPixels,
+      originY + visibleRenderResult.projection.anchorY() -
+          visibleRenderResult.overscanPixels};
+  const auto shown = map_presentation::presentFramePoint(
+      {point.x, point.y}, {pivot.x, pivot.y}, anchor, rotationDelta);
+  output.x = shown.x;
+  output.y = shown.y;
+  return true;
+}
+#endif
 
 void Maps::renderLiveForeground() {
   if (canvasForeground == nullptr) {
@@ -5709,6 +5973,26 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
 
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
+#if MAP_POIS_RUNTIME_ENABLED
+  bool poiIndexReady = false;
+  std::vector<map_nearby_coverage::Block> candidateCoverage;
+  try {
+    MapNearbyVector<map_poi_index::Entry> entries;
+    map_nearby_storage::Status indexStatus;
+    std::string root(normalized.c_str());
+    while (!root.empty() && root.back() == '/') root.pop_back();
+    poiIndexReady = map_nearby_storage::readIndex(
+        root, entries, nullptr, nullptr, indexStatus);
+    if (poiIndexReady) {
+      map_nearby_storage::Status coverageStatus;
+      poiIndexReady = map_nearby_storage::readCoverage(
+          root, candidateCoverage, coverageStatus);
+    }
+  } catch (const std::bad_alloc &) {
+    ESP_LOGE(TAG, "MAP_RESOURCE_REJECTED: Nearby index activation");
+  }
+  cancelNearbySearch();
+#endif
   for (MapBlock *block : memCache.blocks)
     delete block;
   memCache.blocks.clear();
@@ -5717,6 +6001,10 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
   labelFontAsset = std::move(candidateFont);
   streetLabelFontHealthy.store(labelFontAsset.healthy(),
                                std::memory_order_release);
+#if MAP_POIS_RUNTIME_ENABLED
+  nearbyCoverageBlocks = std::move(candidateCoverage);
+  nearbyPoiIndexHealthy.store(poiIndexReady, std::memory_order_release);
+#endif
   labelLayoutCache.clear();
   streetLabelRuntimeFailure.store(map_font_asset::RuntimeError::None,
                                   std::memory_order_release);
@@ -5873,6 +6161,123 @@ bool Maps::requestStorageControl(void (*work)(void *), void *context) {
   xTaskNotifyGive(worker);
   return true;
 }
+
+#if MAP_POIS_RUNTIME_ENABLED
+uint32_t Maps::requestNearbySearch(map_nearby_query::Position rider,
+                                   uint32_t selectedMask, double radiusM) {
+  if (!map_nearby_query::valid(rider) || selectedMask == 0 ||
+      (selectedMask & ~0x1fU) != 0 || !std::isfinite(radiusM) ||
+      radiusM <= 0.0 || radiusM > 25000.0 ||
+      renderWorkerShutdown.load(std::memory_order_acquire))
+    return 0;
+  if (renderWorkerTaskHandle == nullptr && !startRenderWorker())
+    return 0;
+  if (renderStateMutex == nullptr ||
+      xSemaphoreTake(renderStateMutex, pdMS_TO_TICKS(5)) != pdTRUE)
+    return 0;
+  const uint32_t sequence =
+      nearbySearchGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+  pendingNearbySearch = {sequence, rider, selectedMask, radiusM};
+  pendingNearbySearchValid = true;
+  readyNearbySearchValid = false;
+  const TaskHandle_t worker = renderWorkerTaskHandle;
+  xSemaphoreGive(renderStateMutex);
+  if (worker != nullptr) xTaskNotifyGive(worker);
+  return sequence;
+}
+
+void Maps::cancelNearbySearch() {
+  nearbySearchGeneration.fetch_add(1, std::memory_order_acq_rel);
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    pendingNearbySearchValid = false;
+    readyNearbySearchValid = false;
+    xSemaphoreGive(renderStateMutex);
+  }
+}
+
+bool Maps::takeNearbySearchResult(
+    uint32_t &sequence, map_nearby_storage::SearchResult &result) {
+  if (renderStateMutex == nullptr ||
+      xSemaphoreTake(renderStateMutex, 0) != pdTRUE)
+    return false;
+  const bool available = readyNearbySearchValid;
+  if (available) {
+    sequence = readyNearbySearch.sequence;
+    result = readyNearbySearch.result;
+    readyNearbySearchValid = false;
+  }
+  xSemaphoreGive(renderStateMutex);
+  return available;
+}
+
+bool Maps::processPendingNearbySearch() {
+  if (renderStateMutex == nullptr ||
+      xSemaphoreTake(renderStateMutex, portMAX_DELAY) != pdTRUE)
+    return false;
+  const bool available = pendingNearbySearchValid &&
+      pendingStorageControl_ == nullptr &&
+      !pendingVectorMapActivationValid &&
+      !completedVectorMapActivationValid;
+  NearbySearchRequest request{};
+  if (available) {
+    request = pendingNearbySearch;
+    pendingNearbySearchValid = false;
+  }
+  xSemaphoreGive(renderStateMutex);
+  if (!available) return false;
+
+  gMapRenderActiveCancellationGeneration.store(
+      gMapRenderCancellationGeneration.load(std::memory_order_acquire),
+      std::memory_order_release);
+  gMapRenderLastCheckpointUs = micros();
+  gMapRenderLastIdleReleaseUs = gMapRenderLastCheckpointUs;
+  struct CancellationContext {
+    Maps *owner;
+    uint32_t sequence;
+  } cancellation{this, request.sequence};
+  auto shouldCancel = [](void *opaque) {
+    const auto *state = static_cast<const CancellationContext *>(opaque);
+    return state->owner->nearbySearchGeneration.load(
+               std::memory_order_acquire) != state->sequence ||
+           shouldCancelMapRenderWork();
+  };
+  map_nearby_storage::SearchResult result;
+  try {
+    power_management::ScopedLock powerLock(
+        power_management::LockDomain::Storage);
+    if (nearbyCoverageBlocks.empty()) {
+      result.status = map_nearby_storage::Status::Unavailable;
+    } else {
+      result = map_nearby_storage::search(
+          std::string(vectorMapFolder.c_str()), request.rider,
+          request.selectedMask, request.radiusM, shouldCancel, &cancellation,
+          &nearbyCoverageBlocks);
+    }
+  } catch (const std::bad_alloc &) {
+    result.status = map_nearby_storage::Status::ResourceRejected;
+    ESP_LOGE(TAG, "MAP_RESOURCE_REJECTED: Nearby search");
+  }
+  if (xSemaphoreTake(renderStateMutex, portMAX_DELAY) == pdTRUE) {
+    if (request.sequence ==
+        nearbySearchGeneration.load(std::memory_order_acquire)) {
+      // A newer render or storage operation can interrupt the search without
+      // superseding its Nearby request. Publish a typed cancellation so the UI
+      // can retry; silently dropping it would leave the spinner stuck forever.
+      if (pendingVectorMapActivationValid || pendingStorageControl_ != nullptr)
+        result.status = map_nearby_storage::Status::Cancelled;
+      if (result.status != map_nearby_storage::Status::Cancelled)
+        nearbyPoiIndexHealthy.store(
+            result.status == map_nearby_storage::Status::Ok,
+            std::memory_order_release);
+      readyNearbySearch = {request.sequence, result};
+      readyNearbySearchValid = true;
+    }
+    xSemaphoreGive(renderStateMutex);
+  }
+  return true;
+}
+#endif
 
 bool Maps::processPendingStorageControl() {
   if (xSemaphoreTake(renderStateMutex, portMAX_DELAY) != pdTRUE)
@@ -7957,6 +8362,17 @@ void Maps::centerOnGps(double lat, double lon) {
 
   ESP_LOGI(TAG, "centerOnGps: map center updated");
 }
+
+#if MAP_POIS_RUNTIME_ENABLED
+void Maps::centerOnCoordinate(double lat, double lon) {
+  if (!map_nearby_query::valid({lat, lon})) return;
+  followGps = false;
+  point.x = lon2x(lon);
+  point.y = lat2y(lat);
+  isPosMoved = true;
+  redrawMap = true;
+}
+#endif
 
 /**
  * @brief Smooth scroll current map

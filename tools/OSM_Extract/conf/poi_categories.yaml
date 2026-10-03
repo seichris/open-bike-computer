@@ -1,0 +1,49 @@
+schemaVersion: 1
+profileVersion: 1
+blockSizeMeters: 4096
+inactiveShopValues:
+  - closed
+  - "no"
+  - vacant
+categories:
+  - id: 1
+    key: shops
+    maximumZoom: 2
+    rank: 3
+    match:
+      shop: "*"
+    exclude:
+      shop:
+        - bicycle
+  - id: 2
+    key: restaurants_and_cafes
+    maximumZoom: 3
+    rank: 2
+    match:
+      amenity:
+        - cafe
+        - fast_food
+        - restaurant
+  - id: 3
+    key: public_toilets
+    maximumZoom: 3
+    rank: 1
+    match:
+      amenity:
+        - toilets
+  - id: 4
+    key: gas_stations
+    maximumZoom: 3
+    rank: 1
+    match:
+      amenity:
+        - fuel
+  - id: 5
+    key: bicycle_services
+    maximumZoom: 3
+    rank: 0
+    matchAny:
+      - shop:
+          - bicycle
+      - amenity:
+          - bicycle_repair_station

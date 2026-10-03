@@ -152,10 +152,14 @@ int main() {
   render.drawMs = 570;
   render.buildingProjectionMs = 120;
   render.buildingDrawMs = 300;
+  render.poiGatherMs = 8;
+  render.poiLayoutMs = 5;
+  render.poiDrawMs = 3;
   render.buildings = {130, 96, 40, 56, 34, 2, 96, 177, 212,
                       static_cast<uint8_t>(LimiterExtrudedRecords |
                                            LimiterExtrudedPixels),
                       false};
+  render.pois = {47, 12, 21, 3, 11, 52, 416, {2, 3, 1, 4, 2}};
   assert(state.noteRenderForWindow(41, Profile::Medium, render));
   for (int index = 0; index < 3; ++index) {
     assert(state.noteJobForWindow(41, JobEvent::Requested));
@@ -217,6 +221,7 @@ int main() {
   assert(snapshot.memory.cryptoOperationFailures == 2);
   assert(snapshot.totalRender.p95Ms == 750);
   assert(snapshot.buildingTotal.lastMs == 420);
+  assert(snapshot.poiTotal.lastMs == 16);
   assert(snapshot.displayFlush.p95Ms == 125);
   assert(snapshot.maximumUiGapMs == 87);
   assert(snapshot.gpsPackets == 4);
@@ -231,6 +236,12 @@ int main() {
   assert(snapshot.interrupted == 1);
   assert(snapshot.coverageRejected == 1);
   assert(snapshot.buildings.extruded == 40);
+  assert(snapshot.pois.candidates == 47);
+  assert(snapshot.pois.accepted == 12);
+  assert(snapshot.pois.capacityDeferred == 11);
+  assert(snapshot.pois.decodedRecords == 52);
+  assert(snapshot.pois.decodedBytes == 416);
+  assert(snapshot.pois.acceptedCategories[3] == 4);
   assert(snapshot.limiterPasses[3] == 1);
   assert(snapshot.limiterPasses[5] == 1);
   assert(snapshot.routeMarker.accepted == 1);
@@ -275,6 +286,7 @@ int main() {
   assert(reset.jobs.requested == 0);
   assert(reset.maximumUiGapMs == 0);
   assert(reset.routeMarker.accepted == 0);
+  assert(reset.pois.accepted == 0);
   assert(reset.replayTransport.markerRejectedNoActiveWindow == 1);
   assert(reset.replayTransport.markerAccepted == 1);
   assert(reset.windowMinimumInternalFree == 0);

@@ -31,6 +31,32 @@ static Document makeDocument() {
 }
 
 int main() {
+  Document nearbyOnly{};
+  nearbyOnly.instanceCount = 1;
+  nearbyOnly.defaultInstanceID = 7;
+  nearbyOnly.instances[0] = makeInstance(7, ScreenType::Nearby, "Nearby");
+#if MAP_POIS_RUNTIME_ENABLED
+  assert(isSupportedScreenType(ScreenType::Nearby));
+  assert((nearbyOnly.instances[0].mapProfile.visibilityMask &
+          map_profile_protocol::VISIBILITY_POI_MASK) == 0);
+  nearbyOnly.instances[0].mapProfile.visibilityMask |=
+      map_profile_protocol::VISIBILITY_CONTOURS;
+  assert(validate(nearbyOnly) == ValidationError::None);
+  std::array<uint8_t, MAX_DOCUMENT_BYTES> nearbyBytes{};
+  const auto nearbySize = encodeDocument(
+      nearbyOnly, nearbyBytes.data(), nearbyBytes.size());
+  assert(nearbySize > 0);
+  Document nearbyDecoded{};
+  assert(decodeDocument(nearbyBytes.data(), nearbySize, nearbyDecoded) ==
+         DecodeResult::Complete);
+  assert(nearbyDecoded.instances[0].type == ScreenType::Nearby);
+  assert((nearbyDecoded.instances[0].mapProfile.visibilityMask &
+          map_profile_protocol::VISIBILITY_CONTOURS) != 0);
+#else
+  assert(!isSupportedScreenType(ScreenType::Nearby));
+  assert(validate(nearbyOnly) == ValidationError::UnsupportedType);
+#endif
+
   Document radio{};
   radio.instanceCount = 1;
   radio.defaultInstanceID = 6;

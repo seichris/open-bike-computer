@@ -2,6 +2,7 @@
 
 #include "mainScreenTypes.hpp"
 #include "../../ble_navigation/ride_ble_protocol.generated.hpp"
+#include "../../ble_navigation/map_profile_protocol.hpp"
 #include "../../world_radio/world_radio_config.hpp"
 
 #include <array>
@@ -19,11 +20,16 @@ struct Descriptor {
   const char *debugName;
 };
 
-inline constexpr std::array<Descriptor, world_radio_config::ENABLED ? 6 : 5> SCREENS{{
+inline constexpr std::array<Descriptor,
+    (world_radio_config::ENABLED ? 6 : 5) +
+    (map_profile_protocol::POIS_RUNTIME_ENABLED ? 1 : 0)> SCREENS{{
     {MAP_GUIDANCE, DeviceScreenId::MapPlusNavigation, true,
      "map guidance"},
     {RIDESTATS, DeviceScreenId::RideStats, false, "ride telemetry"},
     {MAP, DeviceScreenId::Map, true, "map"},
+#if MAP_POIS_RUNTIME_ENABLED
+    {NEARBY, DeviceScreenId::Nearby, true, "nearby"},
+#endif
     {NAV, DeviceScreenId::Navigation, false, "navigation"},
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
     {WORLD_RADIO, DeviceScreenId::WorldRadio, false, "world radio"},
@@ -44,6 +50,10 @@ constexpr uint8_t supportedMask() {
 }
 
 inline constexpr uint8_t SUPPORTED_MASK = supportedMask();
+inline constexpr uint8_t DEFAULT_MASK = static_cast<uint8_t>(
+    SUPPORTED_MASK &
+    ~(screenBit(DeviceScreenId::WorldRadio) |
+      screenBit(DeviceScreenId::Nearby)));
 
 constexpr const Descriptor *descriptorForTile(tileName tile) {
   for (const Descriptor &screen : SCREENS) {
@@ -84,7 +94,7 @@ constexpr tileName tileForDeviceScreen(uint8_t deviceScreen,
 
 constexpr uint8_t normalizedMask(uint8_t mask) {
   const uint8_t supported = static_cast<uint8_t>(mask & SUPPORTED_MASK);
-  return supported == 0 ? SUPPORTED_MASK : supported;
+  return supported == 0 ? DEFAULT_MASK : supported;
 }
 
 constexpr bool isEnabled(tileName tile, uint8_t enabledMask) {

@@ -189,6 +189,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
         case .mapPlusNavigation: return "location.north.line"
         case .batteryStatus: return "battery.100percent"
         case .worldRadio: return "radio"
+        case .nearby: return "mappin.and.ellipse"
         }
     }
 }
@@ -277,14 +278,22 @@ private struct DeviceScreenInstanceEditorView: View {
                 .disabled(!instance.enabled || isDefault)
             }
 
-            if instance.type == .map || instance.type == .mapPlusNavigation,
+            if instance.type == .map || instance.type == .mapPlusNavigation ||
+                instance.type == .nearby,
                instance.mapProfile != nil {
                 DeviceScreenMapProfileEditor(
                     profile: mapProfileBinding,
                     type: instance.type,
                     supportsNavigationOrientation: bleManager.supportsMapNavigationOrientation,
                     topographicContoursAvailable:
-                        bleManager.topographicContoursAvailable
+                        bleManager.topographicContoursAvailable,
+                    supportsMapPois: bleManager.supportsMapPois,
+                    poisAvailable: bleManager.supportsMapPois &&
+                        bleManager.activeMapRendererFormat == 5 &&
+                        bleManager.activeMapPoiProfileVersion == 1 &&
+                        bleManager.activeMapPoiIndexProfileVersion == 1 &&
+                        bleManager.activeMapPoiDataHealthy &&
+                        bleManager.activeMapPoiIndexHealthy
                 )
             }
 
@@ -369,6 +378,16 @@ private struct DeviceScreenMapProfileEditor: View {
     let type: ConfiguredDeviceScreenType
     let supportsNavigationOrientation: Bool
     let topographicContoursAvailable: Bool
+    let supportsMapPois: Bool
+    let poisAvailable: Bool
+
+    private let poiOptions: [(String, UInt32)] = [
+        ("Shops", 1 << 14),
+        ("Restaurants & Cafes", 1 << 15),
+        ("Public Toilets", 1 << 16),
+        ("Gas Stations", 1 << 17),
+        ("Bicycle Shops & Repair", 1 << 18),
+    ]
 
     private let visibilityOptions: [(String, UInt32)] = [
         ("Buildings", 1 << 0), ("Green Space", 1 << 1),
@@ -400,6 +419,15 @@ private struct DeviceScreenMapProfileEditor: View {
                 )
             )
             .disabled(!topographicContoursAvailable)
+        }
+
+        if type != .nearby && supportsMapPois {
+            Section("Points of Interest") {
+                ForEach(poiOptions, id: \.1) { option in
+                    Toggle(option.0, isOn: visibilityBinding(option.1))
+                        .disabled(!poisAvailable)
+                }
+            }
         }
 
         Section("Labels") {

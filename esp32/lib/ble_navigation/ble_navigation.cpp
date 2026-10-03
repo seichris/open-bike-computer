@@ -812,18 +812,18 @@ bool BLENavigationServer::requestWorkoutStart() {
 }
 
 static uint8_t deviceScreenBit(uint8_t screen) {
-  return (screen <= DEVICE_SCREEN_WORLD_RADIO) ? (1 << screen) : 0;
+  return (screen <= DEVICE_SCREEN_NEARBY) ? (1 << screen) : 0;
 }
 
 static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
   uint8_t mask = (uint8_t)rawMask & DEVICE_SCREEN_SUPPORTED_MASK;
-  return mask == 0 ? DEVICE_SCREEN_SUPPORTED_MASK : mask;
+  return mask == 0 ? DEVICE_SCREEN_DEFAULT_MASK : mask;
 }
 
 static uint8_t normalizedDefaultScreen(int32_t rawDefault,
                                        uint8_t enabledScreensMask) {
   uint8_t defaultScreen =
-      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_WORLD_RADIO
+      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_NEARBY
           ? (uint8_t)rawDefault
           : (uint8_t)DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   if (enabledScreensMask & deviceScreenBit(defaultScreen)) {
@@ -840,6 +840,9 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NAVIGATION)) {
     return DEVICE_SCREEN_NAVIGATION;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_NEARBY)) {
+    return DEVICE_SCREEN_NEARBY;
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_WORLD_RADIO)) {
     return DEVICE_SCREEN_WORLD_RADIO;
@@ -2715,6 +2718,22 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
                   : "false";
       body += ",\"topographyProfileVersion\":" +
               std::to_string(activeMap.target.topographyProfileVersion) +
+              ",\"poiProfileVersion\":" +
+              std::to_string(activeMap.target.poiProfileVersion) +
+              ",\"poiIndexProfileVersion\":" +
+              std::to_string(activeMap.target.poiIndexProfileVersion) +
+              ",\"poiIndexHealthy\":" +
+              (activeMap.target.formatVersion == 5 &&
+                       activeMap.target.poiProfileVersion == 1 &&
+                       activeMap.target.poiIndexProfileVersion == 1 &&
+                       mapView.nearbyIndexHealthy() ? "true" : "false") +
+              ",\"poiDataHealthy\":" +
+              (activeMap.target.formatVersion == 5 &&
+                       activeMap.target.poiProfileVersion == 1 &&
+                       activeMap.target.poiIndexProfileVersion == 1 &&
+                       mapView.nearbyIndexHealthy() ? "true" : "false") +
+              ",\"contourLayerIncluded\":" +
+              (activeMap.target.contoursIncluded ? "true" : "false") +
               ",\"topographyQualityMode\":\"" +
               status_json::escape(activeMap.target.topographyQualityMode) +
               "\",\"contourMinorIntervalM\":" +
@@ -2729,7 +2748,9 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
               status_json::escape(
                   activeMap.target.topographySourcePolicySha256.substr(0, 12)) +
               "\",\"topographySectionHealthy\":";
-      body += activeMap.target.formatVersion == 4 &&
+      body += (activeMap.target.formatVersion == 4 ||
+               (activeMap.target.formatVersion == 5 &&
+                activeMap.target.contoursIncluded)) &&
                       activeMap.target.topographyProfileVersion == 1
                   ? "true"
                   : "false";
@@ -4130,6 +4151,12 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_CLIENT_VERSION) {
       featureFlags |=
           device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE;
+    }
+    if (device_capabilities_protocol::supportsMapPois(
+            clientVersion, map_profile_protocol::POIS_RUNTIME_ENABLED,
+            (featureFlags & device_capabilities_protocol::
+                                SCREEN_CONFIGURATION_FEATURE) != 0)) {
+      featureFlags |= device_capabilities_protocol::MAP_POIS_FEATURE;
     }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,

@@ -50,6 +50,8 @@ constexpr uint32_t SUPPORTED_SCREEN_TYPES =
     screenTypeBit(ScreenType::RideStats) |
     screenTypeBit(ScreenType::MapNavigation) |
     screenTypeBit(ScreenType::BatteryStatus) |
+    (map_profile_protocol::POIS_RUNTIME_ENABLED
+         ? screenTypeBit(ScreenType::Nearby) : 0) |
     (world_radio_config::ENABLED ? screenTypeBit(ScreenType::WorldRadio) : 0);
 
 using RideStatsWidget = ride_ble_protocol_generated::RideStatsWidget;
@@ -217,7 +219,7 @@ inline bool isValidUtf8Name(const char *value, std::size_t length) {
 
 inline bool isSupportedScreenType(ScreenType type) {
   const uint8_t raw = static_cast<uint8_t>(type);
-  return raw <= static_cast<uint8_t>(ScreenType::WorldRadio) &&
+  return raw <= static_cast<uint8_t>(ScreenType::Nearby) &&
          (SUPPORTED_SCREEN_TYPES & (1UL << raw)) != 0;
 }
 
@@ -237,7 +239,7 @@ inline bool isValidMapProfile(const MapProfile &profile, ScreenType type) {
       profile.labelDensity > 3 || profile.labelLanguageMode > 2 ||
       profile.labelTextSize > 2 || profile.labelOrientation > 1)
     return false;
-  if (type == ScreenType::Map)
+  if (type == ScreenType::Map || type == ScreenType::Nearby)
     return profile.rotationMode <= 1;
   if (type == ScreenType::MapNavigation)
     return profile.birdsEyePerspective <= 4 && profile.rotationMode <= 1;
@@ -264,6 +266,7 @@ inline ValidationError validate(const Document &document) {
         instance.name[instance.nameLength] != '\0')
       return ValidationError::InvalidName;
     if ((instance.type == ScreenType::Map ||
+         instance.type == ScreenType::Nearby ||
          instance.type == ScreenType::MapNavigation) &&
         !isValidMapProfile(instance.mapProfile, instance.type))
       return ValidationError::InvalidPayload;
@@ -291,6 +294,8 @@ inline ValidationError validate(const Document &document) {
 
 inline MapProfile defaultMapProfile(ScreenType type) {
   MapProfile profile{};
+  if (type == ScreenType::Nearby)
+    profile.visibilityMask &= ~map_profile_protocol::VISIBILITY_POI_MASK;
   if (type == ScreenType::MapNavigation) {
     profile.rotationMode = 1;
     profile.detailLevel =
@@ -394,6 +399,7 @@ private:
 inline std::size_t payloadSize(ScreenType type) {
   switch (type) {
   case ScreenType::Map:
+  case ScreenType::Nearby:
     return MAP_PAYLOAD_BYTES;
   case ScreenType::MapNavigation:
     return MAP_NAVIGATION_PAYLOAD_BYTES;
@@ -422,7 +428,7 @@ inline bool encodeMapProfile(Writer &writer, const MapProfile &profile,
       !writer.byte(profile.labelTextSize) ||
       !writer.byte(profile.labelOrientation))
     return false;
-  if (type == ScreenType::Map)
+  if (type == ScreenType::Map || type == ScreenType::Nearby)
     return writer.byte(profile.rotationMode);
   return writer.byte(profile.birdsEyeEnabled ? 1 : 0) &&
          writer.byte(profile.birdsEyePerspective) &&
@@ -433,6 +439,7 @@ inline bool encodeMapProfile(Writer &writer, const MapProfile &profile,
 inline bool encodePayload(Writer &writer, const ScreenInstance &instance) {
   switch (instance.type) {
   case ScreenType::Map:
+  case ScreenType::Nearby:
   case ScreenType::MapNavigation:
     return encodeMapProfile(writer, instance.mapProfile, instance.type);
   case ScreenType::RideStats:
@@ -505,7 +512,7 @@ inline bool decodeMapProfile(Reader &reader, std::size_t payloadLength,
       !reader.byte(profile.labelTextSize) ||
       !reader.byte(profile.labelOrientation))
     return false;
-  if (type == ScreenType::Map)
+  if (type == ScreenType::Map || type == ScreenType::Nearby)
     return reader.byte(profile.rotationMode);
   profile.rotationMode = 1;
   return reader.byte(birdsEye) && birdsEye <= 1 &&
@@ -562,6 +569,7 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
     const std::size_t payloadStart = reader.offset();
     switch (instance.type) {
     case ScreenType::Map:
+    case ScreenType::Nearby:
     case ScreenType::MapNavigation:
       instance.mapProfile = defaultMapProfile(instance.type);
       if (!decodeMapProfile(reader, payloadLength, instance.type,

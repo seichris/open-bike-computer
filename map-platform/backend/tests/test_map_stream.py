@@ -38,6 +38,36 @@ def read_fixture() -> dict[str, str]:
 
 
 class MapStreamFormatTests(unittest.TestCase):
+    def test_target5_coverage_is_bounded_canonical_and_contains_rendered_blocks(self):
+        base = {
+            "schemaVersion": 1,
+            "mapId": "map",
+            "target": {"formatVersion": 5},
+            "files": [{"path": "VECTMAP/map/+000+000/0_0.fmb",
+                       "bytes": 1, "sha256": "0" * 64}],
+            "nearbyCoverage": {"profileVersion": 1, "blockSizeMeters": 4096,
+                               "blocks": [[0, 0], [1, 0]]},
+        }
+        self.assertIn(b'"nearbyCoverage"', canonical_manifest_bytes(base))
+        invalid = (
+            {"profileVersion": 1, "blockSizeMeters": 4096, "blocks": []},
+            {"profileVersion": True, "blockSizeMeters": 4096, "blocks": [[0, 0]]},
+            {"profileVersion": 1, "blockSizeMeters": 8192, "blocks": [[0, 0]]},
+            {"profileVersion": 1, "blockSizeMeters": 4096, "blocks": [[1, 0]]},
+            {"profileVersion": 1, "blockSizeMeters": 4096, "blocks": [[1, 0], [0, 0]]},
+            {"profileVersion": 1, "blockSizeMeters": 4096, "blocks": [[0, 0], [0, 0]]},
+            {"profileVersion": 1, "blockSizeMeters": 4096, "blocks": [[4894, 0]]},
+            {"profileVersion": 1, "blockSizeMeters": 4096, "blocks": [[0, 0]] * 1025},
+        )
+        for coverage in invalid:
+            with self.subTest(coverage=coverage), self.assertRaises(MapStreamFormatError):
+                canonical_manifest_bytes({**base, "nearbyCoverage": coverage})
+        with self.assertRaisesRegex(MapStreamFormatError, "requires renderer target 5"):
+            canonical_manifest_bytes({**base, "target": {"formatVersion": 4}})
+        with self.assertRaisesRegex(MapStreamFormatError, "profile is invalid"):
+            canonical_manifest_bytes({key: value for key, value in base.items()
+                                      if key != "nearbyCoverage"})
+
     def test_canonical_manifest_uses_integer_e7_bounds_and_rejects_floats(self):
         file = {
             "path": "VECTMAP/map/+0000+0000/1.fmb",

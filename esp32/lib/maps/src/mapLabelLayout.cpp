@@ -78,7 +78,8 @@ bool inside(const Rectangle &value, Bounds screen) {
 
 MapLabelLayoutVector<Placement>
 place(MapLabelLayoutVector<Option> options, Bounds screen, uint8_t density,
-      const std::vector<ReservedRegion> &reserved, Diagnostics *diagnostics) {
+      const MapLabelLayoutVector<ReservedRegion> &reserved,
+      Diagnostics *diagnostics) {
   if (diagnostics != nullptr) {
     *diagnostics = {};
     diagnostics->gathered = options.size();
