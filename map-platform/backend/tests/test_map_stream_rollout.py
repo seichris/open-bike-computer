@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,6 +48,69 @@ def approval(promotion_id: str) -> MapStreamPromotionApproval:
 
 
 class MapStreamRolloutPolicyTests(unittest.TestCase):
+    def test_app_upgrade_preserves_old_client_and_binds_artifact_to_requester(self):
+        original = approval("msr-20261003-original-app")
+        upgraded = replace(
+            original, promotion_id="msr-20261003-upgraded-app", ios_build="101",
+            ios_git_sha="b" * 40, ios_build_sha256="c" * 64,
+            report_sha256="d" * 64,
+        )
+        policy = self.policy(
+            approved_promotions={x.promotion_id: x for x in (original, upgraded)},
+            MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE="all",
+            MAP_PLATFORM_MAP_STREAM_PROMOTION_ID=original.promotion_id,
+        )
+        for item in (original, upgraded):
+            self.assertTrue(policy.allows_artifact(
+                INSTALLATION_A, "map-prod-1", "4" * 64, PRODUCER_BUILD_SHA,
+                WORKER_IMAGE_DIGEST, original.approved_signing_keys,
+                item.ios_build, item.ios_git_sha, item.ios_build_sha256,
+            ))
+            requirements = policy.artifact_identity_requirements(
+                item.ios_build, item.ios_git_sha, item.ios_build_sha256,
+            )
+            self.assertEqual(requirements["requiredIosBuild"], item.ios_build)
+            self.assertEqual(requirements["requiredIosGitSha"], item.ios_git_sha)
+            self.assertEqual(requirements["requiredIosBuildSha256"], item.ios_build_sha256)
+            self.assertEqual(requirements["requiredFirmwareBuild"], 42)
+        self.assertFalse(policy.allows_artifact(
+            INSTALLATION_A, "map-prod-1", "4" * 64, PRODUCER_BUILD_SHA,
+            WORKER_IMAGE_DIGEST, original.approved_signing_keys,
+            upgraded.ios_build, original.ios_git_sha, upgraded.ios_build_sha256,
+        ))
+        with self.assertRaises(ValueError):
+            policy.artifact_identity_requirements("102", upgraded.ios_git_sha, upgraded.ios_build_sha256)
+        self.assertEqual(policy.public_summary()["approvedIosBuilds"], "100,101")
+
+    def test_other_hardware_worker_or_trust_approval_cannot_admit_a_client(self):
+        original = approval("msr-20261003-original-app")
+        differences = {
+            "candidate_git_sha": "b" * 40,
+            "producer_build_sha256": "b" * 64,
+            "worker_image_digest": "sha256:" + "b" * 64,
+            "firmware_version": "0.4.0",
+            "firmware_build": 43,
+            "firmware_git_sha": "b" * 40,
+            "requirements_sha256": "b" * 64,
+            "approved_signing_keys": frozenset({("map-prod-2", "b" * 64)}),
+        }
+        for field, value in differences.items():
+            with self.subTest(field=field):
+                unrelated = replace(
+                    original, promotion_id="msr-20261003-unrelated-app", ios_build="101",
+                    ios_git_sha="c" * 40, ios_build_sha256="d" * 64, **{field: value},
+                )
+                policy = self.policy(
+                    approved_promotions={x.promotion_id: x for x in (original, unrelated)},
+                    MAP_PLATFORM_MAP_STREAM_ROLLOUT_MODE="all",
+                    MAP_PLATFORM_MAP_STREAM_PROMOTION_ID=original.promotion_id,
+                )
+                self.assertFalse(policy.allows_artifact(
+                    INSTALLATION_A, "map-prod-1", "4" * 64, PRODUCER_BUILD_SHA,
+                    WORKER_IMAGE_DIGEST, original.approved_signing_keys,
+                    unrelated.ios_build, unrelated.ios_git_sha, unrelated.ios_build_sha256,
+                ))
+
     def test_checked_in_approval_registry_passes_runtime_validation(self):
         registry = (
             Path(__file__).resolve().parents[2]

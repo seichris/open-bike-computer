@@ -143,6 +143,7 @@ class MapStreamRolloutPolicy:
     report_sha256: str | None = None
     requirements_sha256: str | None = None
     approved_signing_keys: frozenset[tuple[str, str]] = frozenset()
+    approved_ios_identities: frozenset[tuple[str, str, str]] = frozenset()
 
     @classmethod
     def from_environment(
@@ -193,6 +194,7 @@ class MapStreamRolloutPolicy:
         ).strip()
         approval: MapStreamPromotionApproval | None = None
         approved_keys: frozenset[tuple[str, str]] = frozenset()
+        approved_ios_identities: frozenset[tuple[str, str, str]] = frozenset()
         if mode == MapStreamRolloutMode.ALLOWLIST and not allowlist_values:
             raise ValueError("allowlist rollout mode requires at least one installation ID")
         if mode == MapStreamRolloutMode.PERCENTAGE:
@@ -234,6 +236,22 @@ class MapStreamRolloutPolicy:
                     "map stream rollout approval uses signing material absent from production trust"
                 )
             approved_keys = approval.approved_signing_keys
+            # A new App Store build must not evict an already approved client.
+            # Each additional identity still needs its own recorded approval,
+            # bound to every hardware, producer and trust field of this rollout.
+            compatibility_fields = (
+                "candidate_git_sha", "producer_build_sha256", "worker_image_digest",
+                "firmware_version", "firmware_build", "firmware_git_sha",
+                "requirements_sha256", "approved_signing_keys",
+            )
+            approved_ios_identities = frozenset(
+                (item.ios_build, item.ios_git_sha, item.ios_build_sha256)
+                for item in (approved_promotions_by_id or {}).values()
+                if all(
+                    getattr(item, name) == getattr(approval, name)
+                    for name in compatibility_fields
+                )
+            )
         elif promotion_id:
             raise ValueError(
                 "rollout promotion ID is only valid in percentage or all mode"
@@ -257,7 +275,19 @@ class MapStreamRolloutPolicy:
             report_sha256=approval.report_sha256 if approval else None,
             requirements_sha256=approval.requirements_sha256 if approval else None,
             approved_signing_keys=approved_keys if promotion_id else frozenset(),
+            approved_ios_identities=approved_ios_identities,
         )
+
+    def _allows_app_identity(
+        self, build: str | None, git_sha: str | None, build_sha256: str | None,
+    ) -> bool:
+        if build is None or git_sha is None or build_sha256 is None:
+            return False
+        identities = self.approved_ios_identities or frozenset({(
+            self.required_ios_build, self.required_ios_git_sha,
+            self.required_ios_build_sha256,
+        )})
+        return (build, git_sha, build_sha256) in identities
 
     def includes(self, installation_id: str | None) -> bool:
         if not installation_id or not INSTALLATION_ID_PATTERN.fullmatch(installation_id):
@@ -309,9 +339,9 @@ class MapStreamRolloutPolicy:
             artifact_key in self.approved_signing_keys
             and producer_build_sha256 == self.producer_build_sha256
             and producer_image_digest == self.worker_image_digest
-            and client_app_build == self.required_ios_build
-            and client_app_git_sha == self.required_ios_git_sha
-            and client_app_build_sha256 == self.required_ios_build_sha256
+            and self._allows_app_identity(
+                client_app_build, client_app_git_sha, client_app_build_sha256,
+            )
         )
 
     def artifact_identity_requirements(
@@ -341,10 +371,14 @@ class MapStreamRolloutPolicy:
             or self.required_ios_build_sha256 is None
         ):
             raise ValueError("promoted rollout is missing required client/device identity")
+        if not self._allows_app_identity(
+            client_app_build, client_app_git_sha, client_app_build_sha256,
+        ):
+            raise ValueError("promoted rollout requester app identity is not approved")
         return {
-            "requiredIosBuild": self.required_ios_build,
-            "requiredIosGitSha": self.required_ios_git_sha,
-            "requiredIosBuildSha256": self.required_ios_build_sha256,
+            "requiredIosBuild": client_app_build,
+            "requiredIosGitSha": client_app_git_sha,
+            "requiredIosBuildSha256": client_app_build_sha256,
             "requiredFirmwareVersion": self.required_firmware_version,
             "requiredFirmwareBuild": self.required_firmware_build,
             "requiredFirmwareGitSha": self.required_firmware_git_sha,
@@ -352,6 +386,10 @@ class MapStreamRolloutPolicy:
 
     def public_summary(self) -> dict[str, int | str]:
         summary: dict[str, int | str] = {"mode": self.mode.value}
+        if len(self.approved_ios_identities) > 1:
+            summary["approvedIosBuilds"] = ",".join(
+                sorted({identity[0] for identity in self.approved_ios_identities})
+            )
         if self.mode == MapStreamRolloutMode.ALLOWLIST:
             summary["allowlistCount"] = len(self.allowlist)
         elif self.mode == MapStreamRolloutMode.PERCENTAGE:
