@@ -13,6 +13,38 @@
 
 int main() {
   using namespace map_nearby_query;
+  // Canonical paths must round-trip signed boundaries and negative tile edges
+  // without overflow, and must reject aliases and traversal before activation.
+  const std::array<int32_t, 14> coordinates{{
+      INT32_MIN, INT32_MIN + 1, -16001, -16000, -17, -16, -1,
+      0, 1, 15, 16, 16000, INT32_MAX - 1, INT32_MAX}};
+  for (int32_t expectedX : coordinates) {
+    for (int32_t expectedY : coordinates) {
+      int32_t x = 0, y = 0;
+      const auto path = map_poi_index::blockPath("fixture", expectedX, expectedY);
+      assert(map_poi_index::blockFromPath("fixture", path, x, y));
+      assert(x == expectedX && y == expectedY);
+    }
+  }
+  assert(map_poi_index::relativeBlockPath(-1, 16) == "-001+001/15_0.fmb");
+  assert(map_poi_index::relativeBlockPath(INT32_MIN, INT32_MAX) ==
+         "-134217728+134217727/0_15.fmb");
+  for (const char *relative : {
+      "+000+000/16_0.fmb", "+000+000/-1_0.fmb", "+000+000/+1_0.fmb",
+      "+000+000/01_0.fmb", "+000+000/0_0.fmb/extra", "+000+000/0_0.fmb.fmb",
+      "+00+000/0_0.fmb", "+0000+000/0_0.fmb", "-000+000/0_0.fmb",
+      "+000+000/0_0.fmb/../0_0.fmb", "+134217728+000/0_0.fmb",
+      "-134217729+000/15_0.fmb", "+000+134217728/0_0.fmb",
+      "+999999999999999999999999+000/0_0.fmb", "+000+000/0_.fmb",
+      "+000+000/0_ 1.fmb", "+000+000/0_1x.fmb"}) {
+    int32_t x = 123, y = 456;
+    assert(!map_poi_index::blockFromPath(
+        "fixture", std::string("VECTMAP/fixture/") + relative, x, y));
+    assert(x == 123 && y == 456);
+  }
+  int32_t wrongMapX = 0, wrongMapY = 0;
+  assert(!map_poi_index::blockFromPath("fixture",
+      "VECTMAP/other/+000+000/0_0.fmb", wrongMapX, wrongMapY));
   const Position origin{0.0, 0.0};
   assert(std::fabs(distanceMeters(origin, {0.0, 1.0}) - 111319.4908) < 0.1);
   assert(distanceMeters({80.0, 179.99}, {80.0, -179.99}) < 400.0);

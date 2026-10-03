@@ -145,13 +145,31 @@ available before the end-to-end experience can be exercised.
 
 ### Collision with the original PR
 
-PR #378 currently assigns renderer target 4 / FMB v5 section 5, visibility bit
-13, and CAP2 bit 26 to POIs. Current main assigns those exact identifiers to
-topographic contours and configurable screens. Its current golden vectors,
-generated BLE files, manifests, readers, policies, and tests cannot be merged
-as-is. Do not solve this by renaming only the plan or accepting both meanings
-behind the same version: already-created target-4 artifacts and old clients
-would become ambiguous.
+The original PR #378 assigned renderer target 4 / FMB v5 section 5,
+visibility bit 13, and CAP2 bit 26 to POIs. Current main assigns those
+identifiers to topographic contours and configurable screens. The integrated
+branch has migrated the golden vectors, generated BLE files, manifests,
+readers, policies, and tests to target 5 / FMB v6 section 6, visibility bits
+14-18, and CAP2 bit 31. Never accept both meanings behind the same version:
+already-created target-4 artifacts and old clients would become ambiguous.
+
+### 3 MiB production application budget
+
+PR #378 must pass with the existing dual 3 MiB OTA layout before the separate
+partition migration in issue #461. Keep the 65,536-byte application reserve
+enforced: the maximum verified `firmware.bin` size is 3,080,192 bytes in a
+3,145,728-byte slot. PlatformIO's Flash estimate excludes image overhead;
+the build helper's verified binary size determines acceptance.
+
+The previous image at `809902f75` was 3,080,615 bytes, 423 bytes over that
+limit. The POI path codec now formats a complete relative path once and
+parses bounded string views with 32-bit arithmetic, removing temporary
+strings and 64-bit conversions while preserving canonical-path, signed
+coordinate, traversal, and overflow rejection. Tests cover negative tile
+boundaries, both int32 extremes, invalid aliases, and malformed paths.
+The updated firmware matrix must establish the final binary size before this
+budget gate is marked passed. Runtime enablement and physical qualification
+remain separate from application-size acceptance.
 
 ## Product contract
 

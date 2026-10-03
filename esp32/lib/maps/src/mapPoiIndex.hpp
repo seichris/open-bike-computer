@@ -4,10 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <cerrno>
-#include <limits>
 #include <string>
+#include <string_view>
 
 // FPI1 contains block summaries only. Installation must additionally verify
 // every entry against section 6 of the same signed map and require complete
@@ -36,21 +34,18 @@ struct Entry {
 };
 
 inline std::string relativeBlockPath(int32_t x, int32_t y) {
-  const auto floor16 = [](int32_t value) -> int64_t {
-    const int64_t widened = value;
-    return widened >= 0 ? widened / 16 : -((-widened + 15) / 16);
+  const auto floor16 = [](int32_t value) -> int32_t {
+    return value / 16 - (value % 16 < 0);
   };
-  const int64_t folderX = floor16(x);
-  const int64_t folderY = floor16(y);
-  const int64_t localX = int64_t(x) - folderX * 16;
-  const int64_t localY = int64_t(y) - folderY * 16;
-  char folder[32] = {};
-  const int size = std::snprintf(folder, sizeof(folder), "%+04lld%+04lld",
-                                 static_cast<long long>(folderX),
-                                 static_cast<long long>(folderY));
-  if (size <= 0 || static_cast<size_t>(size) >= sizeof(folder)) return {};
-  return std::string(folder) + "/" + std::to_string(localX) + "_" +
-         std::to_string(localY) + ".fmb";
+  const int32_t folderX = floor16(x);
+  const int32_t folderY = floor16(y);
+  char relative[48];
+  const int size = std::snprintf(relative, sizeof(relative),
+      "%+04ld%+04ld/%ld_%ld.fmb", static_cast<long>(folderX),
+      static_cast<long>(folderY), static_cast<long>(x - folderX * 16),
+      static_cast<long>(y - folderY * 16));
+  if (size <= 0 || static_cast<size_t>(size) >= sizeof(relative)) return {};
+  return std::string(relative, static_cast<size_t>(size));
 }
 
 inline std::string blockPath(const std::string &mapId, int32_t x, int32_t y) {
@@ -65,38 +60,47 @@ inline bool blockFromPath(const std::string &mapId, const std::string &path,
   if (path.compare(0, prefix.size(), prefix) != 0) return false;
   const size_t slash = path.find('/', prefix.size());
   if (slash == std::string::npos) return false;
-  const std::string folder = path.substr(prefix.size(), slash - prefix.size());
+  const std::string_view view(path);
+  const auto folder = view.substr(prefix.size(), slash - prefix.size());
   const size_t secondSign = folder.find_first_of("+-", 1);
   const size_t underscore = path.find('_', slash + 1);
   if (secondSign == std::string::npos || underscore == std::string::npos ||
       path.compare(path.size() >= 4 ? path.size() - 4 : 0, 4, ".fmb") != 0)
     return false;
-  const auto number = [](const std::string &value, int64_t &result) {
+  // Folder coordinates are at most 2^27 in magnitude. Parse bounded views
+  // directly, avoiding temporary strings and 64-bit libc conversion on ESP32.
+  const auto number = [](std::string_view value, uint32_t maximum,
+                         int32_t &result) {
     if (value.empty()) return false;
-    errno = 0;
-    char *end = nullptr;
-    const long long parsed = std::strtoll(value.c_str(), &end, 10);
-    if (errno != 0 || end != value.c_str() + value.size()) return false;
-    result = parsed;
+    const bool negative = value.front() == '-';
+    if (negative || value.front() == '+') value.remove_prefix(1);
+    if (value.empty()) return false;
+    uint32_t parsed = 0;
+    for (char byte : value) {
+      const unsigned digit = static_cast<unsigned>(byte - '0');
+      if (digit > 9 || parsed > maximum / 10 ||
+          (parsed == maximum / 10 && digit > maximum % 10)) return false;
+      parsed = parsed * 10 + digit;
+    }
+    result = negative ? -static_cast<int32_t>(parsed)
+                      : static_cast<int32_t>(parsed);
     return true;
   };
-  int64_t folderX = 0, folderY = 0, localX = 0, localY = 0;
-  if (!number(folder.substr(0, secondSign), folderX) ||
-      !number(folder.substr(secondSign), folderY) ||
-      !number(path.substr(slash + 1, underscore - slash - 1), localX) ||
-      !number(path.substr(underscore + 1, path.size() - underscore - 5), localY) ||
+  int32_t folderX = 0, folderY = 0, localX = 0, localY = 0;
+  if (!number(folder.substr(0, secondSign), 134217728, folderX) ||
+      !number(folder.substr(secondSign), 134217728, folderY) ||
+      !number(view.substr(slash + 1, underscore - slash - 1), 15, localX) ||
+      !number(view.substr(underscore + 1, path.size() - underscore - 5), 15, localY) ||
       localX < 0 || localX >= 16 || localY < 0 || localY >= 16 ||
-      folderX < -134217729 || folderX > 134217728 ||
-      folderY < -134217729 || folderY > 134217728)
+      folderX > 134217727 || folderY > 134217727)
     return false;
-  const int64_t widenedX = folderX * 16 + localX;
-  const int64_t widenedY = folderY * 16 + localY;
-  if (widenedX < INT32_MIN || widenedX > INT32_MAX ||
-      widenedY < INT32_MIN || widenedY > INT32_MAX)
+  const int32_t blockX = folderX * 16 + localX;
+  const int32_t blockY = folderY * 16 + localY;
+  if (view.substr(prefix.size()) != relativeBlockPath(blockX, blockY))
     return false;
-  x = static_cast<int32_t>(widenedX);
-  y = static_cast<int32_t>(widenedY);
-  return path == blockPath(mapId, x, y);
+  x = blockX;
+  y = blockY;
+  return true;
 }
 
 inline uint16_t u16(const uint8_t *data) {
