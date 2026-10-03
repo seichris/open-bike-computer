@@ -276,7 +276,9 @@ void removeEmptyBootDirectories() {
     if (!parseUnsigned(entry->d_name, boot) || boot == currentBoot)
       continue;
     char path[224] = {};
-    snprintf(path, sizeof(path), "%s/%s", bootsRoot, entry->d_name);
+    const int pathLength = snprintf(path, sizeof(path), "%s/%s", bootsRoot, entry->d_name);
+    if (pathLength < 0 || static_cast<std::size_t>(pathLength) >= sizeof(path))
+      continue;
     if (retentionScanInterrupted()) break;
     DIR *directory = opendir(path);
     if (directory == nullptr)
@@ -684,8 +686,12 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
     if ((bootEntry->d_type == DT_DIR || bootEntry->d_type == DT_UNKNOWN) &&
         parseUnsigned(bootEntry->d_name, boot)) {
       char bootPath[192] = {};
-      snprintf(bootPath, sizeof(bootPath),
-               "%s/%s", bootsRoot, bootEntry->d_name);
+      const int bootPathLength = snprintf(bootPath, sizeof(bootPath),
+                                           "%s/%s", bootsRoot, bootEntry->d_name);
+      if (bootPathLength < 0 || static_cast<std::size_t>(bootPathLength) >= sizeof(bootPath)) {
+        scan.interrupted = true;
+        break;
+      }
       if (shouldStop()) break;
       DIR *bootDirectory = opendir(bootPath);
       if (bootDirectory == nullptr)
@@ -711,7 +717,11 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
         file.boot = boot;
         file.chunk = chunk;
         char path[224] = {};
-        snprintf(path, sizeof(path), "%s/%s", bootPath, name);
+        const int pathLength = snprintf(path, sizeof(path), "%s/%s", bootPath, name);
+        if (pathLength < 0 || static_cast<std::size_t>(pathLength) >= sizeof(path)) {
+          scan.interrupted = true;
+          break;
+        }
         file.bytes = static_cast<uint32_t>(storage->size(path));
         if (shouldStop()) break;
         struct stat metadata = {};

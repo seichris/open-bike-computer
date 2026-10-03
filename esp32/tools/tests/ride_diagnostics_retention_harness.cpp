@@ -136,4 +136,15 @@ int main(int argc, char **argv) {
     // A deletion before the lease arrived is legitimate; beforeOperation()
     // rejects every directory read or deletion after its publication.
   }
+  retentionLeaseDeadlineMs.store(0);
+  injectAfter = operations = deleted = 0;
+  // Numeric aliases can parse successfully while exceeding the fixed path
+  // buffer. Never prune from an inventory that cannot represent such a path.
+  const auto longBoot = boots / (std::string(200, '0') + "1");
+  std::filesystem::create_directories(longBoot);
+  std::ofstream(longBoot / "events-000001.jsonl") << "test\n";
+  const auto incomplete = collectChunkFiles(files, 256, candidates, 16);
+  assert(incomplete.interrupted && openDirectories == 0);
+  pruneRetention();
+  assert(deleted == 0 && openDirectories == 0);
 }
