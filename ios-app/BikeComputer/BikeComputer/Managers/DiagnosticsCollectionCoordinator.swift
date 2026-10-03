@@ -164,6 +164,12 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                 guard let pending = entries.first(where: {
                     $0.canResumeAutomatically(postRideEnabled: automaticPostRideCollection) && $0.deviceDigest == digest
                 }) else { return }
+                recorder.record(category: .transfer, event: "diagnostics_resume_selected", fields: [
+                    "operationId": pending.id.uuidString.lowercased(),
+                    "phase": pending.phase.rawValue,
+                    "origin": pending.origin?.rawValue ?? "manual",
+                    "reason": pending.failureCode ?? "pending",
+                ])
                 manifest = pending
                 start(newCutoff: false, automatic: true)
             } catch {

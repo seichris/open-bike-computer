@@ -57,6 +57,7 @@ struct DeviceWiFiRuntime {
   uint32_t stationIPAddress() const { return 0; }
   uint32_t accessPointIPAddress() const { return 0; }
   uint8_t accessPointClientCount() const { return 0; }
+  device_transfer::NetworkReadinessSnapshot readiness() const { return {}; }
 };
 }
 

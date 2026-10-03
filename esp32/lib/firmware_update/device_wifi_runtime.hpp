@@ -21,15 +21,19 @@ public:
   uint32_t stationIPAddress() const;
   uint32_t accessPointIPAddress() const;
   uint8_t accessPointClientCount() const;
+  device_transfer::NetworkReadinessSnapshot readiness() const;
 
 private:
-  bool initialized_ = false;
+  std::atomic<bool> initialized_{false};
   bool ramStorageReady_ = false;
   bool initializationFailed_ = false;
   std::atomic<bool> radioStarted_{false};
   std::atomic<bool> stationRequested_{false};
   std::atomic<bool> stationHasIP_{false};
   std::atomic<int> disconnectReason_{0};
+  std::atomic<bool> apEventStarted_{false};
+  std::atomic<uint32_t> eventSequence_{0}, eventUptimeMs_{0};
+  std::atomic<uint32_t> apStarts_{0}, apStops_{0}, clientJoins_{0}, clientLeaves_{0}, dhcpLeases_{0};
   std::atomic<esp_netif_t *> stationNetif_{nullptr};
   std::atomic<esp_netif_t *> apNetif_{nullptr};
   esp_event_handler_instance_t events_ = nullptr;

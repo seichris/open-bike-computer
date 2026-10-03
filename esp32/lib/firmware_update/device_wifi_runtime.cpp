@@ -2,6 +2,7 @@
 #include <cstring>
 #include <esp_wifi_default.h>
 #include <esp_netif_defaults.h>
+#include <esp_timer.h>
 
 namespace firmware_update {
 namespace {
@@ -62,7 +63,7 @@ esp_err_t DeviceWiFiRuntime::initialize() {
   stationNetif_.store(sta, std::memory_order_release);
   error = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event, this, &events_);
   if (error != ESP_OK) return error;
-  error = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, event, this, &ipEvents_);
+  error = esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, event, this, &ipEvents_);
   if (error != ESP_OK) return error;
   error = clearCredentials();
   if (error != ESP_OK) return error;
@@ -141,6 +142,7 @@ device_transfer::NetworkStartResult DeviceWiFiRuntime::start(
     error = esp_wifi_set_config(WIFI_IF_AP, &config);
   }
   eraseConfig(config);
+  apEventStarted_.store(false, std::memory_order_release);
   disconnectReason_.store(0, std::memory_order_release);
   stationHasIP_.store(false, std::memory_order_release);
   stationRequested_.store(station, std::memory_order_release);
@@ -171,7 +173,22 @@ esp_err_t DeviceWiFiRuntime::stop() {
 
 void DeviceWiFiRuntime::event(void *context, esp_event_base_t base, int32_t id, void *data) {
   auto *runtime = static_cast<DeviceWiFiRuntime *>(context);
-  if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED && data != nullptr &&
+  bool observed = true;
+  if (base == WIFI_EVENT && id == WIFI_EVENT_AP_START) {
+    runtime->apEventStarted_.store(true, std::memory_order_release);
+    runtime->apStarts_.fetch_add(1, std::memory_order_relaxed);
+  } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STOP) {
+    runtime->apEventStarted_.store(false, std::memory_order_release);
+    runtime->apStops_.fetch_add(1, std::memory_order_relaxed);
+  } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
+    runtime->clientJoins_.fetch_add(1, std::memory_order_relaxed);
+  } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
+    runtime->clientLeaves_.fetch_add(1, std::memory_order_relaxed);
+  } else if (base == IP_EVENT && id == IP_EVENT_AP_STAIPASSIGNED) {
+    runtime->dhcpLeases_.fetch_add(1, std::memory_order_relaxed);
+  } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+    // Association is separate from the subsequent IP event.
+  } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED && data != nullptr &&
       runtime->stationRequested_.load(std::memory_order_acquire)) {
     runtime->stationHasIP_.store(false, std::memory_order_release);
     runtime->disconnectReason_.store(static_cast<wifi_event_sta_disconnected_t *>(data)->reason, std::memory_order_release);
@@ -179,6 +196,13 @@ void DeviceWiFiRuntime::event(void *context, esp_event_base_t base, int32_t id, 
              runtime->stationRequested_.load(std::memory_order_acquire) &&
              static_cast<ip_event_got_ip_t *>(data)->esp_netif == runtime->stationNetif_.load(std::memory_order_acquire)) {
     runtime->stationHasIP_.store(true, std::memory_order_release);
+  } else {
+    observed = false;
+  }
+  if (observed) {
+    // No recorder, locks, formatting, MAC/IP/SSID or allocation in callbacks.
+    runtime->eventUptimeMs_.store(static_cast<uint32_t>(esp_timer_get_time() / 1000), std::memory_order_relaxed);
+    runtime->eventSequence_.fetch_add(1, std::memory_order_release);
   }
 }
 
@@ -206,5 +230,32 @@ uint32_t DeviceWiFiRuntime::accessPointIPAddress() const {
 uint8_t DeviceWiFiRuntime::accessPointClientCount() const {
   wifi_sta_list_t clients{};
   return accessPointIPAddress() != 0 && esp_wifi_ap_get_sta_list(&clients) == ESP_OK ? clients.num : 0;
+}
+device_transfer::NetworkReadinessSnapshot DeviceWiFiRuntime::readiness() const {
+  device_transfer::NetworkReadinessSnapshot result;
+  result.available = initialized_.load(std::memory_order_acquire);
+  result.radioStarted = radioStarted_.load(std::memory_order_acquire);
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  result.station = esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_STA;
+  result.apEventStarted = apEventStarted_.load(std::memory_order_acquire);
+  result.eventSequence = eventSequence_.load(std::memory_order_acquire);
+  result.eventUptimeMs = eventUptimeMs_.load(std::memory_order_relaxed);
+  result.apStarts = apStarts_.load(std::memory_order_relaxed);
+  result.apStops = apStops_.load(std::memory_order_relaxed);
+  result.clientJoins = clientJoins_.load(std::memory_order_relaxed);
+  result.clientLeaves = clientLeaves_.load(std::memory_order_relaxed);
+  result.dhcpLeases = dhcpLeases_.load(std::memory_order_relaxed);
+  result.disconnectReason = disconnectReason_.load(std::memory_order_acquire);
+  esp_netif_t *netif = result.station ? stationNetif_.load(std::memory_order_acquire)
+                                     : apNetif_.load(std::memory_order_acquire);
+  result.netifUp = netif != nullptr && esp_netif_is_netif_up(netif);
+  result.hasIP = result.station ? stationIPAddress() != 0 : accessPointIPAddress() != 0;
+  if (!result.station && netif != nullptr) {
+    esp_netif_dhcp_status_t dhcp{};
+    result.dhcpError = esp_netif_dhcps_get_status(netif, &dhcp);
+    if (result.dhcpError == ESP_OK) result.dhcpStatus = static_cast<int32_t>(dhcp);
+  }
+  result.clients = result.station ? 0 : accessPointClientCount();
+  return result;
 }
 } // namespace firmware_update

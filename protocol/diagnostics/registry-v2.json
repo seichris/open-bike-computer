@@ -26,6 +26,19 @@
   ],
   "eventFormatSchema": 1,
   "events": {
+    "http.transport": {
+      "level": "info",
+      "optional": [],
+      "required": [
+        "generation",
+        "phase",
+        "listenerReady",
+        "acceptedClients",
+        "tlsSucceeded",
+        "tlsFailed",
+        "errorCode"
+      ]
+    },
     "logger.health": {
       "level": "info",
       "optional": [
@@ -76,6 +89,46 @@
         "freePsramBytes"
       ]
     },
+    "transfer.diagnostics_preparation": {
+      "level": "info",
+      "optional": [],
+      "required": [
+        "generation",
+        "phase",
+        "durationMs",
+        "code",
+        "queueDepth",
+        "droppedCount",
+        "writtenCount",
+        "storageErrorCount"
+      ]
+    },
+    "transfer.diagnostics_resume_selected": {
+      "level": "info",
+      "optional": [],
+      "required": [
+        "operationId",
+        "phase",
+        "origin",
+        "reason"
+      ]
+    },
+    "transfer.wifi_apply": {
+      "level": "info",
+      "optional": [
+        "operationId",
+        "durationMs",
+        "applyResult",
+        "applyErrorDomain",
+        "applyErrorCode"
+      ],
+      "required": [
+        "mode",
+        "attempt",
+        "phase",
+        "generation"
+      ]
+    },
     "user.issue_marker": {
       "level": "warning",
       "optional": [
@@ -87,9 +140,49 @@
       "required": [
         "code"
       ]
+    },
+    "wifi.events": {
+      "level": "info",
+      "optional": [],
+      "required": [
+        "generation",
+        "sequence",
+        "eventUptimeMs",
+        "apStarts",
+        "apStops",
+        "clientJoins",
+        "clientLeaves",
+        "dhcpLeases",
+        "clients",
+        "disconnectReason"
+      ]
+    },
+    "wifi.readiness": {
+      "level": "info",
+      "optional": [],
+      "required": [
+        "generation",
+        "connectionGeneration",
+        "phase",
+        "available",
+        "radioStarted",
+        "stationMode",
+        "apEventStarted",
+        "netifUp",
+        "hasIP",
+        "dhcpStatus",
+        "errorCode",
+        "listenerReady"
+      ]
     }
   },
   "fields": {
+    "acceptedClients": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
     "accuracy": {
       "firmwareType": "number",
       "iosType": "string",
@@ -133,6 +226,24 @@
       "privacy": "diagnostic"
     },
     "alertMode": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "apEventStarted": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "apStarts": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "apStops": {
       "firmwareType": "number",
       "iosType": "string",
       "maxBytes": 256,
@@ -258,6 +369,24 @@
       "maxBytes": 256,
       "privacy": "diagnostic"
     },
+    "clientJoins": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "clientLeaves": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "clients": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
     "clockSynchronized": {
       "firmwareType": "boolean",
       "iosType": "string",
@@ -360,8 +489,26 @@
       "maxBytes": 256,
       "privacy": "diagnostic"
     },
+    "dhcpLeases": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "dhcpStatus": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
     "diagnosticHold": {
       "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "disconnectReason": {
+      "firmwareType": "number",
       "iosType": "string",
       "maxBytes": 256,
       "privacy": "diagnostic"
@@ -433,6 +580,12 @@
       "privacy": "diagnostic"
     },
     "eventCount": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "eventUptimeMs": {
       "firmwareType": "number",
       "iosType": "string",
       "maxBytes": 256,
@@ -552,6 +705,12 @@
       "maxBytes": 256,
       "privacy": "diagnostic"
     },
+    "hasIP": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
     "highWater": {
       "firmwareType": "number",
       "iosType": "string",
@@ -654,6 +813,12 @@
       "maxBytes": 256,
       "privacy": "diagnostic"
     },
+    "listenerReady": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
     "localAccessorySubnet": {
       "firmwareType": "boolean",
       "iosType": "string",
@@ -720,6 +885,12 @@
       "maxBytes": 256,
       "privacy": "diagnostic"
     },
+    "metricsAvailable": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
     "minimumFreeBytes": {
       "firmwareType": "number",
       "iosType": "string",
@@ -751,6 +922,12 @@
       "privacy": "diagnostic"
     },
     "navigating": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "netifUp": {
       "firmwareType": "boolean",
       "iosType": "string",
       "maxBytes": 256,
@@ -853,6 +1030,24 @@
       "privacy": "diagnostic"
     },
     "queueDepth": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "radioStarted": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "readinessElapsedMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "readinessRemainingMs": {
       "firmwareType": "number",
       "iosType": "string",
       "maxBytes": 256,
@@ -1050,6 +1245,12 @@
       "maxBytes": 256,
       "privacy": "diagnostic"
     },
+    "stationMode": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
     "storage": {
       "firmwareType": "string",
       "iosType": "string",
@@ -1086,6 +1287,12 @@
       "maxBytes": 256,
       "privacy": "diagnostic"
     },
+    "tlsFailed": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
     "tlsStackBytes": {
       "firmwareType": "number",
       "iosType": "string",
@@ -1094,6 +1301,18 @@
     },
     "tlsStarted": {
       "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "tlsSucceeded": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "transactionCount": {
+      "firmwareType": "number",
       "iosType": "string",
       "maxBytes": 256,
       "privacy": "diagnostic"
@@ -1243,8 +1462,8 @@
     "error",
     "fatal"
   ],
-  "schema": 2,
   "protocols": {
     "issueMarker": 2
-  }
+  },
+  "schema": 2
 }

@@ -83,6 +83,19 @@ import Foundation
         let restored = DiagnosticsAcquisitionStore(root: root)
         let initial = try await restored.load(job.id)
         precondition(initial.phase == .partial && initial.verified.count == 1)
+        precondition(!initial.canResumeAutomatically(postRideEnabled: true), "legacy partial jobs require explicit retry after process restart")
+        var eligibility = initial
+        for origin in [DiagnosticsAcquisitionManifest.Origin.manual, .postRide] {
+            eligibility.origin = origin
+            let failures: [String?] = [nil, "transfer_failed", "wifi_memory", "diagnostics_seal_timeout", "cancelled"]
+            for code in failures {
+                eligibility.failureCode = code
+                precondition(!eligibility.canResumeAutomatically(postRideEnabled: true), "another successful job cannot reopen a failed partial job")
+            }
+            eligibility.failureCode = "ride_started"
+            precondition(eligibility.canResumeAutomatically(postRideEnabled: true), "ride interruption must remain resumable")
+            precondition(eligibility.canResumeAutomatically(postRideEnabled: false) == (origin == .manual))
+        }
         let retry = try await restored.inventory(job.id, deviceDigest: job.deviceDigest,
             index: Data("newer".utf8), chunks: [second])
         precondition(retry.expected == [first, second])

@@ -5236,13 +5236,10 @@ extension NavigationProtocolTests {
         )
         assert(DeviceTransferServerProbePolicy.requestTimeout > 5,
                "iOS must not abandon a handshake before the firmware timeout")
-        assertEqual(DeviceTransferServerProbePolicy.maximumAttemptCount, 3,
-                    "pinned preflight attempts remain tightly bounded")
-        assertEqual(
-            DeviceTransferServerProbePolicy.retryDelaysNanoseconds.count,
-            DeviceTransferServerProbePolicy.maximumAttemptCount,
-            "every bounded probe attempt has an explicit delay"
-        )
+        assertEqual(DeviceTransferServerProbePolicy.retryDelayNanoseconds(after: 1), 750_000_000,
+                    "the first retry yields while association settles")
+        assertEqual(DeviceTransferServerProbePolicy.retryDelayNanoseconds(after: 10), 2_000_000_000,
+                    "later fast failures retain a bounded retry interval")
         assertEqual(DeviceTransferServerProbePolicy.absoluteTimeout, 20,
                     "the complete pinned preflight has one absolute deadline")
 
@@ -5280,8 +5277,8 @@ extension NavigationProtocolTests {
         )
         assert(timeout.shouldRetry,
                "a pre-pin transport timeout receives a bounded retry")
-        assertEqual(timeout.diagnosticCode, "network_not_started",
-                    "missing connection metrics retain the earliest known layer")
+        assertEqual(timeout.diagnosticCode, "transport_metrics_unavailable",
+                    "missing metrics leave the network layer unknown")
 
         let secureConnectionFailure = DeviceTransferServerProbeResult(
             outcome: .transportError(
@@ -5373,6 +5370,8 @@ extension NavigationProtocolTests {
 
         let completeSafeFields = DeviceTransferPinnedSessionSnapshot(
             tlsChallengeOutcome: .accepted,
+            metricsAvailable: true,
+            transactionCount: 1,
             waitedForConnectivity: true,
             connectStarted: true,
             connectCompleted: true,
@@ -8564,5 +8563,58 @@ extension NavigationProtocolTests {
 
         return CLLocationCoordinate2D(latitude: Double(lat) / 1_000_000,
                                       longitude: Double(lon) / 1_000_000)
+    }
+}
+
+extension NavigationProtocolTests {
+    static func testDeviceTransferReadinessWindow() async {
+        let offline = DeviceTransferServerProbeResult(
+            outcome: .transportError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet),
+            diagnostics: DeviceTransferPinnedSessionSnapshot()
+        )
+        let ready = DeviceTransferServerProbeResult(outcome: .ready, diagnostics: DeviceTransferPinnedSessionSnapshot(tlsChallengeOutcome: .accepted))
+        var now: TimeInterval = 0
+        var probes = 0
+        do {
+            let result = try await DeviceTransferServerProbePolicy.waitForReadiness(
+                timeout: 20, clock: { now }, sleep: { now += Double($0) / 1_000_000_000 },
+                probe: { remaining in
+                    assert(remaining > 0 && remaining <= 8, "requests cannot exceed remaining readiness budget")
+                    probes += 1
+                    return now >= 7 ? ready : offline
+                }, observe: { _, _, _, _ in }
+            )
+            assert(result.isReady && probes > 3, "IP readiness after the old three-probe cutoff must still succeed")
+            now = 0; probes = 0
+            let timedOut = try await DeviceTransferServerProbePolicy.waitForReadiness(
+                timeout: 20, clock: { now }, sleep: { now += Double($0) / 1_000_000_000 },
+                probe: { _ in probes += 1; return offline }, observe: { _, _, _, _ in }
+            )
+            assert(!timedOut.isReady && now == 20 && probes <= 11, "fast failures use the full deadline without a tight retry loop")
+            now = 0; probes = 0
+            let pinFailure = DeviceTransferServerProbeResult(
+                outcome: offline.outcome,
+                diagnostics: DeviceTransferPinnedSessionSnapshot(tlsChallengeOutcome: .certificateMismatch)
+            )
+            let terminal = try await DeviceTransferServerProbePolicy.waitForReadiness(
+                timeout: 20, clock: { now }, sleep: { now += Double($0) / 1_000_000_000 },
+                probe: { _ in probes += 1; return pinFailure }, observe: { _, _, _, _ in }
+            )
+            assert(terminal == pinFailure && probes == 1 && now == 0, "pin failures must remain terminal")
+            probes = 0
+            do {
+                _ = try await DeviceTransferServerProbePolicy.waitForReadiness(
+                    timeout: 20, clock: { now }, sleep: { _ in throw CancellationError() },
+                    probe: { _ in probes += 1; return offline }, observe: { _, _, _, _ in }
+                )
+                assert(false, "cancellation must interrupt the retry window")
+            } catch is CancellationError {
+                assert(probes == 1, "cancelled retry must not issue another request")
+            }
+        } catch { assert(false, "readiness simulation failed: \(error)") }
+        let absent = DeviceTransferPinnedSessionSnapshot().diagnosticFields
+        assertEqual(absent["metricsAvailable"], "false", "missing URL metrics are explicitly unknown")
+        assert(absent["connectStarted"] == nil && absent["tlsStarted"] == nil, "unknown metrics cannot masquerade as no TCP/TLS")
+        assertEqual(offline.diagnosticCode, "transport_metrics_unavailable", "missing metrics cannot prove an unstarted network load")
     }
 }

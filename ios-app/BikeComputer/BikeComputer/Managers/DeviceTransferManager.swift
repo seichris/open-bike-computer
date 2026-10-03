@@ -417,12 +417,51 @@ enum DeviceTransferServerProbePolicy {
     static let requestTimeout: TimeInterval = 8
     static let resourceTimeout: TimeInterval = 10
     static let absoluteTimeout: TimeInterval = 20
-    static let maximumAttemptCount = 3
     static let retryDelaysNanoseconds: [UInt64] = [
         0,
         750_000_000,
         2_000_000_000,
     ]
+
+    // An accepted association is not IP/route readiness. Fast -1009 failures
+    // must not consume the full budget after only three requests.
+    static func retryDelayNanoseconds(after attempt: Int) -> UInt64 {
+        retryDelaysNanoseconds[min(attempt, retryDelaysNanoseconds.count - 1)]
+    }
+
+    @MainActor
+    static func waitForReadiness(
+        timeout: TimeInterval,
+        clock: () -> TimeInterval,
+        sleep: (UInt64) async throws -> Void,
+        probe: (TimeInterval) async throws -> DeviceTransferServerProbeResult,
+        observe: (Int, TimeInterval, TimeInterval, DeviceTransferServerProbeResult) -> Void
+    ) async throws -> DeviceTransferServerProbeResult {
+        let started = clock()
+        let deadline = started + timeout
+        var attempt = 0
+        var last = DeviceTransferServerProbeResult(
+            outcome: .transportError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut),
+            diagnostics: DeviceTransferPinnedSessionSnapshot()
+        )
+        while clock() < deadline {
+            try Task.checkCancellation()
+            let delay = retryDelayNanoseconds(after: attempt)
+            if delay > 0 {
+                let remaining = deadline - clock()
+                guard remaining > 0 else { break }
+                try await sleep(min(delay, UInt64(remaining * 1_000_000_000)))
+            }
+            try Task.checkCancellation()
+            let remaining = deadline - clock()
+            guard remaining > 0 else { break }
+            attempt += 1
+            last = try await probe(min(requestTimeout, remaining))
+            observe(attempt, max(0, clock() - started), max(0, deadline - clock()), last)
+            if last.isReady || !last.shouldRetry { return last }
+        }
+        return last
+    }
 
     static func makeSessionConfiguration(
         resourceTimeout: TimeInterval = resourceTimeout
@@ -538,6 +577,8 @@ struct DeviceTransferServerProbeResult: Equatable, Sendable {
                 if diagnostics.waitedForConnectivity {
                     return "connectivity_wait_without_network_load"
                 }
+                guard diagnostics.metricsAvailable else { return "transport_metrics_unavailable" }
+                guard diagnostics.transactionCount > 0 else { return "transport_no_transaction_metrics" }
                 return "network_not_started"
             }
         }
@@ -950,6 +991,9 @@ final class DeviceTransferManager {
     ) {
         var fields = fields
         fields["mode"] = mode.rawValue
+        if let operationLease, fields["operationId"] == nil {
+            fields["operationId"] = operationLease.id.uuidString.lowercased()
+        }
         diagnosticsRecorder?.record(
             category: .transfer,
             event: event,
@@ -2077,11 +2121,27 @@ final class DeviceTransferManager {
             configuration.joinOnce = false
             configuration.lifeTimeInDays = 1
 
+            let applyStarted = ProcessInfo.processInfo.systemUptime
+            record(mode: session.mode, event: "wifi_apply", fields: [
+                "attempt": String(attempt + 1), "phase": "requested",
+                "generation": String(session.transferGeneration),
+            ])
             let applyResult = await apply(
                 configuration: configuration,
                 ssid: ssid
             )
             let applyError = applyResult.error
+            var applyFields = [
+                "attempt": String(attempt + 1), "phase": "returned",
+                "generation": String(session.transferGeneration),
+                "durationMs": String(Int((ProcessInfo.processInfo.systemUptime - applyStarted) * 1_000)),
+                "applyResult": applyError == nil ? "accepted" : "error",
+            ]
+            if let applyError {
+                applyFields["applyErrorDomain"] = applyError.domain
+                applyFields["applyErrorCode"] = String(applyError.code)
+            }
+            record(mode: session.mode, event: "wifi_apply", fields: applyFields)
             var keepAppliedConfiguration = false
             defer {
                 if !keepAppliedConfiguration {
@@ -2111,6 +2171,7 @@ final class DeviceTransferManager {
                 }
             }
 
+            let observationStarted = ProcessInfo.processInfo.systemUptime
             let networkObservation: DeviceTransferNetworkObservation
             if associationAccepted {
                 networkObservation = try await waitForNetworkObservation(
@@ -2129,6 +2190,8 @@ final class DeviceTransferManager {
             var observationFields = [
                 "attempt": String(attempt + 1),
                 "result": networkObservation.rawValue,
+                "generation": String(session.transferGeneration),
+                "durationMs": String(Int((ProcessInfo.processInfo.systemUptime - observationStarted) * 1_000)),
                 "applyResult": applyError == nil ? "accepted" : "error",
             ]
             if let applyError {
@@ -2165,7 +2228,7 @@ final class DeviceTransferManager {
                 )
                 if result.isReady {
                     keepAppliedConfiguration = true
-                    print("Device Wi-Fi ready: \(ssid)")
+                    print("Device Wi-Fi ready: pinned endpoint verified")
                     return
                 }
                 lastApplyError = nil
@@ -2207,7 +2270,7 @@ final class DeviceTransferManager {
             )
         } ?? lastDiagnostic ??
             "no authenticated pinned HTTP 200 before the deadline"
-        print("Device Wi-Fi unavailable: \(ssid): \(diagnostic)")
+        print("Device Wi-Fi unavailable: \(diagnostic)")
         if lastFailureWasServerProbe {
             throw OfflineMapPlatformError.transferServerProbeFailed(
                 ssid,
@@ -2301,7 +2364,6 @@ final class DeviceTransferManager {
             1,
             timeout ?? DeviceTransferServerProbePolicy.absoluteTimeout
         )
-        let deadline = ProcessInfo.processInfo.systemUptime + absoluteTimeout
         let diagnostics = DeviceTransferPinnedSessionDiagnostics()
         guard let urlSession = DeviceTransferPinnedSessionFactory.make(
             configuration: DeviceTransferServerProbePolicy
@@ -2329,47 +2391,28 @@ final class DeviceTransferManager {
         }
         defer { urlSession.invalidateAndCancel() }
 
-        var lastResult = DeviceTransferServerProbeResult(
-            outcome: .transportError(
-                domain: NSURLErrorDomain,
-                code: NSURLErrorTimedOut
-            ),
-            diagnostics: diagnostics.snapshot()
-        )
-        for attempt in 0..<DeviceTransferServerProbePolicy.maximumAttemptCount {
-            let delay = DeviceTransferServerProbePolicy
-                .retryDelaysNanoseconds[attempt]
-            if delay > 0 {
-                let remaining = deadline - ProcessInfo.processInfo.systemUptime
-                guard remaining > 0,
-                      Double(delay) / 1_000_000_000 < remaining else { break }
-                try await Task.sleep(nanoseconds: delay)
-            }
-            let remaining = deadline - ProcessInfo.processInfo.systemUptime
-            guard remaining > 0 else { break }
-
-            diagnostics.reset()
-            lastResult = try await probeTransferServer(
-                transferSession: session,
-                statusPath: statusPath,
-                urlSession: urlSession,
-                diagnostics: diagnostics,
-                requestTimeout: min(
-                    DeviceTransferServerProbePolicy.requestTimeout,
-                    remaining
+        return try await DeviceTransferServerProbePolicy.waitForReadiness(
+            timeout: absoluteTimeout,
+            clock: { ProcessInfo.processInfo.systemUptime },
+            sleep: { try await Task.sleep(nanoseconds: $0) },
+            probe: { remaining in
+                diagnostics.reset()
+                return try await self.probeTransferServer(
+                    transferSession: session,
+                    statusPath: statusPath,
+                    urlSession: urlSession,
+                    diagnostics: diagnostics,
+                    requestTimeout: remaining
                 )
-            )
-            recordProbe(
-                session: session,
-                attempt: attempt + 1,
-                networkObservation: networkObservation,
-                result: lastResult
-            )
-            if lastResult.isReady || !lastResult.shouldRetry {
-                return lastResult
+            },
+            observe: { attempt, elapsed, remaining, result in
+                self.recordProbe(
+                    session: session, attempt: attempt,
+                    networkObservation: networkObservation, result: result,
+                    elapsed: elapsed, remaining: remaining
+                )
             }
-        }
-        return lastResult
+        )
     }
 
     nonisolated static func removeAccessoryNetworkConfiguration(ssid: String) {
@@ -2430,10 +2473,15 @@ final class DeviceTransferManager {
         session: DeviceTransferSession,
         attempt: Int,
         networkObservation: DeviceTransferNetworkObservation,
-        result: DeviceTransferServerProbeResult
+        result: DeviceTransferServerProbeResult,
+        elapsed: TimeInterval = 0,
+        remaining: TimeInterval = 0
     ) {
         var fields = result.diagnostics.diagnosticFields
         fields["attempt"] = String(attempt)
+        fields["generation"] = String(session.transferGeneration)
+        fields["readinessElapsedMs"] = String(Int(elapsed * 1_000))
+        fields["readinessRemainingMs"] = String(Int(remaining * 1_000))
         fields["networkObservation"] = networkObservation.rawValue
         fields["outcome"] = result.diagnosticCode
         switch result.outcome {

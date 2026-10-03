@@ -937,6 +937,7 @@ struct NavigationProtocolTests {
         testBackgroundMapUploadResponseBufferIsBounded()
         testMapStreamBackgroundUploadRequest()
         testDeviceTransferServerProbePolicy()
+        await testDeviceTransferReadinessWindow()
         await testDeviceTransferManagerWaitsForMapToken()
         await testDeviceTransferManagerWaitsForFreshDebugToken()
         await testDeviceTransferManagerKeepsConfirmedLANDebugSession()

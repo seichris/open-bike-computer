@@ -9,7 +9,7 @@ using esp_err_t = int;
 using esp_event_base_t = const char *;
 using esp_event_handler_instance_t = void *;
 using wifi_mode_t = int;
-struct esp_netif_t { uint32_t address; };
+struct esp_netif_t { uint32_t address; bool up = false; };
 struct esp_netif_config_t { bool station; };
 struct esp_netif_ip_info_t { struct { uint32_t addr; } ip; };
 struct wifi_init_config_t { int static_tx_buf_num, dynamic_tx_buf_num, tx_buf_type, cache_tx_buf_num, static_rx_buf_num, dynamic_rx_buf_num; };
@@ -37,7 +37,17 @@ constexpr int WIFI_FAST_SCAN = 0, WIFI_CONNECT_AP_BY_SIGNAL = 0,
   WIFI_AUTH_OPEN = 0, WIFI_CIPHER_TYPE_CCMP = 4;
 constexpr esp_event_base_t WIFI_EVENT = "wifi";
 constexpr esp_event_base_t IP_EVENT = "ip";
-constexpr int IP_EVENT_STA_GOT_IP = 1;
+constexpr int IP_EVENT_STA_GOT_IP = 1, IP_EVENT_AP_STAIPASSIGNED = 2;
+constexpr int WIFI_EVENT_AP_START = 7, WIFI_EVENT_AP_STOP = 8,
+  WIFI_EVENT_AP_STACONNECTED = 9, WIFI_EVENT_AP_STADISCONNECTED = 10,
+  WIFI_EVENT_STA_CONNECTED = 11;
+using esp_netif_dhcp_status_t = int;
+int dhcpStatus = 1, dhcpError = 0;
+int64_t esp_timer_get_time() { return 123000; }
+bool esp_netif_is_netif_up(esp_netif_t *net) { return net->up; }
+esp_err_t esp_netif_dhcps_get_status(esp_netif_t *, int *status) {
+  *status = dhcpStatus; return dhcpError;
+}
 #define WIFI_INIT_CONFIG_DEFAULT() wifi_init_config_t{}
 #define ESP_NETIF_DEFAULT_WIFI_AP() esp_netif_config_t{false}
 #define ESP_NETIF_DEFAULT_WIFI_STA() esp_netif_config_t{true}
@@ -102,6 +112,8 @@ void reset() {
   connectFailure = startFailure = interfaceFailure = 0;
   stored[0] = {}; stored[1] = {};
   headroom = {80000, 40000, 70000, 40000};
+  nets[0].up = nets[1].up = false;
+  dhcpStatus = 1; dhcpError = 0;
 }
 void assertQuiescent() {
   assert(!radio && mode == WIFI_MODE_NULL);
@@ -124,6 +136,25 @@ int main() {
     assert(runtime.start(false, "test-ap", "test-password", memory).ok());
     assert(radio && mode == WIFI_MODE_AP && stored[1].ap.authmode == WIFI_AUTH_WPA2_PSK && stored[1].ap.pairwise_cipher == WIFI_CIPHER_TYPE_CCMP);
     assert(runtime.accessPointClientCount() == 2 && runtime.accessPointIPAddress() != 0);
+    auto snapshot = runtime.readiness();
+    assert(snapshot.available && snapshot.radioStarted && !snapshot.station);
+    assert(!snapshot.apEventStarted && !snapshot.netifUp); // esp_wifi_start return is not AP_START/netif readiness
+    nets[1].up = true;
+    handler(handlerContext, WIFI_EVENT, WIFI_EVENT_AP_START, nullptr);
+    handler(handlerContext, WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, nullptr);
+    ipHandler(handlerContext, IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, nullptr);
+    snapshot = runtime.readiness();
+    assert(snapshot.apEventStarted && snapshot.netifUp && snapshot.dhcpStatus == 1);
+    assert(snapshot.apStarts == static_cast<uint32_t>(cycle + 1));
+    assert(snapshot.clientJoins == snapshot.apStarts && snapshot.dhcpLeases == snapshot.apStarts);
+    assert(snapshot.eventUptimeMs == 123);
+    dhcpError = ESP_FAIL;
+    assert(runtime.readiness().dhcpStatus == -1 && runtime.readiness().dhcpError == ESP_FAIL);
+    dhcpError = 0;
+    handler(handlerContext, WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED, nullptr);
+    handler(handlerContext, WIFI_EVENT, WIFI_EVENT_AP_STOP, nullptr);
+    nets[1].up = false;
+    assert(!runtime.readiness().apEventStarted && runtime.readiness().clientLeaves == snapshot.clientJoins);
     assert(runtime.stop() == ESP_OK); assertQuiescent();
     assert(runtime.accessPointIPAddress() == 0 && runtime.accessPointClientCount() == 0);
     // Later sessions reuse the existing allocation, below first-init floor.
@@ -141,6 +172,7 @@ int main() {
     missing.reason = WIFI_REASON_AUTH_FAIL;
     handler(handlerContext, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &missing);
     assert(runtime.stationState() == StationState::AuthenticationFailed);
+    assert(runtime.readiness().disconnectReason == WIFI_REASON_AUTH_FAIL);
     assert(runtime.stop() == ESP_OK); assertQuiescent();
     assert(initializes == 1 && interfaces == 2);
   }

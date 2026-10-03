@@ -203,6 +203,12 @@ private:
   char resourceMode_[12] = {};
   char resourceOperation_[37] = {};
   NetworkStartResult networkStart_;
+  // Worker-owned observation state; at most 16 two-record samples per session.
+  NetworkReadinessSnapshot lastReadiness_;
+  uint32_t readinessSamples_ = 0, lastReadinessPollMs_ = 0, readinessGeneration_ = 0;
+  uint32_t acceptedClients_ = 0, tlsSucceeded_ = 0, tlsFailed_ = 0;
+  bool listenerReady_ = false;
+  bool readinessObserved_ = false;
   bool powerLockHeld_ = false;
   struct HandlerRegistration {
     std::string pathPrefix;
@@ -225,6 +231,8 @@ private:
                  const std::string &message);
   void rememberError(const std::string &code, const std::string &message);
   void observeResources(const char *phase);
+  void observeNetwork(const char *phase, bool force = false);
+  void observeTransport(const char *phase, int32_t error = 0);
   void signalStatusChanged();
   void lockState() const;
   void unlockState() const;

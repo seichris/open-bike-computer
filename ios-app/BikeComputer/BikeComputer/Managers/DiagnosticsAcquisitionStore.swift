@@ -61,7 +61,13 @@ nonisolated struct DiagnosticsAcquisitionManifest: Codable, Equatable, Sendable 
     var appEvidence: [DiagnosticsAppChunkReceipt]? = nil
 
     func canResumeAutomatically(postRideEnabled: Bool) -> Bool {
-        phase.canResumeAutomatically && (origin != .postRide || postRideEnabled)
+        // Persisted transport failures require an explicit retry, including
+        // legacy partial receipts with no reason. A successful unrelated job
+        // must not re-enable them via the coordinator's global trigger guard.
+        guard phase.canResumeAutomatically,
+              origin != .postRide || postRideEnabled else { return false }
+        if phase == .partial { return failureCode == "ride_started" }
+        return failureCode == nil
     }
 
     var deliveryComplete: Bool {

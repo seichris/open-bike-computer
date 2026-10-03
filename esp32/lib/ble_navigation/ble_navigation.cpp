@@ -3512,6 +3512,20 @@ static void cancelDiagnosticsSessionStart() {
 static void diagnosticsSessionStartTask(void *context) {
   const uint32_t generation = static_cast<uint32_t>(
       reinterpret_cast<uintptr_t>(context));
+  const auto observePreparation = [generation](const char *phase, uint32_t elapsed, const char *code) {
+    const auto stats = ride_diagnostics::stats();
+    char fields[320] = {};
+    const int bytes = snprintf(fields, sizeof(fields),
+        "{\"generation\":%lu,\"phase\":\"%s\",\"durationMs\":%lu,\"code\":\"%s\","
+        "\"queueDepth\":%u,\"droppedCount\":%lu,\"writtenCount\":%lu,\"storageErrorCount\":%lu}",
+        static_cast<unsigned long>(generation), phase, static_cast<unsigned long>(elapsed), code,
+        static_cast<unsigned>(stats.queueDepth), static_cast<unsigned long>(stats.dropped),
+        static_cast<unsigned long>(stats.written), static_cast<unsigned long>(stats.storageErrors));
+    if (bytes > 0 && static_cast<size_t>(bytes) < sizeof(fields))
+      (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "transfer", "diagnostics_preparation", fields);
+  };
+  const uint32_t preparationStarted = millis();
+  observePreparation("requested", 0, "");
   // Own the retained-file snapshot before asking the writer to seal. The
   // writer serializes pruning and sealing, so completion proves that a prune
   // which began before this lease has finished while every later prune is
@@ -3521,10 +3535,16 @@ static void diagnosticsSessionStartTask(void *context) {
       storage.prepareDiagnosticsStorage();
   const bool storageReady =
       ride_diagnostics::transfer_policy::storageReady(storageResult);
+  observePreparation("storage_returned", millis() - preparationStarted,
+      ride_diagnostics::transfer_policy::storageFailure(storageResult).code);
+  const uint32_t sealStarted = millis();
   const ride_diagnostics::transfer_policy::SealPreparation sealResult =
       storageReady ? ride_diagnostics::sealActiveChunkForTransfer()
                    : ride_diagnostics::transfer_policy::SealPreparation::
                          StorageUnavailable;
+  observePreparation(storageReady ? "seal_returned" : "seal_skipped", millis() - sealStarted,
+      storageReady ? ride_diagnostics::transfer_policy::sealFailure(sealResult).code
+                   : ride_diagnostics::transfer_policy::storageFailure(storageResult).code);
   const bool ready = storageReady &&
                      ride_diagnostics::transfer_policy::sealReady(sealResult);
 

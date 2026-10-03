@@ -59,6 +59,8 @@ public:
   uint32_t accessPointIPAddress() const override { return wifi_.accessPointIPAddress(); }
   uint8_t accessPointClientCount() const override { return wifi_.accessPointClientCount(); }
 
+  device_transfer::NetworkReadinessSnapshot networkReadiness() const override { return wifi_.readiness(); }
+
   FirmwarePartitionSnapshot partitionSnapshot();
   esp_err_t begin(const esp_partition_t *partition, std::size_t imageSize,
                   esp_ota_handle_t &handle);

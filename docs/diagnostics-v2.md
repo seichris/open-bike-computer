@@ -118,7 +118,10 @@ with a resumable `ride_started` result and cancellation-independent cleanup.
 Collection chooses pending jobs for the original device, not an old completed
 job or a newly connected unrelated board. One automatic attempt is made per
 eligible trigger, not a continuous retry loop. A transport error requires manual
-retry. Leaving the screen has no effect on the job lifetime.
+retry, persisted per acquisition: neither a successful newer collection nor
+relaunch/reconnect re-enables an older failed partial job. Legacy partial jobs
+without a reason also require manual retry. Only a `ride_started` partial job
+can resume automatically (subject to its original opt-in/device fences). Leaving the screen has no effect on the job lifetime.
 
 A capture and an acquisition cutoff are different identities. Collection stores
 the original authenticated index before the first body and never silently swaps
@@ -232,3 +235,41 @@ provider migration and incident pinning require their own explicit capability
 and privacy contracts; do not infer them from the existence of a coredump
 partition or this registry. Current standard bundles report that native crash
 artifacts are absent rather than synthesizing stack traces.
+
+### Wi-Fi readiness evidence
+
+Accessory association and an accepted iOS configuration are distinct from IP
+routing and pinned HTTP readiness. The app keeps one proxy-free, Wi-Fi-only
+pinned session and retries transient failures through the existing 20-second
+absolute window, with 750 ms then 2-second backoff. Each request is capped by
+the remaining budget; cancellation and pin/HTTP failures remain terminal.
+An already observed target network is not reapplied during this window.
+
+`transfer.wifi_apply`, `wifi_observation` and `server_probe` record apply and
+association duration, transfer generation, phone operation UUID and readiness
+elapsed/remaining time. `metricsAvailable` and `transactionCount` distinguish
+missing URLSession metrics from observed connection/TLS fields; absent metrics
+must not be interpreted as proof that no network load occurred.
+
+Firmware `wifi.readiness` records driver-start return separately from AP_START,
+netif-up, configured address, DHCP server status/error and actual listener state.
+`wifi.events` carries boot-lifetime AP start/stop, client join/leave and IP-lease
+counters, last relevant event uptime and station disconnect reason. DHCP status
+uses the pinned ESP-IDF enum (`INIT=0`, `STARTED=1`, `STOPPED=2`); -1 is unavailable,
+with a separate API error. A configured address is not proof that a phone obtained
+a lease. Counters preserve transient edges but are not a full ordered event log.
+Snapshots are sampled at most every 100 ms and emitted only on change/checkpoint,
+with at most 16 two-record samples per session including the final stop sample.
+Callbacks update atomics only and never format, allocate, log or touch storage.
+`generation` is the boot-local resource cycle; `connectionGeneration` links the
+readiness snapshot to the authenticated transport generation recorded by iOS.
+
+`http.transport` records actual listen success/failure, the first accepted TCP
+client, first successful TLS, at most three TLS failures and final session counts.
+A failed bind/listen reports `http_listener_start` rather than advertising ready.
+`transfer.diagnostics_preparation` records storage/seal duration and queue/drop/
+write/error counters before Wi-Fi starts, so a seal timeout remains distinguishable
+from association or HTTPS failure. `transfer.diagnostics_resume_selected` records
+the original acquisition UUID, phase, origin and persisted eligibility reason.
+All new records omit SSIDs, client MACs/addresses, tokens, passwords and payloads.
+Delivery, recording loss and physical qualification remain separate gates.
