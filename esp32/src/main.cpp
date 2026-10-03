@@ -18,6 +18,7 @@
 #error "remote renderer debugging requires firmware diagnostics"
 #endif
 #include <SPI.h>
+#include <Network.h>
 #include <WiFi.h>
 #include <Wire.h>
 #include <esp_bt.h>
@@ -2143,6 +2144,13 @@ void setup() {
 
   if (WiFi.getMode() == WIFI_OFF)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+#if defined(WAVESHARE_AMOLED_175)
+  // The default event loop and boot safety checks are complete. Allocate the
+  // lasting TCP/IP and Arduino event tasks before BLE and transfer workers;
+  // Network.begin() accepts the already-created default event loop.
+  if (!firmware_maintenance::active())
+    (void)Network.begin();
+#endif
 
   log_i("Loading Splash Screen...");
   splashScreen();
