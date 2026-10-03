@@ -22,7 +22,8 @@ inline bool isFontAssetPath(const std::string &path) {
 class StreamValidator {
 public:
   explicit StreamValidator(const std::string &path)
-      : terrain_(path.size() >= 4 && path.substr(path.size() - 4) == ".fme"),
+      : terrain_(path.size() >= 4 &&
+                 path.compare(path.size() - 4, 4, ".fme") == 0),
         fontAsset_(isFontAssetPath(path)),
         blockValidator_(fontAsset_ ? std::string() : path) {}
 

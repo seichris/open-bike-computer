@@ -447,15 +447,19 @@ static inline bool isLineVisible(uint8_t typeId, uint16_t color, uint8_t width,
 }
 
 static inline bool isRouteOverlayVisible(const MapRenderSettings &settings) {
-  return (currentMapStyleSettings().visibilityMask & map_terrain::HEIGHT) ==
-             0 &&
-         (settings.navigationOverlayVisibilityMask & (1 << 8)) != 0;
+#if FIRMWARE_DIAGNOSTICS
+  if (currentMapStyleSettings().visibilityMask & map_terrain::HEIGHT)
+    return false;
+#endif
+  return (settings.navigationOverlayVisibilityMask & (1 << 8)) != 0;
 }
 
 static inline bool isCurrentPositionVisible(const MapRenderSettings &settings) {
-  return (currentMapStyleSettings().visibilityMask & map_terrain::HEIGHT) ==
-             0 &&
-         (settings.navigationOverlayVisibilityMask & (1 << 9)) != 0;
+#if FIRMWARE_DIAGNOSTICS
+  if (currentMapStyleSettings().visibilityMask & map_terrain::HEIGHT)
+    return false;
+#endif
+  return (settings.navigationOverlayVisibilityMask & (1 << 9)) != 0;
 }
 
 static inline bool shouldBoostLineWidth(uint8_t typeId, uint8_t styleWidth) {
@@ -2210,31 +2214,13 @@ bool Maps::drawContourLabels(
       return;
     // Clip to screen before sampling, preventing unbounded off-screen walks.
     float ax = a.x, ay = a.y, bx = b.x, by = b.y;
-    const float dx = bx - ax, dy = by - ay;
-    float lo = 0, hi = 1;
-    const float ps[] = {-dx, dx, -dy, dy},
-                qs[] = {ax + margin, width + margin - ax, ay + margin,
-                        height + margin - ay};
-    for (int i = 0; i < 4; ++i) {
-      if (ps[i] == 0) {
-        if (qs[i] < 0)
-          return;
-      } else {
-        float t = qs[i] / ps[i];
-        if (ps[i] < 0)
-          lo = std::max(lo, t);
-        else
-          hi = std::min(hi, t);
-        if (lo > hi)
-          return;
-      }
-    }
-    bx = ax + hi * dx;
-    by = ay + hi * dy;
-    ax += lo * dx;
-    ay += lo * dy;
-    int steps = std::min(192, 1 + int(std::hypot(bx - ax, by - ay) /
-                                      std::max(1.f, std::min(cw, ch) * .5f)));
+    if (!line_rasterizer::detail::clipLine(ax, ay, bx, by, -margin, -margin,
+                                           width + margin, height + margin))
+      return;
+    // Each step spans at most half an occupancy cell along either axis.
+    int steps = std::min(
+        192, 1 + int(std::max(std::abs(bx - ax), std::abs(by - ay)) /
+                     std::max(1.f, std::min(cw, ch) * .5f)));
     for (int i = 0; i <= steps; ++i)
       reserve({ax + (bx - ax) * i / steps, ay + (by - ay) * i / steps,
                margin * 2, margin * 2});
