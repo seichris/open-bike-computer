@@ -50,8 +50,8 @@ nonisolated struct TopographyCompanionMetadata: Codable, Equatable, Sendable {
     let tileCount: Int
 
     func validate(receipt: TopographyCompanionReceipt) throws {
-        guard schemaVersion == 1, profileVersion == 1,
-              styleId == "contours-transparent-20-50-v1", tileScheme == "xyz",
+        guard (1...2).contains(schemaVersion), profileVersion == 1,
+              styleId == (schemaVersion == 1 ? "contours-transparent-20-50-v1" : "contours-labels-terrain-v2"), tileScheme == "xyz",
               tileSize == 256, scales == [1, 2], minimumZoom == 9, maximumZoom == 16,
               mapId == receipt.mapID, intermediateSha256 == receipt.intermediateSha256,
               sourcePolicySha256 == receipt.sourcePolicySha256, attributionSha256 == receipt.attributionSha256,
@@ -373,17 +373,24 @@ actor TopographyCompanionStore {
         }
         guard count == receipt.bytes, Self.hex(hash.finalize()) == receipt.sha256 else { throw TopographyCompanionError.receipt }
         let database = try TopographyDatabase(url: url)
+        let version = try database.integer("PRAGMA user_version")
         guard try database.integer("PRAGMA application_id") == 0x42544F50,
-              try database.integer("PRAGMA user_version") == 1,
+              (1...2).contains(version),
               try database.integer("PRAGMA page_size") == 4096,
-              try database.integer("SELECT count(*) FROM sqlite_schema") == 2 else { throw TopographyCompanionError.schema }
-        let schemas = [
+              try database.integer("SELECT count(*) FROM sqlite_schema") == (version == 1 ? 2 : 4) else { throw TopographyCompanionError.schema }
+        var schemas = [
             "CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL)",
             "CREATE TABLE tiles (z INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, scale INTEGER NOT NULL, png BLOB NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY (z, x, y, scale)) WITHOUT ROWID"
         ]
+        var names = ["metadata", "tiles"]
+        if version == 2 {
+            schemas.insert("CREATE TABLE labels (x INTEGER NOT NULL, y INTEGER NOT NULL, elevation INTEGER NOT NULL, PRIMARY KEY (x, y, elevation)) WITHOUT ROWID", at: 0)
+            schemas.insert("CREATE TABLE terrain (x INTEGER NOT NULL, y INTEGER NOT NULL, grid BLOB NOT NULL, PRIMARY KEY (x, y)) WITHOUT ROWID", at: 2)
+            names = ["labels", "metadata", "terrain", "tiles"]
+        }
         let schema = try database.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY name")
         defer { sqlite3_finalize(schema) }
-        for (index, name) in ["metadata", "tiles"].enumerated() {
+        for (index, name) in names.enumerated() {
             guard sqlite3_step(schema) == SQLITE_ROW,
                   try TopographyDatabase.text(schema, 0, maximum: 16) == "table",
                   try TopographyDatabase.text(schema, 1, maximum: 16) == name,
@@ -397,6 +404,22 @@ actor TopographyCompanionStore {
         let json = try TopographyDatabase.text(row, 0, maximum: 16384)
         let metadata = try JSONDecoder().decode(TopographyCompanionMetadata.self, from: Data(json.utf8))
         try metadata.validate(receipt: receipt)
+        guard metadata.schemaVersion == version else { throw TopographyCompanionError.schema }
+        if version == 2 {
+            guard try database.integer("SELECT count(*) FROM labels") <= 100_000,
+                  try database.integer("SELECT count(*) FROM terrain") <= 256,
+                  try database.integer("SELECT count(*) FROM labels WHERE typeof(x) != 'integer' OR typeof(y) != 'integer' OR typeof(elevation) != 'integer' OR abs(x) > 20037509 OR abs(y) > 20037509 OR elevation < -12000 OR elevation > 10000 OR elevation % 50 != 0") == 0 else { throw TopographyCompanionError.tile }
+            let rows = try database.prepare("SELECT x,y,grid FROM terrain")
+            defer { sqlite3_finalize(rows) }
+            var result = sqlite3_step(rows)
+            while result == SQLITE_ROW {
+                try Task.checkCancellation()
+                let grid = try Self.terrainGrid(rows)
+                guard grid.x == Int(sqlite3_column_int64(rows, 0)), grid.y == Int(sqlite3_column_int64(rows, 1)) else { throw TopographyCompanionError.tile }
+                result = sqlite3_step(rows)
+            }
+            guard result == SQLITE_DONE else { throw TopographyCompanionError.database }
+        }
         // Exact canonical JSON rejects duplicate keys, extras, booleans in
         // numeric fields and alternate whitespace/number representations.
         let encoder = JSONEncoder()
@@ -431,6 +454,43 @@ actor TopographyCompanionStore {
         self.database = database
         self.metadata = metadata
         return metadata
+    }
+
+    private static func terrainGrid(_ row: OpaquePointer) throws -> TerrainGrid {
+        guard sqlite3_column_type(row, 0) == SQLITE_INTEGER,
+              sqlite3_column_type(row, 1) == SQLITE_INTEGER,
+              sqlite3_column_type(row, 2) == SQLITE_BLOB,
+              sqlite3_column_bytes(row, 2) == 4372,
+              let pointer = sqlite3_column_blob(row, 2) else { throw TopographyCompanionError.tile }
+        return try TerrainGrid(Data(bytes: pointer, count: 4372))
+    }
+
+    func labels(west: Int, south: Int, east: Int, north: Int) throws -> [ContourLabelAnchor] {
+        guard let database, metadata?.schemaVersion == 2 else { return [] }
+        let row = try database.prepare("SELECT x,y,elevation FROM labels WHERE x>=? AND x<=? AND y>=? AND y<=? ORDER BY x,y,elevation LIMIT 512")
+        defer { sqlite3_finalize(row) }
+        for (i,v) in [west,east,south,north].enumerated() { sqlite3_bind_int64(row, Int32(i+1), Int64(v)) }
+        var output: [ContourLabelAnchor] = []
+        var result = sqlite3_step(row)
+        while result == SQLITE_ROW {
+            try Task.checkCancellation()
+            output.append(ContourLabelAnchor(x: Int(sqlite3_column_int64(row,0)), y: Int(sqlite3_column_int64(row,1)), elevation: Int(sqlite3_column_int64(row,2))))
+            result = sqlite3_step(row)
+        }
+        guard result == SQLITE_DONE else { throw TopographyCompanionError.database }
+        return output
+    }
+
+    func terrain(x: Int, y: Int) throws -> [TerrainGrid] {
+        guard let database, metadata?.schemaVersion == 2 else { return [] }
+        let row = try database.prepare("SELECT x,y,grid FROM terrain ORDER BY (x-?)*(x-?)+(y-?)*(y-?),x,y LIMIT 4")
+        defer { sqlite3_finalize(row) }
+        for (i,v) in [x,x,y,y].enumerated() { sqlite3_bind_int64(row, Int32(i+1), Int64(v)) }
+        var output: [TerrainGrid] = []
+        var result = sqlite3_step(row)
+        while result == SQLITE_ROW { try Task.checkCancellation(); output.append(try Self.terrainGrid(row)); result = sqlite3_step(row) }
+        guard result == SQLITE_DONE else { throw TopographyCompanionError.database }
+        return output
     }
 
     func tile(z: Int, x: Int, y: Int, scale: Int) throws -> Data? {
@@ -489,4 +549,34 @@ actor TopographyCompanionStore {
               CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else { throw TopographyCompanionError.tile }
         return data
     }
+}
+
+nonisolated struct TerrainGrid: Sendable {
+    struct Node: Sendable { let height: Int; let shade: UInt8; let slope: UInt8 }
+    let x: Int
+    let y: Int
+    let nodes: [Node]
+    init(_ data: Data) throws {
+        let bytes = [UInt8](data)
+        guard bytes.count == 4372, data.prefix(4) == Data("FME1".utf8) else { throw TopographyCompanionError.tile }
+        func u32(_ p: Int) -> UInt32 { UInt32(bytes[p]) | UInt32(bytes[p+1]) << 8 | UInt32(bytes[p+2]) << 16 | UInt32(bytes[p+3]) << 24 }
+        x = Int(Int32(bitPattern: u32(4))); y = Int(Int32(bitPattern: u32(8)))
+        guard (-4892...4891).contains(x), (-4892...4891).contains(y) else { throw TopographyCompanionError.tile }
+        var crc: UInt32 = 0xffffffff
+        for byte in bytes.dropFirst(16) { crc ^= UInt32(byte); for _ in 0..<8 { crc = (crc >> 1) ^ (crc & 1 == 0 ? 0 : 0xedb88320) } }
+        guard crc ^ 0xffffffff == u32(12) else { throw TopographyCompanionError.tile }
+        var result: [Node] = []; result.reserveCapacity(1089)
+        for p in stride(from: 16, to: bytes.count, by: 4) {
+            let height = Int(Int16(bitPattern: UInt16(bytes[p]) | UInt16(bytes[p+1]) << 8))
+            let shade = bytes[p+2], slope = bytes[p+3]
+            guard height == -32768 ? (shade == 0 && slope == 0) : ((-12000...10000).contains(height) && slope <= 90) else { throw TopographyCompanionError.tile }
+            result.append(Node(height: height, shade: shade, slope: slope))
+        }
+        nodes = result
+    }
+}
+nonisolated struct ContourLabelAnchor: Sendable {
+    let x: Int
+    let y: Int
+    let elevation: Int
 }

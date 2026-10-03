@@ -2366,7 +2366,7 @@ final class OfflineMapManager: ObservableObject {
         createJobAndDownload(
             request: OfflineMapJobRequest
                 .customBBox(selectedMapBounds)
-                .withTopography(includeTopographyInNewMaps)
+                .withTopography(includeTopographyInNewMaps, terrain: bleManager.supportsTerrainExperiments)
         )
     }
 
@@ -2436,7 +2436,7 @@ final class OfflineMapManager: ObservableObject {
             }
             let request = OfflineMapJobRequest
                 .customBBox(bounds)
-                .withTopography(manager.includeTopographyInNewMaps)
+                .withTopography(manager.includeTopographyInNewMaps, terrain: bleManager.supportsTerrainExperiments)
                 .forDevice(
                     firmwareVersion: bleManager.firmwareVersion
                 )
@@ -4049,6 +4049,14 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
+    private static var terrainExperimentsForPhone: Bool {
+#if DEBUG
+        true
+#else
+        false
+#endif
+    }
+
     func makeCustomBBoxRequest() throws -> OfflineMapJobRequest {
         guard let latitude = Double(centerLatitude),
               let longitude = Double(centerLongitude),
@@ -4061,7 +4069,7 @@ final class OfflineMapManager: ObservableObject {
         )
         return OfflineMapJobRequest
             .customBBox(bounds)
-            .withTopography(includeTopographyInNewMaps)
+            .withTopography(includeTopographyInNewMaps, terrain: Self.terrainExperimentsForPhone)
     }
 
     private func createJobAndDownload(request: OfflineMapJobRequest) {

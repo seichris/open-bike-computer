@@ -259,7 +259,7 @@
       "name": "Map projection host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_projection.cpp \\\n  -o ${TMPDIR}/test_map_projection\n${TMPDIR}/test_map_projection",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_projection.cpp \\\n  -o ${TMPDIR}/test_map_projection\n${TMPDIR}/test_map_projection\ng++ -std=c++17 -Wall -Wextra -Werror tools/tests/test_map_terrain.cpp -o ${TMPDIR}/test_map_terrain\n${TMPDIR}/test_map_terrain",
       "tools": [
         "python3",
         "g++"

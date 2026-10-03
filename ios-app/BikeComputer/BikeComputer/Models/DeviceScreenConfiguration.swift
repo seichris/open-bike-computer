@@ -125,8 +125,9 @@ struct DeviceScreenConfigurationCapabilities: Equatable, Sendable {
 struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
     static let defaultVisibilityMask: UInt32 = 0x0fff
     static let contoursVisibilityMask: UInt32 = 1 << 13
+    static let terrainVisibilityMask: UInt32 = 0x3c000
     static let allowedVisibilityMask: UInt32 =
-        defaultVisibilityMask | contoursVisibilityMask
+        defaultVisibilityMask | contoursVisibilityMask | terrainVisibilityMask
 
     var minimumPolygonSize: UInt8 = 0
     var detailLevel: UInt8 = 2

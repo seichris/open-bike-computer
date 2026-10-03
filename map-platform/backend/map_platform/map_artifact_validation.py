@@ -499,6 +499,20 @@ def validate_renderer_artifacts(
     format_version: int,
 ) -> None:
     paths = [entry["path"] for entry in files]
+    from .terrain import validate_grid
+    for relative in paths:
+        if relative.endswith(".fme"):
+            if format_version != 4:
+                raise ValueError("terrain requires renderer target 4")
+            terrain_path = map_root / relative
+            if terrain_path.stat().st_size != 4372:
+                raise ValueError("invalid terrain file length")
+            from .reuse import block_from_pack_path
+            key = block_from_pack_path(relative[:-4] + ".fmb")
+            if key is None or validate_grid(terrain_path.read_bytes()) != (key.x, key.y):
+                raise ValueError("terrain sidecar identity differs from block path")
+            if relative[:-4] + ".fmb" not in paths:
+                raise ValueError("terrain sidecar has no map block")
     fmb_paths = [path for path in paths if path.endswith(".fmb")]
     fmp_paths = [path for path in paths if path.endswith(".fmp")]
     font_relative = f"VECTMAP/{map_id}/assets/street-labels.fma"

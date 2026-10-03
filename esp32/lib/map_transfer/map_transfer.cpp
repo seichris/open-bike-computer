@@ -46,6 +46,17 @@ constexpr uint32_t kZipLocalHeaderSignature = 0x04034b50;
 constexpr uint32_t kZipCentralHeaderSignature = 0x02014b50;
 constexpr uint32_t kZipEndSignature = 0x06054b50;
 
+static bool isMapBlockPath(std::string_view path) {
+  if (path.size() < 4)
+    return false;
+  const auto extension = path.substr(path.size() - 4);
+#if FIRMWARE_DIAGNOSTICS
+  return extension == ".fme" || extension == ".fmb" || extension == ".fmp";
+#else
+  return extension == ".fmb" || extension == ".fmp";
+#endif
+}
+
 static bool isFontAssetPath(const std::string &path,
                             const std::string &mapId) {
   return path == std::string(kVectMapPrefix) + mapId +
@@ -1112,9 +1123,13 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
     if (file.publishPath == std::string(kActiveMapFile).substr(1))
       return fail("manifest_path", "manifest may not overwrite active map");
     const bool isFontAsset = isFontAssetPath(file.path, manifest.mapId);
-    const bool isBlock = file.path.size() >= 4 &&
-                         (file.path.rfind(".fmb") == file.path.size() - 4 ||
-                          file.path.rfind(".fmp") == file.path.size() - 4);
+#if FIRMWARE_DIAGNOSTICS
+    if (file.path.size() >= 4 &&
+        file.path.compare(file.path.size() - 4, 4, ".fme") == 0 &&
+        (manifest.formatVersion != 4 || file.bytes != map_terrain::BYTES))
+      return fail("manifest_terrain", "terrain requires renderer 4 and a complete grid");
+#endif
+    const bool isBlock = isMapBlockPath(file.path);
     if (!isBlock && !isFontAsset)
       return fail("manifest_path", "manifest contains an unsupported map file");
     if (file.bytes == 0 ||
@@ -1371,8 +1386,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
     const bool isManifest = path == "manifest.json";
     const bool isMapFile =
         startsWith(path, kVectMapPrefix) && safeRelativePath(path) &&
-        ((path.size() >= 4 && (path.rfind(".fmb") == path.size() - 4 ||
-                               path.rfind(".fmp") == path.size() - 4)) ||
+        (isMapBlockPath(path) ||
          map_renderer_format::isFontAssetPath(path));
     const bool isMetadata =
         path == "ATTRIBUTION.txt" || startsWith(path, "LICENSES/");
@@ -1490,9 +1504,8 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
       return fail("archive_path", "map archive contains an invalid path");
     const uint64_t dataOffset = offset + 30 + nameLength + extraLength;
     const bool isMapFile = startsWith(path, kVectMapPrefix) &&
-                           safeRelativePath(path) && path.size() >= 4 &&
-                           (path.rfind(".fmb") == path.size() - 4 ||
-                            path.rfind(".fmp") == path.size() - 4 ||
+                           safeRelativePath(path) &&
+                           (isMapBlockPath(path) ||
                             isFontAssetPath(path, manifest.mapId));
     if (isMapFile) {
       if (manifestFileIndex >= manifest.files.size() ||
