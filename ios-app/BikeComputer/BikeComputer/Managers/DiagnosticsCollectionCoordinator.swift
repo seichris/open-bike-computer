@@ -128,6 +128,10 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                 for context in contexts {
                     _ = try await store.create(deviceDigest: context.deviceDigest,
                         captureID: context.captureID, id: context.requestID, origin: .postRide)
+                    if let recorder {
+                        let chunks = try await recorder.appEvidenceSnapshot(captureID: context.captureID)
+                        try await store.retainAppEvidence(context.requestID, chunks: chunks)
+                    }
                 }
                 if !isRunning {
                     status = "Post-ride collection queued durably; waiting for the original device and a non-riding foreground session."
@@ -206,6 +210,16 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                     manifest = try await store.create(deviceDigest: digest, captureID: recorder.currentCaptureID)
                 }
                 guard let id = manifest?.id else { return }
+                if manifest?.appEvidence == nil, let capture = manifest?.captureID {
+                    let chunks = try await recorder.appEvidenceSnapshot(captureID: capture)
+                    try await store.retainAppEvidence(id, chunks: chunks)
+                    manifest = try await store.load(id)
+                }
+                try Task.checkCancellation()
+                guard canCollect(), bleManager.connectedDeviceID == deviceID,
+                      bleManager.isNavigationReady else {
+                    throw RideDiagnosticsError.unavailable("Collection conditions changed while saving capture evidence.")
+                }
                 _ = try await DeviceDiagnosticsTransferManager().downloadDeviceLogs(
                     bleManager: bleManager, recorder: recorder,
                     acquisitionStore: store, acquisitionID: id,
@@ -240,7 +254,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     /// receipt claims against actual archive bytes before reporting completeness.
     func exportForCodex(recorder: RideDiagnosticsRecorder) async throws -> URL {
         let snapshot = try await store.exportSnapshot()
-        let evidenceURL = try await recorder.exportBundleAsync(additionalDeviceChunks: snapshot.chunks)
+        let evidenceURL = try await recorder.exportBundleAsync(additionalDeviceChunks: snapshot.chunks, additionalAppChunks: snapshot.appChunks)
         defer { try? FileManager.default.removeItem(at: evidenceURL) }
         let acquisitions = snapshot.manifests
         let output = FileManager.default.temporaryDirectory

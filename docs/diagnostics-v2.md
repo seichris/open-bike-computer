@@ -143,6 +143,18 @@ from older app versions have no guaranteed cache and still require actual
 archive bytes to prove delivery. This protects retrieval evidence, not physical
 card durability or completeness of the original recording.
 
+New collections also freeze the recorder's existing iOS chunks for their original
+capture, closing the mutable chunk before caching it. App and firmware evidence
+share the same 32 MiB budget; app chunks retain their original process/chunk
+paths and are deduplicated by SHA-256. Each job can reference at most 256 app
+chunks; the cache keeps its existing total file bound. Optional `appEvidence`
+receipts record path, byte count and hash. Export and the CLI verify the actual
+bytes and original capture/process identity before accepting those receipts.
+Cache pressure prevents network collection until evidence admission succeeds.
+This snapshot preserves already-recorded capture context, not future events.
+Older requests whose iOS chunks have already expired remain missing-source
+results; retries cannot manufacture history or remove recorded sequence gaps.
+
 Firmware writes an optional checksummed `.cat2` descriptor when a chunk is sealed,
 containing its byte/hash/sequence identities. It avoids rehashing every retained
 payload merely to list them. Missing/corrupt descriptor caches use the legacy

@@ -6,7 +6,6 @@
 #include <esp_heap_caps.h>
 #include <esp_memory_utils.h>
 #include <esp_wifi.h>
-#include <WiFi.h>
 
 namespace firmware_update {
 namespace {
@@ -429,88 +428,15 @@ void DeviceOperationOwner::run() {
           command.firmwareReceipt.operation, command.firmwareReceipt.image) ? ESP_OK : ESP_FAIL;
       break;
     case Operation::StartStation:
-      result.networkStart.mode.before = networkMemory();
-      if (WiFi.getMode() == WIFI_OFF &&
-          !device_transfer::wifiStartupMemoryAboveObservedFailure(
-              result.networkStart.mode.before)) {
-        result.networkStart.failedStep = device_transfer::NetworkStartStep::Memory;
-        result.networkStart.mode.after = result.networkStart.mode.before;
-        result.networkStart.espError = ESP_ERR_NO_MEM;
-        result.error = ESP_ERR_NO_MEM;
-        break;
-      }
-      result.networkStart.mode.attempted = true;
-      WiFi.persistent(false);
-      if (!WiFi.mode(WIFI_STA)) {
-        result.networkStart.mode.after = networkMemory();
-        result.networkStart.failedStep = device_transfer::NetworkStartStep::Mode;
-        result.networkStart.espError = ESP_FAIL;
-        result.error = ESP_FAIL;
-        break;
-      }
-      result.networkStart.mode.after = networkMemory();
-      result.networkStart.ramStorage.attempted = true;
-      result.networkStart.ramStorage.before = networkMemory();
-      result.error = esp_wifi_set_storage(WIFI_STORAGE_RAM);
-      result.networkStart.ramStorage.after = networkMemory();
-      if (result.error != ESP_OK) {
-        result.networkStart.failedStep = device_transfer::NetworkStartStep::RamStorage;
-        result.networkStart.espError = result.error;
-        break;
-      }
-      WiFi.setAutoReconnect(false);
-      (void)WiFi.begin(networkSsid_, networkPassword_);
-      result.error = ESP_OK;
+    case Operation::StartAccessPoint:
+      result.networkStart = wifi_.start(command.operation == Operation::StartStation,
+                                        networkSsid_, networkPassword_, networkMemory);
+      result.error = result.networkStart.ok() ? ESP_OK : result.networkStart.espError;
       break;
     case Operation::DisconnectStation:
-      result.error = WiFi.disconnect(command.wifiOff, false) ? ESP_OK
-                                                              : ESP_FAIL;
-      break;
-    case Operation::StartAccessPoint: {
-      result.networkStart.mode.before = networkMemory();
-      if (WiFi.getMode() == WIFI_OFF &&
-          !device_transfer::wifiStartupMemoryAboveObservedFailure(
-              result.networkStart.mode.before)) {
-        result.networkStart.failedStep =
-            device_transfer::NetworkStartStep::Memory;
-        result.networkStart.mode.after = result.networkStart.mode.before;
-        result.networkStart.espError = ESP_ERR_NO_MEM;
-        result.error = ESP_ERR_NO_MEM;
-        break;
-      }
-      result.networkStart.mode.attempted = true;
-      WiFi.persistent(false);
-      const bool modeStarted = WiFi.mode(WIFI_AP);
-      result.networkStart.mode.after = networkMemory();
-      if (!modeStarted) {
-        result.networkStart.failedStep = device_transfer::NetworkStartStep::Mode;
-        result.error = ESP_FAIL;
-        break;
-      }
-      result.networkStart.ramStorage.attempted = true;
-      result.networkStart.ramStorage.before = networkMemory();
-      result.error = esp_wifi_set_storage(WIFI_STORAGE_RAM);
-      result.networkStart.ramStorage.after = networkMemory();
-      if (result.error != ESP_OK) {
-        result.networkStart.failedStep = device_transfer::NetworkStartStep::RamStorage;
-        result.networkStart.espError = result.error;
-        break;
-      }
-      result.networkStart.accessPoint.attempted = true;
-      result.networkStart.accessPoint.before = networkMemory();
-      result.error = WiFi.softAP(networkSsid_, networkPassword_) ? ESP_OK
-                                                                  : ESP_FAIL;
-      result.networkStart.accessPoint.after = networkMemory();
-      if (result.error != ESP_OK)
-        result.networkStart.failedStep = device_transfer::NetworkStartStep::AccessPoint;
-      break;
-    }
     case Operation::StopAccessPoint:
-      result.error = WiFi.softAPdisconnect(command.wifiOff) ? ESP_OK
-                                                             : ESP_FAIL;
-      break;
     case Operation::StopWiFi:
-      result.error = WiFi.mode(WIFI_OFF) ? ESP_OK : ESP_FAIL;
+      result.error = wifi_.stop();
       break;
     case Operation::MapActivation:
       // Map finalization performs long SD transactions. Match the former
@@ -528,27 +454,12 @@ void DeviceOperationOwner::run() {
       vTaskPrioritySet(nullptr, 2);
       break;
     case Operation::Quiesce:
+      result.error = wifi_.stop();
       std::memset(networkSsid_, 0, sizeof(networkSsid_));
       std::memset(networkPassword_, 0, sizeof(networkPassword_));
       std::memset(mapSessionId_, 0, sizeof(mapSessionId_));
       std::memset(writeBuffer_, 0, sizeof(writeBuffer_));
-      result.error = ESP_OK;
       break;
-    }
-    if (command.operation == Operation::StartAccessPoint ||
-        command.operation == Operation::StartStation) {
-      const auto *step = (result.networkStart.failedStep ==
-                                 device_transfer::NetworkStartStep::Mode ||
-                             result.networkStart.failedStep ==
-                                 device_transfer::NetworkStartStep::Memory)
-                             ? &result.networkStart.mode
-                         : result.networkStart.failedStep ==
-                                 device_transfer::NetworkStartStep::RamStorage ||
-                               command.operation == Operation::StartStation
-                             ? &result.networkStart.ramStorage
-                             : &result.networkStart.accessPoint;
-      result.networkStart.before = step->before;
-      result.networkStart.after = step->after;
     }
     lastStackHighWaterBytes_.store(
         static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)),

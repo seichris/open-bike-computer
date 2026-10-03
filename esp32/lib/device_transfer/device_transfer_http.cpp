@@ -686,7 +686,7 @@ bool HttpTransferServer::startNetwork() {
         (void)networkOwner->disconnectStation(true);
         return false;
       }
-      if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress()) {
+      if (networkOwner->stationState() == StationState::Connected && networkOwner->stationIPAddress() != 0) {
         lockState();
         startedStation_ = true;
         networkTransport_ = "lan";
@@ -695,7 +695,7 @@ bool HttpTransferServer::startNetwork() {
         Serial.printf(
             "DEVICE_TRANSFER_HTTP: joined LAN ssid_bytes=%u ip=%s\n",
             static_cast<unsigned>(preferredNetwork.ssid.size()),
-            WiFi.localIP().toString().c_str());
+            IPAddress(networkOwner->stationIPAddress()).toString().c_str());
         break;
       }
       vTaskDelay(pdMS_TO_TICKS(kLanConnectPollMs));
@@ -714,10 +714,10 @@ bool HttpTransferServer::startNetwork() {
   if (!lanReady) {
     std::string fallbackReason = requestedHotspotFallbackReason;
     if (preferLan) {
-      const wl_status_t stationStatus = WiFi.status();
+      const StationState stationStatus = networkOwner->stationState();
       fallbackReason = lanFallbackReasonForStatus(
-          static_cast<int>(stationStatus), static_cast<int>(WL_NO_SSID_AVAIL),
-          static_cast<int>(WL_CONNECT_FAILED));
+          static_cast<int>(stationStatus), static_cast<int>(StationState::NoSSID),
+          static_cast<int>(StationState::AuthenticationFailed));
       if (!networkOwner->disconnectStation(true)) {
         setLastError("wifi_station_stop",
                      "could not stop transfer Wi-Fi station safely");
@@ -769,7 +769,7 @@ bool HttpTransferServer::startNetwork() {
         "DEVICE_TRANSFER_HTTP: started AP fallback=%d reason=%s ssid=%s "
         "ip=%s\n",
         !fallbackReason.empty(), fallbackReason.c_str(), apSsid.c_str(),
-        WiFi.softAPIP().toString().c_str());
+        IPAddress(networkOwner->accessPointIPAddress()).toString().c_str());
   }
 
   if (mode == "firmware" && firmware_maintenance::active()) {
@@ -922,7 +922,7 @@ void HttpTransferServer::runWorker() {
           "free_heap=%u stack_words=%u\n",
           networkStatus.networkTransport.c_str(),
           static_cast<unsigned>(networkStatus.networkTransport == "hotspot"
-                                    ? WiFi.softAPgetStationNum()
+                                    ? networkOperationOwner_->accessPointClientCount()
                                     : 0),
           static_cast<unsigned>(ESP.getFreeHeap()),
           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
@@ -1015,7 +1015,7 @@ void HttpTransferServer::runWorker() {
             "free_heap=%u stack_words=%u\n",
             networkStatus.networkTransport.c_str(),
             static_cast<unsigned>(networkStatus.networkTransport == "hotspot"
-                                      ? WiFi.softAPgetStationNum()
+                                      ? networkOperationOwner_->accessPointClientCount()
                                       : 0),
             networkStatus.baseUrl.c_str(),
             static_cast<unsigned>(ESP.getFreeHeap()),
@@ -1083,10 +1083,9 @@ HttpTransferStatus HttpTransferServer::status() const {
   std::string baseUrl;
   if (enabled) {
     IPAddress ip =
-        startedAp ? WiFi.softAPIP()
-                  : (startedStation && WiFi.status() == WL_CONNECTED
-                         ? WiFi.localIP()
-                         : IPAddress());
+        networkOwner == nullptr ? IPAddress()
+        : startedAp ? IPAddress(networkOwner->accessPointIPAddress())
+                    : (startedStation ? IPAddress(networkOwner->stationIPAddress()) : IPAddress());
     if (ip != IPAddress()) {
       baseUrl = std::string("https://") + ip.toString().c_str() + ":" +
                 std::to_string(port);

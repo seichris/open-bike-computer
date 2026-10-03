@@ -33,6 +33,7 @@ constexpr int ESP_OTA_IMG_UNDEFINED = 0;
 int creates = 0, sends = 0, resets = 0;
 bool createFails = false, mutexFails = false, sendFails = false;
 bool receiveFails = false, mismatched = false, resultFails = false;
+bool radioStopFails = false;
 const void *externalPointer = nullptr;
 void *context = nullptr;
 SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *s) { return s; }
@@ -49,6 +50,15 @@ TaskHandle_t xTaskCreateStatic(void (*)(void *), const char *, uint32_t bytes,
 BaseType_t xQueueSend(QueueHandle_t, const void *, TickType_t);
 BaseType_t xQueueReceive(QueueHandle_t, void *, TickType_t);
 void xQueueReset(QueueHandle_t) { ++resets; }
+namespace firmware_update {
+struct DeviceWiFiRuntime {
+  esp_err_t stop() { return radioStopFails ? ESP_FAIL : ESP_OK; }
+  device_transfer::StationState stationState() const { return device_transfer::StationState::Connecting; }
+  uint32_t stationIPAddress() const { return 0; }
+  uint32_t accessPointIPAddress() const { return 0; }
+  uint8_t accessPointClientCount() const { return 0; }
+};
+}
 
 // PRODUCTION_HEADER
 // PRODUCTION_METHODS
@@ -77,7 +87,7 @@ BaseType_t xQueueSend(QueueHandle_t, const void *data, TickType_t) {
   // PRODUCTION_QUIESCE
   default: assert(false);
   }
-  assert(result.error == ESP_OK);
+  assert(result.error == (radioStopFails ? ESP_FAIL : ESP_OK));
   reply = result;
   reply.commandId = command.id + (mismatched ? 1 : 0);
   if (resultFails) reply.error = ESP_FAIL;
@@ -136,4 +146,10 @@ int main() {
     sendFails = receiveFails = resultFails = false;
     assert(!failed.start() && !failed.release() && resets == before);
   }
+  Owner radioFailure;
+  assert(radioFailure.start());
+  radioStopFails = true;
+  assert(!radioFailure.release());
+  radioStopFails = false;
+  assert(!radioFailure.start() && !radioFailure.release());
 }

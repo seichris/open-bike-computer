@@ -32,7 +32,7 @@ def integer(value: Any, minimum: int = 0, maximum: int = 2**32-1) -> bool:
 
 def validate_acquisition(value: dict) -> dict:
     required = {'schema', 'id', 'deviceDigest', 'createdAt', 'updatedAt', 'phase', 'expected', 'verified'}
-    if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - {'captureID', 'indexData', 'failureCode', 'origin', 'evidenceRetained'}:
+    if not isinstance(value, dict) or not required <= value.keys() or value.keys() - required - {'captureID', 'indexData', 'failureCode', 'origin', 'evidenceRetained', 'appEvidence'}:
         raise EvidenceError('invalid acquisition fields')
     if type(value['schema']) is not int or value['schema'] != 2 or value['phase'] not in ('requested', 'collecting', 'partial', 'complete', 'cancelled'):
         raise EvidenceError('invalid acquisition state')
@@ -57,6 +57,19 @@ def validate_acquisition(value: dict) -> dict:
         raise EvidenceError('invalid failure code')
     if not isinstance(value['expected'], list) or len(value['expected']) > 256 or not isinstance(value['verified'], list):
         raise EvidenceError('oversized acquisition')
+    app_chunks = value.get('appEvidence', [])
+    if not isinstance(app_chunks, list) or len(app_chunks) > 256:
+        raise EvidenceError('oversized app acquisition')
+    app_paths = set()
+    for item in app_chunks:
+        if not isinstance(item, dict) or set(item) != {'path', 'bytes', 'sha256'}:
+            raise EvidenceError('invalid app receipt')
+        path = item['path']
+        if not isinstance(path, str) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/events-[0-9]{6,10}\.jsonl', path) or path in app_paths:
+            raise EvidenceError('invalid app receipt path')
+        if not value.get('captureID') or not integer(item['bytes'], 1, 256*1024) or not isinstance(item['sha256'], str) or not HEX.fullmatch(item['sha256']):
+            raise EvidenceError('invalid app receipt identity')
+        app_paths.add(path)
     keys, identities = set(), set()
     for chunk in value['expected']:
         if not isinstance(chunk, dict) or set(chunk) != {'bootSequence', 'chunk', 'bytes', 'sha256'}:
@@ -273,4 +286,17 @@ def open_evidence(path: Path) -> Iterator[Evidence]:
                         raise EvidenceError('acquisition filename identity mismatch')
                     acquisitions.append(receipt)
         manifest, streams = v1.validate_bundle(source)
+        stream_by_path = {stream.path: stream for stream in streams}
+        with zipfile.ZipFile(source) as archive:
+            for acquisition in acquisitions:
+                for receipt in acquisition.get('appEvidence', []):
+                    name = 'app/' + receipt['path']
+                    stream = stream_by_path.get(name)
+                    if stream is None:
+                        raise EvidenceError('retained app evidence is missing')
+                    data = archive.read(name)
+                    process = receipt['path'].split('/')[0]
+                    capture = str(uuid.UUID(acquisition['captureID']))
+                    if len(data) != receipt['bytes'] or digest(data) != receipt['sha256'] or not any(str(event.get('captureId', '')).lower() == capture for event in stream.events) or any(str(event.get('processId', '')).lower() != process for event in stream.events):
+                        raise EvidenceError('retained app evidence identity mismatch')
         yield Evidence(path, source, manifest, streams, acquisitions, sha)

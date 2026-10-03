@@ -15,6 +15,19 @@ nonisolated struct DiagnosticsChunkReceipt: Codable, Equatable, Sendable {
     var key: String { "\(bootSequence):\(chunk):\(sha256)" }
 }
 
+nonisolated struct DiagnosticsAppChunkReceipt: Codable, Equatable, Sendable {
+    let path: String
+    let bytes: Int
+    let sha256: String
+
+    static func validPath(_ path: String) -> Bool {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count == 2 &&
+            UUID(uuidString: String(parts[0]))?.uuidString.lowercased() == String(parts[0]) &&
+            parts[1].range(of: "^events-[0-9]{6,10}\\.jsonl$", options: .regularExpression) != nil
+    }
+}
+
 /// A collection is an immutable inventory plus mutable, replayable receipts.
 /// It is intentionally outside the v1 recorder root: v1 archives remain unchanged.
 nonisolated struct DiagnosticsAcquisitionManifest: Codable, Equatable, Sendable {
@@ -43,6 +56,9 @@ nonisolated struct DiagnosticsAcquisitionManifest: Codable, Equatable, Sendable 
     var failureCode: String?
     // Absent in pre-cache receipts, whose claims still need archive validation.
     var evidenceRetained: Bool? = nil
+    // Absent in old receipts. These are original-capture bytes, never events
+    // recorded later and relabelled to satisfy an older request.
+    var appEvidence: [DiagnosticsAppChunkReceipt]? = nil
 
     func canResumeAutomatically(postRideEnabled: Bool) -> Bool {
         phase.canResumeAutomatically && (origin != .postRide || postRideEnabled)
@@ -92,6 +108,18 @@ actor DiagnosticsAcquisitionStore {
     }
 
     private func validate(_ manifest: DiagnosticsAcquisitionManifest) throws {
+        for receipt in manifest.appEvidence ?? [] {
+            guard DiagnosticsAppChunkReceipt.validPath(receipt.path),
+                  receipt.bytes > 0, receipt.bytes <= 256 * 1024,
+                  receipt.sha256.count == 64,
+                  receipt.sha256.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+                throw Failure.invalidManifest
+            }
+        }
+        guard (manifest.appEvidence?.count ?? 0) <= 256,
+              Set((manifest.appEvidence ?? []).map(\.path)).count == (manifest.appEvidence?.count ?? 0) else {
+            throw Failure.invalidManifest
+        }
         guard manifest.schema == 2,
               manifest.deviceDigest.count == 16,
               manifest.deviceDigest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
@@ -235,11 +263,67 @@ actor DiagnosticsAcquisitionStore {
 
     private func pruneUnreferencedEvidence() throws {
         let referenced = Set(try manifests().flatMap { value in
-            value.expected.map { evidenceName(device: value.deviceDigest, receipt: $0) }
+            value.expected.map { evidenceName(device: value.deviceDigest, receipt: $0) } +
+                (value.appEvidence ?? []).map { "app-\($0.sha256).jsonl" }
         })
         for file in try evidenceFiles() where !referenced.contains(file.lastPathComponent) {
             try FileManager.default.removeItem(at: file)
         }
+    }
+
+    /// Copy immutable, already-recorded iOS chunks into the same bounded cache
+    /// as firmware evidence before allowing the collection to use the network.
+    func retainAppEvidence(_ id: UUID, chunks: [String: Data]) throws {
+        var value = try load(id)
+        guard value.appEvidence == nil else { return }
+        guard chunks.count <= 256, let capture = value.captureID else {
+            throw Failure.invalidManifest
+        }
+        var receipts: [DiagnosticsAppChunkReceipt] = []
+        for (path, data) in chunks {
+            guard DiagnosticsAppChunkReceipt.validPath(path), data.last == 10,
+                  data.count <= 256 * 1024 else { throw Failure.invalidManifest }
+            let lines = data.split(separator: 10)
+            var matchesCapture = false
+            for line in lines {
+                guard let event = try JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                      event["source"] as? String == "ios",
+                      (event["processId"] as? String)?.lowercased() == path.split(separator: "/").first.map(String.init) else {
+                    throw Failure.invalidManifest
+                }
+                if (event["captureId"] as? String)?.lowercased() == capture.uuidString.lowercased() {
+                    matchesCapture = true
+                }
+            }
+            guard matchesCapture else { throw Failure.inventoryChanged }
+            receipts.append(.init(path: path, bytes: data.count,
+                sha256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()))
+        }
+        try pruneUnreferencedEvidence()
+        let files = try evidenceFiles()
+        let retained = try files.reduce(0) { $0 + (try $1.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) }
+        var newBytes = 0
+        var newNames: Set<String> = []
+        for receipt in receipts {
+            let name = "app-\(receipt.sha256).jsonl"
+            if !FileManager.default.fileExists(atPath: evidenceRoot.appendingPathComponent(name).path),
+               newNames.insert(name).inserted { newBytes += receipt.bytes }
+        }
+        guard retained + newBytes <= maximumEvidenceBytes,
+              files.count + newNames.count <= maximumJobs * 256 else { throw Failure.storageFull }
+        for receipt in receipts {
+            let url = evidenceRoot.appendingPathComponent("app-\(receipt.sha256).jsonl")
+            try chunks[receipt.path]!.write(to: url, options: .atomic)
+            #if os(iOS)
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: url.path)
+            #endif
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.synchronize()
+            try handle.close()
+        }
+        value.appEvidence = receipts.sorted { $0.path < $1.path }
+        value.updatedAt = Date()
+        try save(value)
     }
 
     private func matches(_ data: Data, receipt: DiagnosticsChunkReceipt) -> Bool {
@@ -314,11 +398,29 @@ actor DiagnosticsAcquisitionStore {
 
     /// Actor-isolated immutable Data prevents eviction racing recorder snapshot
     /// creation. At most 32 MiB; every returned chunk is rehashed on export.
-    func exportSnapshot() throws -> (manifests: [DiagnosticsAcquisitionManifest], chunks: [String: Data]) {
+    func exportSnapshot() throws -> (manifests: [DiagnosticsAcquisitionManifest], chunks: [String: Data], appChunks: [String: Data]) {
         let entries = try manifests()
         var chunks: [String: Data] = [:]
+        var appChunks: [String: Data] = [:]
         var bytes = 0
         for value in entries {
+            for receipt in value.appEvidence ?? [] {
+                let url = evidenceRoot.appendingPathComponent("app-\(receipt.sha256).jsonl")
+                let attributes = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey])
+                guard attributes.isSymbolicLink != true, attributes.isRegularFile == true,
+                      attributes.fileSize == receipt.bytes else { throw Failure.invalidManifest }
+                let data = try Data(contentsOf: url)
+                guard SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == receipt.sha256 else {
+                    throw Failure.invalidManifest
+                }
+                if let existing = appChunks[receipt.path] {
+                    guard existing == data else { throw Failure.inventoryChanged }
+                } else {
+                    bytes += data.count
+                    guard bytes <= maximumEvidenceBytes else { throw Failure.storageFull }
+                    appChunks[receipt.path] = data
+                }
+            }
             for receipt in value.expected where value.verified.contains(receipt.key) {
                 guard let data = try cached(device: value.deviceDigest, receipt: receipt) else {
                     if value.evidenceRetained == true { throw Failure.invalidManifest }
@@ -335,7 +437,7 @@ actor DiagnosticsAcquisitionStore {
                 }
             }
         }
-        return (entries, chunks)
+        return (entries, chunks, appChunks)
     }
 
     func interrupt(_ id: UUID, cancelled: Bool = false, code: String = "interrupted") throws {

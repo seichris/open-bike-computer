@@ -141,6 +141,7 @@
         "ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift",
@@ -426,6 +427,7 @@
         "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutValueFormatter.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift",
@@ -482,6 +484,7 @@
         "ios-app/BikeComputer/BikeComputer/Utilities/NavigationProtocol.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/NavigationWriteQueue.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/RendererBenchmarkProtocol.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
         "ios-app/BikeComputer/RideShared/NavigationGeometry.swift",
         "ios-app/BikeComputer/RideShared/NavigationRouteArchive.swift",
@@ -539,6 +542,7 @@
     "common-4": {
       "sources": [
         "ios-app/BikeComputer/BikeComputer/Managers/WorkoutMetricsStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/RideDiagnostics.swift",
         "ios-app/BikeComputer/WorkoutShared/RideAutomationSourceHealth.generated.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutContract.swift",

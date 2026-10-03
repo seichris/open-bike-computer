@@ -62,6 +62,8 @@ inline const char *networkStartCode(NetworkStartStep step) {
 // driver configuration on an internal-RAM stack. Transfer protocol and TLS
 // work can then remain on a PSRAM-backed worker without becoming the caller
 // of an indirect flash-cache-disabling operation.
+enum class StationState : uint8_t { Connecting, Connected, NoSSID, AuthenticationFailed };
+
 class NetworkOperationOwner {
 public:
   virtual ~NetworkOperationOwner() = default;
@@ -77,6 +79,10 @@ public:
       const std::string &ssid, const std::string &passphrase) = 0;
   virtual bool stopAccessPoint(bool wifiOff) = 0;
   virtual bool stopWiFi() = 0;
+  virtual StationState stationState() const { return StationState::Connecting; }
+  virtual uint32_t stationIPAddress() const { return 0; }
+  virtual uint32_t accessPointIPAddress() const { return 0; }
+  virtual uint8_t accessPointClientCount() const { return 0; }
   virtual bool healthy() const = 0;
   virtual uint32_t stackHighWaterBytes() const = 0;
   virtual bool stackSampleAvailable() const { return false; }

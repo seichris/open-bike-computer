@@ -50,12 +50,18 @@ enum RideDiagnosticsHostTests {
         let storeRoot = base.appendingPathComponent("v2")
         let store = DiagnosticsAcquisitionStore(root: storeRoot)
         let device = "0123456789abcdef"
-        let job = try await store.create(deviceDigest: device, captureID: nil)
+        recorder.record(category: .ble, event: "retained_capture")
+        recorder.flush()
+        let originalCapture = try require(recorder.currentCaptureID)
+        let appEvidence = try await recorder.appEvidenceSnapshot(captureID: originalCapture)
+        precondition(!appEvidence.isEmpty)
+        let job = try await store.create(deviceDigest: device, captureID: originalCapture)
+        try await store.retainAppEvidence(job.id, chunks: appEvidence)
         var expected: [DiagnosticsChunkReceipt] = []
         var bodies: [Data] = []
         var originals: [URL] = []
         for boot in 1...39 {
-            let capture = String(format: "00000000-0000-0000-0000-%012d", boot)
+            let capture = boot == 1 ? originalCapture.uuidString.lowercased() : String(format: "00000000-0000-0000-0000-%012d", boot)
             let data = Data("{\"schema\":1,\"source\":\"firmware\",\"sequence\":0,\"level\":\"info\",\"category\":\"boot\",\"event\":\"test\",\"captureId\":\"\(capture)\",\"fields\":{\"bootSequence\":\(boot),\"firmwareFingerprint\":\"A1B2C3D4\"}}\n".utf8)
             let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
             expected.append(DiagnosticsChunkReceipt(bootSequence: UInt32(boot), chunk: 1, bytes: data.count, sha256: hash))
@@ -75,10 +81,17 @@ enum RideDiagnosticsHostTests {
         try recorder.enforceRetention()
         precondition(originals.contains { !FileManager.default.fileExists(atPath: $0.path) },
             "fixture must actually prune original acquired chunks")
+        // Simulate ordinary app retention removing every original member.
+        // The acquisition cache must survive independently of those files.
+        for path in appEvidence.keys {
+            let source = base.appendingPathComponent("v1/app").appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: source.path) { try FileManager.default.removeItem(at: source) }
+        }
         let restarted = DiagnosticsAcquisitionStore(root: storeRoot)
         let snapshot = try await restarted.exportSnapshot()
         precondition(snapshot.manifests.first?.deliveryComplete == true && snapshot.chunks.count == 39)
-        let archive = try recorder.exportBundle(additionalDeviceChunks: snapshot.chunks)
+        precondition(snapshot.appChunks == appEvidence)
+        let archive = try recorder.exportBundle(additionalDeviceChunks: snapshot.chunks, additionalAppChunks: snapshot.appChunks)
         defer { try? FileManager.default.removeItem(at: archive) }
         let bytes = try Data(contentsOf: archive)
         for (relative, body) in snapshot.chunks {
@@ -105,7 +118,7 @@ enum RideDiagnosticsHostTests {
         verify.executableURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent("tools/bicino")
         verify.arguments = ["diag", "verify", portable.path, "--acquisition", job.id.uuidString.lowercased(),
-            "--require", "firmware", "--require-complete", "--json"]
+            "--require", "ios,firmware", "--require-complete", "--json"]
         let output = Pipe()
         verify.standardOutput = output
         try verify.run()
@@ -117,6 +130,7 @@ enum RideDiagnosticsHostTests {
         let report = try JSONSerialization.jsonObject(with: result) as! [String: Any]
         let delivery = (report["delivery"] as! [[String: Any]])[0]
         precondition(delivery["expectedChunks"] as? Int == 39 && delivery["state"] as? String == "complete")
+        precondition((report["missingRequiredSources"] as? [String])?.isEmpty == true)
         let stillPruned = originals.filter { !FileManager.default.fileExists(atPath: $0.path) }
         precondition(!stillPruned.isEmpty, "export must not resurrect evidence into ordinary retention")
     }

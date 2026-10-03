@@ -2,7 +2,55 @@ import CryptoKit
 import Foundation
 
 @main enum DiagnosticsAcquisitionStoreTests {
+    static func appEvidenceTests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = DiagnosticsAcquisitionStore(root: root)
+        let capture = UUID(), process = UUID().uuidString.lowercased()
+        let path = "\(process)/events-000001.jsonl"
+        let bytes = Data("{\"source\":\"ios\",\"processId\":\"\(process)\",\"captureId\":\"\(capture.uuidString.lowercased())\"}\n".utf8)
+        let job = try await store.create(deviceDigest: "0123456789abcdef", captureID: capture)
+        precondition(job.appEvidence == nil, "legacy receipts do not claim retention")
+        do { try await store.retainAppEvidence(job.id, chunks: ["../events-000001.jsonl": bytes]); fatalError("unsafe path retained") }
+        catch DiagnosticsAcquisitionStore.Failure.invalidManifest {}
+        let other = try await store.create(deviceDigest: job.deviceDigest, captureID: UUID())
+        do { try await store.retainAppEvidence(other.id, chunks: [path: bytes]); fatalError("foreign capture retained") }
+        catch DiagnosticsAcquisitionStore.Failure.inventoryChanged {}
+        do { try await store.retainAppEvidence(job.id, chunks: [path: bytes.dropLast()]); fatalError("mutable/truncated chunk retained") }
+        catch DiagnosticsAcquisitionStore.Failure.invalidManifest {}
+        try await store.retainAppEvidence(job.id, chunks: [path: bytes])
+        let shared = try await store.create(deviceDigest: job.deviceDigest, captureID: capture)
+        try await store.retainAppEvidence(shared.id, chunks: [path: bytes])
+        let files = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("evidence"), includingPropertiesForKeys: nil)
+        precondition(files.count == 1, "shared original bytes must be deduplicated")
+        let restarted = DiagnosticsAcquisitionStore(root: root)
+        let snapshot = try await restarted.exportSnapshot()
+        precondition(snapshot.appChunks == [path: bytes])
+        // A historical capture with no source does not gain invented evidence.
+        try await restarted.retainAppEvidence(other.id, chunks: [:])
+        let missing = try await restarted.load(other.id)
+        precondition(missing.appEvidence == [])
+        let small = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("bounded"), maximumEvidenceBytes: bytes.count - 1)
+        let limited = try await small.create(deviceDigest: job.deviceDigest, captureID: capture)
+        do { try await small.retainAppEvidence(limited.id, chunks: [path: bytes]); fatalError("app evidence budget exceeded") }
+        catch DiagnosticsAcquisitionStore.Failure.storageFull {}
+        let limitedReceipt = try await small.load(limited.id)
+        precondition(limitedReceipt.appEvidence == nil, "failed cache admission cannot claim retention")
+        try Data(repeating: 0, count: bytes.count).write(to: files[0])
+        do { _ = try await restarted.exportSnapshot(); fatalError("corrupt app evidence exported") }
+        catch DiagnosticsAcquisitionStore.Failure.invalidManifest {}
+        try await restarted.interrupt(job.id, cancelled: true)
+        try await restarted.interrupt(shared.id, cancelled: true)
+        for _ in 0..<17 { _ = try await restarted.create(deviceDigest: job.deviceDigest, captureID: UUID()) }
+        _ = try await restarted.create(deviceDigest: job.deviceDigest, captureID: UUID())
+        precondition(FileManager.default.fileExists(atPath: files[0].path),
+            "evicting one job must preserve bytes referenced by another")
+        _ = try await restarted.create(deviceDigest: job.deviceDigest, captureID: UUID())
+        precondition(!FileManager.default.fileExists(atPath: files[0].path),
+            "evicting the last reference must prune orphaned app evidence")
+    }
     static func main() async throws {
+        try await appEvidenceTests()
         for phase in [DiagnosticsAcquisitionManifest.Phase.requested, .collecting, .partial] {
             precondition(phase.canResumeAutomatically)
         }

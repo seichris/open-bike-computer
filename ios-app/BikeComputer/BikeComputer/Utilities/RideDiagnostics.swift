@@ -1317,12 +1317,45 @@ final class RideDiagnosticsRecorder:
         }
     }
 
-    func exportBundle(additionalDeviceChunks: [String: Data] = [:]) throws -> URL {
-        let prepared = try queue.sync { try prepareExportOnQueue(additionalDeviceChunks: additionalDeviceChunks) }
+    /// Freeze original-capture app bytes before journal admission. Rotating the
+    /// mutable chunk keeps its original member path immutable across retries.
+    /// Missing historical data returns no chunks; it is never relabelled.
+    func appEvidenceSnapshot(captureID: UUID) async throws -> [String: Data] {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    guard self.flushOnQueue() else {
+                        throw RideDiagnosticsError.unavailable("Diagnostic files could not be synchronized.")
+                    }
+                    if self.currentChunkBytes > 0 { self.rotateChunk(recordOutcome: false) }
+                    let appRoot = self.rootURL.appendingPathComponent("app")
+                    var result: [String: Data] = [:]
+                    var bytes = 0
+                    for file in self.allAppChunkFiles() where self.captureIDs(in: file).contains(captureID.uuidString.lowercased()) {
+                        guard let path = Self.archiveRelativePath(file, under: appRoot),
+                              DiagnosticsAppChunkReceipt.validPath(path) else {
+                            throw RideDiagnosticsError.unavailable("Invalid app evidence path.")
+                        }
+                        let data = try Data(contentsOf: file)
+                        bytes += data.count
+                        guard !data.isEmpty, data.count <= 256 * 1024,
+                              result.count < 256, bytes <= DiagnosticsAcquisitionEvidencePolicy.maximumBytes else {
+                            throw RideDiagnosticsError.unavailable("App evidence exceeds its storage bound.")
+                        }
+                        result[path] = data
+                    }
+                    continuation.resume(returning: result)
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+
+    func exportBundle(additionalDeviceChunks: [String: Data] = [:], additionalAppChunks: [String: Data] = [:]) throws -> URL {
+        let prepared = try queue.sync { try prepareExportOnQueue(additionalDeviceChunks: additionalDeviceChunks, additionalAppChunks: additionalAppChunks) }
         return try Self.writePreparedExport(prepared)
     }
 
-    func exportBundleAsync(additionalDeviceChunks: [String: Data] = [:]) async throws -> URL {
+    func exportBundleAsync(additionalDeviceChunks: [String: Data] = [:], additionalAppChunks: [String: Data] = [:]) async throws -> URL {
         let prepared: PreparedExport = try await withCheckedThrowingContinuation {
             continuation in
             let workItem = DispatchWorkItem { [weak self] in
@@ -1336,7 +1369,7 @@ final class RideDiagnosticsRecorder:
                 }
                 do {
                     continuation.resume(
-                        returning: try self.prepareExportOnQueue(additionalDeviceChunks: additionalDeviceChunks)
+                        returning: try self.prepareExportOnQueue(additionalDeviceChunks: additionalDeviceChunks, additionalAppChunks: additionalAppChunks)
                     )
                 } catch {
                     continuation.resume(throwing: error)
@@ -1902,7 +1935,7 @@ final class RideDiagnosticsRecorder:
         return entries.sorted { $0.0 < $1.0 }
     }
 
-    private func prepareExportOnQueue(additionalDeviceChunks: [String: Data] = [:]) throws -> PreparedExport {
+    private func prepareExportOnQueue(additionalDeviceChunks: [String: Data] = [:], additionalAppChunks: [String: Data] = [:]) throws -> PreparedExport {
         guard flushOnQueue() else {
             throw RideDiagnosticsError.unavailable(
                 "Diagnostic files could not be synchronized for export."
@@ -1981,9 +2014,25 @@ final class RideDiagnosticsRecorder:
             // Acquisition evidence has independent ownership and survives v1
             // capture retention. Merge into the same immutable snapshot so it
             // passes the normal event, privacy, checksum and sequence validator.
-            guard additionalDeviceChunks.count <= 20 * 256,
-                  additionalDeviceChunks.values.reduce(0, { $0 + $1.count }) <= 32 * 1024 * 1024 else {
+            guard additionalDeviceChunks.count + additionalAppChunks.count <= 20 * 256,
+                  additionalDeviceChunks.values.reduce(0, { $0 + $1.count }) +
+                    additionalAppChunks.values.reduce(0, { $0 + $1.count }) <= DiagnosticsAcquisitionEvidencePolicy.maximumBytes else {
                 throw RideDiagnosticsError.unavailable("Acquisition evidence exceeds its storage bound.")
+            }
+            for (relative, data) in additionalAppChunks {
+                guard DiagnosticsAppChunkReceipt.validPath(relative), !data.isEmpty, data.count <= 256 * 1024 else {
+                    throw RideDiagnosticsError.unavailable("Invalid app acquisition evidence path or size.")
+                }
+                let destination = snapshotRoot.appendingPathComponent("app").appendingPathComponent(relative)
+                try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if fileManager.fileExists(atPath: destination.path) {
+                    guard try Data(contentsOf: destination) == data else {
+                        throw RideDiagnosticsError.unavailable("App acquisition evidence conflicts with a retained chunk.")
+                    }
+                } else {
+                    try data.write(to: destination, options: .atomic)
+                    applyFileProtection(to: destination)
+                }
             }
             for (relative, data) in additionalDeviceChunks {
                 let components = relative.split(separator: "/", omittingEmptySubsequences: false)

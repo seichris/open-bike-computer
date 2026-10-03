@@ -365,10 +365,12 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             flash_owner.index("case Operation::StartAccessPoint:") :
             flash_owner.index("case Operation::StopAccessPoint:")
         ]
-        self.assertIn("WiFi.persistent(false);", ap_operation)
-        self.assertIn("esp_wifi_set_storage(WIFI_STORAGE_RAM)", ap_operation)
-        self.assertIn("WiFi.softAP(networkSsid_, networkPassword_)", ap_operation)
-        self.assertNotIn("WiFi.softAP(networkSsid_)", ap_operation)
+        self.assertIn("wifi_.start(command.operation == Operation::StartStation,", ap_operation)
+        runtime = (ROOT / "lib/firmware_update/device_wifi_runtime.cpp").read_text()
+        self.assertIn("esp_wifi_set_storage(WIFI_STORAGE_RAM)", runtime)
+        self.assertIn("config.ap.authmode = WIFI_AUTH_WPA2_PSK", runtime)
+        self.assertIn("passwordLength < 8", runtime)
+        self.assertIn("std::memcpy(config.ap.password, password, passwordLength)", runtime)
         info = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleInfo") :
             HTTP.index("bool DeviceDebugHttp::handleFrame")

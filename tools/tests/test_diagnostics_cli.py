@@ -88,6 +88,32 @@ class DiagnosticsCLITests(unittest.TestCase):
         with self.assertRaisesRegex(EvidenceError, 'origin'):
             validate_acquisition(dict(self.acquisition, origin='remote_arbitrary'))
 
+    def test_app_receipts_bind_actual_original_capture_bytes(self):
+        with zipfile.ZipFile(self.inner) as archive:
+            path = next(name for name in archive.namelist() if name.startswith('app/') and name.endswith('.jsonl'))
+            body = archive.read(path)
+        receipt = {'path': path.removeprefix('app/'), 'bytes': len(body),
+                   'sha256': hashlib.sha256(body).hexdigest()}
+        with zipfile.ZipFile(self.bundle) as archive:
+            original = {name: archive.read(name) for name in archive.namelist() if name != 'checksums.sha256'}
+        def with_claim(claim, capture=None):
+            acquisition = dict(self.acquisition, appEvidence=[claim])
+            if capture is not None:
+                acquisition['captureID'] = capture
+            members = dict(original)
+            members['acquisitions/' + acquisition['id'] + '.json'] = json.dumps(acquisition).encode()
+            write_zip(self.bundle, members)
+        with_claim(receipt)
+        self.assertEqual(self.invoke('verify', self.bundle, '--require-complete')[0], 0)
+        for claim in (dict(receipt, sha256='0'*64), dict(receipt, bytes=len(body)+1),
+                      dict(receipt, path=receipt['path'].replace('000001', '000999')),
+                      dict(receipt, path='../events-000001.jsonl')):
+            with_claim(claim)
+            self.assertEqual(self.invoke('verify', self.bundle)[0], 2)
+        with_claim(receipt, '00000000-0000-0000-0000-000000000123')
+        self.assertEqual(self.invoke('verify', self.bundle)[0], 2,
+                         'later/unrelated iOS events cannot satisfy an original-capture receipt')
+
     def test_cache_provenance_is_optional_boolean_and_never_delivery_proof(self):
         from bicino_diagnostics.bundle import validate_acquisition
         for flag in (True, False, None):

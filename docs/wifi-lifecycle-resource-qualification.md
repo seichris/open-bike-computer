@@ -70,6 +70,20 @@ floor remains unchanged. Include this reserved memory and persistent idle task
 in the baseline; it is not a leaked per-session allocation. A poisoned owner
 still cannot admit another command or claim successful quiescence.
 
+The native Wi-Fi runtime now retains its initialized driver and AP/STA netifs
+for the rest of the boot. Repeated operations call `esp_wifi_start/stop` rather
+than destroying and recreating the driver. Teardown stops the radio, clears both
+RAM credential configurations and selects null mode before acknowledging
+quiescence; failures still block owner release and shutdown. Driver mutations
+remain on the internal owner stack, and HTTP reads native network snapshots.
+Arduino WiFi lifecycle flags are not used by this owner. First initialization
+keeps the unchanged internal/DMA memory floors and pinned dynamic-buffer
+configuration. Partial initialization is terminal for this boot. This changes
+the idle memory baseline: include the retained driver/netifs in future device
+measurements. Host cycles prove control flow only; repeated physical transfer,
+idle power, association/DHCP, OTA/map admission and shutdown qualification remain
+required for the new candidate. Earlier-image bench transfers do not qualify it.
+
 `owner_released` is before the HTTP task's own deletion, so its heap observation
 is not a fully idle baseline. Compare the *next* `transfer_entry` (after the
 previous worker-stop fence) to earlier entry samples to check for leaks. Keep

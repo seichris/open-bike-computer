@@ -11,6 +11,23 @@ def source(path):
 
 
 class RuntimeOwnershipContractTests(unittest.TestCase):
+    def test_actual_wifi_runtime_reuses_driver_with_radio_off_and_credentials_erased(self):
+        header = source("lib/firmware_update/device_wifi_runtime.hpp")
+        methods = source("lib/firmware_update/device_wifi_runtime.cpp")
+        def without_includes(text):
+            return "\n".join(line for line in text.splitlines()
+                             if not line.startswith(("#include", "#pragma")))
+        harness = source("tools/tests/device_wifi_runtime_harness.cpp")
+        harness = harness.replace("// PRODUCTION_HEADER", without_includes(header))
+        harness = harness.replace("// PRODUCTION_METHODS", without_includes(methods))
+        with tempfile.TemporaryDirectory() as directory:
+            unit = Path(directory) / "wifi.cpp"
+            unit.write_text(harness)
+            binary = Path(directory) / "wifi"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "tools/tests"), str(unit), "-o", str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
     def test_ota_terminal_cleanup_belongs_to_http_owner(self):
         ota = source("lib/firmware_update/firmware_update_http.cpp")
         disable = ota[ota.index("bool FirmwareUpdateHttpServer::setEnabled"):
@@ -48,22 +65,20 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
     def test_wifi_mutation_and_ota_share_internal_stack_owner(self):
         flash = source("lib/firmware_update/device_operation_owner.cpp")
         http = source("lib/device_transfer/device_transfer_http.cpp")
-        for operation in (
-            "WiFi.persistent(false)",
-            "WiFi.mode(WIFI_STA)",
-            "WiFi.begin(",
-            "WiFi.disconnect(",
-            "WiFi.mode(WIFI_AP)",
-            "WiFi.softAP(",
-            "WiFi.softAPdisconnect(",
-            "WiFi.mode(WIFI_OFF)",
-        ):
-            self.assertIn(operation, flash)
+        runtime = source("lib/firmware_update/device_wifi_runtime.cpp")
+        for operation in ("esp_wifi_init(", "esp_wifi_set_mode(",
+                          "esp_wifi_set_config(", "esp_wifi_start(",
+                          "esp_wifi_connect(", "esp_wifi_stop("):
+            self.assertIn(operation, runtime)
             self.assertNotIn(operation, http)
+        self.assertIn("wifi_.start(", flash)
+        self.assertIn("wifi_.stop()", flash)
+        self.assertNotIn("WiFi.mode(", flash)
+        self.assertNotIn("esp_wifi_deinit(", runtime)
         self.assertIn("setNetworkOperationOwner(&operationOwner_)",
                       source("lib/firmware_update/firmware_update_http.cpp"))
         self.assertGreaterEqual(
-            flash.count("esp_wifi_set_storage(WIFI_STORAGE_RAM)"), 2
+            runtime.count("esp_wifi_set_storage(WIFI_STORAGE_RAM)"), 2
         )
         self.assertIn("internalOwnerStackHighWaterBytes", http)
 
@@ -79,16 +94,16 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
                       policy)
 
     def test_ap_failure_reports_distinct_driver_steps_and_memory(self):
-        flash = source("lib/firmware_update/device_operation_owner.cpp")
+        flash = source("lib/firmware_update/device_wifi_runtime.cpp")
         http = source("lib/device_transfer/device_transfer_http.cpp")
         ble = source("lib/ble_navigation/ble_navigation.cpp")
-        ap = flash[flash.index("case Operation::StartAccessPoint:"):
-                   flash.index("case Operation::StopAccessPoint:")]
+        ap = flash[flash.index("device_transfer::NetworkStartResult DeviceWiFiRuntime::start("):
+                   flash.index("esp_err_t DeviceWiFiRuntime::stop()")]
         for step in ("Mode", "RamStorage", "AccessPoint"):
             self.assertIn(f"NetworkStartStep::{step}", ap)
         for phase in ("mode", "ramStorage", "accessPoint"):
-            self.assertIn(f"networkStart.{phase}.before = networkMemory()", ap)
-            self.assertIn(f"networkStart.{phase}.after = networkMemory()", ap)
+            self.assertIn(f"result.{phase}.before = memory()", ap)
+            self.assertIn(f"result.{phase}.after = memory()", ap)
         self.assertIn("networkStartCode(apStart.failedStep)", http)
         self.assertIn('"wifiStartFailure"', ble)
         self.assertNotIn("apPassphrase.c_str()", http)
@@ -121,11 +136,12 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         methods = flash[flash.index("void DeviceOperationOwner::configure()"):
                         flash.index("bool DeviceOperationOwner::started()")]
         quiesce = flash[flash.index("    case Operation::Quiesce:"):
-                        flash.index("    }\n    if (command.operation", flash.index("    case Operation::Quiesce:"))]
+                        flash.index("    }\n    lastStackHighWaterBytes_", flash.index("    case Operation::Quiesce:"))]
         # Run the exact owner-side clearing before publishing its fake reply.
         quiesce = quiesce.replace("case Operation::Quiesce:", "case Owner::Operation::Quiesce:")
         for field in ("networkSsid_", "networkPassword_", "mapSessionId_", "writeBuffer_"):
             quiesce = quiesce.replace(field, "owner->" + field)
+        quiesce = quiesce.replace("wifi_.stop()", "owner->wifi_.stop()")
         harness = source("tools/tests/device_operation_static_stack_harness.cpp")
         harness = harness.replace("// PRODUCTION_HEADER", header)
         harness = harness.replace("// PRODUCTION_METHODS", "namespace firmware_update {\n" + methods + "\n}")

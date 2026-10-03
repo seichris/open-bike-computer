@@ -15,6 +15,7 @@
 #include "../device_transfer/device_transfer_network_owner.hpp"
 #include "firmware_internal_owner_policy.hpp"
 #include "firmware_operation_receipt.hpp"
+#include "device_wifi_runtime.hpp"
 
 namespace firmware_update {
 
@@ -53,6 +54,10 @@ public:
       const std::string &ssid, const std::string &passphrase) override;
   bool stopAccessPoint(bool wifiOff) override;
   bool stopWiFi() override;
+  device_transfer::StationState stationState() const override { return wifi_.stationState(); }
+  uint32_t stationIPAddress() const override { return wifi_.stationIPAddress(); }
+  uint32_t accessPointIPAddress() const override { return wifi_.accessPointIPAddress(); }
+  uint8_t accessPointClientCount() const override { return wifi_.accessPointClientCount(); }
 
   FirmwarePartitionSnapshot partitionSnapshot();
   esp_err_t begin(const esp_partition_t *partition, std::size_t imageSize,
@@ -142,6 +147,7 @@ private:
   char networkSsid_[33]{};
   char networkPassword_[65]{};
   char mapSessionId_[81]{};
+  DeviceWiFiRuntime wifi_;
   uint32_t nextCommandId_ = 1;
   std::atomic<internal_owner_policy::DispatchState> dispatchState_{
       internal_owner_policy::DispatchState::Ready};
