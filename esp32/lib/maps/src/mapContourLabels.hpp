@@ -13,6 +13,15 @@ inline bool overlaps(Box a, Box b) {
   return std::abs(a.x - b.x) * 2 < a.w + b.w &&
          std::abs(a.y - b.y) * 2 < a.h + b.h;
 }
+inline int characterCount(int elevation) {
+  int count = 2 + (elevation < 0); // Space and unit, plus an optional sign.
+  int magnitude = std::abs(elevation);
+  do {
+    ++count;
+    magnitude /= 10;
+  } while (magnitude);
+  return count;
+}
 inline bool segmentHits(Box box, float ax, float ay, float bx, float by,
                         float margin) {
   // Liang-Barsky against the text rectangle expanded by road/route width.

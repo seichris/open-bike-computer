@@ -2188,9 +2188,9 @@ bool Maps::drawContourLabels(
   std::array<uint8_t, 1024> occupied{};
   const float cw = width / 32.f, ch = height / 32.f;
   const auto reserve = [&](Box b) {
-    for (int y = std::max(0, int(std::floor((b.y - b.h / 2) / ch)));
+    for (int y = std::max(0, int((b.y - b.h / 2) / ch));
          y <= std::min(31, int((b.y + b.h / 2) / ch)); ++y)
-      for (int x = std::max(0, int(std::floor((b.x - b.w / 2) / cw)));
+      for (int x = std::max(0, int((b.x - b.w / 2) / cw));
            x <= std::min(31, int((b.x + b.w / 2) / cw)); ++x)
         occupied[y * 32 + x] = 1;
   };
@@ -2301,19 +2301,20 @@ bool Maps::drawContourLabels(
         auto p = project(ax + (bx - ax) * t, ay + (by - ay) * t);
         if (!p.valid)
           continue;
-        char text[16];
-        snprintf(text, sizeof(text), "%d m", int(record.elevationM));
-        Box box{float(p.x), float(p.y), float(strlen(text) * 12 + 8), 22};
+        Box box{float(p.x), float(p.y),
+                float(characterCount(record.elevationM) * 12 + 8), 22};
         if (box.x - box.w / 2 < 6 || box.y - 11 < 6 ||
             box.x + box.w / 2 > width - 6 || box.y + 11 > height - 6)
           continue;
         if (++considered > 256 || placed == 16)
           return true;
-        if (MAP_RENDER_ROUND_VIEWPORT &&
-            std::hypot(std::abs(box.x - width / 2.f) + box.w / 2,
-                       std::abs(box.y - height / 2.f) + 11) >
-                std::min(width, height) / 2.f - 6)
-          continue;
+        if (MAP_RENDER_ROUND_VIEWPORT) {
+          const float farX = std::abs(box.x - width / 2.f) + box.w / 2;
+          const float farY = std::abs(box.y - height / 2.f) + 11;
+          const float radius = std::min(width, height) / 2.f - 6;
+          if (farX * farX + farY * farY > radius * radius)
+            continue;
+        }
         bool hit = false;
         for (int y = int((box.y - 11) / ch); y <= int((box.y + 11) / ch); ++y)
           for (int x = int((box.x - box.w / 2) / cw);
