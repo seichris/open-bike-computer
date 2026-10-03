@@ -476,6 +476,12 @@ final class TestBLEManager: BLEManager {
         return true
     }
 
+    override func clearRouteGeometry() {
+        // This double records NavigationEngine intent. Actual BLE clear
+        // lifecycle/ACK/reconnect behavior has separate manager tests.
+        _ = sendRouteGeometry(Data())
+    }
+
     override func sendGPSPosition(
         lat: Double,
         lon: Double,
@@ -853,6 +859,8 @@ struct NavigationProtocolTests {
         testDeviceOwnershipProtocol()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testRideApplicationAcknowledgementWaitsForATTCallback()
+        testFailedClearRetiresSiblingsAndReplaysIntent()
+        testPhoneConnectionAdoptionOwnsGeneration()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()
         testBLEManagerGatesTopographicContourVisibility()
@@ -22477,6 +22485,55 @@ struct NavigationProtocolTests {
                "persistent no-response backpressure triggers bounded recovery")
         assert(!noResponseWatchdogManager.isNavigationReady,
                "no-response recovery closes the wedged navigation session")
+    }
+
+    static func testFailedClearRetiresSiblingsAndReplaysIntent() {
+        for failedMember in 0...1 {
+            let manager = BLEManager()
+            var writes: [Data] = []
+            var recoveries = 0
+            let endpoint = NavigationWriteEndpoint(maximumWriteLength: 185,
+                expectsWriteResponse: true, canSend: { true }, write: { writes.append($0) })
+            manager.configureNavigationClearForTesting(endpoint)
+            manager.installNavigationWriteStallRecoveryForTesting(timeout: 60) { recoveries += 1 }
+            manager.clearRouteGeometry()
+            assertEqual(writes.count, 1, "clear starts with the route member")
+            if failedMember == 1 { manager.completeNavigationWriteForTesting(error: nil) }
+            manager.completeNavigationWriteForTesting(error: NSError(domain: "ATT", code: 1))
+            assertEqual(recoveries, 1, "ATT failure recovers the logical command")
+            assertEqual(writes.count, failedMember + 1, "failed command never dispatches another member")
+            assert(manager.pendingNavigationClearForTesting, "unconfirmed clear intent survives failure")
+            let retryStart = writes.count
+            manager.clearConnectionStateForTesting()
+            manager.configureNavigationClearForTesting(endpoint)
+            manager.retryNavigationClearForTesting()
+            assertEqual(writes.count, retryStart + 1, "reconnected clear starts a new complete group")
+            manager.completeNavigationWriteForTesting(error: nil)
+            assertEqual(writes.count, retryStart + 2, "new clear includes its own maneuver member")
+            manager.completeNavigationWriteForTesting(error: nil)
+            assert(manager.pendingNavigationClearForTesting, "ATT completion is not application confirmation")
+            let envelope = RideBLEApplicationCommandEnvelopeV1.decode(writes[retryStart])!
+            manager.handleRideApplicationAcknowledgementForTesting(.init(
+                commandType: .navigationClear, result: .success,
+                commandID: envelope.commandID, stateGeneration: envelope.stateGeneration,
+                leaseGeneration: 1))
+            assert(!manager.pendingNavigationClearForTesting, "matching application ACK settles intent")
+        }
+    }
+
+    static func testPhoneConnectionAdoptionOwnsGeneration() {
+        for alreadyConnected in [false, true] {
+            let manager = BLEManager()
+            assert(manager.adoptConnectionForTesting(connected: alreadyConnected),
+                   "fresh and restored contexts enter the authoritative lifecycle")
+            assertEqual(manager.rideTransportPhase, alreadyConnected ? .authenticating : .connecting,
+                        "restored phase matches platform state")
+            assert(manager.rideConnectionGenerationForTesting > 0, "adoption advances the write generation")
+            assert(!manager.isNavigationReady, "adoption never publishes ride readiness")
+            assert(!manager.adoptConnectionForTesting(connected: alreadyConnected),
+                   "a live context cannot be silently replaced")
+            manager.clearConnectionStateForTesting()
+        }
     }
 
     static func testRideApplicationAcknowledgementWaitsForATTCallback() {

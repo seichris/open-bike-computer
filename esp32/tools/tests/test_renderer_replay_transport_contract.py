@@ -23,7 +23,7 @@ class RendererReplayTransportContractTests(unittest.TestCase):
         callback = BLE.split("class MyGPSCharacteristicCallbacks", 1)[1].split(
             "class ", 1
         )[0]
-        self.assertLess(callback.index("unwrapOwnerAuthenticatedPayload"),
+        self.assertLess(callback.index("decodeProtectedCommand"),
                         callback.index("dispatchReplaySample"))
         self.assertLess(callback.index("bleSessionSupportsRendererBenchmarkSample"),
                         callback.index("dispatchReplaySample"))

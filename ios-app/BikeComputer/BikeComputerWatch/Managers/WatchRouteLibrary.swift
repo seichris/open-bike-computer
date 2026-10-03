@@ -19,6 +19,7 @@ final class WatchRouteLibrary: ObservableObject {
 
     var onRouteExpired: ((WatchRouteIdentityV1) -> Void)?
 
+    private let operations: WatchRouteOperationJournalV2
     private let store: NavigationRouteFileStoreV1
     private let now: () -> Date
     private let defaults: UserDefaults
@@ -52,6 +53,7 @@ final class WatchRouteLibrary: ObservableObject {
         now: @escaping () -> Date = Date.init,
         defaults: UserDefaults = .standard
     ) {
+        self.operations = WatchRouteOperationJournalV2(rootDirectory: store.rootDirectory)
         self.store = store
         self.now = now
         self.defaults = defaults
@@ -66,7 +68,8 @@ final class WatchRouteLibrary: ObservableObject {
     @discardableResult
     func install(
         _ data: Data,
-        expectedIdentity: WatchRouteIdentityV1
+        expectedIdentity: WatchRouteIdentityV1,
+        deliveryOperation: WatchRouteOperationV2? = nil
     ) throws -> WatchRouteInstallResultV1 {
         let archive = try NavigationRouteArchiveV1.decode(
             data,
@@ -81,6 +84,7 @@ final class WatchRouteLibrary: ObservableObject {
            activeIdentity != expectedIdentity {
             throw WatchRouteLibraryError.activeRoutePinned
         }
+        try operations.admit(.install, identity: expectedIdentity, token: deliveryOperation)
         let protectedIdentities = Set(
             [activeIdentity, pendingDeletionIdentity].compactMap { $0 }
         )
@@ -92,6 +96,11 @@ final class WatchRouteLibrary: ObservableObject {
             now: now(),
             evictingOldestUnprotected: protectedIdentities
         )
+        try operations.complete(.install, identity: expectedIdentity, token: deliveryOperation)
+        if pendingDeletionIdentity == expectedIdentity {
+            pendingDeletionIdentity = nil
+            persistPendingDeletion()
+        }
         lastSyncError = nil
         reload()
         let currentIdentities = Set(store.records(now: now()).map {
@@ -115,14 +124,21 @@ final class WatchRouteLibrary: ObservableObject {
         )
     }
 
-    func delete(_ identity: WatchRouteIdentityV1) throws {
+    func delete(_ identity: WatchRouteIdentityV1,
+                deliveryOperation: WatchRouteOperationV2? = nil) throws {
+        try operations.admit(.delete, identity: identity, token: deliveryOperation)
         if activeIdentity == identity {
             pendingDeletionIdentity = identity
             persistPendingDeletion()
+            // This receipt means durable deletion intent; the currently active
+            // navigation may finish, but no new navigation/install may use it.
+            try operations.complete(.delete, identity: identity, token: deliveryOperation)
             lastSyncError = nil
             return
         }
-        try store.delete(matching: identity, now: now())
+        do { try store.deleteDeferred(matching: identity) }
+        catch NavigationRouteFileStoreError.notFound { }
+        try operations.complete(.delete, identity: identity, token: deliveryOperation)
         if pendingDeletionIdentity == identity {
             pendingDeletionIdentity = nil
             persistPendingDeletion()
@@ -134,7 +150,9 @@ final class WatchRouteLibrary: ObservableObject {
     func record(
         matching identity: WatchRouteIdentityV1
     ) throws -> InstalledNavigationRouteV1 {
-        try store.record(matching: identity, now: now())
+        let record = try store.record(matching: identity, now: now())
+        if activeIdentity != identity { try requireInstallVisible(identity) }
+        return record
     }
 
     func displayName(for summary: PlannedRouteSummaryV1) -> String {
@@ -175,6 +193,7 @@ final class WatchRouteLibrary: ObservableObject {
         }) else {
             throw NavigationRouteFileStoreError.notFound
         }
+        try requireInstallVisible(WatchRouteIdentityV1(archive: record.archive))
         try validateStartWindow(record)
         return record
     }
@@ -184,6 +203,7 @@ final class WatchRouteLibrary: ObservableObject {
         _ identity: WatchRouteIdentityV1,
         requiringStartWindow: Bool = true
     ) throws -> InstalledNavigationRouteV1 {
+        try requireInstallVisible(identity)
         let record = try store.record(matching: identity, now: now())
         if requiringStartWindow { try validateStartWindow(record) }
         activeIdentity = identity
@@ -244,9 +264,38 @@ final class WatchRouteLibrary: ObservableObject {
             now: timestamp,
             protecting: protected
         )
-        routes = store.records(now: timestamp).map(\.summary)
+        do {
+            // Replay deletion fences after a crash between journal and unlink.
+            let entries = try operations.entries()
+            let stored = Set(store.recordsIncludingExpired().map { WatchRouteIdentityV1(archive: $0.archive) })
+            for entry in entries where entry.operation == .delete {
+                if activeIdentity == entry.identity || (entry.applied && !stored.contains(entry.identity)) { continue }
+                do { try store.deleteDeferred(matching: entry.identity) }
+                catch NavigationRouteFileStoreError.notFound { }
+                try operations.complete(.delete, identity: entry.identity, token: entry.token)
+            }
+            routes = store.records(now: timestamp).filter {
+                let identity = WatchRouteIdentityV1(archive: $0.archive)
+                let entry = entries.first { $0.identity == identity }
+                return entry == nil || (entry?.operation == .install && entry?.applied == true)
+            }.map(\.summary)
+        } catch {
+            routes = []
+            lastSyncError = "operation_journal_unavailable"
+        }
         scheduleNextExpiry()
         for identity in callbacks { onRouteExpired?(identity) }
+    }
+
+    func operationToken(for identity: WatchRouteIdentityV1) -> WatchRouteOperationV2? {
+        try? operations.entry(identity)?.token
+    }
+
+    private func requireInstallVisible(_ identity: WatchRouteIdentityV1) throws {
+        if let entry = try operations.entry(identity),
+           entry.operation != .install || !entry.applied {
+            throw WatchRouteOperationJournalV2.Failure.staleOperation
+        }
     }
 
     func reportSyncError(_ code: String) {

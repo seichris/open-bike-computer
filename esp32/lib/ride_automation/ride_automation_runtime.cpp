@@ -68,6 +68,7 @@ bool persistedStartSuppression = false;
 struct InboundTransportFrame {
   ride_automation_protocol::Frame frame;
   uint32_t receivedAtMs = 0;
+  ride_command_admission::Authorization authorization{};
 };
 
 QueueHandle_t inboundTransportQueue = nullptr;
@@ -255,10 +256,11 @@ bool persistConfiguration(const ride_automation::Settings &settings,
                                 verified);
 }
 
-bool sendTransportFrame(const ride_automation_protocol::Frame &frame) {
+bool sendTransportFrame(const ride_automation_protocol::Frame &frame,
+                        ride_command_admission::Authorization expected = {}) {
   uint8_t bytes[ride_automation_protocol::FRAME_SIZE]{};
   return ride_automation_protocol::encode(frame, bytes, sizeof(bytes)) &&
-         bleNavServer.notifyRideAutomationFrame(bytes, sizeof(bytes));
+         bleNavServer.notifyRideAutomationFrame(bytes, sizeof(bytes), expected);
 }
 
 bool queueTransportFrame(const ride_automation_protocol::Frame &frame,
@@ -504,8 +506,10 @@ bool matchesOutstandingResponse(
       hasOutstandingDecision, outstandingDecision, frame);
 }
 
+template <typename SendResponse>
 bool processInboundTransportFrame(
-    const ride_automation_protocol::Frame &frame, uint32_t receivedAtMs) {
+    const ride_automation_protocol::Frame &frame, uint32_t receivedAtMs,
+    SendResponse sendResponse) {
   if (ride_automation_protocol::isDuplicateOrOutOfOrderInbound(
           hasInboundFrame, lastInboundFrame, frame)) {
     return false;
@@ -612,7 +616,7 @@ bool processInboundTransportFrame(
     response.acknowledgedKind = static_cast<uint8_t>(
         ride_automation_protocol::Kind::PromptResponse);
     response.monotonicSeconds = receivedAtMs / 1'000;
-    sendTransportFrame(response);
+    sendResponse(response);
   }
 
   const bool configurationTargetsCurrentBoot =
@@ -650,7 +654,7 @@ bool processInboundTransportFrame(
     response.autoPauseEnabled = configuredSettings.autoPauseEnabled;
     response.alertMode = configuredAlertMode;
     response.monotonicSeconds = receivedAtMs / 1'000;
-    sendTransportFrame(response);
+    sendResponse(response);
   } else if (frame.kind == ride_automation_protocol::Kind::Resynchronize) {
     ride_automation_protocol::Frame response;
     response.kind = ride_automation_protocol::Kind::Resynchronize;
@@ -664,7 +668,7 @@ bool processInboundTransportFrame(
     response.autoPauseEnabled = configuredSettings.autoPauseEnabled;
     response.alertMode = configuredAlertMode;
     response.monotonicSeconds = receivedAtMs / 1'000;
-    sendTransportFrame(response);
+    sendResponse(response);
   }
 
   lastInboundFrame = frame;
@@ -733,12 +737,25 @@ void processFirmwareShadow(uint32_t nowMs) {
   InboundTransportFrame inbound;
   while (inboundTransportQueue != nullptr &&
          xQueueReceive(inboundTransportQueue, &inbound, 0) == pdTRUE) {
-#if defined(RIDE_AUTOMATION_TRACE)
-    if (!processInboundTransportFrame(inbound.frame, inbound.receivedAtMs))
-      Serial.println("BLE Ride Automation: rejected queued frame");
-#else
-    (void)processInboundTransportFrame(inbound.frame, inbound.receivedAtMs);
-#endif
+    struct Application {
+      InboundTransportFrame inbound;
+      ride_automation_protocol::Frame response{};
+      bool hasResponse = false;
+    } application{inbound};
+    const bool applied = bleNavServer.applyAuthorizedRideCommand(
+        inbound.authorization, [](void *context) {
+          auto &value = *static_cast<Application *>(context);
+          return processInboundTransportFrame(
+              value.inbound.frame, value.inbound.receivedAtMs,
+              [&value](const ride_automation_protocol::Frame &response) {
+                value.response = response;
+                value.hasResponse = true;
+              });
+        }, &application);
+    // Notify only after releasing ownership; notification encryption acquires
+    // the same lock. A lost response is recovered by the protocol retry.
+    if (applied && application.hasResponse)
+      sendTransportFrame(application.response, inbound.authorization);
   }
   if (traceInitialized && nowMs - lastTraceMs < 1'000)
     return;
@@ -1029,13 +1046,14 @@ void processFirmwareShadow(uint32_t nowMs) {
 }
 
 bool ingestTransportFrame(const uint8_t *data, std::size_t length,
-                          uint32_t receivedAtMs) {
+                          uint32_t receivedAtMs,
+                          ride_command_admission::Authorization authorization) {
   ride_automation_protocol::Frame frame;
   if (!ride_automation_protocol::decode(data, length, frame))
     return false;
   if (inboundTransportQueue == nullptr)
     return false;
-  const InboundTransportFrame inbound{frame, receivedAtMs};
+  const InboundTransportFrame inbound{frame, receivedAtMs, authorization};
   return xQueueSend(inboundTransportQueue, &inbound, 0) == pdTRUE;
 }
 
@@ -1180,7 +1198,8 @@ namespace ride_automation_runtime {
 void setCyclingMotionSource(const ride_automation::CyclingMotionSource *) {}
 void beginFirmwareShadow() {}
 void processFirmwareShadow(uint32_t) {}
-bool ingestTransportFrame(const uint8_t *, std::size_t, uint32_t) {
+bool ingestTransportFrame(const uint8_t *, std::size_t, uint32_t,
+                          ride_command_admission::Authorization) {
   return false;
 }
 UiSnapshot uiSnapshot(uint32_t) { return {}; }

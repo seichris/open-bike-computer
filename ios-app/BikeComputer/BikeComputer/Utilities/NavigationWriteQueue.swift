@@ -126,6 +126,7 @@ nonisolated struct RendererBenchmarkBLETransportEvidence: Codable,
 #endif
 
 struct NavigationWrite {
+    var isStillValid: (() -> Bool)?
     let data: Data
     let prepareData: (() -> Data?)?
     let label: String
@@ -149,6 +150,7 @@ struct NavigationWrite {
     init(
         data: Data,
         label: String,
+        isStillValid: (() -> Bool)? = nil,
         prepareData: (() -> Data?)? = nil,
         transportWrite: ((Data) -> Void)? = nil,
         onWrite: (() -> Void)? = nil,
@@ -163,6 +165,7 @@ struct NavigationWrite {
         protectedFromEviction: Bool = false,
         enqueuedAtUptime: TimeInterval? = nil
     ) {
+        self.isStillValid = isStillValid
         self.data = data
         self.prepareData = prepareData
         self.label = label
@@ -195,6 +198,7 @@ struct NavigationWrite {
         NavigationWrite(
             data: data,
             label: label,
+            isStillValid: isStillValid,
             prepareData: prepareData,
             transportWrite: transportWrite,
             onWrite: onWrite,
@@ -216,6 +220,7 @@ struct NavigationWrite {
         NavigationWrite(
             data: data,
             label: label,
+            isStillValid: isStillValid,
             prepareData: prepareData,
             transportWrite: transportWrite,
             onWrite: onWrite,
@@ -686,6 +691,14 @@ struct NavigationWriteQueue {
         var writesRemaining = max(0, maxWrites)
         while writesRemaining > 0 && count > 0 {
             let nextWrite = pendingPriorityWrites.first ?? pendingWrites.first!
+            if nextWrite.isStillValid?() == false {
+                let retired = pendingPriorityWrites.isEmpty
+                    ? pendingWrites.removeFirst() : pendingPriorityWrites.removeFirst()
+                recordDropped(write: retired)
+                recordDepth()
+                retired.onDrop?()
+                continue
+            }
             guard canSend(nextWrite) else {
                 recordBackpressureStop()
                 break
