@@ -17,6 +17,23 @@ SPEC.loader.exec_module(changed_components)
 
 
 class ChangedComponentsTests(unittest.TestCase):
+    def test_diagnostics_registry_selects_all_producers_and_consumers(self) -> None:
+        for path in ("protocol/diagnostics/registry-v2.json",
+                     "tools/generate_diagnostics_contract.py"):
+            with self.subTest(path=path):
+                self.assertEqual(changed_components.classify_paths([path]), {
+                    "firmware_build": True, "firmware_host": True, "ios": True,
+                    "map_backend": False, "osm": False,
+                })
+
+    def test_diagnostics_cli_and_broker_select_host_tests(self) -> None:
+        for path in ("tools/bicino", "tools/bicino_diagnostics/broker.py"):
+            with self.subTest(path=path):
+                self.assertEqual(changed_components.classify_paths([path]), {
+                    "firmware_build": False, "firmware_host": True, "ios": False,
+                    "map_backend": False, "osm": False,
+                })
+
     def test_evidence_and_scenario_tools_select_their_consumers(self):
         for path in ("tools/build_evidence.py", "tools/build-and-record-firmware"):
             result = changed_components.classify_paths([path])
@@ -338,11 +355,13 @@ class ChangedComponentsTests(unittest.TestCase):
             "WAVESHARE_AMOLED_175",
             "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
             "WAVESHARE_AMOLED_175_PRODUCTION",
+            "WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION",
         )
         targets_206 = (
             "WAVESHARE_AMOLED_206",
             "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
             "WAVESHARE_AMOLED_206_PRODUCTION",
+            "WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION",
         )
 
         self.assertEqual(

@@ -204,6 +204,25 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ = rideAutomationCoordinator
         let bleManager = coordinator.bleManager
         bleManager.diagnosticsRecorder = rideDiagnosticsRecorder
+        DiagnosticsBrokerClient.shared.configure(recorder: rideDiagnosticsRecorder, bleManager: bleManager)
+        DiagnosticsCollectionCoordinator.shared.configure(
+            recorder: rideDiagnosticsRecorder, bleManager: bleManager,
+            canCollect: { [weak self] in
+                guard let self else { return false }
+                return UIApplication.shared.applicationState == .active &&
+                    !self.coordinator.isNavigating &&
+                    !self.workoutSessionCoordinator.store.presentation.isWorkoutActive
+            })
+        bleManager.$isNavigationReady.removeDuplicates()
+            // Published emits during willSet. Resume reads the committed BLE
+            // state, so deliver on the next main-queue turn rather than here.
+            .receive(on: DispatchQueue.main)
+            .filter { $0 }
+            .sink { _ in
+                DiagnosticsCollectionCoordinator.shared.observeConnectedDeviceDuringRide()
+                DiagnosticsCollectionCoordinator.shared.resumeIfPossible()
+            }
+            .store(in: &cancellables)
         watchConnectivityCoordinator.diagnosticsRecorder =
             rideDiagnosticsRecorder
         locationManager.diagnosticsRecorder = rideDiagnosticsRecorder
@@ -212,6 +231,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         workoutMirrorManager.diagnosticsRecorder = rideDiagnosticsRecorder
         rideAutomationCoordinator.diagnosticsRecorder = rideDiagnosticsRecorder
         coordinator.firmwareUpdateManager.diagnosticsRecorder = rideDiagnosticsRecorder
+        // Runtime policy forwarding is explicit at each caller. An iPhone-only
+        // broker request must never mutate a connected peripheral's policy.
         rideDiagnosticsRecorder.$captureBinding
             .removeDuplicates()
             .sink { [weak bleManager] binding in
@@ -219,6 +240,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                     binding.captureID,
                     detailed: binding.detailed
                 )
+                DiagnosticsCollectionCoordinator.shared.observeConnectedDeviceDuringRide()
             }
             .store(in: &cancellables)
         Publishers.CombineLatest(
@@ -237,14 +259,15 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             .scan((previous: false, current: false)) { state, active in
                 (previous: state.current, current: active)
             }
-            .filter {
-                RideDiagnosticsRideLifecyclePolicy.didEndRide(
-                    previous: $0.previous,
-                    current: $0.current
-                )
-            }
-            .sink { [weak rideDiagnosticsRecorder] _ in
-                rideDiagnosticsRecorder?.endRideCapture()
+            .sink { [weak rideDiagnosticsRecorder] state in
+                // Snapshot the finished ride's original identities BEFORE the
+                // recorder rotates its capture. Delivery may occur much later.
+                DiagnosticsCollectionCoordinator.shared.observeRide(active: state.current)
+                if RideDiagnosticsRideLifecyclePolicy.didEndRide(
+                    previous: state.previous, current: state.current
+                ) {
+                    rideDiagnosticsRecorder?.endRideCapture()
+                }
             }
             .store(in: &cancellables)
         bleManager.bindWatchConnectivityCoordinator(
@@ -332,6 +355,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             state: "active"
         )
         coordinator.applicationDidBecomeActive()
+        DiagnosticsCollectionCoordinator.shared.resumeIfPossible()
         setApplicationActive(true)
     }
     
@@ -347,6 +371,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     func setApplicationActive(_ isActive: Bool) {
+        DiagnosticsBrokerClient.shared.setActive(isActive)
         coordinator.setApplicationActive(isActive)
         if #available(iOS 17.0, *),
            let controller =

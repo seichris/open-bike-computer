@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <string>
 
+#include "commit_boundary_policy.hpp"
 #include "device_transfer_network_protocol.hpp"
 #include "device_transfer_network_owner.hpp"
 #include "device_transfer_tls.hpp"
@@ -63,6 +64,18 @@ struct HttpTransferStatus {
 };
 
 struct HttpRequest {
+  std::string mapContentSession;
+  std::string mapLogicalID;
+  std::string mapManifestReceipt;
+  std::string mapSignedManifestReceipt;
+  std::string mapStreamBytes;
+
+  std::string mapOperationAdmissionEpoch;
+  uint64_t mapOperationAdmissionRevision = 0;
+  bool hasMapOperationAdmissionRevision = false;
+  std::string mapOperationID;
+  std::string mapStreamSHA256;
+  bool mapOperationHeadersPresent = false;
   std::string method;
   std::string path;
   std::string transferToken;
@@ -71,6 +84,7 @@ struct HttpRequest {
   bool hasContentLength = false;
   bool connectionClose = false;
   bool connectionReuseRequested = false;
+  uint64_t requestSequence = 0;
   uint32_t transferGeneration = 0;
 };
 
@@ -117,12 +131,25 @@ public:
   void setLastError(const std::string &code, const std::string &message);
   void noteStatusChanged(const char *resourcePhase);
   void sampleResources(const char *resourcePhase);
+  // Diagnostics only: call after consumer manifest/operation validation. Fenced
+  // by current request authority; cannot authorize work or alter a receipt.
+  bool bindResourceOperation(const HttpRequest &request, const std::string &mode,
+                             const std::string &operationID);
   void process();
   HttpTransferStatus status() const;
   bool isRequestAuthorized(const HttpRequest &request);
   void noteDiagnosticsModeDecision(bool matches);
-  bool beginAuthorizedCommit(const HttpRequest &request);
-  void endAuthorizedCommit();
+  using CommitGrant = commit_boundary_policy::Grant;
+  CommitGrant beginAuthorizedCommit(const HttpRequest &request,
+                                    const std::string &mode,
+                                    const std::string &operation,
+                                    const std::string &artifact);
+  bool endAuthorizedCommit(CommitGrant grant);
+  void setCommitAdmissionClosed(bool closed);
+  bool commitInProgress() const;
+  void beginShutdown();
+  void pollShutdown();
+  bool isShutdownQuiescent() const;
   bool waitUntilStopped(uint32_t timeoutMs);
 
 private:
@@ -131,6 +158,7 @@ private:
   bool enabled_ = false;
   bool startedAp_ = false;
   bool startedStation_ = false;
+  bool networkStopFailed_ = false;
   bool hotspotFallback_ = false;
   std::string hotspotFallbackReason_;
   std::string requestedHotspotFallbackReason_;
@@ -154,8 +182,9 @@ private:
   bool currentRequestAuthorized_ = false;
   uint8_t currentAuthorizationBits_ = 0;
   TransferFailureRecord lastTransferFailure_;
-  bool commitInProgress_ = false;
+  commit_boundary_policy::Boundary commitBoundary_;
   uint32_t transferGeneration_ = 0;
+  uint64_t requestSequence_ = 0;
   uint32_t statusRevision_ = 1;
   StatusChangedCallback statusChangedCallback_ = nullptr;
   uint32_t minimumInternalFree_ = UINT32_MAX;
@@ -165,8 +194,21 @@ private:
   uint32_t minimumPsramFree_ = UINT32_MAX;
   uint32_t minimumPsramLargest_ = UINT32_MAX;
   uint32_t workerStackHighWaterBytes_ = 0;
+  bool workerStackSampleAvailable_ = false;
   std::string resourcePhase_ = "unobserved";
+  // Boot-local correlation, retained through revocation/owner cleanup. Never
+  // use the rotating authorization token as an operation identifier.
+  uint32_t resourceCycle_ = 0;
+  uint32_t resourceSample_ = 0;
+  char resourceMode_[12] = {};
+  char resourceOperation_[37] = {};
   NetworkStartResult networkStart_;
+  // Worker-owned observation state; at most 16 two-record samples per session.
+  NetworkReadinessSnapshot lastReadiness_;
+  uint32_t readinessSamples_ = 0, lastReadinessPollMs_ = 0, readinessGeneration_ = 0;
+  uint32_t acceptedClients_ = 0, tlsSucceeded_ = 0, tlsFailed_ = 0;
+  bool listenerReady_ = false;
+  bool readinessObserved_ = false;
   bool powerLockHeld_ = false;
   struct HandlerRegistration {
     std::string pathPrefix;
@@ -189,6 +231,8 @@ private:
                  const std::string &message);
   void rememberError(const std::string &code, const std::string &message);
   void observeResources(const char *phase);
+  void observeNetwork(const char *phase, bool force = false);
+  void observeTransport(const char *phase, int32_t error = 0);
   void signalStatusChanged();
   void lockState() const;
   void unlockState() const;

@@ -352,7 +352,10 @@ class DeviceTransferTLSContractTests(unittest.TestCase):
         flash_owner = (
             ROOT / "lib/firmware_update/device_operation_owner.cpp"
         ).read_text(encoding="utf-8")
-        self.assertIn("WiFi.softAP(networkSsid_, networkPassword_)", flash_owner)
+        self.assertIn("wifi_.start(", flash_owner)
+        runtime = (ROOT / "lib/firmware_update/device_wifi_runtime.cpp").read_text()
+        self.assertIn("config.ap.authmode = WIFI_AUTH_WPA2_PSK", runtime)
+        self.assertIn("passwordLength < 8", runtime)
         self.assertIn('std::string("https://")', HTTP_SOURCE)
 
 

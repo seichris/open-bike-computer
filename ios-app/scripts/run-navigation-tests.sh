@@ -7,6 +7,8 @@ RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/bicino-swift-check.XXXXXX")"
 trap 'rm -rf "$RUN_TMP"' EXIT
 export TMPDIR="${RUN_TMP}/"
 
+"$(dirname "${BASH_SOURCE[0]}")/run-device-map-operation-tests.sh"
+
 "$(dirname "${BASH_SOURCE[0]}")/run-native-workout-zone-tests.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +26,7 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-1 -- \
   -o "${TOPOGRAPHY_ALIGNMENT_OUT}"
 "${TOPOGRAPHY_ALIGNMENT_OUT}"
 
+"${SCRIPT_DIR}/run-device-operation-tests.sh"
 "${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
 bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
 bash "${SCRIPT_DIR}/run-offline-route-tests.sh"

@@ -1,7 +1,11 @@
 #include "ride_diagnostics.hpp"
+#include "live_tail_v2.hpp"
+#include <new>
 #include "ride_diagnostics_control.hpp"
 #include "ride_diagnostics_format.hpp"
 #include "ride_diagnostics_queue_policy.hpp"
+#include "catalog_v2.hpp"
+#include <mbedtls/sha256.h>
 
 #include <Arduino.h>
 #include <atomic>
@@ -13,6 +17,7 @@
 
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
 #include <esp_attr.h>
+#include <esp_random.h>
 #endif
 
 #include "../firmware_metadata/firmware_metadata.hpp"
@@ -94,6 +99,9 @@ constexpr std::size_t kMaximumRetainedFiles = 256;
 constexpr std::size_t kFilePruneBatch = 16;
 
 Storage *storage = nullptr;
+std::atomic<bool> shutdownSealStarted{false};
+std::atomic<bool> shutdownSealReady{false};
+live_v2::Ring *liveRing = nullptr;
 QueueHandle_t normalQueue = nullptr;
 QueueHandle_t criticalQueue = nullptr;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -127,6 +135,9 @@ SemaphoreHandle_t queueMutationMutex = nullptr;
 SemaphoreHandle_t sealComplete = nullptr;
 SemaphoreHandle_t faultCapsuleFlushMutex = nullptr;
 FILE *activeFile = nullptr;
+mbedtls_sha256_context activeHash{};
+bool activeHashValid = false;
+uint32_t activeFirstSequence = 0, activeLastSequence = 0;
 uint32_t activeFileBytes = 0;
 uint32_t activeChunk = 1;
 std::atomic<uint32_t> activeChunkSnapshot{1};
@@ -151,6 +162,8 @@ std::atomic<uint16_t> maxQueueDepth{0};
 std::atomic<uint16_t> normalQueueCriticalCount{0};
 char activeCapture[48] = {};
 portMUX_TYPE captureMux = portMUX_INITIALIZER_UNLOCKED;
+policy_v2::State runtimeCapturePolicy{};
+uint32_t lastMemorySampleMs = 0;
 #if DETAILED_RIDE_DIAGNOSTICS
 std::atomic<bool> detailedCapture{false};
 std::atomic<uint32_t> detailedCaptureDeadlineMs{0};
@@ -196,7 +209,17 @@ struct ChunkFileScan {
   std::size_t storedCount = 0;
   std::size_t totalCount = 0;
   std::size_t pruneCandidateCount = 0;
+  bool interrupted = false;
 };
+
+// A snapshot can arrive after a maintenance pass has started. Check at every
+// filesystem boundary, not just on entry; an incomplete inventory cannot be
+// used to delete files. The current SD transaction still has to return.
+bool retentionScanInterrupted() {
+  return retention_policy::maintenanceMustYield(
+      millis(), retentionLeaseDeadlineMs.load(std::memory_order_acquire),
+      sealRequested.load(std::memory_order_acquire));
+}
 
 bool chunkFileOlder(const ChunkFile &left, const ChunkFile &right) {
   if (left.boot != right.boot)
@@ -221,7 +244,7 @@ void considerFilePruneCandidate(const ChunkFile &file,
 }
 
 bool removeChunkFile(const ChunkFile &file) {
-  if (storage == nullptr)
+  if (storage == nullptr || retentionScanInterrupted())
     return false;
   char path[224] = {};
   snprintf(path, sizeof(path),
@@ -229,11 +252,15 @@ bool removeChunkFile(const ChunkFile &file) {
            diagnosticsRoot(),
            static_cast<unsigned long>(file.boot),
            static_cast<unsigned long>(file.chunk));
-  return storage->remove(path);
+  if (!storage->remove(path)) return false;
+  const std::string catalog = std::string(path) + ".cat2";
+  (void)storage->remove(catalog.c_str());
+  (void)storage->remove((catalog + ".tmp").c_str());
+  return true;
 }
 
 void removeEmptyBootDirectories() {
-  if (storage == nullptr)
+  if (storage == nullptr || retentionScanInterrupted())
     return;
   char bootsRoot[192] = {};
   snprintf(bootsRoot, sizeof(bootsRoot),
@@ -242,17 +269,24 @@ void removeEmptyBootDirectories() {
   if (boots == nullptr)
     return;
   const uint32_t currentBoot = bootSequence.load();
-  while (struct dirent *entry = readdir(boots)) {
+  while (!retentionScanInterrupted()) {
+    struct dirent *entry = readdir(boots);
+    if (entry == nullptr || retentionScanInterrupted()) break;
     uint32_t boot = 0;
     if (!parseUnsigned(entry->d_name, boot) || boot == currentBoot)
       continue;
     char path[224] = {};
-    snprintf(path, sizeof(path), "%s/%s", bootsRoot, entry->d_name);
+    const int pathLength = snprintf(path, sizeof(path), "%s/%s", bootsRoot, entry->d_name);
+    if (pathLength < 0 || static_cast<std::size_t>(pathLength) >= sizeof(path))
+      continue;
+    if (retentionScanInterrupted()) break;
     DIR *directory = opendir(path);
     if (directory == nullptr)
       continue;
     bool empty = true;
-    while (struct dirent *child = readdir(directory)) {
+    while (!retentionScanInterrupted()) {
+      struct dirent *child = readdir(directory);
+      if (child == nullptr) break;
       if (strcmp(child->d_name, ".") != 0 &&
           strcmp(child->d_name, "..") != 0) {
         empty = false;
@@ -260,7 +294,7 @@ void removeEmptyBootDirectories() {
       }
     }
     closedir(directory);
-    if (empty)
+    if (empty && !retentionScanInterrupted())
       (void)storage->rmdir(path);
   }
   closedir(boots);
@@ -268,6 +302,10 @@ void removeEmptyBootDirectories() {
 
 const char *levelName(Level level) {
   switch (level) {
+  case Level::Trace:
+    return "trace";
+  case Level::Fatal:
+    return "fatal";
   case Level::Debug:
     return "debug";
   case Level::Info:
@@ -382,7 +420,7 @@ void updateFaultCapsule(Level level, const char *category, const char *event,
   currentFaultCapsule.eventCount++;
   if (storageFailure)
     currentFaultCapsule.storageErrorCount++;
-  if (level == Level::Warning || level == Level::Error || storageFailure) {
+  if (level >= Level::Warning || storageFailure) {
     if (category != nullptr) {
       strncpy(currentFaultCapsule.lastCriticalCategory, category,
               sizeof(currentFaultCapsule.lastCriticalCategory) - 1);
@@ -513,6 +551,18 @@ ActiveFileCloseResult closeAndAdvanceActiveChunk() {
   if (activePath[0] != '\0')
     strncpy(closingPath, activePath, sizeof(closingPath) - 1);
   const ActiveFileCloseResult closeResult = closeActiveFile();
+  // Hash state belongs to this writer and includes only complete successful
+  // writes. Publish a descriptor only after the data file's close succeeded.
+  if (closeResult == ActiveFileCloseResult::Ready && activeHashValid && activeFileBytes > 0) {
+    catalog_v2::Descriptor descriptor;
+    descriptor.boot = bootSequence.load(); descriptor.chunk = activeChunk;
+    descriptor.bytes = activeFileBytes;
+    descriptor.firstSequence = activeFirstSequence; descriptor.lastSequence = activeLastSequence;
+    if (mbedtls_sha256_finish(&activeHash, descriptor.digest.data()) == 0)
+      (void)catalog_v2::write(*storage, closingPath, descriptor);
+  }
+  mbedtls_sha256_free(&activeHash);
+  activeHashValid = false;
   // stdio may buffer a short capture entirely until fclose(). Determine
   // whether the chunk exists only after the close has flushed those bytes.
   const bool hadActiveChunk = closingPath[0] != '\0' &&
@@ -579,6 +629,11 @@ bool openActiveFile() {
     if (activeFile == nullptr)
       return false;
     activeFileBytes = static_cast<uint32_t>(existingBytes);
+    mbedtls_sha256_free(&activeHash);
+    mbedtls_sha256_init(&activeHash);
+    // Reopened legacy bytes must be hashed by the reader; do not advertise a
+    // digest over only this process's appended suffix.
+    activeHashValid = existingBytes == 0 && mbedtls_sha256_starts(&activeHash, 0) == 0;
     return true;
   }
   activePath[0] = '\0';
@@ -587,6 +642,8 @@ bool openActiveFile() {
 }
 
 void abandonActiveChunkAfterUncertainWrite() {
+  mbedtls_sha256_free(&activeHash);
+  activeHashValid = false;
   const bool hadPath = activePath[0] != '\0';
   (void)closeActiveFile();
   activePath[0] = '\0';
@@ -601,6 +658,14 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
                                 ChunkFile *pruneCandidates,
                                 std::size_t pruneCandidateCapacity) {
   ChunkFileScan scan;
+  auto shouldStop = [&scan]() {
+    scan.interrupted = scan.interrupted || retentionScanInterrupted();
+    return scan.interrupted;
+  };
+  if (shouldStop()) {
+    scan.interrupted = true;
+    return scan;
+  }
   if (files == nullptr || capacity == 0 || storage == nullptr ||
       !storage->getDiagnosticsSdLoaded()) {
     return scan;
@@ -614,17 +679,26 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
 
   const uint32_t selectedBoot = bootSequence.load();
   const uint32_t selectedActiveChunk = activeChunk;
-  while (struct dirent *bootEntry = readdir(boots)) {
+  while (!shouldStop()) {
+    struct dirent *bootEntry = readdir(boots);
+    if (bootEntry == nullptr || shouldStop()) break;
     uint32_t boot = 0;
     if ((bootEntry->d_type == DT_DIR || bootEntry->d_type == DT_UNKNOWN) &&
         parseUnsigned(bootEntry->d_name, boot)) {
       char bootPath[192] = {};
-      snprintf(bootPath, sizeof(bootPath),
-               "%s/%s", bootsRoot, bootEntry->d_name);
+      const int bootPathLength = snprintf(bootPath, sizeof(bootPath),
+                                           "%s/%s", bootsRoot, bootEntry->d_name);
+      if (bootPathLength < 0 || static_cast<std::size_t>(bootPathLength) >= sizeof(bootPath)) {
+        scan.interrupted = true;
+        break;
+      }
+      if (shouldStop()) break;
       DIR *bootDirectory = opendir(bootPath);
       if (bootDirectory == nullptr)
         continue;
-      while (struct dirent *chunkEntry = readdir(bootDirectory)) {
+      while (!shouldStop()) {
+        struct dirent *chunkEntry = readdir(bootDirectory);
+        if (chunkEntry == nullptr || shouldStop()) break;
         const char *name = chunkEntry->d_name;
         if (strncmp(name, "events-", 7) != 0 ||
             strlen(name) < 14 ||
@@ -643,8 +717,13 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
         file.boot = boot;
         file.chunk = chunk;
         char path[224] = {};
-        snprintf(path, sizeof(path), "%s/%s", bootPath, name);
+        const int pathLength = snprintf(path, sizeof(path), "%s/%s", bootPath, name);
+        if (pathLength < 0 || static_cast<std::size_t>(pathLength) >= sizeof(path)) {
+          scan.interrupted = true;
+          break;
+        }
         file.bytes = static_cast<uint32_t>(storage->size(path));
+        if (shouldStop()) break;
         struct stat metadata = {};
         file.modifiedAt = ::stat(path, &metadata) == 0 ? metadata.st_mtime : 0;
         if (scan.storedCount < capacity)
@@ -662,23 +741,23 @@ ChunkFileScan collectChunkFiles(ChunkFile *files, std::size_t capacity,
     }
   }
   closedir(boots);
+  (void)shouldStop();
   std::sort(files, files + scan.storedCount, chunkFileOlder);
   return scan;
 }
 
 void pruneRetention() {
   SemaphoreGuard retentionGuard(retentionMutex);
-  const uint32_t leaseDeadline =
-      retentionLeaseDeadlineMs.load(std::memory_order_acquire);
-  if (retention_policy::snapshotLeaseActive(millis(), leaseDeadline))
+  if (retentionScanInterrupted())
     return;
-  if (leaseDeadline != 0)
-    retentionLeaseDeadlineMs.store(0, std::memory_order_release);
+  // Do not clear an expired deadline here: a concurrent snapshot may have
+  // installed a newer lease since the read.
   std::size_t count = 0;
   while (true) {
     const ChunkFileScan scan = collectChunkFiles(
         retentionFiles, kMaximumRetainedFiles, filePruneCandidates,
         kFilePruneBatch);
+    if (scan.interrupted || retentionScanInterrupted()) return;
     if (scan.totalCount <= kMaximumRetainedFiles) {
       count = scan.storedCount;
       break;
@@ -686,8 +765,10 @@ void pruneRetention() {
     const std::size_t deleteCount = std::min(
         scan.totalCount - kMaximumRetainedFiles, scan.pruneCandidateCount);
     bool removedAny = false;
-    for (std::size_t index = 0; index < deleteCount; ++index)
+    for (std::size_t index = 0; index < deleteCount; ++index) {
+      if (retentionScanInterrupted()) return;
       removedAny = removeChunkFile(filePruneCandidates[index]) || removedAny;
+    }
     if (!removedAny)
       return;
     vTaskDelay(1);
@@ -709,6 +790,7 @@ void pruneRetention() {
     totalBytes += retentionFiles[index].bytes;
 
   for (std::size_t index = 0; index < count; ++index) {
+    if (retentionScanInterrupted()) return;
     const ChunkFile &file = retentionFiles[index];
     const bool isActive = file.boot == bootSequence.load() &&
                           file.chunk == activeChunk;
@@ -811,6 +893,11 @@ bool writeQueuedEvent(const QueuedEvent &event) {
     updateFaultCapsule(Level::Error, "storage", "write_failed", true);
     return false;
   }
+  if (activeFileBytes == 0) activeFirstSequence = event.sequence;
+  activeLastSequence = event.sequence;
+  if (activeHashValid && mbedtls_sha256_update(&activeHash,
+      reinterpret_cast<const uint8_t *>(event.line), result) != 0)
+    activeHashValid = false;
   activeFileBytes += static_cast<uint32_t>(result);
   const uint32_t nowMs = millis();
   if (event.critical || static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) {
@@ -1091,6 +1178,7 @@ void writerTask(void *) {
 
 void startWriterTask() {
 #if PERSISTENT_RIDE_DIAGNOSTICS
+  if (storageTransitionRequested.load(std::memory_order_acquire)) return;
   if (recorderResourcesReady.load(std::memory_order_acquire) &&
       writerTaskHandle == nullptr) {
     // Arduino's SPI FatFs backend can busy-wait for up to its card-response
@@ -1210,7 +1298,7 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
   }
   queued.sequence = sequence;
   queued.length = static_cast<uint16_t>(length);
-  queued.critical = level == Level::Error || level == Level::Warning ||
+  queued.critical = level >= Level::Warning ||
                     strcmp(category, "user") == 0 ||
                     strcmp(category, "lifecycle") == 0;
   queued.rotateBeforeWrite = rotateBeforeWrite;
@@ -1219,7 +1307,9 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
   queued.faultCapsuleBoot = faultBoot;
   queued.faultCapsuleEventCount = faultEventCount;
   queued.faultCapsuleChecksum = faultChecksum;
-  return enqueue(queued);
+  const bool accepted = enqueue(queued);
+  if (accepted && liveRing != nullptr) liveRing->append(sequence, queued.line, queued.length);
+  return accepted;
 }
 
 } // namespace
@@ -1286,6 +1376,12 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
       producerMutex != nullptr && queueMutationMutex != nullptr &&
       faultCapsuleFlushMutex != nullptr && sealComplete != nullptr &&
       retentionMutex != nullptr;
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  if (liveRing == nullptr) {
+    void *memory = heap_caps_malloc(sizeof(live_v2::Ring), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (memory != nullptr) liveRing = new (memory) live_v2::Ring();
+  }
+#endif
   recorderResourcesReady.store(resourcesReady, std::memory_order_release);
   if (!resourcesReady) {
     Serial.println("RIDE_DIAGNOSTICS: recorder_ready=0 reason=resources");
@@ -1323,6 +1419,27 @@ void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe) {
 }
 
 void process(uint32_t nowMs) {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  if (static_cast<uint32_t>(nowMs - lastMemorySampleMs) >= 5000U) {
+    lastMemorySampleMs = nowMs;
+    portENTER_CRITICAL(&captureMux);
+    const bool sampleMemory = policy_v2::active(runtimeCapturePolicy, nowMs, activeCapture) &&
+        (runtimeCapturePolicy.request.mask & registry::domainMask("memory")) != 0;
+    portEXIT_CRITICAL(&captureMux);
+    if (sampleMemory) {
+      char fields[240] = {};
+      snprintf(fields, sizeof(fields),
+        "{\"freeInternalBytes\":%u,\"largestInternalBytes\":%u,\"freePsramBytes\":%u,"
+        "\"minimumInternalBytes\":%u,\"taskCount\":%u}",
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+        static_cast<unsigned>(uxTaskGetNumberOfTasks()));
+      (void)record(Level::Debug, "memory", "health", fields);
+    }
+  }
+#endif
 #if PERSISTENT_RIDE_DIAGNOSTICS && DETAILED_RIDE_DIAGNOSTICS
   // The writer task owns file handles. This hook is intentionally tiny so it
   // can be called from the LVGL loop without adding storage latency there.
@@ -1398,6 +1515,17 @@ bool recordInternal(Level level, const char *category, const char *event,
   (void)fieldsJson;
   return false;
 #else
+  // Filtering precedes JSON construction and never consumes storage/queue loss
+  // counters. Existing explicit RAUT capture remains bounded by its own lease.
+  portENTER_CRITICAL(&captureMux);
+  const bool policyInstalled = runtimeCapturePolicy.installed &&
+      std::strcmp(runtimeCapturePolicy.request.capture, activeCapture) == 0;
+  const bool policyAllows = policy_v2::admit(runtimeCapturePolicy,
+      static_cast<unsigned>(level), registry::domainMask(category), millis(),
+      activeCapture, kMaximumEventBytes);
+  portEXIT_CRITICAL(&captureMux);
+  if (!policyAllows && (policyInstalled || !detailedCaptureEnabled()))
+    return false;
   if (!validToken(category, 32) || !validToken(event, 64)) {
     dropped.fetch_add(1);
     return false;
@@ -1452,24 +1580,64 @@ bool record(Level level, const char *category, const char *event,
   return recordInternal(level, category, event, fieldsJson, false, 0, 0);
 }
 
+bool applyCapturePolicy(const policy_v2::Request &request) {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  portENTER_CRITICAL(&captureMux);
+  const bool accepted = policy_v2::apply(runtimeCapturePolicy, request, millis(), activeCapture);
+  portEXIT_CRITICAL(&captureMux);
+  if (accepted) {
+    char fields[240] = {};
+    snprintf(fields, sizeof(fields),
+      "{\"policyGeneration\":%lu,\"policyMask\":%lu,\"effectiveLevel\":\"%s\",\"budgetBytes\":%lu}",
+      static_cast<unsigned long>(request.generation), static_cast<unsigned long>(request.mask),
+      levelName(static_cast<Level>(request.minimumLevel)), static_cast<unsigned long>(request.budgetBytes));
+    (void)record(Level::Info, "logger", "policy_applied", fields);
+  }
+  return accepted;
+#else
+  (void)request;
+  return false;
+#endif
+}
+
+std::string capturePolicyJson() {
+  portENTER_CRITICAL(&captureMux);
+  const policy_v2::State policy = runtimeCapturePolicy;
+  const bool enabled = policy_v2::active(policy, millis(), activeCapture);
+  portEXIT_CRITICAL(&captureMux);
+  char result[512] = {};
+  snprintf(result, sizeof(result),
+    "{\"schema\":2,\"schemaDigest\":\"%s\",\"supportedMask\":%lu,\"generation\":%lu,"
+    "\"mask\":%lu,\"minimumLevel\":%lu,\"active\":%s,\"captureId\":\"%s\","
+    "\"remainingBytes\":%lu,\"filteredCount\":%lu,\"deadlineUptimeMs\":%lu,"
+    "\"baselineMinimumLevel\":2,\"rawPayloads\":false}", registry::kSha256,
+    static_cast<unsigned long>(registry::kInstrumentedMask),
+    static_cast<unsigned long>(policy.request.generation), static_cast<unsigned long>(policy.request.mask),
+    static_cast<unsigned long>(policy.request.minimumLevel), enabled ? "true" : "false", policy.request.capture,
+    static_cast<unsigned long>(policy.remaining), static_cast<unsigned long>(policy.filtered),
+    static_cast<unsigned long>(policy.deadline));
+  return result;
+}
+
+bool liveTailJson(uint32_t boot, uint32_t after, std::string &output) {
+  // Reserve outside the producer lock. Two records plus metadata fit without
+  // allocating while the producer is briefly excluded; busy reads fail fast.
+  output.reserve(2304);
+  if (liveRing == nullptr || producerMutex == nullptr ||
+      xSemaphoreTake(producerMutex, 0) != pdTRUE) return false;
+  liveRing->json(bootSequence.load(), boot, after, output);
+  xSemaphoreGive(producerMutex);
+  return true;
+}
+
 bool recordHealth(const char *reason) {
   if (reason == nullptr || !validToken(reason, 32))
     return false;
   const Stats snapshot = stats();
   char fields[288] = {};
-  snprintf(fields, sizeof(fields),
-           "{\"reason\":\"%s\",\"enqueuedCount\":%lu,"
-           "\"writtenCount\":%lu,\"droppedCount\":%lu,"
-           "\"storageErrorCount\":%lu,\"queueDepth\":%u,"
-           "\"maxQueueDepth\":%u,\"available\":%s,\"recorderReady\":%s}",
-           reason, static_cast<unsigned long>(snapshot.enqueued),
-           static_cast<unsigned long>(snapshot.written),
-           static_cast<unsigned long>(snapshot.dropped),
-           static_cast<unsigned long>(snapshot.storageErrors),
-           static_cast<unsigned>(snapshot.queueDepth),
-           static_cast<unsigned>(snapshot.maxQueueDepth),
-           snapshot.storageAvailable ? "true" : "false",
-           snapshot.recorderReady ? "true" : "false");
+  if (!detail::formatRecorderHealthFields(fields, sizeof(fields), reason,
+                                         snapshot))
+    return false;
   return record(Level::Info, "logger", "health", fields);
 }
 
@@ -1482,19 +1650,50 @@ bool recordClockAnchor() {
   return recorded;
 }
 
-bool markIssue(const char *code, uint32_t markerSequence) {
+bool markIssue(const char *code, uint32_t markerSequence, const char *incidentId) {
   if (!validIssueCode(code) || markerSequence == 0 ||
+      (incidentId != nullptr && !control::validIncidentId(incidentId)) ||
       !control::markerSequenceCanAdvance(lastMarkerSequence.load(),
                                          markerSequence))
     return false;
-  char fields[96] = {};
-  snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"sequence\":%lu}",
-           code, static_cast<unsigned long>(markerSequence));
+  char fields[192] = {};
+  if (incidentId != nullptr) {
+    snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"sequence\":%lu,\"incidentId\":\"%s\",\"origin\":\"iphone\"}",
+             code, static_cast<unsigned long>(markerSequence), incidentId);
+  } else {
+    snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"sequence\":%lu}",
+             code, static_cast<unsigned long>(markerSequence));
+  }
   if (!record(Level::Warning, "user", "issue_marker", fields))
     return false;
   lastMarkerSequence.store(markerSequence);
   checkpointRequested.store(true);
   return true;
+}
+
+bool markLocalIssue(const char *code) {
+#if PERSISTENT_RIDE_DIAGNOSTICS && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
+  if (!validIssueCode(code)) return false;
+  uint8_t id[16];
+  esp_fill_random(id, sizeof(id));
+  id[6] = (id[6] & 0x0f) | 0x40;
+  id[8] = (id[8] & 0x3f) | 0x80;
+  char incident[37] = {};
+  snprintf(incident, sizeof(incident),
+      "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+      id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7],
+      id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]);
+  char fields[144] = {};
+  snprintf(fields, sizeof(fields), "{\"code\":\"%s\",\"incidentId\":\"%s\",\"origin\":\"device\"}", code, incident);
+  // Local markers have their own UUID; do not consume the phone's monotonic
+  // anti-replay sequence and thereby reject a later legitimate phone marker.
+  if (!record(Level::Warning, "user", "issue_marker", fields)) return false;
+  checkpointRequested.store(true);
+  return true;
+#else
+  (void)code;
+  return false;
+#endif
 }
 
 bool bindCapture(const char *captureID, bool detailed) {
@@ -1792,6 +1991,12 @@ bool prepareForShutdown(uint32_t timeoutMs) {
   (void)timeoutMs;
   return true;
 #else
+  // Maintenance/partial startup never created a writer or opened a chunk.
+  // No SD presence is required to prove that this recorder has no IO to drain.
+  if (writerTaskHandle == nullptr && activeFile == nullptr) {
+    storageTransitionRequested.store(true, std::memory_order_release);
+    return true;
+  }
   (void)recordHealth("shutdown");
   (void)record(Level::Warning, "lifecycle", "controlled_shutdown", "{}");
   checkpointRequested.store(true);
@@ -1804,6 +2009,43 @@ bool prepareForShutdown(uint32_t timeoutMs) {
     updateFaultCapsule(Level::Error, "lifecycle",
                        "controlled_shutdown_unsealed", true);
   return sealed;
+#endif
+}
+
+void noteShutdownDeferred(uint8_t stage) {
+  const char *event = "shutdown_deferred";
+  switch (stage) {
+  case 1: event = "shutdown_drain_timeout"; break;
+  case 2: event = "shutdown_renderer_timeout"; break;
+  case 3: event = "shutdown_seal_timeout"; break;
+  case 4: event = "shutdown_unmount_timeout"; break;
+  default: break;
+  }
+  updateFaultCapsule(Level::Error, "lifecycle", event, false);
+}
+
+bool pollShutdownQuiescence() {
+#if !PERSISTENT_RIDE_DIAGNOSTICS
+  return true;
+#else
+  if (writerTaskHandle == nullptr && activeFile == nullptr) {
+    storageTransitionRequested.store(true, std::memory_order_release);
+    return true;
+  }
+  if (!shutdownSealStarted.exchange(true, std::memory_order_acq_rel)) {
+    // Join/publish exactly one cutoff and allow the writer's 50 ms idle wait
+    // to expire. Repeated short synchronous seal calls would replace an ACK
+    // received between polls with a fresh cutoff indefinitely.
+    const auto sealTask = [](void *) {
+      const bool sealed = prepareForShutdown(4000);
+      shutdownSealReady.store(sealed, std::memory_order_release);
+      vTaskDelete(nullptr);
+    };
+    if (xTaskCreate(sealTask, "diag_stop", 6144, nullptr,
+                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS)
+      return false;
+  }
+  return shutdownSealReady.load(std::memory_order_acquire);
 #endif
 }
 

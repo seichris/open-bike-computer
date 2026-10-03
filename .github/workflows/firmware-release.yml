@@ -267,6 +267,7 @@ jobs:
               --version "${firmware_version}" \
               --build "${firmware_build}" \
               --private-key-base64 "${FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY}" \
+              --map-metadata-reader-version 1 \
               --output "public/firmware/${target}/manifest.json"
             cp \
               "public/firmware/${target}/manifest.json" \

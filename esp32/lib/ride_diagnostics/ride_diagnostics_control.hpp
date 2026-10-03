@@ -16,7 +16,19 @@ struct CaptureBinding {
 struct IssueMarker {
   uint32_t sequence = 0;
   std::string code;
+  std::string incidentId;
 };
+
+inline bool validIncidentId(const std::string &value) {
+  if (value.size() != 36) return false;
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    if (i == 8 || i == 13 || i == 18 || i == 23) {
+      if (value[i] != '-') return false;
+    } else if (!((value[i] >= '0' && value[i] <= '9') ||
+                 (value[i] >= 'a' && value[i] <= 'f'))) return false;
+  }
+  return true;
+}
 
 inline bool bindingRequiresChunkBoundary(
     const char *currentCaptureId, CaptureMode currentMode,
@@ -81,7 +93,9 @@ inline bool parseCaptureBinding(const std::string &command,
 
 inline bool parseIssueMarker(const std::string &command, IssueMarker &marker) {
   constexpr char prefix[] = "mark|1|";
-  if (command.rfind(prefix, 0) != 0 || command.size() <= sizeof(prefix))
+  marker = {};
+  const bool version2 = command.rfind("mark|2|", 0) == 0;
+  if ((!version2 && command.rfind(prefix, 0) != 0) || command.size() <= sizeof(prefix) || command.size() > 100)
     return false;
   const std::size_t sequenceEnd = command.find('|', sizeof(prefix) - 1);
   if (sequenceEnd == std::string::npos ||
@@ -91,7 +105,15 @@ inline bool parseIssueMarker(const std::string &command, IssueMarker &marker) {
           marker.sequence)) {
     return false;
   }
-  marker.code = command.substr(sequenceEnd + 1);
+  const std::size_t codeEnd = command.find('|', sequenceEnd + 1);
+  if (version2) {
+    if (codeEnd == std::string::npos) return false;
+    marker.incidentId = command.substr(codeEnd + 1);
+    if (!validIncidentId(marker.incidentId)) return false;
+    marker.code = command.substr(sequenceEnd + 1, codeEnd - sequenceEnd - 1);
+  } else {
+    marker.code = command.substr(sequenceEnd + 1);
+  }
   return !marker.code.empty() && marker.code.find('|') == std::string::npos;
 }
 

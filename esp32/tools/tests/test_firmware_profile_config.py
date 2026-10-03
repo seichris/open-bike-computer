@@ -19,7 +19,11 @@ def inherited_option(section: str, option: str) -> str:
         assert current not in visited, f"cyclic PlatformIO inheritance at {current}"
         visited.add(current)
         if config.has_option(current, option):
-            return config.get(current, option)
+            return re.sub(
+                r"\$\{([^.}]+)\.([^}]+)\}",
+                lambda match: inherited_option(match[1], match[2]),
+                config.get(current, option),
+            )
         current = config.get(current, "extends", fallback="").strip()
     raise AssertionError(f"{section} does not resolve {option}")
 
@@ -56,6 +60,16 @@ assert main_source.index("std::fflush(stdout)") < main_source.index(
 assert main_source.count("heap8=%lu/%lu dma=%lu/%lu") == 2
 
 waveshare_sdkconfig = config.get("waveshare_amoled_common", "custom_sdkconfig")
+qualification_sdkconfig = inherited_option(
+    "env:WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION", "custom_sdkconfig")
+assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=n" in qualification_sdkconfig
+assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y" in qualification_sdkconfig
+assert "CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192" in qualification_sdkconfig
+assert "CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304" in qualification_sdkconfig
+assert qualification_sdkconfig == inherited_option(
+    "env:WAVESHARE_AMOLED_175_PRODUCTION", "custom_sdkconfig")
+assert "CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y" not in inherited_option(
+    "env:WAVESHARE_AMOLED_206_PRODUCTION", "custom_sdkconfig")
 assert "CONFIG_PM_ENABLE=y" in waveshare_sdkconfig
 assert "CONFIG_PM_DFS_INIT_AUTO=n" in waveshare_sdkconfig
 assert "CONFIG_PM_PROFILING=n" in waveshare_sdkconfig

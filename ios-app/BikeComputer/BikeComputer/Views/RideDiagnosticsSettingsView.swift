@@ -4,20 +4,24 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RideDiagnosticsSettingsView: View {
     @ObservedObject var recorder: RideDiagnosticsRecorder
     @EnvironmentObject private var bleManager: BLEManager
     @Environment(\.dismiss) private var dismiss
     @State private var selectedIssue: RideIssueCode = .other
+    @State private var diagnosticDomain = "ble"
+    @State private var diagnosticLevel: UInt32 = 1
+    @ObservedObject private var broker = DiagnosticsBrokerClient.shared
+    @State private var importingPairing = false
     @State private var exportURL: URL?
     @State private var statusMessage: String?
     @State private var showingDeleteConfirmation = false
-    @State private var isDownloading = false
+    @ObservedObject private var collection = DiagnosticsCollectionCoordinator.shared
     @State private var isExporting = false
     @State private var localMarkerStatus: String?
     @State private var deviceMarkerStatus: String?
-    @State private var downloadTask: Task<Void, Never>?
     @State private var exportTask: Task<Void, Never>?
 
     var body: some View {
@@ -78,14 +82,15 @@ struct RideDiagnosticsSettingsView: View {
                     }
                 }
                 Button {
-                    guard recorder.markIssue(selectedIssue) else {
+                    let incidentID = UUID()
+                    guard recorder.markIssue(selectedIssue, incidentID: incidentID) else {
                         localMarkerStatus = "Failed"
                         deviceMarkerStatus = "Not attempted"
                         statusMessage = "The issue marker could not be saved on this iPhone."
                         return
                     }
                     localMarkerStatus = "Saved"
-                    let deviceMarked = bleManager.sendDiagnosticsIssueMarker(selectedIssue)
+                    let deviceMarked = bleManager.sendDiagnosticsIssueMarker(selectedIssue, incidentID: incidentID)
                     deviceMarkerStatus = deviceMarked
                         ? "Queued; persistence pending"
                         : "Failed — device not ready"
@@ -105,6 +110,41 @@ struct RideDiagnosticsSettingsView: View {
                 Text("Issue marker")
             } footer: {
                 Text("Choose a predefined category so the marker cannot capture private free-form notes.")
+            }
+
+            Section {
+                Picker("Subsystem", selection: $diagnosticDomain) {
+                    ForEach(DiagnosticsSchema.domains.filter {
+                        DiagnosticsSchema.mask(for: $0) & DiagnosticsSchema.instrumentedMask != 0
+                    }, id: \.self) { Text($0).tag($0) }
+                }
+                Picker("Detail", selection: $diagnosticLevel) {
+                    Text("Debug").tag(UInt32(1))
+                    Text("Trace").tag(UInt32(0))
+                }
+                Button("Record Subsystem for One Hour") {
+                    if let policy = recorder.beginTargetedCapture(
+                        mask: DiagnosticsSchema.mask(for: diagnosticDomain),
+                        minimumLevel: diagnosticLevel, seconds: 3600,
+                        budgetBytes: 8 * 1024 * 1024) {
+                        _ = bleManager.sendDiagnosticsCapturePolicy(policy)
+                    }
+                }
+                if let requested = recorder.runtimeCapturePolicy {
+                    Text("iPhone journal policy requested for \(requested.durationSeconds / 60) minutes; 8 MiB trace budget.")
+                    Text(bleManager.diagnosticsCaptureStatus?.acknowledges(requested) == true
+                        ? "Bicino acknowledged the same capture and policy."
+                        : "Bicino has not acknowledged this policy. iPhone recording is independent.")
+                    if bleManager.diagnosticsCaptureStatus != nil {
+                        Button("Retry Policy on Bicino") {
+                            _ = bleManager.sendDiagnosticsCapturePolicy(requested)
+                        }
+                    }
+                }
+            } header: {
+                Text("Targeted diagnostics")
+            } footer: {
+                Text("Only compiled, privacy-safe events are recorded. Info and critical baseline events stay enabled. This does not enable raw sensors, credentials or route coordinates.")
             }
 
             Section {
@@ -134,42 +174,36 @@ struct RideDiagnosticsSettingsView: View {
             }
 
             Section {
+                Toggle("Collect Device Logs After Rides", isOn: Binding(
+                    get: { collection.automaticPostRideCollection },
+                    set: { collection.setAutomaticPostRideCollection($0) }))
+                Text("Opt in to save post-ride requests for the original Bicino. Retrieval may switch Wi-Fi, only while the app is active and you are not riding. Pending logs remain subject to retention.")
+                    .font(.footnote)
                 Button {
-                    guard !isDownloading else { return }
-                    isDownloading = true
-                    statusMessage = "Preparing the authenticated device transfer…"
-                    downloadTask = Task { @MainActor in
-                        defer {
-                            isDownloading = false
-                            downloadTask = nil
-                        }
-                        do {
-                            let imported = try await DeviceDiagnosticsTransferManager()
-                                .downloadDeviceLogs(
-                                    bleManager: bleManager,
-                                    recorder: recorder,
-                                    status: { statusMessage = $0 }
-                                )
-                            statusMessage = imported == 0
-                                ? "Device logs were already imported."
-                                : "Imported \(imported) verified device chunk\(imported == 1 ? "" : "s")."
-                        } catch is CancellationError {
-                            statusMessage = "Device log download cancelled."
-                        } catch {
-                            statusMessage = error.localizedDescription
-                        }
-                    }
+                    collection.start()
                 } label: {
                     Label("Download Device Logs", systemImage: "arrow.down.doc")
                 }
                 .disabled(
-                    isDownloading || !bleManager.isNavigationReady ||
+                    collection.isRunning || !bleManager.isNavigationReady ||
                         !bleManager.supportsRideDiagnostics
                 )
-                if isDownloading {
+                if collection.isRunning {
                     Button("Cancel Device Download", role: .cancel) {
                         statusMessage = "Cancelling device log download…"
-                        downloadTask?.cancel()
+                        collection.cancel()
+                    }
+                }
+                Text(collection.status)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if let manifest = collection.manifest {
+                    LabeledContent("Verified chunks", value: "\(manifest.verified.count) / \(manifest.expected.count)")
+                    LabeledContent("Delivery", value: manifest.deliveryComplete ? "Complete at saved cutoff" : "Incomplete")
+                    Text("Recording coverage is evaluated separately by the host validator.")
+                        .font(.footnote)
+                    if !collection.isRunning && !manifest.deliveryComplete {
+                        Button("Start New Collection Cutoff") { collection.start(newCutoff: true) }
                     }
                 }
                 Button {
@@ -202,13 +236,32 @@ struct RideDiagnosticsSettingsView: View {
             }
 
             Section {
+                Text(broker.status).font(.footnote)
+                Button("Pair Mac from Configuration File") { importingPairing = true }
+                if broker.isPaired {
+                    Button("Queue Handoff to Mac") { broker.enqueueExport(acquisitionID: nil) }
+                    Button("Unpair Mac", role: .destructive) {
+                        do { try broker.unpair() }
+                        catch { statusMessage = "Mac pairing could not be removed." }
+                    }
+                }
+            } header: { Text("Codex handoff") }
+            footer: {
+                Text("Pair only with your own Mac. Until pairing expires, it may request privacy-safe captures and receive bundles on your private LAN while the app is active. No reset, flash, raw payloads or arbitrary commands are allowed. Recording works without the Mac.")
+            }
+
+            Section {
                 Button("Delete iPhone Logs", role: .destructive) {
                     showingDeleteConfirmation = true
                 }
-                .disabled(isDownloading || isExporting)
+                .disabled(collection.isRunning || isExporting)
             } footer: {
                 Text("Already-exported files are unaffected. Device-side chunks age out under their own retention policy.")
             }
+        }
+        .fileImporter(isPresented: $importingPairing, allowedContentTypes: [.json]) { result in
+            do { try broker.pair(from: result.get()) }
+            catch { statusMessage = "The pairing file is invalid, expired or unavailable. No credentials were sent." }
         }
         .navigationTitle("Diagnostics")
         .navigationBarTitleDisplayMode(.inline)
@@ -228,7 +281,6 @@ struct RideDiagnosticsSettingsView: View {
             Button("Cancel", role: .cancel) {}
         }
         .onDisappear {
-            downloadTask?.cancel()
             exportTask?.cancel()
             exportTask = nil
             if let exportURL {
@@ -278,7 +330,7 @@ struct RideDiagnosticsSettingsView: View {
         exportTask = Task { @MainActor in
             defer { isExporting = false }
             do {
-                let completedURL = try await recorder.exportBundleAsync()
+                let completedURL = try await collection.exportForCodex(recorder: recorder)
                 guard !Task.isCancelled else {
                     try? FileManager.default.removeItem(at: completedURL)
                     return

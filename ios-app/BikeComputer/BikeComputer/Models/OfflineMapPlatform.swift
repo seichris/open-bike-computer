@@ -1535,6 +1535,9 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
         let error: TransferError?
     }
 
+    var selectionHealth: MapSelectionHealth? = nil
+    var activeRoot: String? = nil
+    var mapOperationsV1: Bool? = nil
     let enabled: Bool?
     let activeMapId: String?
     let activeSessionId: String?
@@ -2353,12 +2356,38 @@ struct MapTransferDeviceClient {
         onTaskStarted: @escaping @MainActor (Int) -> Void = { _ in },
         progress: @escaping @MainActor (_ completedBytes: Int64, _ totalBytes: Int64) -> Void
     ) async throws {
-        let request = Self.streamUploadRequest(
+        var request = Self.streamUploadRequest(
             baseURL: baseURL,
             sessionId: sessionId,
             sessionToken: sessionToken,
             contentLength: artifact.bytes
         )
+
+        if descriptor.operationID != nil && !descriptor.hasDurableIdentity {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        if let operationID = descriptor.operationID, descriptor.hasDurableIdentity {
+            guard let deviceID = descriptor.deviceID, let appNamespace = descriptor.appNamespace,
+                  let uploadAttemptID = descriptor.uploadAttemptID else {
+                throw OfflineMapPlatformError.invalidResponse
+            }
+            guard let admissionRevision = descriptor.operationAdmissionRevision,
+                  let admissionEpoch = descriptor.operationAdmissionEpoch,
+                  DeviceMapOperationReceipt.isLowerHex(admissionEpoch, count: 32) else {
+                throw OfflineMapPlatformError.invalidResponse
+            }
+            try DeviceMapOperationStore.shared.beginUpload(
+                operationID: operationID, deviceID: deviceID,
+                appNamespace: appNamespace, uploadAttemptID: uploadAttemptID
+            )
+            request.setValue(
+                operationID.uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+                forHTTPHeaderField: "X-Map-Operation-ID"
+            )
+            request.setValue(artifact.sha256, forHTTPHeaderField: "X-Map-Stream-SHA256")
+            request.setValue(String(admissionRevision), forHTTPHeaderField: "X-Map-Operation-Admission-Revision")
+            request.setValue(admissionEpoch, forHTTPHeaderField: "X-Map-Operation-Admission-Epoch")
+        }
 
 #if os(iOS)
         try await BackgroundMapUploadCoordinator.shared.upload(
@@ -2371,9 +2400,32 @@ struct MapTransferDeviceClient {
         )
 #else
         await onTaskStarted(0)
-        let response = try await session.upload(for: request, fromFile: artifact.url)
-        try Self.validate(response: response.1, body: response.0)
-        await progress(artifact.bytes, artifact.bytes)
+        do {
+            let response = try await session.upload(for: request, fromFile: artifact.url)
+            if descriptor.hasDurableIdentity, let operationID = descriptor.operationID,
+               let deviceID = descriptor.deviceID, let namespace = descriptor.appNamespace,
+               let attemptID = descriptor.uploadAttemptID {
+                guard try DeviceMapOperationStore.shared.completeUpload(
+                    operationID: operationID, deviceID: deviceID, appNamespace: namespace,
+                    mapID: descriptor.mapID, sessionID: descriptor.sessionID, uploadAttemptID: attemptID,
+                    responseBody: response.0, httpStatus: (response.1 as? HTTPURLResponse)?.statusCode,
+                    errorCode: nil
+                ) else { throw DeviceMapOperationStore.StoreError.conflict }
+            }
+            try Self.validate(response: response.1, body: response.0)
+            await progress(artifact.bytes, artifact.bytes)
+        } catch {
+            if descriptor.hasDurableIdentity, let operationID = descriptor.operationID,
+               let deviceID = descriptor.deviceID, let namespace = descriptor.appNamespace,
+               let attemptID = descriptor.uploadAttemptID {
+                _ = try DeviceMapOperationStore.shared.completeUpload(
+                    operationID: operationID, deviceID: deviceID, appNamespace: namespace,
+                    mapID: descriptor.mapID, sessionID: descriptor.sessionID, uploadAttemptID: attemptID,
+                    responseBody: Data(), httpStatus: nil, errorCode: (error as NSError).code
+                )
+            }
+            throw error
+        }
 #endif
     }
 
@@ -2406,6 +2458,99 @@ struct MapTransferDeviceClient {
         authorize(&request)
         let data = try await send(request: request, data: nil)
         return try JSONDecoder().decode(MapTransferDeviceStatus.self, from: data)
+    }
+
+    nonisolated func operationAdmission() async throws -> DeviceMapOperationAdmission {
+        var request = URLRequest(url: baseURL.appendingPathComponent("map-transfer/operations/admission"))
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 2
+        authorize(&request)
+        let data = try await send(request: request, data: nil)
+        guard data.count <= 4096 else { throw OfflineMapPlatformError.invalidResponse }
+        return try JSONDecoder().decode(DeviceMapOperationAdmission.self, from: data)
+    }
+
+    nonisolated func acknowledgeOperation(operationID: String) async throws {
+        guard DeviceMapOperationReceipt.isLowerHex(operationID, count: 32) else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        var request = URLRequest(url: baseURL.appendingPathComponent("map-transfer/operations/" + operationID + "/acknowledge"))
+        request.httpMethod = "POST"
+        request.setValue("0", forHTTPHeaderField: "Content-Length")
+        request.timeoutInterval = 2
+        authorize(&request)
+        _ = try await send(request: request, data: Data())
+    }
+
+    nonisolated func commitOperation(operationID: String, streamSHA256: String) async throws -> DeviceMapOperationReceipt {
+        try await controlOperation(operationID: operationID, streamSHA256: streamSHA256, action: .commit)
+    }
+
+    nonisolated func cancelOperation(record: DeviceMapOperationRecord) async throws -> DeviceMapOperationReceipt {
+        try await controlOperation(operationID: record.wireOperationID, streamSHA256: record.streamSHA256,
+                                   action: .cancel, cancellationIdentity: record)
+    }
+
+    private nonisolated func controlOperation(operationID: String, streamSHA256: String,
+                                              action: DeviceMapOperationControlAction,
+                                              cancellationIdentity: DeviceMapOperationRecord? = nil) async throws -> DeviceMapOperationReceipt {
+        guard DeviceMapOperationReceipt.isLowerHex(operationID, count: 32),
+              DeviceMapOperationReceipt.isLowerHex(streamSHA256, count: 64),
+              action == .commit || action == .cancel else { throw OfflineMapPlatformError.invalidResponse }
+        var request = URLRequest(url: baseURL.appendingPathComponent("map-transfer/operations/" + operationID + "/" + action.rawValue))
+        request.httpMethod = "POST"
+        request.setValue("0", forHTTPHeaderField: "Content-Length")
+        request.setValue(operationID, forHTTPHeaderField: "X-Map-Operation-ID")
+        request.setValue(streamSHA256, forHTTPHeaderField: "X-Map-Stream-SHA256")
+        if action == .cancel {
+            guard let record = cancellationIdentity, let epoch = record.admissionEpoch,
+                  let revision = record.admissionRevision,
+                  DeviceMapOperationReceipt.isLowerHex(epoch, count: 32),
+                  DeviceMapOperationReceipt.isLowerHex(record.manifestReceipt, count: 64),
+                  DeviceMapOperationReceipt.isLowerHex(record.signedManifestReceipt, count: 64),
+                  [record.sessionID, record.mapID].allSatisfy({
+                      !$0.isEmpty && $0.utf8.count <= 128 && !$0.contains("\r") && !$0.contains("\n")
+                  }) else { throw OfflineMapPlatformError.invalidResponse }
+            request.setValue(record.sessionID, forHTTPHeaderField: "X-Map-Content-Session")
+            request.setValue(record.mapID, forHTTPHeaderField: "X-Map-Map-ID")
+            request.setValue(record.manifestReceipt, forHTTPHeaderField: "X-Map-Manifest-Receipt")
+            request.setValue(record.signedManifestReceipt, forHTTPHeaderField: "X-Map-Signed-Manifest-Receipt")
+            request.setValue(String(record.streamBytes), forHTTPHeaderField: "X-Map-Stream-Bytes")
+            request.setValue(epoch, forHTTPHeaderField: "X-Map-Operation-Admission-Epoch")
+            request.setValue(String(revision), forHTTPHeaderField: "X-Map-Operation-Admission-Revision")
+        }
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 2
+        authorize(&request)
+        let response = try await session.upload(for: request, from: Data())
+        guard let http = response.1 as? HTTPURLResponse, response.0.count <= 4096 else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        // A conflict carries the winner's durable receipt (for example accepted
+        // after a too-late cancel), rather than a fabricated cancellation error.
+        guard http.statusCode == 200 || http.statusCode == 409 else {
+            try Self.validate(response: response.1, body: response.0)
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        let receipt = try JSONDecoder().decode(DeviceMapOperationReceipt.self, from: response.0)
+        guard receipt.schemaVersion == 1, receipt.operationID == operationID,
+              receipt.streamSHA256 == streamSHA256 else { throw OfflineMapPlatformError.invalidResponse }
+        return receipt
+    }
+
+    nonisolated func operationStatus(operationID: String) async throws -> DeviceMapOperationReceipt {
+        guard DeviceMapOperationReceipt.isLowerHex(operationID, count: 32) else {
+            throw OfflineMapPlatformError.invalidResponse
+        }
+        var request = URLRequest(url: baseURL.appendingPathComponent("map-transfer/operations/" + operationID))
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 2
+        authorize(&request)
+        let data = try await send(request: request, data: nil)
+        guard data.count <= 4096 else { throw OfflineMapPlatformError.invalidResponse }
+        return try JSONDecoder().decode(DeviceMapOperationReceipt.self, from: data)
     }
 
     private nonisolated func put(sessionId: String, path: String, data: Data) async throws {
@@ -2569,6 +2714,17 @@ struct MapTransferDeviceClient {
 }
 
 nonisolated struct BackgroundMapUploadDescriptor: Codable, Equatable {
+    // Optional fields preserve decoding of legacy v1 descriptors. Such records
+    // are never implicitly bound to whichever device happens to reconnect.
+    let schemaVersion: Int?
+    let deviceID: String?
+    let operationID: UUID?
+    let uploadAttemptID: UUID?
+    let appNamespace: String?
+    let connectionEpoch: UInt64?
+    let operationLeaseID: UUID?
+    let operationAdmissionRevision: UInt64?
+    let operationAdmissionEpoch: String?
     let mapID: String
     let sessionID: String
     let protocolVersion: Int
@@ -2584,8 +2740,25 @@ nonisolated struct BackgroundMapUploadDescriptor: Codable, Equatable {
         streamFormatVersion: Int?,
         artifactFilename: String,
         accessPointSSID: String? = nil,
-        tlsCertificateSHA256: String? = nil
+        tlsCertificateSHA256: String? = nil,
+        operationLeaseID: UUID? = nil,
+        deviceID: String? = nil,
+        operationID: UUID? = nil,
+        uploadAttemptID: UUID? = nil,
+        appNamespace: String? = nil,
+        connectionEpoch: UInt64? = nil,
+        operationAdmissionRevision: UInt64? = nil,
+        operationAdmissionEpoch: String? = nil
     ) {
+        self.schemaVersion = 2
+        self.deviceID = deviceID
+        self.operationID = operationID
+        self.uploadAttemptID = uploadAttemptID
+        self.appNamespace = appNamespace
+        self.connectionEpoch = connectionEpoch
+        self.operationLeaseID = operationLeaseID
+        self.operationAdmissionRevision = operationAdmissionRevision
+        self.operationAdmissionEpoch = operationAdmissionEpoch
         self.mapID = mapID
         self.sessionID = sessionID
         self.protocolVersion = protocolVersion
@@ -2593,6 +2766,12 @@ nonisolated struct BackgroundMapUploadDescriptor: Codable, Equatable {
         self.artifactFilename = artifactFilename
         self.accessPointSSID = accessPointSSID
         self.tlsCertificateSHA256 = tlsCertificateSHA256
+    }
+
+    var hasDurableIdentity: Bool {
+        schemaVersion == 2 && deviceID?.isEmpty == false &&
+            operationID != nil && uploadAttemptID != nil &&
+            appNamespace?.isEmpty == false && connectionEpoch != nil
     }
 }
 
@@ -2639,6 +2818,7 @@ nonisolated struct BackgroundMapUploadRecord: Codable, Equatable {
     var completedBytes: Int64?
     var expectedBytes: Int64?
     var httpStatusCode: Int?
+    var responseBody: Data?
 
     init(
         taskID: Int,
@@ -2649,7 +2829,8 @@ nonisolated struct BackgroundMapUploadRecord: Codable, Equatable {
         errorCode: Int?,
         completedBytes: Int64? = nil,
         expectedBytes: Int64? = nil,
-        httpStatusCode: Int? = nil
+        httpStatusCode: Int? = nil,
+        responseBody: Data? = nil
     ) {
         self.taskID = taskID
         self.descriptor = descriptor
@@ -2660,6 +2841,7 @@ nonisolated struct BackgroundMapUploadRecord: Codable, Equatable {
         self.completedBytes = completedBytes
         self.expectedBytes = expectedBytes
         self.httpStatusCode = httpStatusCode
+        self.responseBody = responseBody
     }
 
     var percentage: Int? {
@@ -2683,12 +2865,15 @@ nonisolated struct BackgroundMapUploadResponseBuffer {
 }
 
 nonisolated enum BackgroundMapUploadStateStore {
+    private static let stateLock = NSRecursiveLock()
     private static let key = "offlineMap.backgroundUploads.v1"
     static let didChangeNotification = Notification.Name(
         "OfflineMapBackgroundUploadStateDidChange"
     )
 
     static func records(defaults: UserDefaults = .standard) -> [BackgroundMapUploadRecord] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         guard let data = defaults.data(forKey: key) else { return [] }
         return (try? JSONDecoder().decode([BackgroundMapUploadRecord].self, from: data)) ?? []
     }
@@ -2700,8 +2885,16 @@ nonisolated enum BackgroundMapUploadStateStore {
         now: Date = Date(),
         defaults: UserDefaults = .standard
     ) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         var values = records(defaults: defaults)
-        values.removeAll { $0.taskID == taskID }
+        if values.contains(where: { $0.taskID == taskID && $0.descriptor == descriptor }) {
+            return // Duplicate/late callbacks cannot reset a completed record.
+        }
+        values.removeAll {
+            $0.taskID == taskID && $0.descriptor.appNamespace == descriptor.appNamespace &&
+                $0.descriptor.uploadAttemptID == descriptor.uploadAttemptID
+        }
         values.append(BackgroundMapUploadRecord(
             taskID: taskID,
             descriptor: descriptor,
@@ -2713,17 +2906,22 @@ nonisolated enum BackgroundMapUploadStateStore {
             expectedBytes: expectedBytes.flatMap { $0 > 0 ? $0 : nil },
             httpStatusCode: nil
         ))
-        persist(Array(values.suffix(32)), defaults: defaults)
+        persist(values, defaults: defaults)
     }
 
     static func markProgress(
         taskID: Int,
         completedBytes: Int64,
+        descriptor: BackgroundMapUploadDescriptor? = nil,
         expectedBytes: Int64?,
         defaults: UserDefaults = .standard
     ) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         var values = records(defaults: defaults)
-        guard let index = values.lastIndex(where: { $0.taskID == taskID }),
+        guard let index = values.lastIndex(where: {
+            $0.taskID == taskID && (descriptor == nil || $0.descriptor == descriptor)
+        }),
               values[index].completedAt == nil else { return }
         let boundedCompleted = max(completedBytes, 0)
         let previousPercentage = values[index].percentage
@@ -2733,12 +2931,14 @@ nonisolated enum BackgroundMapUploadStateStore {
         }
         let newPercentage = values[index].percentage
         guard previousPercentage != newPercentage || boundedCompleted == 0 else { return }
-        persist(Array(values.suffix(32)), defaults: defaults)
+        persist(values, defaults: defaults)
     }
 
     static func markCompleted(
         taskID: Int,
         succeeded: Bool,
+        descriptor: BackgroundMapUploadDescriptor? = nil,
+        responseBody: Data? = nil,
         errorCode: Int?,
         httpStatusCode: Int? = nil,
         completedBytes: Int64? = nil,
@@ -2746,8 +2946,16 @@ nonisolated enum BackgroundMapUploadStateStore {
         now: Date = Date(),
         defaults: UserDefaults = .standard
     ) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         var values = records(defaults: defaults)
-        guard let index = values.lastIndex(where: { $0.taskID == taskID }) else { return }
+        guard let index = values.lastIndex(where: {
+            $0.taskID == taskID && (descriptor == nil || $0.descriptor == descriptor)
+        }) else { return }
+        guard values[index].completedAt == nil else { return }
+        values[index].responseBody = responseBody.flatMap {
+            $0.count <= BackgroundMapUploadResponseBuffer.maximumBytes ? $0 : nil
+        }
         values[index].completedAt = now
         values[index].succeeded = succeeded
         values[index].errorCode = errorCode
@@ -2758,7 +2966,7 @@ nonisolated enum BackgroundMapUploadStateStore {
         if let expectedBytes, expectedBytes > 0 {
             values[index].expectedBytes = expectedBytes
         }
-        persist(Array(values.suffix(32)), defaults: defaults)
+        persist(values, defaults: defaults)
     }
 
     static func latest(
@@ -2778,7 +2986,10 @@ nonisolated enum BackgroundMapUploadStateStore {
         _ values: [BackgroundMapUploadRecord],
         defaults: UserDefaults
     ) {
-        if let data = try? JSONEncoder().encode(values) {
+        // Never evict an unresolved upload to satisfy a history bound.
+        let unresolved = values.filter { $0.completedAt == nil }
+        let terminal = values.filter { $0.completedAt != nil }.suffix(32)
+        if let data = try? JSONEncoder().encode(unresolved + terminal) {
             defaults.set(data, forKey: key)
             NotificationCenter.default.post(name: didChangeNotification, object: nil)
         }
@@ -2812,12 +3023,15 @@ final class BackgroundMapUploadCoordinator: NSObject,
         let continuation: CheckedContinuation<Void, Error>
         let progress: @MainActor (Int64, Int64) -> Void
         let expectedBytes: Int64
-        var response = BackgroundMapUploadResponseBuffer()
     }
 
     private let lock = NSLock()
+    private let completionBarrier = DeviceMapUploadCompletionBarrier()
     private var pendingUploads: [Int: PendingUpload] = [:]
     private var retiredTaskIDs: Set<Int> = []
+    private var networkClaims: [Int: UUID] = [:]
+    private var completedTaskIDs: Set<Int> = []
+    private var responseBuffers: [Int: BackgroundMapUploadResponseBuffer] = [:]
     private var backgroundCompletionHandler: (() -> Void)?
 
     private lazy var session: URLSession = {
@@ -2855,6 +3069,11 @@ final class BackgroundMapUploadCoordinator: NSObject,
                 "background upload identity could not be encoded"
             )
         }
+        let claim = await MainActor.run {
+            descriptor.operationLeaseID.flatMap {
+                DeviceTransferManager.retainNetworkClaim(operationLeaseID: $0)
+            }
+        }
         let task = session.uploadTask(with: request, fromFile: fileURL)
         task.taskDescription = description
         BackgroundMapUploadStateStore.markStarted(
@@ -2868,6 +3087,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 lock.lock()
+                if let claim { networkClaims[task.taskIdentifier] = claim }
                 pendingUploads[task.taskIdentifier] = PendingUpload(
                     continuation: continuation,
                     progress: progress,
@@ -2886,12 +3106,38 @@ final class BackgroundMapUploadCoordinator: NSObject,
         backgroundCompletionHandler = completionHandler
         lock.unlock()
         _ = session
+        restorePersistedTasks()
+    }
+
+    private func installRestoredClaim(_ claim: UUID, for task: URLSessionTask) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !completedTaskIDs.contains(task.taskIdentifier),
+              networkClaims[task.taskIdentifier] == nil,
+              task.state == .running || task.state == .suspended else { return false }
+        networkClaims[task.taskIdentifier] = claim
+        return true
     }
 
     func restorePersistedTasks() {
         session.getAllTasks { tasks in
             for task in tasks {
                 if let descriptor = Self.descriptor(for: task) {
+                    if descriptor.hasDurableIdentity,
+                       descriptor.appNamespace == Self.sessionIdentifier,
+                       let leaseID = descriptor.operationLeaseID,
+                       let deviceID = descriptor.deviceID {
+                        Task { @MainActor in
+                            if let claim = DeviceTransferManager.restoreNetworkClaim(
+                                operationLeaseID: leaseID, deviceID: deviceID,
+                                ssid: descriptor.accessPointSSID
+                            ), !self.installRestoredClaim(claim, for: task) {
+                                // Completion or a second restore can beat this
+                                // actor hop. Release only this duplicate claim.
+                                DeviceTransferManager.releaseNetworkClaim(claim)
+                            }
+                        }
+                    }
                     if !Self.hasMatchingStateRecord(
                         taskID: task.taskIdentifier,
                         descriptor: descriptor
@@ -2905,6 +3151,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
                     BackgroundMapUploadStateStore.markProgress(
                         taskID: task.taskIdentifier,
                         completedBytes: task.countOfBytesSent,
+                        descriptor: descriptor,
                         expectedBytes: task.countOfBytesExpectedToSend
                     )
                 }
@@ -2934,13 +3181,16 @@ final class BackgroundMapUploadCoordinator: NSObject,
         await activeUploadActivity().descriptors
     }
 
-    func retireActiveUpload(mapID: String, sessionID: String) async -> Bool {
+    func retireActiveUpload(mapID: String, sessionID: String,
+                            deviceID: String? = nil, operationID: UUID? = nil) async -> Bool {
         let tasks = await allTasks()
         let matchingTasks = tasks.filter { task in
             guard let descriptor = Self.descriptor(for: task) else {
                 return false
             }
-            return descriptor.mapID == mapID && descriptor.sessionID == sessionID
+            return descriptor.mapID == mapID && descriptor.sessionID == sessionID &&
+                (deviceID == nil || descriptor.deviceID == deviceID) &&
+                (operationID == nil || descriptor.operationID == operationID)
         }
         markTasksRetired(matchingTasks.map(\.taskIdentifier))
         for task in matchingTasks
@@ -2953,7 +3203,9 @@ final class BackgroundMapUploadCoordinator: NSObject,
             let remaining = await activeUploadActivity()
             if !remaining.hasUnidentifiedTask,
                remaining.descriptors.allSatisfy({
-                   $0.mapID != mapID || $0.sessionID != sessionID
+                   $0.mapID != mapID || $0.sessionID != sessionID ||
+                       (deviceID != nil && $0.deviceID != deviceID) ||
+                       (operationID != nil && $0.operationID != operationID)
                }) {
                 return true
             }
@@ -3099,6 +3351,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
         BackgroundMapUploadStateStore.markProgress(
             taskID: task.taskIdentifier,
             completedBytes: totalBytesSent,
+            descriptor: Self.descriptor(for: task),
             expectedBytes: totalBytesExpectedToSend
         )
         lock.lock()
@@ -3119,14 +3372,13 @@ final class BackgroundMapUploadCoordinator: NSObject,
         didReceive data: Data
     ) {
         lock.lock()
-        if var pending = pendingUploads[dataTask.taskIdentifier] {
-            guard pending.response.append(data) else {
-                lock.unlock()
-                dataTask.cancel()
-                return
-            }
-            pendingUploads[dataTask.taskIdentifier] = pending
+        var response = responseBuffers[dataTask.taskIdentifier] ?? BackgroundMapUploadResponseBuffer()
+        guard response.append(data) else {
+            lock.unlock()
+            dataTask.cancel()
+            return
         }
+        responseBuffers[dataTask.taskIdentifier] = response
         lock.unlock()
     }
 
@@ -3137,7 +3389,10 @@ final class BackgroundMapUploadCoordinator: NSObject,
     ) {
         lock.lock()
         let pending = pendingUploads.removeValue(forKey: task.taskIdentifier)
-        let wasRetiredForResume = retiredTaskIDs.remove(task.taskIdentifier) != nil
+        completedTaskIDs.insert(task.taskIdentifier)
+        retiredTaskIDs.remove(task.taskIdentifier)
+        let networkClaim = networkClaims.removeValue(forKey: task.taskIdentifier)
+        let responseBody = responseBuffers.removeValue(forKey: task.taskIdentifier)?.data ?? Data()
         lock.unlock()
         let descriptor = Self.descriptor(for: task)
         if let descriptor,
@@ -3153,45 +3408,65 @@ final class BackgroundMapUploadCoordinator: NSObject,
         }
         let nsError = error as NSError?
         let httpStatus = (task.response as? HTTPURLResponse)?.statusCode
-        let succeeded = error == nil && httpStatus.map { 200..<300 ~= $0 } == true
-        BackgroundMapUploadStateStore.markCompleted(
-            taskID: task.taskIdentifier,
-            succeeded: succeeded,
-            errorCode: nsError?.code,
-            httpStatusCode: httpStatus,
-            completedBytes: task.countOfBytesSent,
-            expectedBytes: task.countOfBytesExpectedToSend
-        )
-        NotificationCenter.default.post(
-            name: BackgroundMapUploadStateStore.didChangeNotification,
-            object: nil
-        )
-        if !wasRetiredForResume,
-           let ssid = descriptor?.accessPointSSID,
-           !ssid.isEmpty,
-           descriptor?.protocolVersion == 2 {
-            removeAccessoryNetworkConfigurationIfUnused(
-                ssid: ssid,
-                completedTaskID: task.taskIdentifier
-            )
-        }
-        guard let pending else { return }
-        if let error {
-            pending.continuation.resume(throwing: error)
-            return
-        }
-        do {
-            guard let response = task.response else {
-                throw OfflineMapPlatformError.invalidResponse
+        completionBarrier.complete(persist: {
+            if let descriptor, descriptor.hasDurableIdentity,
+               let operationID = descriptor.operationID, let deviceID = descriptor.deviceID,
+               let namespace = descriptor.appNamespace, let attemptID = descriptor.uploadAttemptID {
+                guard try DeviceMapOperationStore.shared.completeUpload(
+                    operationID: operationID, deviceID: deviceID, appNamespace: namespace,
+                    mapID: descriptor.mapID, sessionID: descriptor.sessionID,
+                    uploadAttemptID: attemptID, responseBody: responseBody,
+                    httpStatus: httpStatus, errorCode: nsError?.code
+                ) else { throw DeviceMapOperationStore.StoreError.conflict }
             }
-            try MapTransferDeviceClient.validate(
-                response: response,
-                body: pending.response.data
+        }, publish: { persistenceError in
+            let succeeded = error == nil && persistenceError == nil && httpStatus.map { 200..<300 ~= $0 } == true
+            if let descriptor {
+                BackgroundMapUploadStateStore.markCompleted(
+                taskID: task.taskIdentifier,
+                succeeded: succeeded,
+                descriptor: descriptor,
+                responseBody: responseBody,
+                errorCode: nsError?.code,
+                httpStatusCode: httpStatus,
+                completedBytes: task.countOfBytesSent,
+                expectedBytes: task.countOfBytesExpectedToSend
+                )
+            }
+            NotificationCenter.default.post(
+                name: BackgroundMapUploadStateStore.didChangeNotification,
+                object: nil
             )
-            pending.continuation.resume()
-        } catch {
-            pending.continuation.resume(throwing: error)
-        }
+            // The delegate owns only its upload claim. The session owner's root
+            // claim spans confirmation and is the only authority to leave the AP.
+            // Legacy/restored descriptors with no live claim cannot remove by SSID.
+            if let networkClaim {
+                Task { @MainActor in
+                    DeviceTransferManager.releaseNetworkClaim(networkClaim)
+                }
+            }
+            guard let pending else { return }
+            if let persistenceError {
+                pending.continuation.resume(throwing: persistenceError)
+                return
+            }
+            if let error {
+                pending.continuation.resume(throwing: error)
+                return
+            }
+            do {
+                guard let response = task.response else {
+                    throw OfflineMapPlatformError.invalidResponse
+                }
+                try MapTransferDeviceClient.validate(
+                    response: response,
+                    body: responseBody
+                )
+                pending.continuation.resume()
+            } catch {
+                pending.continuation.resume(throwing: error)
+            }
+        })
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
@@ -3200,7 +3475,9 @@ final class BackgroundMapUploadCoordinator: NSObject,
         backgroundCompletionHandler = nil
         lock.unlock()
         if let completionHandler {
-            DispatchQueue.main.async(execute: completionHandler)
+            completionBarrier.finishEvents {
+                DispatchQueue.main.async(execute: completionHandler)
+            }
         }
     }
 
@@ -3219,26 +3496,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
         }
     }
 
-    private func removeAccessoryNetworkConfigurationIfUnused(
-        ssid: String,
-        completedTaskID: Int
-    ) {
-        session.getAllTasks { tasks in
-            let remainsInUse = tasks.contains { task in
-                guard task.taskIdentifier != completedTaskID,
-                      task.state == .running || task.state == .suspended else {
-                    return false
-                }
-                guard let descriptor = Self.descriptor(for: task) else {
-                    return true
-                }
-                return descriptor.accessPointSSID == ssid
-            }
-            if !remainsInUse {
-                DeviceTransferManager.removeAccessoryNetworkConfiguration(ssid: ssid)
-            }
-        }
-    }
+
 }
 #endif
 

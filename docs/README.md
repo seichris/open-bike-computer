@@ -42,6 +42,7 @@ been removed; their design history remains available in Git.
 - [Watch navigation release notes and blockers](watch-bicino-navigation-release-notes.md)
 - [Ride automation traces](ride-automation-traces.md)
 - [Ride diagnostics format](ride-diagnostics-format.md)
+- [Agent diagnostics and post-ride handoff](diagnostics-v2.md)
 - [Firmware OTA hardware validation](firmware-ota-hardware-validation.md)
 - [Cloudflare R2 map library runbook](runbooks/cloudflare-r2-final-map-library.md)
 - [Shanghai 3D orchestration runbook](runbooks/shanghai-3d-map-orchestration.md)

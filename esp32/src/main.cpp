@@ -18,6 +18,7 @@
 #error "remote renderer debugging requires firmware diagnostics"
 #endif
 #include <SPI.h>
+#include <Network.h>
 #include <WiFi.h>
 #include <Wire.h>
 #include <esp_bt.h>
@@ -69,6 +70,7 @@ extern xSemaphoreHandle gpsMutex;
 #endif
 
 #include "battery.hpp"
+#include "device_ownership.hpp"
 #include "gpxParser.hpp"
 #include "power.hpp"
 
@@ -213,7 +215,7 @@ static void processFirmwareMaintenanceMode() {
     if (disabled && deviceTransferHttp.waitUntilStopped(5500)) {
       Serial.println("FIRMWARE_MAINTENANCE: returning to normal boot");
       delay(250);
-      ESP.restart();
+      power.deviceRestart();
     }
   }
   delay(5);
@@ -620,6 +622,56 @@ static display_inactivity::Mode currentDisplayMode =
 static uint32_t lastPowerButtonHousekeepingMs = 0;
 #endif
 
+// Allocate the fallback view during normal startup, never while storage may
+// be unmounting or a worker may be stuck. The built-in LVGL font needs no SD.
+static lv_obj_t *shutdownDeferredNotice = nullptr;
+static bool shutdownDeferredNoticeShown = false;
+
+static void prepareShutdownDeferredNotice() {
+  shutdownDeferredNotice = lv_obj_create(lv_layer_sys());
+  lv_obj_set_size(shutdownDeferredNotice, LV_PCT(100), LV_PCT(100));
+  lv_obj_center(shutdownDeferredNotice);
+  lv_obj_set_style_bg_color(shutdownDeferredNotice, lv_color_black(), 0);
+  lv_obj_set_style_bg_opa(shutdownDeferredNotice, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(shutdownDeferredNotice, 0, 0);
+  lv_obj_set_style_radius(shutdownDeferredNotice, 0, 0);
+  lv_obj_clear_flag(shutdownDeferredNotice, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_t *label = lv_label_create(shutdownDeferredNotice);
+  lv_obj_set_width(label, TFT_WIDTH - 48);
+  lv_obj_set_style_text_font(label, LV_FONT_DEFAULT, 0);
+  lv_obj_set_style_text_color(label, lv_color_white(), 0);
+  lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_text_static(label,
+      "Shutdown deferred\n\nLeave device powered on");
+  lv_obj_center(label);
+  lv_obj_add_flag(shutdownDeferredNotice, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void showShutdownDeferredNotice(uint8_t failedStage) {
+  (void)failedStage; // Exact sub-barrier is retained in RTC/serial diagnostics.
+  if (shutdownDeferredNotice == nullptr || shutdownDeferredNoticeShown) return;
+  shutdownDeferredNoticeShown = true;
+  if (mainTimer != nullptr) lv_timer_pause(mainTimer);
+  // Hide the old scene before the one-shot refresh: no map/image/font draw
+  // callback should be invoked against storage that is stopping or unmounted.
+  if (lv_screen_active() != nullptr)
+    lv_obj_add_flag(lv_screen_active(), LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(lv_layer_top(), LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(lv_layer_bottom(), LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(shutdownDeferredNotice, LV_OBJ_FLAG_HIDDEN);
+#ifdef USE_ARDUINO_GFX
+  displayPowerManager.requestState(display_power::State::Dimmed);
+  displayPowerManager.applyPendingPanelChange();
+#else
+  tftOn(24);
+#endif
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+  currentDisplayMode = display_inactivity::Mode::Dimmed;
+#endif
+  // Refresh only; never run LVGL timers or input callbacks in this fallback.
+  lv_refr_now(display);
+}
+
 static const char *remoteDebugStartErrorCode(
     device_debug::FrameStoreStartResult result) {
   switch (result) {
@@ -905,6 +957,10 @@ static bool processTransferInactivityTimeout(uint32_t nowMs) {
 
 static display_inactivity::Update updateDisplayInactivityPolicy(
     uint32_t nowMs, bool touchWake, bool &observedTouchActivity) {
+  if (shutdownDeferredNoticeShown) {
+    observedTouchActivity = false;
+    return {currentDisplayMode, currentDisplayMode, false, false};
+  }
   struct Signals {
     bool initialized = false;
     lv_obj_t *screen = nullptr;
@@ -1503,6 +1559,34 @@ static void processDisconnectedShutdown() {
  */
 void setup() {
   usb_recovery_status::begin();
+  power.setShutdownDeferredCallback(showShutdownDeferredNotice);
+  power.configureShutdown(
+      []() { deviceTransferHttp.beginShutdown(); return true; },
+      []() {
+        deviceTransferHttp.pollShutdown();
+        mapTransferHttp.submitPendingOperationTask();
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
+        const bool audioStopped = waveshare_board::speaker::pollShutdownQuiescence();
+#else
+        const bool audioStopped = true;
+#endif
+        const bool bleWritesStopped = bleNavServer.pollShutdownQuiescence();
+        return bleWritesStopped && audioStopped && deviceTransferHttp.isShutdownQuiescent() &&
+               mapTransferHttp.shutdownQuiescent();
+      },
+      []() { return mapView.pollShutdownQuiescence(); },
+      []() { return deviceTransferHttp.commitInProgress(); },
+      []() { return storage.pollShutdownQuiescence(); },
+      []() -> uint64_t {
+        const auto activation = mapTransferHttp.activationSnapshot();
+        // Only real activation/hash progress refreshes the watchdog. Polling
+        // and keepalives cannot extend its absolute ten-minute cap. The low
+        // counter advances per 64 KiB actual hash IO, not merely per request.
+        return (uint64_t{activation.step} << 56) |
+               (uint64_t{activation.progress} << 48) |
+               (uint64_t{activation.sequence & 0xffffU} << 32) |
+               mapTransferHttp.storageProgressSequence();
+      });
 #ifdef HAS_HARDWARE_GPS
   gpsMutex = xSemaphoreCreateMutex();
 #endif
@@ -1810,6 +1894,12 @@ void setup() {
 
   {
     map_transfer::MapTransferInstaller mapInstaller("/sdcard");
+    mapInstaller.setStorageProgressCallback([](void *) { delay(1); }, nullptr);
+    // Bind early journal recovery before reading/rendering a candidate pointer.
+    // This is the same immutable eFuse derivation later authenticated by BLE;
+    // it neither initializes BLE nor changes ownership credentials.
+    mapInstaller.setOperationDeviceID(device_ownership::hardwareDeviceIdHex());
+    mapTransferHttp.setOperationDeviceID(device_ownership::hardwareDeviceIdHex());
     map_transfer::InstallStatus recoveryStatus =
         mapInstaller.recoverInterruptedActivation();
     recordMapDiagnostic(
@@ -1863,6 +1953,7 @@ void setup() {
           return attempt;
         };
 
+    map_transfer::ActiveMapSelection finalSelection = activeMap;
     RendererMapDiagnosticIdentity finalIdentity;
     std::string finalCode = activeStatus.code;
     bool finalLoaded = false;
@@ -1889,6 +1980,7 @@ void setup() {
         Serial.printf("MAP_TRANSFER: activeMapId=%s root=%s\n",
                       activeMap.mapId.c_str(), activeMap.root.c_str());
       } else if (!activeMap.sessionId.empty()) {
+        mapTransferHttp.observeBootSelection(activeMap, false);
         const map_transfer::InstallStatus rollback =
             mapInstaller.rollbackActiveMap(activeMap.sessionId);
         map_transfer::ActiveMapSelection restored;
@@ -1933,6 +2025,7 @@ void setup() {
             rollback.ok && restoredStatus.ok ? MapDiagnosticMetrics::Probe
                                              : MapDiagnosticMetrics::None);
         if (restoredLoaded) {
+          finalSelection = restored;
           finalIdentity = restoredIdentity;
           finalCode = map_probe_diagnostics::name(restoredAttempt.probe.code);
           finalLoaded = true;
@@ -1960,6 +2053,7 @@ void setup() {
       Serial.printf("MAP_TRANSFER: activeMap unavailable code=%s message=%s\n",
                     activeStatus.code.c_str(), activeStatus.message.c_str());
     }
+    mapTransferHttp.observeBootSelection(finalSelection, finalLoaded, true);
     rendererMapDiagnosticIdentity =
         finalLoaded ? finalIdentity : RendererMapDiagnosticIdentity{};
     recordMapDiagnostic(
@@ -2012,6 +2106,7 @@ void setup() {
   boot_diagnostics::enterStage(boot_diagnostics::Stage::UserInterface);
 #endif
   initLVGL();
+  prepareShutdownDeferredNotice();
   log_i("Checkpoint A: LVGL Init Done");
 
   // Get init Latitude and Longitude
@@ -2049,6 +2144,13 @@ void setup() {
 
   if (WiFi.getMode() == WIFI_OFF)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+#if defined(WAVESHARE_AMOLED_175)
+  // The default event loop and boot safety checks are complete. Allocate the
+  // lasting TCP/IP and Arduino event tasks before BLE and transfer workers;
+  // Network.begin() accepts the already-created default event loop.
+  if (!firmware_maintenance::active())
+    (void)Network.begin();
+#endif
 
   log_i("Loading Splash Screen...");
   splashScreen();
@@ -2102,7 +2204,7 @@ void setup() {
     (void)ride_diagnostics::record(ride_diagnostics::Level::Error, "boot",
                                    "confirmation_failed", "{}");
     firmwareUpdateHttp.rejectRunningApp();
-    ESP.restart();
+    power.deviceRestart();
     return;
   }
   boot_diagnostics::markReady();
@@ -2128,6 +2230,12 @@ void loop() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::heartbeat(
       runtime_watchdog_diagnostics::Role::Ui);
+#endif
+  if (power.processShutdown()) {
+    delay(shutdownDeferredNoticeShown ? 50 : 5);
+    return;
+  }
+#if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   if (boot_diagnostics::safeModeActive()) {
     delay(1000);
     return;
@@ -2141,7 +2249,7 @@ void loop() {
       millis() - firmware_maintenance::activeSinceMs() >= 750) {
     Serial.println("FIRMWARE_MAINTENANCE: rebooting into maintenance");
     Serial.flush();
-    ESP.restart();
+    power.deviceRestart();
   }
 #endif
   uint32_t now = millis();
@@ -2265,6 +2373,8 @@ void loop() {
         mapTransferHttp.acknowledgeActivatedMapRoot(
             pendingMapRendererActivation.transferRoot, loaded);
       } else if (labelRollback) {
+        mapTransferHttp.acknowledgeRuntimeRollback(
+            pendingMapRendererActivation.rendererRoot.substr(7), loaded);
         Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
                       "restored=%d\n",
                       pendingMapRendererActivation.labelFailure.c_str(),
@@ -2300,8 +2410,10 @@ void loop() {
         !labelRollbackQueued) {
       if (labelRuntimeFailure.empty())
         mapView.takeStreetLabelRuntimeFailure(labelRuntimeFailure);
-      if (!labelRuntimeFailure.empty())
+      if (!labelRuntimeFailure.empty()) {
+        mapTransferHttp.markSelectionDegraded();
         labelRollbackQueued = mapTransferHttp.requestRuntimeRollback();
+      }
     }
     map_transfer::ActiveMapSelection restored;
     bool rollbackSucceeded = false;
@@ -2340,6 +2452,8 @@ void loop() {
           mapTransferHttp.acknowledgeActivatedMapRoot(
               pendingMapRendererActivation.transferRoot, false);
         } else {
+          mapTransferHttp.acknowledgeRuntimeRollback(
+              pendingMapRendererActivation.rendererRoot.substr(7), false);
           Serial.printf("MAP_TRANSFER: runtime label failure=%s rollback=%s "
                         "restored=0 queue_timeout=1\n",
                         pendingMapRendererActivation.labelFailure.c_str(),
@@ -2399,6 +2513,7 @@ void loop() {
     updateMapActivationProgressOverlay();
     deviceTransferHttp.process();
     mapTransferHttp.submitPendingRollback();
+    mapTransferHttp.submitPendingOperationTask();
   }
 
   const BLEDebugStats bleStatsBeforeWork = bleNavServer.getDebugStats();
@@ -2505,13 +2620,13 @@ void loop() {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   // Sample the screen-cycle button before LVGL can start a synchronous vector
   // redraw. updateMainScreen() also defers while the raw input is active.
-  if (processWaveshareBootButton()) {
+  if (!shutdownDeferredNoticeShown && processWaveshareBootButton()) {
     displayInactivityPolicy.noteMeaningfulActivity(now);
   }
   if (ui_scheduler::isDue(now, lastPowerButtonHousekeepingMs,
                           kStaticHousekeepingPeriodMs)) {
     lastPowerButtonHousekeepingMs = now;
-    if (processWavesharePowerButton()) {
+    if (!shutdownDeferredNoticeShown && processWavesharePowerButton()) {
       displayInactivityPolicy.noteMeaningfulActivity(now);
     }
   }
@@ -2554,7 +2669,7 @@ void loop() {
   }
 #endif
 
-  bool runLvglHandler = !waitScreenRefresh;
+  bool runLvglHandler = !waitScreenRefresh && !shutdownDeferredNoticeShown;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   constexpr uint32_t kDimmedLvglCadenceMs = 100;
   if (currentDisplayMode == display_inactivity::Mode::DisplayOff) {

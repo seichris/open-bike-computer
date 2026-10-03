@@ -1129,6 +1129,17 @@ final class RideAutomationCoordinator: ObservableObject {
             configurationRetryCountByDevice[deviceID] = 0
             return
         }
+        // Rejections echo the device's current configuration, not the rejected
+        // request's generation. A delayed older request can therefore report
+        // our already-current values. Advancing the generation here creates a
+        // feedback loop of stale queued requests and new persistent writes.
+        // Keep an unconfirmed configuration unconfirmed; the normal periodic
+        // resynchronization can obtain an accepted reply for this generation.
+        if frame.result == .rejected,
+           frame.watermarkOrConfigGeneration == settingsStore.generation,
+           deviceSettings == settingsStore.settings {
+            return
+        }
         confirmedConfigurationGenerationByDevice[deviceID] = nil
         confirmedDeviceSettings = nil
         watchAvailability?.setConfirmedRideDetectionSettings(

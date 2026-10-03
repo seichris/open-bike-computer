@@ -1,3 +1,4 @@
+#include "firmware_metadata_compatibility.hpp"
 #include "firmware_update_http.hpp"
 #include "firmware_update_policy.hpp"
 
@@ -5,17 +6,20 @@
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../status_json/status_json.hpp"
+#include "../power/power.hpp"
+
+extern Power power;
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <esp_app_format.h>
+#include <esp_random.h>
 #include <esp_ota_ops.h>
 #include <mbedtls/base64.h>
 #include <mbedtls/md.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
-#include <sstream>
 #include <vector>
 
 namespace firmware_update {
@@ -211,18 +215,18 @@ static std::string manifestPayload(uint32_t schemaVersion,
                                    const std::string &gitSha, uint32_t size,
                                    const std::string &sha256,
                                    const std::string &releaseUrl,
-                                   uint32_t minUpdaterProtocol) {
-  std::ostringstream payload;
-  payload << "schemaVersion=" << schemaVersion << "\n"
-          << "target=" << target << "\n"
-          << "version=" << version << "\n"
-          << "build=" << build << "\n"
-          << "gitSha=" << gitSha << "\n"
-          << "size=" << size << "\n"
-          << "sha256=" << sha256 << "\n"
-          << "url=" << releaseUrl << "\n"
-          << "minUpdaterProtocol=" << minUpdaterProtocol << "\n";
-  return payload.str();
+                                   uint32_t minUpdaterProtocol,
+                                   uint32_t mapMetadataReaderVersion = 0) {
+  std::string payload = "schemaVersion=" + std::to_string(schemaVersion) + "\n" +
+      "target=" + target + "\n" + "version=" + version + "\n" +
+      "build=" + std::to_string(build) + "\n" + "gitSha=" + gitSha + "\n" +
+      "size=" + std::to_string(size) + "\n" + "sha256=" + sha256 + "\n" +
+      "url=" + releaseUrl + "\n" +
+      "minUpdaterProtocol=" + std::to_string(minUpdaterProtocol) + "\n";
+  if (schemaVersion == 2)
+    payload += "mapMetadataReaderVersion=" +
+               std::to_string(mapMetadataReaderVersion) + "\n";
+  return payload;
 }
 
 static bool verifyManifestSignature(const std::string &payload,
@@ -397,8 +401,119 @@ std::string FirmwareUpdateHttpServer::statusJson() const {
   } else {
     body += ",\"lastError\":null";
   }
+  body += ",\"firmwareOperation\":" + operationReceiptJson();
   body += ",\"device\":" + firmware_metadata::json() + "}";
   return body;
+}
+
+void FirmwareUpdateHttpServer::setOperationDeviceID(const std::string &device) {
+  if (!operationDeviceID_.empty()) return; // immutable for this boot
+  operationDeviceID_ = device;
+  uint8_t random[16]; esp_fill_random(random, sizeof(random));
+  const char *hex = "0123456789abcdef";
+  for (uint8_t b : random) { operationAdmissionEpoch_ += hex[b>>4]; operationAdmissionEpoch_ += hex[b&15]; }
+}
+
+bool FirmwareUpdateHttpServer::readOperationReceipt(receipt::Record &record) const {
+  if (!receipt::load(record)) return false;
+  uint32_t highWater = operationRevisionHighWater_.load();
+  for (;;) {
+    if (record.revision < highWater) return false; // storage reset/regression in this boot
+    if (operationRevisionHighWater_.compare_exchange_weak(highWater, record.revision)) return true;
+  }
+}
+
+std::string FirmwareUpdateHttpServer::operationReceiptJson() const {
+  std::string json = "{\"protocolVersion\":";
+  json += FIRMWARE_OPERATIONS_V1_ENABLED ? "1" : "0";
+#if FIRMWARE_OPERATIONS_V1_ENABLED
+  receipt::Record record{};
+  const bool readable = readOperationReceipt(record);
+  const bool local = readable && (record.phase == receipt::Phase::Empty || operationDeviceID_ == record.device);
+  status_json::appendStringField(json, "result", local ? receipt::phaseName(record.phase) : "unavailable");
+  if (local) {
+    status_json::appendStringField(json, "admissionEpoch", operationAdmissionEpoch_);
+    status_json::appendUnsignedField(json, "admissionRevision", record.revision);
+    if (record.phase != receipt::Phase::Empty) {
+      status_json::appendStringField(json, "operationId", record.operation);
+      status_json::appendStringField(json, "imageSha256", record.image);
+    }
+  }
+#endif
+  return json + "}";
+}
+
+bool FirmwareUpdateHttpServer::reconcileOperationReceipt(bool runningAccepted) {
+#if FIRMWARE_OPERATIONS_V1_ENABLED
+  receipt::Record record{};
+  if (!readOperationReceipt(record)) return false;
+  if (record.phase == receipt::Phase::Empty) return true;
+  if (operationDeviceID_ != record.device) return false;
+  if (record.phase != receipt::Phase::Accepted) return true;
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  if (!running) return false;
+  if (running->address != record.partitionAddress) {
+    // Previous image booted: selection never completed, or bootloader rolled back.
+    // Do not infer which from version strings or a maintenance correlation.
+    return runningAccepted ? receipt::finish(false) : true;
+  }
+  if (record.imageBytes > running->size) return false;
+  // Hash the exact signed uploaded byte range, not the ESP app-descriptor hash.
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  bool ok = mbedtls_sha256_starts(&sha, 0) == 0;
+  uint8_t buffer[1024], digest[32];
+  for (uint32_t offset=0; ok && offset<record.imageBytes;) {
+    const size_t count = std::min<size_t>(sizeof(buffer), record.imageBytes-offset);
+    ok = esp_partition_read(running, offset, buffer, count) == ESP_OK &&
+         mbedtls_sha256_update(&sha, buffer, count) == 0;
+    offset += count;
+  }
+  ok = ok && mbedtls_sha256_finish(&sha, digest) == 0;
+  mbedtls_sha256_free(&sha);
+  if (!ok) return false;
+  const char *hex = "0123456789abcdef";
+  char encoded[65]{};
+  for (unsigned i=0;i<32;++i) { encoded[2*i]=hex[digest[i]>>4]; encoded[2*i+1]=hex[digest[i]&15]; }
+  if (std::strcmp(encoded, record.image) != 0) return false;
+  return runningAccepted ? receipt::finish(true) : true;
+#else
+  (void)runningAccepted;
+  return true;
+#endif
+}
+
+void FirmwareUpdateHttpServer::handleOperationAcknowledgement(
+    const device_transfer::HttpRequest &request, device_transfer::TransferClient &client) {
+#if FIRMWARE_OPERATIONS_V1_ENABLED
+  std::string body, operation, image;
+  if (!device_transfer::readHttpBody(client, request.contentLength, 256, body) ||
+      !findJsonString(body, "operationId", operation) ||
+      !findJsonString(body, "imageSha256", image) ||
+      operation.size()!=32 || image.size()!=64 || operationDeviceID_.size()!=32) {
+    reject(client, 400, "operation_identity_invalid", "exact operation identity required"); return;
+  }
+  if (!transferServer_->isRequestAuthorized(request)) {
+    reject(client, 401, "transfer_token_invalid", "fresh authorization required"); return;
+  }
+  receipt::Record record{};
+  std::memcpy(record.device, operationDeviceID_.c_str(), 33);
+  std::memcpy(record.operation, operation.c_str(), 33);
+  std::memcpy(record.image, image.c_str(), 65);
+  const auto grant = transferServer_->beginAuthorizedCommit(request, "firmware", request.path, image);
+  if (!grant) {
+    reject(client, 409, "transfer_cancelled", "firmware result acknowledgement was revoked"); return;
+  }
+  const auto acknowledged = operationOwner_.acknowledgeFirmwareOperation(record);
+  transferServer_->endAuthorizedCommit(grant);
+  if (acknowledged != ESP_OK) {
+    reject(client, 409, "operation_acknowledgement_failed", "terminal identity or durable storage mismatch"); return;
+  }
+  device_transfer::sendHttpJson(client, 200, operationReceiptJson());
+#else
+  (void)request;
+  reject(client, 404, "not_found", "firmware operation receipts disabled");
+#endif
 }
 
 std::string FirmwareUpdateHttpServer::bootAcceptanceJson(bool ready) const {
@@ -422,15 +537,23 @@ bool FirmwareUpdateHttpServer::markRunningAppValid() {
   // application's readiness checks, but there is nothing to confirm.
   if (query == ESP_ERR_NOT_FOUND ||
       (query == ESP_OK && (state == ESP_OTA_IMG_VALID ||
-                           state == ESP_OTA_IMG_UNDEFINED)))
+                           state == ESP_OTA_IMG_UNDEFINED))) {
+    // Receipt persistence failure leaves accepted/unresolved, never invalidates
+    // an already valid image. Retry at a later boot; status polling is read-only.
+    (void)reconcileOperationReceipt(true);
     return true;
+  }
   if (query != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY)
     return false;
+  // Keep bootloader rollback available until exact signed bytes are verified.
+  if (!reconcileOperationReceipt(false)) return false;
   const esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
   if (result != ESP_OK)
     return false;
-  return esp_ota_get_state_partition(running, &state) == ESP_OK &&
-         state == ESP_OTA_IMG_VALID;
+  if (esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_VALID)
+    return false;
+  (void)reconcileOperationReceipt(true);
+  return true;
 }
 
 void FirmwareUpdateHttpServer::rejectRunningApp() {
@@ -462,6 +585,9 @@ bool FirmwareUpdateHttpServer::handleRequest(
     reject(client, 401, "transfer_token_invalid",
            "firmware transfer token is missing or invalid");
     return true;
+  }
+  if (request.method == "POST" && request.path == "/firmware-update/operation/acknowledge") {
+    handleOperationAcknowledgement(request, client); return true;
   }
   if (request.method == "GET" && request.path == kStatusPath) {
     handleStatus(client);
@@ -515,6 +641,7 @@ void FirmwareUpdateHttpServer::handleBegin(
   uint32_t build = 0;
   uint32_t size = 0;
   uint32_t minUpdaterProtocol = 0;
+  uint32_t mapMetadataReaderVersion = 0;
   bool allowDowngrade = false;
   if (!findJsonUint(body, "schemaVersion", schemaVersion) ||
       !findJsonString(body, "version", version) ||
@@ -531,7 +658,8 @@ void FirmwareUpdateHttpServer::handleBegin(
   }
   findJsonBool(body, "allowDowngrade", allowDowngrade);
 
-  if (schemaVersion != 1 ||
+  if ((schemaVersion != 1 && schemaVersion != 2) ||
+      (schemaVersion == 2 && !findJsonUint(body, "mapMetadataReaderVersion", mapMetadataReaderVersion)) ||
       minUpdaterProtocol > firmware_metadata::kUpdaterProtocolVersion) {
     fail(client, 400, "manifest_unsupported",
          "firmware manifest is not supported");
@@ -548,10 +676,32 @@ void FirmwareUpdateHttpServer::handleBegin(
   }
   const std::string signedPayload =
       manifestPayload(schemaVersion, target, version, build, gitSha, size,
-                      sha256, releaseUrl, minUpdaterProtocol);
+                      sha256, releaseUrl, minUpdaterProtocol, mapMetadataReaderVersion);
   if (!verifyManifestSignature(signedPayload, manifestSignature)) {
     fail(client, 400, "manifest_signature_invalid",
          "firmware manifest signature is invalid");
+    return;
+  }
+  if (schemaVersion == 1) {
+    uint32_t attestedReader = 0;
+    std::string readerSignature;
+    const bool hasReader = findJsonUint(body, "mapMetadataReaderVersion", attestedReader);
+    const bool hasSignature = findJsonString(body, "mapMetadataReaderSignature", readerSignature);
+    if (hasReader || hasSignature) {
+      if (!hasReader || !hasSignature || !verifyManifestSignature(
+          manifestPayload(2, target, version, build, gitSha, size, sha256,
+                          releaseUrl, minUpdaterProtocol, attestedReader), readerSignature)) {
+        fail(client,400,"metadata_reader_signature_invalid","map reader attestation is invalid");
+        return;
+      }
+      mapMetadataReaderVersion = attestedReader;
+    }
+  }
+  // Capability is inside the verified release signature and bound to image SHA.
+  // A greater build number or developer downgrade flag cannot bypass this floor.
+  if (!metadata_compatibility::allowsReader(mapMetadataReaderVersion)) {
+    fail(client,409,"metadata_reader_incompatible",
+         "signed firmware does not support retained map operation metadata");
     return;
   }
   if (build <= firmware_metadata::build() && !allowDowngrade) {
@@ -575,7 +725,38 @@ void FirmwareUpdateHttpServer::handleBegin(
     return;
   }
 
+  receipt::Record operationRecord{};
+  uint32_t admissionRevision = 0;
+#if FIRMWARE_OPERATIONS_V1_ENABLED
+  std::string operationId, admissionEpoch;
+  receipt::Record previous{};
+  if (!findJsonString(body, "operationId", operationId) || operationId.size()!=32 ||
+      !receipt::hex(operationId.c_str(),32) || operationDeviceID_.size()!=32 ||
+      !findJsonString(body, "admissionEpoch", admissionEpoch) ||
+      admissionEpoch.empty() || admissionEpoch != operationAdmissionEpoch_ ||
+      !findJsonUint(body, "admissionRevision", admissionRevision) ||
+      !readOperationReceipt(previous) || previous.revision != admissionRevision) {
+    reject(client, 409, "operation_admission_invalid", "fresh durable admission and operation identity required"); return;
+  }
+  if (previous.phase != receipt::Phase::Empty && operationDeviceID_ != previous.device) {
+    reject(client, 409, "operation_foreign_device", "retained operation belongs to another owner identity"); return;
+  }
+  if (previous.phase != receipt::Phase::Empty && previous.phase != receipt::Phase::Acknowledged) {
+    reject(client, 409, "operation_unresolved", "query and acknowledge the retained operation first"); return;
+  }
+  if (operationId == previous.operation) {
+    reject(client, 409, "operation_replay", "acknowledged operation cannot be repeated"); return;
+  }
+  std::memcpy(operationRecord.operation, operationId.c_str(), 33);
+  std::memcpy(operationRecord.device, operationDeviceID_.c_str(), 33);
+  std::memcpy(operationRecord.image, sha256.c_str(), 65);
+  operationRecord.partitionAddress = updatePartition->address;
+  operationRecord.imageBytes = size;
+#endif
   resetUploadState();
+  pendingMapMetadataReader_ = mapMetadataReaderVersion;
+  pendingReceipt_ = operationRecord;
+  pendingReceiptRevision_ = admissionRevision;
   esp_ota_handle_t handle = 0;
   esp_err_t result = operationOwner_.begin(updatePartition, size, handle);
   if (result != ESP_OK) {
@@ -588,6 +769,12 @@ void FirmwareUpdateHttpServer::handleBegin(
          "another firmware transaction owns the OTA lifecycle");
     return;
   }
+
+#if FIRMWARE_OPERATIONS_V1_ENABLED
+  // Signed manifest, durable admission, device binding and replay checks above
+  // selected this exact operation. Correlation conveys no authorization.
+  (void)transferServer_->bindResourceOperation(request, "firmware", operationId);
+#endif
 
   lockState();
   status_ = "receiving";
@@ -772,14 +959,16 @@ void FirmwareUpdateHttpServer::handleFinalize(
     return;
   }
 
-  if (!transferServer_->beginAuthorizedCommit(request)) {
+  const auto commitGrant = transferServer_->beginAuthorizedCommit(
+      request, "firmware", request.path, expectedSha256);
+  if (commitGrant == 0) {
     resetUploadState();
     fail(client, 409, "transfer_cancelled",
          "firmware transfer authorization was revoked before activation");
     return;
   }
   if (!transaction_.beginCommit()) {
-    transferServer_->endAuthorizedCommit();
+    transferServer_->endAuthorizedCommit(commitGrant);
     resetUploadState();
     fail(client, 409, "ota_commit_state_invalid",
          "firmware transaction could not enter the commit boundary");
@@ -788,9 +977,27 @@ void FirmwareUpdateHttpServer::handleFinalize(
 
   firmware_maintenance::setStage(firmware_maintenance::Stage::Committing);
   transferServer_->noteStatusChanged("commit_boundary");
+#if FIRMWARE_OPERATIONS_V1_ENABLED
+  // Persist on the internal-stack owner, under the irrevocable grant, BEFORE
+  // boot selection. A failed or ambiguous NVS write must not select an image.
+  result = operationOwner_.acceptFirmwareOperation(pendingReceipt_, pendingReceiptRevision_);
+  if (result != ESP_OK) {
+    transferServer_->endAuthorizedCommit(commitGrant);
+    resetUploadState();
+    fail(client, 500, "operation_receipt_unresolved", "durable OTA acceptance could not be confirmed");
+    return;
+  }
+  operationRevisionHighWater_.store(pendingReceiptRevision_ + 1);
+#endif
+  if (!metadata_compatibility::allowsReader(pendingMapMetadataReader_)) {
+    transferServer_->endAuthorizedCommit(commitGrant);
+    resetUploadState();
+    fail(client,409,"metadata_reader_incompatible","map metadata compatibility changed before boot selection");
+    return;
+  }
   result = operationOwner_.selectBootPartition(updatePartition);
   if (result != ESP_OK) {
-    transferServer_->endAuthorizedCommit();
+    transferServer_->endAuthorizedCommit(commitGrant);
     resetUploadState();
     fail(client, 500, "set_boot_partition_failed", esp_err_to_name(result));
     return;
@@ -809,8 +1016,11 @@ void FirmwareUpdateHttpServer::handleFinalize(
                 updatePartition->label, pendingVersion.c_str(),
                 static_cast<unsigned>(pendingBuild), appDescription.version,
                 appDescription.project_name);
-  delay(750);
-  ESP.restart();
+  // Boot selection is complete. Close admission before releasing its grant;
+  // the main shutdown coordinator drains this HTTP worker before rebooting.
+  transferServer_->beginShutdown();
+  transferServer_->endAuthorizedCommit(commitGrant);
+  power.deviceRestart();
 }
 
 void FirmwareUpdateHttpServer::handleCancel(device_transfer::TransferClient &client) {

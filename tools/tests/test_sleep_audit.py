@@ -36,6 +36,10 @@ class SleepAuditTests(unittest.TestCase):
         self.assertIn("passed", self.compile_run(
             ROOT / "esp32/tools/tests/test_sleep_audit.cpp"))
 
+    def test_shutdown_barrier_fault_sequences(self):
+        self.assertIn("passed", self.compile_run(
+            ROOT / "esp32/tools/tests/test_shutdown_barrier.cpp"))
+
     def test_passive_bus_read_both_boards(self):
         source = (ROOT / "esp32/lib/waveshare_board/i2c_bus.cpp").read_text()
         start = source.index("bool readRegisterBlock8Once(")
@@ -256,12 +260,21 @@ int main() {
 
     def test_shutdown_order_and_passive_final_checkpoint(self):
         power = (POWER / "power.cpp").read_text()
-        shutdown = power[power.index("void Power::deviceShutdown()") :]
+        request = power.split("void Power::deviceShutdown()", 1)[1].split(
+            "void Power::deviceRestart()", 1)[0]
+        self.assertIn("shutdownRequested_.store(true", request)
+        self.assertNotIn("powerDeepSleep", request)
+        shutdown = power[power.index("bool Power::processShutdown()") :]
+        self.assertIn("if (shutdownBarrier_.permit())", shutdown)
+        self.assertIn("Stage::Deferred", shutdown)
         self.assertLess(shutdown.index("sleep_audit::requested("),
-                        shutdown.index("ride_diagnostics::prepareForShutdown("))
+                        shutdown.index("ride_diagnostics::pollShutdownQuiescence("))
         self.assertLess(shutdown.index("sleep_audit::recorderSealed("),
                         shutdown.index("powerOffPeripherals();"))
         sleep = power[power.index("void Power::powerDeepSleep()") : power.index("void Power::powerLightSleepTimer")]
+        self.assertLess(sleep.index("if (!shutdownBarrier_.permit()) return;"),
+                        sleep.index("esp_bt_controller_disable()"))
+        self.assertNotIn("esp_wifi_stop()", sleep)
         self.assertLess(sleep.index("sleep_audit::entering("),
                         sleep.index("esp_deep_sleep_start();"))
         runtime = (POWER / "sleep_audit.cpp").read_text()

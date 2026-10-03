@@ -13,8 +13,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
-#include <iomanip>
-#include <sstream>
+#include "gpxValueFormat.hpp"
 #include <dirent.h> 
 #include "esp_log.h"
 #include "tinyxml2.h"
@@ -92,11 +91,8 @@ bool GPXParser::editTagAttrOrElem(const char* tag, const char* attribute, const 
     return false;
   }
  
-  std::ostringstream oldValueStream, newValueStream;
-  oldValueStream << oldValue;
-  newValueStream << newValue;
-  std::string oldValueStr = oldValueStream.str();
-  std::string newValueStr = newValueStream.str();
+  const std::string oldValueStr = gpx_value_format::value(oldValue);
+  const std::string newValueStr = gpx_value_format::value(newValue);
  
   for (tinyxml2::XMLElement* tagElement = root->FirstChildElement(tag); tagElement != nullptr; tagElement = tagElement->NextSiblingElement(tag))
   {
@@ -173,9 +169,7 @@ bool GPXParser::insertTagAttrOrElem(const char* tag, const char* attribute, cons
       return false;
   }
 
-  std::ostringstream valueStream;
-  valueStream << value;
-  std::string valueStr = valueStream.str();
+  const std::string valueStr = gpx_value_format::value(value);
 
   if (attribute)
     tagElement->SetAttribute(attribute, valueStr.c_str());

@@ -4,12 +4,18 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <atomic>
 #include <functional>
 
+// Explicit direct dependency for PlatformIO circular-library include paths.
+#include <WiFi.h>
 #include "../device_transfer/device_transfer_http.hpp"
 #include "../device_transfer/device_transfer_http_limits.hpp"
 #include "map_transfer.hpp"
 #include "map_stream_receiver.hpp"
+#include "map_operation_journal.hpp"
+#include "map_selection_health.hpp"
+#include "../device_transfer/operation_admission_policy.hpp"
 
 namespace firmware_update { class DeviceOperationOwner; }
 
@@ -25,6 +31,11 @@ public:
     bool sessionPresent = false;
   };
 
+  void setOperationDeviceID(const std::string &device);
+  bool operationsSupported() const;
+  bool requestOperationStatus(const std::string &operationID);
+  std::string operationStatusJson() const;
+  bool takeOperationStatusNotification();
   void configure(std::string storageRoot = "/sdcard", uint16_t port = 8080,
                  device_transfer::HttpTransferServer *sharedServer = nullptr);
   void setStreamTrustStore(MapStreamTrustStore trustStore);
@@ -35,6 +46,10 @@ public:
   bool setEnabled(bool enabled);
   void setLastError(const std::string &code, const std::string &message);
   void process();
+  bool shutdownQuiescent() const;
+  uint32_t storageProgressSequence() const {
+    return storageProgressSequence_.load(std::memory_order_relaxed);
+  }
   HttpTransferStatus status() const;
   MapActivationSnapshot activationSnapshot() const;
   std::string activationStatusJson(bool compact = false) const;
@@ -48,17 +63,87 @@ public:
   void setOperationOwner(firmware_update::DeviceOperationOwner *owner) {
     operationOwner_ = owner;
   }
+  std::string selectionHealthJson() const;
+  // Boot recovery/storage worker only: resolves retained operation identity.
+  void observeBootSelection(const ActiveMapSelection &selected, bool loaded,
+                            bool preserveAffected = false);
+  void markSelectionDegraded();
+  void acknowledgeRuntimeRollback(const std::string &root, bool loaded);
   bool requestRuntimeRollback();
   void submitPendingRollback();
+  void submitPendingOperationTask();
   bool takeRuntimeRollback(ActiveMapSelection &restored, bool &succeeded);
 
 private:
+  class OperationStoreGuard {
+  public:
+    explicit OperationStoreGuard(const MapTransferHttpServer &owner) : owner_(owner) {
+      if (owner_.operationStoreMutex_) xSemaphoreTakeRecursive(owner_.operationStoreMutex_,portMAX_DELAY);
+    }
+    ~OperationStoreGuard() {
+      if (owner_.operationStoreMutex_) xSemaphoreGiveRecursive(owner_.operationStoreMutex_);
+    }
+    OperationStoreGuard(const OperationStoreGuard &) = delete;
+    OperationStoreGuard &operator=(const OperationStoreGuard &) = delete;
+  private:
+    const MapTransferHttpServer &owner_;
+  };
+  class StateGuard {
+  public:
+    explicit StateGuard(const MapTransferHttpServer &owner) : owner_(owner) { owner_.lockState(); }
+    ~StateGuard() { owner_.unlockState(); }
+    StateGuard(const StateGuard &) = delete;
+    StateGuard &operator=(const StateGuard &) = delete;
+  private:
+    const MapTransferHttpServer &owner_;
+  };
   std::string storageRoot_ = "/sdcard";
+  std::atomic<uint32_t> storageProgressSequence_{0};
+  std::string operationDeviceID_;
+  MapSelectionHealth selectionHealth_;
+  std::string selectionOperationID(const ActiveMapSelection &selected) const;
+  mutable operation::AdmissionFence operationAdmission_;
+  bool observeOperationRevision(uint64_t revision) const;
+  bool permitsOperationAdmission(const std::string &epoch, uint64_t revision) const;
+  std::string operationQuery_;
+  std::string operationStatus_;
+  bool operationTaskSubmitted_ = false;
+  bool operationStatusNotification_ = false;
+  std::string terminalOperationID_;
+  std::string terminalSessionID_;
+  std::string terminalMapID_;
+  bool terminalAutomaticExit_ = false;
+  bool terminalFailed_ = false;
+  std::string rollbackOperationID_;
+  struct CommitRecovery {
+    operation::Identity identity;
+    device_transfer::HttpResponseCompletionToken response;
+    bool armed = false;
+    bool responseCompleted = false;
+    bool pending() const { return !identity.session.empty(); }
+  };
+  CommitRecovery commitRecovery_;
+  void armCommitRecovery(const device_transfer::HttpRequest &request);
+  void retryAcceptedActivation(const std::string &sessionId);
+  bool recoverCommitDisposition(const CommitRecovery &recovery);
+  static void operationTask(void *context);
+  void executeOperationTask();
+  std::string readOperationStatus(const std::string &operationID) const;
+  bool admitReceivingOperation(const device_transfer::HttpRequest &request,
+                               const MapStreamInstallSnapshot &snapshot);
+  bool handleOperationControl(const device_transfer::HttpRequest &request,
+                              device_transfer::TransferClient &client);
+  bool recordPreparedOperation(const device_transfer::HttpRequest &request,
+                       const MapStreamInstallSnapshot &snapshot,
+                       const std::string &streamHash);
+  std::string pendingMapOperationID_;
   device_transfer::HttpTransferServer ownedTransferServer_;
   device_transfer::HttpTransferServer *transferServer_ =
       &ownedTransferServer_;
   MapTransferInstaller installer_{"/sdcard"};
   mutable SemaphoreHandle_t stateMutex_ = nullptr;
+  mutable SemaphoreHandle_t operationStoreMutex_ = nullptr;
+  StaticSemaphore_t operationStoreMutexStorage_{};
   StaticSemaphore_t stateMutexStorage_{};
   MapActivationState activationState_;
   MapStreamTrustStore streamTrustStore_;
@@ -81,6 +166,9 @@ private:
     bool pending() const { return !sessionId.empty(); }
   };
   DeferredActivation deferredActivation_;
+  // Unique server grant retained until renderer ACK or verified rollback.
+  device_transfer::HttpTransferServer::CommitGrant pendingCommitGrant_ = 0;
+  void releaseCommitGrant();
   enum class RollbackKind { None, Transfer, Runtime };
   StorageControlSubmit storageControlSubmit_ = nullptr;
   firmware_update::DeviceOperationOwner *operationOwner_ = nullptr;

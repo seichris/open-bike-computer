@@ -8,6 +8,7 @@ namespace ride_diagnostics::http_policy {
 enum class RouteKind : uint8_t {
   Unknown = 0,
   Status,
+  Policy,
   Index,
   Chunk,
   ActiveTail,
@@ -43,12 +44,25 @@ inline Route parseRoute(const std::string &method, const std::string &path,
     return {};
   const std::string relative = path.substr(prefix.size());
   if (method == "GET") {
+    if (relative == "capabilities" || relative == "policy")
+      return {RouteKind::Policy};
     if (relative == "status")
       return {RouteKind::Status};
     if (relative == "index")
       return {RouteKind::Index};
     if (relative == "active-tail")
       return {RouteKind::ActiveTail};
+    if (relative.rfind("active-tail/", 0) == 0) {
+      const std::string identity = relative.substr(12);
+      const std::size_t slash = identity.find('/');
+      Route route{RouteKind::ActiveTail};
+      if (slash == std::string::npos || identity.find('/', slash + 1) != std::string::npos ||
+          !parsePositiveUnsigned(identity.substr(0, slash), route.boot)) return {};
+      const std::string after = identity.substr(slash + 1);
+      if (after == "0") route.chunk = 0;
+      else if (!parsePositiveUnsigned(after, route.chunk)) return {};
+      return route;
+    }
     constexpr char chunkPrefix[] = "chunks/";
     if (relative.rfind(chunkPrefix, 0) == 0) {
       const std::string identity = relative.substr(sizeof(chunkPrefix) - 1);

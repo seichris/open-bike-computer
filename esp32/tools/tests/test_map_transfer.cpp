@@ -931,7 +931,7 @@ static void testPruningPreservesLiveDurableStreamReferences() {
   const std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string maps = root + "/VECTMAP/.maps";
-  for (const std::string &name :
+  for (const std::string name :
        {"active", "previous", "installing", "ready", "pending", "transaction",
         "transaction-previous", "obsolete"}) {
     assert(::system((std::string("mkdir -p ") + maps + "/" + name).c_str()) ==
@@ -952,7 +952,7 @@ static void testPruningPreservesLiveDurableStreamReferences() {
             "{\"root\":\"/VECTMAP/.maps/transaction\","
             "\"previousRoot\":\"/VECTMAP/.maps/transaction-previous\"}\n");
   assert(installer.pruneObsoleteInstalledMaps());
-  for (const std::string &name : {"active", "previous", "installing", "pending",
+  for (const std::string name : {"active", "previous", "installing", "pending",
                                   "transaction", "transaction-previous"}) {
     assert(exists(maps + "/" + name + "/map.fmb"));
   }

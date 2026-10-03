@@ -197,6 +197,7 @@ private final class FakeWorkoutBackgroundExecutionLease:
     private(set) var isActive = false
     private(set) var beginCount = 0
     private(set) var endCount = 0
+    var onEnd: (() -> Void)?
     private var expirationHandler:
         (@MainActor @Sendable () -> Void)?
 
@@ -214,6 +215,7 @@ private final class FakeWorkoutBackgroundExecutionLease:
         isActive = false
         endCount += 1
         expirationHandler = nil
+        onEnd?()
     }
 
     func expireSynchronously() {
@@ -936,6 +938,8 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         client.recordsValue = [record("orphan", mapped: mapped)]
         let scheduler = WorkoutLiveActivityWaitScheduler()
         let lease = FakeWorkoutBackgroundExecutionLease()
+        let leaseEnded = expectation(description: "reconciliation lease ended")
+        lease.onEnd = { leaseEnded.fulfill() }
         let controller = makeController(
             source: source,
             client: client,
@@ -952,7 +956,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         XCTAssertEqual(scheduler.requestedIntervals, [3])
 
         await scheduler.resumeNext()
-        await settle()
+        await fulfillment(of: [leaseEnded], timeout: 3)
 
         XCTAssertFalse(lease.isActive)
         XCTAssertEqual(client.endings.map(\.0), ["orphan"])

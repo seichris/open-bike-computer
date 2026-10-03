@@ -1,5 +1,8 @@
 #include "device_transfer_http.hpp"
 #include "commit_boundary_policy.hpp"
+#include "lifecycle_resource_event.hpp"
+#include "renderer_stack_metrics.hpp"
+#include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../firmware_maintenance/firmware_maintenance.hpp"
 #include "../firmware_maintenance/firmware_maintenance_policy.hpp"
 #include "../power_management/power_management.hpp"
@@ -9,11 +12,12 @@
 #include "response_write_policy.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cstdio>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
-#include <sstream>
+#include <new>
 
 namespace device_transfer {
 namespace {
@@ -301,7 +305,7 @@ bool HttpTransferServer::bindAuthenticatedBleSession(uint64_t sessionId) {
 
 bool HttpTransferServer::suspendFirmwareAuthenticatedBleSession() {
   lockState();
-  if (!enabled_ || commitInProgress_) {
+  if (!enabled_ || commitBoundary_.active()) {
     unlockState();
     return false;
   }
@@ -318,7 +322,7 @@ void HttpTransferServer::clearAuthenticatedBleSession() {
   lockState();
   const bool hadBinding = authenticatedBleSessionId_ != 0;
   const bool wasEnabled = enabled_;
-  const bool commitInProgress = commitInProgress_;
+  const bool commitInProgress = commitBoundary_.active();
   authenticatedBleSessionId_ = 0;
   if (commitInProgress) {
     // The authenticated request already crossed the serialized activation
@@ -471,17 +475,17 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   }
   if (!enabled && wasEnabled) {
     lockState();
-    const bool commitInProgress = commitInProgress_;
-    unlockState();
+    const bool commitInProgress = commitBoundary_.active();
     if (!commit_boundary_policy::cancellationAllowed(commitInProgress)) {
+      unlockState();
       setLastError("commit_in_progress",
                    "firmware activation has crossed the commit boundary");
       return false;
     }
+    // Keep the lock from the grant check through generation revocation.
     // Revoke the request generation before stopping the listener/AP. Network
     // teardown can take long enough for a nearly complete handler to advance;
     // it must observe cancellation before it can publish or activate anything.
-    lockState();
     enabled_ = false;
     mode_.clear();
     apPassphrase_.clear();
@@ -496,6 +500,13 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
   }
   if (enabled || !wasEnabled) {
     lockState();
+    if ((enabled && commitBoundary_.admissionClosed()) ||
+        (!enabled && commitBoundary_.active())) {
+      unlockState();
+      if (acquiredPowerLock)
+        power_management::release(power_management::LockDomain::Transfer);
+      return false;
+    }
     const bool transferBoundary = enabled_ != enabled ||
                                   (enabled && mode_ != mode);
     enabled_ = enabled;
@@ -506,6 +517,13 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
         apPassphrase_ = generateSessionToken().substr(0, 24);
       }
       if (!wasEnabled) {
+        resourceCycle_ = nextHttpTransferGeneration(resourceCycle_);
+        resourceSample_ = 0;
+        workerStackHighWaterBytes_ = 0;
+        workerStackSampleAvailable_ = false;
+        std::snprintf(resourceMode_, sizeof(resourceMode_), "%s",
+                      lifecycle_resources::modeName(requestedMode.c_str()));
+        resourceOperation_[0] = '\0';
         lastTransferFailure_ = {};
         networkStart_ = {};
         if (requestedMode != "debug" && requestedMode != "diagnostics")
@@ -591,6 +609,7 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
       }
       if (firmware_maintenance::active())
         firmware_maintenance::setStage(firmware_maintenance::Stage::Failed);
+      observeResources("worker_failed");
       signalStatusChanged();
       return false;
     }
@@ -620,8 +639,14 @@ void HttpTransferServer::sampleResources(const char *resourcePhase) {
 void HttpTransferServer::process() {}
 
 bool HttpTransferServer::startNetwork() {
+  readinessSamples_ = 0;
+  readinessObserved_ = false;
+  lastReadinessPollMs_ = 0;
+  acceptedClients_ = tlsSucceeded_ = tlsFailed_ = 0;
+  listenerReady_ = false;
   lockState();
   const bool enabled = enabled_;
+  readinessGeneration_ = transferGeneration_;
   NetworkOperationOwner *networkOwner = networkOperationOwner_;
   const LanCredentials preferredNetwork = preferredNetwork_;
   preferredNetwork_ = {};
@@ -647,10 +672,17 @@ bool HttpTransferServer::startNetwork() {
     networkSsid_ = preferredNetwork.ssid;
     unlockState();
 
-    if (!networkOwner->startStation(preferredNetwork.ssid,
-                                    preferredNetwork.password)) {
-      setLastError("wifi_station_start",
-                   "could not start transfer Wi-Fi station safely");
+    observeResources("before_wifi_station");
+    const NetworkStartResult stationStart = networkOwner->startStationDetailed(
+        preferredNetwork.ssid, preferredNetwork.password);
+    lockState();
+    networkStart_ = stationStart;
+    unlockState();
+    observeResources("after_wifi_station");
+    observeNetwork("station_start_returned", true);
+    if (!stationStart.ok()) {
+      setLastError(networkStartCode(stationStart.failedStep),
+                   "could not start transfer Wi-Fi station safely; see Wi-Fi startup status for the failed step and memory snapshot");
       return false;
     }
     const uint32_t started = millis();
@@ -662,7 +694,8 @@ bool HttpTransferServer::startNetwork() {
         (void)networkOwner->disconnectStation(true);
         return false;
       }
-      if (WiFi.status() == WL_CONNECTED && WiFi.localIP() != IPAddress()) {
+      observeNetwork("station_connecting");
+      if (networkOwner->stationState() == StationState::Connected && networkOwner->stationIPAddress() != 0) {
         lockState();
         startedStation_ = true;
         networkTransport_ = "lan";
@@ -671,7 +704,7 @@ bool HttpTransferServer::startNetwork() {
         Serial.printf(
             "DEVICE_TRANSFER_HTTP: joined LAN ssid_bytes=%u ip=%s\n",
             static_cast<unsigned>(preferredNetwork.ssid.size()),
-            WiFi.localIP().toString().c_str());
+            IPAddress(networkOwner->stationIPAddress()).toString().c_str());
         break;
       }
       vTaskDelay(pdMS_TO_TICKS(kLanConnectPollMs));
@@ -690,10 +723,10 @@ bool HttpTransferServer::startNetwork() {
   if (!lanReady) {
     std::string fallbackReason = requestedHotspotFallbackReason;
     if (preferLan) {
-      const wl_status_t stationStatus = WiFi.status();
+      const StationState stationStatus = networkOwner->stationState();
       fallbackReason = lanFallbackReasonForStatus(
-          static_cast<int>(stationStatus), static_cast<int>(WL_NO_SSID_AVAIL),
-          static_cast<int>(WL_CONNECT_FAILED));
+          static_cast<int>(stationStatus), static_cast<int>(StationState::NoSSID),
+          static_cast<int>(StationState::AuthenticationFailed));
       if (!networkOwner->disconnectStation(true)) {
         setLastError("wifi_station_stop",
                      "could not stop transfer Wi-Fi station safely");
@@ -708,6 +741,7 @@ bool HttpTransferServer::startNetwork() {
     networkStart_ = apStart;
     unlockState();
     observeResources("after_wifi_ap");
+    observeNetwork("ap_start_returned", true);
     if (!apStart.ok()) {
       char message[300] = {};
       std::snprintf(message, sizeof(message),
@@ -742,10 +776,8 @@ bool HttpTransferServer::startNetwork() {
     networkSsid_ = apSsid;
     unlockState();
     Serial.printf(
-        "DEVICE_TRANSFER_HTTP: started AP fallback=%d reason=%s ssid=%s "
-        "ip=%s\n",
-        !fallbackReason.empty(), fallbackReason.c_str(), apSsid.c_str(),
-        WiFi.softAPIP().toString().c_str());
+        "DEVICE_TRANSFER_HTTP: started AP fallback=%d reason=%s\n",
+        !fallbackReason.empty(), fallbackReason.c_str());
   }
 
   if (mode == "firmware" && firmware_maintenance::active()) {
@@ -765,7 +797,16 @@ bool HttpTransferServer::startNetwork() {
   }
 
   observeResources("before_listener");
+  errno = 0;
   server_.begin();
+  const int listenerError = errno;
+  listenerReady_ = static_cast<bool>(server_);
+  observeNetwork("listener_begin", true);
+  observeTransport("listener_begin", listenerReady_ ? 0 : listenerError);
+  if (!listenerReady_) {
+    setLastError("http_listener_start", "transfer HTTPS listener failed to bind/listen");
+    return false;
+  }
   server_.setNoDelay(true);
   Serial.printf(
       "DEVICE_TRANSFER_HTTP: listener started port=%u transport=%s "
@@ -797,14 +838,23 @@ void HttpTransferServer::stopNetwork() {
   unlockState();
 
   server_.stop();
+  listenerReady_ = false;
   if (networkOwner == nullptr)
     return;
+  bool stopped = true;
   if (startedAp)
-    (void)networkOwner->stopAccessPoint(true);
+    stopped = networkOwner->stopAccessPoint(true) && stopped;
   if (startedStation)
-    (void)networkOwner->disconnectStation(true);
+    stopped = networkOwner->disconnectStation(true) && stopped;
   if (hadNetworkActivity)
-    (void)networkOwner->stopWiFi();
+    stopped = networkOwner->stopWiFi() && stopped;
+  observeNetwork("network_stop_returned", true);
+  observeTransport("network_stop_returned", stopped ? 0 : -1);
+  if (!stopped) {
+    lockState();
+    networkStopFailed_ = true;
+    unlockState();
+  }
 }
 
 void HttpTransferServer::runWorker() {
@@ -829,6 +879,7 @@ void HttpTransferServer::runWorker() {
     observeResources("network_stopped");
     if (networkOperationOwner_ != nullptr && !networkOperationOwner_->release()) {
       lockState();
+      networkStopFailed_ = true;
       if (lastErrorCode_.empty())
         rememberError("operation_owner_poisoned",
                       "internal transfer owner could not be safely released");
@@ -865,6 +916,7 @@ void HttpTransferServer::runWorker() {
       observeResources("network_stopped");
       if (networkOperationOwner_ != nullptr && !networkOperationOwner_->release()) {
         lockState();
+        networkStopFailed_ = true;
         if (lastErrorCode_.empty())
           rememberError("operation_owner_poisoned",
                         "internal transfer owner could not be safely released");
@@ -881,8 +933,11 @@ void HttpTransferServer::runWorker() {
       }
       return;
     }
+    observeNetwork("network_observed");
     WiFiClient acceptedClient = server_.accept();
     if (acceptedClient) {
+      ++acceptedClients_;
+      if (acceptedClients_ == 1) observeTransport("first_tcp_accepted");
       observeResources("client_accepted");
       const HttpTransferStatus networkStatus = status();
       Serial.printf(
@@ -890,7 +945,7 @@ void HttpTransferServer::runWorker() {
           "free_heap=%u stack_words=%u\n",
           networkStatus.networkTransport.c_str(),
           static_cast<unsigned>(networkStatus.networkTransport == "hotspot"
-                                    ? WiFi.softAPgetStationNum()
+                                    ? networkOperationOwner_->accessPointClientCount()
                                     : 0),
           static_cast<unsigned>(ESP.getFreeHeap()),
           static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
@@ -930,6 +985,8 @@ void HttpTransferServer::runWorker() {
             static_cast<unsigned long>(diagnostics.before.psramLargest),
             static_cast<unsigned long>(diagnostics.after.psramFree),
             static_cast<unsigned long>(diagnostics.after.psramLargest));
+        ++tlsFailed_;
+        if (tlsFailed_ <= 3) observeTransport(transferTlsFailureStageName(diagnostics.stage), diagnostics.lastEspError);
         setLastError(transferTlsFailureCode(diagnostics), message);
         Serial.printf(
             "DEVICE_TRANSFER_HTTP: rejected client before secure request %s\n",
@@ -938,6 +995,8 @@ void HttpTransferServer::runWorker() {
         observeResources("tls_failed");
         continue;
       }
+      ++tlsSucceeded_;
+      if (tlsSucceeded_ == 1) observeTransport("first_tls_ready");
       observeResources("tls_ready");
       lockState();
       activeClient_ = &client;
@@ -983,7 +1042,7 @@ void HttpTransferServer::runWorker() {
             "free_heap=%u stack_words=%u\n",
             networkStatus.networkTransport.c_str(),
             static_cast<unsigned>(networkStatus.networkTransport == "hotspot"
-                                      ? WiFi.softAPgetStationNum()
+                                      ? networkOperationOwner_->accessPointClientCount()
                                       : 0),
             networkStatus.baseUrl.c_str(),
             static_cast<unsigned>(ESP.getFreeHeap()),
@@ -1051,10 +1110,9 @@ HttpTransferStatus HttpTransferServer::status() const {
   std::string baseUrl;
   if (enabled) {
     IPAddress ip =
-        startedAp ? WiFi.softAPIP()
-                  : (startedStation && WiFi.status() == WL_CONNECTED
-                         ? WiFi.localIP()
-                         : IPAddress());
+        networkOwner == nullptr ? IPAddress()
+        : startedAp ? IPAddress(networkOwner->accessPointIPAddress())
+                    : (startedStation ? IPAddress(networkOwner->stationIPAddress()) : IPAddress());
     if (ip != IPAddress()) {
       baseUrl = std::string("https://") + ip.toString().c_str() + ":" +
                 std::to_string(port);
@@ -1156,26 +1214,100 @@ void HttpTransferServer::noteDiagnosticsModeDecision(bool matches) {
   unlockState();
 }
 
-bool HttpTransferServer::beginAuthorizedCommit(const HttpRequest &request) {
+bool HttpTransferServer::bindResourceOperation(
+    const HttpRequest &request, const std::string &mode,
+    const std::string &operationID) {
+  lockState();
+  const bool authorized =
+      isHttpTransferGenerationCurrent(enabled_, transferGeneration_,
+                                      request.transferGeneration) &&
+      mode_ == mode && authenticatedBleSessionId_ != 0 &&
+      !sessionToken_.empty() && constantTimeEqual(request.transferToken, sessionToken_);
+  const bool bound = authorized && lifecycle_resources::bindOperation(
+      resourceOperation_, operationID.c_str());
+  unlockState();
+  if (bound)
+    observeResources("operation_selected");
+  return bound;
+}
+
+HttpTransferServer::CommitGrant HttpTransferServer::beginAuthorizedCommit(
+    const HttpRequest &request, const std::string &mode,
+    const std::string &operation, const std::string &artifact) {
   lockState();
   const bool authorized =
       isHttpTransferGenerationCurrent(enabled_, transferGeneration_,
                                       request.transferGeneration) &&
       authenticatedBleSessionId_ != 0 && !sessionToken_.empty() &&
       constantTimeEqual(request.transferToken, sessionToken_);
-  if (commit_boundary_policy::begin(authorized, commitInProgress_)) {
+  CommitGrant grant = 0;
+  try {
+    grant = commitBoundary_.begin(authorized, mode_ == mode,
+        (request.method == "PUT" || request.method == "POST") &&
+            request.path == operation, operation, artifact);
+  } catch (const std::bad_alloc &) {
+    // No grant was published; do not leave the state mutex locked.
+  }
+  if (grant != 0) {
+    // A generic OTA request has no map identity header. Keep its adapter-bound
+    // operation, while accepting only validated UUID syntax for map identity.
+    if (mode == "map")
+      (void)lifecycle_resources::bindOperation(resourceOperation_, request.mapOperationID.c_str());
     currentRequestAuthorized_ = true;
     lastUsefulTrafficMs_ = millis();
   }
   unlockState();
-  return authorized;
+  if (grant != 0)
+    observeResources("commit_granted");
+  return grant;
 }
 
-void HttpTransferServer::endAuthorizedCommit() {
+bool HttpTransferServer::endAuthorizedCommit(CommitGrant grant) {
   lockState();
-  commit_boundary_policy::end(commitInProgress_);
+  const bool ended = commitBoundary_.end(grant);
   unlockState();
-  signalStatusChanged();
+  if (ended) {
+    observeResources("grant_released");
+    signalStatusChanged();
+  }
+  return ended;
+}
+
+void HttpTransferServer::setCommitAdmissionClosed(bool closed) {
+  lockState();
+  commitBoundary_.closeAdmission(closed);
+  unlockState();
+}
+
+bool HttpTransferServer::commitInProgress() const {
+  lockState();
+  const bool active = commitBoundary_.active();
+  unlockState();
+  return active;
+}
+
+void HttpTransferServer::beginShutdown() {
+  setCommitAdmissionClosed(true);
+  observeResources("shutdown_requested");
+  clearAuthenticatedBleSession();
+}
+
+void HttpTransferServer::pollShutdown() {
+  lockState();
+  const bool stop = commitBoundary_.admissionClosed() && !commitBoundary_.active();
+  unlockState();
+  if (stop)
+    clearAuthenticatedBleSession();
+  process();
+}
+
+bool HttpTransferServer::isShutdownQuiescent() const {
+  lockState();
+  const bool quiet = commitBoundary_.admissionClosed() && !commitBoundary_.active() &&
+      !enabled_ && workerTask_ == nullptr && !startedAp_ && !startedStation_ &&
+      !networkStopFailed_;
+  unlockState();
+  return quiet;
 }
 
 bool HttpTransferServer::waitUntilStopped(uint32_t timeoutMs) {
@@ -1230,9 +1362,18 @@ bool HttpTransferServer::handleClient(TransferClient &client,
   std::string version;
   std::string requestLineTrailing;
   {
-    std::stringstream requestStream(requestLine);
-    requestStream >> request.method >> request.path >> version;
-    requestStream >> requestLineTrailing;
+    size_t position = 0;
+    const auto readToken = [&]() {
+      const size_t start = requestLine.find_first_not_of(" \t\n\r\f\v", position);
+      if (start == std::string::npos) return std::string();
+      const size_t end = requestLine.find_first_of(" \t\n\r\f\v", start);
+      position = end == std::string::npos ? requestLine.size() : end;
+      return requestLine.substr(start, position - start);
+    };
+    request.method = readToken();
+    request.path = readToken();
+    version = readToken();
+    requestLineTrailing = readToken();
   }
   if (request.method.empty() || request.path.empty() ||
       version != "HTTP/1.1" || !requestLineTrailing.empty()) {
@@ -1279,6 +1420,17 @@ bool HttpTransferServer::handleClient(TransferClient &client,
               "transfer encoding is not supported");
     return false;
   }
+  request.mapContentSession = std::move(securityHeaders.mapContentSession);
+  request.mapLogicalID = std::move(securityHeaders.mapLogicalID);
+  request.mapManifestReceipt = std::move(securityHeaders.mapManifestReceipt);
+  request.mapSignedManifestReceipt = std::move(securityHeaders.mapSignedManifestReceipt);
+  request.mapStreamBytes = std::move(securityHeaders.mapStreamBytes);
+  request.mapOperationAdmissionEpoch = std::move(securityHeaders.mapOperationAdmissionEpoch);
+  request.mapOperationAdmissionRevision = securityHeaders.mapOperationAdmissionRevision;
+  request.hasMapOperationAdmissionRevision = securityHeaders.hasMapOperationAdmissionRevision;
+  request.mapOperationID = std::move(securityHeaders.mapOperationID);
+  request.mapStreamSHA256 = std::move(securityHeaders.mapStreamSHA256);
+  request.mapOperationHeadersPresent = securityHeaders.mapOperationSeen || securityHeaders.mapStreamSHA256Seen || securityHeaders.mapOperationAdmissionRevisionSeen || securityHeaders.mapOperationAdmissionEpochSeen || securityHeaders.operationIdentityHeadersSeen != 0;
   request.transferToken = std::move(securityHeaders.transferToken);
   request.contentType = std::move(securityHeaders.contentType);
   request.contentLength = securityHeaders.contentLength;
@@ -1298,6 +1450,12 @@ bool HttpTransferServer::handleClient(TransferClient &client,
                                       : 0);
   lockState();
   request.transferGeneration = transferGeneration_;
+  if (requestSequence_ == UINT64_MAX) {
+    unlockState();
+    sendError(client, 503, "request_sequence_exhausted", "device restart required");
+    return false;
+  }
+  request.requestSequence = ++requestSequence_;
   unlockState();
 
   HttpRequestHandler *handler = handlerForPath(request.path);
@@ -1426,11 +1584,119 @@ void HttpTransferServer::observeResources(const char *phase) {
   minimumPsramLargest_ = std::min(minimumPsramLargest_, psramLargest);
   if (workerTask_ != nullptr && currentTask == workerTask_) {
     workerStackHighWaterBytes_ =
-        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)) *
-        sizeof(StackType_t);
+        static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+    workerStackSampleAvailable_ = true;
   }
   resourcePhase_ = phase == nullptr ? "unknown" : phase;
+  lifecycle_resources::Snapshot sample;
+  NetworkOperationOwner *owner = networkOperationOwner_;
+  // At most 64 five-record checkpoints per admitted session. Repeated payload
+  // samples and arbitrary handler phases cannot flood the reserved recorder.
+  const bool emit = resourceCycle_ != 0 && resourceSample_ < 64 &&
+                    lifecycle_resources::checkpoint(phase);
+  if (emit) {
+    sample.cycle = resourceCycle_;
+    sample.sample = ++resourceSample_;
+    sample.generation = transferGeneration_;
+    sample.free[0] = internalFree; sample.largest[0] = internalLargest;
+    sample.free[1] = dmaFree; sample.largest[1] = dmaLargest;
+    sample.free[2] = psramFree; sample.largest[2] = psramLargest;
+    sample.minimumFree[0] = minimumInternalFree_;
+    sample.minimumFree[1] = minimumDmaFree_;
+    sample.minimumFree[2] = minimumPsramFree_;
+    sample.minimumLargest[0] = minimumInternalLargest_;
+    sample.minimumLargest[1] = minimumDmaLargest_;
+    sample.minimumLargest[2] = minimumPsramLargest_;
+    sample.tlsStack = workerStackHighWaterBytes_;
+    sample.stackAvailableMask = workerStackSampleAvailable_ ? 1U : 0U;
+    sample.cleanupFailed = networkStopFailed_;
+    std::memcpy(sample.mode, resourceMode_, sizeof(sample.mode));
+    std::memcpy(sample.operation, resourceOperation_, sizeof(sample.operation));
+  }
   unlockState();
+  if (emit) {
+    sample.ownerStack = owner == nullptr ? 0 : owner->stackHighWaterBytes();
+    sample.rendererStack = renderer_diagnostics::rendererStackHighWaterBytes();
+    if (owner != nullptr && owner->stackSampleAvailable())
+      sample.stackAvailableMask |= 2U;
+    if (renderer_diagnostics::rendererStackSampleAvailable())
+      sample.stackAvailableMask |= 4U;
+    char fields[320] = {};
+    if (lifecycle_resources::metadata(fields, sample, phase))
+      (void)ride_diagnostics::record(ride_diagnostics::Level::Info,
+          "lifecycle", "transfer_checkpoint", fields);
+    for (unsigned pool = 0; pool < 3; ++pool)
+      if (lifecycle_resources::pool(fields, sample, pool))
+        (void)ride_diagnostics::record(ride_diagnostics::Level::Info,
+            "lifecycle", "transfer_resources", fields);
+    if (lifecycle_resources::stacks(fields, sample))
+      (void)ride_diagnostics::record(ride_diagnostics::Level::Info,
+          "lifecycle", "transfer_stacks", fields);
+  }
+}
+
+void HttpTransferServer::observeNetwork(const char *phase, bool force) {
+  const uint32_t now = millis();
+  if (!force && now - lastReadinessPollMs_ < 100) return;
+  lastReadinessPollMs_ = now;
+  lockState();
+  NetworkOperationOwner *owner = networkOperationOwner_;
+  const uint32_t generation = resourceCycle_;
+  unlockState();
+  if (owner == nullptr || generation == 0) return;
+  const NetworkReadinessSnapshot sample = owner->networkReadiness();
+  const auto &old = lastReadiness_;
+  const bool changed = !readinessObserved_ ||
+      sample.eventSequence != old.eventSequence ||
+      sample.radioStarted != old.radioStarted || sample.station != old.station ||
+      sample.apEventStarted != old.apEventStarted || sample.netifUp != old.netifUp ||
+      sample.hasIP != old.hasIP || sample.dhcpStatus != old.dhcpStatus ||
+      sample.dhcpError != old.dhcpError || sample.clients != old.clients ||
+      sample.disconnectReason != old.disconnectReason;
+  // Reserve the final snapshot even if the network churned through its budget.
+  if ((!force && !changed) || (readinessSamples_ >= 15 &&
+      std::strcmp(phase, "network_stop_returned") != 0)) return;
+  ++readinessSamples_;
+  lastReadiness_ = sample;
+  readinessObserved_ = true;
+  char fields[384] = {};
+  int bytes = std::snprintf(fields, sizeof(fields),
+      "{\"generation\":%lu,\"connectionGeneration\":%lu,\"phase\":\"%s\",\"available\":%s,"
+      "\"radioStarted\":%s,\"stationMode\":%s,\"apEventStarted\":%s,"
+      "\"netifUp\":%s,\"hasIP\":%s,\"dhcpStatus\":%ld,\"errorCode\":%ld,\"listenerReady\":%s}",
+      static_cast<unsigned long>(generation), static_cast<unsigned long>(readinessGeneration_), phase, sample.available ? "true" : "false",
+      sample.radioStarted ? "true" : "false", sample.station ? "true" : "false",
+      sample.apEventStarted ? "true" : "false", sample.netifUp ? "true" : "false",
+      sample.hasIP ? "true" : "false", static_cast<long>(sample.dhcpStatus),
+      static_cast<long>(sample.dhcpError), listenerReady_ ? "true" : "false");
+  if (bytes > 0 && static_cast<size_t>(bytes) < sizeof(fields))
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "wifi", "readiness", fields);
+  bytes = std::snprintf(fields, sizeof(fields),
+      "{\"generation\":%lu,\"sequence\":%lu,\"eventUptimeMs\":%lu,"
+      "\"apStarts\":%lu,\"apStops\":%lu,\"clientJoins\":%lu,\"clientLeaves\":%lu,"
+      "\"dhcpLeases\":%lu,\"clients\":%u,\"disconnectReason\":%ld}",
+      static_cast<unsigned long>(generation), static_cast<unsigned long>(sample.eventSequence),
+      static_cast<unsigned long>(sample.eventUptimeMs), static_cast<unsigned long>(sample.apStarts),
+      static_cast<unsigned long>(sample.apStops), static_cast<unsigned long>(sample.clientJoins),
+      static_cast<unsigned long>(sample.clientLeaves), static_cast<unsigned long>(sample.dhcpLeases),
+      static_cast<unsigned>(sample.clients), static_cast<long>(sample.disconnectReason));
+  if (bytes > 0 && static_cast<size_t>(bytes) < sizeof(fields))
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "wifi", "events", fields);
+}
+
+void HttpTransferServer::observeTransport(const char *phase, int32_t error) {
+  lockState();
+  const uint32_t generation = resourceCycle_;
+  unlockState();
+  char fields[240] = {};
+  const int bytes = std::snprintf(fields, sizeof(fields),
+      "{\"generation\":%lu,\"phase\":\"%s\",\"listenerReady\":%s,"
+      "\"acceptedClients\":%lu,\"tlsSucceeded\":%lu,\"tlsFailed\":%lu,\"errorCode\":%ld}",
+      static_cast<unsigned long>(generation), phase, listenerReady_ ? "true" : "false",
+      static_cast<unsigned long>(acceptedClients_), static_cast<unsigned long>(tlsSucceeded_),
+      static_cast<unsigned long>(tlsFailed_), static_cast<long>(error));
+  if (bytes > 0 && static_cast<size_t>(bytes) < sizeof(fields))
+    (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "http", "transport", fields);
 }
 
 void HttpTransferServer::signalStatusChanged() {

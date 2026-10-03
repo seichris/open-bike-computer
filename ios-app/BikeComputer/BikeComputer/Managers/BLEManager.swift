@@ -301,6 +301,14 @@ enum WorkoutTelemetryWriteRouting {
     }
 }
 
+nonisolated struct MapTransferHTTPStatusContext: Equatable, Sendable {
+    let deviceID: String
+    let selectedDeviceID: String?
+    let connectionEpoch: UInt64
+    let transferGeneration: UInt32
+    let authorizationDigest: String
+}
+
 enum DeviceBLEProtocol {
     static let serviceUUIDString = RideBLEGeneratedProtocolV1.serviceUUID
     static let navigationCharacteristicUUIDString =
@@ -1131,6 +1139,10 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferActiveMapId: String = ""
     @Published var mapTransferActiveSessionId: String = ""
     @Published private(set) var activeDeviceMap: DeviceActiveMapDescriptor?
+    @Published private(set) var mapSelectionHealth: MapSelectionHealth?
+    private var mapSelectionHealthProjection = MapSelectionHealthProjection()
+    private var mapSelectionHealthDeviceID: String?
+    private var mapSelectionHealthConnectionEpoch: UInt64?
     @Published private(set) var activeMapManifestReceipt: String = ""
     @Published private(set) var activeMapRendererFormat: Int?
     @Published private(set) var activeMapLabelProfileVersion: Int?
@@ -1161,6 +1173,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
     @Published private(set) var hasFreshMapTransferStatus = false
+    @Published private(set) var mapOperationStatus: DeviceMapOperationReceipt?
+    @Published private(set) var mapOperationObservationGeneration: UInt64 = 0
+    @Published private(set) var mapOperationConnectionEpoch: UInt64 = 0
     @Published var deviceTransferMode: String = ""
     @Published var deviceTransferBaseURL: URL?
     @Published var deviceTransferAccessPointSSID: String?
@@ -1178,11 +1193,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var deviceTransferRemoteStatusRevision: UInt32 = 0
     @Published private(set) var supportsSecureDeviceTransferV1 = false
     @Published private(set) var supportsSignedMapStreamV1 = false
+    @Published private(set) var supportsMapOperationsV1 = false
     @Published private(set) var supportsFirmwareMaintenanceV1 = false
     @Published private(set) var deviceTransferLegacyArchivePolicy: String?
     @Published private(set) var deviceTransferLastErrorCode: String?
     @Published private(set) var deviceTransferLastErrorMessage: String?
     @Published private(set) var deviceTransferLastErrorSequence: UInt64?
+    @Published private(set) var diagnosticsCaptureStatus: DiagnosticsCaptureStatus?
+    @Published private(set) var diagnosticsLiveTail: DiagnosticsFirmwareLiveTail?
     @Published private(set) var deviceTransferStatusRevision: UInt64 = 0
     @Published private(set) var deviceTransferResourceSnapshot:
         DeviceTransferResourceSnapshot?
@@ -1190,6 +1208,7 @@ class BLEManager: NSObject, ObservableObject {
         DeviceTransferWiFiStartFailure?
     @Published private(set) var firmwareMaintenanceActive = false
     @Published private(set) var firmwareMaintenanceStage = "normal"
+    @Published private(set) var firmwareOperation: FirmwareOperationReceipt?
     @Published private(set) var firmwareMaintenanceCorrelation: UInt32 = 0
     @Published private(set) var firmwareMaintenanceReconnectExpected = false
     @Published private(set) var deviceStorageBackend: String?
@@ -1492,6 +1511,8 @@ class BLEManager: NSObject, ObservableObject {
     private var navigationWriteResponseTimeoutTimer: Timer?
     private var navigationWriteResponseGeneration: UInt64 = 0
     private var navigationBackpressureStartedAt: Date?
+    var transferConnectionEpoch: UInt64 { rideDeliveryConnectionGeneration }
+
     private var rideDeliveryConnectionGeneration: UInt64 = 0
     private var rideTransportStateMachine = RideBLETransportStateMachineV1(
         role: .ownerPhone
@@ -5520,6 +5541,8 @@ class BLEManager: NSObject, ObservableObject {
         supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
+        diagnosticsCaptureStatus = nil
+        diagnosticsLiveTail = nil
         supportsRideDeliveryAcknowledgement = false
         supportsWorldRadio = false
         supportsScreenConfiguration = false
@@ -5947,6 +5970,22 @@ class BLEManager: NSObject, ObservableObject {
         )
     }
 
+    @discardableResult
+    func requestMapOperationStatus(operationID: String) -> Bool {
+        guard supportsMapOperationsV1,
+              !firmwareMaintenanceReconnectExpected,
+              isNavigationReady,
+              authenticatedWriteSession != nil,
+              let packet = MapOperationQueryPacket.make(operationID: operationID) else { return false }
+        let queued = sendTransferControlPacket(
+            packet,
+            label: "map operation status",
+            coalescingKey: "transfer.map.operation.\(operationID)"
+        )
+        if queued { mapOperationStatus = nil }
+        return queued
+    }
+
     func resetMapTransferActivationObservation() {
         mapTransferActivationStatus = "idle"
         mapTransferActivationSequence = nil
@@ -6135,12 +6174,42 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
-    func sendDiagnosticsIssueMarker(_ code: RideIssueCode) -> Bool {
+    func requestDiagnosticsLiveTail(boot: UInt32, after: UInt32) -> Bool {
+        guard isNavigationReady, supportsRideDiagnostics,
+              diagnosticsCaptureStatus?.schemaDigest == DiagnosticsSchema.digest else { return false }
+        return sendTransferControlPacket(
+            Data("\(DeviceBLEProtocol.deviceTransferControlPrefix)live|2|\(boot)|\(after)".utf8),
+            label: "bounded live diagnostics", coalescingKey: "transfer.diagnostics.live")
+    }
+
+    @discardableResult
+    func sendDiagnosticsCapturePolicy(_ request: DiagnosticsCaptureRequest) -> Bool {
+        guard isNavigationReady, supportsRideDiagnostics, request.valid,
+              let remote = diagnosticsCaptureStatus, remote.valid,
+              remote.schemaDigest == DiagnosticsSchema.digest,
+              request.mask & ~remote.supportedMask == 0,
+              diagnosticsRecorder?.currentCaptureID == request.captureID else { return false }
+        // Enqueue the binding first on the same authenticated ordered transport.
+        guard sendDiagnosticsCaptureBinding(request.captureID) else { return false }
+        return sendTransferControlPacket(
+            Data("\(DeviceBLEProtocol.deviceTransferControlPrefix)\(request.command)".utf8),
+            label: "bounded diagnostics policy", coalescingKey: "transfer.diagnostics.policy")
+    }
+
+    @discardableResult
+    func sendDiagnosticsIssueMarker(_ code: RideIssueCode, incidentID: UUID? = nil) -> Bool {
         guard supportsRideDiagnostics else { return false }
         let markerSequence = nextDiagnosticsMarkerSequence
-        let packet = Data(
-            "\(DeviceBLEProtocol.deviceTransferControlPrefix)mark|1|\(markerSequence)|\(code.rawValue)".utf8
-        )
+        // Only the matching registry attests the v2 marker wire contract.
+        // Legacy devices still get their bounded v1 marker, without claiming
+        // a shared incident UUID or durable device acknowledgement.
+        let marker: String
+        if let incidentID, diagnosticsCaptureStatus?.schemaDigest == DiagnosticsSchema.digest {
+            marker = "mark|2|\(markerSequence)|\(code.rawValue)|\(incidentID.uuidString.lowercased())"
+        } else {
+            marker = "mark|1|\(markerSequence)|\(code.rawValue)"
+        }
+        let packet = Data("\(DeviceBLEProtocol.deviceTransferControlPrefix)\(marker)".utf8)
         let queued = sendTransferControlPacket(
             packet,
             label: "diagnostics issue marker",
@@ -6718,6 +6787,13 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func clearTransferState() {
+        mapSelectionHealth = nil
+        mapSelectionHealthProjection = MapSelectionHealthProjection()
+        mapSelectionHealthDeviceID = nil
+        mapSelectionHealthConnectionEpoch = nil
+        mapOperationStatus = nil
+        mapOperationObservationGeneration &+= 1
+        mapOperationConnectionEpoch = transferConnectionEpoch
         mapTransferModeEnabled = false
         mapTransferBaseURL = nil
         mapTransferAccessPointSSID = nil
@@ -6771,6 +6847,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferRemoteStatusRevision = 0
         supportsSecureDeviceTransferV1 = false
         supportsSignedMapStreamV1 = false
+        supportsMapOperationsV1 = false
         supportsFirmwareMaintenanceV1 = false
         deviceTransferLegacyArchivePolicy = nil
         deviceTransferLastErrorCode = nil
@@ -6781,6 +6858,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceTransferWiFiStartFailure = nil
         firmwareMaintenanceActive = false
         firmwareMaintenanceStage = "normal"
+        firmwareOperation = nil
         firmwareMaintenanceCorrelation = 0
         deviceStorageBackend = nil
         deviceStoragePowerCycleRequired = nil
@@ -6834,6 +6912,8 @@ class BLEManager: NSObject, ObservableObject {
         supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
+        diagnosticsCaptureStatus = nil
+        diagnosticsLiveTail = nil
         supportsRideDeliveryAcknowledgement = false
         supportsWorldRadio = false
         supportsScreenConfiguration = false
@@ -10198,6 +10278,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsRendererBenchmarkSample = false
         supportsRideDiagnostics = false
         supportsDetailedRideDiagnostics = false
+        diagnosticsCaptureStatus = nil
+        diagnosticsLiveTail = nil
         supportsRideDeliveryAcknowledgement = false
         supportsWorldRadio = false
         supportsScreenConfiguration = false
@@ -10913,6 +10995,19 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             return true
         }
 
+        if let live = object["diagnosticsLive"] as? [String: Any],
+           let validated = DeviceDiagnosticsTransferManager.validatedLiveTail(live) {
+            diagnosticsLiveTail = validated
+        }
+        if let policy = object["diagnosticsPolicy"],
+           let data = try? JSONSerialization.data(withJSONObject: policy),
+           let decoded = try? JSONDecoder().decode(DiagnosticsCaptureStatus.self, from: data),
+           decoded.valid {
+            diagnosticsCaptureStatus = decoded
+        } else {
+            diagnosticsCaptureStatus = nil
+        diagnosticsLiveTail = nil
+        }
         let enabled = object["enabled"] as? Bool ?? false
         deviceTransferMode = object["mode"] as? String ?? ""
         if let baseURLString = object["baseUrl"] as? String {
@@ -10956,6 +11051,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 capabilities["secureTransferV1"] as? Bool ?? false
             supportsSignedMapStreamV1 =
                 capabilities["signedMapStreamV1"] as? Bool ?? false
+            supportsMapOperationsV1 =
+                capabilities["mapOperationsV1"] as? Bool ?? false
             supportsFirmwareMaintenanceV1 =
                 capabilities["firmwareMaintenanceV1"] as? Bool ?? false
             deviceTransferLegacyArchivePolicy =
@@ -10963,6 +11060,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         } else {
             supportsSecureDeviceTransferV1 = false
             supportsSignedMapStreamV1 = false
+            supportsMapOperationsV1 = false
             supportsFirmwareMaintenanceV1 = false
             deviceTransferLegacyArchivePolicy = nil
         }
@@ -11096,6 +11194,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             firmwareMaintenanceStage = "normal"
             firmwareMaintenanceCorrelation = 0
         }
+        firmwareOperation = (object["firmwareOperation"] as? [String: Any]).flatMap { value in
+            guard let data = try? JSONSerialization.data(withJSONObject: value) else { return nil }
+            return try? JSONDecoder().decode(FirmwareOperationReceipt.self, from: data)
+        }
         if let checkpoint = object["bootCheckpoint"] as? [String: Any] {
             firmwareBootSequence =
                 (checkpoint["bootSequence"] as? NSNumber)?.uint32Value
@@ -11219,7 +11321,73 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         return applyMapTransferStatusBody(body)
     }
 
+    private func hideProvisionalActiveMap() {
+        // Firmware selects the pointer before the renderer acknowledges it. Keep a
+        // different previous selection visible, but never advertise the candidate
+        // (including a failed candidate) as an installed Saved Map.
+        guard let activeDeviceMap,
+              MapActivationVisibilityPolicy.hidesActiveSelection(
+                activeMapID: activeDeviceMap.mapID,
+                activeSessionID: activeDeviceMap.sessionID,
+                activationStatus: mapTransferActivationStatus,
+                activationMapID: mapTransferActivationMapId,
+                activationSessionID: mapTransferActivationSessionId) else { return }
+        self.activeDeviceMap = nil
+    }
+
+    private func projectMapSelectionHealth(_ health: MapSelectionHealth?, fieldPresent: Bool,
+                                           activeRoot: String?) {
+        if fieldPresent || mapSelectionHealthProjection.hasObservedHealth {
+            guard isConnected, let connectedDeviceID, !connectedDeviceID.isEmpty,
+                  activeDeviceID == nil || activeDeviceID == connectedDeviceID,
+                  mapSelectionHealthDeviceID == nil || mapSelectionHealthDeviceID == connectedDeviceID,
+                  mapSelectionHealthConnectionEpoch == nil || mapSelectionHealthConnectionEpoch == transferConnectionEpoch else {
+                activeDeviceMap = nil
+                return
+            }
+            mapSelectionHealthDeviceID = connectedDeviceID
+            mapSelectionHealthConnectionEpoch = transferConnectionEpoch
+        }
+        let visible = mapSelectionHealthProjection.apply(health, fieldPresent: fieldPresent,
+            activeRoot: activeRoot, mapID: mapTransferActiveMapId,
+            sessionID: mapTransferActiveSessionId)
+        mapSelectionHealth = mapSelectionHealthProjection.health
+        let awaitingTerminalReceipt = health.map { selection in
+            !selection.operationID.isEmpty && mapOperationStatus?.operationID == selection.operationID &&
+                mapOperationStatus?.phase != "installed"
+        } ?? false
+        if !visible || awaitingTerminalReceipt { activeDeviceMap = nil }
+    }
+
+    func captureMapTransferHTTPStatusContext() -> MapTransferHTTPStatusContext? {
+        guard isConnected, let connectedDeviceID, !connectedDeviceID.isEmpty,
+              let token = deviceTransferSessionToken, !token.isEmpty else { return nil }
+        return MapTransferHTTPStatusContext(deviceID: connectedDeviceID, selectedDeviceID: activeDeviceID,
+            connectionEpoch: transferConnectionEpoch, transferGeneration: deviceTransferGeneration,
+            authorizationDigest: SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined())
+    }
+
+    func isCurrentMapTransferHTTPStatusContext(_ context: MapTransferHTTPStatusContext?) -> Bool {
+        guard let context else { return false }
+        return captureMapTransferHTTPStatusContext() == context
+    }
+
+    @discardableResult
+    func applyAuthenticatedMapTransferStatus(_ status: MapTransferDeviceStatus,
+                                             context: MapTransferHTTPStatusContext) -> Bool {
+        guard isCurrentMapTransferHTTPStatusContext(context) else { return false }
+        applyVerifiedMapTransferStatus(status)
+        return true
+    }
+
+#if HOST_TESTING
+    // Fixture injection only. Production HTTP projections require captured context.
     func applyAuthenticatedMapTransferStatus(_ status: MapTransferDeviceStatus) {
+        applyVerifiedMapTransferStatus(status)
+    }
+#endif
+
+    private func applyVerifiedMapTransferStatus(_ status: MapTransferDeviceStatus) {
         if let enabled = status.enabled {
             mapTransferModeEnabled = enabled
         }
@@ -11265,6 +11433,9 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferActivationProgress = nil
             mapTransferActivationError = nil
         }
+        projectMapSelectionHealth(status.selectionHealth, fieldPresent: status.selectionHealth != nil,
+                                  activeRoot: status.activeRoot)
+        hideProvisionalActiveMap()
         hasFreshMapTransferStatus = true
     }
 
@@ -11273,6 +11444,18 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferStatusDescription = "invalid status"
             log("Received invalid map transfer status payload")
             return true
+        }
+
+        if let operation = object["operation"] as? [String: Any] {
+            mapOperationStatus = nil
+            if let data = try? JSONSerialization.data(withJSONObject: operation),
+               let receipt = try? JSONDecoder().decode(DeviceMapOperationReceipt.self, from: data),
+               receipt.schemaVersion == 1,
+               MapOperationQueryPacket.make(operationID: receipt.operationID) != nil {
+                mapOperationStatus = receipt
+                mapOperationConnectionEpoch = transferConnectionEpoch
+                mapOperationObservationGeneration &+= 1
+            }
         }
 
         mapTransferModeEnabled = object["enabled"] as? Bool ?? false
@@ -11357,6 +11540,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferStatusDescription = "transfer mode disabled"
         }
 
+        let health = (object["selectionHealth"] as? [String: Any]).flatMap {
+            try? JSONSerialization.data(withJSONObject: $0)
+        }.flatMap { try? JSONDecoder().decode(MapSelectionHealth.self, from: $0) }
+        projectMapSelectionHealth(health, fieldPresent: object["selectionHealth"] != nil,
+                                  activeRoot: object["activeRoot"] as? String)
+        hideProvisionalActiveMap()
         hasFreshMapTransferStatus = true
         log("Map transfer status: \(mapTransferStatusDescription)")
         return true
