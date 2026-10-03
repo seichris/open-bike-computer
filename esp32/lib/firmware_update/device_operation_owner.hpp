@@ -89,7 +89,7 @@ private:
     StopAccessPoint,
     StopWiFi,
     MapActivation,
-    Shutdown,
+    Quiesce,
   };
 
   struct Command {
@@ -130,6 +130,12 @@ private:
   StaticQueue_t resultQueueStorage_{};
   uint8_t resultQueueBuffer_[sizeof(Result)]{};
   std::atomic<TaskHandle_t> workerTask_{nullptr};
+  // This owner is a boot-lifetime object in internal BSS. Reserving its
+  // cache-safe stack at link time avoids taking the largest DMA-capable heap
+  // block immediately before Wi-Fi initialization. The task sleeps between
+  // commands and is reused after quiescence, never deleted/recreated.
+  alignas(16) StackType_t workerStack_[kWorkerStackBytes / sizeof(StackType_t)]{};
+  StaticTask_t workerTaskStorage_{};
   std::atomic<uint32_t> lastStackHighWaterBytes_{0};
   std::atomic<bool> stackSampleAvailable_{false};
   alignas(4) uint8_t writeBuffer_[kMaximumWriteBytes]{};

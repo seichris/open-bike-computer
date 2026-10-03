@@ -60,6 +60,16 @@ ESP32-S3 FreeRTOS `task.h` documents high-water values in bytes and its
 renderer control work share those stack measurements. Rendering, full refresh,
 buffer ownership and scheduler policy are unchanged.
 
+The network/flash owner reserves one 16 KiB stack and its TCB in internal BSS.
+Its one static task is created on first use and blocks on the command queue
+between operations. After network teardown, `release()` acknowledges quiescence
+and clears staged credentials/data; it does not delete or recreate that task.
+This fixed boot-lifetime cost prevents a late owner-stack allocation from
+consuming the largest DMA-capable block before Wi-Fi startup. The Wi-Fi memory
+floor remains unchanged. Include this reserved memory and persistent idle task
+in the baseline; it is not a leaked per-session allocation. A poisoned owner
+still cannot admit another command or claim successful quiescence.
+
 `owner_released` is before the HTTP task's own deletion, so its heap observation
 is not a fully idle baseline. Compare the *next* `transfer_entry` (after the
 previous worker-stop fence) to earlier entry samples to check for leaks. Keep

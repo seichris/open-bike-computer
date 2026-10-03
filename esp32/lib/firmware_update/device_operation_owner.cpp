@@ -4,6 +4,7 @@
 #include <cstring>
 #include <new>
 #include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
 #include <esp_wifi.h>
 #include <WiFi.h>
 
@@ -52,11 +53,16 @@ bool DeviceOperationOwner::startLocked() {
   if (workerTask_ != nullptr)
     return true;
 
-  TaskHandle_t worker = nullptr;
-  const BaseType_t created = xTaskCreateWithCaps(
-      taskThunk, "device_operation", kWorkerStackBytes, this, 2, &worker,
-      static_cast<UBaseType_t>(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (created != pdPASS)
+  // OTA and Wi-Fi can disable the flash/PSRAM cache. Fail closed if this
+  // boot-lifetime owner was ever placed outside internal memory.
+  if (!esp_ptr_internal(workerStack_) ||
+      !esp_ptr_internal(&workerTaskStorage_) ||
+      !esp_ptr_internal(writeBuffer_))
+    return false;
+  TaskHandle_t worker = xTaskCreateStatic(
+      taskThunk, "device_operation", kWorkerStackBytes, this, 2,
+      workerStack_, &workerTaskStorage_);
+  if (worker == nullptr)
     return false;
   workerTask_ = worker;
   return true;
@@ -75,7 +81,7 @@ bool DeviceOperationOwner::release() {
     xSemaphoreGive(callMutex_);
     return false;
   }
-  Command command{Operation::Shutdown};
+  Command command{Operation::Quiesce};
   command.id = nextCommandId_++;
   if (command.id == 0)
     command.id = nextCommandId_++;
@@ -91,15 +97,11 @@ bool DeviceOperationOwner::release() {
     xSemaphoreGive(callMutex_);
     return false;
   }
-  // The owner sent its terminal result and then parks forever. It cannot
-  // touch a staging buffer after this point; reclaim its capability stack.
-  vTaskDeleteWithCaps(workerTask_);
-  workerTask_ = nullptr;
+  // The matching result proves that staging credentials/data were cleared.
+  // Keep the one static task blocked on its queue. Reusing a deleted static
+  // TCB before another core's idle cleanup would be unsafe.
   xQueueReset(commandQueue_);
   xQueueReset(resultQueue_);
-  std::memset(networkSsid_, 0, sizeof(networkSsid_));
-  std::memset(networkPassword_, 0, sizeof(networkPassword_));
-  std::memset(mapSessionId_, 0, sizeof(mapSessionId_));
   xSemaphoreGive(callMutex_);
   return true;
 }
@@ -525,7 +527,11 @@ void DeviceOperationOwner::run() {
       }
       vTaskPrioritySet(nullptr, 2);
       break;
-    case Operation::Shutdown:
+    case Operation::Quiesce:
+      std::memset(networkSsid_, 0, sizeof(networkSsid_));
+      std::memset(networkPassword_, 0, sizeof(networkPassword_));
+      std::memset(mapSessionId_, 0, sizeof(mapSessionId_));
+      std::memset(writeBuffer_, 0, sizeof(writeBuffer_));
       result.error = ESP_OK;
       break;
     }
@@ -549,8 +555,6 @@ void DeviceOperationOwner::run() {
         std::memory_order_release);
     stackSampleAvailable_.store(true, std::memory_order_release);
     (void)xQueueSend(resultQueue_, &result, portMAX_DELAY);
-    if (command.operation == Operation::Shutdown)
-      (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   }
 }
 
