@@ -8,6 +8,10 @@
 #include <string>
 #include <vector>
 
+#ifndef FIRMWARE_DIAGNOSTICS
+#define FIRMWARE_DIAGNOSTICS 1
+#endif
+
 // #include "../../compass/compass.hpp" // Circular dependency if not careful,
 // but likely needed for getHeading
 #include "../../ble_navigation/ble_navigation.hpp"
@@ -115,7 +119,9 @@ private:
     map_label_block::Block labelData;
     map_building_block::Block buildingData;
     map_contour_block::Block contourData;
+#if FIRMWARE_DIAGNOSTICS
     std::vector<map_terrain::Grid, PsramAllocator<map_terrain::Grid>> terrain;
+#endif
 
     // Spatial grid for polygon culling: grid[cellIndex] = list of polygon
     // indices
