@@ -11,6 +11,7 @@ enum PhoneRouteWatchSyncStateV1: Equatable {
 
 enum PhoneRouteLibraryError: Error, Equatable {
     case watchUnavailable
+    case watchUpdateRequired
     case transferInProgress
     case stravaBookmarkMissing
     case stravaBookmarkConflict
@@ -34,6 +35,7 @@ final class PhoneRouteLibrary: ObservableObject {
         [WatchRouteIdentityV1: PhoneRouteWatchSyncStateV1] = [:]
     @Published private var displayNames: SavedRouteDisplayNames
 
+    private let operations: WatchRouteOperationJournalV2
     private let store: NavigationRouteFileStoreV1
     private let stravaBookmarkStore: StravaRouteReloadBookmarkStoreV1
     private let connectivity: PhoneWatchConnectivityCoordinator
@@ -64,6 +66,7 @@ final class PhoneRouteLibrary: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var expiryTask: Task<Void, Never>?
     private var pendingInstallExpiryTask: Task<Void, Never>?
+    private var deletionRetryTask: Task<Void, Never>?
 
     convenience init(connectivity: PhoneWatchConnectivityCoordinator) {
         let base = FileManager.default.urls(
@@ -98,6 +101,7 @@ final class PhoneRouteLibrary: ObservableObject {
         defaults: UserDefaults = .standard,
         now: @escaping () -> Date = Date.init
     ) {
+        self.operations = WatchRouteOperationJournalV2(rootDirectory: store.rootDirectory)
         self.store = store
         self.stravaBookmarkStore = stravaBookmarkStore ??
             StravaRouteReloadBookmarkStoreV1(
@@ -140,7 +144,7 @@ final class PhoneRouteLibrary: ObservableObject {
         }
         connectivity.$state
             .map {
-                $0.isActivated && $0.isPaired && $0.isWatchAppInstalled
+                $0.isActivated && $0.isPaired && $0.isWatchAppInstalled && $0.routeSyncSchemaVersion >= 2
             }
             .removeDuplicates()
             .sink { [weak self] isWatchAvailable in
@@ -174,7 +178,13 @@ final class PhoneRouteLibrary: ObservableObject {
         let archive = try NavigationRouteArchiveV1.decode(
             data, purpose: .offlineNavigation, now: now()
         )
-        try requireUsableIdentity(WatchRouteIdentityV1(archive: archive))
+        let identity = WatchRouteIdentityV1(archive: archive)
+        try requireUsableIdentity(identity)
+        if let prior = try operations.entry(identity), prior.operation == .delete, prior.applied {
+            // Explicit import after a completed deletion is a new desired state,
+            // even when its content bytes are identical to the deleted archive.
+            _ = try operations.issue(.install, identity: identity)
+        }
         let record = try store.install(data, now: now())
         reload()
         return record.summary
@@ -255,9 +265,13 @@ final class PhoneRouteLibrary: ObservableObject {
     }
 
     private func isPendingDeletion(_ identity: WatchRouteIdentityV1) -> Bool {
-        pendingDeletionKeys.contains(Self.receiptKey(identity)) ||
+        if pendingDeletionKeys.contains(Self.receiptKey(identity)) ||
             localDeletionTombstones.contains(identity) ||
-            providerDeletionTombstones.contains(identity)
+            providerDeletionTombstones.contains(identity) { return true }
+        do {
+            let operation = try operations.entry(identity)
+            return operation?.operation == .delete && operation?.applied == false
+        } catch { return true }
     }
 
     private func requireUsableIdentity(_ identity: WatchRouteIdentityV1) throws {
@@ -410,14 +424,28 @@ final class PhoneRouteLibrary: ObservableObject {
         isAvailableOffline(summary) && summary.providerID != RouteProviderPolicyV1.mapKit.providerID
     }
 
+    func retryWatchSync(_ summary: PlannedRouteSummaryV1) throws {
+        if isPendingDeletion(identity(for: summary)) {
+            try delete(summary)
+        } else {
+            try sendToWatch(summary)
+        }
+    }
+
     func sendToWatch(_ summary: PlannedRouteSummaryV1) throws {
         let identity = identity(for: summary)
         try requireUsableIdentity(identity)
         let record = try store.record(matching: identity, now: now())
         try record.archive.validate(purpose: .watchTransfer, now: now())
         let key = Self.receiptKey(identity)
+        guard connectivity.state.routeSyncSchemaVersion >= 2 else {
+            watchSyncState[identity] = .rejected("watch_update_required")
+            return
+        }
         attemptedInstallKeys.insert(key)
-        guard connectivity.transferRoute(record) != nil else {
+        let operation = try operations.issue(.install, identity: identity,
+                                             renew: !pendingInstallKeys.contains(key))
+        guard connectivity.transferRoute(record, deliveryOperation: operation) != nil else {
             rejectedInstallReasons[key] = "watch_unavailable"
             persistInstallAttempts()
             watchSyncState[identity] = .rejected("watch_unavailable")
@@ -433,7 +461,7 @@ final class PhoneRouteLibrary: ObservableObject {
             immediateInstallKeys.insert(key)
         }
         scheduleNextPendingInstallExpiry()
-        connectivity.sendRouteImmediately(record)
+        connectivity.sendRouteImmediately(record, deliveryOperation: operation)
     }
 
     @discardableResult
@@ -551,15 +579,21 @@ final class PhoneRouteLibrary: ObservableObject {
         guard !pendingInstallKeys.contains(key) else {
             throw PhoneRouteLibraryError.transferInProgress
         }
-        guard readyReceiptKeys.contains(key) ||
-                pendingDeletionKeys.contains(key) else {
+        let priorOperation = try operations.entry(identity)
+        guard readyReceiptKeys.contains(key) || attemptedInstallKeys.contains(key) ||
+                pendingDeletionKeys.contains(key) || priorOperation != nil else {
             try store.delete(matching: identity, now: now())
             removeDisplayName(routeID: summary.id)
             watchSyncState.removeValue(forKey: identity)
             reload()
             return
         }
-        guard connectivity.requestRouteDeletion(identity) != nil else {
+        guard connectivity.state.routeSyncSchemaVersion >= 2 else {
+            watchSyncState[identity] = .rejected("watch_update_required")
+            throw PhoneRouteLibraryError.watchUpdateRequired
+        }
+        let operation = try operations.issue(.delete, identity: identity)
+        guard connectivity.requestRouteDeletion(identity, deliveryOperation: operation) != nil else {
             throw PhoneRouteLibraryError.watchUnavailable
         }
         pendingDeletionKeys.insert(key)
@@ -571,6 +605,19 @@ final class PhoneRouteLibrary: ObservableObject {
     func reload() {
         let timestamp = now()
         loadStravaBookmarks()
+        do {
+            // The journal precedes WC submission and legacy UI bookkeeping.
+            // Reconcile a crash after receipt persistence but before local unlink.
+            let stored = Set(store.recordsIncludingExpired().map { WatchRouteIdentityV1(archive: $0.archive) })
+            for operation in try operations.entries()
+                where operation.operation == .delete && operation.applied && stored.contains(operation.identity) {
+                localDeletionTombstones.insert(operation.identity)
+            }
+        } catch {
+            routes = []
+            offlineNavigationRoutes = []
+            return
+        }
         for identity in localDeletionTombstones {
             _ = finishLocalDeletion(identity)
         }
@@ -624,6 +671,22 @@ final class PhoneRouteLibrary: ObservableObject {
     }
 
     private func receive(_ message: WatchRouteSyncMessageV1) {
+        // A receipt must identify the exact current operation, including after
+        // reinstalling identical route bytes. Old file/immediate replies cannot
+        // settle a successor install or deletion.
+        do {
+            let operation = try operations.entry(message.identity)
+            guard message.deliveryOperation == operation?.token else { return }
+            if let operation {
+                guard (message.status != .ready || operation.operation == .install),
+                      (message.status != .deleted || operation.operation == .delete) else { return }
+                if message.status == .ready || message.status == .deleted ||
+                    (message.status == .evicted && operation.operation == .delete) {
+                    try operations.complete(operation.operation, identity: message.identity,
+                                            token: message.deliveryOperation)
+                }
+            }
+        } catch { return }
         switch message.status {
         case .ready:
             if providerDeletionTombstones.contains(message.identity) ||
@@ -641,6 +704,7 @@ final class PhoneRouteLibrary: ObservableObject {
             ) else { return }
             let key = Self.receiptKey(message.identity)
             readyReceiptKeys.insert(key)
+            _ = connectivity.cancelRouteTransfers(message.identity)
             clearPendingInstall(key)
             attemptedInstallKeys.remove(key)
             rejectedInstallReasons.removeValue(forKey: key)
@@ -652,7 +716,8 @@ final class PhoneRouteLibrary: ObservableObject {
         case .deleted, .evicted:
             let identity = message.identity
             let key = Self.receiptKey(identity)
-            let deletionRequested = isPendingDeletion(identity)
+            let deletionRequested = isPendingDeletion(identity) ||
+                ((try? operations.entry(identity)?.operation) == .delete)
             // An ordinary eviction changes Watch availability, not phone
             // ownership. Ignore unsolicited deletion acknowledgements.
             if message.status == .deleted && !deletionRequested { return }
@@ -675,6 +740,12 @@ final class PhoneRouteLibrary: ObservableObject {
             persistInstallAttempts()
             reload()
         case .rejected:
+            if (try? operations.entry(message.identity)?.operation) == .delete {
+                queuedProviderDeletions.remove(message.identity)
+                watchSyncState[message.identity] = .rejected(message.errorCode ?? "watch_rejected")
+                scheduleDeletionRetry()
+                return
+            }
             if providerDeletionTombstones.contains(message.identity) ||
                 localDeletionTombstones.contains(message.identity) {
                 queuedProviderDeletions.remove(message.identity)
@@ -846,12 +917,27 @@ final class PhoneRouteLibrary: ObservableObject {
     }
 
     private func retryProviderDeletions() {
-        for identity in providerDeletionTombstones
-            where !queuedProviderDeletions.contains(identity) {
-            guard connectivity.requestRouteDeletion(identity) != nil else {
-                continue
-            }
+        guard connectivity.state.routeSyncSchemaVersion >= 2 else { return }
+        guard let operationsPending = try? operations.entries() else { return }
+        let identities = providerDeletionTombstones.union(operationsPending.filter {
+            $0.operation == .delete && !$0.applied
+        }.map(\.identity))
+        for identity in identities where !queuedProviderDeletions.contains(identity) {
+            guard let operation = try? operations.issue(.delete, identity: identity),
+                  connectivity.requestRouteDeletion(identity, deliveryOperation: operation) != nil else { continue }
             queuedProviderDeletions.insert(identity)
+        }
+        if !identities.isEmpty { scheduleDeletionRetry() }
+    }
+
+    private func scheduleDeletionRetry() {
+        guard deletionRetryTask == nil else { return }
+        deletionRetryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(30)) } catch { return }
+            guard let self else { return }
+            deletionRetryTask = nil
+            queuedProviderDeletions.removeAll()
+            retryProviderDeletions()
         }
     }
 
@@ -979,7 +1065,8 @@ final class PhoneRouteLibrary: ObservableObject {
                       now: now()
                   ) else { continue }
             immediateInstallKeys.insert(key)
-            connectivity.sendRouteImmediately(record)
+            guard let operation = try? operations.issue(.install, identity: identity) else { continue }
+            connectivity.sendRouteImmediately(record, deliveryOperation: operation)
         }
     }
 
@@ -988,7 +1075,8 @@ final class PhoneRouteLibrary: ObservableObject {
     /// left alone so reloads cannot duplicate work or hide a failed transfer.
     private func autoQueueEligibleRoutes() {
         let state = connectivity.state
-        guard state.isActivated, state.isPaired, state.isWatchAppInstalled else {
+        guard state.isActivated, state.isPaired, state.isWatchAppInstalled,
+              state.routeSyncSchemaVersion >= 2 else {
             return
         }
         for summary in routes {
@@ -1071,7 +1159,7 @@ final class PhoneRouteLibrary: ObservableObject {
         for identity: WatchRouteIdentityV1
     ) -> PhoneRouteWatchSyncStateV1 {
         let key = Self.receiptKey(identity)
-        if pendingDeletionKeys.contains(key) { return .deleting }
+        if isPendingDeletion(identity) { return .deleting }
         if pendingInstallKeys.contains(key) { return .transferring }
         if readyReceiptKeys.contains(key) { return .ready }
         if let reason = rejectedInstallReasons[key] {
@@ -1085,5 +1173,15 @@ final class PhoneRouteLibrary: ObservableObject {
 
     private static func receiptKey(_ identity: WatchRouteIdentityV1) -> String {
         "\(identity.routeID.uuidString.lowercased())|\(identity.revision)|\(identity.contentHash)"
+    }
+}
+
+
+extension PhoneRouteLibraryError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .watchUpdateRequired: "Update Bicino on Apple Watch before syncing routes."
+        default: nil
+        }
     }
 }

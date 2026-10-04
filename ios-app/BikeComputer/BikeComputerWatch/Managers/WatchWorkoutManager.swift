@@ -511,7 +511,14 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
     private var isMirroring = false
     private var isMirrorStartInFlight = false
     private var mirrorStartAttemptID: UUID?
-    private var mirrorSendAttemptID: UUID?
+    private var mirrorSendDeadlineTask: Task<Void, Never>?
+    private let mirrorSendTimeout: TimeInterval
+    private var mirrorSendAttemptID: UUID? {
+        didSet {
+            mirrorSendDeadlineTask?.cancel()
+            mirrorSendDeadlineTask = nil
+        }
+    }
     private var remoteControlGate = WorkoutRemoteControlSequenceGate()
     private var pendingRemoteStateAcknowledgement: (
         control: WorkoutControlV1,
@@ -680,6 +687,7 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         mirrorShutdownEndSession:
             (@MainActor (HKWorkoutSession) -> Void)? = nil,
         mirrorRetryDelay: TimeInterval = 5,
+        mirrorSendTimeout: TimeInterval = 8,
         mirrorShutdownDeliveryTimeout: TimeInterval = 10,
         terminalCleanupRetryDelay: TimeInterval = 1,
         workoutLaunchRequestLifetime: TimeInterval = 30,
@@ -738,6 +746,8 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         self.injectedMirrorSendOperation = mirrorSendOperation
         self.injectedMirrorShutdownEndSession = mirrorShutdownEndSession
         self.mirrorRetryDelay = mirrorRetryDelay
+        self.mirrorSendTimeout = mirrorSendTimeout.isFinite
+            ? min(max(0.01, mirrorSendTimeout), 60) : 8
         self.mirrorShutdownDeliveryTimeout = mirrorShutdownDeliveryTimeout
         self.terminalCleanupRetryDelay = terminalCleanupRetryDelay.isFinite
             ? min(max(0, terminalCleanupRetryDelay), 60)
@@ -4929,6 +4939,18 @@ final class WatchWorkoutManager: NSObject, ObservableObject {
         let callbackReference = WorkoutWeakReference(self)
         let attemptID = UUID()
         mirrorSendAttemptID = attemptID
+        if envelope.snapshot.map({ [.ended, .failed].contains($0.state) }) != true {
+            mirrorSendDeadlineTask = Task { @MainActor [weak self, mirrorSendTimeout] in
+                do { try await Task.sleep(for: .seconds(mirrorSendTimeout)) } catch { return }
+                guard !Task.isCancelled, let self,
+                      session === workoutSession,
+                      mirrorSendAttemptID == attemptID else { return }
+                mirrorSendAttemptID = nil
+                mirrorEnvelopeBuffer.interruptInFlight()
+                isMirroring = false
+                scheduleMirrorRetry(for: workoutSession)
+            }
+        }
         let completion: @Sendable (Bool, Error?) -> Void = { success, _ in
             Task { @MainActor in
                 guard let manager = callbackReference.value,

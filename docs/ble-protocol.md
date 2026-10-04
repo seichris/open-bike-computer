@@ -311,7 +311,7 @@ Offset  Size  Field
 ```
 
 Command type `1` is `navigationClear`; type `2` is `workoutState`. A navigation
-clear is one owner member (empty route) or two Watch members (empty route plus
+clear is two members on both iPhone and Watch (empty route plus
 the canonical `1|0|Navigation idle` maneuver). A workout group contains the
 canonical core, extended, and optional origin frames in their existing order.
 Only terminal/idle workout state and explicit navigation clear require this
@@ -815,7 +815,26 @@ ownership-v2 channel `7`. A cached GATT table uses:
 
 The native protected wire frame is 74 bytes; the protected fallback is 78
 bytes. Native and fallback paths unwrap authentication before entering the same
-strict parser. Frames use little-endian numeric fields:
+strict parser. Feature-channel decoding always requires both the transport and
+ownership sessions to be authenticated; only the ownership handshake entry point
+admits plaintext. This includes navigation and settings multiplexing.
+
+Queue admission is provisional. Every automation frame carries the admission
+session and lease generations. The runtime revalidates them under the ownership
+mutex immediately before applying the command, serializing application against
+release, expiry, disconnect, and revocation. Configuration becomes durable only
+after this check and successful persistence. A disconnect before application
+invalidates configuration and live controls alike; the controller retries or
+resynchronizes on the new lease. Responses are generated under that transaction
+and sent after unlocking, still fenced to its original session/lease.
+
+Notifications select a subscribed channel before encryption: native RAUT first,
+otherwise navigation fallback, only if the cached peer MTU fits the protected
+frame. Host callbacks maintain subscription snapshots; producers do not query
+NimBLE. No subscribed channel, insufficient MTU, or a full queue causes failure
+for protocol retry. Queue admission is not delivery or application confirmation.
+
+Frames use little-endian numeric fields:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
@@ -2245,3 +2264,63 @@ normative offsets, validation, replay/expiry and compatibility matrix. The JSON
 contract generates Swift/C++ constants and append-only widget IDs. Golden
 packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
 by both languages.
+
+
+## Companion delivery lifetime
+
+Fresh and CoreBluetooth-restored iPhone connections enter the same generation
+and authentication lifecycle. Connected restorations enter service discovery;
+connecting restorations retain the system attempt; disconnecting restorations
+wait for the real callback with the existing bounded cancellation deadline.
+Neither an authentication callback nor elapsed time revives a retiring attempt.
+Rejected Watch phone preparation uses the same cancellation boundary.
+
+A critical application command owns all its members. Completion, failure,
+cancellation, and supersession invalidate every unsent member before external
+callbacks. iPhone retains an unconfirmed navigation-clear intent for the selected
+peripheral across reconnect, resends a complete group after capabilities, and
+settles it only on its matching application acknowledgement. New explicit route
+or maneuver state supersedes that intent. Legacy peers retain their documented
+best-effort empty-route behavior.
+
+HealthKit send completion and authoritative workout confirmation have independent
+deadlines. iPhone retires a missing framework completion after eight seconds and
+allows queued controls to progress, preserving monotonic control sequences and
+terminal-choice uncertainty. A late callback cannot finish a successor attempt.
+Watch applies the same bound to live mirror sends, then restarts mirroring with
+its newest buffered snapshot; terminal delivery keeps its separate shutdown bound.
+
+WatchConnectivity route schema 2 adds `bicino.route.operationGeneration` (a
+positive UInt64 encoded as decimal text) and `bicino.route.operationID` (UUID).
+The content identity remains route UUID, revision, and hash. iPhone persists an
+operation before submitting either immediate or file delivery; both carry the
+same token. Retries retain it; a deliberate new install or delete advances it.
+The Watch writes an operation journal before touching bytes and marks successful
+application before acknowledging the exact token. Startup finishes journaled
+deletions before making routes available. Completed deletion fences survive
+archive removal, so delayed files cannot resurrect deleted content. An active
+route may finish after a durable delete receipt, but cannot start again. A newer
+install may intentionally supersede deletion. Conflicting or stale operations,
+corrupt journals, and persistence failures fail closed.
+
+Watch advertises `bicino.route.supportedSchema = 2` in application context.
+The phone requires this before new transfers and shows an update instruction for
+older Watch apps. Schema-1 messages remain readable for upgrade recovery, but cannot overwrite a
+schema-2 fence or reinstall a legacy-deleted identity. New transfers require both
+apps to support schema 2; a receipt without the submitted token cannot mark them
+ready. Eviction and error receipts also identify their operation. The sender
+cancels redundant file transfers after an exact ready receipt. The sender also
+replays journaled deletion intent after a crash before UI bookkeeping, and
+finishes local unlink after a crash following the receiver receipt. Rejection
+keeps deletion pending for retry; only a new explicit import after completed
+cleanup can restore identical content.
+
+Watch controller keychain cleanup uses a separate applied receipt containing the
+exact validated revoke request and its response (`watchControllerRevocationReceiptV1`).
+No owner key or controller credential is included. The phone retains its persisted
+outbox until an accepted matching receipt arrives, including after restart.
+WatchConnectivity enqueue/didFinish never settles cleanup. Outstanding system
+transfers are deduplicated, and absent/rejected receipts retry with 30–300 second
+backoff when activated. Repeated keychain deletion is idempotent and scoped to the
+same DeviceID and ControllerID; an old receipt cannot revoke a successor key.
+Bike settings expose pending cleanup until that matching receipt is applied.

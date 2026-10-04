@@ -168,7 +168,15 @@ final class WorkoutMirrorManager: NSObject {
 
     private var controlSequencer = WorkoutControlEnvelopeSequencer()
     private var remoteQueue: [RemoteMessage] = []
-    private var remoteSendInFlight: RemoteSendAttempt?
+    private var remoteSendDeadlineTask: Task<Void, Never>?
+    private let remoteSendTimeout: TimeInterval
+    private let remoteSendWait: @MainActor @Sendable (TimeInterval) async throws -> Void
+    private var remoteSendInFlight: RemoteSendAttempt? {
+        didSet {
+            remoteSendDeadlineTask?.cancel()
+            remoteSendDeadlineTask = nil
+        }
+    }
     private var segmentStatusReplayMessage: RemoteMessage?
     private var segmentReplayAfterSendAttemptID: UUID?
 
@@ -179,6 +187,8 @@ final class WorkoutMirrorManager: NSObject {
         watchLaunchTimeout: TimeInterval = WorkoutMirrorManager.watchLaunchTimeout,
         controlConfirmationTimeout: TimeInterval =
             WorkoutMirrorManager.defaultControlConfirmationTimeout,
+        remoteSendTimeout: TimeInterval = 8,
+        remoteSendWait: (@MainActor @Sendable (TimeInterval) async throws -> Void)? = nil,
         finalSnapshotTimeout: TimeInterval =
             WorkoutMirrorManager.defaultFinalSnapshotTimeout,
         firstSnapshotWait: (@MainActor @Sendable (
@@ -201,6 +211,11 @@ final class WorkoutMirrorManager: NSObject {
             @escaping @Sendable (Bool, Error?) -> Void
         ) -> Void)? = nil
     ) {
+        self.remoteSendTimeout = remoteSendTimeout.isFinite
+            ? min(max(0.01, remoteSendTimeout), 60) : 8
+        self.remoteSendWait = remoteSendWait ?? { timeout in
+            try await Task.sleep(for: .seconds(timeout))
+        }
         self.healthStore = healthStore
         self.store = store ?? WorkoutMetricsStore(now: now)
         self.now = now
@@ -1119,6 +1134,24 @@ final class WorkoutMirrorManager: NSObject {
             message: message
         )
         remoteSendInFlight = attempt
+        let attachmentID = currentTransportAttachmentID
+        remoteSendDeadlineTask = Task { @MainActor [weak self, remoteSendWait, remoteSendTimeout] in
+            do { try await remoteSendWait(remoteSendTimeout) } catch { return }
+            guard !Task.isCancelled, let self,
+                  remoteSendInFlight?.id == attempt.id,
+                  currentTransportAttachmentID == attachmentID,
+                  isCurrentTransport(session) else { return }
+            // HealthKit exposes no cancellation. Retire only this local barrier;
+            // the semantic confirmation deadline still owns outcome reporting.
+            // A successor has a higher control sequence, so a late old command
+            // cannot supersede a newer manual/terminal decision on Watch.
+            remoteSendInFlight = nil
+            if segmentReplayAfterSendAttemptID == attempt.id {
+                segmentReplayAfterSendAttemptID = nil
+                enqueueUnconfirmedSegmentReplayIfNeeded()
+            }
+            drainRemoteQueue()
+        }
         if message.control == .markSegment {
             segmentStatusReplayMessage = message
         }

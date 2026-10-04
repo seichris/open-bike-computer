@@ -769,6 +769,14 @@ private struct BikeComputerDetailView: View {
                 title: "Direct rides",
                 value: directRideStatus(for: device)
             )
+            if bleManager.watchConnectivityState.pendingControllerCleanupDeviceIDs.contains(device.deviceID) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Watch key cleanup awaiting confirmation")
+                    Text("Cleanup retries automatically when the Watch is available.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             if bleManager.connectedDeviceID == device.deviceID,
                let status = bleManager.watchControllerOperationStatus {
                 HStack(spacing: 12) {

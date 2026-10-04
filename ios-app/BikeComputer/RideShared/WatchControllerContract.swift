@@ -205,6 +205,53 @@ struct WatchControllerResponseV1: Codable, Equatable, Sendable {
     }
 }
 
+/// Receipt for keychain application, distinct from WatchConnectivity delivery.
+/// The echoed revoke request carries identifiers only; validation forbids keys.
+struct WatchControllerRevocationReceiptV1: Codable, Equatable, Sendable {
+    static let userInfoPayloadKey = "watchControllerRevocationReceiptV1"
+    let request: WatchControllerRequestV1
+    let response: WatchControllerResponseV1
+
+    func validated() throws -> Self {
+        _ = try request.validated()
+        _ = try response.validated()
+        guard request.operation == .revoke, request.requestID == response.requestID,
+              response.proof == nil else { throw WatchControllerContractError.invalidEnvelope }
+        return self
+    }
+    func encoded() throws -> Data { try PropertyListEncoder().encode(validated()) }
+    static func decode(_ data: Data) throws -> Self {
+        try PropertyListDecoder().decode(Self.self, from: data).validated()
+    }
+}
+
+/// Persist `requests` before transport submission. Transport admission/completion
+/// never changes this state; only the exact applied receipt can settle an intent.
+struct WatchControllerRevocationOutboxV1 {
+    private(set) var requests: [WatchControllerRequestV1]
+
+    init(requests: [WatchControllerRequestV1] = []) {
+        self.requests = requests.filter { $0.operation == .revoke && (try? $0.validated()) != nil }
+    }
+
+    @discardableResult
+    mutating func enqueue(_ request: WatchControllerRequestV1) -> Bool {
+        guard request.operation == .revoke, (try? request.validated()) != nil,
+              !requests.contains(where: { $0.deviceID == request.deviceID &&
+                  $0.controllerID == request.controllerID }) else { return false }
+        requests.append(request)
+        return true
+    }
+
+    @discardableResult
+    mutating func apply(_ receipt: WatchControllerRevocationReceiptV1) -> Bool {
+        guard (try? receipt.validated()) != nil, receipt.response.accepted,
+              requests.contains(receipt.request) else { return false }
+        requests.removeAll { $0 == receipt.request }
+        return true
+    }
+}
+
 enum WatchControllerCryptographyV1 {
     static func enrollmentProof(
         credential: WatchControllerCredentialV1,
@@ -649,6 +696,8 @@ struct PhoneWatchConnectivityStateV1: Equatable, Sendable {
     var isWatchAppInstalled = false
     var isReachable = false
     var watchMetadata: WatchDeviceMetadataV1?
+    var routeSyncSchemaVersion = 1
+    var pendingControllerCleanupDeviceIDs: Set<String> = []
 
     var controllerAvailability: WatchControllerAvailabilityV1 {
         WatchControllerAvailabilityV1(

@@ -25,6 +25,38 @@ def function_body(source: str, signature: str) -> str:
 
 
 class BLENotificationDispatchTests(unittest.TestCase):
+    def test_every_automation_entry_uses_the_mandatory_protected_boundary(self):
+        # This adapter-wiring check complements executable authentication/lease
+        # policy tests: it catches a forgotten guard in either fallback callback.
+        for callback in (
+            "class MyNavCharacteristicCallbacks",
+            "class MySettingsCharacteristicCallbacks",
+            "class MyRideAutomationCharacteristicCallbacks",
+        ):
+            body = function_body(BLE_SOURCE, callback)
+            self.assertIn("decodeProtectedCommand(", body)
+            self.assertLess(body.index("decodeProtectedCommand("),
+                            body.index("admitRideAutomationFrame("))
+            self.assertNotIn("decodeOwnershipHandshake(", body)
+            self.assertNotIn("ingestTransportFrame(", body)
+        protected = function_body(BLE_SOURCE, "static bool decodeProtectedCommand(")
+        self.assertIn("false, scopedWatch", protected)
+        decode = function_body(BLE_SOURCE, "static bool decodeSessionPayload(")
+        self.assertIn("ride_command_admission::mayDecode", decode)
+        self.assertIn("deviceOwnership.authorizeRideWrite", decode)
+
+    def test_deferred_command_application_is_fenced_under_ownership_lock(self):
+        apply = function_body(BLE_SOURCE, "bool BLENavigationServer::applyAuthorizedRideCommand(")
+        self.assertLess(apply.index("xSemaphoreTake"), apply.index("ride_command_admission::mayApply"))
+        self.assertLess(apply.index("ride_command_admission::mayApply"), apply.index("apply(context)"))
+        self.assertLess(apply.index("apply(context)"), apply.index("xSemaphoreGive"))
+        runtime = (Path(__file__).resolve().parents[2] / "lib" / "ride_automation" /
+                   "ride_automation_runtime.cpp").read_text(encoding="utf-8")
+        drain = function_body(runtime, "void processFirmwareShadow(uint32_t nowMs)")
+        self.assertLess(drain.index("applyAuthorizedRideCommand"),
+                        drain.index("processInboundTransportFrame"))
+        self.assertIn("inbound.authorization", drain)
+
     def test_producers_queue_and_host_task_owns_transport_apis(self):
         enqueue = function_body(
             BLE_SOURCE, "static bool enqueueDeferredNotification"

@@ -10,21 +10,29 @@ final class PhoneWatchConnectivityCoordinator: ObservableObject {
         var isPaired = false
         var isWatchAppInstalled = false
         var isReachable = false
+        var routeSyncSchemaVersion = 2
     }
     @Published var state = State()
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
+    var operations: [WatchRouteIdentityV1: WatchRouteOperationV2] = [:]
     var acceptsDeletion = true
     var cancelledTransferCount = 1
     private(set) var sideEffects = 0
     private(set) var transferredRouteIDs: [UUID] = []
     private(set) var immediateRouteIDs: [UUID] = []
     private(set) var cancelledRouteIdentities: [WatchRouteIdentityV1] = []
-    func transferRoute(_ record: InstalledNavigationRouteV1) -> UUID? {
+    func acknowledgeCurrent(_ message: WatchRouteSyncMessageV1) {
+        onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: message.operation, identity: message.identity, status: message.status,
+            errorCode: message.errorCode, deliveryOperation: operations[message.identity]))
+    }
+    func transferRoute(_ record: InstalledNavigationRouteV1, deliveryOperation: WatchRouteOperationV2? = nil) -> UUID? {
+        operations[WatchRouteIdentityV1(archive: record.archive)] = deliveryOperation
         sideEffects += 1
         transferredRouteIDs.append(record.archive.routeID)
         return UUID()
     }
-    func sendRouteImmediately(_ record: InstalledNavigationRouteV1) {
+    func sendRouteImmediately(_ record: InstalledNavigationRouteV1, deliveryOperation: WatchRouteOperationV2? = nil) {
         sideEffects += 1
         immediateRouteIDs.append(record.archive.routeID)
     }
@@ -33,7 +41,8 @@ final class PhoneWatchConnectivityCoordinator: ObservableObject {
         cancelledRouteIdentities.append(identity)
         return cancelledTransferCount
     }
-    func requestRouteDeletion(_ identity: WatchRouteIdentityV1) -> UUID? {
+    func requestRouteDeletion(_ identity: WatchRouteIdentityV1, deliveryOperation: WatchRouteOperationV2? = nil) -> UUID? {
+        operations[identity] = deliveryOperation
         sideEffects += 1
         return acceptsDeletion ? UUID() : nil
     }
@@ -227,6 +236,7 @@ struct OfflineRouteSaveTests {
     }
 
     static func main() throws {
+        try operationReceiptAndCrashRecovery()
         try sourceAndValidation()
         try saveIdentityRestartAndDuplicates()
         try interactionCancellationAndStorageFailure()
@@ -242,6 +252,42 @@ struct OfflineRouteSaveTests {
         try selectedMapKitSaving()
         try uiWiring()
         print("Offline route save/navigation: \(checks) checks passed")
+    }
+
+    static func operationReceiptAndCrashRecovery() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let summary = try f.library.importGPX(gpx(), fileName: "Crash.gpx")
+        let archive = try f.library.offlineArchive(for: summary)
+        let identity = WatchRouteIdentityV1(archive: archive)
+        let bytes = try archive.encoded(purpose: .offlineNavigation, now: f.now)
+        try f.library.sendToWatch(summary)
+        let oldInstall = f.watch.operations[identity]!
+        let journal = WatchRouteOperationJournalV2(rootDirectory: f.root)
+        let deletion = try journal.issue(.delete, identity: identity)
+        let restarted = f.makeLibrary()
+        check(restarted.offlineNavigationRoutes.isEmpty, "journaled delete excludes navigation after crash")
+        check(f.watch.operations[identity] == deletion, "restart queues the exact persisted deletion")
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(operation: .acknowledge,
+            identity: identity, status: .ready, deliveryOperation: oldInstall))
+        check(restarted.offlineNavigationRoutes.isEmpty, "old install receipt cannot overwrite deletion intent")
+        try journal.complete(.delete, identity: identity, token: deletion)
+        let afterReceiptCrash = f.makeLibrary()
+        check(afterReceiptCrash.routes.isEmpty && f.store.records(now: f.now).isEmpty,
+              "crash after receipt but before unlink completes local deletion on restart")
+        let imported = try afterReceiptCrash.importArchive(bytes)
+        try afterReceiptCrash.sendToWatch(imported)
+        let newer = f.watch.operations[identity]!
+        check(newer.generation > deletion.generation, "explicit reimport can reinstall identical bytes")
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(operation: .acknowledge,
+            identity: identity, status: .deleted, deliveryOperation: deletion))
+        check(afterReceiptCrash.routes.count == 1, "old deletion receipt cannot delete explicit reinstall")
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(operation: .acknowledge,
+            identity: identity, status: .ready))
+        check(afterReceiptCrash.watchSyncState[identity] == .ready, "only exact successor receipt marks ready")
+        f.watch.state.routeSyncSchemaVersion = 1
+        try afterReceiptCrash.sendToWatch(imported)
+        check(afterReceiptCrash.watchSyncState[identity] == .rejected("watch_update_required"),
+              "older Watch requires update instead of an unacknowledgeable transfer")
     }
 
     static func sourceAndValidation() throws {
@@ -682,7 +728,7 @@ struct OfflineRouteSaveTests {
             f.watch.immediateRouteIDs == [first.id, first.id],
             "Repeated reachable-state refreshes do not duplicate live sends"
         )
-        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
             operation: .acknowledge,
             identity: firstIdentity,
             status: .ready,
@@ -702,7 +748,7 @@ struct OfflineRouteSaveTests {
         let secondIdentity = WatchRouteIdentityV1(
             archive: try f.library.offlineArchive(for: second)
         )
-        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
             operation: .acknowledge,
             identity: secondIdentity,
             status: .rejected,
@@ -752,7 +798,7 @@ struct OfflineRouteSaveTests {
         let identity = WatchRouteIdentityV1(archive: archive)
         let selected = try f.library.offlineDraft(for: saved.summary)
         try f.library.sendToWatch(saved.summary)
-        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
             operation: .acknowledge, identity: identity, status: .ready, errorCode: nil))
         let factory = TestNavigationDirectionsFactory()
         let coordinator = BikeComputerCoordinator(destinationStore: SavedDestinationStore(defaults: f.defaults),
@@ -773,11 +819,11 @@ struct OfflineRouteSaveTests {
         let restarted = f.makeLibrary()
         check(!restarted.isAvailableOffline(saved.summary), "Pending deletion survives restart")
         failure { _ = try restarted.offlineArchive(for: saved.summary) }
-        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
             operation: .acknowledge, identity: identity, status: .rejected, errorCode: "in_use"))
-        check(restarted.isAvailableOffline(saved.summary), "An explicitly rejected Watch deletion keeps the original route")
+        check(!restarted.isAvailableOffline(saved.summary), "A rejected receipt keeps the durable deletion intent for retry")
         try restarted.delete(saved.summary)
-        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
             operation: .acknowledge, identity: identity, status: .deleted, errorCode: nil))
         check(restarted.routes.isEmpty && f.makeLibrary().routes.isEmpty, "Acknowledged deletion is durable")
     }
@@ -845,7 +891,7 @@ struct OfflineRouteSaveTests {
                 let summary = try f.library.importArchive(archive.encoded(purpose: .offlineNavigation, now: f.now))
                 let identity = WatchRouteIdentityV1(archive: archive)
                 try f.library.sendToWatch(summary)
-                f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+                f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
                     operation: .acknowledge, identity: identity, status: .ready, errorCode: nil))
                 f.fileManager.failsRouteDeletion = true
                 if provider == RouteProviderPolicyV1.strava {
@@ -854,8 +900,11 @@ struct OfflineRouteSaveTests {
                 } else {
                     try f.library.delete(summary)
                 }
-                f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+                f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
                     operation: .acknowledge, identity: identity, status: status, errorCode: nil))
+                let deletion = try WatchRouteOperationJournalV2(rootDirectory: f.root).entry(identity)
+                check(deletion?.operation == .delete && deletion?.applied == true,
+                      "Exact deleted or evicted receipt settles the durable deletion before unlink")
                 check(!f.store.records(now: f.now).isEmpty, "Injected local unlink failure really leaves archive bytes")
                 check(f.library.offlineNavigationRoutes.isEmpty, "Watch acknowledgement cannot clear failed local cleanup")
                 failure { _ = try f.library.offlineArchive(for: summary) }
@@ -873,7 +922,7 @@ struct OfflineRouteSaveTests {
         let summary = try f.library.importGPX(gpx(), fileName: "Keep.gpx")
         let identity = WatchRouteIdentityV1(archive: try f.library.offlineArchive(for: summary))
         for status in [WatchRouteSyncStatusV1.evicted, .deleted] {
-            f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
                 operation: .acknowledge, identity: identity, status: status, errorCode: nil))
             check(f.library.isAvailableOffline(summary), "Unrequested Watch removal does not delete the iPhone copy")
         }

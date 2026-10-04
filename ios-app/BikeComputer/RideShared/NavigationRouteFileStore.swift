@@ -538,3 +538,97 @@ final class NavigationRouteFileStoreV1 {
 #endif
     }
 }
+
+
+/// Write-ahead operation ledger. Persist the fence before touching route bytes,
+/// then mark applied before acknowledging. Corrupt or unwritable metadata fails
+/// closed. Completed deletion fences are never pruned with route archives.
+final class WatchRouteOperationJournalV2 {
+    struct Entry: Codable, Equatable {
+        let identity: WatchRouteIdentityV1
+        let operation: WatchRouteSyncOperationV1
+        let token: WatchRouteOperationV2?
+        var applied: Bool
+    }
+    enum Failure: Error, Equatable { case staleOperation, conflict, exhausted }
+    let fileURL: URL
+
+    init(rootDirectory: URL) {
+        fileURL = rootDirectory.appendingPathComponent(".route-operations-v2.plist")
+    }
+
+    func entries() throws -> [Entry] {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
+        let values = try PropertyListDecoder().decode([Entry].self, from: Data(contentsOf: fileURL))
+        guard Set(values.map(\.identity)).count == values.count,
+              values.allSatisfy({ $0.operation != .acknowledge && ($0.token?.generation ?? 1) > 0 })
+        else { throw Failure.conflict }
+        return values
+    }
+
+    func entry(_ identity: WatchRouteIdentityV1) throws -> Entry? {
+        try entries().first { $0.identity == identity }
+    }
+
+    /// Sender: persist a token before either immediate or background submission.
+    func issue(_ operation: WatchRouteSyncOperationV1, identity: WatchRouteIdentityV1,
+               renew: Bool = false) throws -> WatchRouteOperationV2 {
+        guard operation != .acknowledge else { throw Failure.conflict }
+        let previous = try entry(identity)
+        if !renew, previous?.operation == operation, let token = previous?.token { return token }
+        let generation = previous?.token?.generation ?? 0
+        guard generation < UInt64.max else { throw Failure.exhausted }
+        let token = WatchRouteOperationV2(generation: generation + 1, id: UUID())
+        try replace(.init(identity: identity, operation: operation, token: token, applied: false))
+        return token
+    }
+
+    /// Receiver: duplicates retry the same pending operation; stale or conflicting
+    /// deliveries never replace a fence. Legacy installs cannot cross a deletion.
+    func admit(_ operation: WatchRouteSyncOperationV1, identity: WatchRouteIdentityV1,
+               token: WatchRouteOperationV2?) throws {
+        guard operation != .acknowledge, (token?.generation ?? 1) > 0 else { throw Failure.conflict }
+        if let previous = try entry(identity) {
+            if let token {
+                let oldGeneration = previous.token?.generation ?? 0
+                guard token.generation >= oldGeneration else { throw Failure.staleOperation }
+                if token.generation == oldGeneration {
+                    guard token == previous.token, operation == previous.operation else { throw Failure.conflict }
+                    return
+                }
+            } else {
+                guard previous.token == nil else { throw Failure.staleOperation }
+                if operation == .install && previous.operation == .delete { throw Failure.staleOperation }
+                if operation == previous.operation { return }
+            }
+        }
+        try replace(.init(identity: identity, operation: operation, token: token, applied: false))
+    }
+
+    func complete(_ operation: WatchRouteSyncOperationV1, identity: WatchRouteIdentityV1,
+                  token: WatchRouteOperationV2?) throws {
+        guard var value = try entry(identity), value.operation == operation,
+              value.token == token else { throw Failure.conflict }
+        guard !value.applied else { return }
+        value.applied = true
+        try replace(value)
+    }
+
+    private func replace(_ value: Entry) throws {
+        var values = try entries().filter { $0.identity != value.identity }
+        values.append(value)
+        let data = try PropertyListEncoder().encode(values)
+        let directory = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try data.write(to: fileURL, options: .atomic)
+        let handle = try FileHandle(forWritingTo: fileURL)
+        defer { try? handle.close() }
+        try handle.synchronize()
+#if canImport(Darwin)
+        let descriptor = Darwin.open(directory.path, O_RDONLY)
+        guard descriptor >= 0 else { throw NavigationRouteFileStoreError.ioFailure }
+        defer { _ = Darwin.close(descriptor) }
+        guard Darwin.fsync(descriptor) == 0 else { throw NavigationRouteFileStoreError.ioFailure }
+#endif
+    }
+}

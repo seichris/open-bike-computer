@@ -431,6 +431,7 @@ final class WatchConnectivityCoordinator: NSObject {
         ), let data = try? metadata.encoded() else { return }
         var merged = session.applicationContext
         merged[WatchDeviceMetadataV1.applicationContextKey] = data
+        merged[WatchRouteSyncMessageV1.supportedSchemaContextKey] = 2
         if let workoutHealthSetupSnapshot,
            let healthData = try? workoutHealthSetupSnapshot.encoded() {
             merged[WorkoutHealthSetupSnapshotV1.applicationContextKey] =
@@ -455,6 +456,7 @@ final class WatchConnectivityCoordinator: NSObject {
         guard let data else {
             return routeAcknowledgement(
                 request.identity,
+                deliveryOperation: request.deliveryOperation,
                 status: .rejected,
                 error: "file_read"
             )
@@ -462,6 +464,7 @@ final class WatchConnectivityCoordinator: NSObject {
         guard request.encodedByteCount == data.count else {
             return routeAcknowledgement(
                 request.identity,
+                deliveryOperation: request.deliveryOperation,
                 status: .rejected,
                 error: "byte_count"
             )
@@ -477,23 +480,26 @@ final class WatchConnectivityCoordinator: NSObject {
             guard archive.deleteAfter == request.deleteAfter else {
                 return routeAcknowledgement(
                     request.identity,
+                    deliveryOperation: request.deliveryOperation,
                     status: .rejected,
                     error: "retention_mismatch"
                 )
             }
             let result = try routeLibrary.install(
                 data,
-                expectedIdentity: request.identity
+                expectedIdentity: request.identity,
+                deliveryOperation: request.deliveryOperation
             )
             for evictedIdentity in result.evictedIdentities {
                 acknowledge(evictedIdentity, status: .evicted)
             }
-            return routeAcknowledgement(request.identity, status: .ready)
+            return routeAcknowledgement(request.identity, deliveryOperation: request.deliveryOperation, status: .ready)
         } catch {
             let code = Self.errorCode(for: error)
             routeLibrary.reportSyncError(code)
             return routeAcknowledgement(
                 request.identity,
+                deliveryOperation: request.deliveryOperation,
                 status: .rejected,
                 error: code
             )
@@ -515,6 +521,7 @@ final class WatchConnectivityCoordinator: NSObject {
         case .failure(let error):
             routeAcknowledgement(
                 request.identity,
+                deliveryOperation: request.deliveryOperation,
                 status: .rejected,
                 error: error.rawValue
             )
@@ -528,7 +535,17 @@ final class WatchConnectivityCoordinator: NSObject {
         if let payload = userInfo[
             WatchControllerTransportV1.userInfoPayloadKey
         ] as? Data {
-            _ = receiveControllerRequest(payload)
+            let result = receiveControllerRequest(payload)
+            if let request = try? WatchControllerRequestV1.decode(payload),
+               request.operation == .revoke,
+               let response = try? WatchControllerResponseV1.decode(result),
+               let receipt = try? WatchControllerRevocationReceiptV1(
+                   request: request, response: response).encoded(),
+               let session, session.activationState == .activated {
+                session.transferUserInfo([
+                    WatchControllerRevocationReceiptV1.userInfoPayloadKey: receipt
+                ])
+            }
             return
         }
         guard let request = WatchRouteSyncMessageV1(propertyList: userInfo),
@@ -536,15 +553,15 @@ final class WatchConnectivityCoordinator: NSObject {
             return
         }
         do {
-            try routeLibrary.delete(request.identity)
-            acknowledge(request.identity, status: .deleted)
+            try routeLibrary.delete(request.identity, deliveryOperation: request.deliveryOperation)
+            acknowledge(routeAcknowledgement(request.identity, deliveryOperation: request.deliveryOperation, status: .deleted))
         } catch NavigationRouteFileStoreError.notFound {
             // Deletion is idempotent: the requested exact revision is absent.
-            acknowledge(request.identity, status: .deleted)
+            acknowledge(routeAcknowledgement(request.identity, deliveryOperation: request.deliveryOperation, status: .deleted))
         } catch {
             let code = Self.errorCode(for: error)
             routeLibrary.reportSyncError(code)
-            acknowledge(request.identity, status: .rejected, error: code)
+            acknowledge(routeAcknowledgement(request.identity, deliveryOperation: request.deliveryOperation, status: .rejected, error: code))
         }
     }
 
@@ -643,6 +660,7 @@ final class WatchConnectivityCoordinator: NSObject {
     ) {
         acknowledge(routeAcknowledgement(
             identity,
+            deliveryOperation: routeLibrary.operationToken(for: identity),
             status: status,
             error: error
         ))
@@ -656,6 +674,7 @@ final class WatchConnectivityCoordinator: NSObject {
 
     private func routeAcknowledgement(
         _ identity: WatchRouteIdentityV1,
+        deliveryOperation: WatchRouteOperationV2? = nil,
         status: WatchRouteSyncStatusV1,
         error: String? = nil
     ) -> WatchRouteSyncMessageV1 {
@@ -663,12 +682,17 @@ final class WatchConnectivityCoordinator: NSObject {
             operation: .acknowledge,
             identity: identity,
             status: status,
-            errorCode: error
+            errorCode: error,
+            deliveryOperation: deliveryOperation
         )
     }
 
     private static func errorCode(for error: Error) -> String {
         switch error {
+        case WatchRouteOperationJournalV2.Failure.staleOperation:
+            "stale_operation"
+        case WatchRouteOperationJournalV2.Failure.conflict:
+            "operation_conflict"
         case WatchRouteLibraryError.metadataMismatch:
             "metadata_mismatch"
         case NavigationRouteFileStoreError.capacityExceeded:

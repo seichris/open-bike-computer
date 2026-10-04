@@ -13,22 +13,31 @@ final class PhoneWatchConnectivityCoordinator: ObservableObject {
         var isPaired = false
         var isWatchAppInstalled = false
         var isReachable = false
+        var routeSyncSchemaVersion = 2
     }
     @Published var state = State()
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
+    var operations: [WatchRouteIdentityV1: WatchRouteOperationV2] = [:]
     private(set) var sideEffects = 0
-    func transferRoute(_ record: InstalledNavigationRouteV1) -> UUID? {
+    func acknowledgeCurrent(_ message: WatchRouteSyncMessageV1) {
+        onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: message.operation, identity: message.identity, status: message.status,
+            errorCode: message.errorCode, deliveryOperation: operations[message.identity]))
+    }
+    func transferRoute(_ record: InstalledNavigationRouteV1, deliveryOperation: WatchRouteOperationV2? = nil) -> UUID? {
+        operations[WatchRouteIdentityV1(archive: record.archive)] = deliveryOperation
         sideEffects += 1
         return UUID()
     }
-    func sendRouteImmediately(_ record: InstalledNavigationRouteV1) {
+    func sendRouteImmediately(_ record: InstalledNavigationRouteV1, deliveryOperation: WatchRouteOperationV2? = nil) {
         sideEffects += 1
     }
     func cancelRouteTransfers(_ identity: WatchRouteIdentityV1) -> Int {
         sideEffects += 1
         return 1
     }
-    func requestRouteDeletion(_ identity: WatchRouteIdentityV1) -> UUID? {
+    func requestRouteDeletion(_ identity: WatchRouteIdentityV1, deliveryOperation: WatchRouteOperationV2? = nil) -> UUID? {
+        operations[identity] = deliveryOperation
         sideEffects += 1
         return UUID()
     }

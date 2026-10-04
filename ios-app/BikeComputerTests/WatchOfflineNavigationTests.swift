@@ -4,6 +4,7 @@ import Foundation
 @MainActor
 enum WatchOfflineNavigationTests {
     static func main() throws {
+        try testOperationFencesSurviveRestartAndReordering()
         try testActiveRoutePinAndDeferredDeletion()
         try testNavigationJournalRoundTripAndValidation()
         try testExpiryAndDowngradeFailClosed()
@@ -11,6 +12,58 @@ enum WatchOfflineNavigationTests {
         try testEvictionReportsExactIdentity()
         try testPhoneOnlyMapKitRejected()
         print("WatchOfflineNavigationTests passed")
+    }
+
+    private static func testOperationFencesSurviveRestartAndReordering() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("route-fences-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "route-fences.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let route = try archive(revision: 1, now: now)
+        let bytes = try route.encoded(purpose: .watchTransfer, now: now)
+        let identity = WatchRouteIdentityV1(archive: route)
+        let store = NavigationRouteFileStoreV1(rootDirectory: root, limits: .watch, destination: .watch)
+        var library = WatchRouteLibrary(store: store, now: { now }, defaults: defaults)
+        let install = WatchRouteOperationV2(generation: 1, id: UUID())
+        let delete = WatchRouteOperationV2(generation: 2, id: UUID())
+        _ = try library.install(bytes, expectedIdentity: identity, deliveryOperation: install)
+        _ = try library.install(bytes, expectedIdentity: identity, deliveryOperation: install)
+        try library.delete(identity, deliveryOperation: delete)
+        library = WatchRouteLibrary(store: store, now: { now }, defaults: defaults)
+        for old in [install, nil] {
+            expectThrows(WatchRouteOperationJournalV2.Failure.staleOperation,
+                         "late and legacy file deliveries cannot cross a durable delete") {
+                _ = try library.install(bytes, expectedIdentity: identity, deliveryOperation: old)
+            }
+        }
+        expect(library.routes.isEmpty, "deletion survives restart and duplicate delivery")
+        let reinstall = WatchRouteOperationV2(generation: 3, id: UUID())
+        _ = try library.install(bytes, expectedIdentity: identity, deliveryOperation: reinstall)
+        expect(library.routes.count == 1, "new operation deliberately reinstalls identical bytes")
+        expectThrows(WatchRouteOperationJournalV2.Failure.staleOperation, "old delete cannot remove a reinstall") {
+            try library.delete(identity, deliveryOperation: delete)
+        }
+        expectThrows(WatchRouteOperationJournalV2.Failure.conflict, "same generation cannot change operation identity") {
+            try library.delete(identity, deliveryOperation: .init(generation: 3, id: UUID()))
+        }
+        let journal = WatchRouteOperationJournalV2(rootDirectory: root)
+        let crashDelete = WatchRouteOperationV2(generation: 4, id: UUID())
+        try journal.admit(.delete, identity: identity, token: crashDelete)
+        // Simulate process death after persisting intent, before removing bytes.
+        expect(store.records(now: now).count == 1, "crash fixture still has route bytes")
+        library = WatchRouteLibrary(store: store, now: { now }, defaults: defaults)
+        expect(library.routes.isEmpty && store.records(now: now).isEmpty,
+               "startup reconciles write-ahead deletion before publishing routes")
+        try library.delete(identity, deliveryOperation: crashDelete)
+        try Data("corrupt journal".utf8).write(to: journal.fileURL)
+        do {
+            _ = try library.install(bytes, expectedIdentity: identity,
+                                    deliveryOperation: .init(generation: 5, id: UUID()))
+            expect(false, "corrupt journal must fail closed")
+        } catch { }
+        expect(store.records(now: now).isEmpty, "failed fence admission cannot write bytes")
     }
 
     private static func testPhoneOnlyMapKitRejected() throws {

@@ -1499,6 +1499,14 @@ class BLEManager: NSObject, ObservableObject {
     private var nextRideDeliveryStateGeneration: UInt32 = 0
     private var pendingRideApplicationDeliveries:
         [UUID: PendingRideBLEApplicationDelivery] = [:]
+    private struct NavigationClearIntent {
+        let id: UUID
+        let peripheralID: UUID?
+    }
+    private var pendingNavigationClear: NavigationClearIntent?
+#if HOST_TESTING
+    private var navigationClearEndpointForTesting: NavigationWriteEndpoint?
+#endif
     private let rideApplicationAcknowledgementTimeout: TimeInterval = 5
 #if HOST_TESTING
     private var navigationWriteResponseTimeout: TimeInterval = 60
@@ -3969,6 +3977,7 @@ class BLEManager: NSObject, ObservableObject {
     /// Send navigation data to ESP32
     @discardableResult
     func sendNavigationData(_ data: String) -> Bool {
+        if data != "1|0|Navigation idle" { supersedePendingNavigationClear() }
         guard let endpoint = navigationWriteEndpoint,
               isConnected,
               isNavigationReady else {
@@ -4001,6 +4010,7 @@ class BLEManager: NSObject, ObservableObject {
     /// Format: [StartLat:4][StartLon:4][DeltaLat:2][DeltaLon:2]...
     @discardableResult
     func sendRouteGeometry(_ data: Data) -> Bool {
+        if !data.isEmpty { supersedePendingNavigationClear() }
         guard let peripheral = connectedPeripheral,
               isConnected,
               isNavigationReady else {
@@ -4069,24 +4079,57 @@ class BLEManager: NSObject, ObservableObject {
         )
     }
 
-    /// Clear route geometry on ESP32.
+    /// Own the desired clear across connection attempts until application ACK.
     func clearRouteGeometry() {
-        if let acknowledged = sendAcknowledgedNavigationClear() {
-            if !acknowledged {
-                recoverFromRideApplicationFailure(
-                    "critical navigation clear admission failed",
-                    failureReason: .criticalAdmissionFailed
-                )
-            }
-            return
-        }
-        _ = sendRouteGeometry(Data())
+        supersedePendingNavigationClear()
+        pendingNavigationClear = NavigationClearIntent(
+            id: UUID(), peripheralID: connectedPeripheral?.identifier
+                ?? lastConnectedPeripheralIdentifier)
+        retryPendingNavigationClear()
     }
 
-    /// Returns nil when the negotiated peer or cached GATT table cannot use
-    /// the versioned clear contract, preserving the legacy clear fallback.
+    private func supersedePendingNavigationClear() {
+        pendingNavigationClear = nil
+        let obsolete = pendingRideApplicationDeliveries.values.filter {
+            $0.commandType == .navigationClear
+        }.map(\.commandID)
+        for id in obsolete { finishRideApplicationDelivery(commandID: id, outcome: .dropped) }
+    }
+
+    private func retryPendingNavigationClear() {
+        guard let intent = pendingNavigationClear, isConnected, isNavigationReady,
+              hasReceivedDeviceCapabilities,
+              intent.peripheralID == nil || intent.peripheralID == connectedPeripheral?.identifier,
+              !pendingRideApplicationDeliveries.values.contains(where: {
+                  $0.commandType == .navigationClear
+              }) else { return }
+        if let acknowledged = sendAcknowledgedNavigationClear() {
+            if !acknowledged {
+                recoverFromRideApplicationFailure("critical navigation clear admission failed",
+                                                  failureReason: .criticalAdmissionFailed)
+            }
+        } else if sendRouteGeometry(Data()) {
+            // Legacy peers have no application receipt; their historical
+            // best-effort semantics are explicit and limited to those peers.
+            pendingNavigationClear = nil
+        }
+    }
+
+    /// Returns nil only for peers that do not advertise application receipts.
+    /// Missing required characteristics on an advertised contract fails closed.
     private func sendAcknowledgedNavigationClear() -> Bool? {
         guard supportsRideDeliveryAcknowledgement else { return nil }
+#if HOST_TESTING
+        if let endpoint = navigationClearEndpointForTesting {
+            return enqueueNavigationClearGroup { index, payload, id, dispatched, dropped, failed in
+                NavigationWrite(data: payload, label: "clear test member", transportWrite: endpoint.write,
+                    onWrite: dispatched, onDrop: dropped, onWriteFailure: failed,
+                    transportCanSend: endpoint.canSend,
+                    transportExpectsWriteResponse: endpoint.expectsWriteResponse,
+                    applicationCommandID: id, writeClass: index == 0 ? .route : .navigationSnapshot)
+            }
+        }
+#endif
         guard isConnected,
               isNavigationReady,
               let peripheral = connectedPeripheral,
@@ -4098,25 +4141,13 @@ class BLEManager: NSObject, ObservableObject {
               let navigationWriteType = preferredWriteType(
                 for: navigationCharacteristic
               ) else {
-            log("Ride acknowledgement capability present without clear characteristics; using legacy clear")
-            return nil
+            log("Ride acknowledgement capability present without clear characteristics")
+            return false
         }
 
-        // A clear is a state boundary. Obsolete route or maneuver snapshots
-        // must not remain behind it and recreate the state after firmware has
-        // acknowledged the clear.
-        navigationWriteQueue.removePendingWrites(ofClass: .route)
-        navigationWriteQueue.removePendingWrites(ofClass: .navigationSnapshot)
-        let payloads = [Data(), Data("1|0|Navigation idle".utf8)]
         let characteristics = [routeCharacteristic, navigationCharacteristic]
         let writeTypes = [routeWriteType, navigationWriteType]
-        return enqueueAcknowledgedRideApplicationGroup(
-            commandType: .navigationClear,
-            payloads: payloads,
-            completionHandlers: payloads.map { _ in {} },
-            dropHandlers: payloads.map { _ in {} },
-            failureHandlers: payloads.map { _ in {} }
-        ) { [weak self, weak peripheral]
+        return enqueueNavigationClearGroup { [weak self, weak peripheral]
             index, payload, commandID, onDispatch, onDropped, onFailure in
             guard let self, let peripheral,
                   characteristics.indices.contains(index),
@@ -4676,6 +4707,35 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    private typealias RideGroupWriteBuilder = (
+        Int, Data, UUID, @escaping () -> Void, @escaping () -> Void,
+        @escaping () -> Void
+    ) -> NavigationWrite?
+
+    private func enqueueNavigationClearGroup(makeWrite: RideGroupWriteBuilder) -> Bool {
+        // A clear is a state boundary. Obsolete route or maneuver snapshots
+        // must not remain behind it and recreate the state after firmware has
+        // acknowledged the clear.
+        navigationWriteQueue.removePendingWrites(ofClass: .route)
+        navigationWriteQueue.removePendingWrites(ofClass: .navigationSnapshot)
+        let payloads = [Data(), Data("1|0|Navigation idle".utf8)]
+        let intentID = pendingNavigationClear?.id
+        return enqueueAcknowledgedRideApplicationGroup(
+            commandType: .navigationClear,
+            payloads: payloads,
+            completionHandlers: [{ [weak self] in
+                guard self?.pendingNavigationClear?.id == intentID else { return }
+                self?.pendingNavigationClear = nil
+            }, {}],
+            dropHandlers: [{ [weak self] in
+                guard self?.pendingNavigationClear?.id == intentID else { return }
+                self?.recoverFromRideApplicationFailure("navigation clear was dropped")
+            }, {}],
+            failureHandlers: [{}, {}],
+            makeWrite: makeWrite
+        )
+    }
+
     private func enqueueAcknowledgedRideApplicationGroup(
         commandType: RideBLEApplicationCommandTypeV1,
         payloads: [Data],
@@ -4754,7 +4814,11 @@ class BLEManager: NSObject, ObservableObject {
             ) else {
                 return false
             }
-            writes.append(write)
+            var guardedWrite = write
+            guardedWrite.isStillValid = { [weak pending] in
+                pending.map { !$0.isFinished } ?? false
+            }
+            writes.append(guardedWrite)
         }
         pending.writes = writes
         pendingRideApplicationDeliveries[commandID] = pending
@@ -4903,6 +4967,9 @@ class BLEManager: NSObject, ObservableObject {
         case .dropped:
             pending.dropHandlers.forEach { $0() }
         case .transportFailure:
+            // The shared owner retires every sibling before external callbacks
+            // or queue flushing. ATT success alone never completes the group.
+            recoverFromRideApplicationFailure("critical command ATT failure")
             pending.failureHandlers.forEach { $0() }
         }
         if pendingRideApplicationDeliveries.isEmpty,
@@ -4956,6 +5023,7 @@ class BLEManager: NSObject, ObservableObject {
             .applicationRejected
     ) {
         guard isNavigationReady else { return }
+        isNavigationReady = false
         _ = reduceRideTransport(.failed(
             generation: rideTransportStateMachine.generation,
             reason: failureReason
@@ -5538,6 +5606,7 @@ class BLEManager: NSObject, ObservableObject {
             generation: rideTransportStateMachine.generation,
             schemaVersion: 1
         ))
+        retryPendingNavigationClear()
         log("Device capabilities unavailable; using baseline feature visibility")
         sendScreenSettingsAfterCapabilityNegotiation()
         sendMapProfilesAfterCapabilityNegotiation()
@@ -6584,9 +6653,23 @@ class BLEManager: NSObject, ObservableObject {
             return
         }
 
-        _ = reduceRideTransport(.beginConnection)
+        guard adoptConnectionContext(peripheral) else { return }
+        centralManager.connect(peripheral, options: nil)
+        log("Connecting to: \(peripheral.name ?? "Unknown")")
+        if BLEConnectionPersistence.shouldCancelTimedOutConnection(
+            isPairing: pendingPairingSession != nil
+        ) {
+            startConnectionTimeout(for: peripheral)
+        }
+    }
+
+    /// Fresh and restored platform links receive the same generation, queues,
+    /// authentication reset and delegate ownership before accepting callbacks.
+    private func adoptConnectionContext(_ peripheral: CBPeripheral?) -> Bool {
+        guard reduceRideTransport(.beginConnection) == .applied else { return false }
         stopPhysicalScan(reason: "connection attempt starting")
         connectedPeripheral = peripheral
+        isConnected = false
         connectedDeviceID = nil
         navigationCharacteristic = nil
         authCharacteristic = nil
@@ -6623,15 +6706,17 @@ class BLEManager: NSObject, ObservableObject {
         authRetryTimer = nil
         authTimeoutTimer?.invalidate()
         authTimeoutTimer = nil
-        peripheral.delegate = self
+        peripheral?.delegate = self
         isConnecting = true
-        centralManager.connect(peripheral, options: nil)
-        log("Connecting to: \(peripheral.name ?? "Unknown")")
-        if BLEConnectionPersistence.shouldCancelTimedOutConnection(
-            isPairing: pendingPairingSession != nil
-        ) {
-            startConnectionTimeout(for: peripheral)
-        }
+        return true
+    }
+
+    private func retireRestoredConnection(_ peripheral: CBPeripheral) {
+        pendingConnectionAfterDisconnect = peripheral.identifier
+        _ = reduceRideTransport(.failed(generation: rideTransportStateMachine.generation,
+                                        reason: .connectionFailed))
+        armRideRecoveryCancellationDeadline()
+        centralManager.cancelPeripheralConnection(peripheral)
     }
 
     private func startConnectionTimeout(for peripheral: CBPeripheral) {
@@ -6644,6 +6729,9 @@ class BLEManager: NSObject, ObservableObject {
                 return
             }
 
+            _ = self.reduceRideTransport(.failed(generation: self.rideTransportStateMachine.generation,
+                                                reason: .connectionFailed))
+            self.armRideRecoveryCancellationDeadline()
             self.log("BLE connection timed out")
             if self.pendingPairingSession != nil {
                 self.pairingError = "Could not connect to that Bike Computer."
@@ -8011,7 +8099,8 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func completeAuthentication(for peripheral: CBPeripheral) {
-        guard let characteristic = navigationCharacteristic,
+        guard rideTransportStateMachine.phase == .authenticating,
+              let characteristic = navigationCharacteristic,
               let navigationWriteType = preferredWriteType(for: characteristic) else {
             log("Navigation characteristic is not writable after authentication")
             return
@@ -8046,9 +8135,9 @@ class BLEManager: NSObject, ObservableObject {
         pendingAuthNonce = nil
         authFlowState = .authenticated
         let transportGeneration = rideTransportStateMachine.generation
-        _ = reduceRideTransport(.authenticated(
+        guard reduceRideTransport(.authenticated(
             generation: transportGeneration
-        ))
+        )) == .applied else { return }
         // Owner authentication atomically claims or renews the firmware ride
         // lease. The legacy auth response does not expose its numeric lease
         // generation, so 1 is a local nonzero readiness sentinel only; wire
@@ -8993,6 +9082,27 @@ class BLEManager: NSObject, ObservableObject {
     }
 
 #if HOST_TESTING
+    func configureNavigationClearForTesting(_ endpoint: NavigationWriteEndpoint) {
+        lastConnectedPeripheralIdentifier = nil
+        navigationClearEndpointForTesting = endpoint
+        installNavigationWriteEndpoint(endpoint)
+        hasReceivedDeviceCapabilities = true
+        supportsRideDeliveryAcknowledgement = true
+        isConnected = true
+        isNavigationReady = true
+    }
+    var pendingNavigationClearForTesting: Bool { pendingNavigationClear != nil }
+    func retryNavigationClearForTesting() { retryPendingNavigationClear() }
+    func adoptConnectionForTesting(connected: Bool) -> Bool {
+        guard adoptConnectionContext(nil) else { return false }
+        if connected {
+            return reduceRideTransport(.linkConnected(generation: rideTransportStateMachine.generation)) == .applied
+        }
+        return true
+    }
+    var rideConnectionGenerationForTesting: UInt64 { rideDeliveryConnectionGeneration }
+    func clearConnectionStateForTesting() { clearConnectionState() }
+
     func installRideApplicationAcknowledgementRaceForTesting(
         commandID: UUID,
         commandType: RideBLEApplicationCommandTypeV1,
@@ -9341,29 +9451,25 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         }
         clearUnknownDiscoveryState()
         isOpportunisticDiscoverySuppressed = true
-        restored.delegate = self
+        if restored.state != .disconnected {
+            guard adoptConnectionContext(restored) else {
+                central.cancelPeripheralConnection(restored)
+                return
+            }
+        }
         log("Restored Bike Computer connection state: \(restored.state.rawValue)")
         switch restored.state {
         case .connected:
-            connectedPeripheral = restored
-            isConnecting = false
-            isConnected = false
-            isNavigationReady = false
-            peripheralName = restored.name ?? "BikeComputer"
-            startMonitoringRSSI()
-            startAuthenticationTimeout(for: restored)
-            restored.discoverServices([serviceUUID, deviceInformationServiceUUID])
+            centralManager(central, didConnect: restored)
         case .connecting:
-            connectedPeripheral = restored
-            isConnecting = true
+            // The pending OS attempt now belongs to the adopted generation.
+            startConnectionTimeout(for: restored)
         case .disconnected:
             connectToPeripheral(restored)
         case .disconnecting:
-            connectedPeripheral = restored
-            pendingConnectionAfterDisconnect = restored.identifier
+            retireRestoredConnection(restored)
         @unknown default:
-            connectedPeripheral = restored
-            pendingConnectionAfterDisconnect = restored.identifier
+            retireRestoredConnection(restored)
         }
         let restoredIdentifiersToCancel = Set(
             BLERestorationPolicy.identifiersToCancel(
@@ -9595,10 +9701,10 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             event: "transport_connected",
             fields: ["connectionState": "connected"]
         )
-        _ = reduceRideTransport(.linkConnected(
+        guard reduceRideTransport(.linkConnected(
             generation: rideTransportStateMachine.generation
-        ))
-        
+        )) == .applied else { return }
+
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
         isConnecting = false
@@ -10553,6 +10659,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 ? data[4]
                 : 1
         ))
+        retryPendingNavigationClear()
         if hasScopedWatchController,
            pendingWatchControllerOperation == nil {
             hasReceivedWatchControllerStatus = false

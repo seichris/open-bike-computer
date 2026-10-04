@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ride_command_admission.hpp"
+
 /**
  * @file ble_navigation.hpp
  * @brief BLE navigation server for iOS app communication
@@ -267,6 +269,10 @@ public:
   /** True when the current BLE connection completed owner authentication. */
   bool isAuthenticated() const;
 
+  // Callback runs under the ownership lock; it must defer transport responses.
+  bool applyAuthorizedRideCommand(ride_command_admission::Authorization admitted,
+                                  bool (*apply)(void *), void *context);
+
   /**
    * @brief Process any pending BLE events (call from main loop)
    */
@@ -302,7 +308,8 @@ public:
   WorkoutStartRequestPresentation workoutStartRequestPresentation() const;
   bool requestWorldRadio(const world_radio_protocol::Request &request);
   bool canRequestWorldRadio() const;
-  bool notifyRideAutomationFrame(const uint8_t *data, size_t length);
+  bool notifyRideAutomationFrame(const uint8_t *data, size_t length,
+      ride_command_admission::Authorization expected = {});
 
   BLEDebugStats getDebugStats() const;
 
