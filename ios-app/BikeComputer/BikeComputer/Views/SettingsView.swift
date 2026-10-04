@@ -54,6 +54,7 @@ private func copernicusTopographyNotice(
 }
 
 struct SettingsView: View {
+    @EnvironmentObject private var social: SocialCoordinator
     @EnvironmentObject var bleManager: BLEManager
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -150,6 +151,11 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
+                Section {
+                    NavigationLink("Friends & Riding") {
+                        SocialHubView(store: social, routeLibrary: routeLibrary)
+                    }
+                }
                 if shouldPromoteBikeComputerSettings {
                     Section {
                         bikeComputerSettingsLink

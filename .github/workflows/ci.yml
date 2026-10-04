@@ -431,6 +431,8 @@ jobs:
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-render-ahead-map-architecture-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-render-ahead-map-architecture-host-tests/results.json"
       - name: Map profile protocol host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-map-profile-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-map-profile-protocol-host-tests/results.json"
+      - name: Social rider protocol and circular layout tests
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check social-riders-host-tests --report "$RUNNER_TEMP/dev-checks/social-riders-host-tests/results.json"
       - name: Device capabilities protocol host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-device-capabilities-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-device-capabilities-protocol-host-tests/results.json"
       - name: Screen configuration protocol and Ride Stats widget host tests

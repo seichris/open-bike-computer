@@ -1059,6 +1059,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsStreetLabels: Bool = false
     @Published private(set) var supports3DBuildings: Bool = false
     @Published private(set) var supportsMapNavigationOrientation = false
+    @Published private(set) var supportsGroupRiders = false
+    var onSocialAcknowledgement: ((Data) -> Void)?
     @Published private(set) var supportsTopographicContours = false
     @Published private(set) var supportsExplicitInvalidGPSHeading: Bool = false
     @Published private(set) var supportsScopedWatchController: Bool = false
@@ -5508,6 +5510,7 @@ class BLEManager: NSObject, ObservableObject {
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
         supportsTopographicContours = false
+        supportsGroupRiders = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -6820,6 +6823,7 @@ class BLEManager: NSObject, ObservableObject {
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
         supportsTopographicContours = false
+        supportsGroupRiders = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -10186,6 +10190,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
         supportsTopographicContours = false
+        supportsGroupRiders = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -10343,6 +10348,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.rideAutomationCapabilityMask != 0
         let hasExplicitInvalidGPSHeading =
             flags & DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask != 0
+        supportsGroupRiders = flags & RideBLEGeneratedProtocolV1.groupRidersV1Feature != 0
         let hasScopedWatchController =
             flags & DeviceBLEProtocol.scopedWatchControllerCapabilityMask != 0
         let hasRemoteDeviceDebug =
@@ -10575,6 +10581,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     }
 
     @discardableResult
+    func sendSocialPacket(_ data: Data) -> Bool {
+        guard supportsGroupRiders, isNavigationReady else { return false }
+        return sendFallbackMapPacket(data, label: "group rider", writeClass: .settingsControl, atomically: true)
+    }
+
+    @discardableResult
     func sendWorldRadioStatus(_ status: WorldRadioStatus) -> Bool {
         guard supportsWorldRadio, isNavigationReady,
               let payload = status.encoded() else {
@@ -10592,6 +10604,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
 
     @discardableResult
     func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
+        if data.starts(with: Data("GACK".utf8)) {
+            if isNavigationReady && supportsGroupRiders && data.count == 17 { onSocialAcknowledgement?(data) }
+            return true
+        }
         if data.starts(with: RideBLEApplicationAcknowledgementV1.prefix) {
             guard supportsRideDeliveryAcknowledgement,
                   let acknowledgement =

@@ -2,6 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>BicinoSocialEnabled</key>
+	<string>$(BICINO_SOCIAL_ENABLED)</string>
+	<key>BicinoFirebaseAppID</key>
+	<string>$(BICINO_FIREBASE_APP_ID)</string>
+	<key>BicinoFirebaseSenderID</key>
+	<string>$(BICINO_FIREBASE_SENDER_ID)</string>
+	<key>BicinoFirebaseAPIKey</key>
+	<string>$(BICINO_FIREBASE_API_KEY)</string>
+	<key>BicinoFirebaseProjectID</key>
+	<string>$(BICINO_FIREBASE_PROJECT_ID)</string>
+	<key>BicinoGoogleClientID</key>
+	<string>$(BICINO_GOOGLE_CLIENT_ID)</string>
+
 	<key>BicinoMapServiceHost</key>
 	<string>$(BICINO_MAP_SERVICE_HOST)</string>
 	<key>BicinoMapCatalogHost</key>

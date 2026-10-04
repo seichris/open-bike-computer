@@ -42,6 +42,7 @@ struct BikeComputerApp: App {
                     appDelegate.setApplicationActive($0)
                 }
             )
+            .environmentObject(appDelegate.social)
         }
     }
 }
@@ -50,6 +51,11 @@ struct BikeComputerApp: App {
 
 @MainActor
 class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        social.didRegisterNotifications(deviceToken)
+    }
+
+    let social = SocialCoordinator()
     let workoutMirrorManager: WorkoutMirrorManager
     let workoutSessionCoordinator: WorkoutSessionCoordinator
     let cyclingSensorStore: CyclingSensorStore
@@ -154,6 +160,17 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             callbackScheme: callbackScheme
         )
         super.init()
+        social.live.prepareLocation = { [weak locationManager] in
+            guard let locationManager else { return false }
+            if !locationManager.isLocationAuthorized { locationManager.requestWhenInUseAuthorization(); return false }
+            return true
+        }
+        social.live.$isSharing.removeDuplicates().sink { [weak locationManager] sharing in
+            locationManager?.setSocialRideSharing(sharing)
+        }.store(in: &cancellables)
+        locationManager.$currentLocation.sink { [weak social] location in
+            social?.live.updateLocation(location)
+        }.store(in: &cancellables)
         destinationStore.$favoriteDestinations
             .map { destinations in
                 Array(destinations.compactMap { destination in
@@ -203,6 +220,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ = coordinator
         _ = rideAutomationCoordinator
         let bleManager = coordinator.bleManager
+        social.bindBLE(bleManager)
+
         bleManager.diagnosticsRecorder = rideDiagnosticsRecorder
         watchConnectivityCoordinator.diagnosticsRecorder =
             rideDiagnosticsRecorder
@@ -243,8 +262,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                     current: $0.current
                 )
             }
-            .sink { [weak rideDiagnosticsRecorder] _ in
+            .sink { [weak rideDiagnosticsRecorder, weak social] _ in
                 rideDiagnosticsRecorder?.endRideCapture()
+                Task { @MainActor in await social?.live.stopSharing() }
             }
             .store(in: &cancellables)
         bleManager.bindWatchConnectivityCoordinator(

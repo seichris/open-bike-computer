@@ -261,6 +261,8 @@ struct MapViewContainer: UIViewRepresentable {
     var isRouteCalculationActive = false
     var topographyOverlay: MKTileOverlay? = nil
     var offlineNavigationPolyline: MKPolyline? = nil
+    var socialRiders: [SocialRider] = []
+    var socialPhotos: [String: UIImage] = [:]
 
     private var visibleSavedRoutePreview: MapSavedRouteOverlay? {
         let content = SavedRouteMapPolicy.content(
@@ -331,6 +333,7 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
+        context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos, location: location)
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: uiView)
         context.coordinator.applyAppearanceIfNeeded(
             appearance,
@@ -462,6 +465,8 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
+        let socialLayer = SocialMapLayer()
+
         private var displayedTopographyOverlay: MKTileOverlay?
 
         func updateTopographyOverlay(_ overlay: MKTileOverlay?, on mapView: MKMapView) {
@@ -1083,6 +1088,7 @@ struct MapViewContainer: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            socialLayer.layout()
             controlState?.updatePitch(from: mapView)
             updateOfflineMapSelectionBounds()
         }
@@ -1339,6 +1345,9 @@ struct MapViewContainer: UIViewRepresentable {
 
         
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            if let rider = annotation as? SocialRiderAnnotation {
+                return socialLayer.annotationView(rider, map: mapView)
+            }
             // Use default view for user location
             if annotation is MKUserLocation {
                 return nil
