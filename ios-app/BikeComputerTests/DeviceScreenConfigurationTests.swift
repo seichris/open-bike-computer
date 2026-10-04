@@ -102,9 +102,14 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         return
     }
     assertEqual(
-        zoneCapabilities,
-        .v1,
-        "native-zone screen capability TLV decodes exact limits and mask"
+        zoneCapabilities.supportedScreenTypes,
+        0x3f,
+        "older native-zone firmware does not advertise Nearby"
+    )
+    assert(
+        !legacyCapabilities.supports(.nearby) &&
+            !zoneCapabilities.supports(.nearby),
+        "older screen capability masks keep Nearby unavailable"
     )
     for widget in RideStatsWidget.allCases {
         assertEqual(
@@ -169,6 +174,41 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         DeviceScreenMapProfile.mapDefault.visibilityMask &
             DeviceScreenMapProfile.contoursVisibilityMask == 0,
         "topographic contours default off until an active map proves support"
+    )
+    assertEqual(
+        DeviceScreenMapProfile.mapDefault.visibilityMask &
+            DeviceScreenMapProfile.poiVisibilityMask,
+        DeviceScreenMapProfile.poiVisibilityMask,
+        "new ordinary Map instances include all five POI categories"
+    )
+    assertEqual(
+        DeviceScreenMapProfile.mapPlusNavigationDefault.visibilityMask &
+            DeviceScreenMapProfile.poiVisibilityMask,
+        0,
+        "new navigation instances remain uncluttered by POIs"
+    )
+    var nearby = DeviceScreenInstance.defaults(id: 7, type: .nearby)
+    nearby.mapProfile?.visibilityMask |=
+        DeviceScreenMapProfile.contoursVisibilityMask
+    let nearbyDocument = DeviceScreenConfigurationDocument(
+        defaultInstanceID: 7,
+        instances: [nearby]
+    )
+    let nearbyCapabilities = DeviceScreenConfigurationCapabilities.v1
+    assertEqual(
+        try? DeviceScreenConfigurationCodec.decode(
+            DeviceScreenConfigurationCodec.encode(
+                nearbyDocument, capabilities: nearbyCapabilities
+            ), capabilities: nearbyCapabilities
+        ),
+        nearbyDocument,
+        "Nearby retains its own 16-byte map profile independently of picker selections"
+    )
+    assert(
+        (try? DeviceScreenConfigurationCodec.encode(
+            nearbyDocument, capabilities: legacyCapabilities
+        )) == nil,
+        "Nearby is rejected before the device advertises screen type 6"
     )
     let radioDocument = DeviceScreenConfigurationDocument(
         defaultInstanceID: 6,

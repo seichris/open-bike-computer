@@ -15,13 +15,15 @@ int main() {
   static_assert(world_radio_config::supportsClient(255) ==
                 world_radio_config::ENABLED);
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
-  static_assert(SUPPORTED_MASK == 0x3F);
+  static_assert(SUPPORTED_MASK ==
+      (map_profile_protocol::POIS_RUNTIME_ENABLED ? 0x7F : 0x3F));
   static_assert(deviceScreenForTile(WORLD_RADIO) == 5);
   static_assert(tileForDeviceScreen(5) == WORLD_RADIO);
   assert(nextEnabled(NAV, SUPPORTED_MASK) == WORLD_RADIO);
   assert(nextEnabled(WORLD_RADIO, SUPPORTED_MASK) == BATTERY_STATUS);
 #else
-  static_assert(SUPPORTED_MASK == 0x1F);
+  static_assert(SUPPORTED_MASK ==
+      (map_profile_protocol::POIS_RUNTIME_ENABLED ? 0x5F : 0x1F));
   static_assert(descriptorForTile(WORLD_RADIO) == nullptr);
   static_assert(descriptorForDeviceScreen(5) == nullptr);
   static_assert(normalizedMask(0x3F) == 0x1F);
@@ -29,11 +31,19 @@ int main() {
   assert(nextEnabled(NAV, SUPPORTED_MASK) == BATTERY_STATUS);
 #endif
   static_assert(isMapBacked(MAP));
+  static_assert(DEFAULT_MASK == 0x1F);
+  static_assert(normalizedMask(0) == DEFAULT_MASK);
+  static_assert((DEFAULT_MASK & screenBit(DeviceScreenId::Nearby)) == 0);
+  static_assert(isMapBacked(NEARBY) ==
+                map_profile_protocol::POIS_RUNTIME_ENABLED);
+  static_assert(tileForDeviceScreen(6) ==
+                (map_profile_protocol::POIS_RUNTIME_ENABLED ? NEARBY : MAP));
   static_assert(isMapBacked(MAP_GUIDANCE));
   static_assert(!isMapBacked(WORLD_RADIO));
   static_assert(isEnabled(COMPASS, SUPPORTED_MASK));
 
-  assert(nextEnabled(COMPASS, SUPPORTED_MASK) == NAV);
+  assert(nextEnabled(COMPASS, SUPPORTED_MASK) ==
+         (map_profile_protocol::POIS_RUNTIME_ENABLED ? NEARBY : NAV));
   assert(nextEnabled(NAV, static_cast<uint8_t>(SUPPORTED_MASK & ~screenBit(DeviceScreenId::WorldRadio))) ==
          BATTERY_STATUS);
   assert(previousEnabled(BATTERY_STATUS, SUPPORTED_MASK) ==

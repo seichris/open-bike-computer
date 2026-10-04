@@ -439,7 +439,12 @@ final class DeviceScreenConfigurationController: ObservableObject {
         guard draft.instances.count < Int(capabilities.maximumInstances) else {
             throw DeviceScreenConfigurationValidationError.invalidInstanceCount
         }
-        _ = try draft.add(type: type, after: instanceID)
+        let id = try draft.add(type: type, after: instanceID)
+        if !capabilities.supports(.nearby),
+           let index = draft.instances.firstIndex(where: { $0.id == id }) {
+            draft.instances[index].mapProfile?.visibilityMask &=
+                ~DeviceScreenMapProfile.poiVisibilityMask
+        }
         self.draft = draft
     }
 

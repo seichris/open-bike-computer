@@ -7,12 +7,12 @@ import zlib
 from dataclasses import replace
 from pathlib import Path
 
-from map_platform.map_artifact_validation import validate_fmb5, _parse_base_geometry
+from map_platform.map_artifact_validation import validate_fmb5, validate_fmb6, _parse_base_geometry
 from map_platform.topography_artifacts import (
     Contour, ContourSection, HEADER, RECORD, decode_contour_section,
-    encode_contour_section, upgrade_fmb4,
+    encode_contour_section, upgrade_fmb4, replace_fmb6_contours, empty_fmb6,
 )
-from tests.map_label_fixtures import one_building_fmb4
+from tests.map_label_fixtures import one_building_fmb4, fmb6_with_pois
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -44,6 +44,61 @@ class ContourArtifactsTests(unittest.TestCase):
         self.assertEqual(encoded, encode_contour_section(replace(self.section, contours=tuple(reversed(self.section.contours)))))
         empty = ContourSection(50, 250, ())
         self.assertEqual(decode_contour_section(encode_contour_section(empty)), empty)
+
+    def test_fmb6_contour_composition_preserves_pois_and_vectors(self):
+        original = fmb6_with_pois()
+        self.path.write_bytes(original)
+        combined = replace_fmb6_contours(self.path, self.section)
+        self.path.write_bytes(combined)
+        result = validate_fmb6(self.path)
+        self.assertEqual((result.contour_records, result.poi_records, result.building_records), (2, 2, 1))
+        self.assertEqual(result.poi_categories, (0, 1, 0, 0, 1))
+        directory, _ = _parse_base_geometry(original)
+        self.assertEqual(original[:directory], combined[:directory])
+        for index in (0, 1, 2, 3, 5):
+            before_offset, before_length = struct.unpack_from("<II", original, directory + 8 + index * 16 + 4)
+            after_offset, after_length = struct.unpack_from("<II", combined, directory + 8 + index * 16 + 4)
+            self.assertEqual(original[before_offset:before_offset + before_length],
+                             combined[after_offset:after_offset + after_length])
+        self.assertEqual(replace_fmb6_contours(self.path, self.section), combined)
+
+    def test_shared_combined_fmb6_golden_matches_backend_composition(self):
+        fixture = ROOT / "tools/tests/fixtures/fmb/golden_blocks.txt"
+        blocks = dict(
+            line.split("=", 1)
+            for line in fixture.read_text(encoding="ascii").splitlines()
+            if line and not line.startswith("#")
+        )
+        self.path.write_bytes(bytes.fromhex(blocks["fmb_v6"]))
+        combined = replace_fmb6_contours(self.path, self.section)
+        self.assertEqual(combined, bytes.fromhex(blocks["fmb_v6_combined"]))
+        self.path.write_bytes(combined)
+        result = validate_fmb6(self.path)
+        self.assertEqual((result.contour_records, result.contour_points), (2, 5))
+        self.assertEqual((result.poi_records, result.poi_categories),
+                         (2, (0, 1, 0, 0, 1)))
+
+    def test_shared_flat_empty_fmb6_golden_is_a_valid_empty_map(self):
+        fixture = ROOT / "tools/tests/fixtures/fmb/golden_blocks.txt"
+        empty_line = next(
+            line for line in fixture.read_text(encoding="ascii").splitlines()
+            if line.startswith("fmb_v6_flat_empty=")
+        )
+        raw = bytes.fromhex(empty_line.split("=", 1)[1])
+        self.path.write_bytes(raw)
+        result = validate_fmb6(self.path)
+        self.assertEqual((result.contour_records, result.contour_points,
+                          result.poi_records, result.building_records),
+                         (0, 0, 0, 0))
+        self.assertEqual(replace_fmb6_contours(
+            self.path, ContourSection(20, 100, ())), raw)
+
+    def test_terrain_only_combined_block_has_empty_poi_section(self):
+        self.path.write_bytes(empty_fmb6(0x12345678, self.section))
+        result = validate_fmb6(self.path)
+        self.assertEqual((result.contour_records, result.poi_records, result.building_records), (2, 0, 0))
+        with self.assertRaises(ValueError):
+            validate_fmb5(self.path)
 
     def test_rejects_invalid_encoder_inputs(self):
         base = self.section.contours[0]

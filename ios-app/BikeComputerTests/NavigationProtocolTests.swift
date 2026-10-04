@@ -925,6 +925,7 @@ struct NavigationProtocolTests {
         await testOfflineMapClientRejectsUnsupportedRendererWithoutDowngrade()
         testStreetLabelMapContract()
         testBikeMapStreamGoldenVector()
+        testBikeMapPOIIndexValidation()
         testBikeMapStreamArtifactValidation()
         testOfflineMapArtifactSelectionAndProtocolNegotiation()
         testSavedMapArtifactMetadataRoundTrip()
@@ -1047,6 +1048,156 @@ struct NavigationProtocolTests {
             ),
             "every Watch transport diagnostic field is admitted by the privacy policy"
         )
+    }
+
+    static func testBikeMapPOIIndexValidation() {
+        func le16(_ value: UInt16) -> [UInt8] {
+            [UInt8(truncatingIfNeeded: value), UInt8(truncatingIfNeeded: value >> 8)]
+        }
+        func le32(_ value: UInt32) -> [UInt8] {
+            (0..<4).map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) }
+        }
+        func crc32(_ bytes: Data) -> UInt32 {
+            var crc = UInt32.max
+            for byte in bytes {
+                crc ^= UInt32(byte)
+                for _ in 0..<8 {
+                    crc = (crc >> 1) ^ (crc & 1 == 1 ? 0xedb8_8320 : 0)
+                }
+            }
+            return ~crc
+        }
+        func encodedIndex(_ entry: Data) -> Data {
+            var index = Data("FPI1".utf8)
+            index.append(contentsOf: le16(32))
+            index.append(contentsOf: le16(0))
+            index.append(contentsOf: le32(1))
+            index.append(contentsOf: le32(crc32(entry)))
+            index.append(entry)
+            return index
+        }
+
+        var poiSection = Data()
+        poiSection.append(contentsOf: le16(1))
+        poiSection.append(contentsOf: le16(8))
+        poiSection.append(contentsOf: le32(1))
+        poiSection.append(contentsOf: [20, 0, 30, 0, 1, 2, 0, 0])
+        var block = Data([70, 77, 66, 6, 0, 0, 0, 0])
+        block.append(contentsOf: [69, 88, 84, 54, 6, 0, 0, 0])
+        for type in UInt8(1)...UInt8(5) {
+            block.append(contentsOf: [type, 1, 0, 0])
+            block.append(contentsOf: le32(112))
+            block.append(contentsOf: le32(0))
+            block.append(contentsOf: le32(0))
+        }
+        block.append(contentsOf: [6, 1, 0, 0])
+        block.append(contentsOf: le32(112))
+        block.append(contentsOf: le32(16))
+        block.append(contentsOf: le32(crc32(poiSection)))
+        block.append(poiSection)
+
+        guard let summary = try? BikeMapPOIIndexValidator.blockEntry(block) else {
+            assert(false, "iPhone independently reads a valid FMB6 POI section")
+            return
+        }
+        var entry = Data()
+        entry.append(contentsOf: le32(0))
+        entry.append(contentsOf: le32(0))
+        entry.append(contentsOf: le32(1))
+        entry.append(contentsOf: le16(1))
+        for _ in 0..<4 { entry.append(contentsOf: le16(0)) }
+        entry.append(contentsOf: le32(112))
+        entry.append(contentsOf: le32(16))
+        entry.append(contentsOf: le16(0))
+        let index = encodedIndex(entry)
+        let path = BikeMapPOIIndexValidator.blockPath(mapID: "poi-map", x: 0, y: 0)
+        assertEqual(path, "VECTMAP/poi-map/+000+000/0_0.fmb",
+                    "iPhone uses canonical block path mapping")
+        assertEqual(try? BikeMapPOIIndexValidator.decode(index).count, 1,
+                    "iPhone decodes one CRC-validated FPI1 entry")
+        do {
+            try BikeMapPOIIndexValidator.matches(
+                index, mapID: "poi-map", blocksByPath: [path: summary],
+                expectedCategories: [1, 0, 0, 0, 0]
+            )
+        } catch {
+            assert(false, "FPI1 matches the signed FMB6 POI section: \(error)")
+        }
+        var corrupt = index
+        corrupt[corrupt.count - 1] ^= 1
+        assert((try? BikeMapPOIIndexValidator.decode(corrupt)) == nil,
+               "iPhone rejects an FPI1 CRC mismatch")
+        var wrongOffset = entry
+        wrongOffset[22] = 113
+        do {
+            try BikeMapPOIIndexValidator.matches(
+                encodedIndex(wrongOffset), mapID: "poi-map",
+                blocksByPath: [path: summary], expectedCategories: [1, 0, 0, 0, 0]
+            )
+            assert(false, "signed but inconsistent FPI1 section offsets are rejected")
+        } catch {
+            // Expected: a valid index CRC is not proof of block correspondence.
+        }
+
+        let goldenURL = URL(fileURLWithPath: "tools/tests/fixtures/fmb/golden_blocks.txt")
+        guard let goldenText = try? String(contentsOf: goldenURL, encoding: .ascii),
+              let combinedLine = goldenText.split(separator: "\n").first(where: {
+                  $0.hasPrefix("fmb_v6_combined=")
+              }),
+              let combinedBlock = Data(hex: String(combinedLine.dropFirst("fmb_v6_combined=".count))),
+              let combinedPOI = try? BikeMapPOIIndexValidator.blockEntry(combinedBlock),
+              let directory = combinedBlock.range(of: Data("EXT6".utf8))?.lowerBound else {
+            assert(false, "the shared combined FMB6 golden block is readable")
+            return
+        }
+        func read32(_ bytes: Data, at offset: Int) -> Int? {
+            guard offset >= 0, offset <= bytes.count - 4 else { return nil }
+            return (0..<4).reduce(0) { value, shift in
+                value | Int(bytes[offset + shift]) << (shift * 8)
+            }
+        }
+        let contourEntry = directory + 8 + 4 * 16
+        guard let contourOffset = read32(combinedBlock, at: contourEntry + 4),
+              let contourLength = read32(combinedBlock, at: contourEntry + 8),
+              let contourCRC = read32(combinedBlock, at: contourEntry + 12),
+              contourOffset >= directory + 104,
+              contourLength > 12,
+              contourOffset <= combinedBlock.count - contourLength,
+              let contour = try? TopographyContourSection.validate(
+                  combinedBlock.subdata(in: contourOffset..<(contourOffset + contourLength))
+              ) else {
+            assert(false, "iPhone independently reads the shared combined contour section")
+            return
+        }
+        assertEqual(combinedPOI.categoryCounts, [0, 1, 0, 0, 1],
+                    "combined FMB6 preserves both POI categories")
+        assertEqual(contour.recordCount, 2, "combined FMB6 carries two contours")
+        assertEqual(contour.pointCount, 5, "combined FMB6 carries five contour points")
+        assertEqual(Int(crc32(combinedBlock.subdata(in: contourOffset..<(contourOffset + contourLength)))),
+                    contourCRC, "combined contour directory CRC matches its section")
+
+        guard let flatLine = goldenText.split(separator: "\n").first(where: {
+                  $0.hasPrefix("fmb_v6_flat_empty=")
+              }),
+              let flatBlock = Data(hex: String(flatLine.dropFirst("fmb_v6_flat_empty=".count))),
+              let flatDirectory = flatBlock.range(of: Data("EXT6".utf8))?.lowerBound,
+              let flatContourOffset = read32(flatBlock, at: flatDirectory + 8 + 4 * 16 + 4),
+              let flatContourLength = read32(flatBlock, at: flatDirectory + 8 + 4 * 16 + 8),
+              flatContourLength == 12,
+              flatContourOffset <= flatBlock.count - flatContourLength,
+              let flatContours = try? TopographyContourSection.validate(
+                  flatBlock.subdata(in: flatContourOffset..<(flatContourOffset + flatContourLength))
+              ) else {
+            assert(false, "iPhone independently reads the shared flat and empty FMB6 block")
+            return
+        }
+        assertEqual(flatContours.recordCount, 0, "flat FMB6 carries no contours")
+        do {
+            let emptyPOI = try BikeMapPOIIndexValidator.blockEntry(flatBlock)
+            assert(emptyPOI == nil, "flat FMB6 carries a valid empty POI section")
+        } catch {
+            assert(false, "flat FMB6 empty POI section is valid: \(error)")
+        }
     }
 
     static func testBikeMapStreamGoldenVector() {
@@ -8431,7 +8582,7 @@ struct NavigationProtocolTests {
                 )
                 assertEqual(
                     renderers.first?["formatVersions"] as? [Int],
-                    [1, 2, 3, 4],
+                    [1, 2, 3, 4, 5],
                     "download grants advertise discrete renderer versions"
                 )
                 return (200, try! JSONEncoder().encode(grant))
@@ -8866,6 +9017,28 @@ struct NavigationProtocolTests {
         } catch {
             assert(false, "malformed capability profiles are invalid responses")
         }
+
+        let poiCanary = try! JSONDecoder().decode(
+            OfflineMapGenerationCapabilities.self,
+            from: Data(#"""
+            {
+                "schemaVersion":1,
+                "deploymentChannel":"production",
+                "policySha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "generationProfiles":[
+                    {"id":"map-pois-v1","rendererFormatVersion":5,"features":["street-labels","3d-buildings","map-pois"],"optionalFeatures":["contours"]},
+                    {"id":"buildings-3d-v1","rendererFormatVersion":3,"features":["street-labels","3d-buildings"]},
+                    {"id":"street-labels-v1","rendererFormatVersion":2,"features":["street-labels"]},
+                    {"id":"legacy-vector-v1","rendererFormatVersion":1,"features":[]}
+                ]
+            }
+            """#.utf8)
+        )
+        do {
+            try poiCanary.require(rendererFormatVersion: 5)
+        } catch {
+            assert(false, "the exact target-5 POI capability profile is accepted")
+        }
     }
 
     static func testSavedMapRendererCompatibilityPolicy() {
@@ -9001,6 +9174,77 @@ struct NavigationProtocolTests {
             assert(false, "valid target-3 manifest is accepted: \(error)")
         }
 
+        let poiManifest = Data((
+            "{\"buildings\":{" +
+            "\"classDefaultHeightCount\":0,\"explicitHeightCount\":1," +
+            "\"inheritedHeightCount\":0,\"levelsHeightCount\":0," +
+            "\"localMedianHeightCount\":0,\"recordCount\":1}," +
+            "\"files\":[" +
+            "{\"bytes\":4,\"path\":\"VECTMAP/poi-map/+000+000/0_0.fmb\",\"sha256\":\"\(sha)\"}," +
+            "{\"bytes\":4,\"path\":\"VECTMAP/poi-map/assets/nearby-pois.fpi\",\"sha256\":\"\(sha)\"}," +
+            "{\"bytes\":4,\"path\":\"VECTMAP/poi-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}]," +
+            "\"layers\":{\"contours\":\"not-included\"}," +
+            "\"mapId\":\"poi-map\"," +
+            "\"nearbyCoverage\":{\"blockSizeMeters\":4096,\"blocks\":[[0,0]]," +
+            "\"profileVersion\":1}," +
+            "\"pois\":{\"bicycleServicesCount\":1,\"gasStationsCount\":1," +
+            "\"publicToiletsCount\":1,\"recordCount\":5," +
+            "\"restaurantsAndCafesCount\":1,\"shopsCount\":1}," +
+            "\"producer\":{\"buildSha256\":\"\(sha)\",\"imageDigest\":\"sha256:\(sha)\"}," +
+            "\"schemaVersion\":1," +
+            "\"target\":{\"buildingProfileVersion\":1,\"formatVersion\":5," +
+            "\"internationalFallback\":\"en\",\"labelLanguages\":[\"en\"]," +
+            "\"labelProfileVersion\":1,\"poiIndexProfileVersion\":1,\"poiProfileVersion\":1," +
+            "\"renderer\":\"esp32-fmb\"," +
+            "\"requestedFeatures\":[\"3d-buildings\",\"map-pois\",\"street-labels\"]}}"
+        ).utf8)
+        do {
+            let decoded = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                poiManifest,
+                expectedMapID: "poi-map",
+                header: BikeMapStreamFormat.Header(
+                    formatVersion: 1,
+                    flags: 0,
+                    manifestBytes: UInt32(poiManifest.count),
+                    signatureEnvelopeBytes: 80,
+                    fileCount: 3,
+                    payloadBytes: 12
+                )
+            )
+            assertEqual(decoded.target.poiProfileVersion, 1,
+                        "target-5 manifest carries the signed POI profile")
+        } catch {
+            assert(false, "valid target-5 manifest is accepted: \(error)")
+        }
+
+        for (old, replacement) in [
+            ("\"blocks\":[[0,0]]", "\"blocks\":[]"),
+            ("\"blocks\":[[0,0]]", "\"blocks\":[[1,0]]"),
+            ("\"blocks\":[[0,0]]", "\"blocks\":[[0,0],[0,0]]"),
+            ("\"profileVersion\":1", "\"profileVersion\":2"),
+        ] {
+            let changed = Data(String(data: poiManifest, encoding: .utf8)!
+                .replacingOccurrences(of: old, with: replacement).utf8)
+            do {
+                _ = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
+                    changed,
+                    expectedMapID: "poi-map",
+                    header: BikeMapStreamFormat.Header(
+                        formatVersion: 1, flags: 0,
+                        manifestBytes: UInt32(changed.count),
+                        signatureEnvelopeBytes: 80,
+                        fileCount: 3, payloadBytes: 12
+                    )
+                )
+                assert(false, "invalid Nearby coverage must be rejected")
+            } catch {
+                guard case .invalidManifest = error as? BikeMapStreamFormatError else {
+                    assert(false, "invalid Nearby coverage reports a manifest failure")
+                    return
+                }
+            }
+        }
+
         let nonCanonicalLanguage = Data(
             String(data: manifest, encoding: .utf8)!
                 .replacingOccurrences(of: "zh-Hant", with: "ZH-hant").utf8
@@ -9027,6 +9271,8 @@ struct NavigationProtocolTests {
         }
 
         for (prefix, target, accepted, message) in [
+            (Data([0x46, 0x4d, 0x42, 5]), 4, true, "target 4 accepts FMB v5"),
+            (Data([0x46, 0x4d, 0x42, 4]), 4, false, "target 4 rejects FMB v4"),
             (Data([0x46, 0x4d, 0x42, 4]), 3, true, "target 3 accepts FMB v4"),
             (Data([0x46, 0x4d, 0x42, 3]), 3, false, "target 3 rejects FMB v3"),
             (Data([0x46, 0x4d, 0x42, 3]), 2, true, "target 2 accepts FMB v3"),
@@ -17935,7 +18181,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 28, "capability version negotiates signed topographic contours alongside existing capabilities")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 29, "capability version reserves map POIs alongside signed topographic contours")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1Feature, 1 << 29, "CAP2 bit 29 advertises versioned workout zones without reusing the display inactivity capability")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1MinimumClientVersion, 27, "zone negotiation requires protocol 27, independent of the iOS version")
         assertEqual(DeviceBLEProtocol.topographicContoursCapabilityMask, 1 << 30, "CAP2 bit 30 advertises signed topographic contour support")
@@ -20014,6 +20260,8 @@ struct NavigationProtocolTests {
                "malformed CAPS clears remote-debug support")
         assert(!manager.supportsGPSPositionQualityV1,
                "malformed CAPS clears GPS-quality support")
+        assert(!manager.supportsMapPois,
+               "malformed CAPS clears map POI support")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
 
         let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
@@ -20038,6 +20286,30 @@ struct NavigationProtocolTests {
                "CAP2 bit 13 does not collide with remote device debugging")
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
+
+        let cap2WithRendererReplay =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0x11, 0x80, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithRendererReplay),
+               "CAP2 renderer replay notification should be consumed")
+        assert(!manager.supportsMapPois,
+               "released renderer replay bit 23 must not enable map POIs")
+        let incompleteMapPOICapability =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0, 0x80])
+        assert(manager.handleDeviceCapabilitiesNotification(incompleteMapPOICapability),
+               "CAP2 high-bit POI capability is parsed as unsigned")
+        assert(!manager.supportsMapPois,
+               "POI controls stay off without extended visibility and target-5 reader prerequisites")
+        let cap2WithMapPois =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0x10, 0x11, 0, 0xC0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithMapPois),
+               "CAP2 map POI notification should be consumed")
+        assert(manager.supportsStreetLabels && manager.supports3DBuildings,
+               "the target-5 fixture carries its prerequisite capabilities")
+        assert(manager.supportsMapPois,
+               "CAP2 bit 31 enables map POI profiles and controls")
 
         let cap2WithScopedWatch = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, 0, 0x7F, 0, 0])
@@ -22628,6 +22900,41 @@ struct NavigationProtocolTests {
         assertEqual(sentPackets.count, 1, "legacy firmware receives one visibility packet")
         assertEqual(readInt32LE(sentPackets[0], offset: 5), 0x14,
                     "legacy firmware folds tracks into paths and service roads into local streets")
+
+        let poiManager = BLEManager()
+        let poiCapabilities =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0x10, 0x11, 0, 0xC0])
+        assert(poiManager.handleDeviceCapabilitiesNotification(poiCapabilities),
+               "CAP2 map POI capability is accepted")
+        poiManager.isConnected = true
+        poiManager.isNavigationReady = true
+        poiManager.showBuildings = false
+        poiManager.showGreenSpace = false
+        poiManager.showPaths = false
+        poiManager.showTracks = false
+        poiManager.showMajorRoads = false
+        poiManager.showLocalStreets = false
+        poiManager.showServiceRoads = false
+        poiManager.showWater = false
+        poiManager.showRailways = false
+        poiManager.showOtherAreas = false
+        poiManager.showRouteOverlay = false
+        poiManager.showCurrentPosition = false
+        poiManager.showPOIShops = true
+        poiManager.showPOIRestaurantsAndCafes = false
+        poiManager.showPOIPublicToilets = true
+        poiManager.showPOIGasStations = false
+        poiManager.showPOIBicycleServices = true
+        var poiPackets: [Data] = []
+        poiManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { poiPackets.append($0) }
+        ))
+        poiManager.sendVisibilityMask(for: .map)
+        assertEqual(readInt32LE(poiPackets[0], offset: 5), 0x55000,
+                    "capable firmware receives selected POI bits and the extended marker")
     }
 
     static func testBLEManagerGatesTopographicContourVisibility() {
@@ -24812,7 +25119,7 @@ struct NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapStateKnown":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeMapDisplayName":"Kyoto Hills","activeMapBoundsE7":[1356000000,349000000,1360000000,352000000],"activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapStateKnown":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeMapDisplayName":"Kyoto Hills","activeMapBoundsE7":[1356000000,349000000,1360000000,352000000],"activeRendererFormat":5,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"poiProfileVersion":1,"poiIndexProfileVersion":1,"poiDataHealthy":true,"poiIndexHealthy":true,"contourLayerIncluded":false,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -24830,7 +25137,7 @@ struct NavigationProtocolTests {
                     "device map descriptor exposes its manifest display name")
         assertEqual(manager.activeDeviceMap?.bounds?.minLongitude, 135.6,
                     "device map descriptor converts integer preview bounds")
-        assertEqual(manager.activeMapRendererFormat, 2,
+        assertEqual(manager.activeMapRendererFormat, 5,
                     "status parser exposes active renderer target")
         assertEqual(manager.activeMapLabelProfileVersion, 1,
                     "status parser exposes active label profile")
@@ -24838,6 +25145,14 @@ struct NavigationProtocolTests {
                     "status parser exposes active label languages")
         assert(manager.activeMapFontAssetHealthy,
                "status parser exposes live FMA1 health")
+        assertEqual(manager.activeMapPoiProfileVersion, 1,
+                    "status parser exposes the active POI profile")
+        assertEqual(manager.activeMapPoiIndexProfileVersion, 1,
+                    "status parser exposes the signed POI index profile")
+        assert(manager.activeMapPoiDataHealthy,
+                   "status parser exposes independently validated POI data health")
+        assert(manager.activeMapPoiIndexHealthy,
+               "status parser exposes independently validated POI index health")
         assertEqual(manager.mapTransferActivationStatus, "activating", "status parser exposes activation state")
         assertEqual(manager.mapTransferActivationSequence, 12, "status parser exposes activation sequence")
         assertEqual(manager.mapTransferActivationSessionId, "tokyo-v2", "status parser exposes activation session")
@@ -24851,6 +25166,17 @@ struct NavigationProtocolTests {
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
         assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
+
+        let failedActivationPacket =
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+                "{\"enabled\":false,\"activeMapId\":\"kyoto-v1\",\"activeRendererFormat\":4,\"poiProfileVersion\":1,\"poiDataHealthy\":true,\"activation\":{\"status\":\"failed\"}}".utf8
+            )
+        assert(manager.handleMapTransferStatusNotification(failedActivationPacket),
+               "failed target-4 activation status should be consumed")
+        assertEqual(manager.activeMapPoiProfileVersion, nil,
+                    "activation failure clears the active POI profile")
+        assert(!manager.activeMapPoiDataHealthy,
+               "activation failure clears active POI health")
 
         let legacyPacket = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
             "{\"enabled\":true,\"activeMapId\":\"legacy-map\"}".utf8
@@ -25549,6 +25875,11 @@ struct NavigationProtocolTests {
             "mapSettings.showWater",
             "mapSettings.showRailways",
             "mapSettings.showOtherAreas",
+            "mapSettings.showPOIShops",
+            "mapSettings.showPOIRestaurantsAndCafes",
+            "mapSettings.showPOIPublicToilets",
+            "mapSettings.showPOIGasStations",
+            "mapSettings.showPOIBicycleServices",
             "mapSettings.showNature",
             "mapSettings.showMinorRoads",
             "mapPlusNavigationSettings.minPolygonSize",
@@ -25574,6 +25905,11 @@ struct NavigationProtocolTests {
             "mapPlusNavigationSettings.showWater",
             "mapPlusNavigationSettings.showRailways",
             "mapPlusNavigationSettings.showOtherAreas",
+            "mapPlusNavigationSettings.showPOIShops",
+            "mapPlusNavigationSettings.showPOIRestaurantsAndCafes",
+            "mapPlusNavigationSettings.showPOIPublicToilets",
+            "mapPlusNavigationSettings.showPOIGasStations",
+            "mapPlusNavigationSettings.showPOIBicycleServices",
             "mapPlusNavigationSettings.migrated.v1",
             "mapSettings.recommendedDefaults.v2",
             "streetLabels.defaults.v1",
@@ -25633,6 +25969,18 @@ struct NavigationProtocolTests {
                "fresh Map + Navigation profiles hide other areas")
         assert(!freshManager.mapPlusNavigationLabelsEnabled,
                "fresh Map + Navigation profiles hide street labels")
+        assert(freshManager.showPOIShops &&
+               freshManager.showPOIRestaurantsAndCafes &&
+               freshManager.showPOIPublicToilets &&
+               freshManager.showPOIGasStations &&
+               freshManager.showPOIBicycleServices,
+               "fresh Map profiles show all POI categories")
+        assert(!freshManager.mapPlusNavigationShowPOIShops &&
+               !freshManager.mapPlusNavigationShowPOIRestaurantsAndCafes &&
+               !freshManager.mapPlusNavigationShowPOIPublicToilets &&
+               !freshManager.mapPlusNavigationShowPOIGasStations &&
+               !freshManager.mapPlusNavigationShowPOIBicycleServices,
+               "fresh Map + Navigation profiles hide all POI categories")
         assertEqual(freshManager.mapPlusNavigationLabelDensity, 2,
                     "fresh Map + Navigation profiles retain Balanced as the dormant label density")
 
@@ -25819,6 +26167,8 @@ struct NavigationProtocolTests {
         manager.showServiceRoads = false
         manager.mapPlusNavigationShowTracks = false
         manager.mapPlusNavigationShowServiceRoads = false
+        manager.showPOIShops = false
+        manager.mapPlusNavigationShowPOIBicycleServices = true
         manager.mapLabelsEnabled = false
         manager.mapLabelDensity = 1
         manager.mapLabelLanguageMode = 0
@@ -25846,6 +26196,10 @@ struct NavigationProtocolTests {
                "Map + Navigation track visibility should persist independently")
         assert(!reloaded.mapPlusNavigationShowServiceRoads,
                "Map + Navigation service-road visibility should persist independently")
+        assert(!reloaded.showPOIShops,
+               "Map POI visibility should persist")
+        assert(reloaded.mapPlusNavigationShowPOIBicycleServices,
+               "Map + Navigation POI visibility should persist independently")
         assert(!reloaded.mapLabelsEnabled,
                "Map street-label visibility should persist")
         assertEqual(reloaded.mapLabelDensity, 1,

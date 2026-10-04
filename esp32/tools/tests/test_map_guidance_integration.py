@@ -71,6 +71,19 @@ def function_body(source: str, signature: str) -> str:
 class MapGuidanceIntegrationTests(unittest.TestCase):
     """Supplemental wiring guards; behavioral contracts live in C++ tests."""
 
+    def test_pois_share_the_stable_camera_visible_crop_with_labels(self):
+        raster = function_body(MAP_RENDERER_SOURCE, "bool Maps::readVectorMap(")
+        self.assertIn("poiGutter = context.labelGutter", raster)
+        self.assertIn("poiSurface.width = context.labelViewportWidth", raster)
+        self.assertIn("poiSurface.height = context.labelViewportHeight", raster)
+        self.assertIn("projected.x - poiGutter", raster)
+        self.assertIn("projected.y - poiGutter", raster)
+        self.assertIn("projectedMarker.x - poiGutter", raster)
+        self.assertIn("projectedMarker.y - poiGutter", raster)
+        self.assertIn("map_poi_icon::draw(poiSurface", raster)
+        labels = function_body(MAP_RENDERER_SOURCE, "bool Maps::drawStreetLabels(")
+        self.assertIn("poiReservedRegions", labels)
+
     def test_ui_submission_path_contains_no_storage_or_raster_work(self):
         generate = function_body(
             MAP_RENDERER_SOURCE, "bool Maps::generateVectorMap"

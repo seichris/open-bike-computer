@@ -45,6 +45,46 @@ GLOBAL_BUILDING_MAX_FMB_BYTES = 2 * 1024 * 1024
 GLOBAL_BUILDING_ARCHIVE_FIXED_BYTES = 1024 * 1024
 
 
+def selection_output_blocks(job: MapJob, maximum_blocks: int) -> tuple[MapBlock, ...]:
+    """The complete selected block grid, including blocks with no rendered features.
+
+    Nearby coverage must use this selection, not the sparse set of emitted FMB
+    files or nonempty FPI entries. Keep both scope planners on this same path.
+    """
+    if maximum_blocks <= 0:
+        raise BuildingScopeError("building_scope_policy_invalid", "output block limit is invalid")
+    geometry = canonical_selection_geometry(job.geometry.geometry)
+    corridor_width_mm = (
+        None if job.geometry.corridor_width_m is None
+        else int(round(job.geometry.corridor_width_m * 1_000))
+    )
+    selection = _projected_selection(job, geometry, corridor_width_mm)
+    min_x, min_y, max_x, max_y = aligned_projected_extent(job.geometry.bounds)
+    if job.geometry.mode in {GeometryMode.CUSTOM_BBOX, GeometryMode.CURATED_REGION}:
+        candidate_count = (
+            (max_x - min_x) // MAP_BLOCK_SIZE_METERS
+            * (max_y - min_y) // MAP_BLOCK_SIZE_METERS
+        )
+        if candidate_count > maximum_blocks:
+            raise BuildingScopeError(
+                "building_scope_exceeded", "output scope exceeds configured map policy"
+            )
+        blocks = tuple(
+            MapBlock(x, y)
+            for x in range(min_x // MAP_BLOCK_SIZE_METERS, max_x // MAP_BLOCK_SIZE_METERS)
+            for y in range(min_y // MAP_BLOCK_SIZE_METERS, max_y // MAP_BLOCK_SIZE_METERS)
+        )
+    elif selection["type"] == "line":
+        blocks = blocks_for_route(selection, maximum_blocks)
+    else:
+        blocks = blocks_for_polygons(selection, maximum_blocks)
+    if not blocks:
+        raise BuildingScopeError(
+            "building_scope_policy_invalid", "selection does not intersect an output block"
+        )
+    return blocks
+
+
 class BuildingScopeError(RuntimeError):
     """A target-3 scope cannot be planned without violating its policy."""
 
@@ -318,27 +358,8 @@ def plan_building_scope(
         if job.geometry.corridor_width_m is None
         else int(round(job.geometry.corridor_width_m * 1_000))
     )
-    selection = _projected_selection(job, canonical_geometry, corridor_width_mm)
-    min_x, min_y, max_x, max_y = aligned_projected_extent(job.geometry.bounds)
     maximum_blocks = max(1, policy.max_source_area_m2 // (MAP_BLOCK_SIZE_METERS ** 2))
-    if job.geometry.mode in {GeometryMode.CUSTOM_BBOX, GeometryMode.CURATED_REGION}:
-        candidate_count = (
-            (max_x - min_x) // MAP_BLOCK_SIZE_METERS
-            * (max_y - min_y) // MAP_BLOCK_SIZE_METERS
-        )
-        if candidate_count > maximum_blocks:
-            raise BuildingScopeError("building_scope_exceeded", "output scope exceeds configured area policy")
-        blocks = tuple(
-            MapBlock(x, y)
-            for x in range(min_x // MAP_BLOCK_SIZE_METERS, max_x // MAP_BLOCK_SIZE_METERS)
-            for y in range(min_y // MAP_BLOCK_SIZE_METERS, max_y // MAP_BLOCK_SIZE_METERS)
-        )
-    elif selection["type"] == "line":
-        blocks = blocks_for_route(selection, maximum_blocks)
-    else:
-        blocks = blocks_for_polygons(selection, maximum_blocks)
-    if not blocks:
-        raise BuildingScopeError("building_scope_policy_invalid", "selection does not intersect an output block")
+    blocks = selection_output_blocks(job, maximum_blocks)
 
     output = (
         min(block.x for block in blocks) * MAP_BLOCK_SIZE_METERS,
@@ -489,33 +510,8 @@ def plan_global_building_scope(
         if job.geometry.corridor_width_m is None
         else int(round(job.geometry.corridor_width_m * 1_000))
     )
-    selection = _projected_selection(job, canonical_geometry, corridor_width_mm)
-    min_x, min_y, max_x, max_y = aligned_projected_extent(job.geometry.bounds)
     maximum_blocks = global_policy.max_output_blocks
-    if job.geometry.mode in {GeometryMode.CUSTOM_BBOX, GeometryMode.CURATED_REGION}:
-        candidate_count = (
-            (max_x - min_x) // MAP_BLOCK_SIZE_METERS
-            * (max_y - min_y) // MAP_BLOCK_SIZE_METERS
-        )
-        if candidate_count > maximum_blocks:
-            raise BuildingScopeError(
-                "building_scope_exceeded",
-                "global output scope exceeds configured map policy",
-            )
-        blocks = tuple(
-            MapBlock(x, y)
-            for x in range(min_x // MAP_BLOCK_SIZE_METERS, max_x // MAP_BLOCK_SIZE_METERS)
-            for y in range(min_y // MAP_BLOCK_SIZE_METERS, max_y // MAP_BLOCK_SIZE_METERS)
-        )
-    elif selection["type"] == "line":
-        blocks = blocks_for_route(selection, maximum_blocks)
-    else:
-        blocks = blocks_for_polygons(selection, maximum_blocks)
-    if not blocks:
-        raise BuildingScopeError(
-            "building_scope_policy_invalid",
-            "selection does not intersect an output block",
-        )
+    blocks = selection_output_blocks(job, maximum_blocks)
     estimated_archive_bytes = (
         global_policy.archive_fixed_bytes
         + len(blocks) * global_policy.estimated_fmb_bytes_per_block

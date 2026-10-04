@@ -421,7 +421,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
       instance.mapProfile.buildings3DEnabled = after.buildings3DEnabled;
   };
   const uint8_t mask = legacy.enabledScreensMask & DEVICE_SCREEN_SUPPORTED_MASK;
-  bool represented[6]{};
+  bool represented[7]{};
   for (uint8_t index = 0; index < document.instanceCount; ++index) {
     ScreenInstance &instance = document.instances[index];
     const uint8_t rawType = static_cast<uint8_t>(instance.type);
@@ -429,7 +429,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     if (importMask)
       instance.enabled = (mask & (1U << rawType)) != 0;
   }
-  for (uint8_t rawType = 0; rawType < 6 &&
+  for (uint8_t rawType = 0; rawType < 7 &&
                             document.instanceCount <
                                 screen_configuration_protocol::MAX_INSTANCES;
        ++rawType) {
@@ -448,6 +448,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     case ScreenType::MapNavigation: name = "Map + Navigation"; break;
     case ScreenType::BatteryStatus: name = "Battery Status"; break;
     case ScreenType::WorldRadio: name = "World Radio"; break;
+    case ScreenType::Nearby: name = "Nearby"; break;
     }
     (void)screen_configuration_protocol::setName(instance, name,
                                                   std::strlen(name));

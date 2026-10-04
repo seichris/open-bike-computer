@@ -217,7 +217,7 @@ Topographic Contours                            On
 
 ### Device controls
 
-Propose `MAP_VISIBILITY_CONTOURS` at map-visibility bit 13 for both Map and Map + Navigation profiles; bits 13-14 are still unallocated in that mask at the recorded baseline. Reserve visibility bit 14 for a later hillshade contract; it remains zero and hidden until that contract exists. This is a different namespace from CAP2 capability bits: CAP2 bit 13 is already GPS-heading support.
+`MAP_VISIBILITY_CONTOURS` uses map-visibility bit 13 for both Map and Map + Navigation profiles. At the original planning baseline, bits 13-14 were unallocated; the issue #338 combined-map/POI contract now allocates bits 14-18 to five POI groups. Reserve the next available visibility bit, 19, for a later hillshade contract, subject to a fresh allocation check when that feature is implemented. This is a different namespace from CAP2 capability bits: CAP2 bit 13 is already GPS-heading support.
 
 Extend `normalizedFeatureVisibilityMask`, effective feature masks, render-job identity, persistence/migration, and iOS mask serialization together so bit 13 is not silently stripped. Preserve the bit-12 extended-visibility marker and current service-road/track compatibility behavior. Recheck allocations before implementing against a later main.
 
@@ -578,7 +578,7 @@ A later proposal must choose and version:
 - MapKit appearance parity; and
 - independent visibility/capability/status contracts.
 
-If it changes device bytes, use renderer format 5 / FMB v6 with a sixth required section and feature `hillshade`. Do not make format-4 file composition optional after release.
+Issue #338 allocates renderer format 5 / FMB v6 section 6 to POIs and the Nearby index. If hillshade changes device bytes, use the next format, target 6 / FMB v7, with a seventh required section and feature `hillshade`, subject to a fresh allocation check. Do not reinterpret target 5 or make format-4 file composition optional after release.
 
 ## Implementation phases
 

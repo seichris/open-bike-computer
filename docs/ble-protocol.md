@@ -915,13 +915,13 @@ Current setting IDs:
 | `4` | Legacy display rotation | Ignored. Rotation is fixed by firmware target: 90° on the 1.75-inch device and 0° on the 2.06-inch device. |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
 | `7` | Map zoom level | `0...5` |
-| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker, bit 13 topographic contours |
+| `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker, bit 13 topographic contours, bits 14-18 shops, restaurants/cafes, public toilets, gas stations, and bicycle shops/repair respectively |
 | `9` | Map street width | Absolute rendered width is `1...24` px. The wire value remains `width - 4` (`-3...20`) so older apps that send a boost remain compatible. |
 | `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a route-blue dot when no route is loaded and a route-blue arrow while navigating. Both shapes are rendered at their final display resolution. |
 | `11` | Tap to switch screens | `0` disabled, `1` enabled. When enabled, a short tap cycles the device through the enabled main screens. Map drags and long presses are ignored by this shortcut. |
 | `12` | Device brightness | Whole-number percent. Firmware clamps the signed value to `5...100`, saves the normalized value in NVS, and applies it from the display task. First boot defaults to `100`; the saved value is restored across reboot and display sleep/wake. |
-| `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation, bit 4 Battery Status. Invalid or empty masks fall back to all supported screens. Existing four-screen configurations enable Battery Status once during migration, after which it remains user-toggleable. |
-| `14` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation, `4` Battery Status. Invalid or disabled defaults prefer Map + Navigation, then the first enabled fallback screen. |
+| `13` | Enabled main screens mask | bit 0 Map, bit 1 Navigation, bit 2 Ride Stats, bit 3 Map + Navigation, bit 4 Battery Status; optional bit 5 World Radio and bit 6 Nearby only in qualifying firmware. Invalid or empty masks fall back to the five ordinary screens, not the opt-in screens. Existing four-screen configurations enable Battery Status once during migration, after which it remains user-toggleable. |
+| `14` | Default main screen | `0` Map, `1` Navigation, `2` Ride Stats, `3` Map + Navigation, `4` Battery Status; optional `5` World Radio and `6` Nearby. Invalid or disabled defaults prefer Map + Navigation, then the first enabled fallback screen. |
 | `15` | Disconnected sleep timeout | seconds before deep sleep while not connected to the app: `60`, `120`, `300`, `600`; `0` disables automatic disconnected sleep. An unclaimed device waiting to be added applies a minimum 600-second registration grace period; `0` still disables automatic disconnected sleep. |
 | `16` | Map + Navigation minimum polygon size | `0...50` |
 | `17` | Map + Navigation detail level | `0` low, `1` medium, `2` high |
@@ -998,11 +998,16 @@ local and service roads and bit `2` to both paths and tracks.
 Legacy v1 map blocks do not contain feature type IDs, so the renderer also
 combines Local with Service and Paths with Tracks for those blocks. Downloading
 a current v2 map is required for independent road-class visibility.
+POI bits `14...18` are sent only after authenticated CAP2 bit `31`
+negotiation. Fresh Map profiles enable all five; fresh Map + Navigation profiles
+disable all five. Older firmware receives no POI bits and saved choices remain
+available for a later capable connection. Nearby uses an independent transient
+category selection and never rewrites either saved visibility mask.
 
 Visibility bit `13` controls FMB5 topographic contours independently for Map
 and Map + Navigation. It remains off in fresh profiles. iOS exposes and sends
-the bit only when CAP2 bit `30`, active renderer format `4`, topography profile
-`1`, and a healthy active contour section all agree. Firmware preserves the bit
+the bit only when CAP2 bit `30`, an active contour-containing renderer target
+`4` or `5`, topography profile `1`, and a healthy active contour section all agree. Firmware preserves the bit
 through configurable-screen round trips and ignores it for older blocks. This
 source contract does not by itself enable production generation or establish
 physical performance qualification.
@@ -1024,7 +1029,10 @@ MaximumDocumentBytes: UInt16LE (=4096)
 ```
 
 Screen types are `0=Map`, `1=Navigation`, `2=Ride Stats`, `3=Map +
-Navigation`, and `4=Battery Status`. Multiple instances may use the same type.
+Navigation`, `4=Battery Status`, optional `5=World Radio`, and `6=Nearby`.
+Nearby is advertised in `SupportedScreenTypes` only by the POI-enabled
+development firmware; production keeps it hidden pending hardware acceptance.
+Multiple instances may use the same type.
 Each instance has a nonzero stable `UInt32` ID, an independent enabled flag and
 name, and type-specific payload. The ordered enabled instances define the
 device's tap/PWR-button cycle; `DefaultInstanceID` must identify an enabled
@@ -1041,7 +1049,7 @@ DocumentCRC32: UInt32LE
 ```
 
 Flag bit `0` means enabled; other flag bits are invalid. Navigation and Battery
-Status payloads contain only payload version `1`. Map and Map + Navigation
+Status payloads contain only payload version `1`. Map, Nearby, and Map + Navigation
 payloads carry the complete independent map profile (detail, widths, zoom,
 visibility, labels, rotation, and the type-specific bird's-eye fields). Map +
 Navigation appends its independent rotation byte (`0` north-up, `1` course-up)
@@ -1279,7 +1287,9 @@ reports the complete configurable-screen store, characteristic, codec, and runti
 path described above. Bit `27` reports World Radio. Bit `28` reports the
 atomic configurable display-inactivity timeout pair (setting ID `38`). Bit
 `29` reports versioned workout zones. Bit `30` reports the complete renderer
-format 4/FMB5 contour decode, installation, status, and visibility path. Client version `11` requests
+format 4/FMB5 contour decode, installation, status, and visibility path. Bit
+`31` reports the target-5/FMB6 POI reader, independent visibility controls,
+and indexed Nearby screen. Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
@@ -1297,9 +1307,14 @@ Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
 Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
 configurable display inactivity timeouts. Version `27` requests bit `29`,
 versioned workout zones. Version `28` requests bit `30`, topographic contours.
-The current iPhone client negotiates version `28`; older direct Watch clients
+Version `29` requests bit `31`, map POIs and Nearby. The current iPhone client
+negotiates version `29`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
+Firmware sets bit `31` only when `MAP_POIS_RUNTIME_ENABLED=1` and the
+configurable-screen store and characteristic are ready. The opt-in
+`*_REMOTE_DEBUG` profiles currently enable it for physical qualification;
+ordinary and production profiles keep it clear.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
 Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
 omits both the screen and capability pending physical interaction qualification.
@@ -1389,6 +1404,9 @@ Display inactivity timeouts, CAP2 schema 1, only feature bit 28:
 
 Topographic contours, CAP2 schema 1, only feature bit 30:
 43 41 50 32 01 00 00 00 40
+
+Map POIs and Nearby, CAP2 schema 1, only feature bit 31:
+43 41 50 32 01 00 00 00 80
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and

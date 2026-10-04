@@ -15,6 +15,7 @@ extension RideBLEScreenTypeV1: Identifiable {
         case .mapPlusNavigation: return "Map + Navigation"
         case .batteryStatus: return "Battery Status"
         case .worldRadio: return "World Radio"
+        case .nearby: return "Nearby"
         }
     }
 }
@@ -125,8 +126,9 @@ struct DeviceScreenConfigurationCapabilities: Equatable, Sendable {
 struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
     static let defaultVisibilityMask: UInt32 = 0x0fff
     static let contoursVisibilityMask: UInt32 = 1 << 13
+    static let poiVisibilityMask: UInt32 = 0x1f << 14
     static let allowedVisibilityMask: UInt32 =
-        defaultVisibilityMask | contoursVisibilityMask
+        defaultVisibilityMask | contoursVisibilityMask | poiVisibilityMask
 
     var minimumPolygonSize: UInt8 = 0
     var detailLevel: UInt8 = 2
@@ -144,7 +146,13 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
     var birdsEyePerspective: UInt8 = 1
     var buildings3DEnabled = true
 
-    static var mapDefault: DeviceScreenMapProfile { .init() }
+    static var mapDefault: DeviceScreenMapProfile {
+        var profile = DeviceScreenMapProfile()
+        profile.visibilityMask |= poiVisibilityMask
+        return profile
+    }
+
+    static var nearbyDefault: DeviceScreenMapProfile { .init() }
 
     static var mapPlusNavigationDefault: DeviceScreenMapProfile {
         var profile = DeviceScreenMapProfile()
@@ -169,7 +177,7 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
               labelTextSize <= 2,
               labelOrientation <= 1 else { return false }
         switch type {
-        case .map: return rotationMode <= 1
+        case .map, .nearby: return rotationMode <= 1
         case .mapPlusNavigation: return birdsEyePerspective <= 4 && rotationMode <= 1
         default: return false
         }
@@ -205,7 +213,8 @@ struct DeviceScreenInstance: Identifiable, Equatable, Codable, Sendable {
             enabled: true,
             name: name ?? type.title,
             mapProfile: type == .map ? .mapDefault :
-                (type == .mapPlusNavigation ? .mapPlusNavigationDefault : nil),
+                (type == .nearby ? .nearbyDefault :
+                    (type == .mapPlusNavigation ? .mapPlusNavigationDefault : nil)),
             rideStatsLayout: type == .rideStats ? RideStatsLayout() : nil
         )
     }
@@ -291,9 +300,11 @@ struct DeviceScreenConfigurationDocument: Equatable, Codable, Sendable {
                 throw DeviceScreenConfigurationValidationError.unsupportedType
             }
             switch instance.type {
-            case .map, .mapPlusNavigation:
+            case .map, .mapPlusNavigation, .nearby:
                 guard let profile = instance.mapProfile,
                       profile.isValid(for: instance.type),
+                      (profile.visibilityMask & DeviceScreenMapProfile.poiVisibilityMask == 0 ||
+                       capabilities.supports(.nearby)),
                       instance.rideStatsLayout == nil else {
                     throw DeviceScreenConfigurationValidationError.invalidPayload
                 }
@@ -512,7 +523,7 @@ enum DeviceScreenConfigurationCodec {
     private static func encodePayload(_ instance: DeviceScreenInstance) throws -> Data {
         var payload = Data([payloadVersion])
         switch instance.type {
-        case .map, .mapPlusNavigation:
+        case .map, .mapPlusNavigation, .nearby:
             guard let profile = instance.mapProfile else {
                 throw DeviceScreenConfigurationValidationError.invalidPayload
             }
@@ -526,7 +537,7 @@ enum DeviceScreenConfigurationCodec {
                 profile.labelDensity, profile.labelLanguageMode,
                 profile.labelTextSize, profile.labelOrientation,
             ])
-            if instance.type == .map {
+            if instance.type == .map || instance.type == .nearby {
                 payload.append(profile.rotationMode)
             } else {
                 payload.append(profile.birdsEyeEnabled ? 1 : 0)
@@ -561,15 +572,17 @@ enum DeviceScreenConfigurationCodec {
         var mapProfile: DeviceScreenMapProfile?
         var rideStatsLayout: RideStatsLayout?
         switch type {
-        case .map, .mapPlusNavigation:
-            let expectedCount = type == .map ? 16 : 19
+        case .map, .mapPlusNavigation, .nearby:
+            let expectedCount = type == .map || type == .nearby ? 16 : 19
             let legacyNavigation = type == .mapPlusNavigation && payload.count == 18
             guard payload.count == expectedCount || legacyNavigation else {
                 throw DeviceScreenConfigurationValidationError.invalidPayload
             }
             var profile = type == .map
                 ? DeviceScreenMapProfile.mapDefault
-                : DeviceScreenMapProfile.mapPlusNavigationDefault
+                : (type == .nearby
+                    ? DeviceScreenMapProfile.nearbyDefault
+                    : DeviceScreenMapProfile.mapPlusNavigationDefault)
             profile.minimumPolygonSize = try reader.byte()
             profile.detailLevel = try reader.byte()
             profile.routeLineWidth = try reader.byte()
@@ -581,7 +594,7 @@ enum DeviceScreenConfigurationCodec {
             profile.labelLanguageMode = try reader.byte()
             profile.labelTextSize = try reader.byte()
             profile.labelOrientation = try reader.byte()
-            if type == .map {
+            if type == .map || type == .nearby {
                 profile.rotationMode = try reader.byte()
             } else {
                 let birdsEye = try reader.byte()

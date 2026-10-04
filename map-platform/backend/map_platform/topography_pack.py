@@ -12,9 +12,12 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-from .map_artifact_validation import validate_fma1, validate_fmb5
+from .map_artifact_validation import validate_fma1, validate_fmb5, validate_fmb6
 from .reuse import MapBlock, block_from_pack_path
-from .topography_artifacts import TOPOGRAPHY_PROFILE_VERSION, ContourSection, empty_fmb5, upgrade_fmb4
+from .topography_artifacts import (
+    TOPOGRAPHY_PROFILE_VERSION, ContourSection, empty_fmb5, upgrade_fmb4,
+    empty_fmb6, replace_fmb6_contours,
+)
 from .topography_cache import _sync_directory
 from .topography_companion import write_companion
 from .topography_geometry import CompiledTopography, MAX_BLOCKS
@@ -23,7 +26,11 @@ from .topography_pipeline import canonical_bytes
 
 def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
                               compiled: CompiledTopography, sample: dict, attribution: bytes,
-                              *, cancel: Callable[[], None] = lambda: None) -> dict:
+                              *, cancel: Callable[[], None] = lambda: None,
+                              renderer_format_version: int = 4) -> dict:
+    if type(renderer_format_version) is not int or renderer_format_version not in {4, 5}:
+        raise ValueError("unsupported contour map target")
+    combined = renderer_format_version == 5
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", map_id):
         raise ValueError("invalid topographic map ID")
     if output.exists() or output.is_symlink():
@@ -69,13 +76,15 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
         for bx, by in keys:
             cancel()
             section = compiled.sections.get((bx, by), empty)
-            data = upgrade_fmb4(blocks[bx, by], section) if (bx, by) in blocks else empty_fmb5(profile.profile_fingerprint, section)
+            upgrade = replace_fmb6_contours if combined else upgrade_fmb4
+            empty_block = empty_fmb6 if combined else empty_fmb5
+            data = upgrade(blocks[bx, by], section) if (bx, by) in blocks else empty_block(profile.profile_fingerprint, section)
             block = MapBlock(bx, by)
             relative = f"VECTMAP/{map_id}/{block.folder_name}/{bx & 15}_{by & 15}.fmb"
             destination = device / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
-            metadata = validate_fmb5(destination)
+            metadata = (validate_fmb6 if combined else validate_fmb5)(destination)
             if (metadata.profile_fingerprint != profile.profile_fingerprint
                     or metadata.maximum_glyph_id > profile.glyph_count
                     or metadata.maximum_language_id > profile.language_count):
@@ -86,6 +95,12 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
             files.append({"path": relative, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
         font_data = font_output.read_bytes()
         files.append({"path": font_output.relative_to(device).as_posix(), "bytes": len(font_data), "sha256": hashlib.sha256(font_data).hexdigest()})
+        if combined:
+            from .poi_index import build_index, index_path
+            index_bytes = build_index(device, map_id, files, cancel=cancel)
+            relative_index = index_path(map_id)
+            (device / relative_index).write_bytes(index_bytes)
+            files.append({"path": relative_index, "bytes": len(index_bytes), "sha256": hashlib.sha256(index_bytes).hexdigest()})
         notice_sha = hashlib.sha256(attribution).hexdigest()
         companion = staged / f"{map_id}.btopo"
         companion_metadata = write_companion(companion, compiled, map_id=map_id,
@@ -93,7 +108,7 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
                                             attribution_sha256=notice_sha, bounds_e7=sample["boundsE7"], cancel=cancel)
         (staged / "ATTRIBUTION.txt").write_bytes(attribution)
         receipt = {"schemaVersion": 1, "kind": "bicino-topography-development-pair-v1", "productionEligible": False,
-                   "mapId": map_id, "rendererFormatVersion": 4, "blockFormatVersion": 5,
+                   "mapId": map_id, "rendererFormatVersion": renderer_format_version, "blockFormatVersion": renderer_format_version + 1,
                    "profileVersion": TOPOGRAPHY_PROFILE_VERSION, "sourcePolicySha256": sample["sourcePolicySha256"],
                    "sampleSha256": sample_sha, "selectionSha256": compiled.selection_sha256,
                    "intermediateSha256": compiled.intermediate_sha256, "attributionSha256": notice_sha,

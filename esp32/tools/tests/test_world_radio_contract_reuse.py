@@ -19,9 +19,14 @@ class WorldRadioContractReuseTests(unittest.TestCase):
         self.assertEqual(contract["screen_types"], {
             "map": 0, "navigation": 1, "ride_stats": 2,
             "map_plus_navigation": 3, "battery_status": 4, "world_radio": 5,
+            "nearby": 6,
         })
         self.assertEqual(generator.SWIFT_OUTPUT.read_text(), generator.render_swift(contract))
         self.assertEqual(generator.CPP_OUTPUT.read_text(), generator.render_cpp(contract))
+        legacy_enum = generator.render_swift(contract).split(
+            "nonisolated enum RideBLELegacyScreenV1", 1
+        )[1].split("var wireType", 1)[0]
+        self.assertNotIn("case nearby", legacy_enum)
         # Freeze this feature's wire requirement, not the latest client version:
         # adding an unrelated capability must not invalidate World Radio.
         radio = contract["capabilities"]["features"]["world_radio"]

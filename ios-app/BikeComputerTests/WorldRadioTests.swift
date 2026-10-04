@@ -254,7 +254,8 @@ private func runWorldRadioGoldenTests() {
     appended.appendWireUInt16LE(0xabcd)
     appended.appendWireUInt32LE(UInt32.max)
     precondition(appended == Data([0xcd, 0xab, 0xff, 0xff, 0xff, 0xff]))
-    precondition(RideBLEScreenTypeV1.allCases.map(\.rawValue) == [0, 1, 2, 3, 4, 5])
+    precondition(RideBLEScreenTypeV1.allCases.map(\.rawValue) == [0, 1, 2, 3, 4, 5, 6])
+    precondition(RideBLELegacyScreenV1.allCases.map(\.rawValue) == [0, 1, 2, 3, 4, 5])
     for screen in RideBLELegacyScreenV1.allCases {
         precondition(screen.rawValue == Int(screen.wireType.rawValue))
     }

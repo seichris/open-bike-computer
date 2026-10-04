@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "../maps/src/mapNearbyCoverage.hpp"
+
 namespace map_transfer {
 
 struct ManifestFile {
@@ -20,6 +22,7 @@ struct MapPresentationMetadata {
   std::string displayName;
   std::array<int32_t, 4> boundsE7 = {};
   bool hasBoundsE7 = false;
+  std::vector<map_nearby_coverage::Block> nearbyCoverageBlocks;
 };
 
 struct MapPresentationRevision {
@@ -34,6 +37,7 @@ struct MapManifest {
   std::string displayName;
   std::array<int32_t, 4> boundsE7 = {};
   bool hasBoundsE7 = false;
+  std::vector<map_nearby_coverage::Block> nearbyCoverageBlocks;
   std::string renderer;
   uint32_t formatVersion = 0;
   uint32_t labelProfileVersion = 0;
@@ -43,6 +47,12 @@ struct MapManifest {
   uint32_t topographyProfileVersion = 0;
   uint32_t buildingRecordCount = 0;
   uint32_t buildingProvenanceCounts[5] = {0, 0, 0, 0, 0};
+  uint32_t poiProfileVersion = 0;
+  uint32_t poiIndexProfileVersion = 0;
+  std::vector<std::string> requestedFeatures;
+  bool contoursIncluded = false;
+  uint32_t poiRecordCount = 0;
+  uint32_t poiCategoryCounts[5] = {0, 0, 0, 0, 0};
   uint32_t contourRecordCount = 0;
   uint32_t contourPointCount = 0;
   uint32_t contourMinorIntervalM = 0;
@@ -79,6 +89,11 @@ struct MapTargetMetadata {
   std::vector<std::string> labelLanguages;
   std::string internationalFallback;
   uint32_t buildingProfileVersion = 0;
+  uint32_t poiProfileVersion = 0;
+  uint32_t poiIndexProfileVersion = 0;
+  uint32_t poiRecordCount = 0;
+  bool contoursIncluded = false;
+  std::string poiIndexSha256;
   uint32_t topographyProfileVersion = 0;
   std::string topographyQualityMode;
   uint32_t contourMinorIntervalM = 0;

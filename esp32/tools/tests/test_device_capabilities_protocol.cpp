@@ -74,6 +74,13 @@ int main() {
                 28);
   static_assert(device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE ==
                 (1UL << 30));
+  static_assert(device_capabilities_protocol::MAP_POIS_CLIENT_VERSION == 29);
+  static_assert(device_capabilities_protocol::MAP_POIS_FEATURE ==
+                (1UL << 31));
+  assert(!device_capabilities_protocol::supportsMapPois(28, true, true));
+  assert(!device_capabilities_protocol::supportsMapPois(29, false, true));
+  assert(!device_capabilities_protocol::supportsMapPois(29, true, false));
+  assert(device_capabilities_protocol::supportsMapPois(29, true, true));
   static_assert((device_capabilities_protocol::WORLD_RADIO_FEATURE &
                  (device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE |
                   device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
@@ -188,6 +195,14 @@ int main() {
   assert(topographicContoursSize == sizeof(expectedTopographicContours));
   for (size_t index = 0; index < topographicContoursSize; ++index)
     assert(output[index] == expectedTopographicContours[index]);
+  const size_t mapPoisSize = device_capabilities_protocol::encodeCap2(
+      device_capabilities_protocol::MAP_POIS_FEATURE, nullptr, false,
+      output, sizeof(output));
+  const uint8_t expectedMapPois[] = {
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x80};
+  assert(mapPoisSize == sizeof(expectedMapPois));
+  for (size_t index = 0; index < mapPoisSize; ++index)
+    assert(output[index] == expectedMapPois[index]);
   const size_t rideDiagnosticsSize = device_capabilities_protocol::encodeCap2(
       device_capabilities_protocol::RIDE_DIAGNOSTICS_FEATURE, nullptr, false,
       output, sizeof(output));

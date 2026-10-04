@@ -11,7 +11,7 @@ int main() {
   body += "}";
 
   assert(body ==
-         "{\"first\":1,\"text\":\"quote\\\" slash\\\\ line\\n\"," 
+         "{\"first\":1,\"text\":\"quote\\\" slash\\\\ line\\n\","
          "\"count\":42,\"ready\":true}");
   assert(status_json::escape(std::string("a\x01", 2)) == "a\\u0001");
   return 0;

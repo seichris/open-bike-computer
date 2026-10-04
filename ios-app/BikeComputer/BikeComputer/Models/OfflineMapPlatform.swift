@@ -1162,6 +1162,7 @@ struct OfflineMapGenerationProfile: Decodable, Equatable {
     let id: String
     let rendererFormatVersion: Int
     let features: [String]
+    let optionalFeatures: [String]?
 }
 
 struct OfflineMapGenerationCapabilities: Decodable, Equatable {
@@ -1181,6 +1182,10 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
                 "topographic-contours-v1",
                 ["3d-buildings", "contours", "street-labels"]
             ),
+            5: (
+                "map-pois-v1",
+                ["3d-buildings", "map-pois", "street-labels"]
+            ),
         ]
         guard schemaVersion == 1,
               ["development", "production"].contains(deploymentChannel),
@@ -1194,7 +1199,12 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
                   let features = Set($0.features)
                   return $0.id == contract.id &&
                       contract.features.isSubset(of: features) &&
-                      features.count == $0.features.count
+                      features.count == $0.features.count &&
+                      ($0.rendererFormatVersion == 5
+                        ? Set($0.optionalFeatures ?? []).isSubset(of: ["contours"]) &&
+                          Set($0.optionalFeatures ?? []).count ==
+                            ($0.optionalFeatures ?? []).count
+                        : $0.optionalFeatures == nil)
               }) else {
             throw OfflineMapPlatformError.invalidResponse
         }
@@ -1541,6 +1551,15 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     var activeManifestReceipt: String? = nil
     var activeMapDisplayName: String? = nil
     var activeMapBoundsE7: [Int]? = nil
+    var activeRendererFormat: Int? = nil
+    var labelProfileVersion: Int? = nil
+    var labelLanguages: [String]? = nil
+    var fontAssetHealthy: Bool? = nil
+    var poiProfileVersion: Int? = nil
+    var poiIndexProfileVersion: Int? = nil
+    var poiDataHealthy: Bool? = nil
+    var poiIndexHealthy: Bool? = nil
+    var contourLayerIncluded: Bool? = nil
     let activation: Activation?
     let protocols: [Int]?
     let streamFormatVersions: [Int]?

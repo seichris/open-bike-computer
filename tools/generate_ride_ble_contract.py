@@ -73,6 +73,11 @@ def load_contract() -> dict:
     if sorted(widgets.values()) != list(range(22)):
         raise SystemExit("Ride Stats widgets must retain their append-only v1 IDs 0...21")
     screen_types = contract["screen_types"]
+    legacy_screen_types = ("map", "navigation", "ride_stats",
+                           "map_plus_navigation", "battery_status", "world_radio")
+    if any(screen_types.get(name) != value
+           for value, name in enumerate(legacy_screen_types)):
+        raise SystemExit("legacy screen setting IDs 0...5 must remain unchanged")
     values = list(screen_types.values())
     if (not screen_types or len(values) != len(set(values))
             or any(type(value) is not int or not 0 <= value < 8 for value in values)
@@ -203,16 +208,20 @@ def render_swift(contract: dict) -> str:
     for name, value in screen_configuration["results"].items():
         lines.append(f"    case {camel(name)} = {value}")
     lines.extend(["}", ""])
-    # Separate legacy Int and wire UInt8 adapters preserve source compatibility;
-    # both are generated from the same identifiers, never from UI ordering.
+    # The legacy setting-0 mask remains six bits. New configurable-screen types
+    # are wire-only and must never leak into the old screen-settings channel.
+    legacy_screen_types = ("map", "navigation", "ride_stats",
+                           "map_plus_navigation", "battery_status", "world_radio")
     for enum_name, raw_type in (("RideBLEScreenTypeV1", "UInt8"),
                                 ("RideBLELegacyScreenV1", "Int")):
         lines.append(f"nonisolated enum {enum_name}: {raw_type}, CaseIterable, Codable, Sendable {{")
-        for name, value in contract["screen_types"].items():
+        names = contract["screen_types"] if raw_type == "UInt8" else legacy_screen_types
+        for name in names:
+            value = contract["screen_types"][name]
             lines.append(f"    case {camel(name)} = {value}")
         if raw_type == "Int":
             lines.extend(["", "    var wireType: RideBLEScreenTypeV1 {", "        switch self {"])
-            for name in contract["screen_types"]:
+            for name in legacy_screen_types:
                 lines.append(f"        case .{camel(name)}: return .{camel(name)}")
             lines.extend(["        }", "    }"])
         lines.extend(["}", ""])
