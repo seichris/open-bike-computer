@@ -403,7 +403,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
     private static let lowercaseSHA256Pattern = "^[0-9a-f]{64}$"
     private static let safeMapIDPattern = "^[A-Za-z0-9._-]+$"
     private static let mapPathPattern =
-        "^VECTMAP/[A-Za-z0-9._-]+/(?:[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\\.fm[bp]|assets/street-labels\\.fma)$"
+        "^VECTMAP/[A-Za-z0-9._-]+/(?:[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\\.fm[bpe]|assets/street-labels\\.fma)$"
 
     struct Manifest: Decodable {
         struct Producer: Decodable {
@@ -1000,7 +1000,11 @@ nonisolated enum BikeMapStreamArtifactValidator {
         path: String,
         rendererFormatVersion: Int
     ) throws {
-        if path.hasSuffix(".fmb") {
+        if path.hasSuffix(".fme") {
+            guard rendererFormatVersion == 4, prefix == Data("FME1".utf8) else {
+                throw BikeMapStreamFormatError.invalidManifest("terrain header does not match its target")
+            }
+        } else if path.hasSuffix(".fmb") {
             guard prefix.count == 4,
                   prefix.prefix(3) == Data("FMB".utf8) else {
                 throw BikeMapStreamFormatError.invalidManifest(

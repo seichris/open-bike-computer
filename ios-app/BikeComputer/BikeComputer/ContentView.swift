@@ -60,6 +60,7 @@ private extension PresentationDetent {
 }
 
 struct ContentView: View {
+    @State private var terrainExperiment: TerrainMapStyle?
     
     // MARK: - State
     
@@ -1654,6 +1655,13 @@ struct ContentView: View {
 
     private var mapLayersMenu: some View {
         Menu {
+            if let overlay = offlineMapManager.topographyOverlay as? BicinoTopographyTileOverlay, overlay.hasTerrainFeatures {
+                Section("Offline Terrain Experiments") {
+                    ForEach([TerrainMapStyle.hillshade, .elevationTint, .terrain3D]) { style in
+                        Button(style == .elevationTint ? "Tint & Slope" : style.title) { terrainExperiment = style }
+                    }
+                }
+            }
             Section("Base Map") {
                 Picker("Base Map", selection: mapBaseStyleBinding) {
                     ForEach(IPhoneMapBaseStyle.allCases) { style in
@@ -1682,6 +1690,11 @@ struct ContentView: View {
             mapControlIcon("map.fill")
         }
         .buttonStyle(.plain)
+        .sheet(item: $terrainExperiment) { style in
+            if let overlay = offlineMapManager.topographyOverlay as? BicinoTopographyTileOverlay {
+                BicinoTerrainExperimentView(overlay: overlay, style: style)
+            }
+        }
         .accessibilityLabel("Layers")
         .accessibilityValue(
             "\(mapAppearance.baseStyle.title), " +

@@ -6,8 +6,11 @@ The output receipt is written last; incomplete output is never a ready pack.
 from __future__ import annotations
 
 import hashlib
+import base64
+from .terrain import validate_grid, clip_grid, ALGORITHM
 import os
 import re
+import struct
 import tempfile
 from pathlib import Path
 from typing import Callable
@@ -53,7 +56,24 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
         if key is None or (key.x, key.y) in blocks:
             raise ValueError("invalid or duplicate vector block path")
         blocks[key.x, key.y] = path
-    keys = sorted(set(blocks) | set(compiled.sections))
+    terrain_grids = {}
+    encoded_grids = sample.get("terrainGrids", [])
+    if not isinstance(encoded_grids, list) or len(encoded_grids) > MAX_BLOCKS:
+        raise ValueError("terrain grid count exceeds bound")
+    if encoded_grids and sample.get("terrainAlgorithm") != ALGORITHM:
+        raise ValueError("unsupported terrain algorithm")
+    for encoded in encoded_grids:
+        if not isinstance(encoded, str) or len(encoded) > 6000:
+            raise ValueError("terrain grid encoding exceeds bound")
+        data = base64.b64decode(encoded, validate=True)
+        key = validate_grid(data)
+        if key in terrain_grids:
+            raise ValueError("duplicate terrain grid")
+        clipped = clip_grid(data, compiled.terrain_selection) if compiled.terrain_selection else data
+        if any(height != -32768 for height, _, _ in struct.iter_unpack("<hBB", clipped[16:])):
+            terrain_grids[key] = clipped
+    # Device coverage is clipped by the same selection as vector/contour data.
+    keys = sorted(set(blocks) | set(compiled.sections) | set(terrain_grids))
     if not keys or len(keys) > MAX_BLOCKS:
         raise ValueError("topographic map exceeds block budget or has no device coverage")
     empty = ContourSection(sample["minorIntervalM"], sample["indexIntervalM"], ())
@@ -75,6 +95,11 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
             destination = device / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(data)
+            if (bx, by) in terrain_grids:
+                terrain_data = terrain_grids[bx, by]
+                terrain_relative = relative[:-4] + ".fme"
+                (device / terrain_relative).write_bytes(terrain_data)
+                files.append({"path": terrain_relative, "bytes": len(terrain_data), "sha256": hashlib.sha256(terrain_data).hexdigest()})
             metadata = validate_fmb5(destination)
             if (metadata.profile_fingerprint != profile.profile_fingerprint
                     or metadata.maximum_glyph_id > profile.glyph_count
@@ -90,7 +115,7 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
         companion = staged / f"{map_id}.btopo"
         companion_metadata = write_companion(companion, compiled, map_id=map_id,
                                             source_policy_sha256=sample["sourcePolicySha256"],
-                                            attribution_sha256=notice_sha, bounds_e7=sample["boundsE7"], cancel=cancel)
+                                            attribution_sha256=notice_sha, bounds_e7=sample["boundsE7"], cancel=cancel, terrain_grids={k:v for k,v in terrain_grids.items() if k in keys} if "terrainGrids" in sample else None)
         (staged / "ATTRIBUTION.txt").write_bytes(attribution)
         receipt = {"schemaVersion": 1, "kind": "bicino-topography-development-pair-v1", "productionEligible": False,
                    "mapId": map_id, "rendererFormatVersion": 4, "blockFormatVersion": 5,

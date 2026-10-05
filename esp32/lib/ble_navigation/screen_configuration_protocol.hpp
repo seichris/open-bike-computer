@@ -33,7 +33,8 @@ constexpr uint32_t APP_INSTANCE_ID_MASK = 1UL << 31;
 constexpr uint32_t ALLOWED_VISIBILITY_MASK =
     map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
     map_profile_protocol::VISIBILITY_OVERLAY_MASK |
-    map_profile_protocol::VISIBILITY_CONTOURS;
+    map_profile_protocol::VISIBILITY_CONTOURS |
+    map_profile_protocol::VISIBILITY_TERRAIN;
 constexpr uint32_t DEFAULT_VISIBILITY_MASK =
     map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
     map_profile_protocol::VISIBILITY_OVERLAY_MASK;

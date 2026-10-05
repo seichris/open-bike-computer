@@ -31,6 +31,7 @@ class CompiledTopography:
     intermediate_sha256: str
     sample_sha256: str
     selection_sha256: str
+    terrain_selection: dict | None = None
 
     @property
     def record_count(self) -> int:
@@ -176,4 +177,4 @@ def compile_contours(sample: dict, selection: dict, *, corridor_width_m: float =
                 "selectionSha256": selection_sha,
                 "sections": [[*key, hashlib.sha256(encode_contour_section(section)).hexdigest()]
                              for key, section in sections.items()]}
-    return CompiledTopography(sections, hashlib.sha256(canonical_bytes(identity)).hexdigest(), sample_sha, selection_sha)
+    return CompiledTopography(sections, hashlib.sha256(canonical_bytes(identity)).hexdigest(), sample_sha, selection_sha, transform(project(working_crs, "EPSG:3857"), selected).__geo_interface__)

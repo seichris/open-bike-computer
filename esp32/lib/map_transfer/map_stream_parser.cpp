@@ -9,6 +9,10 @@
 #include <new>
 #include <utility>
 
+#ifndef FIRMWARE_DIAGNOSTICS
+#define FIRMWARE_DIAGNOSTICS 1
+#endif
+
 #if defined(ARDUINO) && defined(BOARD_HAS_PSRAM)
 #include <esp_heap_caps.h>
 #endif
@@ -806,10 +810,17 @@ bool safeMapPath(std::string_view path, const std::string &mapId,
     return false;
   }
   const bool fontAsset = tile == "assets" && filename == "street-labels.fma";
+  const auto extension = filename.size() >= 4
+                             ? filename.substr(filename.size() - 4)
+                             : std::string_view{};
+#if FIRMWARE_DIAGNOSTICS
+  const bool block = extension == ".fme" || extension == ".fmb" ||
+                     extension == ".fmp";
+#else
+  const bool block = extension == ".fmb" || extension == ".fmp";
+#endif
   if (!fontAsset &&
-      (filename.size() < 5 ||
-       !(filename.substr(filename.size() - 4) == ".fmb" ||
-         filename.substr(filename.size() - 4) == ".fmp"))) {
+      (filename.size() < 5 || !block)) {
     return false;
   }
   tileOffset = secondSlash + 1;
@@ -1083,6 +1094,10 @@ bool parseMapStreamManifest(std::string_view manifestText,
     size_t filenameBytes = 0;
     if (!safeMapPath(path, parsed.metadata.mapId, tileOffset, tileBytes,
                      filenameOffset, filenameBytes) ||
+#if FIRMWARE_DIAGNOSTICS
+        (endsWith(path, ".fme") &&
+         (parsed.metadata.formatVersion != 4 || file.bytes != 4372)) ||
+#endif
         file.bytes == 0 ||
         file.bytes >
             (endsWith(path, "/assets/street-labels.fma")

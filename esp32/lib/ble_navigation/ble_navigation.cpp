@@ -4131,6 +4131,8 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE;
     }
+    if (map_profile_protocol::VISIBILITY_TERRAIN != 0 && clientVersion >= 29)
+      featureFlags |= ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE;
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,

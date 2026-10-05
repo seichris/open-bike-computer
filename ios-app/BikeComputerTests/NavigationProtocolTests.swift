@@ -6825,6 +6825,10 @@ struct NavigationProtocolTests {
             sideLengthKm: 22.264
         )
         let request = OfflineMapJobRequest.customBBox(bounds)
+        let terrainRequest = request.withTopography(true, terrain: true).forDevice(firmwareVersion: "1.0.0")
+        assertEqual(terrainRequest.target?.rendererFormatVersion, 4, "terrain needs renderer 4")
+        assertEqual(terrainRequest.target?.terrainProfileVersion, 1, "device request retains terrain opt-in")
+        assertEqual(request.withTopography(true).target?.terrainProfileVersion, nil, "legacy topography does not opt in to terrain")
         assertEqual(request.mode, "custom_bbox", "custom cut-out uses backend bbox mode")
         assert(request.bbox != nil, "custom cut-out includes bbox")
         assert(abs((request.bbox?[1] ?? 0) - 34.9) < 0.001, "bbox min latitude uses requested size")
@@ -17935,7 +17939,7 @@ struct NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 28, "capability version negotiates signed topographic contours alongside existing capabilities")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 29, "capability version negotiates terrain experiments alongside existing capabilities")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1Feature, 1 << 29, "CAP2 bit 29 advertises versioned workout zones without reusing the display inactivity capability")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1MinimumClientVersion, 27, "zone negotiation requires protocol 27, independent of the iOS version")
         assertEqual(DeviceBLEProtocol.topographicContoursCapabilityMask, 1 << 30, "CAP2 bit 30 advertises signed topographic contour support")
@@ -22639,6 +22643,13 @@ struct NavigationProtocolTests {
                "CAP2 topographic contour capability is accepted")
         assert(manager.supportsTopographicContours,
                "CAP2 bit 30 enables contour-aware transfer and settings")
+        assert(!manager.supportsTerrainExperiments, "legacy contour capability does not advertise terrain")
+        assert(manager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 0, 0xc0])),
+            "CAP2 terrain capability is accepted")
+        assert(manager.supportsTerrainExperiments, "CAP2 bit 31 unlocks experimental Map presets")
+        assert(manager.handleDeviceCapabilitiesNotification(capabilities), "legacy capabilities remain accepted")
+        assert(!manager.supportsTerrainExperiments, "renegotiation clears terrain capability")
         let status = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
             """
             {"enabled":true,"activeMapId":"topo-map","activeRendererFormat":4,"topographyProfileVersion":1,"topographyQualityMode":"standard-20m-v1","contourMinorIntervalM":20,"contourIndexIntervalM":100,"contourNoDataMillionths":0,"containsContours":true,"topographySourcePolicyReceiptPrefix":"abcdef012345","topographySectionHealthy":true}

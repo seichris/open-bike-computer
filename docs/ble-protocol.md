@@ -2245,3 +2245,20 @@ normative offsets, validation, replay/expiry and compatibility matrix. The JSON
 contract generates Swift/C++ constants and append-only widget IDs. Golden
 packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
 by both languages.
+
+### Experimental terrain map presets (client 29)
+
+CAP2 bit 31 (`terrain_experiments`) is advertised only by diagnostics firmware.
+It enables presets of existing configurable `Map` screen instances: Hillshade,
+Tint & Slope, and 3D Terrain. There are no new screen IDs or larger legacy masks.
+The instance's UInt32 visibility field uses bits 14 hillshade, 15 elevation tint,
+16 slope shading, and 17 terrain height exploration. Tint combines bits 14+15;
+slope uses bit 16 independently. Ordinary Map and Map+Navigation defaults do not
+change. Production rejects these experimental visibility bits.
+
+Contour numbers follow bit 13 in both existing map screens, independently of
+street-label density. Firmware-owned numeric glyphs support existing font packs.
+3D Terrain is an isolated height-surface experiment; route/position overlays
+are suppressed because navigation has not been qualified on a draped surface.
+These screens must pass separate physical performance/readability gates before
+any production enablement. Old maps without FME1 sidecars remain readable.

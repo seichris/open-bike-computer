@@ -36,7 +36,7 @@ from .topography_artifacts import (
 
 ALLOWED_PACK_FILE_RE = re.compile(
     r"VECTMAP/[A-Za-z0-9._-]+/(?:"
-    r"[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bp]|"
+    r"[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\.fm[bpe]|"
     r"assets/street-labels\.fma)"
 )
 MAX_PACK_MAP_ID_BYTES = 64

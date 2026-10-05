@@ -140,6 +140,14 @@ class TopographyGeometryTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             assemble_topographic_pack(source, output, "test-map", compiled, self.sample, b"Test notices\n")
 
+    def test_generated_terrain_receipt_survives_full_packaging(self):
+        import base64
+        from map_platform.terrain import ALGORITHM, encode_grid
+        self.sample["terrainAlgorithm"] = ALGORITHM
+        self.sample["terrainGrids"] = [base64.b64encode(encode_grid(0, 0, [(100, 180, 0)] * 1089)).decode()]
+        self.test_generated_topography_receipt_survives_full_packaging()
+        self.assertEqual(len(list((self.root / "pair/device").rglob("*.fme"))), 1)
+
     def test_generated_topography_receipt_survives_full_packaging(self):
         self.sample["sources"] = [{
             "sourceId": "fixture", "datasetRelease": "test-release",
@@ -340,6 +348,23 @@ class TopographyGeometryTests(unittest.TestCase):
             receipt_path.write_text(json.dumps(receipt))
             with self.subTest(sql=sql):
                 self.assertEqual(read(path), "invalid")
+
+        from map_platform.terrain import encode_grid
+        terrain = self.root / "terrain.btopo"
+        metadata = write_companion(terrain, compiled, map_id="test-map",
+                                   source_policy_sha256="a" * 64, attribution_sha256="b" * 64,
+                                   bounds_e7=self.sample["boundsE7"],
+                                   terrain_grids={(0, 0): encode_grid(0, 0, [(100, 180, 0)] * 1089)})
+        receipt["sha256"] = hashlib.sha256(terrain.read_bytes()).hexdigest()
+        receipt["bytes"] = terrain.stat().st_size
+        receipt_path.write_text(json.dumps(receipt))
+        self.assertEqual(read(terrain), f"ok {metadata['tileCount']}")
+        with sqlite3.connect(terrain) as database:
+            database.execute("UPDATE terrain SET grid = zeroblob(4372)")
+        receipt["sha256"] = hashlib.sha256(terrain.read_bytes()).hexdigest()
+        receipt["bytes"] = terrain.stat().st_size
+        receipt_path.write_text(json.dumps(receipt))
+        self.assertEqual(read(terrain), "invalid")
 
     def test_empty_companion_is_valid_and_cancelled_write_is_not_published(self):
         self.sample["contours"] = []
