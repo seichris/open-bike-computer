@@ -4045,6 +4045,25 @@ extension NavigationProtocolTests {
                 }
                 assertEqual(try store.records(), original,
                     "summary recovery preserves cancellation, receipts and the original observation binding")
+                if scenario == "unknown" {
+                    let unavailable = try JSONSerialization.data(withJSONObject: [
+                        "operation": ["schemaVersion": 1, "deviceID": record.deviceID,
+                            "operationID": record.wireOperationID, "status": "result_unavailable"]])
+                    assert(ble.handleMapTransferStatusNotification(
+                        Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + unavailable),
+                        "recovery receives a fresh authenticated exact-operation reply")
+                    let queriesBeforeRecovery = ble.requestedOperationIDs.count
+                    manager.reconcileLastTransfer(bleManager: ble)
+                    assert(manager.isDeviceTransferBusy,
+                        "a fresh unavailable result starts the saved precommit cancellation recovery")
+                    assertEqual(ble.requestedOperationIDs.count, queriesBeforeRecovery,
+                        "polling must not clear the fresh proof before the scheduled recovery uses it")
+                    manager.reconcileLastTransfer(bleManager: ble)
+                    assertEqual(ble.requestedOperationIDs.count, queriesBeforeRecovery,
+                        "polling yields while the foreground recovery owns query and control")
+                    assertEqual(try store.records(), original,
+                        "starting transport recovery does not infer a terminal map result")
+                }
                 if ["unknown", "installed", "unconfirmed"].contains(scenario) {
                     let receipt = try cancellationReceipt(for: record)
                     guard let terminal = try store.ingest(receipt) else {

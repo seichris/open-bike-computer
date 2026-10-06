@@ -4212,6 +4212,10 @@ final class OfflineMapManager: ObservableObject {
                 try await manager.resumeDurableMapControl(bleManager: bleManager)
             }
         }
+        // The foreground recovery owns polling while it runs. A new query
+        // clears the fresh BLE receipt before its scheduled task can verify
+        // precommit recovery, and would also overwrite its connection status.
+        guard !isDeviceTransferBusy else { return true }
         _ = bleManager.requestMapOperationStatus(operationID: record.wireOperationID)
         statusMessage = currentDeviceMapOperation?.lastReceipt?.phase == "accepted"
             ? "Device accepted this map. Waiting for installation to finish."

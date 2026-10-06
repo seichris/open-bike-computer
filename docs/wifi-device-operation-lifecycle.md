@@ -50,6 +50,11 @@ queries the exact operation and retains its cancellation/commit intent until a
 matching device receipt settles admission. Legacy history and another device's
 or app's journal cannot acquire this recovery path.
 
+When a fresh exact-operation reply starts foreground query/control recovery,
+the background reconciliation poll yields until that recovery finishes. It must
+not issue another query that clears the reply before precommit recovery verifies
+it or replace the foreground network-connection status.
+
 An operation ID is a random 32-character lowercase hexadecimal UUID representation.
 It is separate from the existing signed content session ID. A client persists
 intent before entry and sends these additional signed-stream request headers:
