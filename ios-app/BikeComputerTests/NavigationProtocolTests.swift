@@ -69,10 +69,13 @@ final class ReentrantUploadDefaults: UserDefaults, @unchecked Sendable {
 
 func assertUploadStateObserverCanRead(_ defaults: UserDefaults) {
     let readFinished = DispatchSemaphore(value: 0)
-    DispatchQueue.global().async {
+    // Delegate-like writers can occupy the cooperative/GCD pools while they
+    // wait for main. Give this simulated graph reader its own OS thread so a
+    // pool-starvation timeout cannot masquerade as the original lock inversion.
+    Thread {
         _ = BackgroundMapUploadStateStore.records(defaults: defaults)
         readFinished.signal()
-    }
+    }.start()
     assert(readFinished.wait(timeout: .now() + 1) == .success,
            "upload persistence and notifications must not lock out an independent UI reader")
     assert(Thread.isMainThread,
