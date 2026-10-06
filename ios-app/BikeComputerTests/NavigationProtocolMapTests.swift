@@ -407,8 +407,18 @@ extension NavigationProtocolTests {
     static func testProvisionalActiveMapVisibility() {
         let boot = String(repeating: "a", count: 32)
         let operation = String(repeating: "b", count: 32)
+        // Firmware reports installer roots without /sdcard (safeActiveRoot).
+        let currentRoot = "/VECTMAP/.maps/current-session"
+        for root in [currentRoot, "/VECTMAP", "/VECTMAP/.maps/map-prod_1.2"] {
+            assert(MapSelectionHealth.isInstallerRoot(root), "firmware installer root \(root) is accepted")
+        }
+        for root in ["/maps/current", "/sdcard/VECTMAP/.maps/current-session", "/VECTMAP/.maps/",
+                     "/VECTMAP/.maps/a/b", "/VECTMAP/.maps/.hidden", "/VECTMAP/.maps/a..b",
+                     "/VECTMAP/.maps/" + String(repeating: "a", count: 81), "VECTMAP"] {
+            assert(!MapSelectionHealth.isInstallerRoot(root), "non-installer root \(root) is rejected")
+        }
         func health(_ state: String, _ revision: UInt64, bootID: String? = nil,
-                    root: String = "/maps/current", mapID: String = "candidate",
+                    root: String = "/VECTMAP/.maps/current-session", mapID: String = "candidate",
                     sessionID: String = "current-session") -> MapSelectionHealth {
             MapSelectionHealth(schemaVersion: 1, bootID: bootID ?? boot, revision: revision,
                 state: state, root: root, operationID: operation, mapID: mapID,
@@ -416,7 +426,7 @@ extension NavigationProtocolTests {
         }
         var projection = MapSelectionHealthProjection()
         func apply(_ value: MapSelectionHealth?, present: Bool = true) -> Bool {
-            projection.apply(value, fieldPresent: present, activeRoot: "/maps/current",
+            projection.apply(value, fieldPresent: present, activeRoot: currentRoot,
                 mapID: "candidate", sessionID: "current-session")
         }
         assert(apply(nil, present: false), "old firmware preserves legacy visibility policy")
@@ -426,12 +436,12 @@ extension NavigationProtocolTests {
         assert(projection.health?.state == "degraded", "current health records degradation independently")
         assert(!apply(health("ready", 1)), "stale ready cannot erase degradation")
         assert(!apply(health("ready", 2)), "conflicting same revision is rejected")
-        assert(!apply(health("ready", 3, root: "/maps/wrong")), "wrong root is rejected")
+        assert(!apply(health("ready", 3, root: "/VECTMAP/.maps/wrong-session")), "wrong root is rejected")
         assert(!apply(health("ready", 3, mapID: "other")), "wrong map is rejected")
         assert(!apply(health("ready", 3, sessionID: "old")), "wrong session is rejected")
         assert(!apply(health("ready", 3, bootID: String(repeating: "c", count: 32))), "wrong boot is rejected")
         let wrongOperation = MapSelectionHealth(schemaVersion: 1, bootID: boot, revision: 3,
-            state: "ready", root: "/maps/current", operationID: String(repeating: "d", count: 32),
+            state: "ready", root: currentRoot, operationID: String(repeating: "d", count: 32),
             mapID: "candidate", sessionID: "current-session", affectedOperationID: "")
         assert(!apply(wrongOperation), "same root and content cannot silently change operation identity")
         assert(projection.health?.revision == 2, "rejected observations never replace saved health")
@@ -446,11 +456,11 @@ extension NavigationProtocolTests {
         assert(!malformed.apply(nil, fieldPresent: false, activeRoot: nil, mapID: nil, sessionID: nil),
                "malformed capability remains conservative in this connection")
         let legacyHealth = MapSelectionHealth(schemaVersion: 1, bootID: boot, revision: 1,
-            state: "ready", root: "/maps/legacy", operationID: "", mapID: "legacy",
+            state: "ready", root: "/VECTMAP", operationID: "", mapID: "legacy",
             sessionID: "", affectedOperationID: "")
         var legacyProjection = MapSelectionHealthProjection()
         assert(legacyProjection.apply(legacyHealth, fieldPresent: true,
-            activeRoot: "/maps/legacy", mapID: "legacy", sessionID: ""),
+            activeRoot: "/VECTMAP", mapID: "legacy", sessionID: ""),
             "legacy selections are grounded by exact root and map without a session")
 
         let ble = BLEManager()
@@ -460,9 +470,9 @@ extension NavigationProtocolTests {
         let context = ble.captureMapTransferHTTPStatusContext()!
         func statusData(_ state: String, _ revision: UInt64) -> Data {
             Data("""
-            {"activeRoot":"/maps/current","activeMapId":"candidate","activeSessionId":"current-session",
+            {"activeRoot":"\(currentRoot)","activeMapId":"candidate","activeSessionId":"current-session",
              "selectionHealth":{"schemaVersion":1,"bootID":"\(boot)","revision":\(revision),
-             "state":"\(state)","root":"/maps/current","operationID":"\(operation)",
+             "state":"\(state)","root":"\(currentRoot)","operationID":"\(operation)",
              "mapID":"candidate","sessionID":"current-session","affectedOperationID":""}}
             """.utf8)
         }
@@ -3992,11 +4002,76 @@ extension NavigationProtocolTests {
             )
         )
         manager.reconcileLastTransfer(bleManager: bleManager)
+        assertEqual(manager.lastTransferOutcome, "unknown",
+                    "an idle rebooted device does not claim activation is still running")
         assertEqual(
             manager.statusMessage,
-            "Activation paused. Tap Upload to resume.",
-            "an idle rebooted device does not claim activation is still running"
+            "The device result for this map was not observed. Send it again to verify the installation.",
+            "an unobservable result asks for a verifying re-send instead of polling forever"
         )
+        assert(!manager.hasPendingDeviceActivation, "an unknown result stops activation polling")
+    }
+
+    @MainActor
+    static func testOfflineMapManagerResendsUnobservedLegacyResult() {
+        let suite = "offline-map-unobserved-result-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            assert(false, "test defaults should create")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("map-1", forKey: "offlineMap.lastTransfer.mapId")
+        defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+        defaults.set("map-1-manifest", forKey: "offlineMap.lastTransfer.sessionId")
+        defaults.set(4, forKey: "offlineMap.lastTransfer.previousSequence")
+        // The device rebooted after selecting this session: the pointer remains,
+        // but no activation for it survives and no terminal result will arrive.
+        let bleManager = BLEManager()
+        bleManager.applyAuthenticatedMapTransferStatus(
+            try! JSONDecoder().decode(MapTransferDeviceStatus.self, from: Data("""
+            {"activeMapId":"map-1","activeSessionId":"map-1-manifest"}
+            """.utf8)))
+
+        let observing = OfflineMapManager(defaults: defaults)
+        observing.recordTransferObservationForTesting(connectionEpoch: bleManager.transferConnectionEpoch)
+        observing.reconcileLastTransfer(bleManager: bleManager)
+        assertEqual(observing.lastTransferOutcome, "unconfirmed",
+                    "the observing connection keeps waiting for its own terminal activation")
+
+        let unbound = OfflineMapManager(defaults: defaults)
+        unbound.recordTransferObservationForTesting(connectionEpoch: bleManager.transferConnectionEpoch &+ 1)
+        unbound.reconcileLastTransfer(bleManager: bleManager)
+        assertEqual(unbound.lastTransferOutcome, "unknown",
+                    "an exact pointer after a reconnect or reboot is not installation evidence")
+        assert(!unbound.hasPendingDeviceActivation && unbound.activationProgress == nil,
+               "an unknown result stops polling and clears stale progress")
+
+        for state in ["installed", "failed"] {
+            bleManager.applyAuthenticatedMapTransferStatus(
+                try! JSONDecoder().decode(MapTransferDeviceStatus.self, from: Data("""
+                {"activeMapId":"map-1","activeSessionId":"map-1-manifest","activation":{"status":"\(state)","sequence":5,"sessionId":"map-1-manifest","mapId":"map-1"}}
+                """.utf8)))
+            for reconnected in [false, true] {
+                defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+                let restored = OfflineMapManager(defaults: defaults)
+                if reconnected {
+                    restored.recordTransferObservationForTesting(
+                        connectionEpoch: bleManager.transferConnectionEpoch &+ 1)
+                }
+                restored.reconcileLastTransfer(bleManager: bleManager)
+                assertEqual(restored.lastTransferOutcome, "unknown",
+                            "a terminal \(state) cannot bind after relaunch or reconnect")
+                assert(!restored.hasPendingDeviceActivation && restored.activationProgress == nil &&
+                       restored.errorMessage == nil,
+                       "an unbound terminal result leaves the verifying re-send available")
+            }
+            defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+            let current = OfflineMapManager(defaults: defaults)
+            current.recordTransferObservationForTesting(connectionEpoch: bleManager.transferConnectionEpoch)
+            current.reconcileLastTransfer(bleManager: bleManager)
+            assertEqual(current.lastTransferOutcome, state,
+                        "the original observing connection still accepts matching terminal status")
+        }
     }
 
     @MainActor
@@ -4032,9 +4107,9 @@ extension NavigationProtocolTests {
         bleManager.applyAuthenticatedMapTransferStatus(terminal)
         manager.reconcileLastTransfer(bleManager: bleManager)
 
-        assertEqual(manager.lastTransferOutcome, "installed", "fresh matching terminal status reconciles after app restart")
+        assertEqual(manager.lastTransferOutcome, "unknown", "a terminal legacy result cannot bind after app restart")
         assert(!manager.hasPendingDeviceActivation,
-               "installed reconciliation clears pending activation status")
+               "an unbound terminal result clears pending activation status for a verifying re-send")
         assertEqual(
             manager.activationProgress,
             nil,
@@ -4058,6 +4133,7 @@ extension NavigationProtocolTests {
 
         let manager = OfflineMapManager(defaults: defaults)
         let bleManager = BLEManager()
+        manager.recordTransferObservationForTesting(connectionEpoch: bleManager.transferConnectionEpoch)
         let terminal = try! JSONDecoder().decode(MapTransferDeviceStatus.self, from: Data("""
         {"activeMapId":"map-1","activeSessionId":"map-1-manifest","activation":{"status":"installed","sequence":9,"sessionId":"map-1-manifest","mapId":"map-1"}}
         """.utf8))
@@ -4065,7 +4141,7 @@ extension NavigationProtocolTests {
         manager.reconcileLastTransfer(bleManager: bleManager)
 
         assertEqual(manager.lastTransferOutcome, "installed",
-                    "persisted activation acknowledgement reconciles after app restart")
+                    "the original observing connection reconciles its activation acknowledgement")
     }
 
     static func testOfflineMapPolygonClosesRing() {
@@ -4837,7 +4913,7 @@ extension NavigationProtocolTests {
     }
 
     static func testCachedPackRecoveryDecision() {
-        for state in ["activating", "ready", "finalizing", "idle"] {
+        for state in ["activating", "ready", "finalizing"] {
             assertEqual(CachedPackRecoveryDecision.evaluate(
                 expectedSessionId: "session-new", activeSessionId: "session-new",
                 activationStatus: state, activationSessionId: "session-new"
@@ -4849,18 +4925,38 @@ extension NavigationProtocolTests {
         }
         assertEqual(CachedPackRecoveryDecision.evaluate(
             expectedSessionId: "session-new", activeSessionId: "session-new",
-            activationStatus: "installed", activationSessionId: "session-new"
+            activationStatus: "installed", activationSessionId: "session-new",
+            bindsOriginalObservation: true
         ), .installed, "matching terminal state confirms cached recovery")
-        assertEqual(
-            CachedPackRecoveryDecision.evaluate(
-                expectedSessionId: "session-new",
-                activeSessionId: "session-new",
-                activationStatus: "idle",
-                activationSessionId: ""
-            ),
-            .pending,
-            "exact active pointer alone cannot complete recovered installation"
-        )
+        assertEqual(CachedPackRecoveryDecision.evaluate(
+            expectedSessionId: "session-new", activeSessionId: "session-new",
+            activationStatus: "installed", activationSessionId: "session-new"
+        ), .absent, "an unbound terminal result requires a verifying re-send")
+        assertEqual(ExistingMapStreamAttemptDisposition.evaluate(
+            expectedSessionID: "session-new", activeSessionID: "session-new",
+            activationStatus: "installed", activationSessionID: "session-new"
+        ), .upload, "a verifying re-send cannot be skipped by an old terminal status")
+        assertEqual(ExistingMapStreamAttemptDisposition.evaluate(
+            expectedSessionID: "session-new", activeSessionID: "session-new",
+            activationStatus: "installed", activationSessionID: "session-new",
+            bindsOriginalObservation: true
+        ), .installed, "the original observing connection may retain its installed result")
+        for activationSessionId in ["session-new", ""] {
+            assertEqual(
+                CachedPackRecoveryDecision.evaluate(
+                    expectedSessionId: "session-new",
+                    activeSessionId: "session-new",
+                    activationStatus: "idle",
+                    activationSessionId: activationSessionId
+                ),
+                .absent,
+                "an exact pointer without a live activation is re-sent for a fresh result"
+            )
+            assertEqual(ExistingMapStreamAttemptDisposition.evaluate(
+                expectedSessionID: "session-new", activeSessionID: "session-new",
+                activationStatus: "idle", activationSessionID: activationSessionId
+            ), .upload, "an exact pointer never completes installation or blocks a verifying re-send")
+        }
         assertEqual(
             CachedPackRecoveryDecision.evaluate(
                 expectedSessionId: "session-new",

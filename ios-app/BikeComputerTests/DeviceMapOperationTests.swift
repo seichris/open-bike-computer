@@ -127,11 +127,24 @@ struct DeviceMapOperationTests {
         let snapshotProcess = DeviceMapOperationStore.observationProcessID
         let priorSelection = DeviceMapConfirmedSelectionSnapshot(deviceID: deviceID,
             mapID: "previous-map", sessionID: "previous-content-session",
-            manifestReceipt: String(repeating: "e", count: 64), root: "/maps/previous",
+            manifestReceipt: String(repeating: "e", count: 64), root: "/VECTMAP/.maps/previous-content-session",
             operationID: String(repeating: "f", count: 32),
             healthBootID: String(repeating: "a", count: 32), healthRevision: 8,
             connectionEpoch: 7, observationProcessID: snapshotProcess,
             observedAt: Date(timeIntervalSince1970: 0))
+        func selection(root: String) -> DeviceMapConfirmedSelectionSnapshot {
+            DeviceMapConfirmedSelectionSnapshot(deviceID: deviceID, mapID: "previous-map",
+                sessionID: priorSelection.sessionID, manifestReceipt: priorSelection.manifestReceipt,
+                root: root, operationID: priorSelection.operationID, healthBootID: priorSelection.healthBootID,
+                healthRevision: priorSelection.healthRevision, connectionEpoch: 7,
+                observationProcessID: snapshotProcess, observedAt: priorSelection.observedAt)
+        }
+        try check(priorSelection.isValid && selection(root: "/VECTMAP").isValid,
+                  "firmware installer roots (without /sdcard) are valid health context")
+        try check(!selection(root: "/maps/previous").isValid &&
+                  !selection(root: "/sdcard/VECTMAP/.maps/previous-content-session").isValid &&
+                  !selection(root: "/VECTMAP/.maps/../VECTMAP").isValid,
+                  "roots outside the firmware installer contract are rejected")
         func capturePrevious(device: String? = nil, epoch: UInt64 = 7,
                              process: UUID? = nil, fresh: Bool = true,
                              confirmed: Bool = true, unconfirmed: Bool = false) -> DeviceMapConfirmedSelectionSnapshot? {
@@ -365,6 +378,18 @@ struct DeviceMapOperationTests {
         try check(!mismatchedLegacy.confirmLegacyTerminal(outcome: "installed_confirmed",
             deviceID: deviceID, connectionEpoch: 7, processID: UUID()), "legacy proof cannot survive unconfirmed relaunch")
         try check(mismatchedLegacy.legacyTerminalConfirmedAt == nil && !mismatchedLegacy.isTerminal)
+        try check(mismatchedLegacy.blocksNewTransfer(connectionEpoch: 7, processID: legacyProcess),
+                  "a legacy transfer still confirmable in its connection and process owns admission")
+        try check(!mismatchedLegacy.blocksNewTransfer(connectionEpoch: 8, processID: legacyProcess) &&
+                  !mismatchedLegacy.blocksNewTransfer(connectionEpoch: 7, processID: UUID()),
+                  "after a reconnect or relaunch unresolved legacy history no longer blocks other maps")
+        try check(makeRecord().blocksNewTransfer(connectionEpoch: 8, processID: UUID()),
+                  "a durable operation owns admission until its device receipt is terminal")
+        var confirmedLegacy = legacyRecord()
+        try check(confirmedLegacy.confirmLegacyTerminal(outcome: "installed_confirmed", deviceID: deviceID,
+            connectionEpoch: 7, processID: legacyProcess) &&
+            !confirmedLegacy.blocksNewTransfer(connectionEpoch: 7, processID: legacyProcess),
+                  "terminal legacy evidence never blocks a new transfer")
         for index in 0..<150 {
             var completed = legacyRecord()
             try legacyHistory.save(completed)

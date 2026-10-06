@@ -23,6 +23,18 @@ The iOS reconciler requires fresh matching terminal activation. A pointer,
 changed map ID, HTTP 200, completed upload or `activating` status is insufficient.
 Provisional selection cannot produce a Saved Maps installed check mark.
 
+Legacy transfer records bind only in the BLE connection and app process that
+observed the transfer; a device reboot always replaces the connection. After a
+reconnect or relaunch, a matching session pointer is not pending: the app polls
+only while status reports a live activation of that session, then marks the
+result unknown, stops polling and re-enables the Saved Maps transfer button, so
+re-sending the same signed stream produces a fresh terminal result. An
+unresolved legacy record from an earlier connection or process never blocks
+another map.
+Even a matching terminal `installed` or `failed` status after that boundary
+cannot bind the old record or skip the verifying re-send. A terminal result
+remains confirmable in the original observing connection and app process.
+
 ### Versioned map operations (qualification-gated)
 
 `MAP_OPERATIONS_V1_ENABLED` defaults to **0**. Do not enable it in production

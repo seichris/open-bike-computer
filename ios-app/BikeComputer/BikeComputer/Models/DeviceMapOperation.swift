@@ -91,11 +91,24 @@ nonisolated struct DeviceMapConfirmedSelectionSnapshot: Codable, Equatable, Send
            !DeviceMapOperationReceipt.isLowerHex(manifestReceipt, count: 64) { return false }
         if let healthBootID {
             guard DeviceMapOperationReceipt.isLowerHex(healthBootID, count: 32),
-                  (healthRevision ?? 0) > 0, let root, root.hasPrefix("/maps/"),
-                  !root.split(separator: "/").contains("..") else { return false }
+                  (healthRevision ?? 0) > 0, let root, Self.isInstallerRoot(root) else { return false }
         } else if healthRevision != nil || root != nil || operationID != nil { return false }
         if let operationID, !DeviceMapOperationReceipt.isLowerHex(operationID, count: 32) { return false }
         return true
+    }
+
+    // Same firmware installer-root contract as MapSelectionHealth, which this
+    // standalone model cannot import: /VECTMAP or /VECTMAP/.maps/<safe ID>.
+    static func isInstallerRoot(_ root: String) -> Bool {
+        if root == "/VECTMAP" { return true }
+        let prefix = "/VECTMAP/.maps/"
+        guard root.hasPrefix(prefix) else { return false }
+        let id = root.dropFirst(prefix.count)
+        return !id.isEmpty && id.utf8.count <= 80 && !id.hasPrefix(".") && !id.contains("..") &&
+            id.utf8.allSatisfy {
+                (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) ||
+                    $0 == 45 || $0 == 46 || $0 == 95
+            }
     }
 
     static func capture(_ observation: Self, currentDeviceID: String?, currentEpoch: UInt64,
@@ -161,6 +174,17 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
         return legacyTerminalConfirmedAt != nil && observationProcessID != nil &&
             lastReceipt == nil && acknowledgedAt == nil &&
             ["installed_confirmed", "failed_or_rolled_back"].contains(observation)
+    }
+
+    // A durable operation owns device admission until its receipt is terminal.
+    // A legacy observation can only become terminal in the BLE connection and
+    // app process that created it (confirmLegacyTerminal). After either changes
+    // it stays unresolved history, but must not block another transfer forever;
+    // active OS uploads and the firmware commit grant are fenced separately.
+    func blocksNewTransfer(connectionEpoch: UInt64, processID: UUID) -> Bool {
+        guard !isTerminal else { return false }
+        return usesDurableProtocol ||
+            (self.connectionEpoch == connectionEpoch && observationProcessID == processID)
     }
 
 

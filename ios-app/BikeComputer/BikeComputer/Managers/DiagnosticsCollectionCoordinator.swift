@@ -128,41 +128,36 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
             await preceding?.value
             guard let self else { return }
             defer { if rideJournalGeneration == generation { rideJournalTask = nil } }
-            var savedRequestID: UUID?
+            var appEvidence: ((UUID) async throws -> [String: Data])?
+            if let recorder {
+                appEvidence = { try await recorder.appEvidenceSnapshot(captureID: $0) }
+            }
+            let journaled: (queued: Int, failures: [DiagnosticsPostRideJournal.Failure])
             do {
-                for context in contexts {
-                    savedRequestID = nil
-                    _ = try await store.create(deviceDigest: context.deviceDigest,
-                        captureID: context.captureID, id: context.requestID, origin: .postRide)
-                    savedRequestID = context.requestID
-                    if let recorder {
-                        let chunks = try await recorder.appEvidenceSnapshot(captureID: context.captureID)
-                        try await store.retainAppEvidence(context.requestID, chunks: chunks)
-                    }
-                }
-                if !isRunning {
-                    status = "Post-ride collection queued durably; waiting for the original device and a non-riding foreground session."
-                }
-                // Enqueuing new work is deliberate; failed attempts otherwise
-                // remain stopped until a manual retry, not a Wi-Fi retry loop.
+                journaled = try await DiagnosticsPostRideJournal.enqueue(contexts.map {
+                    DiagnosticsPostRideJournal.Request(id: $0.requestID, captureID: $0.captureID,
+                                                       deviceDigest: $0.deviceDigest)
+                }, store: store, appEvidence: appEvidence)
+            } catch {
+                status = "Collection journal write failed; completeness is unknown."
+                automaticRetryAllowed = false
+                return
+            }
+            for failure in journaled.failures {
+                recorder?.record(level: .warning, category: .transfer, event: "diagnostics_download_failed",
+                    fields: DiagnosticsAcquisitionFailureReporting.fields(for: failure.error,
+                        acquisitionID: failure.requestID, phase: failure.requestID == nil ? "request" : "app_evidence"))
+            }
+            if let failure = journaled.failures.last {
+                status = DiagnosticsAcquisitionFailureReporting.status(for: failure.error)
+            } else if !isRunning {
+                status = "Post-ride collection queued durably; waiting for the original device and a non-riding foreground session."
+            }
+            // Enqueuing new work is deliberate; failed attempts otherwise
+            // remain stopped until a manual retry, not a Wi-Fi retry loop.
+            if journaled.queued > 0 {
                 automaticRetryAllowed = true
                 if automaticPostRideCollection { resumeIfPossible() }
-            } catch {
-                let failure = error
-                if let savedRequestID {
-                    do {
-                        try await store.interrupt(savedRequestID,
-                            code: DiagnosticsAcquisitionFailureReporting.code(for: failure))
-                    } catch {
-                        status = "Collection journal write failed; completeness is unknown."
-                        automaticRetryAllowed = false
-                        return
-                    }
-                }
-                recorder?.record(level: .warning, category: .transfer, event: "diagnostics_download_failed",
-                    fields: DiagnosticsAcquisitionFailureReporting.fields(for: failure,
-                        acquisitionID: savedRequestID, phase: savedRequestID == nil ? "request" : "app_evidence"))
-                status = DiagnosticsAcquisitionFailureReporting.status(for: failure)
             }
         }
     }

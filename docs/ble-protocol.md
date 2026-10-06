@@ -1737,6 +1737,9 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DTRN` | iOS -> ESP32 | `enter\|diagnostics\|h1\|e` | Re-enter diagnostics on the protected hotspot after the iPhone confirms that the advertised LAN endpoint is unreachable. |
 | `DTRN` | iOS -> ESP32 | `capture\|1\|<standard-or-detailed>\|<uuid>` | Bind the current random iPhone capture UUID and capture level; idempotent on reconnect. Detailed mode is sent only with CAP2 bit `21` and is rejected by firmware without the read-only ride-automation shadow producer. |
 | `DTRN` | iOS -> ESP32 | `mark\|1\|<sequence>\|<code>` | Persist one predefined issue marker. Sequence is positive and strictly increasing for the bound capture; replayed or out-of-order markers are rejected. |
+| `DTRN` | iOS -> ESP32 | `mark\|2\|<sequence>\|<code>\|<incident-uuid>` | Registry-v2 marker carrying the phone's shared lowercase incident UUID. `mark\|1` sequence rules apply; the command is at most 100 bytes. iOS sends it only when `DSTS.diagnosticsPolicy.schemaDigest` matches its registry, otherwise `mark\|1`. |
+| `DTRN` | iOS -> ESP32 | `policy\|2\|<capture-uuid>\|<generation>\|<mask>\|<minimumLevel>\|<durationSeconds>\|<budgetBytes>\|<registrySha256>` | Install a bounded debug/trace lease for the bound capture. Sent after `capture\|1` and only when the registry digest matches. The lowercase UUID must equal the bound capture; generation is positive; mask is nonzero and within `supportedMask`; level is `0`-`5` (trace-fatal); duration is `1`-`14400` seconds; budget is `1024` bytes to 32 MiB; the command is at most 240 bytes. A same-generation retry must be identical and never renews the lease or budget; a lower generation is rejected. Failure records `diagnostics_policy_rejected`. |
+| `DTRN` | iOS -> ESP32 | `live\|2\|<boot>\|<after>` | Request one live-tail page in the next `DSTS` as `diagnosticsLive`. Cursor fields are unsigned 32-bit decimals; boot `0` returns the newest events. Malformed requests, and more than one request per second, are ignored. |
 | `DTRN` | iOS -> ESP32 | `capture_end` | End the active detailed capture binding. |
 | `DTRN` | iOS -> ESP32 | `tls\|prepare` | Generate and durably stage the next device-local TLS identity while no transfer is active. |
 | `DTRN` | iOS -> ESP32 | `tls\|commit\|<sha256>` | Atomically select the staged identity only when the exact lowercase leaf-certificate SHA-256 matches. |
@@ -1745,6 +1748,17 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `DSTS` | iOS -> ESP32 | empty | Request generic device-transfer status and the current HTTPS credential/pin. |
 | `DSTS` | ESP32 -> iOS | UTF-8 JSON | Complete generic device-transfer status when it fits one authenticated notification. |
 | `DSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Chunked generic device-transfer status. |
+
+With persistent ride diagnostics, `DSTS` includes `diagnosticsPolicy`, the
+device's observed effective policy, not an acknowledgement of a queued write:
+`schema` `2`, `schemaDigest`, `supportedMask`, `generation`, `mask`,
+`minimumLevel`, `active`, `captureId`, `remainingBytes`, `filteredCount`,
+`deadlineUptimeMs`, `baselineMinimumLevel` `2` and `rawPayloads` `false`. After
+an accepted `live|2` request, the next status may include `diagnosticsLive`:
+`schema` `2`, `available`, `bootSequence`, `firstSequence`, `lastSequence`,
+`nextSequence`, `gap`, `more`, `durability` `enqueued_not_durable` and at most
+two `events` from a 16-entry RAM ring. It is omitted while the recorder is busy
+and never proves durable storage.
 
 The device preserves a detailed binding through short BLE gaps. If the last
 confirmed workout lifecycle was active and workout telemetry remains stale for

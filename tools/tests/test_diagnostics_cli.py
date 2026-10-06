@@ -19,7 +19,9 @@ from diagnostics_test_support import v1_fixture,v2_fixture,write_zip
 class DiagnosticsCLITests(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory()
-        self.root=Path(self.temporary.name)
+        # macOS temp paths live under the /var -> /private/var symlink, which
+        # output and broker paths deliberately refuse as an ancestor.
+        self.root=Path(self.temporary.name).resolve()
         self.inner=self.root/'inner.zip'
         self.chunk=v1_fixture(self.inner)
         self.bundle=self.root/'bundle.zip'

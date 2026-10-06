@@ -1004,6 +1004,7 @@ struct NavigationProtocolTests {
         testSavedRouteNamingAndViewWiring()
         testTopographicMapChoicesAreIndependent()
         testOfflineMapManagerRestoresLastTransferIdentity()
+        testOfflineMapManagerResendsUnobservedLegacyResult()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
         testOfflineMapPolygonClosesRing()
@@ -2290,8 +2291,8 @@ struct NavigationProtocolTests {
                 activationStatus: "idle",
                 activationSessionID: nil
             ),
-            .awaitDevice,
-            "an exact pointer without a terminal result waits without retransmitting"
+            .upload,
+            "an exact pointer without a live activation is re-sent to obtain a fresh terminal result"
         )
     }
 

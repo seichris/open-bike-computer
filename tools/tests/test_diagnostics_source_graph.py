@@ -79,7 +79,10 @@ class DiagnosticsSourceGraphTests(unittest.TestCase):
         self.assertIn("generation == operationGeneration", coordinator)
         self.assertIn("cancelled: Task.isCancelled && userCancelled", coordinator)
         self.assertIn('"ride_started"', coordinator)
-        self.assertIn("context.captureID, id: context.requestID", coordinator)
+        self.assertIn("DiagnosticsPostRideJournal.enqueue", coordinator)
+        self.assertRegex(coordinator,
+                         r"DiagnosticsPostRideJournal\.Request\(id:\s*\$0\.requestID,\s*"
+                         r"captureID:\s*\$0\.captureID,\s*deviceDigest:\s*\$0\.deviceDigest\)")
         self.assertLess(app.index("observeRide(active: state.current)"), app.index("rideDiagnosticsRecorder?.endRideCapture()"))
         self.assertIn("$0.canResumeAutomatically(postRideEnabled: automaticPostRideCollection) && $0.deviceDigest == digest", coordinator)
 

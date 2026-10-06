@@ -992,14 +992,15 @@ nonisolated enum CachedPackRecoveryDecision: Equatable {
         expectedSessionId: String,
         activeSessionId: String,
         activationStatus: String,
-        activationSessionId: String
+        activationSessionId: String,
+        bindsOriginalObservation: Bool = false
     ) -> CachedPackRecoveryDecision {
         if activationSessionId == expectedSessionId, activationStatus == "installed" {
-            return .installed
+            return bindsOriginalObservation ? .installed : .absent
         }
-        if activeSessionId == expectedSessionId, activationStatus != "failed" {
-            return .pending
-        }
+        // Only a live activation for this session waits. An exact active pointer
+        // alone (for example after a reboot lost the terminal result) is not
+        // evidence: re-send the same signed stream for a fresh terminal result.
         if activationSessionId == expectedSessionId,
            ["receiving", "paused", "finalizing", "ready", "activating", "installed"]
             .contains(activationStatus) {
@@ -1018,16 +1019,17 @@ nonisolated enum ExistingMapStreamAttemptDisposition: Equatable {
         expectedSessionID: String,
         activeSessionID: String?,
         activationStatus: String?,
-        activationSessionID: String?
+        activationSessionID: String?,
+        bindsOriginalObservation: Bool = false
     ) -> Self {
-        if activeSessionID == expectedSessionID,
-           activationSessionID != expectedSessionID || activationStatus == nil || activationStatus == "idle" {
-            return .awaitDevice
-        }
+        // activeSessionID is deliberately not evidence: the pointer precedes the
+        // renderer ACK and survives reboots that lose the terminal result. With
+        // no live activation for this session, re-send the identical signed
+        // stream; the device verifies its bytes and reports a fresh result.
         guard activationSessionID == expectedSessionID else { return .upload }
         switch activationStatus {
         case "installed":
-            return .installed
+            return bindsOriginalObservation ? .installed : .upload
         case "receiving", "finalizing", "ready", "activating":
             return .awaitDevice
         default:
@@ -2079,6 +2081,9 @@ final class OfflineMapManager: ObservableObject {
     @Published private(set) var lastTransferMapId: String
     @Published private(set) var lastTransferOutcome: String
     @Published private(set) var lastTransferObservedIdleOnAnotherMap = false
+    // In memory only: like a legacy record, a relaunched process has not
+    // observed the last transfer and cannot bind its result to this epoch.
+    private var lastTransferConnectionEpoch: UInt64?
     @Published private(set) var catalogMaps: [OfflineMapCatalogMap] = []
     @Published private(set) var catalogShares: [OfflineMapCatalogShare] = []
     @Published private(set) var libraryLinkCode: OfflineMapLibraryLinkCode?
@@ -4101,6 +4106,39 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
+    private func hasBoundLegacyTransferObservation(mapID: String, sessionID: String,
+                                                    bleManager: BLEManager) -> Bool {
+        lastTransferMapId == mapID &&
+            defaults.string(forKey: OfflineMapDefaults.lastTransferSessionIdKey) == sessionID &&
+            lastTransferConnectionEpoch == bleManager.transferConnectionEpoch
+    }
+
+    // A legacy result is only bound in the BLE connection and app process that
+    // observed its transfer; a device reboot always replaces the connection.
+    // Elsewhere, wait only for a live activation of this session. Otherwise
+    // nothing can still confirm it: stop polling and let a re-send of the same
+    // signed stream produce a fresh terminal result. Never infer from a pointer.
+    private func resolveUnboundLegacyResult(sessionID: String, bleManager: BLEManager) {
+        guard bleManager.hasFreshMapTransferStatus else {
+            statusMessage = "Waiting for device map status"
+            startActivationReconciliationMonitor(bleManager: bleManager)
+            return
+        }
+        if bleManager.mapTransferActivationSessionId == sessionID,
+           ["receiving", "paused", "finalizing", "ready", "activating"]
+            .contains(bleManager.mapTransferActivationStatus) {
+            statusMessage = bleManager.mapTransferActivationStatus == "paused"
+                ? "Map upload paused. Tap Upload to resume."
+                : "Activation continues on device"
+            errorMessage = nil
+            startActivationReconciliationMonitor(bleManager: bleManager)
+            return
+        }
+        updateLastTransferOutcome("unknown")
+        statusMessage = "The device result for this map was not observed. Send it again to verify the installation."
+        errorMessage = nil
+    }
+
     private func reconcileDurableMapOperation(bleManager: BLEManager) -> Bool {
         guard let record = currentDeviceMapOperation else {
             guard defaults.string(forKey: "offlineMap.deviceOperationID") != nil else { return false }
@@ -4117,7 +4155,7 @@ final class OfflineMapManager: ObservableObject {
             // exact-operation receipt. Do not bind old records to a new epoch.
             if record.connectionEpoch != bleManager.transferConnectionEpoch ||
                 record.observationProcessID != DeviceMapOperationStore.observationProcessID {
-                statusMessage = "Map result needs verification on the original device"
+                resolveUnboundLegacyResult(sessionID: record.sessionID, bleManager: bleManager)
                 return true
             }
             return false
@@ -4204,6 +4242,12 @@ final class OfflineMapManager: ObservableObject {
               ),
               !sessionId.isEmpty else {
             lastTransferObservedIdleOnAnotherMap = false
+            return
+        }
+
+        guard hasBoundLegacyTransferObservation(mapID: lastTransferMapId, sessionID: sessionId,
+                                               bleManager: bleManager) else {
+            resolveUnboundLegacyResult(sessionID: sessionId, bleManager: bleManager)
             return
         }
 
@@ -4803,6 +4847,10 @@ final class OfflineMapManager: ObservableObject {
 #if HOST_TESTING
     func syncCatalogLibraryForTesting() {
         syncCatalogLibraryIfNeeded()
+    }
+
+    func recordTransferObservationForTesting(connectionEpoch: UInt64) {
+        lastTransferConnectionEpoch = connectionEpoch
     }
 #endif
 
@@ -5583,10 +5631,8 @@ final class OfflineMapManager: ObservableObject {
                 startActivationReconciliationMonitor(bleManager: bleManager)
                 return .pending
             }
-            if operation.connectionEpoch != bleManager.transferConnectionEpoch ||
-                operation.observationProcessID != DeviceMapOperationStore.observationProcessID {
-                return .pending
-            }
+            // A legacy journal alone is not an observation in this process.
+            // Only the in-memory transfer binding may accept its terminal result.
         }
         guard bleManager.requestMapTransferStatus() else { return .absent }
         _ = await bleManager.waitForNavigationWritesToDrain(timeoutSeconds: 2)
@@ -5600,7 +5646,9 @@ final class OfflineMapManager: ObservableObject {
                 activeSessionId: bleManager.mapTransferActiveSessionId,
                 activationStatus: bleManager.mapTransferActivationStatus,
                 activationSessionId: bleManager.hasFreshMapTransferStatus
-                    ? bleManager.mapTransferActivationSessionId : ""
+                    ? bleManager.mapTransferActivationSessionId : "",
+                bindsOriginalObservation: hasBoundLegacyTransferObservation(
+                    mapID: identity.mapID, sessionID: expectedSessionId, bleManager: bleManager)
             )
             switch decision {
             case .installed:
@@ -5854,7 +5902,9 @@ final class OfflineMapManager: ObservableObject {
                     sessionID: sessionId,
                     defaults: defaults
                 )?.percentage,
-                bleManager: bleManager
+                bleManager: bleManager,
+                bindsOriginalObservation: hasBoundLegacyTransferObservation(
+                    mapID: expectedMapId, sessionID: sessionId, bleManager: bleManager)
             )
             return
         case .retireExisting:
@@ -5892,7 +5942,9 @@ final class OfflineMapManager: ObservableObject {
             expectedSessionID: sessionId,
             activeSessionID: bleManager.mapTransferActiveSessionId,
             activationStatus: bleManager.mapTransferActivationStatus,
-            activationSessionID: bleManager.mapTransferActivationSessionId
+            activationSessionID: bleManager.mapTransferActivationSessionId,
+            bindsOriginalObservation: hasBoundLegacyTransferObservation(
+                mapID: expectedMapId, sessionID: sessionId, bleManager: bleManager)
         )
         if disposition != .upload {
             retainExistingStreamAttempt(
@@ -5907,7 +5959,9 @@ final class OfflineMapManager: ObservableObject {
                 activationStep: bleManager.mapTransferActivationStep,
                 activationStepCount: bleManager.mapTransferActivationStepCount,
                 activationProgress: bleManager.mapTransferActivationProgress,
-                bleManager: bleManager
+                bleManager: bleManager,
+                bindsOriginalObservation: hasBoundLegacyTransferObservation(
+                    mapID: expectedMapId, sessionID: sessionId, bleManager: bleManager)
             )
             return
         }
@@ -5915,7 +5969,9 @@ final class OfflineMapManager: ObservableObject {
         var deviceOperation: DeviceMapOperationRecord?
         if let deviceID = bleManager.activeDeviceID, !deviceID.hasPrefix("legacy:") {
             let existing = try DeviceMapOperationStore.shared.records().first {
-                $0.deviceID == deviceID && !$0.isTerminal
+                $0.deviceID == deviceID && $0.blocksNewTransfer(
+                    connectionEpoch: bleManager.transferConnectionEpoch,
+                    processID: DeviceMapOperationStore.observationProcessID)
             }
             if let existing {
                 guard existing.mapID == expectedMapId && existing.sessionID == sessionId &&
@@ -5953,7 +6009,8 @@ final class OfflineMapManager: ObservableObject {
                                    previousMapId: bleManager.mapTransferActiveMapId,
                                    previousSessionId: bleManager.mapTransferActiveSessionId,
                                    previousSequence: bleManager.mapTransferActivationSequence,
-                                   outcome: "unconfirmed", protocolVersion: 2,
+                                   outcome: "unconfirmed",
+                                   connectionEpoch: bleManager.transferConnectionEpoch, protocolVersion: 2,
                                    streamFormatVersion: 1, artifactURL: packURL)
                 }
             }
@@ -6141,7 +6198,9 @@ final class OfflineMapManager: ObservableObject {
                     expectedSessionID: sessionId,
                     activeSessionID: initialDeviceStatus.activeSessionId,
                     activationStatus: initialDeviceStatus.activation?.status,
-                    activationSessionID: initialDeviceStatus.activation?.sessionId
+                    activationSessionID: initialDeviceStatus.activation?.sessionId,
+                    bindsOriginalObservation: hasBoundLegacyTransferObservation(
+                        mapID: expectedMapId, sessionID: sessionId, bleManager: bleManager)
                 )
                 if disposition != .upload {
                     retainExistingStreamAttempt(
@@ -6156,7 +6215,9 @@ final class OfflineMapManager: ObservableObject {
                         activationStep: initialDeviceStatus.activation?.step,
                         activationStepCount: initialDeviceStatus.activation?.steps,
                         activationProgress: initialDeviceStatus.activation?.progress,
-                        bleManager: bleManager
+                        bleManager: bleManager,
+                        bindsOriginalObservation: hasBoundLegacyTransferObservation(
+                            mapID: expectedMapId, sessionID: sessionId, bleManager: bleManager)
                     )
                     return
                 }
@@ -6172,6 +6233,7 @@ final class OfflineMapManager: ObservableObject {
                     previousSequence: initialDeviceStatus.activation?.sequence ??
                         bleManager.mapTransferActivationSequence,
                     outcome: "uploading",
+                    connectionEpoch: bleManager.transferConnectionEpoch,
                     protocolVersion: 2,
                     streamFormatVersion: 1,
                     artifactURL: packURL
@@ -6286,13 +6348,15 @@ final class OfflineMapManager: ObservableObject {
         activationStep: Int?,
         activationStepCount: Int?,
         activationProgress: Int?,
-        bleManager: BLEManager
+        bleManager: BLEManager,
+        bindsOriginalObservation: Bool = false
     ) {
         let disposition = ExistingMapStreamAttemptDisposition.evaluate(
             expectedSessionID: sessionID,
             activeSessionID: activeSessionID,
             activationStatus: activationStatus,
-            activationSessionID: activationSessionID
+            activationSessionID: activationSessionID,
+            bindsOriginalObservation: bindsOriginalObservation
         )
         recordTransfer(
             mapId: mapID,
@@ -6301,6 +6365,7 @@ final class OfflineMapManager: ObservableObject {
             previousSessionId: activeSessionID,
             previousSequence: activationSequence,
             outcome: disposition == .installed ? "installed" : "unconfirmed",
+            connectionEpoch: bindsOriginalObservation ? bleManager.transferConnectionEpoch : nil,
             protocolVersion: 2,
             streamFormatVersion: 1,
             artifactURL: artifactURL
@@ -6377,6 +6442,7 @@ final class OfflineMapManager: ObservableObject {
             previousSessionId: previousSessionID,
             previousSequence: previousSequence,
             outcome: "activating",
+            connectionEpoch: bleManager.transferConnectionEpoch,
             protocolVersion: 2,
             streamFormatVersion: 1,
             artifactURL: artifactURL
@@ -6826,10 +6892,12 @@ final class OfflineMapManager: ObservableObject {
                                 previousSessionId: String?,
                                 previousSequence: UInt32?,
                                 outcome: String,
+                                connectionEpoch: UInt64?,
                                 protocolVersion: Int = 1,
                                 streamFormatVersion: Int? = nil,
                                 artifactURL: URL? = nil) {
         lastTransferObservedIdleOnAnotherMap = false
+        lastTransferConnectionEpoch = connectionEpoch
         lastTransferMapId = mapId
         defaults.set(mapId, forKey: OfflineMapDefaults.lastTransferMapIdKey)
         defaults.set(sessionId, forKey: OfflineMapDefaults.lastTransferSessionIdKey)
@@ -6939,7 +7007,7 @@ final class OfflineMapManager: ObservableObject {
                 fields: ["mapId": lastTransferMapId, "outcome": outcome]
             )
         }
-        if outcome == "cancelled" || MapActivationProgressPresentation.shouldClear(
+        if outcome == "cancelled" || outcome == "unknown" || MapActivationProgressPresentation.shouldClear(
             forTransferOutcome: outcome
         ) {
             activationProgress = nil

@@ -42,7 +42,21 @@ nonisolated struct MapSelectionHealth: Codable, Equatable, Sendable {
         ["unknown", "ready", "degraded", "rolling_back", "rollback_failed"].contains(state) &&
         (operationID.isEmpty || MapOperationQueryPacket.make(operationID: operationID) != nil) &&
         (affectedOperationID.isEmpty || MapOperationQueryPacket.make(operationID: affectedOperationID) != nil) &&
-        (root.isEmpty || (root.hasPrefix("/maps/") && !root.split(separator: "/").contains("..")))
+        (root.isEmpty || Self.isInstallerRoot(root))
+    }
+
+    // Firmware reports installer roots without /sdcard, exactly as its
+    // safeActiveRoot() accepts them: /VECTMAP or /VECTMAP/.maps/<safe ID>.
+    static func isInstallerRoot(_ root: String) -> Bool {
+        if root == "/VECTMAP" { return true }
+        let prefix = "/VECTMAP/.maps/"
+        guard root.hasPrefix(prefix) else { return false }
+        let id = root.dropFirst(prefix.count)
+        return !id.isEmpty && id.utf8.count <= 80 && !id.hasPrefix(".") && !id.contains("..") &&
+            id.utf8.allSatisfy {
+                (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) ||
+                    $0 == 45 || $0 == 46 || $0 == 95
+            }
     }
 }
 

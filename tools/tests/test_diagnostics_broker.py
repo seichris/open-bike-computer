@@ -24,7 +24,9 @@ from diagnostics_test_support import v1_fixture,v2_fixture
 class DiagnosticsBrokerTests(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory()
-        self.parent=Path(self.temporary.name)
+        # macOS temp paths live under the /var -> /private/var symlink, which
+        # broker roots deliberately refuse as an ancestor.
+        self.parent=Path(self.temporary.name).resolve()
         self.root=self.parent/'broker'
         with socket.socket() as sock:
             sock.bind(('127.0.0.1',0)); self.port=sock.getsockname()[1]

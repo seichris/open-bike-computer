@@ -533,3 +533,49 @@ actor DiagnosticsAcquisitionStore {
         try save(value)
     }
 }
+
+/// A ride can span several authenticated capture/device contexts whose
+/// identities exist only in memory until journaled. Journal each one
+/// independently: a full cache or job journal for one context must not drop
+/// the others. A failed request keeps its failure code for manual retry.
+nonisolated enum DiagnosticsPostRideJournal {
+    struct Request: Equatable, Sendable {
+        let id: UUID
+        let captureID: UUID
+        let deviceDigest: String
+    }
+    struct Failure {
+        let requestID: UUID? // Nil when the request itself was not journaled.
+        let error: Error
+    }
+
+    /// Throws only when a failed request cannot be marked interrupted: the
+    /// journal is not writable, so completeness is unknown.
+    @MainActor
+    static func enqueue(_ requests: [Request], store: DiagnosticsAcquisitionStore,
+                        appEvidence: ((UUID) async throws -> [String: Data])?) async throws
+        -> (queued: Int, failures: [Failure]) {
+        var queued = 0
+        var failures: [Failure] = []
+        for request in requests {
+            var savedRequestID: UUID?
+            do {
+                _ = try await store.create(deviceDigest: request.deviceDigest,
+                    captureID: request.captureID, id: request.id, origin: .postRide)
+                savedRequestID = request.id
+                if let appEvidence {
+                    let chunks = try await appEvidence(request.captureID)
+                    try await store.retainAppEvidence(request.id, chunks: chunks)
+                }
+                queued += 1
+            } catch {
+                if let savedRequestID {
+                    try await store.interrupt(savedRequestID,
+                        code: DiagnosticsAcquisitionFailureReporting.code(for: error))
+                }
+                failures.append(Failure(requestID: savedRequestID, error: error))
+            }
+        }
+        return (queued, failures)
+    }
+}

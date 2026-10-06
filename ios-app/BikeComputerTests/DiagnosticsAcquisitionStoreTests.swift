@@ -244,7 +244,47 @@ import Foundation
         precondition(!FileManager.default.fileExists(atPath: files[0].path),
             "evicting the last reference must prune orphaned app evidence")
     }
+    @MainActor
+    static func postRideJournalTests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = DiagnosticsAcquisitionStore(root: root, maximumEvidenceBytes: 512)
+        let process = UUID().uuidString.lowercased()
+        func evidence(_ capture: UUID, chunk: Int, padding: Int = 0) -> [String: Data] {
+            let line = "{\"source\":\"ios\",\"processId\":\"\(process)\",\"captureId\":\"\(capture.uuidString.lowercased())\"," +
+                "\"padding\":\"\(String(repeating: "x", count: padding))\"}\n"
+            return ["\(process)/events-\(String(format: "%06d", chunk)).jsonl": Data(line.utf8)]
+        }
+        let unjournaled = DiagnosticsPostRideJournal.Request(id: UUID(), captureID: UUID(), deviceDigest: "invalid")
+        let full = DiagnosticsPostRideJournal.Request(id: UUID(), captureID: UUID(), deviceDigest: "0123456789abcdef")
+        let later = DiagnosticsPostRideJournal.Request(id: UUID(), captureID: UUID(), deviceDigest: "0123456789abcdef")
+        let noSource = DiagnosticsPostRideJournal.Request(id: UUID(), captureID: UUID(), deviceDigest: "fedcba9876543210")
+        let result = try await DiagnosticsPostRideJournal.enqueue([unjournaled, full, later, noSource], store: store) {
+            switch $0 {
+            case full.captureID: return evidence($0, chunk: 1, padding: 1024)
+            case later.captureID: return evidence($0, chunk: 2)
+            default: return [:]
+            }
+        }
+        precondition(result.queued == 2 && result.failures.map(\.requestID) == [nil, full.id],
+            "one failed context must not drop the remaining post-ride identities")
+        precondition((result.failures[1].error as? DiagnosticsAcquisitionStore.Failure) == .storageFull)
+        let fullReceipt = try await store.load(full.id)
+        precondition(fullReceipt.phase == .partial && fullReceipt.failureCode == "cache_full" &&
+            fullReceipt.origin == .postRide && !fullReceipt.canResumeAutomatically(postRideEnabled: true),
+            "a cache-full request is retained for explicit retry")
+        let laterReceipt = try await store.load(later.id)
+        precondition(laterReceipt.phase == .requested && laterReceipt.origin == .postRide &&
+            laterReceipt.appEvidence?.count == 1 && laterReceipt.canResumeAutomatically(postRideEnabled: true),
+            "a later context is journaled with its original evidence after an earlier failure")
+        let noSourceReceipt = try await store.load(noSource.id)
+        precondition(noSourceReceipt.appEvidence == [] && noSourceReceipt.deviceDigest == noSource.deviceDigest)
+        let journaled = try await store.manifests()
+        precondition(journaled.count == 3, "the unjournaled request leaves no receipt")
+    }
+
     static func main() async throws {
+        try await postRideJournalTests()
         try await bytePressureTests()
         try await appPressureAndOversizeTests()
         try await protectedPressureAndReportingTests()
