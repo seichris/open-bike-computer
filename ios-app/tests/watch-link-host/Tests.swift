@@ -257,7 +257,7 @@ enum Tests {
             await run("terminal workout and clear application ACK ordering \(appBeforeATT)") {
                 let f = Fixture(); defer { f.close() }
                 f.link.setWorkoutDemand(true)
-                f.link.endWorkoutDemandAfterClearing(.init(identity: .init(state: .ended)))
+                f.link.endWorkoutDemandAfterSending(.init(identity: .init(state: .ended)))
                 let group = f.link.testActiveGroup!
                 f.link.testATT(on: f.peer) // first member
                 if appBeforeATT { f.link.testAcknowledge(group, on: f.peer) }
@@ -278,6 +278,31 @@ enum Tests {
                 f.link.testAcknowledge(clear, on: f.peer)
                 expect(f.peer.writes.last?.data == Data("LEASE_RELEASE".utf8), "lease follows terminal and clear acceptance")
             }
+        }
+        await run("finished workout releases without summary dismissal") {
+            let f = Fixture(); defer { f.close() }
+            f.link.setDemand(navigation: false, workout: true)
+            f.link.endWorkoutDemandAfterSending(.init(identity: .init(state: .ended)))
+            guard let terminal = f.link.testActiveGroup else {
+                expect(false, "final workout state is submitted before handback")
+                return
+            }
+            f.link.testDrainATT(on: f.peer)
+            expect(f.link.testDemand.workoutReleasePending,
+                   "transport writes alone cannot discard final-state delivery")
+            expect(f.releases.isEmpty, "the phone reservation remains until the device accepts the terminal state")
+            f.link.testAcknowledge(terminal, on: f.peer)
+            expect(!f.link.testDemand.requiresConnection,
+                   "accepting the terminal state releases workout demand without Done")
+            expect(f.peer.writes.last?.data == Data("LEASE_RELEASE".utf8),
+                   "controller release follows terminal-state acceptance")
+            expect(f.releases.isEmpty, "device lease acknowledgement precedes phone handback")
+            f.link.testAuth("LEASE_RELEASED", on: f.peer)
+            expect(f.releases == [f.id], "the exact completed ride returns ownership to the phone")
+            f.link.testDrop(f.peer)
+            await settle()
+            expect(f.link.transportPhase == .idle && !f.link.testDemand.requiresConnection,
+                   "keeping the completed summary open cannot reconnect the Watch")
         }
         await run("workout independently retains demand after navigation clear") {
             let f = Fixture(); defer { f.close() }

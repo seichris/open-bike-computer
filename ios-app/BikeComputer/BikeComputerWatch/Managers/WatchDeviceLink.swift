@@ -560,7 +560,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         return true
     }
 
-    func endWorkoutDemandAfterClearing(_ frames: WorkoutDeviceFrames) {
+    func endWorkoutDemandAfterSending(_ frames: WorkoutDeviceFrames) {
         demand.beginWorkoutRelease()
         clearWorkout(frames)
         finishPendingReleasesIfPossible()
