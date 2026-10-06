@@ -980,6 +980,7 @@ nonisolated enum MapTransferOutcomePolicy {
 nonisolated enum MapActivationConfirmationResult: Equatable {
     case installed
     case cancelled
+    case retiredUnknown
     case continuesOnDevice(lastState: String)
 }
 
@@ -2163,6 +2164,9 @@ final class OfflineMapManager: ObservableObject {
     private(set) var clientInstallationToken: String?
     private let deviceTransferManager = DeviceTransferManager()
     private var deviceMapOperationStore = DeviceMapOperationStore.shared
+#if HOST_TESTING
+    private var fencedRetirementCleanupForTesting: ((BLEManager) async -> Bool)?
+#endif
     @Published private var packDisplayNames: [String: String]
     private var mapJobTask: Task<Void, Never>?
     private var mapJobTaskID: UUID?
@@ -3977,7 +3981,7 @@ final class OfflineMapManager: ObservableObject {
 
     var canCancelCurrentMapOperation: Bool {
         guard let record = currentDeviceMapOperation, record.usesDurableProtocol,
-              !record.isTerminal, record.lastReceipt?.phase != "accepted" else { return false }
+              !record.isTerminal, !record.isRetiredUnknown, record.lastReceipt?.phase != "accepted" else { return false }
         return record.cancellationRequestedAt == nil
     }
 
@@ -4161,6 +4165,12 @@ final class OfflineMapManager: ObservableObject {
             }
             return false
         }
+        if record.isRetiredUnknown {
+            updateLastTransferOutcome("unknown")
+            statusMessage = "The previous map result is unknown. Send the map again to verify installation."
+            errorMessage = nil
+            return true
+        }
         if record.observation == "installed_confirmed", record.lastReceipt?.phase == "installed" {
             updateLastTransferOutcome("installed")
             statusMessage = "map installed: \(displayName(forMapId: record.mapID))"
@@ -4225,7 +4235,7 @@ final class OfflineMapManager: ObservableObject {
 
     private func restorePendingDurableTransfer(bleManager: BLEManager) {
         guard let record = currentDeviceMapOperation,
-              record.usesDurableProtocol, !record.isTerminal,
+              record.usesDurableProtocol, !record.isTerminal, !record.isRetiredUnknown,
               record.deviceID == bleManager.activeDeviceID,
               record.appNamespace == BackgroundMapUploadSessionNamespace.identifier(
                 bundleIdentifier: Bundle.main.bundleIdentifier) else { return }
@@ -4884,6 +4894,10 @@ final class OfflineMapManager: ObservableObject {
 
     func useMapOperationStoreForTesting(_ store: DeviceMapOperationStore) {
         deviceMapOperationStore = store
+    }
+
+    func useFencedRetirementCleanupForTesting(_ cleanup: @escaping (BLEManager) async -> Bool) {
+        fencedRetirementCleanupForTesting = cleanup
     }
 #endif
 
@@ -5660,6 +5674,7 @@ final class OfflineMapManager: ObservableObject {
             if operation.usesDurableProtocol {
                 _ = reconcileDurableMapOperation(bleManager: bleManager)
                 if currentDeviceMapOperation?.observation == "installed_confirmed" { return .installed }
+                if currentDeviceMapOperation?.isRetiredUnknown == true { return .absent }
                 if currentDeviceMapOperation?.isTerminal == true { return .absent }
                 startActivationReconciliationMonitor(bleManager: bleManager)
                 return .pending
@@ -6344,7 +6359,8 @@ final class OfflineMapManager: ObservableObject {
             }
         } catch {
             let durablePending = currentDeviceMapOperation.map {
-                $0.mapID == expectedMapId && $0.sessionID == sessionId && $0.usesDurableProtocol && !$0.isTerminal
+                $0.mapID == expectedMapId && $0.sessionID == sessionId && $0.usesDurableProtocol &&
+                    !$0.isTerminal && !$0.isRetiredUnknown
             } ?? false
             let outcome = durablePending ? "unconfirmed" : MapTransferOutcomePolicy.outcome(
                 after: error,
@@ -6521,6 +6537,10 @@ final class OfflineMapManager: ObservableObject {
         )
         transferProgress = 1
         switch confirmation {
+        case .retiredUnknown:
+            updateLastTransferOutcome("unknown")
+            statusMessage = "The previous map result is unknown. Send the map again to verify installation."
+            errorMessage = nil
         case .cancelled:
             updateLastTransferOutcome("cancelled")
             statusMessage = "Map upload cancelled before installation"
@@ -6560,10 +6580,67 @@ final class OfflineMapManager: ObservableObject {
         if defaults.string(forKey: "offlineMap.deviceOperationID") != nil, record == nil {
             return // A missing/corrupt journal is unresolved ownership, not legacy cleanup.
         }
-        if let record, record.usesDurableProtocol, !record.isTerminal { return }
+        if let record, record.usesDurableProtocol, !record.isTerminal, !record.isRetiredUnknown { return }
         if await deviceTransferManager.exitMapTransfer(bleManager: bleManager), let record {
             try? self.deviceMapOperationStore.markCleanupComplete(operationID: record.operationID)
         }
+    }
+
+    private func retireUnavailablePrecommitIfFenced(
+        _ unavailable: DeviceMapOperationReceipt, operation: DeviceMapOperationRecord,
+        client: MapTransferDeviceClient, bleManager: BLEManager,
+        context: MapTransferHTTPStatusContext
+    ) async throws -> Bool {
+        guard operation.commitRequestedAt == nil, operation.cancellationRequestedAt != nil,
+              operation.lastReceipt?.phase != "accepted", !operation.isTerminal,
+              operation.fencedRetirement == nil,
+              bleManager.isCurrentMapTransferHTTPStatusContext(context) else { return false }
+        let admission = try await client.operationAdmission()
+        try Task.checkCancellation()
+        guard bleManager.isCurrentMapTransferHTTPStatusContext(context),
+              let current = currentDeviceMapOperation, current.operationID == operation.operationID,
+              current.appNamespace == BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: Bundle.main.bundleIdentifier),
+              current.originalUploadIsFenced(unavailable: unavailable, admission: admission) else { return false }
+#if os(iOS)
+        _ = await BackgroundMapUploadCoordinator.shared.retireActiveUpload(
+            mapID: current.mapID, sessionID: current.sessionID,
+            deviceID: current.deviceID, operationID: current.operationID)
+        let uploads = await BackgroundMapUploadCoordinator.shared.activeUploadActivity()
+        guard !uploads.hasActiveTask else { return false }
+#else
+        guard !hasActiveBackgroundUpload else { return false }
+#endif
+        guard bleManager.isCurrentMapTransferHTTPStatusContext(context),
+              let beforeCleanup = currentDeviceMapOperation,
+              beforeCleanup.operationID == current.operationID,
+              beforeCleanup.permitsFencedRetirement(unavailable: unavailable, admission: admission) else { return false }
+        let cleanupRevision = bleManager.deviceTransferStatusRevision
+        let cleared: Bool
+#if HOST_TESTING
+        if let cleanup = fencedRetirementCleanupForTesting {
+            cleared = await cleanup(bleManager)
+        } else {
+            cleared = await deviceTransferManager.exitMapTransfer(bleManager: bleManager)
+        }
+#else
+        cleared = await deviceTransferManager.exitMapTransfer(bleManager: bleManager)
+#endif
+        guard cleared, bleManager.isConnected, bleManager.isNavigationReady,
+              bleManager.activeDeviceID == current.deviceID,
+              bleManager.connectedDeviceID == current.deviceID,
+              bleManager.transferConnectionEpoch == context.connectionEpoch,
+              bleManager.deviceTransferStatusRevision > cleanupRevision,
+              bleManager.deviceTransferMode.isEmpty,
+              bleManager.deviceTransferSessionToken?.isEmpty != false else { return false }
+        let proof = DeviceMapFencedRetirement(unavailable: unavailable, admission: admission,
+            connectionEpoch: context.connectionEpoch,
+            observationProcessID: DeviceMapOperationStore.observationProcessID,
+            cleanupRevisionBefore: cleanupRevision,
+            cleanupRevisionAfter: bleManager.deviceTransferStatusRevision, observedAt: Date())
+        _ = try deviceMapOperationStore.retireFencedPrecommit(operationID: current.operationID,
+            deviceID: current.deviceID, appNamespace: current.appNamespace, proof: proof)
+        return true
     }
 
     func confirmActivatedMap(expectedMapId: String,
@@ -6601,6 +6678,7 @@ final class OfflineMapManager: ObservableObject {
                 guard operation.deviceID == confirmationDeviceID else {
                     return .continuesOnDevice(lastState: "reconnect the original device")
                 }
+                if operation.isRetiredUnknown { return .retiredUnknown }
                 if operation.observation == "installed_confirmed", operation.lastReceipt?.phase == "installed" {
                     if bleManager.isCurrentMapTransferHTTPStatusContext(confirmationHTTPContext) {
                         await acknowledgeDurableResult(operation, client: client)
@@ -6618,9 +6696,11 @@ final class OfflineMapManager: ObservableObject {
                     throw OfflineMapPlatformError.mapActivationFailed(operation.lastReceipt?.phase ?? "failed")
                 }
                 var receipt: DeviceMapOperationReceipt?
+                var receivedHTTPReceipt = false
                 if bleManager.isCurrentMapTransferHTTPStatusContext(confirmationHTTPContext) {
                     receipt = try? await client.operationStatus(operationID: operation.wireOperationID)
                     if !bleManager.isCurrentMapTransferHTTPStatusContext(confirmationHTTPContext) { receipt = nil }
+                    receivedHTTPReceipt = receipt != nil
                 }
                 guard confirmationDeviceID == bleManager.activeDeviceID else { return .continuesOnDevice(lastState: "device connection changed; exact result remains unconfirmed") }
                 if receipt == nil {
@@ -6632,6 +6712,12 @@ final class OfflineMapManager: ObservableObject {
                     _ = bleManager.requestMapOperationStatus(operationID: operation.wireOperationID)
                 }
                 var observedRecord: DeviceMapOperationRecord?
+                if receivedHTTPReceipt, let receipt, receipt.status == "result_unavailable",
+                   let context = confirmationHTTPContext,
+                   try await retireUnavailablePrecommitIfFenced(receipt, operation: operation,
+                       client: client, bleManager: bleManager, context: context) {
+                    return .retiredUnknown
+                }
                 if let receipt {
                     observedRecord = try recordDeviceOperationReceipt(receipt, bleManager: bleManager)
                 }
@@ -7018,11 +7104,13 @@ final class OfflineMapManager: ObservableObject {
                currentDeviceMapOperation == nil, ["installed", "failed"].contains(requestedOutcome) { return "unconfirmed" }
             guard let record = currentDeviceMapOperation, record.mapID == lastTransferMapId,
                   record.usesDurableProtocol else { return requestedOutcome }
+            if record.isRetiredUnknown { return "unknown" }
             if requestedOutcome == "installed", record.observation != "installed_confirmed" { return "unconfirmed" }
             if requestedOutcome == "failed", !record.isTerminal { return "unconfirmed" }
             return requestedOutcome
         }()
-        if updateOperationRecord, var record = currentDeviceMapOperation, record.mapID == lastTransferMapId {
+        if updateOperationRecord, var record = currentDeviceMapOperation,
+           record.mapID == lastTransferMapId, !record.isRetiredUnknown {
             if !record.usesDurableProtocol && ["installed", "failed"].contains(requestedOutcome) {
                 record.observation = requestedOutcome == "installed" ? "installed_confirmed" : "failed_or_rolled_back"
             } else if requestedOutcome == "unconfirmed", !record.isTerminal, record.lastReceipt?.phase != "accepted" {

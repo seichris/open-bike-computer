@@ -431,6 +431,83 @@ struct DeviceMapOperationTests {
         expectFailure({ try saturated.save(makeRecord()) }, "128 unresolved records must refuse new admission")
         try check(try saturated.records().count == 128)
 
+        var fenced = makeRecord()
+        fenced.cancellationRequestedAt = Date(timeIntervalSince1970: 2)
+        let unavailable = DeviceMapOperationReceipt(schemaVersion: 1, deviceID: fenced.deviceID,
+            operationID: fenced.wireOperationID, sessionID: nil, mapID: nil, manifestReceipt: nil,
+            signedManifestReceipt: nil, streamSHA256: nil, streamBytes: nil, phase: nil,
+            revision: nil, status: "result_unavailable")
+        let currentAdmission = DeviceMapOperationAdmission(schemaVersion: 1, deviceID: fenced.deviceID,
+            admissionRevision: 42, admissionEpoch: String(repeating: "f", count: 32))
+        let fencedProof = DeviceMapFencedRetirement(unavailable: unavailable, admission: currentAdmission,
+            connectionEpoch: 2, observationProcessID: DeviceMapOperationStore.observationProcessID,
+            cleanupRevisionBefore: 12, cleanupRevisionAfter: 13, observedAt: Date(timeIntervalSince1970: 3))
+        let fencedURL = directory.appendingPathComponent("fenced.json")
+        let fencedStore = DeviceMapOperationStore(url: fencedURL)
+        try fencedStore.save(fenced)
+        let retired = try fencedStore.retireFencedPrecommit(operationID: fenced.operationID,
+            deviceID: fenced.deviceID, appNamespace: fenced.appNamespace, proof: fencedProof)
+        try check(retired.isRetiredUnknown && !retired.isTerminal && retired.lastReceipt == nil &&
+                  retired.acknowledgedAt == nil, "fenced retirement preserves an unknown device outcome")
+        try check(!retired.blocksNewTransfer(connectionEpoch: 2, processID: UUID()),
+                  "verified retirement permits a fresh transfer without reviving the old operation")
+        try check(retired.admissionEpoch == fenced.admissionEpoch &&
+                  retired.admissionRevision == fenced.admissionRevision && retired.nextControlAction == .none,
+                  "retirement never refreshes the old upload token or sends another old control")
+        try check(try DeviceMapOperationStore(url: fencedURL).records() == [retired],
+                  "the exact unavailable reply, boot fence and cleanup proof survive relaunch")
+        expectFailure({ try fencedStore.beginUpload(operationID: fenced.operationID, deviceID: fenced.deviceID,
+            appNamespace: fenced.appNamespace, uploadAttemptID: UUID()) }, "a retired upload cannot restart")
+        let late = try receipt("installed", 5, overrides: ["operationID": fenced.wireOperationID])
+        try check(try fencedStore.ingest(late) == nil && fencedStore.records() == [retired],
+                  "late old receipts cannot turn unknown history into a new installation")
+        for scenario in ["commit", "accepted", "terminal-receipt", "active-upload", "legacy", "no-cancel", "same-epoch",
+                         "wrong-device", "wrong-operation", "unavailable-storage", "no-cleanup", "wrong-app"] {
+            var candidate = fenced
+            var response = unavailable
+            var admission = currentAdmission
+            var after: UInt64 = 13
+            if scenario == "commit" { candidate.commitRequestedAt = Date(timeIntervalSince1970: 2) }
+            if scenario == "accepted" { candidate.lastReceipt = try receipt("accepted", 4,
+                overrides: ["operationID": fenced.wireOperationID]) }
+            if scenario == "terminal-receipt" { candidate.lastReceipt = try receipt("installed", 4,
+                overrides: ["operationID": fenced.wireOperationID]) }
+            if scenario == "active-upload" { candidate.uploadAttemptID = UUID() }
+            if scenario == "legacy" { candidate.usesDurableProtocol = false }
+            if scenario == "no-cancel" { candidate.cancellationRequestedAt = nil }
+            if scenario == "same-epoch" { admission = DeviceMapOperationAdmission(schemaVersion: 1,
+                deviceID: fenced.deviceID, admissionRevision: 99, admissionEpoch: fenced.admissionEpoch!) }
+            if ["wrong-device", "wrong-operation", "unavailable-storage"].contains(scenario) {
+                response = DeviceMapOperationReceipt(schemaVersion: 1,
+                    deviceID: scenario == "wrong-device" ? "other-device" : fenced.deviceID,
+                    operationID: scenario == "wrong-operation" ? String(repeating: "0", count: 32) : fenced.wireOperationID,
+                    sessionID: nil, mapID: nil, manifestReceipt: nil, signedManifestReceipt: nil,
+                    streamSHA256: nil, streamBytes: nil, phase: nil, revision: nil,
+                    status: scenario == "unavailable-storage" ? "storage_unavailable" : "result_unavailable")
+            }
+            if scenario == "no-cleanup" { after = 12 }
+            let proof = DeviceMapFencedRetirement(unavailable: response, admission: admission,
+                connectionEpoch: 2, observationProcessID: DeviceMapOperationStore.observationProcessID,
+                cleanupRevisionBefore: 12, cleanupRevisionAfter: after, observedAt: Date(timeIntervalSince1970: 3))
+            let denied = DeviceMapOperationStore(url: directory.appendingPathComponent("denied-\(scenario).json"))
+            try denied.save(candidate)
+            expectFailure({ _ = try denied.retireFencedPrecommit(operationID: candidate.operationID,
+                deviceID: candidate.deviceID, appNamespace: scenario == "wrong-app" ? "other-app" : candidate.appNamespace,
+                proof: proof) }, "\(scenario) must not retire unavailable work")
+            try check(try denied.records() == [candidate], "\(scenario) preserves the original journal")
+        }
+        let retirementIOURL = directory.appendingPathComponent("retirement-io.json")
+        try DeviceMapOperationStore(url: retirementIOURL).save(fenced)
+        let failingRetirement = DeviceMapOperationStore(url: retirementIOURL, atomicWriter: { _, _ in
+            throw DeviceMapOperationStore.StoreError.invalidStore
+        })
+        expectFailure({ _ = try failingRetirement.retireFencedPrecommit(operationID: fenced.operationID,
+            deviceID: fenced.deviceID, appNamespace: fenced.appNamespace, proof: fencedProof) },
+            "a failed retirement write cannot release admission")
+        try check(try failingRetirement.records() == [fenced])
+        expectFailure({ try DeviceMapOperationStore(url: directory.appendingPathComponent("injected-proof.json"))
+            .save(retired) }, "ordinary save cannot create a retirement proof")
+
         let failedDestination = directory.appendingPathComponent("not-a-file")
         try FileManager.default.createDirectory(at: failedDestination, withIntermediateDirectories: false)
         expectFailure({ try DeviceMapOperationStore(url: failedDestination).save(record) }, "IO failure must propagate")

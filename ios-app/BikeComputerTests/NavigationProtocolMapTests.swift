@@ -23,12 +23,15 @@ private extension Data {
 
 private final class MapOperationRecoveryTestBLEManager: BLEManager {
     var recoveryDeviceID: String?
+    var recoveryEpoch: UInt64 = 0
     var requestedOperationIDs: [String] = []
 
     override var activeDeviceID: String? {
         get { recoveryDeviceID }
         set { recoveryDeviceID = newValue }
     }
+
+    override var transferConnectionEpoch: UInt64 { recoveryEpoch }
 
     override func centralManagerDidUpdateState(_ central: CBCentralManager) {}
 
@@ -3950,6 +3953,128 @@ extension NavigationProtocolTests {
         assert(source.contains("$offlineMapManager.includeTopographyInNewMaps") &&
                source.contains("$offlineMapManager.topographicMapsEnabled"),
                "active map selection and Layers menu expose separate topo controls")
+    }
+
+    @MainActor
+    static func testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit() async {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for scenario in ["retire", "same-epoch", "commit", "accepted", "wrong-admission-device",
+                         "wrong-receipt-operation", "foreign-app", "cleanup-failed", "cleanup-stale",
+                         "device-changed", "epoch-changed", "write-failed"] {
+            let suite = "fenced-retirement-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let namespace = BackgroundMapUploadSessionNamespace.identifier(bundleIdentifier: Bundle.main.bundleIdentifier)
+            var operation = DeviceMapOperationRecord(schemaVersion: 1,
+                deviceID: String(repeating: "a", count: 32), operationID: UUID(),
+                sessionID: "old-session", mapID: "old-map", manifestReceipt: String(repeating: "b", count: 64),
+                signedManifestReceipt: String(repeating: "c", count: 64), streamSHA256: String(repeating: "d", count: 64),
+                streamBytes: 123, artifactFilename: "old.bmap", appNamespace: scenario == "foreign-app" ? "other-app" : namespace,
+                createdAt: Date(timeIntervalSince1970: 1), connectionEpoch: 7, observation: "result_unknown",
+                cleanup: "pending", usesDurableProtocol: true, lastReceipt: nil,
+                admissionEpoch: String(repeating: "e", count: 32), admissionRevision: 42,
+                commitRequestedAt: scenario == "commit" ? Date(timeIntervalSince1970: 2) : nil,
+                cancellationRequestedAt: Date(timeIntervalSince1970: 2))
+            if scenario == "accepted" {
+                operation.lastReceipt = DeviceMapOperationReceipt(schemaVersion: 1, deviceID: operation.deviceID,
+                    operationID: operation.wireOperationID, sessionID: operation.sessionID, mapID: operation.mapID,
+                    manifestReceipt: operation.manifestReceipt, signedManifestReceipt: operation.signedManifestReceipt,
+                    streamSHA256: operation.streamSHA256, streamBytes: operation.streamBytes,
+                    phase: "accepted", revision: 3, status: nil)
+            }
+            let fixture = operation
+            defaults.set(fixture.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            defaults.set(fixture.mapID, forKey: "offlineMap.lastTransfer.mapId")
+            defaults.set(fixture.sessionID, forKey: "offlineMap.lastTransfer.sessionId")
+            defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+            let storeURL = directory.appendingPathComponent("\(scenario)/operations.json")
+            try! DeviceMapOperationStore(url: storeURL).save(fixture)
+            let store = scenario == "write-failed" ? DeviceMapOperationStore(url: storeURL, atomicWriter: { _, _ in
+                throw DeviceMapOperationStore.StoreError.invalidStore
+            }) : DeviceMapOperationStore(url: storeURL)
+            let manager = OfflineMapManager(defaults: defaults,
+                cacheDirectory: directory.appendingPathComponent("\(scenario)/cache"))
+            manager.useMapOperationStoreForTesting(store)
+            let ble = MapOperationRecoveryTestBLEManager()
+            ble.recoveryDeviceID = fixture.deviceID
+            ble.setConnectedDeviceIDForTesting(fixture.deviceID)
+            ble.recoveryEpoch = 2
+            ble.isConnected = true
+            ble.isNavigationReady = true
+            ble.deviceTransferSessionToken = "test-token"
+            ble.deviceTransferMode = "map"
+            var cleanupCount = 0
+            manager.useFencedRetirementCleanupForTesting { _ in
+                cleanupCount += 1
+                if scenario == "cleanup-failed" { return false }
+                if scenario != "cleanup-stale" {
+                    assert(ble.handleDeviceTransferStatusNotification(Data("DSTS{\"enabled\":false,\"mode\":\"\"}".utf8)),
+                           "cleanup uses the real fresh device-status parser")
+                }
+                if scenario == "device-changed" {
+                    ble.recoveryDeviceID = "other-device"
+                    ble.setConnectedDeviceIDForTesting("other-device")
+                }
+                if scenario == "epoch-changed" { ble.recoveryEpoch += 1 }
+                return true
+            }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel(); FirmwareRequestCaptureProtocol.handler = nil }
+            var paths: [String] = []
+            FirmwareRequestCaptureProtocol.handler = { request, _ in
+                paths.append(request.url!.lastPathComponent)
+                let object: [String: Any]
+                if request.url!.lastPathComponent == "admission" {
+                    object = ["schemaVersion": 1,
+                        "deviceID": scenario == "wrong-admission-device" ? "other-device" : fixture.deviceID,
+                        "admissionEpoch": scenario == "same-epoch" ? fixture.admissionEpoch! : String(repeating: "f", count: 32),
+                        "admissionRevision": 42]
+                } else {
+                    object = ["schemaVersion": 1, "deviceID": fixture.deviceID,
+                        "operationID": scenario == "wrong-receipt-operation" ? String(repeating: "0", count: 32) : fixture.wireOperationID,
+                        "status": "result_unavailable"]
+                }
+                return (HTTPURLResponse(url: request.url!, statusCode: request.httpMethod == "POST" ? 409 : 200,
+                    httpVersion: nil, headerFields: nil)!, try JSONSerialization.data(withJSONObject: object))
+            }
+            let client = MapTransferDeviceClient(baseURL: URL(string: "https://device.test:8080")!,
+                sessionToken: "test-token", session: session)
+            var clock = Date(timeIntervalSince1970: 100)
+            var result: MapActivationConfirmationResult?
+            do {
+                result = try await manager.confirmActivatedMap(expectedMapId: fixture.mapID, sessionId: fixture.sessionID,
+                    previousMapId: nil, previousSessionId: nil, previousSequence: nil, acceptedSequence: nil,
+                    client: client, bleManager: ble, timeout: 1, now: { clock }, sleep: { _ in clock.addTimeInterval(2) })
+            } catch {
+                assertEqual(scenario, "write-failed", "only injected persistence failure may throw")
+            }
+            if scenario == "retire" {
+                let persisted = try! store.records()[0]
+                assertEqual(result, .retiredUnknown, "fresh fence plus verified cleanup retires only as unknown")
+                assert(persisted.isRetiredUnknown && !persisted.isTerminal && persisted.lastReceipt == nil,
+                       "retirement never fabricates cancellation, installation or a device receipt")
+                assertEqual(paths, [fixture.wireOperationID, "admission"],
+                            "retirement uses fresh reads and never refreshes an old PUT or sends old commit/cancel")
+                assertEqual(cleanupCount, 1, "retirement requires transport cleanup")
+                assert(!persisted.blocksNewTransfer(connectionEpoch: 2, processID: UUID()),
+                       "the verified retired attempt releases admission for a new operation")
+                manager.reconcileLastTransfer(bleManager: ble)
+                assertEqual(manager.lastTransferOutcome, "unknown", "the UI stops waiting without claiming success")
+                assert(!manager.canCancelCurrentMapOperation, "retired history cannot reacquire old cancellation")
+                let queries = ble.requestedOperationIDs.count
+                manager.reconcileLastTransfer(bleManager: ble)
+                assertEqual(ble.requestedOperationIDs.count, queries, "retired history cannot restart polling")
+            } else {
+                assert(result != .retiredUnknown, "\(scenario) cannot release admission")
+                assertEqual(try! store.records(), [fixture], "\(scenario) preserves the original operation")
+                if ["same-epoch", "commit", "accepted", "wrong-admission-device", "wrong-receipt-operation", "foreign-app"].contains(scenario) {
+                    assertEqual(cleanupCount, 0, "\(scenario) cannot stop transport without a valid fence")
+                }
+            }
+        }
     }
 
     @MainActor

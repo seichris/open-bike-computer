@@ -48,6 +48,18 @@ nonisolated struct DeviceMapOperationAdmission: Codable, Equatable, Sendable {
     let admissionEpoch: String
 }
 
+// Local retirement evidence, not a terminal device outcome. The fresh boot
+// epoch fences the original PUT; verified transport cleanup fences its owner.
+nonisolated struct DeviceMapFencedRetirement: Codable, Equatable, Sendable {
+    let unavailable: DeviceMapOperationReceipt
+    let admission: DeviceMapOperationAdmission
+    let connectionEpoch: UInt64
+    let observationProcessID: UUID
+    let cleanupRevisionBefore: UInt64
+    let cleanupRevisionAfter: UInt64
+    let observedAt: Date
+}
+
 // The app's durable observation is deliberately separate from device outcome.
 // Neither HTTP completion nor a changed selected map implies installed.
 nonisolated struct DeviceMapOperationReceipt: Codable, Equatable, Sendable {
@@ -154,6 +166,46 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
     var retiredAt: Date? = nil
     var legacyTerminalConfirmedAt: Date? = nil
     var previousConfirmedSelection: DeviceMapConfirmedSelectionSnapshot? = nil
+    var fencedRetirement: DeviceMapFencedRetirement? = nil
+
+    func originalUploadIsFenced(unavailable: DeviceMapOperationReceipt,
+                                admission: DeviceMapOperationAdmission) -> Bool {
+        guard usesDurableProtocol, !isTerminal, commitRequestedAt == nil,
+              cancellationRequestedAt != nil, acknowledgedAt == nil,
+              lastReceipt == nil || ["receiving", "prepared"].contains(lastReceipt?.phase ?? ""),
+              let originalEpoch = admissionEpoch, (admissionRevision ?? 0) > 0,
+              DeviceMapOperationReceipt.isLowerHex(originalEpoch, count: 32),
+              unavailable.schemaVersion == 1, unavailable.deviceID == deviceID,
+              unavailable.operationID == wireOperationID,
+              unavailable.status == "result_unavailable", unavailable.phase == nil,
+              unavailable.revision == nil, unavailable.sessionID == nil, unavailable.mapID == nil,
+              unavailable.manifestReceipt == nil, unavailable.signedManifestReceipt == nil,
+              unavailable.streamSHA256 == nil, unavailable.streamBytes == nil,
+              admission.schemaVersion == 1, admission.deviceID == deviceID,
+              admission.admissionRevision > 0,
+              DeviceMapOperationReceipt.isLowerHex(admission.admissionEpoch, count: 32),
+              admission.admissionEpoch != originalEpoch else { return false }
+        return true
+    }
+
+    func permitsFencedRetirement(unavailable: DeviceMapOperationReceipt,
+                                 admission: DeviceMapOperationAdmission) -> Bool {
+        originalUploadIsFenced(unavailable: unavailable, admission: admission) &&
+            (uploadAttemptID == nil || uploadCompletedAt != nil)
+    }
+
+    var isRetiredUnknown: Bool {
+        guard let proof = fencedRetirement, observation == "result_unknown", cleanup == "complete",
+              permitsFencedRetirement(unavailable: proof.unavailable, admission: proof.admission),
+              proof.cleanupRevisionAfter > proof.cleanupRevisionBefore,
+              proof.observedAt >= createdAt,
+              proof.observedAt >= (cancellationRequestedAt ?? .distantFuture) else { return false }
+        return true
+    }
+
+    var hasRetainableHistoryEvidence: Bool {
+        hasRetainableTerminalEvidence || isRetiredUnknown
+    }
 
     mutating func confirmLegacyTerminal(outcome: String, deviceID: String,
                                        connectionEpoch: UInt64, processID: UUID,
@@ -176,13 +228,14 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
             ["installed_confirmed", "failed_or_rolled_back"].contains(observation)
     }
 
-    // A durable operation owns device admission until its receipt is terminal.
+    // Durable admission requires a terminal receipt or verified retirement of
+    // an unavailable, uncommitted attempt whose original PUT is boot-fenced.
     // A legacy observation can only become terminal in the BLE connection and
     // app process that created it (confirmLegacyTerminal). After either changes
     // it stays unresolved history, but must not block another transfer forever;
     // active OS uploads and the firmware commit grant are fenced separately.
     func blocksNewTransfer(connectionEpoch: UInt64, processID: UUID) -> Bool {
-        guard !isTerminal else { return false }
+        guard !isTerminal, !isRetiredUnknown else { return false }
         return usesDurableProtocol ||
             (self.connectionEpoch == connectionEpoch && observationProcessID == processID)
     }
@@ -191,7 +244,7 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
     // Every network control action is selected from durable device evidence.
     // A missing receipt or accepted grant must be queried, never re-uploaded.
     var nextControlAction: DeviceMapOperationControlAction {
-        if isTerminal { return .none }
+        if isTerminal || isRetiredUnknown { return .none }
         if lastReceipt?.phase == "accepted" { return .query }
         if cancellationRequestedAt != nil {
             return .cancel
@@ -227,7 +280,7 @@ nonisolated struct DeviceMapOperationRecord: Codable, Equatable, Sendable {
             receipt.streamSHA256 == streamSHA256 && receipt.streamBytes == streamBytes
     }
     mutating func apply(_ receipt: DeviceMapOperationReceipt) -> Bool {
-        guard retiredAt == nil, matches(receipt), receipt.status == nil,
+        guard retiredAt == nil, !isRetiredUnknown, matches(receipt), receipt.status == nil,
               let revision = receipt.revision, revision > 0,
               ["receiving", "prepared", "accepted", "installed", "failed", "cancelled"].contains(receipt.phase ?? ""),
               revision >= (lastReceipt?.revision ?? 0) else { return false }
@@ -283,7 +336,8 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
     func save(_ record: DeviceMapOperationRecord) throws {
         try save(record, replacingUploadAttempt: false)
     }
-    private func save(_ record: DeviceMapOperationRecord, replacingUploadAttempt: Bool) throws {
+    private func save(_ record: DeviceMapOperationRecord, replacingUploadAttempt: Bool,
+                      retiringFencedPrecommit: Bool = false) throws {
         lock.lock(); defer { lock.unlock() }
         guard Self.isValid(record) else { throw StoreError.invalidStore }
         var records = try self.records()
@@ -309,6 +363,9 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
                   old.acknowledgedAt == nil || old.acknowledgedAt == record.acknowledgedAt,
                   old.legacyTerminalConfirmedAt == nil || old.legacyTerminalConfirmedAt == record.legacyTerminalConfirmedAt,
                   old.retiredAt == record.retiredAt,
+                  old.fencedRetirement == record.fencedRetirement ||
+                    (retiringFencedPrecommit && old.fencedRetirement == nil && record.isRetiredUnknown),
+                  !old.isRetiredUnknown || old == record,
                   !old.isTerminal || (old.observation == record.observation && old.lastReceipt == record.lastReceipt),
                   (record.lastReceipt?.revision ?? 0) >= (old.lastReceipt?.revision ?? 0),
                   old.lastReceipt?.revision != record.lastReceipt?.revision || old.lastReceipt == record.lastReceipt else {
@@ -316,6 +373,7 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
             }
             records[index] = record
         } else {
+            guard record.fencedRetirement == nil else { throw StoreError.conflict }
             records = Self.retained(records, now: Date(), reserveSlot: true, protecting: record.operationID)
             guard records.filter({ $0.retiredAt == nil }).count < 128,
                   records.count < 4096 else { throw StoreError.capacity }
@@ -330,18 +388,19 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
     // Compact after durable receipt + ACK, or legacy terminal evidence observed
     // in its original process/connection (legacy IDs never reach the device).
     // Require finished OS transport and lease cleanup. Keep exact terminal
-    // evidence as a 30-day tombstone so a late callback cannot revive an old ID.
+    // evidence (including fenced unknown history) as a 30-day tombstone so a
+    // late callback cannot revive an old ID.
     private static func retained(_ input: [DeviceMapOperationRecord], now: Date,
                                  reserveSlot: Bool, protecting: UUID?) -> [DeviceMapOperationRecord] {
         let cutoff = now.addingTimeInterval(-30 * 24 * 60 * 60)
         var records = input.filter { $0.operationID == protecting || $0.retiredAt == nil || $0.retiredAt! > cutoff }
         let eligible = records.indices.filter {
             let r = records[$0]
-            return r.retiredAt == nil && r.hasRetainableTerminalEvidence && r.cleanup == "complete" &&
+            return r.retiredAt == nil && r.hasRetainableHistoryEvidence && r.cleanup == "complete" &&
                 (r.uploadAttemptID == nil || r.uploadCompletedAt != nil)
         }.sorted {
-            (records[$0].acknowledgedAt ?? records[$0].legacyTerminalConfirmedAt ?? .distantFuture) <
-            (records[$1].acknowledgedAt ?? records[$1].legacyTerminalConfirmedAt ?? .distantFuture)
+            (records[$0].acknowledgedAt ?? records[$0].legacyTerminalConfirmedAt ?? records[$0].fencedRetirement?.observedAt ?? .distantFuture) <
+            (records[$1].acknowledgedAt ?? records[$1].legacyTerminalConfirmedAt ?? records[$1].fencedRetirement?.observedAt ?? .distantFuture)
         }
         var liveCount = records.filter { $0.retiredAt == nil }.count
         var fullHistory = eligible.count
@@ -379,6 +438,22 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
         try save(record)
     }
 
+    func retireFencedPrecommit(operationID: UUID, deviceID: String, appNamespace: String,
+                              proof: DeviceMapFencedRetirement) throws -> DeviceMapOperationRecord {
+        lock.lock(); defer { lock.unlock() }
+        guard var record = try records().first(where: { $0.operationID == operationID }),
+              record.deviceID == deviceID, record.appNamespace == appNamespace,
+              record.fencedRetirement == nil,
+              proof.observationProcessID == Self.observationProcessID,
+              record.permitsFencedRetirement(unavailable: proof.unavailable, admission: proof.admission),
+              proof.cleanupRevisionAfter > proof.cleanupRevisionBefore else { throw StoreError.conflict }
+        record.observation = "result_unknown"
+        record.cleanup = "complete"
+        record.fencedRetirement = proof
+        try save(record, replacingUploadAttempt: false, retiringFencedPrecommit: true)
+        return record
+    }
+
     private static func isValid(_ record: DeviceMapOperationRecord) -> Bool {
         guard record.schemaVersion == 1, !record.deviceID.isEmpty, !record.sessionID.isEmpty,
               !record.mapID.isEmpty, !record.appNamespace.isEmpty, !record.artifactFilename.isEmpty,
@@ -404,9 +479,10 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
             guard !record.usesDurableProtocol, record.hasRetainableTerminalEvidence else { return false }
         }
         if record.retiredAt != nil {
-            guard record.hasRetainableTerminalEvidence, record.cleanup == "complete",
+            guard record.hasRetainableHistoryEvidence, record.cleanup == "complete",
                   record.uploadAttemptID == nil || record.uploadCompletedAt != nil else { return false }
         }
+        if record.fencedRetirement != nil && !record.isRetiredUnknown { return false }
         return (record.uploadResponseBody?.count ?? 0) <= 4096
     }
 
@@ -415,7 +491,8 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard var record = try records().first(where: { $0.operationID == operationID }),
               record.deviceID == deviceID, record.appNamespace == appNamespace,
-              record.usesDurableProtocol, record.admissionRevision != nil, record.admissionEpoch != nil, !record.isTerminal,
+              record.usesDurableProtocol, record.admissionRevision != nil, record.admissionEpoch != nil,
+              !record.isTerminal, !record.isRetiredUnknown,
               !["prepared", "accepted"].contains(record.lastReceipt?.phase ?? ""),
               record.commitRequestedAt == nil, record.cancellationRequestedAt == nil else { throw StoreError.conflict }
         if record.uploadAttemptID == uploadAttemptID { return }
@@ -459,7 +536,7 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
         guard var record = try records().first(where: { $0.operationID == operationID }),
               record.usesDurableProtocol else { throw StoreError.conflict }
         // The device won the race. Never send cancel for a known grant/terminal.
-        if record.isTerminal || record.lastReceipt?.phase == "accepted" { return record }
+        if record.isTerminal || record.isRetiredUnknown || record.lastReceipt?.phase == "accepted" { return record }
         if record.cancellationRequestedAt == nil { record.cancellationRequestedAt = now }
         record.observation = "cancel_requested"
         try save(record)
@@ -502,7 +579,8 @@ nonisolated final class DeviceMapOperationStore: @unchecked Sendable {
         guard var record = try records().first(where: { $0.operationID == operationID }),
               record.deviceID == deviceID, record.appNamespace == appNamespace,
               record.mapID == mapID, record.sessionID == sessionID,
-              record.retiredAt == nil, record.uploadAttemptID == uploadAttemptID else { return false }
+              record.retiredAt == nil, !record.isRetiredUnknown,
+              record.uploadAttemptID == uploadAttemptID else { return false }
         guard responseBody.count <= 4096 else { throw StoreError.invalidStore }
         if record.uploadCompletedAt != nil { return true }
         if !responseBody.isEmpty {

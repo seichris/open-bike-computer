@@ -55,6 +55,24 @@ the background reconciliation poll yields until that recovery finishes. It must
 not issue another query that clears the reply before precommit recovery verifies
 it or replace the foreground network-connection status.
 
+An unavailable precommit attempt can be retired locally as **unknown**, without
+a terminal device receipt, only after fresh pinned HTTP reads return its exact
+`result_unavailable` response and a valid admission token for a **different boot
+epoch**. The journal must have cancellation intent, no commit intent and no
+accepted/terminal receipt. The original epoch/revision and artifact identity are
+never refreshed. The old PUT cannot be admitted in the new boot; retirement
+does not claim what happened in the previous boot or bind any selected map to it.
+
+The client stops the exact OS upload, requires all active upload tasks to finish,
+and verifies fresh empty transfer status in the same authenticated device/BLE
+connection after bounded transport cleanup. It atomically saves the unavailable
+reply, fresh admission and cleanup observation before releasing admission. A
+write failure, same boot epoch, missing/corrupt journal, identity/context change,
+unfinished upload or failed cleanup keeps the attempt blocked. Late callbacks
+cannot revive retired unknown history; a re-send uses a new operation ID and its
+own admission token. Unknown retirement keeps the history for the same bounded
+retention period as terminal tombstones and never fabricates an ACK or outcome.
+
 An operation ID is a random 32-character lowercase hexadecimal UUID representation.
 It is separate from the existing signed content session ID. A client persists
 intent before entry and sends these additional signed-stream request headers:

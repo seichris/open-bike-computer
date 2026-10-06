@@ -770,6 +770,7 @@ struct NavigationProtocolTests {
     static func main() async {
         if CommandLine.arguments.contains("--map-operation-recovery-only") {
             testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary()
+            await testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit()
             print("Map operation recovery regression passed")
             return
         }
@@ -1010,6 +1011,7 @@ struct NavigationProtocolTests {
         testTopographicMapChoicesAreIndependent()
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary()
+        await testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit()
         testOfflineMapManagerResendsUnobservedLegacyResult()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()

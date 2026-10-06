@@ -2338,6 +2338,17 @@ prepared state. Stale/unknown admission returns `result_unavailable`; it never
 refreshes the old attempt or claims a proved cancellation. Transport revocation
 alone is not a durable cancelled receipt.
 
+The companion may separately retire an unavailable **precommit** attempt as local
+unknown history. It requires an exact fresh pinned-HTTP `result_unavailable`
+response, a fresh `GET /map-transfer/operations/admission` response for the same
+device with a different boot epoch, saved cancellation intent, no commit intent
+or accepted/terminal receipt, completed OS uploads and fresh verified empty
+transfer status after cleanup in the same authenticated connection. These reads
+do not refresh the original upload's token or create a device outcome. The client
+persists the fence and cleanup proof before allowing a new operation ID to send
+the map again. A same-epoch revision change alone is insufficient, and a context,
+cleanup or persistence failure leaves admission blocked.
+
 Authenticated `GET /map-transfer/operations/<operationID>` returns a bounded
 JSON receipt. Owner-authenticated `MOPQ|<operationID>` queues the same query on
 the storage-control worker and returns a full ordinary MSTS response with an
