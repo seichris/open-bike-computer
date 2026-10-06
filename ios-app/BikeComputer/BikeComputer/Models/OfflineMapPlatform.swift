@@ -2865,17 +2865,28 @@ nonisolated struct BackgroundMapUploadResponseBuffer {
 }
 
 nonisolated enum BackgroundMapUploadStateStore {
-    private static let stateLock = NSRecursiveLock()
     private static let key = "offlineMap.backgroundUploads.v1"
     static let didChangeNotification = Notification.Name(
         "OfflineMapBackgroundUploadStateDidChange"
     )
 
     static func records(defaults: UserDefaults = .standard) -> [BackgroundMapUploadRecord] {
-        stateLock.lock()
-        defer { stateLock.unlock() }
+        // UserDefaults returns an independent Data snapshot. UI reads never
+        // wait for a delegate or hold a store lock across framework callbacks.
         guard let data = defaults.data(forKey: key) else { return [] }
         return (try? JSONDecoder().decode([BackgroundMapUploadRecord].self, from: data)) ?? []
+    }
+
+    private static func mutate(_ body: () -> Void) {
+        // Serialize the entire read/modify/persist operation. UserDefaults.set
+        // synchronously notifies SwiftUI, so a delegate must reach the main
+        // executor BEFORE acquiring anything a view could wait on. Completion
+        // still persists before returning to the URLSession completion barrier.
+        if Thread.isMainThread {
+            body()
+        } else {
+            DispatchQueue.main.sync(execute: body)
+        }
     }
 
     static func markStarted(
@@ -2885,28 +2896,28 @@ nonisolated enum BackgroundMapUploadStateStore {
         now: Date = Date(),
         defaults: UserDefaults = .standard
     ) {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        var values = records(defaults: defaults)
-        if values.contains(where: { $0.taskID == taskID && $0.descriptor == descriptor }) {
-            return // Duplicate/late callbacks cannot reset a completed record.
+        mutate {
+            var values = records(defaults: defaults)
+            if values.contains(where: { $0.taskID == taskID && $0.descriptor == descriptor }) {
+                return // Duplicate/late callbacks cannot reset a completed record.
+            }
+            values.removeAll {
+                $0.taskID == taskID && $0.descriptor.appNamespace == descriptor.appNamespace &&
+                    $0.descriptor.uploadAttemptID == descriptor.uploadAttemptID
+            }
+            values.append(BackgroundMapUploadRecord(
+                taskID: taskID,
+                descriptor: descriptor,
+                startedAt: now,
+                completedAt: nil,
+                succeeded: nil,
+                errorCode: nil,
+                completedBytes: 0,
+                expectedBytes: expectedBytes.flatMap { $0 > 0 ? $0 : nil },
+                httpStatusCode: nil
+            ))
+            persist(values, defaults: defaults)
         }
-        values.removeAll {
-            $0.taskID == taskID && $0.descriptor.appNamespace == descriptor.appNamespace &&
-                $0.descriptor.uploadAttemptID == descriptor.uploadAttemptID
-        }
-        values.append(BackgroundMapUploadRecord(
-            taskID: taskID,
-            descriptor: descriptor,
-            startedAt: now,
-            completedAt: nil,
-            succeeded: nil,
-            errorCode: nil,
-            completedBytes: 0,
-            expectedBytes: expectedBytes.flatMap { $0 > 0 ? $0 : nil },
-            httpStatusCode: nil
-        ))
-        persist(values, defaults: defaults)
     }
 
     static func markProgress(
@@ -2916,22 +2927,22 @@ nonisolated enum BackgroundMapUploadStateStore {
         expectedBytes: Int64?,
         defaults: UserDefaults = .standard
     ) {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        var values = records(defaults: defaults)
-        guard let index = values.lastIndex(where: {
-            $0.taskID == taskID && (descriptor == nil || $0.descriptor == descriptor)
-        }),
-              values[index].completedAt == nil else { return }
-        let boundedCompleted = max(completedBytes, 0)
-        let previousPercentage = values[index].percentage
-        values[index].completedBytes = boundedCompleted
-        if let expectedBytes, expectedBytes > 0 {
-            values[index].expectedBytes = expectedBytes
+        mutate {
+            var values = records(defaults: defaults)
+            guard let index = values.lastIndex(where: {
+                $0.taskID == taskID && (descriptor == nil || $0.descriptor == descriptor)
+            }),
+                  values[index].completedAt == nil else { return }
+            let boundedCompleted = max(completedBytes, 0)
+            let previousPercentage = values[index].percentage
+            values[index].completedBytes = boundedCompleted
+            if let expectedBytes, expectedBytes > 0 {
+                values[index].expectedBytes = expectedBytes
+            }
+            let newPercentage = values[index].percentage
+            guard previousPercentage != newPercentage || boundedCompleted == 0 else { return }
+            persist(values, defaults: defaults)
         }
-        let newPercentage = values[index].percentage
-        guard previousPercentage != newPercentage || boundedCompleted == 0 else { return }
-        persist(values, defaults: defaults)
     }
 
     static func markCompleted(
@@ -2946,27 +2957,27 @@ nonisolated enum BackgroundMapUploadStateStore {
         now: Date = Date(),
         defaults: UserDefaults = .standard
     ) {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        var values = records(defaults: defaults)
-        guard let index = values.lastIndex(where: {
-            $0.taskID == taskID && (descriptor == nil || $0.descriptor == descriptor)
-        }) else { return }
-        guard values[index].completedAt == nil else { return }
-        values[index].responseBody = responseBody.flatMap {
-            $0.count <= BackgroundMapUploadResponseBuffer.maximumBytes ? $0 : nil
+        mutate {
+            var values = records(defaults: defaults)
+            guard let index = values.lastIndex(where: {
+                $0.taskID == taskID && (descriptor == nil || $0.descriptor == descriptor)
+            }) else { return }
+            guard values[index].completedAt == nil else { return }
+            values[index].responseBody = responseBody.flatMap {
+                $0.count <= BackgroundMapUploadResponseBuffer.maximumBytes ? $0 : nil
+            }
+            values[index].completedAt = now
+            values[index].succeeded = succeeded
+            values[index].errorCode = errorCode
+            values[index].httpStatusCode = httpStatusCode
+            if let completedBytes {
+                values[index].completedBytes = max(completedBytes, 0)
+            }
+            if let expectedBytes, expectedBytes > 0 {
+                values[index].expectedBytes = expectedBytes
+            }
+            persist(values, defaults: defaults)
         }
-        values[index].completedAt = now
-        values[index].succeeded = succeeded
-        values[index].errorCode = errorCode
-        values[index].httpStatusCode = httpStatusCode
-        if let completedBytes {
-            values[index].completedBytes = max(completedBytes, 0)
-        }
-        if let expectedBytes, expectedBytes > 0 {
-            values[index].expectedBytes = expectedBytes
-        }
-        persist(values, defaults: defaults)
     }
 
     static func latest(

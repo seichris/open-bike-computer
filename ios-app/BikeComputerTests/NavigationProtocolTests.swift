@@ -54,6 +54,31 @@ func waitForMainLoop(timeout: TimeInterval, condition: () -> Bool) -> Bool {
     return condition()
 }
 
+// UserDefaults can synchronously notify SwiftUI while a delegate writes. Model
+// that observer reading upload state from another thread before the write ends.
+final class ReentrantUploadDefaults: UserDefaults, @unchecked Sendable {
+    var uploadWriteObserver: (() -> Void)?
+
+    override func set(_ value: Any?, forKey defaultName: String) {
+        if defaultName == "offlineMap.backgroundUploads.v1" {
+            uploadWriteObserver?()
+        }
+        super.set(value, forKey: defaultName)
+    }
+}
+
+func assertUploadStateObserverCanRead(_ defaults: UserDefaults) {
+    let readFinished = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        _ = BackgroundMapUploadStateStore.records(defaults: defaults)
+        readFinished.signal()
+    }
+    assert(readFinished.wait(timeout: .now() + 1) == .success,
+           "upload persistence and notifications must not lock out an independent UI reader")
+    assert(Thread.isMainThread,
+           "upload state writes and their UI notifications run on the main thread")
+}
+
 func appendUInt16LE(_ value: UInt16, to data: inout Data) {
     data.append(UInt8(value & 0xFF))
     data.append(UInt8((value >> 8) & 0xFF))
@@ -768,6 +793,12 @@ struct NavigationProtocolTests {
     }
 
     static func main() async {
+        if CommandLine.arguments.contains("--background-upload-state-only") {
+            await testBackgroundMapUploadStateObserverReentrancy()
+            testBackgroundMapUploadRestorationState()
+            print("Background upload state regression passed")
+            return
+        }
         if CommandLine.arguments.contains("--map-operation-recovery-only") {
             testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary()
             await testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit()
@@ -937,6 +968,7 @@ struct NavigationProtocolTests {
         testSavedMapArtifactMetadataRoundTrip()
         testSavedMapRendererCompatibilityPolicy()
         testBackgroundMapUploadRestorationState()
+        await testBackgroundMapUploadStateObserverReentrancy()
         testBackgroundMapUploadArbitration()
         testBackgroundMapUploadSessionNamespace()
         testPausedMapUploadResumePolicy()
@@ -2527,6 +2559,77 @@ struct NavigationProtocolTests {
             [replacement],
             "a reused URL session task ID replaces stale cross-session state"
         )
+    }
+
+    static func testBackgroundMapUploadStateObserverReentrancy() async {
+        let suite = "BackgroundUploadObserverTests-\(UUID().uuidString)"
+        let defaults = ReentrantUploadDefaults(suiteName: suite)!
+        defaults.uploadWriteObserver = { assertUploadStateObserverCanRead(defaults) }
+        let observer = NotificationCenter.default.addObserver(
+            forName: BackgroundMapUploadStateStore.didChangeNotification,
+            object: nil, queue: nil
+        ) { _ in assertUploadStateObserverCanRead(defaults) }
+        defer {
+            NotificationCenter.default.removeObserver(observer)
+            defaults.uploadWriteObserver = nil
+            defaults.removePersistentDomain(forName: suite)
+        }
+        let descriptor = BackgroundMapUploadDescriptor(
+            mapID: "observer-map", sessionID: "observer-session", protocolVersion: 2,
+            streamFormatVersion: 1,
+            artifactFilename: "observer-map.bmap"
+        )
+        BackgroundMapUploadStateStore.markStarted(
+            taskID: 1, descriptor: descriptor, expectedBytes: 100, defaults: defaults
+        )
+        // Use a real background caller, as URLSession does, without blocking
+        // the main executor while waiting for its durable completion.
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                BackgroundMapUploadStateStore.markProgress(
+                    taskID: 1, completedBytes: 50, descriptor: descriptor,
+                    expectedBytes: 100, defaults: defaults
+                )
+                BackgroundMapUploadStateStore.markCompleted(
+                    taskID: 1, succeeded: true, descriptor: descriptor, errorCode: nil,
+                    httpStatusCode: 200, completedBytes: 100, expectedBytes: 100,
+                    defaults: defaults
+                )
+                BackgroundMapUploadStateStore.markProgress(
+                    taskID: 1, completedBytes: 60, descriptor: descriptor,
+                    expectedBytes: 100, defaults: defaults
+                )
+                BackgroundMapUploadStateStore.markStarted(
+                    taskID: 1, descriptor: descriptor, expectedBytes: 100, defaults: defaults
+                )
+                let result = BackgroundMapUploadStateStore.records(defaults: defaults).first
+                assertEqual(result?.succeeded, true, "completion is persisted before returning to the delegate")
+                assertEqual(result?.completedBytes, 100, "late progress/start cannot revive a terminal upload")
+                continuation.resume()
+            }
+        }
+        await withTaskGroup(of: Void.self) { group in
+            for taskID in 2...17 {
+                group.addTask {
+                    let value = BackgroundMapUploadDescriptor(
+                        mapID: "concurrent-\(taskID)", sessionID: "session-\(taskID)",
+                        protocolVersion: 2, streamFormatVersion: 1,
+                        artifactFilename: "map-\(taskID).bmap"
+                    )
+                    BackgroundMapUploadStateStore.markStarted(
+                        taskID: taskID, descriptor: value, expectedBytes: 100, defaults: defaults
+                    )
+                    BackgroundMapUploadStateStore.markCompleted(
+                        taskID: taskID, succeeded: true, descriptor: value, errorCode: nil,
+                        completedBytes: 100, expectedBytes: 100, defaults: defaults
+                    )
+                }
+            }
+        }
+        let results = BackgroundMapUploadStateStore.records(defaults: defaults)
+        assertEqual(results.count, 17, "concurrent delegates cannot lose another task's persisted update")
+        assert(results.allSatisfy { $0.succeeded == true && $0.completedBytes == 100 },
+               "every concurrent completion remains terminal and durable")
     }
 
     static func testBackgroundMapUploadArbitration() {

@@ -212,6 +212,15 @@ delivery. Legacy background records remain conservative and are not rebound to
 the currently connected board. Relaunch queries the original device; it cannot
 promise BLE or polling execution while iOS is force-terminated.
 
+Background upload history serializes each read/modify/persist operation on the
+main executor. Readers take an independent defaults snapshot without a shared
+store lock. Defaults writes can synchronously notify SwiftUI; holding a store
+lock during that callback deadlocks against Saved Maps rendering. A delegate
+completion still persists its transport result before returning to the existing
+background-event barrier. Duplicate or late start/progress callbacks cannot
+revive a completed upload, and this history never substitutes for a device
+installation receipt.
+
 ## Shutdown
 
 Explicit shutdown/restart is a sticky request processed by a nonblocking main
