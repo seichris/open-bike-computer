@@ -1,8 +1,8 @@
 # Watch workout companion release notes
 
-Release candidate: **1.9 (24)**. App Store version 1.8 is already distributed,
-and App Store Connect already contains builds through 22, so the build number
-advances for this release candidate.
+Release candidate: **1.9 (25)**. App Store version 1.8 is already distributed,
+and App Store Connect already contains build 24. Build 25 includes the current
+map-download recovery changes and ships with its embedded Watch companion.
 
 ## App Store What's New
 
@@ -11,6 +11,8 @@ Download offline maps more reliably on your Bicino.
 - Recover automatically if the app's map-security credential becomes
   unavailable.
 - Retry map creation after securely restoring that credential.
+- Resume interrupted map downloads and recover pending downloads after reopening
+  the app.
 
 ## App Review notes
 
