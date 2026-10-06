@@ -21,6 +21,23 @@ private extension Data {
     }
 }
 
+private final class MapOperationRecoveryTestBLEManager: BLEManager {
+    var recoveryDeviceID: String?
+    var requestedOperationIDs: [String] = []
+
+    override var activeDeviceID: String? {
+        get { recoveryDeviceID }
+        set { recoveryDeviceID = newValue }
+    }
+
+    override func centralManagerDidUpdateState(_ central: CBCentralManager) {}
+
+    override func requestMapOperationStatus(operationID: String) -> Bool {
+        requestedOperationIDs.append(operationID)
+        return true
+    }
+}
+
 
 extension NavigationProtocolTests {
     static func testOfflineMapJobRecoverySelection() {
@@ -3933,6 +3950,119 @@ extension NavigationProtocolTests {
         assert(source.contains("$offlineMapManager.includeTopographyInNewMaps") &&
                source.contains("$offlineMapManager.topographicMapsEnabled"),
                "active map selection and Layers menu expose separate topo controls")
+    }
+
+    @MainActor
+    static func testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let deviceID = String(repeating: "a", count: 32)
+        let namespace = BackgroundMapUploadSessionNamespace.identifier(
+            bundleIdentifier: Bundle.main.bundleIdentifier)
+
+        func cancellationReceipt(for record: DeviceMapOperationRecord) throws -> DeviceMapOperationReceipt {
+            try JSONDecoder().decode(DeviceMapOperationReceipt.self,
+                from: JSONSerialization.data(withJSONObject: [
+                    "schemaVersion": 1, "deviceID": record.deviceID,
+                    "operationID": record.wireOperationID, "sessionID": record.sessionID,
+                    "mapID": record.mapID, "manifestReceipt": record.manifestReceipt,
+                    "signedManifestReceipt": record.signedManifestReceipt,
+                    "streamSHA256": record.streamSHA256, "streamBytes": record.streamBytes,
+                    "phase": "cancelled", "revision": 1]))
+        }
+
+        for scenario in ["unknown", "installed", "unconfirmed", "legacy", "other-device", "other-app", "terminal"] {
+            let suite = "map-operation-recovery-\(UUID().uuidString)"
+            guard let defaults = UserDefaults(suiteName: suite) else {
+                fatalError("test defaults unavailable")
+            }
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.set("previous-map", forKey: "offlineMap.lastTransfer.mapId")
+            defaults.set("previous-session", forKey: "offlineMap.lastTransfer.sessionId")
+            defaults.set("previous.bmap", forKey: "offlineMap.lastTransfer.artifactFilename")
+            let previousOutcome = ["unknown", "installed", "unconfirmed"].contains(scenario)
+                ? scenario : "unknown"
+            defaults.set(previousOutcome, forKey: "offlineMap.lastTransfer.outcome")
+
+            let fixtureDeviceID = scenario == "other-device"
+                ? String(repeating: "e", count: 32) : deviceID
+            let fixtureNamespace = scenario == "other-app"
+                ? "other.app.map-transfer.background" : namespace
+            var record = DeviceMapOperationRecord(
+                schemaVersion: 1, deviceID: fixtureDeviceID, operationID: UUID(),
+                sessionID: "pending-session", mapID: "pending-map",
+                manifestReceipt: String(repeating: "b", count: 64),
+                signedManifestReceipt: String(repeating: "c", count: 64),
+                streamSHA256: String(repeating: "d", count: 64), streamBytes: 123,
+                artifactFilename: "pending.bmap", appNamespace: fixtureNamespace,
+                createdAt: Date(timeIntervalSince1970: 1), connectionEpoch: 7,
+                observation: "result_unknown", cleanup: "pending", usesDurableProtocol: true,
+                lastReceipt: nil, cancellationRequestedAt: Date(timeIntervalSince1970: 2))
+            if scenario == "legacy" { record.usesDurableProtocol = false }
+            if scenario == "installed" { record.observation = "cancel_requested" }
+            if scenario == "terminal" {
+                let receipt = try! cancellationReceipt(for: record)
+                assert(record.apply(receipt), "terminal history requires an exact device receipt")
+                record.cleanup = "complete"
+            }
+            defaults.set(record.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            let store = DeviceMapOperationStore(url: directory
+                .appendingPathComponent("\(scenario)/operations.json"))
+            do {
+                try store.save(record)
+                let original = try store.records()
+                let manager = OfflineMapManager(defaults: defaults,
+                    cacheDirectory: directory.appendingPathComponent("\(scenario)/cache"))
+                manager.useMapOperationStoreForTesting(store)
+                let ble = MapOperationRecoveryTestBLEManager()
+                ble.recoveryDeviceID = deviceID
+                ble.isConnected = true
+                ble.isNavigationReady = true
+                manager.reconcileLastTransfer(bleManager: ble)
+
+                if ["unknown", "installed", "unconfirmed"].contains(scenario) {
+                    assertEqual(ble.requestedOperationIDs, [record.wireOperationID],
+                        "an unresolved durable operation is queried independently of the \(scenario) summary")
+                    assertEqual(manager.lastTransferMapId, record.mapID,
+                        "recovery projects the operation's canonical map identity")
+                    assertEqual(defaults.string(forKey: "offlineMap.lastTransfer.sessionId"), record.sessionID,
+                        "recovery projects the exact operation session")
+                    assertEqual(defaults.string(forKey: "offlineMap.lastTransfer.artifactFilename"), record.artifactFilename,
+                        "recovery cannot retain an unrelated artifact filename")
+                    assertEqual(manager.lastTransferOutcome, "unconfirmed",
+                        "recovery awaits a device receipt instead of inferring success")
+                    assert(record.blocksNewTransfer(connectionEpoch: ble.transferConnectionEpoch,
+                        processID: DeviceMapOperationStore.observationProcessID),
+                        "admission remains fenced until an exact terminal receipt")
+                } else {
+                    assert(ble.requestedOperationIDs.isEmpty,
+                        "\(scenario) history cannot acquire durable recovery")
+                    assertEqual(manager.lastTransferMapId, "previous-map",
+                        "\(scenario) history cannot replace the transfer summary")
+                    assertEqual(manager.lastTransferOutcome, previousOutcome,
+                        "\(scenario) history keeps its outcome")
+                }
+                assertEqual(try store.records(), original,
+                    "summary recovery preserves cancellation, receipts and the original observation binding")
+                if ["unknown", "installed", "unconfirmed"].contains(scenario) {
+                    let receipt = try cancellationReceipt(for: record)
+                    guard let terminal = try store.ingest(receipt) else {
+                        fatalError("exact cancellation receipt must reconcile the original operation")
+                    }
+                    ble.isConnected = false
+                    ble.isNavigationReady = false
+                    manager.reconcileLastTransfer(bleManager: ble)
+                    assertEqual(manager.lastTransferOutcome, "cancelled",
+                        "an exact device receipt settles the canonical recovered map")
+                    assert(!terminal.blocksNewTransfer(connectionEpoch: ble.transferConnectionEpoch,
+                        processID: DeviceMapOperationStore.observationProcessID),
+                        "only the exact terminal result releases operation admission")
+                }
+            } catch {
+                fatalError("map operation recovery fixture \(scenario) failed: \(error)")
+            }
+        }
     }
 
     @MainActor

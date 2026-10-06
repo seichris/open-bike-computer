@@ -2162,6 +2162,7 @@ final class OfflineMapManager: ObservableObject {
     private(set) var clientInstallationId: String
     private(set) var clientInstallationToken: String?
     private let deviceTransferManager = DeviceTransferManager()
+    private var deviceMapOperationStore = DeviceMapOperationStore.shared
     @Published private var packDisplayNames: [String: String]
     private var mapJobTask: Task<Void, Never>?
     private var mapJobTaskID: UUID?
@@ -3961,7 +3962,7 @@ final class OfflineMapManager: ObservableObject {
     private var currentDeviceMapOperation: DeviceMapOperationRecord? {
         guard let rawID = defaults.string(forKey: "offlineMap.deviceOperationID"),
               let id = UUID(uuidString: rawID) else { return nil }
-        return try? DeviceMapOperationStore.shared.records().first { $0.operationID == id }
+        return try? self.deviceMapOperationStore.records().first { $0.operationID == id }
     }
 
     private func recordDeviceOperationReceipt(_ receipt: DeviceMapOperationReceipt,
@@ -3971,7 +3972,7 @@ final class OfflineMapManager: ObservableObject {
               current.deviceID == bleManager.activeDeviceID,
               current.appNamespace == BackgroundMapUploadSessionNamespace.identifier(bundleIdentifier: Bundle.main.bundleIdentifier),
               current.wireOperationID == receipt.operationID else { return nil }
-        return try DeviceMapOperationStore.shared.ingest(receipt)
+        return try self.deviceMapOperationStore.ingest(receipt)
     }
 
     var canCancelCurrentMapOperation: Bool {
@@ -3988,7 +3989,7 @@ final class OfflineMapManager: ObservableObject {
         guard let current = currentDeviceMapOperation,
               current.deviceID == bleManager.activeDeviceID else { return }
         do {
-            let record = try DeviceMapOperationStore.shared.requestCancellation(operationID: current.operationID)
+            let record = try self.deviceMapOperationStore.requestCancellation(operationID: current.operationID)
             guard !record.isTerminal else { return }
             if record.lastReceipt?.phase == "accepted" {
                 statusMessage = "Device already accepted this map. Waiting for installation to finish."
@@ -4021,7 +4022,7 @@ final class OfflineMapManager: ObservableObject {
         guard record.isTerminal, record.acknowledgedAt == nil else { return }
         do {
             try await client.acknowledgeOperation(operationID: record.wireOperationID)
-            try DeviceMapOperationStore.shared.markAcknowledged(operationID: record.operationID)
+            try self.deviceMapOperationStore.markAcknowledged(operationID: record.operationID)
         } catch { /* Keep receipt and retry ACK on a later authenticated session. */ }
     }
 
@@ -4038,9 +4039,9 @@ final class OfflineMapManager: ObservableObject {
         try Task.checkCancellation()
         let requested: DeviceMapOperationRecord
         if action == .commit {
-            requested = try DeviceMapOperationStore.shared.requestCommit(operationID: current.operationID)
+            requested = try self.deviceMapOperationStore.requestCommit(operationID: current.operationID)
         } else {
-            requested = try DeviceMapOperationStore.shared.requestCancellation(operationID: current.operationID)
+            requested = try self.deviceMapOperationStore.requestCancellation(operationID: current.operationID)
             guard requested.nextControlAction == .cancel else { return requested }
         }
         do {
@@ -4067,7 +4068,7 @@ final class OfflineMapManager: ObservableObject {
         } catch {
             // Losing a POST response does not cancel accepted work. Preserve the
             // intent and re-query this same ID before another control request.
-            try DeviceMapOperationStore.shared.markControlResponseUnknown(operationID: requested.operationID)
+            try self.deviceMapOperationStore.markControlResponseUnknown(operationID: requested.operationID)
             return nil
         }
     }
@@ -4218,7 +4219,31 @@ final class OfflineMapManager: ObservableObject {
         return true
     }
 
+    private func restorePendingDurableTransfer(bleManager: BLEManager) {
+        guard let record = currentDeviceMapOperation,
+              record.usesDurableProtocol, !record.isTerminal,
+              record.deviceID == bleManager.activeDeviceID,
+              record.appNamespace == BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: Bundle.main.bundleIdentifier) else { return }
+        if lastTransferOutcome != "unconfirmed" || lastTransferMapId != record.mapID ||
+            defaults.string(forKey: OfflineMapDefaults.lastTransferSessionIdKey) != record.sessionID ||
+            defaults.string(forKey: OfflineMapDefaults.lastTransferArtifactFilenameKey) != record.artifactFilename {
+            // The durable journal owns recovery even when the display summary
+            // was left on an older map or settled by the legacy status path.
+            recordTransfer(mapId: record.mapID, sessionId: record.sessionID,
+                previousMapId: record.previousConfirmedSelection?.mapID,
+                previousSessionId: record.previousConfirmedSelection?.sessionID,
+                previousSequence: nil, outcome: "unconfirmed",
+                connectionEpoch: record.connectionEpoch, protocolVersion: 2,
+                streamFormatVersion: 1,
+                artifactURL: (try? cachedPackDirectory())?.appendingPathComponent(record.artifactFilename),
+                updateOperationRecord: false)
+        }
+        startActivationReconciliationMonitor(bleManager: bleManager)
+    }
+
     func reconcileLastTransfer(bleManager: BLEManager) {
+        restorePendingDurableTransfer(bleManager: bleManager)
         if lastTransferOutcome == "unconfirmed", reconcileDurableMapOperation(bleManager: bleManager) { return }
         guard bleManager.hasFreshMapTransferStatus else {
             lastTransferObservedIdleOnAnotherMap = false
@@ -4851,6 +4876,10 @@ final class OfflineMapManager: ObservableObject {
 
     func recordTransferObservationForTesting(connectionEpoch: UInt64) {
         lastTransferConnectionEpoch = connectionEpoch
+    }
+
+    func useMapOperationStoreForTesting(_ store: DeviceMapOperationStore) {
+        deviceMapOperationStore = store
     }
 #endif
 
@@ -5968,7 +5997,7 @@ final class OfflineMapManager: ObservableObject {
 
         var deviceOperation: DeviceMapOperationRecord?
         if let deviceID = bleManager.activeDeviceID, !deviceID.hasPrefix("legacy:") {
-            let existing = try DeviceMapOperationStore.shared.records().first {
+            let existing = try self.deviceMapOperationStore.records().first {
                 $0.deviceID == deviceID && $0.blocksNewTransfer(
                     connectionEpoch: bleManager.transferConnectionEpoch,
                     processID: DeviceMapOperationStore.observationProcessID)
@@ -6002,7 +6031,7 @@ final class OfflineMapManager: ObservableObject {
                 )
             }
             if let deviceOperation {
-                try DeviceMapOperationStore.shared.save(deviceOperation)
+                try self.deviceMapOperationStore.save(deviceOperation)
                 defaults.set(deviceOperation.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
                 if deviceOperation.usesDurableProtocol {
                     recordTransfer(mapId: expectedMapId, sessionId: sessionId,
@@ -6077,7 +6106,7 @@ final class OfflineMapManager: ObservableObject {
                 // ACK may have been impossible after the previous automatic AP
                 // exit. Retire only already-durable terminal results for this
                 // exact device once a fresh authenticated session is available.
-                for terminal in try DeviceMapOperationStore.shared.records().filter({
+                for terminal in try self.deviceMapOperationStore.records().filter({
                     $0.deviceID == originalDeviceID && $0.isTerminal && $0.usesDurableProtocol &&
                     $0.acknowledgedAt == nil && $0.lastReceipt != nil
                 }).prefix(32) {
@@ -6099,11 +6128,11 @@ final class OfflineMapManager: ObservableObject {
                             guard originalDeviceID == bleManager.activeDeviceID,
                                   originalEpoch == bleManager.transferConnectionEpoch,
                               bleManager.isCurrentMapTransferHTTPStatusContext(httpContext) else { throw CancellationError() }
-                            record = try DeviceMapOperationStore.shared.prepareReplayAfterUnavailable(
+                            record = try self.deviceMapOperationStore.prepareReplayAfterUnavailable(
                                 operationID: record.operationID, admission: admission
                             )
                         } else {
-                            guard let updated = try DeviceMapOperationStore.shared.ingest(receipt) else {
+                            guard let updated = try self.deviceMapOperationStore.ingest(receipt) else {
                                 throw OfflineMapPlatformError.invalidResponse
                             }
                             record = updated
@@ -6125,7 +6154,7 @@ final class OfflineMapManager: ObservableObject {
                             return
                         }
                         if record.lastReceipt?.phase == "receiving" {
-                            record = try DeviceMapOperationStore.shared.retireInterruptedTransport(operationID: record.operationID)
+                            record = try self.deviceMapOperationStore.retireInterruptedTransport(operationID: record.operationID)
                         }
                     }
                     record.usesDurableProtocol = record.usesDurableProtocol || initialDeviceStatus.mapOperationsV1 == true
@@ -6147,7 +6176,7 @@ final class OfflineMapManager: ObservableObject {
                         record.admissionEpoch = admission.admissionEpoch
                     }
                     record.observation = "in_progress"
-                    try DeviceMapOperationStore.shared.save(record)
+                    try self.deviceMapOperationStore.save(record)
                     deviceOperation = record
                 }
                 if let activation = initialDeviceStatus.activation,
@@ -6529,7 +6558,7 @@ final class OfflineMapManager: ObservableObject {
         }
         if let record, record.usesDurableProtocol, !record.isTerminal { return }
         if await deviceTransferManager.exitMapTransfer(bleManager: bleManager), let record {
-            try? DeviceMapOperationStore.shared.markCleanupComplete(operationID: record.operationID)
+            try? self.deviceMapOperationStore.markCleanupComplete(operationID: record.operationID)
         }
     }
 
@@ -6895,7 +6924,8 @@ final class OfflineMapManager: ObservableObject {
                                 connectionEpoch: UInt64?,
                                 protocolVersion: Int = 1,
                                 streamFormatVersion: Int? = nil,
-                                artifactURL: URL? = nil) {
+                                artifactURL: URL? = nil,
+                                updateOperationRecord: Bool = true) {
         lastTransferObservedIdleOnAnotherMap = false
         lastTransferConnectionEpoch = connectionEpoch
         lastTransferMapId = mapId
@@ -6934,7 +6964,7 @@ final class OfflineMapManager: ObservableObject {
             sessionID: sessionId,
             outcome: outcome
         )
-        updateLastTransferOutcome(outcome)
+        updateLastTransferOutcome(outcome, updateOperationRecord: updateOperationRecord)
     }
 
     private func previousConfirmedSelection(bleManager: BLEManager) -> DeviceMapConfirmedSelectionSnapshot? {
@@ -6975,10 +7005,10 @@ final class OfflineMapManager: ObservableObject {
               record.confirmLegacyTerminal(outcome: outcome, deviceID: deviceID,
                 connectionEpoch: bleManager.transferConnectionEpoch,
                 processID: DeviceMapOperationStore.observationProcessID) else { return }
-        try? DeviceMapOperationStore.shared.save(record)
+        try? self.deviceMapOperationStore.save(record)
     }
 
-    private func updateLastTransferOutcome(_ requestedOutcome: String) {
+    private func updateLastTransferOutcome(_ requestedOutcome: String, updateOperationRecord: Bool = true) {
         let outcome: String = {
             if defaults.string(forKey: "offlineMap.deviceOperationID") != nil,
                currentDeviceMapOperation == nil, ["installed", "failed"].contains(requestedOutcome) { return "unconfirmed" }
@@ -6988,14 +7018,14 @@ final class OfflineMapManager: ObservableObject {
             if requestedOutcome == "failed", !record.isTerminal { return "unconfirmed" }
             return requestedOutcome
         }()
-        if var record = currentDeviceMapOperation, record.mapID == lastTransferMapId {
+        if updateOperationRecord, var record = currentDeviceMapOperation, record.mapID == lastTransferMapId {
             if !record.usesDurableProtocol && ["installed", "failed"].contains(requestedOutcome) {
                 record.observation = requestedOutcome == "installed" ? "installed_confirmed" : "failed_or_rolled_back"
             } else if requestedOutcome == "unconfirmed", !record.isTerminal, record.lastReceipt?.phase != "accepted" {
                 record.observation = "result_unknown"
             }
             // Persistence failure cannot manufacture a successful durable result.
-            try? DeviceMapOperationStore.shared.save(record)
+            try? self.deviceMapOperationStore.save(record)
         }
         let changed = lastTransferOutcome != outcome
         lastTransferOutcome = outcome

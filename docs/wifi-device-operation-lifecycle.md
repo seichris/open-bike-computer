@@ -42,6 +42,14 @@ without the metadata/downgrade, resource and physical evidence below. Status
 advertises `mapOperationsV1: true` only when the feature and device-bound storage
 are ready. Absence/false means the conservative legacy contract above.
 
+An unresolved durable operation is recovered using its journaled map, session,
+artifact and operation identities, even if the last-transfer display summary
+still names another map or says `unknown`. Restoring that summary does not
+rewrite the operation record or its original observation binding. The client
+queries the exact operation and retains its cancellation/commit intent until a
+matching device receipt settles admission. Legacy history and another device's
+or app's journal cannot acquire this recovery path.
+
 An operation ID is a random 32-character lowercase hexadecimal UUID representation.
 It is separate from the existing signed content session ID. A client persists
 intent before entry and sends these additional signed-stream request headers:
