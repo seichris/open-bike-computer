@@ -3,6 +3,77 @@ import Foundation
 
 @main
 enum RideDiagnosticsHostTests {
+    static func oversizedAppSnapshotReportsCacheFull() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.record(category: .lifecycle, event: "snapshot_limit")
+        recorder.flush()
+        let capture = try require(recorder.currentCaptureID)
+        let original = try await recorder.appEvidenceSnapshot(captureID: capture)
+        let path = try require(original.keys.sorted().first)
+        let data = try require(original[path])
+        let directory = root.appendingPathComponent("app").appendingPathComponent(path).deletingLastPathComponent()
+        // Valid, original-capture chunks reach the request-count bound before
+        // the acquisition store or network can be entered.
+        for chunk in 1...257 {
+            try data.write(to: directory.appendingPathComponent(String(format: "events-%06d.jsonl", chunk)))
+        }
+        do {
+            _ = try await recorder.appEvidenceSnapshot(captureID: capture)
+            preconditionFailure("oversized app snapshot admitted")
+        } catch {
+            precondition((error as? DiagnosticsAcquisitionStore.Failure) == .storageFull)
+            precondition(DiagnosticsAcquisitionFailureReporting.code(for: error) == "cache_full")
+        }
+        let retained = try Data(contentsOf: root.appendingPathComponent("app").appendingPathComponent(path))
+        precondition(retained == data, "snapshot refusal must preserve original recorder evidence")
+    }
+
+    static func cacheAdmissionFailureIsRecorded() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root.appendingPathComponent("recorder"))
+        recorder.record(category: .lifecycle, event: "before_admission")
+        recorder.flush()
+        let capture = try require(recorder.currentCaptureID)
+        let store = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("cache"), maximumEvidenceBytes: 1)
+        let job = try await store.create(deviceDigest: "0123456789abcdef", captureID: capture)
+        let chunks = try await recorder.appEvidenceSnapshot(captureID: capture)
+        do {
+            try await store.retainAppEvidence(job.id, chunks: chunks)
+            preconditionFailure("original app evidence should exceed this cache")
+        } catch {
+            precondition((error as? DiagnosticsAcquisitionStore.Failure) == .storageFull)
+            // Use the same report as the coordinator before any transfer
+            // manager is entered. Actual recorder output must retain the code.
+            recorder.record(level: .warning, category: .transfer, event: "diagnostics_download_failed",
+                fields: DiagnosticsAcquisitionFailureReporting.fields(for: error, acquisitionID: job.id, phase: "app_evidence"))
+            try await store.interrupt(job.id, code: DiagnosticsAcquisitionFailureReporting.code(for: error))
+        }
+        recorder.flush()
+        let events = try require(FileManager.default.enumerator(at: root.appendingPathComponent("recorder/app"), includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "jsonl" }
+        let records = try events.flatMap { url in
+            try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+            }
+        }
+        let failure = try require(records.first { $0.event == "diagnostics_download_failed" })
+        precondition(failure.fields["code"] == "cache_full" && failure.fields["reason"] == "cache_full")
+        precondition(failure.fields["operationId"] == job.id.uuidString.lowercased())
+        precondition(failure.fields["phase"] == "app_evidence")
+        precondition(!failure.fields.values.contains { $0.contains(root.path) || $0.contains("http") })
+        let persisted = try await store.load(job.id)
+        precondition(persisted.failureCode == "cache_full" && persisted.indexData == nil && persisted.appEvidence == nil)
+        // Failure reporting must not consume or remove the original recorder
+        // history it failed to copy into the acquisition cache.
+        for (path, data) in chunks {
+            let original = try Data(contentsOf: root.appendingPathComponent("recorder/app").appendingPathComponent(path))
+            precondition(original == data)
+        }
+    }
+
     /// Exercise the real queue, not a source-string assertion. The v1 sequence
     /// remains storage order; emissionSequence and occurrence time identify ingress.
     static func occurrenceTimeSurvivesWriterDelay() throws {
@@ -143,6 +214,8 @@ enum RideDiagnosticsHostTests {
     }
 
     static func main() async throws {
+        try await oversizedAppSnapshotReportsCacheFull()
+        try await cacheAdmissionFailureIsRecorded()
         try await acquisitionSurvivesCaptureRetention()
         try occurrenceTimeSurvivesWriterDelay()
         precondition(RideDiagnosticsFieldPolicy.isAllowed("recorderReady"))

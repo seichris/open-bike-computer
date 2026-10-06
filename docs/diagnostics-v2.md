@@ -135,10 +135,17 @@ Verified acquisition chunks are stored before their receipts in a separate,
 deduplicated evidence cache (32 MiB total, 256 KiB per chunk, at most 20 jobs
 with 256 chunks each). This is additional to ordinary recorder retention.
 Completing a collection revalidates every retained body. Ordinary capture/age/
-byte pruning cannot remove these acquisition bytes. When the job journal evicts
-a completed or cancelled job, only cache files no remaining job references are
-removed; incomplete jobs are never evicted to admit another request. A full
-cache leaves the collection partial and preserves earlier verified bodies.
+byte pruning cannot remove these acquisition bytes. Admission evicts the oldest
+completed or cancelled jobs when either the job limit or the evidence byte/file
+limit requires space. Only cache files no remaining job references are removed;
+the current acquisition and all incomplete jobs are protected. App snapshots
+are admitted as a whole; firmware bodies are admitted individually as verified.
+Shared bodies count once, including prospective app-snapshot references. The
+store plans a feasible reclamation before eviction: if the request still cannot
+fit, even terminal receipts and bodies are left intact. A full cache leaves the
+collection partial with `failureCode=cache_full`, an explicit cache-full status
+and a privacy-safe `diagnostics_download_failed` event, including failures before
+network entry. Earlier verified bodies survive. Retrying requires user action.
 Restart and export rehash cached bytes. Export combines them with the recorder
 snapshot under their original device/boot/chunk paths, through the existing v1
 validator; it does not restore them into ordinary recorder retention. Receipts

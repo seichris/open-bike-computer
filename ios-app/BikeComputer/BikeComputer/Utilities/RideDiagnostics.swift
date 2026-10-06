@@ -1349,9 +1349,11 @@ final class RideDiagnosticsRecorder:
                         }
                         let data = try Data(contentsOf: file)
                         bytes += data.count
-                        guard !data.isEmpty, data.count <= 256 * 1024,
-                              result.count < 256, bytes <= DiagnosticsAcquisitionEvidencePolicy.maximumBytes else {
-                            throw RideDiagnosticsError.unavailable("App evidence exceeds its storage bound.")
+                        guard !data.isEmpty, data.count <= 256 * 1024 else {
+                            throw RideDiagnosticsError.unavailable("Invalid app evidence chunk size.")
+                        }
+                        guard result.count < 256, bytes <= DiagnosticsAcquisitionEvidencePolicy.maximumBytes else {
+                            throw DiagnosticsAcquisitionStore.Failure.storageFull
                         }
                         result[path] = data
                     }

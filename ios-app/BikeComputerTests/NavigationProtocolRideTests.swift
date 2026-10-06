@@ -5126,6 +5126,40 @@ extension NavigationProtocolTests {
         } catch {
             assert(false, "end-to-end diagnostics succeeds: \(error)")
         }
+
+        // Reuse the authenticated fixture with a cache too small for the body.
+        // The real download path must preserve its inventory, clean up its
+        // session, and record a specific cache failure rather than unknown.
+        let store = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("cache"),
+            maximumEvidenceBytes: stream.count - 1)
+        do {
+            let job = try await store.create(deviceDigest: recorder.deviceDigest(
+                for: "01234567-89ab-cdef-0123-456789abcdef"), captureID: nil)
+            do {
+                _ = try await manager.downloadDeviceLogs(bleManager: bleManager, recorder: recorder,
+                    acquisitionStore: store, acquisitionID: job.id, status: { _ in })
+                assert(false, "oversized firmware cache admission must fail")
+            } catch DiagnosticsAcquisitionStore.Failure.storageFull {
+                let manifest = try await store.load(job.id)
+                assertEqual(manifest.expected.count, 1, "cache failure preserves the frozen firmware inventory")
+                assert(manifest.verified.isEmpty, "failed cache admission cannot claim verified delivery")
+                assertEqual(sessionController.exitCount, 2, "cache failure still cleans up the entered session")
+                recorder.flush()
+                let capture = recorder.currentCaptureID!
+                let chunks = try await recorder.appEvidenceSnapshot(captureID: capture)
+                let records = chunks.values.flatMap { data in
+                    data.split(separator: 10).compactMap {
+                        try? JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0))
+                    }
+                }
+                let failure = records.last { $0.event == "diagnostics_download_failed" }
+                assertEqual(failure?.fields["code"], "cache_full", "download reports the specific cache error")
+                assertEqual(failure?.fields["reason"], "cache_full", "cache pressure has a specific failure reason")
+                assert(failure?.fields["sessionToken"] == nil, "failure events cannot contain transfer credentials")
+            }
+        } catch {
+            assert(false, "cache failure fixture and reporting succeed: \(error)")
+        }
     }
 
     static func testDeviceTransferManagerWaitsForFreshDebugToken() async {

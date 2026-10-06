@@ -416,9 +416,11 @@ final class DeviceDiagnosticsTransferManager {
             }
         } else if error is CancellationError {
             code = "cancelled"
+        } else if (error as? DiagnosticsAcquisitionStore.Failure) == .storageFull {
+            code = DiagnosticsAcquisitionFailureReporting.code(for: error)
         }
         return [
-            "reason": enteredSession ? "transfer_failed" : "entry_failed",
+            "reason": code == "cache_full" ? code : (enteredSession ? "transfer_failed" : "entry_failed"),
             "code": code,
             "mode": DeviceTransferSession.Mode.diagnostics.rawValue,
         ]

@@ -54,7 +54,11 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
             guard let self else { return }
             do {
                 manifest = try await store.manifests().first(where: { $0.phase.canResumeAutomatically })
-                if manifest != nil { status = "Interrupted collection retained; waiting for the original device." }
+                if manifest?.failureCode == "cache_full" {
+                    status = DiagnosticsAcquisitionFailureReporting.status(for: DiagnosticsAcquisitionStore.Failure.storageFull)
+                } else if manifest != nil {
+                    status = "Interrupted collection retained; waiting for the original device."
+                }
                 restoreFinished = true
                 resumeIfPossible()
             } catch {
@@ -124,10 +128,13 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
             await preceding?.value
             guard let self else { return }
             defer { if rideJournalGeneration == generation { rideJournalTask = nil } }
+            var savedRequestID: UUID?
             do {
                 for context in contexts {
+                    savedRequestID = nil
                     _ = try await store.create(deviceDigest: context.deviceDigest,
                         captureID: context.captureID, id: context.requestID, origin: .postRide)
+                    savedRequestID = context.requestID
                     if let recorder {
                         let chunks = try await recorder.appEvidenceSnapshot(captureID: context.captureID)
                         try await store.retainAppEvidence(context.requestID, chunks: chunks)
@@ -141,7 +148,21 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                 automaticRetryAllowed = true
                 if automaticPostRideCollection { resumeIfPossible() }
             } catch {
-                status = "Post-ride request could not be saved. Retained logs were left unchanged; collect manually."
+                let failure = error
+                if let savedRequestID {
+                    do {
+                        try await store.interrupt(savedRequestID,
+                            code: DiagnosticsAcquisitionFailureReporting.code(for: failure))
+                    } catch {
+                        status = "Collection journal write failed; completeness is unknown."
+                        automaticRetryAllowed = false
+                        return
+                    }
+                }
+                recorder?.record(level: .warning, category: .transfer, event: "diagnostics_download_failed",
+                    fields: DiagnosticsAcquisitionFailureReporting.fields(for: failure,
+                        acquisitionID: savedRequestID, phase: savedRequestID == nil ? "request" : "app_evidence"))
+                status = DiagnosticsAcquisitionFailureReporting.status(for: failure)
             }
         }
     }
@@ -211,11 +232,15 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                 // cancellation guards still prevent an error retry loop.
                 resumeIfPossible()
             }
+            var acquisitionID: UUID?
+            var failurePhase = "request"
             do {
                 if manifest == nil || manifest?.deliveryComplete == true || newCutoff {
                     manifest = try await store.create(deviceDigest: digest, captureID: recorder.currentCaptureID)
                 }
                 guard let id = manifest?.id else { return }
+                acquisitionID = id
+                failurePhase = "app_evidence"
                 if manifest?.appEvidence == nil, let capture = manifest?.captureID {
                     let chunks = try await recorder.appEvidenceSnapshot(captureID: capture)
                     try await store.retainAppEvidence(id, chunks: chunks)
@@ -226,6 +251,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                       bleManager.isNavigationReady else {
                     throw RideDiagnosticsError.unavailable("Collection conditions changed while saving capture evidence.")
                 }
+                failurePhase = "device_download"
                 _ = try await DeviceDiagnosticsTransferManager().downloadDeviceLogs(
                     bleManager: bleManager, recorder: recorder,
                     acquisitionStore: store, acquisitionID: id,
@@ -234,10 +260,17 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                 automaticRetryAllowed = true
                 status = "Device evidence verified for the saved cutoff. Export the support bundle for Codex."
             } catch {
-                if let id = manifest?.id {
+                let failure = error
+                if failurePhase != "device_download" {
+                    recorder.record(level: .warning, category: .transfer, event: "diagnostics_download_failed",
+                        fields: DiagnosticsAcquisitionFailureReporting.fields(for: failure,
+                            acquisitionID: acquisitionID, phase: failurePhase))
+                }
+                if let id = acquisitionID {
                     do {
                         try await store.interrupt(id, cancelled: Task.isCancelled && userCancelled,
-                            code: Task.isCancelled ? (userCancelled ? "cancelled" : "ride_started") : "transfer_failed")
+                            code: Task.isCancelled ? (userCancelled ? "cancelled" : "ride_started")
+                                : DiagnosticsAcquisitionFailureReporting.code(for: failure))
                         manifest = try await store.load(id)
                     } catch {
                         status = "Collection journal write failed; completeness is unknown."
@@ -246,8 +279,9 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                     }
                 }
                 status = manifest?.deliveryComplete == true
+                    && DiagnosticsAcquisitionFailureReporting.code(for: failure) != "cache_full"
                     ? "Evidence was verified, but transfer cleanup needs attention. Reconnect before another operation."
-                    : "Partial evidence retained. Resume with the original device: \(error.localizedDescription)"
+                    : DiagnosticsAcquisitionFailureReporting.status(for: failure)
                 // A ride interruption is resumable when riding stops; an
                 // explicit cancellation or transport error requires user retry.
                 automaticRetryAllowed = Task.isCancelled && !userCancelled

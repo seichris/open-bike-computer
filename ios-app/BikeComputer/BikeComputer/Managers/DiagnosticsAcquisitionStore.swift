@@ -7,6 +7,29 @@ nonisolated enum DiagnosticsAcquisitionEvidencePolicy {
     static let maximumBytes = 32 * 1024 * 1024
 }
 
+/// One failure vocabulary for journal receipts, UI and privacy-safe events,
+/// including admission errors raised before a network transfer starts.
+nonisolated enum DiagnosticsAcquisitionFailureReporting {
+    static func code(for error: Error) -> String {
+        (error as? DiagnosticsAcquisitionStore.Failure) == .storageFull ? "cache_full" : "transfer_failed"
+    }
+
+    static func status(for error: Error) -> String {
+        if (error as? DiagnosticsAcquisitionStore.Failure) == .storageFull {
+            return error.localizedDescription
+        }
+        return "Partial evidence retained. Resume with the original device: \(error.localizedDescription)"
+    }
+
+    static func fields(for error: Error, acquisitionID: UUID?, phase: String) -> [String: String] {
+        let code = code(for: error)
+        var fields = ["reason": code, "code": code, "phase": phase]
+        if let acquisitionID { fields["operationId"] = acquisitionID.uuidString.lowercased() }
+        // Never include error descriptions, cache paths or source identities.
+        return fields
+    }
+}
+
 nonisolated struct DiagnosticsChunkReceipt: Codable, Equatable, Sendable {
     let bootSequence: UInt32
     let chunk: UInt32
@@ -81,7 +104,19 @@ nonisolated struct DiagnosticsAcquisitionManifest: Codable, Equatable, Sendable 
 /// tokens, SSIDs, URLs or BLE identifiers. Atomic replacement supports process
 /// recovery; physical power durability is not claimed by this store.
 actor DiagnosticsAcquisitionStore {
-    enum Failure: Error { case invalidManifest, inventoryChanged, notFound, storageFull }
+    enum Failure: LocalizedError, Equatable {
+        case invalidManifest, inventoryChanged, notFound, storageFull
+
+        var errorDescription: String? {
+            switch self {
+            case .storageFull:
+                return "Diagnostics cache is full (32 MiB limit). This collection could not retain more evidence. Incomplete collections and their saved evidence were preserved."
+            case .invalidManifest: return "Retained diagnostics evidence could not be validated."
+            case .inventoryChanged: return "Diagnostics evidence does not match the saved collection."
+            case .notFound: return "The saved diagnostics collection could not be found."
+            }
+        }
+    }
     private let root: URL
     private let maximumJobs = 20
     private let maximumManifestBytes = 256 * 1024
@@ -187,7 +222,9 @@ actor DiagnosticsAcquisitionStore {
                 throw Failure.invalidManifest
             }
             return try load(id)
-        }.sorted { $0.createdAt < $1.createdAt }
+        }.sorted {
+            $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
+        }
     }
 
     func create(deviceDigest: String, captureID: UUID?, id: UUID = UUID(),
@@ -267,14 +304,60 @@ actor DiagnosticsAcquisitionStore {
         return files
     }
 
-    private func pruneUnreferencedEvidence() throws {
-        let referenced = Set(try manifests().flatMap { value in
-            value.expected.map { evidenceName(device: value.deviceDigest, receipt: $0) } +
-                (value.appEvidence ?? []).map { "app-\($0.sha256).jsonl" }
-        })
+    private func evidenceNames(_ value: DiagnosticsAcquisitionManifest) -> Set<String> {
+        Set(value.expected.map { evidenceName(device: value.deviceDigest, receipt: $0) } +
+            (value.appEvidence ?? []).map { "app-\($0.sha256).jsonl" })
+    }
+
+    private func pruneUnreferencedEvidence(preserving incoming: Set<String> = []) throws {
+        let referenced = Set(try manifests().flatMap { evidenceNames($0) }).union(incoming)
         for file in try evidenceFiles() where !referenced.contains(file.lastPathComponent) {
             try FileManager.default.removeItem(at: file)
         }
+    }
+
+    /// Plan the entire admission before deleting anything. Count unique cached
+    /// bodies, not receipt bytes: app and firmware bodies may be shared by jobs.
+    /// Missing expected firmware chunks remain references but consume no bytes
+    /// until downloaded. No incomplete job (or the caller) is an eviction victim.
+    private func admitEvidence(_ incoming: [String: Int], protecting id: UUID) throws {
+        let entries = try manifests()
+        var sizes: [String: Int] = [:]
+        for file in try evidenceFiles() {
+            sizes[file.lastPathComponent] = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        }
+        sizes.merge(incoming) { _, requested in requested }
+        var references: [String: Int] = [:]
+        for entry in entries {
+            for name in evidenceNames(entry) { references[name, default: 0] += 1 }
+        }
+        // Preserve prospective references even if their last old owner is
+        // evicted before the new app-evidence receipt is atomically published.
+        for name in incoming.keys { references[name, default: 0] += 1 }
+        var bytes = 0, files = 0
+        for (name, size) in sizes where references[name, default: 0] > 0 {
+            bytes += size
+            files += 1
+        }
+        var victims: [UUID] = []
+        for entry in entries where entry.id != id && (entry.phase == .complete || entry.phase == .cancelled) {
+            if bytes <= maximumEvidenceBytes && files <= maximumJobs * 256 { break }
+            victims.append(entry.id)
+            for name in evidenceNames(entry) {
+                references[name, default: 0] -= 1
+                if references[name] == 0, let size = sizes[name] {
+                    bytes -= size
+                    files -= 1
+                }
+            }
+        }
+        // Oversized requests or protected/shared bytes can make reclamation
+        // impossible. Leave even terminal receipts intact in that case.
+        guard bytes <= maximumEvidenceBytes, files <= maximumJobs * 256 else { throw Failure.storageFull }
+        for victim in victims { try FileManager.default.removeItem(at: path(victim)) }
+        // Receipt removal precedes body removal: process loss cannot leave a
+        // surviving job claiming a body that this retention pass removed.
+        try pruneUnreferencedEvidence(preserving: Set(incoming.keys))
     }
 
     /// Copy immutable, already-recorded iOS chunks into the same bounded cache
@@ -313,18 +396,9 @@ actor DiagnosticsAcquisitionStore {
             receipts.append(.init(path: path, bytes: data.count,
                 sha256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()))
         }
-        try pruneUnreferencedEvidence()
-        let files = try evidenceFiles()
-        let retained = try files.reduce(0) { $0 + (try $1.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) }
-        var newBytes = 0
-        var newNames: Set<String> = []
-        for receipt in receipts {
-            let name = "app-\(receipt.sha256).jsonl"
-            if !FileManager.default.fileExists(atPath: evidenceRoot.appendingPathComponent(name).path),
-               newNames.insert(name).inserted { newBytes += receipt.bytes }
-        }
-        guard retained + newBytes <= maximumEvidenceBytes,
-              files.count + newNames.count <= maximumJobs * 256 else { throw Failure.storageFull }
+        let incoming = Dictionary(receipts.map { ("app-\($0.sha256).jsonl", $0.bytes) },
+            uniquingKeysWith: { first, _ in first })
+        try admitEvidence(incoming, protecting: id)
         for receipt in receipts {
             let url = evidenceRoot.appendingPathComponent("app-\(receipt.sha256).jsonl")
             try chunks[receipt.path]!.write(to: url, options: .atomic)
@@ -371,15 +445,9 @@ actor DiagnosticsAcquisitionStore {
         guard matches(data, receipt: receipt) else { throw Failure.invalidManifest }
         // Persist exact bytes before publishing a receipt. Ordinary v1 capture
         // retention has no ownership of this bounded, deduplicated store.
-        try pruneUnreferencedEvidence()
-        let url = evidenceRoot.appendingPathComponent(evidenceName(device: value.deviceDigest, receipt: receipt))
-        let files = try evidenceFiles()
-        let retainedBytes = try files.reduce(0) { total, file in
-            total + (try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
-        }
-        let replacedBytes = FileManager.default.fileExists(atPath: url.path)
-            ? (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) : 0
-        guard retainedBytes - replacedBytes + data.count <= maximumEvidenceBytes else { throw Failure.storageFull }
+        let name = evidenceName(device: value.deviceDigest, receipt: receipt)
+        try admitEvidence([name: data.count], protecting: id)
+        let url = evidenceRoot.appendingPathComponent(name)
         try data.write(to: url, options: .atomic)
         #if os(iOS)
         try FileManager.default.setAttributes(

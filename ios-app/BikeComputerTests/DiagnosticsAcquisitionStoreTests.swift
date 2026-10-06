@@ -2,6 +2,201 @@ import CryptoKit
 import Foundation
 
 @main enum DiagnosticsAcquisitionStoreTests {
+    static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func receipt(_ data: Data, chunk: UInt32 = 1) -> DiagnosticsChunkReceipt {
+        .init(bootSequence: 1, chunk: chunk, bytes: data.count, sha256: digest(data))
+    }
+
+    static func firmwareJob(_ store: DiagnosticsAcquisitionStore, data: Data,
+                            phase: DiagnosticsAcquisitionManifest.Phase) async throws -> UUID {
+        let job = try await store.create(deviceDigest: "0123456789abcdef", captureID: nil)
+        let item = receipt(data)
+        _ = try await store.inventory(job.id, deviceDigest: job.deviceDigest, index: Data(), chunks: [item])
+        try await store.verified(job.id, receipt: item, data: data)
+        if phase == .complete { try await store.finish(job.id) }
+        if phase == .partial || phase == .cancelled {
+            try await store.interrupt(job.id, cancelled: phase == .cancelled)
+        }
+        return job.id
+    }
+
+    static func cacheSnapshot(_ root: URL) throws -> [String: Data] {
+        let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey])!
+        var result: [String: Data] = [:]
+        for case let file as URL in files where try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+            result[String(file.path.dropFirst(root.path.count))] = try Data(contentsOf: file)
+        }
+        return result
+    }
+
+    static func bytePressureTests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = DiagnosticsAcquisitionStore(root: root, maximumEvidenceBytes: 110)
+        let oldComplete = try await firmwareJob(store, data: Data(repeating: 1, count: 30), phase: .complete)
+        let oldCancelled = try await firmwareJob(store, data: Data(repeating: 2, count: 20), phase: .cancelled)
+        let youngerComplete = try await firmwareJob(store, data: Data(repeating: 8, count: 10), phase: .complete)
+        let partialBytes = Data(repeating: 3, count: 20)
+        let partial = try await firmwareJob(store, data: partialBytes, phase: .partial)
+        let active = try await store.create(deviceDigest: "0123456789abcdef", captureID: nil)
+        let first = Data(repeating: 4, count: 30), second = Data(repeating: 5, count: 40)
+        _ = try await store.inventory(active.id, deviceDigest: active.deviceDigest, index: Data(),
+            chunks: [receipt(first), receipt(second, chunk: 2)])
+        try await store.verified(active.id, receipt: receipt(first), data: first)
+        let before = try await store.manifests()
+        precondition(before.count == 5, "reproduce byte pressure well below the 20-job limit")
+        try await store.verified(active.id, receipt: receipt(second, chunk: 2), data: second)
+        let restarted = DiagnosticsAcquisitionStore(root: root, maximumEvidenceBytes: 110)
+        let remaining = try await restarted.manifests()
+        precondition(Set(remaining.map(\.id)) == Set([youngerComplete, partial, active.id]),
+            "reclaim oldest terminal jobs while preserving partial and collecting jobs")
+        precondition(!FileManager.default.fileExists(atPath: root.appendingPathComponent(oldComplete.uuidString.lowercased() + ".json").path))
+        precondition(!FileManager.default.fileExists(atPath: root.appendingPathComponent(oldCancelled.uuidString.lowercased() + ".json").path))
+        let retainedPartial = try await restarted.chunkData(partial, receipt: receipt(partialBytes))
+        let retainedFirst = try await restarted.chunkData(active.id, receipt: receipt(first))
+        precondition(retainedPartial == partialBytes && retainedFirst == first,
+            "eviction cannot discard an incomplete job's already verified prefix")
+        try await restarted.finish(active.id)
+        let exported = try await restarted.exportSnapshot()
+        precondition(exported.chunks.values.reduce(0) { $0 + $1.count } == 100,
+            "stop reclamation as soon as the request fits; preserve younger terminal jobs")
+
+        // A completed body shared only by terminal jobs frees zero bytes when
+        // the first reference is evicted; both owners must go to admit 60 bytes.
+        let sharedRoot = root.appendingPathComponent("shared")
+        let sharedStore = DiagnosticsAcquisitionStore(root: sharedRoot, maximumEvidenceBytes: 100)
+        let shared = Data(repeating: 6, count: 50)
+        _ = try await firmwareJob(sharedStore, data: shared, phase: .complete)
+        _ = try await firmwareJob(sharedStore, data: shared, phase: .complete)
+        let newer = try await firmwareJob(sharedStore, data: Data(repeating: 7, count: 60), phase: .complete)
+        let sharedRemaining = try await sharedStore.manifests()
+        let sharedExport = try await sharedStore.exportSnapshot()
+        precondition(sharedRemaining.map(\.id) == [newer] && sharedExport.chunks.count == 1,
+            "shared firmware evidence is reclaimed only after its last owner")
+    }
+
+    static func appPressureAndOversizeTests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let capture = UUID(), process = UUID().uuidString.lowercased()
+        func app(_ chunk: Int) -> (String, Data) {
+            (String(format: "%@/events-%06d.jsonl", process, chunk),
+             Data("{\"source\":\"ios\",\"processId\":\"\(process)\",\"captureId\":\"\(capture.uuidString.lowercased())\",\"sequence\":\(chunk)}\n".utf8))
+        }
+        let (sharedPath, shared) = app(1), (oldPath, old) = app(2), (newPath, new) = app(3)
+        let limit = shared.count + new.count
+        let store = DiagnosticsAcquisitionStore(root: root, maximumEvidenceBytes: limit)
+        func appJob(_ chunks: [String: Data], complete: Bool) async throws -> UUID {
+            let job = try await store.create(deviceDigest: "0123456789abcdef", captureID: capture)
+            try await store.retainAppEvidence(job.id, chunks: chunks)
+            if complete {
+                _ = try await store.inventory(job.id, deviceDigest: job.deviceDigest, index: Data(), chunks: [])
+                try await store.finish(job.id)
+            }
+            return job.id
+        }
+        let oldest = try await appJob([sharedPath: shared], complete: true)
+        let second = try await appJob([oldPath: old], complete: true)
+        let requested = try await appJob([sharedPath: shared], complete: false)
+        let incoming = try await store.create(deviceDigest: "0123456789abcdef", captureID: capture)
+        try await store.retainAppEvidence(incoming.id, chunks: [sharedPath: shared, newPath: new])
+        let restarted = DiagnosticsAcquisitionStore(root: root, maximumEvidenceBytes: limit)
+        let remaining = try await restarted.manifests()
+        precondition(Set(remaining.map(\.id)) == Set([requested, incoming.id]),
+            "app admission protects requested jobs and cannot count a shared body as reclaimed")
+        precondition(!remaining.contains { $0.id == oldest || $0.id == second })
+        let snapshot = try await restarted.exportSnapshot()
+        precondition(snapshot.appChunks == [sharedPath: shared, newPath: new])
+        precondition(snapshot.appChunks.values.reduce(0) { $0 + $1.count } == limit,
+            "admission at the exact byte bound succeeds without double counting shared bodies")
+
+        // One batch cannot fit even in an empty cache. No terminal receipts or
+        // evidence may be discarded on this rejected admission.
+        try await restarted.interrupt(requested, cancelled: true)
+        let oversized = try await restarted.create(deviceDigest: "0123456789abcdef", captureID: capture)
+        let before = try cacheSnapshot(root)
+        do {
+            try await restarted.retainAppEvidence(oversized.id,
+                chunks: [sharedPath: shared, oldPath: old, newPath: new])
+            fatalError("oversized app snapshot admitted")
+        } catch DiagnosticsAcquisitionStore.Failure.storageFull {}
+        let after = try cacheSnapshot(root)
+        precondition(after == before, "oversized batch admission must be non-destructive")
+        let oversizedReceipt = try await restarted.load(oversized.id)
+        precondition(oversizedReceipt.appEvidence == nil, "failed batch must not publish partial app receipts")
+
+        // The incoming snapshot can be the only remaining reference to a
+        // shared body after its completed owner is evicted during admission.
+        let prospectiveRoot = root.appendingPathComponent("prospective")
+        let prospectiveStore = DiagnosticsAcquisitionStore(root: prospectiveRoot, maximumEvidenceBytes: limit)
+        for (path, bytes) in [(sharedPath, shared), (oldPath, old)] {
+            let owner = try await prospectiveStore.create(deviceDigest: "0123456789abcdef", captureID: capture)
+            try await prospectiveStore.retainAppEvidence(owner.id, chunks: [path: bytes])
+            _ = try await prospectiveStore.inventory(owner.id, deviceDigest: owner.deviceDigest, index: Data(), chunks: [])
+            try await prospectiveStore.finish(owner.id)
+        }
+        let prospective = try await prospectiveStore.create(deviceDigest: "0123456789abcdef", captureID: capture)
+        try await prospectiveStore.retainAppEvidence(prospective.id, chunks: [sharedPath: shared, newPath: new])
+        let prospectiveEntries = try await prospectiveStore.manifests()
+        let prospectiveSnapshot = try await prospectiveStore.exportSnapshot()
+        precondition(prospectiveEntries.map(\.id) == [prospective.id])
+        precondition(prospectiveSnapshot.appChunks == [sharedPath: shared, newPath: new])
+    }
+
+    static func protectedPressureAndReportingTests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = DiagnosticsAcquisitionStore(root: root, maximumEvidenceBytes: 100)
+        let shared = Data(repeating: 1, count: 50)
+        let terminal = try await firmwareJob(store, data: shared, phase: .complete)
+        let incomplete = try await firmwareJob(store, data: shared, phase: .partial)
+        let active = try await store.create(deviceDigest: "0123456789abcdef", captureID: nil)
+        let incoming = Data(repeating: 2, count: 60)
+        _ = try await store.inventory(active.id, deviceDigest: active.deviceDigest, index: Data(), chunks: [receipt(incoming)])
+        let before = try cacheSnapshot(root)
+        do {
+            try await store.verified(active.id, receipt: receipt(incoming), data: incoming)
+            fatalError("eviction stole evidence shared with an incomplete acquisition")
+        } catch {
+            precondition((error as? DiagnosticsAcquisitionStore.Failure) == .storageFull)
+            let after = try cacheSnapshot(root)
+            precondition(after == before,
+                "infeasible admission must preserve terminal jobs as well as incomplete jobs")
+            let status = DiagnosticsAcquisitionFailureReporting.status(for: error)
+            precondition(status.contains("cache is full") && status.contains("32 MiB") && status.contains("preserved"))
+            let fields = DiagnosticsAcquisitionFailureReporting.fields(for: error, acquisitionID: active.id, phase: "device_download")
+            precondition(fields == ["code": "cache_full", "reason": "cache_full", "phase": "device_download",
+                "operationId": active.id.uuidString.lowercased()])
+            try await store.interrupt(active.id, code: DiagnosticsAcquisitionFailureReporting.code(for: error))
+        }
+        let restarted = DiagnosticsAcquisitionStore(root: root, maximumEvidenceBytes: 100)
+        let failed = try await restarted.load(active.id)
+        let remaining = try await restarted.manifests()
+        precondition(failed.phase == .partial && failed.failureCode == "cache_full" && failed.verified.isEmpty)
+        precondition(!failed.canResumeAutomatically(postRideEnabled: true), "cache failure cannot create a reconnect retry storm")
+        precondition(Set(remaining.map(\.id)) == Set([terminal, incomplete, active.id]))
+        let retained = try await restarted.chunkData(incomplete, receipt: receipt(shared))
+        precondition(retained == shared)
+
+        let oversized = try await restarted.create(deviceDigest: active.deviceDigest, captureID: nil)
+        let tooLarge = Data(repeating: 3, count: 101)
+        _ = try await restarted.inventory(oversized.id, deviceDigest: active.deviceDigest, index: Data(), chunks: [receipt(tooLarge)])
+        let beforeOversize = try cacheSnapshot(root)
+        do {
+            try await restarted.verified(oversized.id, receipt: receipt(tooLarge), data: tooLarge)
+            fatalError("oversized firmware body admitted")
+        } catch DiagnosticsAcquisitionStore.Failure.storageFull {}
+        let afterOversize = try cacheSnapshot(root)
+        precondition(afterOversize == beforeOversize)
+        let privateError = NSError(domain: "https://private.example/token", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "private password or cache path"])
+        let safe = DiagnosticsAcquisitionFailureReporting.fields(for: privateError, acquisitionID: nil, phase: "request")
+        precondition(safe == ["code": "transfer_failed", "reason": "transfer_failed", "phase": "request"])
+    }
+
     static func appEvidenceTests() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -50,6 +245,9 @@ import Foundation
             "evicting the last reference must prune orphaned app evidence")
     }
     static func main() async throws {
+        try await bytePressureTests()
+        try await appPressureAndOversizeTests()
+        try await protectedPressureAndReportingTests()
         try await appEvidenceTests()
         for phase in [DiagnosticsAcquisitionManifest.Phase.requested, .collecting, .partial] {
             precondition(phase.canResumeAutomatically)
@@ -87,7 +285,7 @@ import Foundation
         var eligibility = initial
         for origin in [DiagnosticsAcquisitionManifest.Origin.manual, .postRide] {
             eligibility.origin = origin
-            let failures: [String?] = [nil, "transfer_failed", "wifi_memory", "diagnostics_seal_timeout", "cancelled"]
+            let failures: [String?] = [nil, "transfer_failed", "cache_full", "wifi_memory", "diagnostics_seal_timeout", "cancelled"]
             for code in failures {
                 eligibility.failureCode = code
                 precondition(!eligibility.canResumeAutomatically(postRideEnabled: true), "another successful job cannot reopen a failed partial job")
