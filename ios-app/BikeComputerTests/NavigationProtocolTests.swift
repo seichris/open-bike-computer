@@ -771,6 +771,7 @@ struct NavigationProtocolTests {
         if CommandLine.arguments.contains("--map-operation-recovery-only") {
             testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary()
             await testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit()
+            await testOfflineMapManagerCancelsUnusedIncompatibleMapAdmission()
             print("Map operation recovery regression passed")
             return
         }
@@ -1012,6 +1013,7 @@ struct NavigationProtocolTests {
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary()
         await testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit()
+        await testOfflineMapManagerCancelsUnusedIncompatibleMapAdmission()
         testOfflineMapManagerResendsUnobservedLegacyResult()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()

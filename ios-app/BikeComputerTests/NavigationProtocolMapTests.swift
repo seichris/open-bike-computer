@@ -4078,6 +4078,105 @@ extension NavigationProtocolTests {
     }
 
     @MainActor
+    static func testOfflineMapManagerCancelsUnusedIncompatibleMapAdmission() async {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for scenario in ["cancelled", "response-lost", "wrong-receipt", "response-context-changed", "device-changed",
+                         "selected-mismatch", "context-changed", "prior-upload", "prior-commit", "foreign-app", "write-failed"] {
+            let suite = "incompatible-map-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let namespace = BackgroundMapUploadSessionNamespace.identifier(bundleIdentifier: Bundle.main.bundleIdentifier)
+            let fixture = DeviceMapOperationRecord(schemaVersion: 1,
+                deviceID: String(repeating: "a", count: 32), operationID: UUID(), sessionID: "session", mapID: "map",
+                manifestReceipt: String(repeating: "b", count: 64), signedManifestReceipt: String(repeating: "c", count: 64),
+                streamSHA256: String(repeating: "d", count: 64), streamBytes: 123, artifactFilename: "map.bmap",
+                appNamespace: scenario == "foreign-app" ? "other-app" : namespace, createdAt: Date(), connectionEpoch: 2,
+                observation: "in_progress", cleanup: "pending", usesDurableProtocol: true, lastReceipt: nil,
+                admissionEpoch: String(repeating: "e", count: 32), admissionRevision: 42,
+                uploadAttemptID: scenario == "prior-upload" ? UUID() : nil,
+                observationProcessID: DeviceMapOperationStore.observationProcessID,
+                commitRequestedAt: scenario == "prior-commit" ? Date() : nil)
+            let url = directory.appendingPathComponent("\(scenario)/operations.json")
+            try! DeviceMapOperationStore(url: url).save(fixture)
+            let store = scenario == "write-failed" ? DeviceMapOperationStore(url: url, atomicWriter: { _, _ in
+                throw DeviceMapOperationStore.StoreError.invalidStore
+            }) : DeviceMapOperationStore(url: url)
+            defaults.set(fixture.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            let manager = OfflineMapManager(defaults: defaults, cacheDirectory: directory.appendingPathComponent("\(scenario)/cache"))
+            manager.useMapOperationStoreForTesting(store)
+            let ble = MapOperationRecoveryTestBLEManager()
+            ble.recoveryDeviceID = fixture.deviceID
+            ble.setConnectedDeviceIDForTesting(fixture.deviceID)
+            ble.recoveryEpoch = 2
+            ble.isConnected = true
+            ble.isNavigationReady = true
+            ble.deviceTransferSessionToken = "test-token"
+            ble.deviceTransferMode = "map"
+            if scenario == "selected-mismatch" { ble.recoveryDeviceID = "other-device" }
+            let context = ble.captureMapTransferHTTPStatusContext()!
+            if scenario == "device-changed" { ble.recoveryDeviceID = "other-device" }
+            if scenario == "context-changed" { ble.recoveryEpoch += 1 }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel(); FirmwareRequestCaptureProtocol.handler = nil }
+            var paths: [String] = []
+            FirmwareRequestCaptureProtocol.handler = { request, _ in
+                paths.append(request.url!.lastPathComponent)
+                assertEqual(request.httpMethod, "POST", "rejection never uploads a stream or sends commit")
+                if request.url!.lastPathComponent == "acknowledge" {
+                    return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
+                }
+                assertEqual(request.url!.lastPathComponent, "cancel", "only explicit cancellation releases an unused admission")
+                assertEqual(request.value(forHTTPHeaderField: "X-Map-Operation-ID"), fixture.wireOperationID, "cancel preserves exact operation")
+                assertEqual(request.value(forHTTPHeaderField: "X-Map-Operation-Admission-Epoch"), fixture.admissionEpoch, "cancel preserves original epoch")
+                let persisted = try! store.records()[0]
+                assert(persisted.cancellationRequestedAt != nil, "intent is durable before POST")
+                if scenario == "response-lost" { throw URLError(.networkConnectionLost) }
+                if scenario == "response-context-changed" {
+                    if Thread.isMainThread {
+                        MainActor.assumeIsolated { ble.recoveryEpoch += 1 }
+                    } else {
+                        DispatchQueue.main.sync {
+                            MainActor.assumeIsolated { ble.recoveryEpoch += 1 }
+                        }
+                    }
+                }
+                let receipt: [String: Any] = ["schemaVersion": 1, "deviceID": fixture.deviceID,
+                    "operationID": scenario == "wrong-receipt" ? String(repeating: "0", count: 32) : fixture.wireOperationID,
+                    "sessionID": fixture.sessionID, "mapID": fixture.mapID, "manifestReceipt": fixture.manifestReceipt,
+                    "signedManifestReceipt": fixture.signedManifestReceipt, "streamSHA256": fixture.streamSHA256,
+                    "streamBytes": fixture.streamBytes, "phase": "cancelled", "revision": 1]
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!,
+                        try JSONSerialization.data(withJSONObject: receipt))
+            }
+            let client = MapTransferDeviceClient(baseURL: URL(string: "https://device.test:8080")!, sessionToken: "test-token", session: session)
+            do {
+                try await manager.rejectMapStreamBeforeUploadForTesting(.signingKeyNotTrusted,
+                    operation: fixture, client: client, bleManager: ble, context: context)
+                assert(false, "a rejection must always reach the caller")
+            } catch OfflineMapPlatformError.mapStreamCompatibilityRejected(let rejection) {
+                assertEqual(rejection, .signingKeyNotTrusted, "control failure cannot hide the original rejection")
+            } catch { assert(false, "the original rejection is preserved") }
+            assert(manager.errorMessage?.contains("signing_key_not_trusted") == true, "the preflight cause remains visible")
+            let persisted = try! store.records()[0]
+            if scenario == "cancelled" {
+                assertEqual(paths, ["cancel", "acknowledge"], "matching saved terminal receipt permits ACK")
+                assertEqual(persisted.observation, "cancelled_before_commit", "device cancellation releases the journal")
+                assert(persisted.acknowledgedAt != nil && persisted.commitRequestedAt == nil, "cancel never commits or claims installed")
+            } else if ["response-lost", "wrong-receipt", "response-context-changed"].contains(scenario) {
+                assertEqual(paths, ["cancel"], "uncertain cancellation never ACKs")
+                assert(persisted.cancellationRequestedAt != nil && !persisted.isTerminal && persisted.lastReceipt == nil,
+                       "lost or foreign response remains unresolved with durable intent")
+            } else {
+                assert(paths.isEmpty, "\(scenario) cannot acquire automatic cancellation")
+                assertEqual(persisted, fixture, "\(scenario) preserves existing ownership")
+            }
+        }
+    }
+
+    @MainActor
     static func testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary() {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)

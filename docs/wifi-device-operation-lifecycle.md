@@ -73,6 +73,15 @@ cannot revive retired unknown history; a re-send uses a new operation ID and its
 own admission token. Unknown retirement keeps the history for the same bounded
 retention period as terminal tombstones and never fabricates an ACK or outcome.
 
+If signed-stream compatibility checks reject a newly admitted operation before
+any PUT, the app preserves the specific rejection in the UI and records its
+bounded reason in `map.stream_compatibility_rejected`. In the same pinned
+device/session it saves cancellation intent and sends the existing exact-identity
+cancel request. Only a matching durable terminal receipt permits acknowledgement
+and cleanup; a lost response or storage/context change keeps reconciliation
+pending while the compatibility error remains visible. This automatic path
+cannot cancel a prior upload or commit, or another app's operation.
+
 An operation ID is a random 32-character lowercase hexadecimal UUID representation.
 It is separate from the existing signed content session ID. A client persists
 intent before entry and sends these additional signed-stream request headers:

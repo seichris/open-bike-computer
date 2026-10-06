@@ -4086,6 +4086,41 @@ final class OfflineMapManager: ObservableObject {
         return record.permitsPrecommitSessionRecovery(after: receipt)
     }
 
+    private func rejectMapStreamBeforeUpload(
+        _ rejection: MapInstallProtocolRejection,
+        operation: DeviceMapOperationRecord?,
+        client: MapTransferDeviceClient,
+        bleManager: BLEManager,
+        context: MapTransferHTTPStatusContext
+    ) async throws {
+        errorMessage = OfflineMapPlatformError.mapStreamCompatibilityRejected(rejection).localizedDescription
+        diagnosticsRecorder?.record(category: .map, event: "stream_compatibility_rejected",
+                                    fields: ["reason": rejection.rawValue])
+        // Only this unused admission may be cancelled automatically. A prior
+        // PUT or commit keeps its existing reconciliation requirements.
+        if let operation, operation.usesDurableProtocol,
+           operation.uploadAttemptID == nil, operation.commitRequestedAt == nil,
+           operation.lastReceipt == nil, !operation.isTerminal, !operation.isRetiredUnknown,
+           operation.deviceID == context.deviceID,
+           operation.deviceID == context.selectedDeviceID,
+           operation.appNamespace == BackgroundMapUploadSessionNamespace.identifier(bundleIdentifier: Bundle.main.bundleIdentifier),
+           currentDeviceMapOperation == operation,
+           bleManager.isCurrentMapTransferHTTPStatusContext(context) {
+            do {
+                let requested = try deviceMapOperationStore.requestCancellation(operationID: operation.operationID)
+                if let result = try await advanceDurableMapControl(requested, client: client,
+                    bleManager: bleManager, connectionEpoch: context.connectionEpoch),
+                   result.isTerminal, bleManager.isCurrentMapTransferHTTPStatusContext(context) {
+                    await acknowledgeDurableResult(result, client: client)
+                }
+            } catch {
+                // A failed save/control response is still unresolved. The
+                // original compatibility error must remain visible either way.
+            }
+        }
+        throw OfflineMapPlatformError.mapStreamCompatibilityRejected(rejection)
+    }
+
     private func resumeDurableMapControl(bleManager: BLEManager) async throws {
         guard let record = currentDeviceMapOperation, record.usesDurableProtocol,
               record.deviceID == bleManager.activeDeviceID else { return }
@@ -4898,6 +4933,13 @@ final class OfflineMapManager: ObservableObject {
 
     func useFencedRetirementCleanupForTesting(_ cleanup: @escaping (BLEManager) async -> Bool) {
         fencedRetirementCleanupForTesting = cleanup
+    }
+
+    func rejectMapStreamBeforeUploadForTesting(_ rejection: MapInstallProtocolRejection,
+        operation: DeviceMapOperationRecord?, client: MapTransferDeviceClient,
+        bleManager: BLEManager, context: MapTransferHTTPStatusContext) async throws {
+        try await rejectMapStreamBeforeUpload(rejection, operation: operation, client: client,
+                                             bleManager: bleManager, context: context)
     }
 #endif
 
@@ -6237,9 +6279,8 @@ final class OfflineMapManager: ObservableObject {
                        deviceStatus: initialDeviceStatus
                    )
                 if let rejection = protocolEvaluation.rejection {
-                    throw OfflineMapPlatformError.mapStreamCompatibilityRejected(
-                        rejection
-                    )
+                    try await rejectMapStreamBeforeUpload(rejection, operation: deviceOperation,
+                        client: client, bleManager: bleManager, context: httpContext)
                 }
                 let disposition: ExistingMapStreamAttemptDisposition = deviceOperation?.usesDurableProtocol == true
                     ? .upload : ExistingMapStreamAttemptDisposition.evaluate(
@@ -6377,7 +6418,11 @@ final class OfflineMapManager: ObservableObject {
                     ? "Cancellation requested. Waiting for the device's saved result."
                     : (uploadSucceeded ? "Activation confirmation delayed. Reconnecting to device…"
                        : "Map upload paused. Tap Upload to resume.")
-                errorMessage = nil
+                if case OfflineMapPlatformError.mapStreamCompatibilityRejected = error {
+                    errorMessage = diagnosticMessage(for: error)
+                } else {
+                    errorMessage = nil
+                }
                 startActivationReconciliationMonitor(bleManager: bleManager)
                 return
             }
