@@ -2,6 +2,9 @@
 
 import configparser
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -34,7 +37,30 @@ for section in config.sections():
         sdk = inherited_option(section, "custom_sdkconfig")
         assert "CONFIG_APP_COMPILE_TIME_DATE=n" in sdk, section
         assert "CONFIG_BOOTLOADER_COMPILE_TIME_DATE=n" in sdk, section
+        ipc_sizes = re.findall(r"^CONFIG_ESP_IPC_TASK_STACK_SIZE=(\d+)$", sdk, re.M)
+        assert ipc_sizes == ["1536"], (section, ipc_sizes)
 main_source = (project_dir / "src/main.cpp").read_text()
+assert '#include "ipc_stack_budget.hpp"' in main_source
+# Exercise effective SDK values, including the failing pinned-Arduino value
+# and the S3 default that leaves too little reserve on the observed crash path.
+compiler = shutil.which("c++") or shutil.which("g++")
+assert compiler, "a C++ compiler is required for the effective IPC config gate"
+with tempfile.TemporaryDirectory() as temporary:
+    stub_dir = Path(temporary)
+    for board in ("WAVESHARE_AMOLED_175", "WAVESHARE_AMOLED_206", "LEGACY_BOARD"):
+        for size in (None, 1024, 1280, 1536, 2048):
+            (stub_dir / "sdkconfig.h").write_text(
+                "" if size is None else f"#define CONFIG_ESP_IPC_TASK_STACK_SIZE {size}\n"
+            )
+            result = subprocess.run(
+                [compiler, "-std=c++17", "-fsyntax-only", "-x", "c++",
+                 f"-D{board}", "-I", str(stub_dir), "-I", str(project_dir / "include"), "-"],
+                input='#include "ipc_stack_budget.hpp"\n', text=True, capture_output=True,
+            )
+            accepted = board == "LEGACY_BOARD" or (size is not None and size >= 1536)
+            assert (result.returncode == 0) == accepted, (board, size, result.stderr)
+            if not accepted:
+                assert "Waveshare Bluetooth IPC stack requires" in result.stderr
 lv_conf_source = (project_dir / "lib/lvgl/lv_conf.h").read_text()
 assert "-DBUILD_PROFILE=" in prebuild_source
 assert "OPEN_BIKE_EXPECTED_GIT_SHA" in prebuild_source

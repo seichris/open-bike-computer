@@ -7,6 +7,7 @@
  */
 
 #include <Arduino.h>
+#include "ipc_stack_budget.hpp"
 
 #include <algorithm>
 #include <cstdio>

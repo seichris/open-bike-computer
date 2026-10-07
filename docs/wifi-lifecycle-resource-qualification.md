@@ -70,6 +70,21 @@ floor remains unchanged. Include this reserved memory and persistent idle task
 in the baseline; it is not a leaked per-session allocation. A poisoned owner
 still cannot admit another command or claim successful quiescence.
 
+Both IPC tasks reserve 1,536 bytes each through the tracked custom-core
+configuration, including the separate light-sleep profiles. The effective SDK
+value is checked at application compile time. On the retained 1.75-inch Personal
+image, Bluetooth startup exhausted the pinned Arduino configuration's 1,024-byte
+`ipc0` stack while allocating the controller interrupt. The interrupted call
+chain also needs the ESP32-S3's 192-byte interrupt context on that task's stack;
+fill-pattern high-water measurements can miss these writes. The 1,536-byte
+candidate adds 1 KiB of internal heap allocation across both cores. Keep the
+stack watchpoint and heap guards enabled, and include that cost in fresh
+internal/DMA free and largest-block measurements. This configuration change
+still requires exact-image boot, transfer and recovery qualification on each
+board family. A successful host config test or earlier-image boot cannot
+establish adequate stack reserve. The startup panic is separate from a later
+hotspot association failure on a boot that reached ready.
+
 The native Wi-Fi runtime now retains its initialized driver and AP/STA netifs
 for the rest of the boot. Repeated operations call `esp_wifi_start/stop` rather
 than destroying and recreating the driver. Teardown stops the radio, clears both
