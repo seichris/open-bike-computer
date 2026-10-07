@@ -537,17 +537,27 @@ nonisolated enum RideDiagnosticsStoredZipWriter {
         appendUInt16LE(UInt16((value >> 16) & 0xffff), to: &data)
     }
 
-    private static func crc32(_ data: Data) -> UInt32 {
-        var crc: UInt32 = 0xffff_ffff
-        for byte in data {
-            crc ^= UInt32(byte)
-            for _ in 0..<8 {
-                crc = (crc & 1) == 1
-                    ? (crc >> 1) ^ 0xedb8_8320
-                    : crc >> 1
-            }
+    private static let crc32Table: [UInt32] = (0..<256).map { index in
+        var value = UInt32(index)
+        for _ in 0..<8 {
+            value = (value & 1) == 1
+                ? (value >> 1) ^ 0xedb8_8320
+                : value >> 1
         }
-        return crc ^ 0xffff_ffff
+        return value
+    }
+
+    private static func crc32(_ data: Data) -> UInt32 {
+        // The nested support archive checks tens of MiB several times. Keep
+        // the same IEEE checksum without eight bit steps and Data iteration
+        // overhead for every byte, including in physical Debug builds.
+        data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            var crc: UInt32 = 0xffff_ffff
+            for byte in bytes {
+                crc = (crc >> 8) ^ crc32Table[Int((crc ^ UInt32(byte)) & 0xff)]
+            }
+            return crc ^ 0xffff_ffff
+        }
     }
 }
 

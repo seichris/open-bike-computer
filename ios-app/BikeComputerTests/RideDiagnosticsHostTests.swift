@@ -3,6 +3,39 @@ import Foundation
 
 @main
 enum RideDiagnosticsHostTests {
+    static func storedZIPChecksumsMatchKnownVectors() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let padded = Data([0xff] + Array("123456789".utf8) + [0xff])
+        let fixtures: [(String, Data, UInt32)] = [
+            ("empty", Data(), 0),
+            ("digits", padded[1..<10], 0xcbf4_3926),
+            ("binary", Data((0..<256).map { UInt8($0) }), 0x2905_8c73),
+        ]
+        let url = root.appendingPathComponent("vectors.zip")
+        try RideDiagnosticsStoredZipWriter.write(entries: fixtures.map { ($0.0, $0.1) }, to: url)
+        let archive = try Data(contentsOf: url)
+        func littleEndian32(at offset: Int) -> UInt32 {
+            (0..<4).reduce(UInt32(0)) { $0 | UInt32(archive[offset + $1]) << ($1 * 8) }
+        }
+        var offset = 0
+        for (name, body, checksum) in fixtures {
+            precondition(littleEndian32(at: offset) == 0x0403_4b50)
+            precondition(littleEndian32(at: offset + 14) == checksum,
+                         "local ZIP headers must retain the standard IEEE CRC")
+            let payloadStart = offset + 30 + name.utf8.count
+            precondition(archive[payloadStart..<(payloadStart + body.count)] == body)
+            offset = payloadStart + body.count
+        }
+        for (name, _, checksum) in fixtures {
+            precondition(littleEndian32(at: offset) == 0x0201_4b50)
+            precondition(littleEndian32(at: offset + 16) == checksum,
+                         "central ZIP headers must match the known checksum")
+            offset += 46 + name.utf8.count
+        }
+    }
+
     static func oversizedAppSnapshotReportsCacheFull() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -214,6 +247,7 @@ enum RideDiagnosticsHostTests {
     }
 
     static func main() async throws {
+        try storedZIPChecksumsMatchKnownVectors()
         try await oversizedAppSnapshotReportsCacheFull()
         try await cacheAdmissionFailureIsRecorded()
         try await acquisitionSurvivesCaptureRetention()
