@@ -2,6 +2,7 @@
 #include "test_map_stream_install.cpp"
 #undef main
 #include "../../lib/map_transfer/map_selection_anchor.hpp"
+#include <cstring>
 
 #if defined(MAP_RECOVERY_INSTRUMENT_FUNCTIONS)
 namespace {
