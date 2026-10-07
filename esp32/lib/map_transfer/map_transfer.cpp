@@ -2063,9 +2063,7 @@ bool MapTransferInstaller::preparationBlocksActivation(const ReadyStreamMap &rea
       ready.operationID.empty() || prepared.operationID!=ready.operationID;
 }
 
-InstallStatus MapTransferInstaller::activateReadyStreamMap(
-    const std::string &sessionId,
-    const ActivationProgressCallback &onProgress) const {
+InstallStatus MapTransferInstaller::recoverStreamSelection() const {
   if (!hasInterruptedActivation()) {
     ActiveMapSelection canonical;
     if (!readActiveMap(canonical).ok) {
@@ -2078,6 +2076,30 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
     if (!recovered.ok)
       return recovered;
   }
+  return {true, "ok", ""};
+}
+
+InstallStatus MapTransferInstaller::activateReadyStreamMap(
+    const std::string &sessionId,
+    const ActivationProgressCallback &onProgress) const {
+  const auto recovered = recoverStreamSelection();
+  if (!recovered.ok) return recovered;
+  bool needsSelectionRecovery = false;
+  const auto selected = selectReadyStreamMap(sessionId, onProgress,
+                                            needsSelectionRecovery);
+  if (needsSelectionRecovery) {
+    // A failed canonical write can require a full predecessor rehash. The
+    // selection phase must return before recovery reserves its own frame.
+    const auto recovery = recoverInterruptedActivation();
+    if (!recovery.ok) return recovery;
+  }
+  return selected;
+}
+
+InstallStatus MapTransferInstaller::selectReadyStreamMap(
+    const std::string &sessionId,
+    const ActivationProgressCallback &onProgress,
+    bool &needsSelectionRecovery) const {
   ReadyStreamMap ready;
   InstallStatus readyStatus = readReadyStreamMap(sessionId, ready);
   if (!readyStatus.ok)
@@ -2196,10 +2218,8 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
     selected.previousSignedManifestReceipt = previous.signedManifestReceipt;
   }
   if (!writeActiveMap(selected)) {
-    InstallStatus recovered = recoverInterruptedActivation();
-    return recovered.ok
-               ? fail("stream_active_write", "could not select ready map")
-               : recovered;
+    needsSelectionRecovery = true;
+    return fail("stream_active_write", "could not select ready map");
   }
   if (onProgress)
     onProgress({3, 3, 2, 3});
@@ -2228,18 +2248,16 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
 
 InstallStatus MapTransferInstaller::recoverPendingStreamActivation(
     const ActivationProgressCallback &onProgress) const {
-  if (!hasInterruptedActivation()) {
-    ActiveMapSelection canonical;
-    if (!readActiveMap(canonical).ok) {
-      const auto anchored = recoverSelectionAnchor();
-      if (!anchored.ok) return anchored;
-    }
-  }
-  if (hasInterruptedActivation()) {
-    InstallStatus recovered = recoverInterruptedActivation();
-    if (!recovered.ok)
-      return recovered;
-  }
+  const auto recovered = recoverStreamSelection();
+  if (!recovered.ok) return recovered;
+  std::string sessionId;
+  const auto pending = resolvePendingStreamActivation(sessionId);
+  if (!pending.ok || sessionId.empty()) return pending;
+  return activateReadyStreamMap(sessionId, onProgress);
+}
+
+InstallStatus MapTransferInstaller::resolvePendingStreamActivation(
+    std::string &sessionId) const {
   std::string pending;
   const std::string pendingPath =
       joinPath(storageRoot_, kPendingStreamActivationFile);
@@ -2292,10 +2310,10 @@ InstallStatus MapTransferInstaller::recoverPendingStreamActivation(
       return fail("stream_pending_recovery",
                   "could not restore pending stream activation");
   }
-  const std::string sessionId = jsonStringValue(pending, "sessionId");
+  sessionId = jsonStringValue(pending, "sessionId");
   if (!safeId(sessionId))
     return fail("stream_pending_invalid", "pending stream session is invalid");
-  return activateReadyStreamMap(sessionId, onProgress);
+  return {true, "ok", ""};
 }
 
 InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
@@ -2526,6 +2544,65 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
                         "could not finish stream activation cleanup");
 }
 
+InstallStatus MapTransferInstaller::recoverActiveSelection() const {
+  const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
+  ActiveMapSelection selected;
+  InstallStatus active = readActiveMap(selected);
+  if (!active.ok && active.code == "active_missing") {
+    const auto anchor = recoverSelectionAnchor();
+    if (anchor.code != "selection_anchor_none") return anchor;
+  }
+  if (!active.ok || activeRootExists(selected.root)) {
+    if (active.ok || active.code == "active_missing")
+      return {true, "ok", ""};
+    if (active.code == "active_invalid") {
+      const std::string activeBackup = activePath + ".bak";
+      removeTree(activePath);
+      if (fileExists(activeBackup) &&
+          renameStoragePath(activeBackup.c_str(), activePath.c_str()) == 0) {
+        ActiveMapSelection backup;
+        InstallStatus backupStatus = readActiveMap(backup);
+        if (backupStatus.ok && activeRootExists(backup.root)) {
+          removeTree(activePath + ".tmp");
+          return {true, "recovered_rollback",
+                  "restored valid active map metadata backup"};
+        }
+        removeTree(activePath);
+      }
+      const auto anchor = recoverSelectionAnchor();
+      if (anchor.code != "selection_anchor_none") return anchor;
+      removeTree(activeBackup);
+      removeTree(activePath + ".tmp");
+      return {true, "recovered_rollback",
+              "cleared invalid active map metadata"};
+    }
+    return active;
+  }
+  if (!selected.previousRoot.empty() &&
+      rollbackRootMatches(selected.previousRoot, selected.previousMapId,
+                          selected.previousManifestReceipt,
+                          selected.previousSignedManifestReceipt)) {
+    ActiveMapSelection rollback;
+    rollback.mapId = selected.previousMapId;
+    rollback.sessionId = selected.previousSessionId;
+    rollback.root = selected.previousRoot;
+    rollback.target = selected.previousTarget;
+    rollback.manifestReceipt = selected.previousManifestReceipt;
+    rollback.signedManifestReceipt = selected.previousSignedManifestReceipt;
+    if (!writeActiveMap(rollback))
+      return fail("active_recovery",
+                  "could not restore previous map selection");
+    return {true, "recovered_rollback", "restored previous map selection"};
+  }
+  if (!removeTree(activePath) || !removeTree(activePath + ".bak") ||
+      !removeTree(activePath + ".tmp")) {
+    return fail("active_recovery",
+                "could not clear missing active map selection");
+  }
+  return {true, "recovered_rollback",
+          "cleared missing active map selection"};
+}
+
 InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   const std::string transactionPath =
       joinPath(storageRoot_, kActivationTransactionFile);
@@ -2535,61 +2612,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
     const std::string backupPath = transactionPath + ".bak";
     if (!fileExists(backupPath)) {
       removeTree(transactionPath + ".tmp");
-      ActiveMapSelection selected;
-      InstallStatus active = readActiveMap(selected);
-      if (!active.ok && active.code == "active_missing") {
-        const auto anchor = recoverSelectionAnchor();
-        if (anchor.code != "selection_anchor_none") return anchor;
-      }
-      if (!active.ok || activeRootExists(selected.root)) {
-        if (active.ok || active.code == "active_missing")
-          return {true, "ok", ""};
-        if (active.code == "active_invalid") {
-          const std::string activeBackup = activePath + ".bak";
-          removeTree(activePath);
-          if (fileExists(activeBackup) &&
-              renameStoragePath(activeBackup.c_str(), activePath.c_str()) == 0) {
-            ActiveMapSelection backup;
-            InstallStatus backupStatus = readActiveMap(backup);
-            if (backupStatus.ok && activeRootExists(backup.root)) {
-              removeTree(activePath + ".tmp");
-              return {true, "recovered_rollback",
-                      "restored valid active map metadata backup"};
-            }
-            removeTree(activePath);
-          }
-          const auto anchor = recoverSelectionAnchor();
-          if (anchor.code != "selection_anchor_none") return anchor;
-          removeTree(activeBackup);
-          removeTree(activePath + ".tmp");
-          return {true, "recovered_rollback",
-                  "cleared invalid active map metadata"};
-        }
-        return active;
-      }
-      if (!selected.previousRoot.empty() &&
-          rollbackRootMatches(selected.previousRoot, selected.previousMapId,
-                              selected.previousManifestReceipt,
-                              selected.previousSignedManifestReceipt)) {
-        ActiveMapSelection rollback;
-        rollback.mapId = selected.previousMapId;
-        rollback.sessionId = selected.previousSessionId;
-        rollback.root = selected.previousRoot;
-        rollback.target = selected.previousTarget;
-        rollback.manifestReceipt = selected.previousManifestReceipt;
-        rollback.signedManifestReceipt = selected.previousSignedManifestReceipt;
-        if (!writeActiveMap(rollback))
-          return fail("active_recovery",
-                      "could not restore previous map selection");
-        return {true, "recovered_rollback", "restored previous map selection"};
-      }
-      if (!removeTree(activePath) || !removeTree(activePath + ".bak") ||
-          !removeTree(activePath + ".tmp")) {
-        return fail("active_recovery",
-                    "could not clear missing active map selection");
-      }
-      return {true, "recovered_rollback",
-              "cleared missing active map selection"};
+      return recoverActiveSelection();
     }
     if (renameStoragePath(backupPath.c_str(), transactionPath.c_str()) != 0 ||
         !readTextFile(transactionPath, transaction, 2048)) {
@@ -2692,7 +2715,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
     if (!clearInvalidTransaction())
       return fail("transaction_invalid",
                   "could not clear invalid map activation transaction");
-    InstallStatus recovered = recoverInterruptedActivation();
+    InstallStatus recovered = recoverActiveSelection();
     if (!recovered.ok)
       return recovered;
     return {true, "recovered_rollback",

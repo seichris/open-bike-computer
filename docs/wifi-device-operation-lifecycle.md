@@ -14,6 +14,16 @@ stack budget; a privately recovered matching-build bench dump identified that
 temporary task as the crashed task. Owner reclamation avoids that extra task
 and retains the existing PSRAM worker stacks and renderer architecture.
 
+Map finalization retains its fixed 16 KiB internal owner stack. A matching bench
+coredump proved stack exhaustion when a failed canonical-selection write entered
+nested journal and predecessor recovery. Pending resolution, preflight recovery,
+and map selection now return before the next phase runs. A selection-write
+failure unwinds the selection frame before recovering; invalid-journal recovery
+uses the shared active-selection phase without recursively re-entering journal
+recovery. Full predecessor verification, authorization and uncertain outcomes
+remain required. This reduces overlapping stack frames without consuming more
+internal heap/BSS or moving cache-sensitive operations onto PSRAM.
+
 ## Implemented contract
 
 ### Existing clients and firmware

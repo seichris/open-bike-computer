@@ -3,8 +3,114 @@
 #undef main
 #include "../../lib/map_transfer/map_selection_anchor.hpp"
 
+#if defined(MAP_RECOVERY_INSTRUMENT_FUNCTIONS)
+namespace {
+void *recoveryEntry = nullptr;
+bool observeRecovery = false;
+unsigned recoveryDepth = 0;
+unsigned maximumRecoveryDepth = 0;
+}
+extern "C" __attribute__((no_instrument_function))
+void __cyg_profile_func_enter(void *function, void *) {
+  if (observeRecovery && function == recoveryEntry) {
+    ++recoveryDepth;
+    if (recoveryDepth > maximumRecoveryDepth)
+      maximumRecoveryDepth = recoveryDepth;
+  }
+}
+extern "C" __attribute__((no_instrument_function))
+void __cyg_profile_func_exit(void *function, void *) {
+  if (observeRecovery && function == recoveryEntry)
+    --recoveryDepth;
+}
+#endif
+
 namespace {
 namespace anchor = map_transfer::selection_anchor;
+class TornSelectionWriteInstaller : public MapTransferInstaller {
+public:
+  explicit TornSelectionWriteInstaller(const std::string &root)
+      : MapTransferInstaller(root), root_(root) {}
+protected:
+  bool writeTextFileAtomic(const std::string &path,
+                           const std::string &text) const override {
+    if (failNextSelection_ && path == root_ + "/VECTMAP/active-map.json") {
+      failNextSelection_ = false;
+      ::unlink(path.c_str());
+      writeFile(root_ + "/VECTMAP/.activation-transaction.json", "{torn");
+      return false;
+    }
+    return MapTransferInstaller::writeTextFileAtomic(path, text);
+  }
+private:
+  std::string root_;
+  mutable bool failNextSelection_ = true;
+};
+
+void testFailedCanonicalWriteRecoversVerifiedPredecessor() {
+  const auto root = tempRoot();
+  MapTransferInstaller initial(root);
+  prepareReadyRoot(root, "previous");
+  assert(initial.activateReadyStreamMap("previous").ok);
+  prepareReadyRoot(root, "candidate");
+  TornSelectionWriteInstaller installer(root);
+#if defined(MAP_RECOVERY_INSTRUMENT_FUNCTIONS)
+  const auto member = &MapTransferInstaller::recoverInterruptedActivation;
+  std::memcpy(&recoveryEntry, &member, sizeof(recoveryEntry));
+  recoveryDepth = maximumRecoveryDepth = 0;
+  observeRecovery = true;
+#endif
+  const auto result = installer.recoverPendingStreamActivation();
+#if defined(MAP_RECOVERY_INSTRUMENT_FUNCTIONS)
+  observeRecovery = false;
+  assert(recoveryDepth == 0 && maximumRecoveryDepth == 1);
+#endif
+  // Recovery restores availability, and cannot turn the failed replacement
+  // into an installed result or destroy the still-verifiable candidate.
+  assert(!result.ok && result.code == "stream_active_write");
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok);
+  assert(selected.sessionId == "previous");
+  assert(readFile(root + selected.root + "/+0000+0000/0.fmb") == kPayload0);
+  assert(exists(root + "/VECTMAP/.maps/candidate/.ready"));
+  std::filesystem::remove_all(root);
+}
+
+void testInvalidJournalAndMissingSelectionRecoverWithoutRecursion() {
+  const auto root = tempRoot();
+  MapTransferInstaller installer(root);
+  prepareReadyRoot(root, "previous");
+  assert(installer.activateReadyStreamMap("previous").ok);
+  prepareReadyRoot(root, "candidate");
+  assert(installer.activateReadyStreamMap("candidate").ok);
+  assert(::unlink((root + "/VECTMAP/active-map.json").c_str()) == 0);
+  writeFile(root + "/VECTMAP/.activation-transaction.json", "{torn");
+
+#if defined(MAP_RECOVERY_INSTRUMENT_FUNCTIONS)
+  // Clang/GCC on the supported Darwin/Linux hosts use the Itanium member
+  // pointer ABI: a nonvirtual entry address followed by a this adjustment.
+  // Instrument the actual production call, rather than an imitation of it.
+  const auto member = &MapTransferInstaller::recoverInterruptedActivation;
+  static_assert(sizeof(member) == 2 * sizeof(void *));
+  std::memcpy(&recoveryEntry, &member, sizeof(recoveryEntry));
+  recoveryDepth = maximumRecoveryDepth = 0;
+  observeRecovery = true;
+#endif
+  const auto result = installer.recoverInterruptedActivation();
+#if defined(MAP_RECOVERY_INSTRUMENT_FUNCTIONS)
+  observeRecovery = false;
+  assert(recoveryDepth == 0);
+  assert(maximumRecoveryDepth == 1);
+#endif
+  assert(result.ok);
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok);
+  assert(selected.sessionId == "previous");
+  assert(selected.previousSessionId.empty());
+  assert(readFile(root + selected.root + "/+0000+0000/0.fmb") == kPayload0);
+  assert(!exists(root + "/VECTMAP/.activation-transaction.json"));
+  std::filesystem::remove_all(root);
+}
 void testAnchorEnvelopeRejectsCorruptionAndUnknownSchemas() {
   anchor::Record record{1,"device-a","operation-a","{\"mapId\":\"known\"}\n"}, restored;
   auto bytes=anchor::encode(record);
@@ -139,6 +245,8 @@ void testAlternatingSlotOverwriteCrashCuts() {
 
 }
 int main() {
+  testInvalidJournalAndMissingSelectionRecoverWithoutRecursion();
+  testFailedCanonicalWriteRecoversVerifiedPredecessor();
   testAnchorEnvelopeRejectsCorruptionAndUnknownSchemas();
   testAnchorsRestoreOnlyExactVerifiedPredecessors();
   testAlternationRetainsFullRollbackRoots();

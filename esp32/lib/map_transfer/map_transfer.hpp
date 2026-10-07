@@ -258,6 +258,15 @@ protected:
                                    const std::string &text) const;
 
 private:
+  // These phases run on the fixed internal owner stack. Keep the selection
+  // locals out of recovery and unwind pending resolution before activation.
+  __attribute__((noinline)) InstallStatus recoverStreamSelection() const;
+  __attribute__((noinline)) InstallStatus selectReadyStreamMap(
+      const std::string &sessionId, const ActivationProgressCallback &onProgress,
+      bool &needsSelectionRecovery) const;
+  __attribute__((noinline)) InstallStatus resolvePendingStreamActivation(
+      std::string &sessionId) const;
+  __attribute__((noinline)) InstallStatus recoverActiveSelection() const;
   bool preparationBlocksActivation(const ReadyStreamMap &ready) const;
   InstallStatus readStreamMapMetadata(const std::string &sessionId,
                                       ReadyStreamMap &ready, bool prepared) const;
