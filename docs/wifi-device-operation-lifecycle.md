@@ -5,6 +5,15 @@ It preserves signed streams, pinned HTTPS, authenticated BLE, the internal-RAM
 operation owner, #540 pointer recovery, and the existing renderer/full-refresh
 strategy. HTTP upload completion is **not** installation success.
 
+PSRAM-backed HTTP and renderer workers publish completion only after their
+owned cleanup and callouts return, then park. Their internal-stack owner
+reclaims the task with `vTaskDeleteWithCaps(worker)` before clearing its handle
+or allowing restart/shutdown to finish. Self deletion through
+`vTaskDeleteWithCaps(nullptr)` creates an SDK cleanup task with the minimum
+stack budget; a privately recovered matching-build bench dump identified that
+temporary task as the crashed task. Owner reclamation avoids that extra task
+and retains the existing PSRAM worker stacks and renderer architecture.
+
 ## Implemented contract
 
 ### Existing clients and firmware
@@ -34,6 +43,15 @@ another map.
 Even a matching terminal `installed` or `failed` status after that boundary
 cannot bind the old record or skip the verifying re-send. A terminal result
 remains confirmable in the original observing connection and app process.
+
+While a foreground stream upload is awaiting the OS transport, loss of its
+original authenticated BLE binding cancels only that in-memory upload attempt.
+Its delegate persists transport completion and releases its network claim before
+resuming the caller. This prevents the progress UI waiting for the background
+session's six-hour connectivity deadline after a reboot. Cancellation does not
+prove whether the device accepted or installed the map; normal fresh-status or
+durable-operation reconciliation retains that uncertainty. Restored OS jobs do
+not acquire a new foreground connection binding.
 
 ### Versioned map operations (qualification-gated)
 

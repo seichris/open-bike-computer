@@ -19,6 +19,7 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 cd "${REPO_DIR}"
 
 python3 "${SCRIPT_DIR}/run-durable-map-attempt-tests.py"
+python3 "${SCRIPT_DIR}/run-map-upload-binding-tests.py"
 
 TOPOGRAPHY_ALIGNMENT_OUT="${TMPDIR:-/tmp}/open-bike-topography-alignment-tests"
 python3 "${DEV_SWIFT_COMPILER}" navigation-1 -- \

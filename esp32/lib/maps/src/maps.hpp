@@ -408,6 +408,7 @@ private:
   void finalizeVectorMapFolderSwitchOnUi();
   bool startRenderWorker();
   bool stopRenderWorker();
+  bool reclaimRenderWorker();
   bool recoverRenderWorkerIfNeeded();
   bool buildRenderRequest(uint8_t zoom, uint32_t nowMs,
                           RenderRequest &request);

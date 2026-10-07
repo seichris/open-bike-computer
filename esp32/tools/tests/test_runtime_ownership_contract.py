@@ -38,7 +38,16 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         worker = http[http.index("void HttpTransferServer::runWorker"):
                       http.index("void HttpTransferServer::workerTaskThunk")]
         cleanup = worker.index("handlers_[index].handler->workerWillStop();")
-        self.assertLess(cleanup, worker.index("workerTask_ = nullptr;", cleanup))
+        self.assertLess(cleanup, worker.index("stopNetwork();", cleanup))
+        self.assertNotIn("workerTask_ = nullptr;", worker)
+        thunk = http[http.index("void HttpTransferServer::workerTaskThunk"):
+                     http.index("HttpTransferStatus HttpTransferServer::status")]
+        self.assertLess(thunk.index("server->runWorker();"),
+                        thunk.index("server->workerStopped_ = true;"))
+        owner = http[http.index("void HttpTransferServer::process()"):
+                     http.index("void HttpTransferServer::workerTaskThunk")]
+        self.assertLess(owner.index("vTaskDeleteWithCaps(worker);"),
+                        owner.index("workerTask_ = nullptr;"))
 
     def test_firmware_tls_and_flash_have_separate_stack_owners(self):
         ota = source("lib/firmware_update/firmware_update_http.cpp")

@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstdio>
 #include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
 #include <esp_system.h>
 #include <new>
 
@@ -572,6 +573,7 @@ bool HttpTransferServer::setEnabled(bool enabled, std::string mode) {
     // new task can observe state. Holding the mutex across xTaskCreate makes
     // an immediately scheduled worker wait until both fields are coherent.
     lockState();
+    workerStopped_ = false;
     const BaseType_t created = xTaskCreateWithCaps(
         workerTaskThunk, "device_http", workerStackBytes, this, 1, &worker,
         workerStackCaps);
@@ -636,7 +638,27 @@ void HttpTransferServer::sampleResources(const char *resourcePhase) {
   observeResources(resourcePhase);
 }
 
-void HttpTransferServer::process() {}
+void HttpTransferServer::process() {
+  uint32_t stackMarker = 0;
+  if (!esp_ptr_internal(&stackMarker))
+    return;
+  lockState();
+  const TaskHandle_t worker = workerTask_;
+  if (worker == nullptr || !workerStopped_ ||
+      worker == xTaskGetCurrentTaskHandle()) {
+    unlockState();
+    return;
+  }
+  // The worker has returned from all transport/network cleanup and will only
+  // park. Reclaim it from this internal owner stack: self deletion creates an
+  // SDK helper with configMINIMAL_STACK_SIZE, which crashed on the bench.
+  vTaskDeleteWithCaps(worker);
+  workerTask_ = nullptr;
+  workerStopped_ = false;
+  unlockState();
+  observeResources("worker_reclaimed");
+  signalStatusChanged();
+}
 
 bool HttpTransferServer::startNetwork() {
   readinessSamples_ = 0;
@@ -887,7 +909,6 @@ void HttpTransferServer::runWorker() {
     }
     observeResources("owner_released");
     lockState();
-    workerTask_ = nullptr;
     const bool releasePowerLock = powerLockHeld_;
     powerLockHeld_ = false;
     unlockState();
@@ -924,7 +945,6 @@ void HttpTransferServer::runWorker() {
       }
       observeResources("owner_released");
       lockState();
-      workerTask_ = nullptr;
       const bool releasePowerLock = powerLockHeld_;
       powerLockHeld_ = false;
       unlockState();
@@ -1055,9 +1075,16 @@ void HttpTransferServer::runWorker() {
 
 void HttpTransferServer::workerTaskThunk(void *arg) {
   auto *server = static_cast<HttpTransferServer *>(arg);
-  if (server != nullptr)
+  if (server != nullptr) {
     server->runWorker();
-  vTaskDeleteWithCaps(nullptr);
+    server->lockState();
+    server->workerStopped_ = true;
+    server->unlockState();
+  }
+  // No callouts or owned resources remain after publishing the stopped bit.
+  // Keep the handle alive until process() has actually reclaimed its storage.
+  for (;;)
+    vTaskSuspend(nullptr);
 }
 
 HttpTransferStatus HttpTransferServer::status() const {
@@ -1313,6 +1340,7 @@ bool HttpTransferServer::isShutdownQuiescent() const {
 bool HttpTransferServer::waitUntilStopped(uint32_t timeoutMs) {
   const uint32_t started = millis();
   while (true) {
+    process();
     lockState();
     const bool stopped = workerTask_ == nullptr;
     unlockState();

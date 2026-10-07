@@ -135,7 +135,8 @@ class MapActivationHandoffTests(unittest.TestCase):
             "static_cast<UBaseType_t>(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)",
             DEVICE_TRANSFER_SOURCE,
         )
-        self.assertIn("vTaskDeleteWithCaps(nullptr);", DEVICE_TRANSFER_SOURCE)
+        self.assertIn("vTaskDeleteWithCaps(worker);", DEVICE_TRANSFER_SOURCE)
+        self.assertNotIn("vTaskDeleteWithCaps(nullptr);", DEVICE_TRANSFER_SOURCE)
         self.assertNotIn("vTaskDelete(nullptr);", DEVICE_TRANSFER_SOURCE)
 
     def test_activation_progress_yields_to_the_idle_task(self):

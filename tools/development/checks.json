@@ -177,7 +177,7 @@
       "name": "Runtime ownership and allocation recovery tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror -pthread \\\n  tools/tests/test_runtime_ownership.cpp -o ${TMPDIR}/test_runtime_ownership\n${TMPDIR}/test_runtime_ownership\npython3 tools/tests/test_runtime_ownership_contract.py\npython3 tools/tests/test_runtime_rollback_failure.py\npython3 tools/tests/test_firmware_runtime_boundaries.py",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror -pthread \\\n  tools/tests/test_runtime_ownership.cpp -o ${TMPDIR}/test_runtime_ownership\n${TMPDIR}/test_runtime_ownership\npython3 tools/tests/test_runtime_ownership_contract.py\npython3 -m unittest tools.tests.test_caps_worker_retirement\npython3 tools/tests/test_runtime_rollback_failure.py\npython3 tools/tests/test_firmware_runtime_boundaries.py",
       "tools": [
         "python3",
         "g++"

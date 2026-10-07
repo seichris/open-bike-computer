@@ -217,6 +217,7 @@ private:
   std::array<HandlerRegistration, 4> handlers_{};
   size_t handlerCount_ = 0;
   TaskHandle_t workerTask_ = nullptr;
+  bool workerStopped_ = false;
   TransferClient *activeClient_ = nullptr;
   NetworkOperationOwner *networkOperationOwner_ = nullptr;
 

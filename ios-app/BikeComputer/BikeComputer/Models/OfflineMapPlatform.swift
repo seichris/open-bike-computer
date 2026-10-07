@@ -2354,6 +2354,7 @@ struct MapTransferDeviceClient {
         sessionId: String,
         descriptor: BackgroundMapUploadDescriptor,
         onTaskStarted: @escaping @MainActor (Int) -> Void = { _ in },
+        isBindingCurrent: (@MainActor () -> Bool)? = nil,
         progress: @escaping @MainActor (_ completedBytes: Int64, _ totalBytes: Int64) -> Void
     ) async throws {
         var request = Self.streamUploadRequest(
@@ -2396,6 +2397,7 @@ struct MapTransferDeviceClient {
             expectedBytes: artifact.bytes,
             descriptor: descriptor,
             onTaskStarted: onTaskStarted,
+            isBindingCurrent: isBindingCurrent,
             progress: progress
         )
 #else
@@ -3072,6 +3074,7 @@ final class BackgroundMapUploadCoordinator: NSObject,
         expectedBytes: Int64,
         descriptor: BackgroundMapUploadDescriptor,
         onTaskStarted: @escaping @MainActor (Int) -> Void = { _ in },
+        isBindingCurrent: (@MainActor () -> Bool)? = nil,
         progress: @escaping @MainActor (Int64, Int64) -> Void
     ) async throws {
         let descriptorData = try JSONEncoder().encode(descriptor)
@@ -3095,9 +3098,45 @@ final class BackgroundMapUploadCoordinator: NSObject,
         task.countOfBytesClientExpectsToSend = expectedBytes
         task.countOfBytesClientExpectsToReceive = 512
         await onTaskStarted(task.taskIdentifier)
+        try await wait(for: task, descriptor: descriptor, claim: claim,
+                       expectedBytes: expectedBytes, isBindingCurrent: isBindingCurrent,
+                       progress: progress)
+    }
+
+    private func wait(
+        for task: URLSessionUploadTask,
+        descriptor: BackgroundMapUploadDescriptor,
+        claim: UUID?,
+        expectedBytes: Int64,
+        isBindingCurrent: (@MainActor () -> Bool)?,
+        progress: @escaping @MainActor (Int64, Int64) -> Void
+    ) async throws {
+        // Only a live invocation can observe its original BLE binding. Restored
+        // OS jobs retain their persisted identity and use normal reconciliation.
+        let bindingMonitor = isBindingCurrent.map { isBindingCurrent in
+            Task { @MainActor in
+                while !Task.isCancelled {
+                    if !isBindingCurrent(),
+                       self.cancelForegroundUpload(task, descriptor: descriptor) { return }
+                    do { try await Task.sleep(nanoseconds: 250_000_000) }
+                    catch { return }
+                }
+            }
+        }
+        defer { bindingMonitor?.cancel() }
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 lock.lock()
+                // Cancellation may complete the suspended OS task before this
+                // continuation is registered. Never install an orphan waiter.
+                if completedTaskIDs.contains(task.taskIdentifier) {
+                    lock.unlock()
+                    if let claim {
+                        Task { @MainActor in DeviceTransferManager.releaseNetworkClaim(claim) }
+                    }
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
                 if let claim { networkClaims[task.taskIdentifier] = claim }
                 pendingUploads[task.taskIdentifier] = PendingUpload(
                     continuation: continuation,
@@ -3105,11 +3144,29 @@ final class BackgroundMapUploadCoordinator: NSObject,
                     expectedBytes: expectedBytes
                 )
                 lock.unlock()
-                task.resume()
+                if Task.isCancelled { task.cancel() } else { task.resume() }
             }
         } onCancel: {
             task.cancel()
         }
+    }
+
+    @discardableResult
+    private func cancelForegroundUpload(
+        _ task: URLSessionUploadTask, descriptor: BackgroundMapUploadDescriptor
+    ) -> Bool {
+        lock.lock()
+        let canCancel = descriptor.uploadAttemptID != nil &&
+            Self.descriptor(for: task) == descriptor &&
+            pendingUploads[task.taskIdentifier] != nil &&
+            !completedTaskIDs.contains(task.taskIdentifier) &&
+            (task.state == .running || task.state == .suspended)
+        lock.unlock()
+        guard canCancel else { return false }
+        // Cancel only this attempt. Completion persists its uncertain transport
+        // outcome and releases its own network claim before resuming the caller.
+        task.cancel()
+        return true
     }
 
     func handleEvents(completionHandler: @escaping () -> Void) {

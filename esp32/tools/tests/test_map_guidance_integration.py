@@ -149,7 +149,10 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         self.assertIn("xTaskCreatePinnedToCoreWithCaps", start)
         self.assertIn("MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT", start)
         self.assertNotIn("xTaskCreatePinnedToCore(", start)
-        self.assertIn("vTaskDeleteWithCaps(nullptr)", thunk)
+        self.assertIn("vTaskSuspend(nullptr)", thunk)
+        reclaim = function_body(MAP_RENDERER_SOURCE, "bool Maps::reclaimRenderWorker")
+        self.assertIn("vTaskDeleteWithCaps(worker)", reclaim)
+        self.assertNotIn("vTaskDeleteWithCaps(nullptr)", thunk)
         self.assertNotIn("vTaskDelete(nullptr)", thunk)
 
     def test_round_panel_sizes_overscan_without_spending_coverage_margin(self):

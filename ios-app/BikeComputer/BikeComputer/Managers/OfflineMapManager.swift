@@ -6361,6 +6361,12 @@ final class OfflineMapManager: ObservableObject {
                                 taskID,
                                 mapID: expectedMapId
                             )
+                        },
+                        isBindingCurrent: {
+                            originalDeviceID == bleManager.activeDeviceID &&
+                                originalEpoch == bleManager.transferConnectionEpoch &&
+                                bleManager.isCurrentMapTransferHTTPStatusContext(httpContext) &&
+                                self.currentDeviceMapOperation?.operationID == uploadOperationID
                         }
                     ) { completedBytes, totalBytes in
                         guard originalDeviceID == bleManager.activeDeviceID,
