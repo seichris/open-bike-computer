@@ -1796,9 +1796,13 @@ transfer id and accepts both forms.
 Generic device-transfer status uses the equivalent `DSTS{...}` direct response
 or `DSTC` chunk header. Firmware keeps an incomplete `DSTC` snapshot on the
 owner task and resumes it only as the bounded authenticated-notification queue
-drains. A fresh status event supersedes an incomplete older snapshot and uses a
-new transfer id, so chunks from different `statusRevision` values cannot be
-combined.
+drains. A status request or policy update received during that transmission
+coalesces one follow-up response after the current snapshot finishes; the
+follow-up reads the latest state without requiring another client request.
+Polling does not restart an incomplete stream. A changed body uses a new
+transfer id, so chunks from different snapshots cannot be combined. Mode
+transitions and BLE authorization boundaries discard the incomplete stream and
+its pending follow-up before publishing status for the new state.
 
 Firmware-update clients require `capabilities.firmwareMaintenanceV1`. Before
 downloading or rebooting, iOS checks `firmware.otaEligible`,

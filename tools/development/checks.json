@@ -520,7 +520,7 @@
       "name": "Transfer control dispatch host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "python -m unittest tools.tests.test_ble_notification_dispatch\ng++ -std=c++17 \\\n  tools/tests/test_transfer_control_dispatch.cpp \\\n  -o ${TMPDIR}/test_transfer_control_dispatch\n${TMPDIR}/test_transfer_control_dispatch\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_transfer_status_chunk_session.cpp \\\n  -o ${TMPDIR}/test_map_transfer_status_chunk_session\n${TMPDIR}/test_map_transfer_status_chunk_session",
+      "command": "python -m unittest tools.tests.test_ble_notification_dispatch tools.tests.test_device_transfer_status_refresh\ng++ -std=c++17 \\\n  tools/tests/test_transfer_control_dispatch.cpp \\\n  -o ${TMPDIR}/test_transfer_control_dispatch\n${TMPDIR}/test_transfer_control_dispatch\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_transfer_status_chunk_session.cpp \\\n  -o ${TMPDIR}/test_map_transfer_status_chunk_session\n${TMPDIR}/test_map_transfer_status_chunk_session",
       "tools": [
         "python3",
         "g++"

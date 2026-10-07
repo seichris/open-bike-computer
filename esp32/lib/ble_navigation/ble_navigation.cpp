@@ -179,6 +179,8 @@ static std::atomic<bool> pendingMapAvailabilityStatus{false};
 static map_transfer_status_protocol::ChunkTransmission
     pendingDeviceTransferStatusChunks;
 static std::atomic<bool> pendingDeviceTransferStatusContinuation{false};
+// Only the Arduino owner task touches the chunk stream and this refresh bit.
+static bool pendingDeviceTransferStatusRefresh = false;
 static map_transfer_status_protocol::ChunkTransmission
     pendingRendererDiagnosticsChunks;
 static std::atomic<bool> pendingRendererDiagnosticsContinuation{false};
@@ -344,6 +346,8 @@ static void scheduleDeferredNotificationEvent();
 static void deferredNotificationEventHandler(struct ble_npl_event *event);
 static void pumpPendingMapTransferStatusChunks();
 static void pumpPendingDeviceTransferStatusChunks();
+static void queueTransferControl(ble_transfer::Action action,
+                                 uint8_t notifications);
 static void pumpPendingRendererDiagnosticsChunks();
 
 static void clearRendererWindowRequest() {
@@ -3177,6 +3181,10 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
   if (pendingDeviceTransferStatusChunks.active()) {
+    // Finish the accepted stream first, then answer with current state. A
+    // policy command or poll arriving under backpressure must not lose its
+    // response, and restarting here would starve the central's reassembly.
+    pendingDeviceTransferStatusRefresh = true;
     pumpPendingDeviceTransferStatusChunks();
     return;
   }
@@ -3225,6 +3233,7 @@ static void pumpPendingDeviceTransferStatusChunks() {
       activeConnHandle == BLE_HS_CONN_HANDLE_NONE ||
       mapTransferStatusCharacteristic == nullptr) {
     pendingDeviceTransferStatusChunks.reset();
+    pendingDeviceTransferStatusRefresh = false;
     pendingDeviceTransferStatusContinuation.store(false,
                                                   std::memory_order_release);
     return;
@@ -3255,11 +3264,17 @@ static void pumpPendingDeviceTransferStatusChunks() {
         "BLE Device Transfer: status notified (%u bytes, %u chunks)\n",
         static_cast<unsigned>(bodySize),
         static_cast<unsigned>(chunkCount));
+    if (pendingDeviceTransferStatusRefresh) {
+      pendingDeviceTransferStatusRefresh = false;
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    }
   }
 }
 
 static void resetPendingDeviceTransferStatusChunks() {
   pendingDeviceTransferStatusChunks.reset();
+  pendingDeviceTransferStatusRefresh = false;
   pendingDeviceTransferStatusContinuation.store(false,
                                                 std::memory_order_release);
 }
