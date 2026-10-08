@@ -29,6 +29,8 @@ public:
 private:
   Storage &storage_;
 };
+// All NVS-backed reads require an internal stack too. PSRAM-backed HTTP callers
+// use DeviceOperationOwner's reader/receipt methods rather than these helpers.
 // requireReader runs only on the internal operation owner. A failed write is
 // ambiguous: deny OTA in this boot until an explicit successful retry verifies it.
 bool requireReader(uint32_t reader);

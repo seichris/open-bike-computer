@@ -6959,6 +6959,14 @@ final class OfflineMapManager: ObservableObject {
             return
         }
         if let operation = currentDeviceMapOperation, operation.usesDurableProtocol {
+            if MapActivationProgressPresentation.shouldClear(
+                forTransferOutcome: lastTransferOutcome,
+                durableObservation: operation.observation
+            ) {
+                activationProgress = nil
+                statusMessage = "Map upload result unknown. Waiting for the device's saved result."
+                return
+            }
             if operation.lastReceipt?.phase == "accepted" {
                 activationProgress = nil
                 statusMessage = "Device accepted this map. Waiting for installation to finish."
@@ -7180,8 +7188,9 @@ final class OfflineMapManager: ObservableObject {
                 fields: ["mapId": lastTransferMapId, "outcome": outcome]
             )
         }
-        if outcome == "cancelled" || outcome == "unknown" || MapActivationProgressPresentation.shouldClear(
-            forTransferOutcome: outcome
+        if MapActivationProgressPresentation.shouldClear(
+            forTransferOutcome: outcome,
+            durableObservation: currentDeviceMapOperation?.observation
         ) {
             activationProgress = nil
         }

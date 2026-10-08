@@ -99,6 +99,18 @@ measurements. Host cycles prove control flow only; repeated physical transfer,
 idle power, association/DHCP, OTA/map admission and shutdown qualification remain
 required for the new candidate. Earlier-image bench transfers do not qualify it.
 
+NVS reads can also disable the flash cache. The metadata-reader floor shortcut,
+OTA compatibility checks and durable OTA receipt reads therefore validate that
+the caller's stack is internal before reading directly; PSRAM-backed HTTP
+workers dispatch those reads to the internal owner. Internal loop/BLE status
+reads remain direct so they do not queue behind long map activation work.
+Reentrant floor protection on the owner executes there without queueing to
+itself. Both NVS adapters also reject an external-stack caller before opening
+NVS, so a missed caller fails closed through the existing error path. Keep the
+SDK cache/stack assertion enabled. A decoded qualification-image
+panic identified the previous unguarded floor read before the map request body
+was consumed; phone-side upload byte counts do not locate a device crash offset.
+
 `owner_released` is before the HTTP task's own deletion, so its heap observation
 is not a fully idle baseline. Compare the *next* `transfer_entry` (after the
 previous worker-stop fence) to earlier entry samples to check for leaks. Keep

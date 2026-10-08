@@ -818,8 +818,12 @@ struct MapActivationProgressPresentation: Equatable {
         )
     }
 
-    static func shouldClear(forTransferOutcome outcome: String) -> Bool {
-        outcome == "installed" || outcome == "failed"
+    static func shouldClear(
+        forTransferOutcome outcome: String,
+        durableObservation: String? = nil
+    ) -> Bool {
+        ["installed", "failed", "cancelled", "unknown"].contains(outcome) ||
+            (outcome == "unconfirmed" && durableObservation == "result_unknown")
     }
 }
 

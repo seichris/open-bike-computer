@@ -26,6 +26,8 @@ struct StaticTask_t { int value = 0; };
 struct StaticQueue_t { int value = 0; };
 struct StaticSemaphore_t { int value = 0; };
 constexpr int pdTRUE = 1, ESP_OK = 0, ESP_FAIL = -1;
+constexpr int ESP_ERR_TIMEOUT = -2, ESP_ERR_NO_MEM = -3;
+constexpr int ESP_ERR_INVALID_STATE = -4, ESP_ERR_INVALID_ARG = -5;
 constexpr int ESP_OTA_IMG_UNDEFINED = 0;
 #define pdMS_TO_TICKS(n) (n)
 #define configASSERT(n) assert(n)
@@ -36,6 +38,8 @@ bool receiveFails = false, mismatched = false, resultFails = false;
 bool radioStopFails = false;
 const void *externalPointer = nullptr;
 void *context = nullptr;
+TaskHandle_t currentTask = nullptr;
+TaskHandle_t xTaskGetCurrentTaskHandle() { return currentTask; }
 SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t *s) { return s; }
 QueueHandle_t xQueueCreateStatic(unsigned count, unsigned, uint8_t *, StaticQueue_t *q) {
   assert(count == 1);
@@ -115,6 +119,12 @@ int main() {
   externalPointer = nullptr;
   assert(owner.start());
   const TaskHandle_t identity = owner.workerTask_.load();
+  currentTask = identity;
+  const int sendsBeforeSelfDispatch = sends;
+  assert(owner.execute(Owner::Command{}, reply) == ESP_ERR_INVALID_STATE);
+  assert(sends == sendsBeforeSelfDispatch);
+  assert(owner.dispatchState_ == firmware_update::internal_owner_policy::DispatchState::Ready);
+  currentTask = nullptr;
   for (int session = 0; session < 100; ++session) {
     std::memset(owner.networkSsid_, 0x11, sizeof(owner.networkSsid_));
     std::memset(owner.networkPassword_, 0x22, sizeof(owner.networkPassword_));

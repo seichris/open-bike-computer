@@ -71,6 +71,8 @@ public:
   esp_err_t description(const esp_partition_t *partition,
                         esp_app_desc_t &description);
   esp_err_t protectMetadataReaderFloor(uint32_t reader);
+  bool allowsMetadataReader(uint32_t reader);
+  bool readFirmwareOperationReceipt(receipt::Record &record);
   esp_err_t selectBootPartition(const esp_partition_t *partition);
   esp_err_t acceptFirmwareOperation(const receipt::Record &record, uint32_t revision);
   esp_err_t acknowledgeFirmwareOperation(const receipt::Record &record);
@@ -88,6 +90,8 @@ private:
     Description,
     SelectBoot,
     ProtectMetadataReaderFloor,
+    CheckMetadataReader,
+    ReadFirmwareOperationReceipt,
     AcceptFirmwareOperation,
     AcknowledgeFirmwareOperation,
     StartStation,
@@ -120,6 +124,7 @@ private:
     esp_app_desc_t description{};
     uint32_t commandId = 0;
     device_transfer::NetworkStartResult networkStart;
+    receipt::Record firmwareReceipt{};
   };
 
   // Map activation is the deepest internal-stack operation. The HTTP/TLS
@@ -160,6 +165,7 @@ private:
                     const std::string *networkPassword = nullptr,
                     TickType_t timeoutTicks = kCommandTimeoutTicks);
   bool startLocked();
+  static bool callerStackIsInternal();
   void run();
   static void taskThunk(void *context);
 };

@@ -259,15 +259,47 @@ esp_err_t DeviceOperationOwner::selectBootPartition(
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
+bool DeviceOperationOwner::callerStackIsInternal() {
+  uint32_t stackMarker = 0;
+  return esp_ptr_internal(&stackMarker);
+}
+
 esp_err_t DeviceOperationOwner::protectMetadataReaderFloor(uint32_t reader) {
-  // Read-only fast path avoids allocating an idle 16 KiB owner on every boot.
-  if (metadata_compatibility::floorAlreadyProtected(reader)) return ESP_OK;
+  // NVS reads can disable the cache too. Only an internal-stack caller may
+  // use the read-only shortcut; TLS workers must dispatch before touching NVS.
+  if (callerStackIsInternal()) {
+    if (metadata_compatibility::floorAlreadyProtected(reader)) return ESP_OK;
+    // Map activation already runs on this owner. Never queue to ourselves.
+    if (workerTask_ != nullptr && xTaskGetCurrentTaskHandle() == workerTask_) {
+      return metadata_compatibility::requireReader(reader) ? ESP_OK : ESP_FAIL;
+    }
+  }
   Command command;
   command.operation = Operation::ProtectMetadataReaderFloor;
   command.receiptRevision = reader;
   Result result;
   const auto dispatch = execute(command, result);
   return dispatch == ESP_OK ? result.error : dispatch;
+}
+
+bool DeviceOperationOwner::allowsMetadataReader(uint32_t reader) {
+  // Keep BLE/loop status reads out of the long map-activation command queue.
+  if (callerStackIsInternal()) return metadata_compatibility::allowsReader(reader);
+  Command command;
+  command.operation = Operation::CheckMetadataReader;
+  command.receiptRevision = reader;
+  Result result;
+  return execute(command, result) == ESP_OK && result.error == ESP_OK;
+}
+
+bool DeviceOperationOwner::readFirmwareOperationReceipt(receipt::Record &record) {
+  if (callerStackIsInternal()) return receipt::load(record);
+  Command command;
+  command.operation = Operation::ReadFirmwareOperationReceipt;
+  Result result;
+  if (execute(command, result) != ESP_OK || result.error != ESP_OK) return false;
+  record = result.firmwareReceipt;
+  return true;
 }
 
 esp_err_t DeviceOperationOwner::acceptFirmwareOperation(const receipt::Record &record, uint32_t revision) {
@@ -288,6 +320,9 @@ esp_err_t DeviceOperationOwner::execute(
     const Command &command, Result &result, const uint8_t *writeData,
     const std::string *networkSsid,
     const std::string *networkPassword, TickType_t timeoutTicks) {
+  if (workerTask_ != nullptr && xTaskGetCurrentTaskHandle() == workerTask_) {
+    return ESP_ERR_INVALID_STATE;
+  }
   configure();
   if (xSemaphoreTake(callMutex_, timeoutTicks) != pdTRUE) {
     return ESP_ERR_TIMEOUT;
@@ -412,6 +447,12 @@ void DeviceOperationOwner::run() {
       break;
     case Operation::ProtectMetadataReaderFloor:
       result.error = metadata_compatibility::requireReader(command.receiptRevision) ? ESP_OK : ESP_FAIL;
+      break;
+    case Operation::CheckMetadataReader:
+      result.error = metadata_compatibility::allowsReader(command.receiptRevision) ? ESP_OK : ESP_FAIL;
+      break;
+    case Operation::ReadFirmwareOperationReceipt:
+      result.error = receipt::load(result.firmwareReceipt) ? ESP_OK : ESP_FAIL;
       break;
     case Operation::SelectBoot:
       result.error = esp_ota_set_boot_partition(command.partition);

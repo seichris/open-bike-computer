@@ -11,6 +11,9 @@ class FirmwareOperationReceipts(unittest.TestCase):
     def test_nvs_adapter_commit_and_read_failures(self):
         with tempfile.TemporaryDirectory() as directory:
             p = Path(directory)
+            (p / "esp_memory_utils.h").write_text(
+                "#pragma once\ninline bool esp_ptr_internal(const void *) { return true; }\n"
+            )
             (p / "nvs.h").write_text(r'''
 #pragma once
 #include <cstddef>

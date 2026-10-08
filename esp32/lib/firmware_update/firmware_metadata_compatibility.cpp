@@ -1,6 +1,7 @@
 #include "firmware_metadata_compatibility.hpp"
 #include <atomic>
 #include <nvs.h>
+#include <esp_memory_utils.h>
 
 namespace firmware_update::metadata_compatibility {
 namespace {
@@ -10,6 +11,8 @@ class NVSStorage final : public Storage {
 public:
   bool read(uint32_t &floor) override {
     floor = 0;
+    uint32_t stackMarker = 0;
+    if (!esp_ptr_internal(&stackMarker)) return false;
     nvs_handle_t handle;
     const esp_err_t opened = nvs_open("map_meta_floor", NVS_READONLY, &handle);
     if (opened == ESP_ERR_NVS_NOT_FOUND) return observedFloor.load() == 0;
@@ -23,6 +26,8 @@ public:
     return true;
   }
   bool write(uint32_t floor) override {
+    uint32_t stackMarker = 0;
+    if (!esp_ptr_internal(&stackMarker)) return false;
     nvs_handle_t handle;
     if (nvs_open("map_meta_floor", NVS_READWRITE, &handle) != ESP_OK) return false;
     esp_err_t result = nvs_set_u32(handle, "reader", floor);

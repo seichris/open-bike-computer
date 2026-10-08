@@ -415,7 +415,7 @@ void FirmwareUpdateHttpServer::setOperationDeviceID(const std::string &device) {
 }
 
 bool FirmwareUpdateHttpServer::readOperationReceipt(receipt::Record &record) const {
-  if (!receipt::load(record)) return false;
+  if (!operationOwner_.readFirmwareOperationReceipt(record)) return false;
   uint32_t highWater = operationRevisionHighWater_.load();
   for (;;) {
     if (record.revision < highWater) return false; // storage reset/regression in this boot
@@ -699,7 +699,7 @@ void FirmwareUpdateHttpServer::handleBegin(
   }
   // Capability is inside the verified release signature and bound to image SHA.
   // A greater build number or developer downgrade flag cannot bypass this floor.
-  if (!metadata_compatibility::allowsReader(mapMetadataReaderVersion)) {
+  if (!operationOwner_.allowsMetadataReader(mapMetadataReaderVersion)) {
     fail(client,409,"metadata_reader_incompatible",
          "signed firmware does not support retained map operation metadata");
     return;
@@ -989,7 +989,7 @@ void FirmwareUpdateHttpServer::handleFinalize(
   }
   operationRevisionHighWater_.store(pendingReceiptRevision_ + 1);
 #endif
-  if (!metadata_compatibility::allowsReader(pendingMapMetadataReader_)) {
+  if (!operationOwner_.allowsMetadataReader(pendingMapMetadataReader_)) {
     transferServer_->endAuthorizedCommit(commitGrant);
     resetUploadState();
     fail(client,409,"metadata_reader_incompatible","map metadata compatibility changed before boot selection");

@@ -11,6 +11,39 @@ def source(path):
 
 
 class RuntimeOwnershipContractTests(unittest.TestCase):
+    def test_actual_metadata_reads_are_cache_safe_and_owner_reentrant(self):
+        header = source("lib/firmware_update/device_operation_owner.hpp")
+        header = "\n".join(line for line in header.splitlines()
+                           if not line.startswith(("#include", "#pragma")))
+        header = header.replace(" : public device_transfer::NetworkOperationOwner", "")
+        header = header.replace(" override", "").replace("private:", "public:")
+        text = source("lib/firmware_update/device_operation_owner.cpp")
+        methods = text[text.index("bool DeviceOperationOwner::callerStackIsInternal()"):
+                       text.index("esp_err_t DeviceOperationOwner::acceptFirmwareOperation")]
+        cases = text[text.index("    case Operation::ProtectMetadataReaderFloor:"):
+                     text.index("    case Operation::SelectBoot:",
+                                text.index("    case Operation::ProtectMetadataReaderFloor:"))]
+        harness = source("tools/tests/device_operation_metadata_read_harness.cpp")
+        harness = harness.replace("// PRODUCTION_HEADER", header)
+        harness = harness.replace("// PRODUCTION_METHODS", "namespace firmware_update {\n" + methods + "\n}")
+        harness = harness.replace("// PRODUCTION_READ_CASES", cases)
+        with tempfile.TemporaryDirectory() as directory:
+            unit = Path(directory) / "metadata.cpp"
+            binary = Path(directory) / "metadata"
+            unit.write_text(harness)
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "tools/tests"), str(unit), "-o", str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+            # Reintroduce the observed unguarded shortcut only in a temporary
+            # copy. It must hit the fake cache-safety fault, not merely fail to
+            # compile or trip an unrelated assertion.
+            unsafe = harness.replace("if (callerStackIsInternal()) {", "if (true) {", 1)
+            self.assertNotEqual(unsafe, harness)
+            unit.write_text(unsafe)
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "tools/tests"), str(unit), "-o", str(binary)], check=True)
+            self.assertEqual(subprocess.run([str(binary)]).returncode, 42)
+
     def test_actual_wifi_runtime_reuses_driver_with_radio_off_and_credentials_erased(self):
         header = source("lib/firmware_update/device_wifi_runtime.hpp")
         methods = source("lib/firmware_update/device_wifi_runtime.cpp")
@@ -144,6 +177,8 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         flash = source("lib/firmware_update/device_operation_owner.cpp")
         methods = flash[flash.index("void DeviceOperationOwner::configure()"):
                         flash.index("bool DeviceOperationOwner::started()")]
+        methods += flash[flash.index("esp_err_t DeviceOperationOwner::execute("):
+                         flash.index("void DeviceOperationOwner::run()")]
         quiesce = flash[flash.index("    case Operation::Quiesce:"):
                         flash.index("    }\n    lastStackHighWaterBytes_", flash.index("    case Operation::Quiesce:"))]
         # Run the exact owner-side clearing before publishing its fake reply.

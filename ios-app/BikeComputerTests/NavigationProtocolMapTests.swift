@@ -613,6 +613,20 @@ extension NavigationProtocolTests {
                 ),
             "terminal transfer outcomes clear restored activation progress"
         )
+        assert(
+            MapActivationProgressPresentation.shouldClear(
+                forTransferOutcome: "unconfirmed",
+                durableObservation: "result_unknown"
+            ),
+            "a failed durable upload cannot restore its cached percentage as live installation progress"
+        )
+        assert(
+            !MapActivationProgressPresentation.shouldClear(
+                forTransferOutcome: "unconfirmed",
+                durableObservation: "commit_accepted"
+            ),
+            "an accepted durable commit remains distinguishable from an unknown upload"
+        )
     }
 
     static func testMapUploadProgressReconciliation() {
