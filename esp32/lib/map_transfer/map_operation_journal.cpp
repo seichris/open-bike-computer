@@ -16,7 +16,10 @@ bool MapOperationStorage::read(unsigned slot,std::vector<uint8_t> &bytes) {
   FILE *file=std::fopen(path(slot).c_str(),"rb");
   if (!file) return errno==ENOENT;
   // A vector allocation can throw; release the descriptor during unwinding.
-  std::unique_ptr<FILE,decltype(&std::fclose)> owner(file,&std::fclose);
+  struct FileCloser {
+    void operator()(FILE *stream) const noexcept { std::fclose(stream); }
+  };
+  std::unique_ptr<FILE,FileCloser> owner(file);
   // This read nests beneath the manifest parser on the HTTP task. Keep the
   // bounded image off its stack, without reserving 4 KiB for a small journal.
   struct stat status{};
