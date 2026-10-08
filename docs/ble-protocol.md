@@ -2112,10 +2112,18 @@ Status responses should include:
 - `activation`: the latest activation `status`, monotonic boot-local
   `sequence`, `sessionId`, optional `mapId`, numbered `step`, total `steps`,
   integer `progress` percentage, and structured `error`, when present. Status
-  is `idle`, `receiving`, `paused`, `finalizing`, `ready`, `activating`,
+  is `idle`, `receiving`, `paused`, `finalizing`, `ready`, `activating`, `recovering`,
   `failed`, or `installed`. BLE uses a compact form
   that omits error messages and duplicate `lastError`; HTTPS retains the full
-  diagnostic text.
+  diagnostic text. Optional `ownerRecoveryCode` retains the first internal-owner
+  activation failure across same-session recovery retries; `terminalCode` retains
+  the final failure code (or `installed`). Both are bounded to 63 bytes, appear in
+  compact BLE and HTTPS status, and reset for a new session or a new attempt
+  after a terminal result. They are boot-local diagnostic context, not receipts.
+  The `transfer.map_activation_result` diagnostic event retains the exact
+  operation ID, terminal phase/code and first owner code (`reason`). Status
+  remains available when recording loses an event; neither survives a reboot
+  as new durable receipt authority.
 - `lastError`: last installer/upload error code, when present. HTTPS also includes
   the diagnostic message.
 - `activeError`: active-map metadata error code, when no active map is installed.

@@ -465,6 +465,29 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(handedOffState.begin("stream-session", 3, 4) ==
          ActivationBeginResult::Started);
   assert(handedOffState.snapshot().sequence == 9);
+
+  MapActivationState recovering;
+  assert(recovering.begin("accepted-session", 3) == ActivationBeginResult::Started);
+  recovering.rememberOwnerRecovery("stream_active_write");
+  recovering.finish("recovering", "", "stream_transaction_recovery", "retry");
+  assert(recovering.begin("accepted-session", 3) == ActivationBeginResult::Started);
+  recovering.rememberOwnerRecovery("later_worker_error");
+  recovering.finish("failed", "map", "stream_finalization", "removed unselected staging");
+  for (bool compactStatus : {false, true}) {
+    const auto json = recovering.json(compactStatus);
+    assert(json.find("\"ownerRecoveryCode\":\"stream_active_write\"") != std::string::npos);
+    assert(json.find("\"terminalCode\":\"stream_finalization\"") != std::string::npos);
+  }
+  assert(recovering.begin("another-session", 3) == ActivationBeginResult::Started);
+  assert(recovering.snapshot().ownerRecoveryCode[0] == '\0');
+  assert(recovering.snapshot().terminalCode[0] == '\0');
+  const std::string oversized(1000, 'x');
+  recovering.rememberOwnerRecovery(oversized.c_str());
+  recovering.finish("failed", "map", oversized, "");
+  assert(std::strlen(recovering.snapshot().ownerRecoveryCode.data()) == 63);
+  assert(std::strlen(recovering.snapshot().terminalCode.data()) == 63);
+  assert(recovering.begin("another-session", 3) == ActivationBeginResult::Started);
+  assert(recovering.snapshot().ownerRecoveryCode[0] == '\0');
 }
 
 static void testRejectsUnsafeManifestPath() {

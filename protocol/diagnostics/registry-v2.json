@@ -113,6 +113,16 @@
         "reason"
       ]
     },
+    "transfer.map_activation_result": {
+      "level": "info",
+      "optional": [],
+      "required": [
+        "operationId",
+        "phase",
+        "code",
+        "reason"
+      ]
+    },
     "transfer.wifi_apply": {
       "level": "info",
       "optional": [

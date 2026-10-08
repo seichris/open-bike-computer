@@ -61,7 +61,10 @@ void testFailedCanonicalWriteRecoversVerifiedPredecessor() {
   recoveryDepth = maximumRecoveryDepth = 0;
   observeRecovery = true;
 #endif
-  const auto result = installer.recoverPendingStreamActivation();
+  std::string firstRecovery;
+  const auto result = installer.recoverPendingStreamActivation({},
+      [](void *context, const char *code) { *static_cast<std::string *>(context) = code; }, &firstRecovery);
+  assert(firstRecovery == "stream_active_write");
 #if defined(MAP_RECOVERY_INSTRUMENT_FUNCTIONS)
   observeRecovery = false;
   assert(recoveryDepth == 0 && maximumRecoveryDepth == 1);

@@ -7181,6 +7181,11 @@ final class OfflineMapManager: ObservableObject {
         let changed = lastTransferOutcome != outcome
         lastTransferOutcome = outcome
         defaults.set(outcome, forKey: OfflineMapDefaults.lastTransferOutcomeKey)
+        if outcome == "failed" {
+            statusMessage = "Map installation failed"
+        } else if outcome == "cancelled" {
+            statusMessage = "Map upload cancelled before installation"
+        }
         if changed {
             diagnosticsRecorder?.record(
                 category: .map,

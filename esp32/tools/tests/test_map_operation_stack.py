@@ -1,5 +1,6 @@
 """Bound real journal frames and exercise size races and workspace exhaustion."""
 from pathlib import Path
+import json
 import shutil
 import subprocess
 import tempfile
@@ -9,13 +10,107 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class MapOperationStackTests(unittest.TestCase):
+    def test_psram_workspace_exhaustion_preserves_selection_and_recovery_evidence(self):
+        compiler = shutil.which('g++')
+        self.assertIsNotNone(compiler)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / 'esp_heap_caps.h').write_text('''#pragma once
+#include <cstddef>
+constexpr unsigned MALLOC_CAP_SPIRAM=1, MALLOC_CAP_8BIT=2;
+void *heap_caps_malloc(size_t,unsigned);
+void heap_caps_free(void *);
+''')
+            fixture = directory / 'workspace.cpp'
+            fixture.write_text(r'''
+#define main originalMapStreamTests
+#include "tools/tests/test_map_stream_install.cpp"
+#undef main
+#define ARDUINO 1
+#define BOARD_HAS_PSRAM 1
+#include "lib/map_transfer/map_activation_workspace.hpp"
+#include <cstdlib>
+static bool failNext=false, failHash=false;
+static size_t outstanding=0;
+void *heap_caps_malloc(size_t bytes,unsigned caps) {
+  assert(caps==3); // Never borrow the internal heap floor.
+  if (failNext || (failHash && bytes==sizeof(map_transfer::Sha256Hasher)+1024)) {
+    failNext=false; failHash=false; return nullptr;
+  }
+  void *memory=std::malloc(bytes); if(memory) ++outstanding; return memory;
+}
+void heap_caps_free(void *memory) { if(memory) { assert(outstanding); --outstanding; std::free(memory); } }
+struct ThrowingWorkspace { ThrowingWorkspace() { throw std::bad_alloc(); } };
+struct FailPredecessorHashInstaller : MapTransferInstaller {
+  using MapTransferInstaller::MapTransferInstaller;
+  bool writeTextFileAtomic(const std::string &path,const std::string &text) const override {
+    const bool written=MapTransferInstaller::writeTextFileAtomic(path,text);
+    if(written && path.find("/.activation-transaction.json")!=std::string::npos) failHash=true;
+    return written;
+  }
+};
+int main() {
+  const auto root=tempRoot();
+  MapTransferInstaller installer(root);
+  prepareReadyRoot(root,"previous"); assert(installer.activateReadyStreamMap("previous").ok);
+  prepareReadyRoot(root,"candidate");
+  const auto active=root+"/VECTMAP/active-map.json";
+  const auto previous=readFile(active);
+  // Failure at initial selection cannot alter the active pointer or staged map.
+  failNext=true;
+  try { installer.activateReadyStreamMap("candidate"); assert(false); }
+  catch(const std::bad_alloc &) {}
+  assert(readFile(active)==previous && exists(root+"/VECTMAP/.maps/candidate/.ready"));
+  assert(!exists(root+"/VECTMAP/.activation-transaction.json"));
+  // Failure in the predecessor hash cannot silently skip an anchor and write
+  // the candidate. The ready journal is retained for an exact later retry.
+  FailPredecessorHashInstaller failing(root);
+  try { failing.activateReadyStreamMap("candidate"); assert(false); }
+  catch(const std::bad_alloc &) {}
+  assert(!failHash && readFile(active)==previous);
+  assert(exists(root+"/VECTMAP/.activation-transaction.json"));
+  assert(exists(root+"/VECTMAP/.maps/candidate/.ready"));
+  assert(outstanding==0);
+  assert(installer.recoverInterruptedActivation().ok);
+  ActiveMapSelection selected; assert(installer.readActiveMap(selected).ok && selected.sessionId=="candidate");
+  assert(outstanding==0);
+  try { (void)map_transfer::makeActivationWorkspace<ThrowingWorkspace>(); assert(false); }
+  catch(const std::bad_alloc &) {}
+  assert(outstanding==0); // Construction failures also release the allocation.
+  std::filesystem::remove_all(root);
+}
+''')
+            object_path = directory / 'map_transfer.o'
+            adapter = directory / 'workspace_adapter.hpp'
+            adapter.write_text('#define ARDUINO 1\n#define BOARD_HAS_PSRAM 1\n#include "' +
+                               str(ROOT / 'lib/map_transfer/map_activation_workspace.hpp') +
+                               '"\n#undef ARDUINO\n#undef BOARD_HAS_PSRAM\n')
+            subprocess.run([compiler, '-std=c++17', '-O2', '-include', str(adapter),
+                            '-I' + str(directory), '-c', str(ROOT / 'lib/map_transfer/map_transfer.cpp'),
+                            '-o', str(object_path)], check=True)
+            # Use the canonical map-stream source list, rather than maintaining
+            # a second compiler graph that could omit production dependencies.
+            checks = json.loads((ROOT.parent / 'tools/development/checks.json').read_text())['checks']
+            command = next(c['command'] for c in checks if c['id']=='esp32-host-map-stream-format-host-tests')
+            start = command.index('g++ -std=c++17 -Wall -Wextra -Werror $test_flags')
+            command = command[start:command.index('\n  ${TMPDIR}/${test}', start)]
+            command = command.replace('$test_flags', '-DARDUINO -DBOARD_HAS_PSRAM -I' + str(directory) + ' -I.')
+            command = command.replace('lib/map_transfer/map_transfer.cpp', str(object_path))
+            command = command.replace('tools/tests/${test}.cpp', str(fixture))
+            command = command.replace('${TMPDIR}/${test}', str(directory / 'workspace'))
+            # The fixture's production dependencies use their normal host paths;
+            # only the allocator adapter and fixture select the PSRAM branch.
+            command = command.replace('-DARDUINO -DBOARD_HAS_PSRAM', '')
+            subprocess.run(['bash', '-c', command], cwd=ROOT, check=True)
+            subprocess.run([str(directory / 'workspace')], check=True)
+
     def test_compiled_journal_frames_do_not_reintroduce_the_nested_stack_cliff(self):
         compiler = shutil.which('g++')
         self.assertIsNotNone(compiler)
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
             frames = {}
-            for source in ('map_transfer/map_operation_journal.cpp', 'device_transfer/durable_operation.cpp'):
+            for source in ('map_transfer/map_operation_journal.cpp', 'device_transfer/durable_operation.cpp', 'map_transfer/map_transfer.cpp'):
                 output = directory / (Path(source).stem + '.o')
                 subprocess.run([compiler, '-std=c++17', '-O2', '-fstack-usage', '-c',
                                 str(ROOT / 'lib' / source), '-o', str(output)], check=True)
@@ -31,8 +126,15 @@ class MapOperationStackTests(unittest.TestCase):
                 (('Store7restore', 'Store::restore'), 512),
                 (('Store13admitInternal', 'Store::admitInternal'), 1536),
                 (('Store10transition', 'Store::transition'), 1536),
+                (('recoverInterruptedActivation',), 384),
+                (('selectReadyStreamMap',), 1536),
+                (('recoverStreamActivationTransaction',), 1536),
+                (('finalizeOperation',), 1024),
+                (('fileSha256Hex',), 256),
+                (('writeActiveMap',), 128),
+                (('persistPredecessorAnchor',), 768),
             ):
-                values = [value for name, value in frames.items() if any(marker in name for marker in names)]
+                values = [value for name, value in frames.items() if any(marker in name for marker in names) and "clE" not in name and "lambda" not in name and "Workspace" not in name and ".cold" not in name]
                 self.assertEqual(len(values), 1, names)
                 self.assertLessEqual(values[0], limit, names)
 

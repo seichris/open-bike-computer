@@ -5,6 +5,8 @@
 
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "map_stream_compiled_trust.hpp"
+#include "map_activation_workspace.hpp"
+#include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
 
 #include <algorithm>
@@ -1299,6 +1301,8 @@ MapActivationSnapshot MapTransferHttpServer::activationSnapshot() const {
     snapshot.progress = streamInstallState_.progress();
     snapshot.errorCode = streamInstallState_.errorCode;
     snapshot.errorMessage = streamInstallState_.errorMessage;
+    snapshot.ownerRecoveryCode.fill(0);
+    snapshot.terminalCode.fill(0);
   }
   unlockState();
   return snapshot;
@@ -1653,14 +1657,49 @@ void MapTransferHttpServer::finishActivation(std::string status, std::string map
   // prepared fields into the state is allocation-free.
   std::string stateCode = errorCode;
   std::string stateMessage = errorMessage;
+  const bool terminal = status == "failed" || status == "installed";
+  const std::string phase = status;
   lockState();
   activationState_.finish(std::move(status), std::move(mapId),
                           std::move(stateCode), std::move(stateMessage));
   unlockState();
+  if (terminal) recordActivationOutcome(phase, errorCode);
   if (!errorCode.empty()) {
     transferServer_->setLastError(errorCode, errorMessage);
   }
   ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
+}
+
+void MapTransferHttpServer::rememberOwnerRecovery(const char *code) noexcept {
+  StateGuard guard(*this);
+  activationState_.rememberOwnerRecovery(code);
+}
+
+void MapTransferHttpServer::recordActivationOutcome(const std::string &phase,
+                                                     const std::string &code) try {
+  struct Workspace {
+    std::array<char, 64> first{}, terminal{};
+    std::array<char, 33> operation{};
+    char fields[384]{};
+  };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  {
+    StateGuard guard(*this);
+    workspace->first = activationState_.ownerRecoveryCode();
+    workspace->terminal = activationState_.terminalCode();
+    const auto &operation = !terminalOperationID_.empty() ? terminalOperationID_ :
+        commitRecovery_.identity.operation;
+    std::copy_n(operation.data(), std::min(operation.size(), workspace->operation.size() - 1),
+                workspace->operation.data());
+  }
+  const int bytes = std::snprintf(workspace->fields, sizeof(workspace->fields),
+      "{\"operationId\":\"%s\",\"phase\":\"%s\",\"code\":\"%s\",\"reason\":\"%s\"}",
+      workspace->operation.data(), phase.c_str(), workspace->terminal.data(), workspace->first.data());
+  if (bytes > 0 && static_cast<size_t>(bytes) < sizeof(workspace->fields))
+    (void)ride_diagnostics::record(code.empty() ? ride_diagnostics::Level::Info : ride_diagnostics::Level::Error,
+        "transfer", "map_activation_result", workspace->fields);
+} catch (const std::bad_alloc &) {
+  // Authenticated status retains the bounded codes even if recording is lost.
 }
 
 void MapTransferHttpServer::updateActivationProgress(
@@ -1760,6 +1799,7 @@ void MapTransferHttpServer::beginDeferredActivation(
                    "map activation is still resolving on the device");
     } else if (dispatch != ESP_OK) {
       retryAcceptedActivation(activation.sessionId);
+      rememberOwnerRecovery("activation_owner");
       finishActivation("recovering", "", "activation_owner",
                        "accepted map activation requires recovery");
     }
@@ -1799,6 +1839,7 @@ void MapTransferHttpServer::ownedInstalledCleanup(void *context,
   auto *server = static_cast<MapTransferHttpServer *>(context);
   const InstallStatus cleaned = server->installer_.activateReadyStreamMap(sessionId);
   if (!cleaned.ok) {
+    server->rememberOwnerRecovery(cleaned.code.c_str());
     server->retryAcceptedActivation(sessionId);
     server->setLastError(cleaned.code, cleaned.message);
   } else {
@@ -1812,7 +1853,7 @@ void MapTransferHttpServer::executeActivation(const std::string &sessionId,
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Transfer);
   const bool waitingForRenderer =
-      runStreamActivationTask(sessionId, automaticExit);
+      runStreamActivationTask(sessionId, automaticExit, true);
   if (waitingForRenderer) {
     StateGuard guard(*this);
     if (commitRecovery_.identity.session == sessionId) commitRecovery_ = {};
@@ -1823,24 +1864,31 @@ void MapTransferHttpServer::executeActivation(const std::string &sessionId,
 }
 
 catch (const std::bad_alloc &) {
+  rememberOwnerRecovery("out_of_memory");
   retryAcceptedActivation(sessionId);
   // Do not allocate another error report while recovering from allocation
   // failure. Durable accepted state remains queryable and the worker retries.
 }
 
 bool MapTransferHttpServer::runStreamActivationTask(
-    const std::string &sessionId, bool automaticExit) {
+    const std::string &sessionId, bool automaticExit, bool internalOwner) {
   const auto onProgress = [this](const ActivationProgress &progress) {
     updateActivationProgress(progress);
   };
-  InstallStatus activated = installer_.recoverPendingStreamActivation(onProgress);
+  const auto onRecovery = [](void *context, const char *code) {
+    static_cast<MapTransferHttpServer *>(context)->rememberOwnerRecovery(code);
+  };
+  InstallStatus activated = installer_.recoverPendingStreamActivation(onProgress,
+      internalOwner ? +onRecovery : nullptr, this);
   if (!activated.ok) {
+    if (internalOwner) rememberOwnerRecovery(activated.code.c_str());
     finishActivation("recovering", "", activated.code, activated.message);
     return false;
   }
   ActiveMapSelection selected;
   InstallStatus active = installer_.readActiveMap(selected);
   if (!active.ok || selected.sessionId != sessionId) {
+    if (internalOwner) rememberOwnerRecovery(active.ok ? "stream_activation_identity" : active.code.c_str());
     finishActivation("recovering", active.ok ? selected.mapId : "",
                      active.ok ? "stream_activation_identity" : active.code,
                      active.ok ? "activated stream session does not match"
@@ -1850,6 +1898,7 @@ bool MapTransferHttpServer::runStreamActivationTask(
   ReadyStreamMap ready;
   const auto readyStatus=installer_.readReadyStreamMap(sessionId,ready);
   if (!readyStatus.ok) {
+    if (internalOwner) rememberOwnerRecovery(readyStatus.code.c_str());
     finishActivation("recovering","",readyStatus.code,readyStatus.message); return false;
   }
   std::string operationID = ready.operationID; // Allocate before taking the mutex.

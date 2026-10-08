@@ -1169,6 +1169,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferActivationStep: Int?
     @Published var mapTransferActivationStepCount: Int?
     @Published var mapTransferActivationProgress: Int?
+    @Published var mapTransferActivationOwnerRecoveryCode: String?
+    @Published var mapTransferActivationTerminalCode: String?
     @Published var mapTransferActivationError: String?
     @Published var mapTransferLastError: String?
     @Published var mapTransferStatusDescription: String = "unknown"
@@ -5995,6 +5997,8 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferActivationStepCount = nil
         mapTransferActivationProgress = nil
         mapTransferActivationError = nil
+        mapTransferActivationOwnerRecoveryCode = nil
+        mapTransferActivationTerminalCode = nil
     }
 
     @discardableResult
@@ -6821,6 +6825,8 @@ class BLEManager: NSObject, ObservableObject {
         mapTransferActivationStepCount = nil
         mapTransferActivationProgress = nil
         mapTransferActivationError = nil
+        mapTransferActivationOwnerRecoveryCode = nil
+        mapTransferActivationTerminalCode = nil
         mapTransferLastError = nil
         mapTransferStatusDescription = "unknown"
         hasFreshMapTransferStatus = false
@@ -11407,6 +11413,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         }
 
         if let activation = status.activation {
+            mapTransferActivationOwnerRecoveryCode = activation.ownerRecoveryCode
+            mapTransferActivationTerminalCode = activation.terminalCode
             mapTransferActivationStatus = activation.status ?? "idle"
             mapTransferActivationSequence = activation.sequence
             mapTransferActivationSessionId = activation.sessionId ?? ""
@@ -11432,6 +11440,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferActivationStepCount = nil
             mapTransferActivationProgress = nil
             mapTransferActivationError = nil
+            mapTransferActivationOwnerRecoveryCode = nil
+            mapTransferActivationTerminalCode = nil
         }
         projectMapSelectionHealth(status.selectionHealth, fieldPresent: status.selectionHealth != nil,
                                   activeRoot: status.activeRoot)
@@ -11491,6 +11501,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         activeMapTopographySourcePolicyReceiptPrefix =
             object["topographySourcePolicyReceiptPrefix"] as? String ?? ""
         if let activation = object["activation"] as? [String: Any] {
+            mapTransferActivationOwnerRecoveryCode = activation["ownerRecoveryCode"] as? String
+            mapTransferActivationTerminalCode = activation["terminalCode"] as? String
             mapTransferActivationStatus = activation["status"] as? String ?? "idle"
             mapTransferActivationSequence =
                 (activation["sequence"] as? NSNumber)?.uint32Value
@@ -11515,6 +11527,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             mapTransferActivationStepCount = nil
             mapTransferActivationProgress = nil
             mapTransferActivationError = nil
+            mapTransferActivationOwnerRecoveryCode = nil
+            mapTransferActivationTerminalCode = nil
         }
         deviceHasSDCard = object["sdPresent"] as? Bool
         deviceMapStateKnown = object["mapStateKnown"] as? Bool ?? false

@@ -60,7 +60,10 @@ public:
   bool pendingRendererAcknowledgement_=false;
   bool grantOwned=true, automaticExit=false;
   int outcome=0, runs=0;
-  bool runStreamActivationTask(const std::string &, bool) {
+  std::string firstOwnerCode;
+  void rememberOwnerRecovery(const char *code) { if(firstOwnerCode.empty()) firstOwnerCode=code; }
+  bool runStreamActivationTask(const std::string &, bool, bool owner) {
+    assert(owner);
     ++runs;
     if(outcome==2) throw std::bad_alloc();
     if(outcome==1) {pendingRendererAcknowledgement_=true;return true;}
@@ -78,6 +81,7 @@ int main() {
     server.outcome=outcome;
     server.executeActivation("accepted-session",true);
     assert(server.grantOwned && server.commitRecovery_.armed && !server.automaticExit);
+    if(outcome==2) assert(server.firstOwnerCode=="out_of_memory");
     assert(server.commitRecovery_.identity.session=="accepted-session");
     // Actual recovery may now retry; eventual renderer handoff retires the
     // dormant disposition while retaining the grant for its ACK/receipt.
@@ -141,6 +145,7 @@ public:
   void retryAcceptedActivation(const std::string &) {++retries;}
   void finishActivation(const char *,const char *,const char *,const char *) {}
   void setLastError(const char *,const char *) {}
+  void rememberOwnerRecovery(const char *) {}
   void beginDeferredActivation(const DeferredActivation &,bool);
 };
 ''' + body + r'''
@@ -227,7 +232,10 @@ public:
   bool storageAvailable = true;
   bool refreshStreamStorageCapability(bool) { return storageAvailable; }
   bool observeOperationRevision(uint64_t) { return true; }
-  bool runStreamActivationTask(const std::string &, bool) { dispatched = true; return true; }
+  std::string firstOwnerCode;
+  void rememberOwnerRecovery(const char *code) { if(firstOwnerCode.empty()) firstOwnerCode=code; }
+  bool runStreamActivationTask(const std::string &, bool, bool owner = false) {
+    assert(!owner); dispatched = true; return true; }
   void finishActivation(const char *, const std::string &, const char *, const char *) { finished = true; }
   void releaseCommitGrant() { released = true; }
   bool recoverCommitDisposition(const CommitRecovery &);

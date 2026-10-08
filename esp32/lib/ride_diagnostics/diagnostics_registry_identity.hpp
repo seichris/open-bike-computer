@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <cstring>
 namespace ride_diagnostics::registry {
-inline constexpr const char *kSha256 = "548d3389225598c84156b57458ea2120660ffa6c72639abe4496bc1ce2def98d";
+inline constexpr const char *kSha256 = "d942e77fc46e8200a9dffa6e06aa08b8227da60f36315af5b563d397051a7a88";
 inline constexpr unsigned kSchema = 2;
 inline constexpr uint32_t kInstrumentedMask = 5814230U;
 inline constexpr const char *kDomains[] = {

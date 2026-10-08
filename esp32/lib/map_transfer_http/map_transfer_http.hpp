@@ -212,7 +212,10 @@ private:
   static void ownedInstalledCleanup(void *context, const char *sessionId,
                                     bool automaticExit);
   bool runStreamActivationTask(const std::string &sessionId,
-                               bool automaticExit);
+                               bool automaticExit, bool internalOwner = false);
+  void rememberOwnerRecovery(const char *code) noexcept;
+  __attribute__((noinline)) void recordActivationOutcome(const std::string &phase,
+                                                        const std::string &code);
   void updateStreamInstallState(const MapStreamInstallSnapshot &snapshot,
                                 bool active);
   bool streamStoragePathAccessible() const;

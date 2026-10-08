@@ -4303,15 +4303,43 @@ extension NavigationProtocolTests {
                         "starting transport recovery does not infer a terminal map result")
                 }
                 if ["unknown", "installed", "unconfirmed"].contains(scenario) {
-                    let receipt = try cancellationReceipt(for: record)
+                    var receipt = try cancellationReceipt(for: record)
+                    if scenario == "installed" {
+                        // Exercise the retained-terminal branch after the UI
+                        // already presented accepted/wait state for this map.
+                        var fields: [String: Any] = [
+                            "schemaVersion": 1, "deviceID": record.deviceID,
+                            "operationID": record.wireOperationID, "sessionID": record.sessionID,
+                            "mapID": record.mapID, "manifestReceipt": record.manifestReceipt,
+                            "signedManifestReceipt": record.signedManifestReceipt,
+                            "streamSHA256": record.streamSHA256, "streamBytes": record.streamBytes,
+                            "phase": "accepted", "revision": 1]
+                        let accepted = try JSONDecoder().decode(DeviceMapOperationReceipt.self,
+                            from: JSONSerialization.data(withJSONObject: fields))
+                        let persistedAccepted = try store.ingest(accepted)
+                        assert(persistedAccepted != nil, "the exact accepted receipt is persisted")
+                        manager.reconcileLastTransfer(bleManager: ble)
+                        assert(manager.statusMessage.contains("Waiting for installation"),
+                            "the real manager presents accepted/wait state")
+                        fields["phase"] = "failed"
+                        fields["revision"] = 2
+                        receipt = try JSONDecoder().decode(DeviceMapOperationReceipt.self,
+                            from: JSONSerialization.data(withJSONObject: fields))
+                    }
                     guard let terminal = try store.ingest(receipt) else {
                         fatalError("exact cancellation receipt must reconcile the original operation")
                     }
                     ble.isConnected = false
                     ble.isNavigationReady = false
                     manager.reconcileLastTransfer(bleManager: ble)
-                    assertEqual(manager.lastTransferOutcome, "cancelled",
+                    assertEqual(manager.lastTransferOutcome, scenario == "installed" ? "failed" : "cancelled",
                         "an exact device receipt settles the canonical recovered map")
+                    if scenario == "installed" {
+                        assertEqual(manager.statusMessage, "Map installation failed",
+                            "a retained failed receipt replaces stale accepted/wait text")
+                        assert(manager.errorMessage != nil,
+                            "the terminal failure still presents its device error")
+                    }
                     assert(!terminal.blocksNewTransfer(connectionEpoch: ble.transferConnectionEpoch,
                         processID: DeviceMapOperationStore.observationProcessID),
                         "only the exact terminal result releases operation admission")
@@ -5829,9 +5857,13 @@ extension NavigationProtocolTests {
             throw URLError(.timedOut)
         }
         let terminalStatus = try! JSONDecoder().decode(MapTransferDeviceStatus.self, from: Data("""
-        {"activeMapId":"map-1","activeSessionId":"session-1","activation":{"status":"installed","sequence":8,"sessionId":"session-1","mapId":"map-1"}}
+        {"activeMapId":"map-1","activeSessionId":"session-1","activation":{"status":"installed","sequence":8,"sessionId":"session-1","mapId":"map-1","ownerRecoveryCode":"stream_active_write","terminalCode":"installed"}}
         """.utf8))
         bleManager.applyAuthenticatedMapTransferStatus(terminalStatus)
+        assertEqual(bleManager.mapTransferActivationOwnerRecoveryCode, "stream_active_write",
+            "authenticated status retains the first owner failure alongside terminal success")
+        assertEqual(bleManager.mapTransferActivationTerminalCode, "installed",
+            "authenticated status decodes the bounded terminal code")
         var confirmation: MapActivationConfirmationResult?
         await runMainActorAsyncTest {
             confirmation = try await manager.confirmActivatedMap(

@@ -1537,6 +1537,8 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
         let steps: Int?
         let progress: Int?
         let error: TransferError?
+        var ownerRecoveryCode: String? = nil
+        var terminalCode: String? = nil
     }
 
     var selectionHealth: MapSelectionHealth? = nil
