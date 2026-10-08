@@ -2,6 +2,7 @@
 #include "../../lib/maps/src/mapBlockFormat.hpp"
 
 #include <cassert>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
