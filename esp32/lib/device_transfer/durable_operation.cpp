@@ -1,6 +1,8 @@
 #include "durable_operation.hpp"
 #include <algorithm>
 #include <limits>
+#include <memory>
+#include <new>
 #include <utility>
 
 namespace device_transfer::durable_operation {
@@ -116,7 +118,11 @@ Store::Store(Storage &storage, std::string device)
 Result Store::restore() {
   ready_ = false;
   if (!hex(device_, 32)) return Result::Invalid;
-  std::array<Record,kCapacity> selected{};
+  // Restore is also called from nested parser callbacks. These bounded record
+  // arrays must not consume the HTTP stack while FAT/SD and IRQ frames nest.
+  using Records=std::array<Record,kCapacity>;
+  std::unique_ptr<Records> selected(new(std::nothrow) Records{});
+  if (!selected) return Result::StorageFailure;
   uint64_t best = 0; unsigned slot = 1; bool any = false;
   std::vector<uint8_t> bestBytes;
   for (unsigned i=0;i<2;++i) {
@@ -128,15 +134,17 @@ Result Store::restore() {
     // not downgrade to the other slot and silently discard new semantics.
     if (bytes.size()>=5 && bytes[0]=='O' && bytes[1]=='B' && bytes[2]=='O' &&
         bytes[3]=='P' && bytes[4]!=kSchema) return Result::Corrupt;
-    std::array<Record,kCapacity> candidate{}; uint64_t generation=0;
-    if (!decode(bytes,candidate,generation)) continue;
-    for (const auto &r : candidate)
+    std::unique_ptr<Records> candidate(new(std::nothrow) Records{});
+    if (!candidate) return Result::StorageFailure;
+    uint64_t generation=0;
+    if (!decode(bytes,*candidate,generation)) continue;
+    for (const auto &r : *candidate)
       if (!r.identity.operation.empty() && r.identity.device != device_) return Result::ForeignDevice;
     if (generation == best && bytes != bestBytes) return Result::Corrupt;
-    if (generation > best) { best=generation; selected=candidate; slot=i; bestBytes=bytes; }
+    if (generation > best) { best=generation; selected=std::move(candidate); slot=i; bestBytes=bytes; }
   }
   if (any && !best) return Result::Corrupt;
-  records_=selected; generation_=best; activeSlot_=slot; ready_=true;
+  records_=std::move(*selected); generation_=best; activeSlot_=slot; ready_=true;
   return Result::Ok;
 }
 Result Store::locate(const Identity &id, size_t &index) const {
@@ -149,7 +157,7 @@ Result Store::locate(const Identity &id, size_t &index) const {
   }
   return Result::Unavailable;
 }
-Result Store::persist(std::array<Record,kCapacity> next) {
+Result Store::persist(std::array<Record,kCapacity> &&next) {
   if (generation_ == std::numeric_limits<uint64_t>::max()) return Result::StorageFailure;
   const auto bytes=encode(next,generation_+1); const unsigned target=1-activeSlot_;
   std::vector<uint8_t> readback;
@@ -166,7 +174,7 @@ Result Store::admitInternal(const Identity &id) {
   if (found!=Result::Unavailable) return found;
   auto next=records_;
   for (auto &r : next) if (r.identity.operation.empty() || r.acknowledged) {
-    r={id,Phase::Receiving,generation_+1}; return persist(next);
+    r={id,Phase::Receiving,generation_+1}; return persist(std::move(next));
   }
   return Result::Busy;
 }
@@ -175,7 +183,8 @@ Result Store::initializeAdmission(uint64_t seed) {
   if (generation_!=0) return Result::Replay;
   if (!seed || seed==std::numeric_limits<uint64_t>::max()) return Result::Invalid;
   generation_=seed;
-  return persist(records_);
+  auto next=records_;
+  return persist(std::move(next));
 }
 Result Store::admit(const Identity &id,uint64_t creationRevision) {
   size_t index=0;
@@ -206,7 +215,7 @@ Result Store::transition(const Identity &id, Phase phase) {
   if (phase==Phase::Forgotten) next[i].acknowledged=true;
   else next[i].phase=phase;
   next[i].revision=generation_+1;
-  return persist(next);
+  return persist(std::move(next));
 }
 Result Store::prepare(const Identity &id) { return transition(id,Phase::Prepared); }
 Result Store::accept(const Identity &id) { return transition(id,Phase::Accepted); }

@@ -111,6 +111,29 @@ SDK cache/stack assertion enabled. A decoded qualification-image
 panic identified the previous unguarded floor read before the map request body
 was consumed; phone-side upload byte counts do not locate a device crash offset.
 
+The durable map journal is also read synchronously from the manifest-admission
+callback, nested beneath the stream parser and FAT/SD calls on the HTTP worker.
+A later qualification-image panic exhausted that worker's 16 KiB stack: the
+saved SP was 116 bytes below its allocation, and the interrupt-context store hit
+the stack watchpoint. This is separate from the earlier NVS cache-safety fault.
+Journal reads now discover and bound the file size, read into the existing heap
+vector, and require the exact byte count plus EOF; short reads, growth, oversized
+images and I/O failures remain failures. The restore record arrays use bounded,
+checked heap workspaces, and mutations move their snapshot into persistence
+instead of keeping an additional record-array copy on the caller's stack. The
+file owner also closes the journal if vector allocation throws. The
+two-slot checks, readback, device binding and admission/commit semantics remain
+unchanged. Admission stays inside the manifest callback; moving it after
+`feed()` would permit the same call to create/write payload files first.
+
+The host compiler frame check detects large journal/restore frames returning.
+It does not qualify the ESP32's total path: include virtual journal reads and
+writes, parser/status callbacks, FAT/SD create/write/sync/readback, recovery and
+bounded directory recursion, TLS receive, and the 192-byte IRQ context plus
+watchpoint reserve in exact linked-image analysis. Physical upload, checkpoint
+resume and interrupted-activation recovery still need measured stack headroom.
+Do not increase the stack or relax memory floors to hide an unbounded path.
+
 `owner_released` is before the HTTP task's own deletion, so its heap observation
 is not a fully idle baseline. Compare the *next* `transfer_entry` (after the
 previous worker-stop fence) to earlier entry samples to check for leaks. Keep

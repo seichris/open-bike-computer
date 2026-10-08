@@ -1,6 +1,7 @@
 #include "map_operation_journal.hpp"
 #include <cerrno>
 #include <cstdio>
+#include <memory>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -14,12 +15,24 @@ bool MapOperationStorage::read(unsigned slot,std::vector<uint8_t> &bytes) {
   if (slot>1) return false;
   FILE *file=std::fopen(path(slot).c_str(),"rb");
   if (!file) return errno==ENOENT;
-  uint8_t buffer[4097];
-  const size_t count=std::fread(buffer,1,sizeof(buffer),file);
-  const bool ok=!std::ferror(file) && count<sizeof(buffer);
-  const bool closed=std::fclose(file)==0;
-  if (!ok || !closed) return false;
-  bytes.assign(buffer,buffer+count); return true;
+  // A vector allocation can throw; release the descriptor during unwinding.
+  std::unique_ptr<FILE,decltype(&std::fclose)> owner(file,&std::fclose);
+  // This read nests beneath the manifest parser on the HTTP task. Keep the
+  // bounded image off its stack, without reserving 4 KiB for a small journal.
+  struct stat status{};
+  bool ok=::fstat(::fileno(file),&status)==0 && S_ISREG(status.st_mode) &&
+          status.st_size>=0 && status.st_size<=4096;
+  if (ok) {
+    const size_t expected=static_cast<size_t>(status.st_size);
+    bytes.resize(expected);
+    const size_t count=expected ? std::fread(bytes.data(),1,expected,file) : 0;
+    const int trailing=std::fgetc(file);
+    // Size discovery is not authority: reject a short read or later growth.
+    ok=count==expected && trailing==EOF && !std::ferror(file);
+  }
+  const bool closed=std::fclose(owner.release())==0;
+  if (!ok || !closed) { bytes.clear(); return false; }
+  return true;
 }
 bool MapOperationStorage::writeDurable(unsigned slot,const std::vector<uint8_t> &bytes) {
   if (slot>1 || bytes.empty() || bytes.size()>4096) return false;

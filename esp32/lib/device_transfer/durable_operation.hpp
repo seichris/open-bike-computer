@@ -72,7 +72,7 @@ public:
 private:
   Result admitInternal(const Identity &identity);
   Result transition(const Identity &, Phase);
-  Result persist(std::array<Record, kCapacity> next);
+  Result persist(std::array<Record, kCapacity> &&next);
   Result locate(const Identity &, size_t &) const;
   Storage &storage_;
   std::string device_;
