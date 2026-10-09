@@ -88,7 +88,10 @@ class DiagnosticsSourceGraphTests(unittest.TestCase):
 
     def test_resume_rereads_committed_state_and_runs_after_cleanup(self):
         app = (ROOT / PREFIX / "BikeComputerApp.swift").read_text()
-        readiness = app.split("bleManager.$isNavigationReady.removeDuplicates()", 1)[1].split(".store(in:", 1)[0]
+        readiness = app.split("bleManager.$isNavigationReady", 1)[1].split(".store(in:", 1)[0]
+        self.assertIn("bleManager.$supportsRideDiagnostics", readiness)
+        self.assertIn(".map { $0 && $1 }", readiness)
+        self.assertLess(readiness.index(".map"), readiness.index(".removeDuplicates()"))
         self.assertLess(readiness.index(".receive(on: DispatchQueue.main)"), readiness.index(".sink"))
         coordinator = (ROOT / PREFIX / "Managers/DiagnosticsCollectionCoordinator.swift").read_text()
         ended = coordinator.split("rideIsActive = false\n", 2)[-1].split("let preceding = rideJournalTask", 1)[0]
