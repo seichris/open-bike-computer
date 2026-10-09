@@ -87,6 +87,10 @@ The phone polls only while foreground-active and paired. Files remain in a
 recipient-scoped, bounded outbox until the authenticated Mac verifies and
 acknowledges their exact hash. No claim is made that iOS permits arbitrary
 background execution. Reopen the app to resume an offline handoff.
+When the Mac's bounded inbox is full, the pinned broker reports `507` with the
+typed `inbox_full` reason. The app asks the user to archive received bundles on
+the Mac and retains the pending ZIP for the same hash-verified retry. Existing
+acknowledged uploads can still replay their receipts at the capacity limit.
 Unpair removes the local Keychain credential immediately and tries to revoke it
 on the pinned Mac. If the Mac is unreachable, use the Mac's revocation command;
 local logs and recipient-scoped pending handoffs remain preserved. The explicit

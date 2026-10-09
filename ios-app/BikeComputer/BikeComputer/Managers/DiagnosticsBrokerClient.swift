@@ -42,7 +42,7 @@ nonisolated enum DiagnosticsBrokerKeychain {
 }
 
 nonisolated private enum DiagnosticsBrokerHTTP {
-    enum Failure: Error { case unavailable, invalidResponse, authorizationDenied }
+    enum Failure: Error { case unavailable, invalidResponse, authorizationDenied, inboxFull }
     static func request(_ pairing: DiagnosticsBrokerPairing, method: String, path: String,
                         body: Data? = nil, file: URL? = nil, digest: String? = nil) async throws -> Data {
         guard pairing.valid(), let base = pairing.baseURL else { throw Failure.unavailable }
@@ -88,12 +88,19 @@ nonisolated private enum DiagnosticsBrokerHTTP {
         }
         let (stream, response) = try await session.bytes(for: request)
         if (response as? HTTPURLResponse)?.statusCode == 401 { throw Failure.authorizationDenied }
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
+        let statusCode = (response as? HTTPURLResponse)?.statusCode
+        guard statusCode == 200 || (file != nil && statusCode == 507),
               response.expectedContentLength <= 64 * 1024 else { throw Failure.invalidResponse }
         var data = Data()
         for try await byte in stream {
             guard data.count < 64 * 1024 else { throw Failure.invalidResponse }
             data.append(byte)
+        }
+        if statusCode == 507 {
+            struct CapacityResponse: Decodable { let schema: Int; let error: String }
+            guard let capacity = try? JSONDecoder().decode(CapacityResponse.self, from: data),
+                  capacity.schema == 2, capacity.error == "inbox_full" else { throw Failure.invalidResponse }
+            throw Failure.inboxFull
         }
         return data
     }
@@ -262,6 +269,10 @@ final class DiagnosticsBrokerClient: ObservableObject {
                         status = "Mac enrollment expired or pairing was revoked. Import a fresh enrollment file; retained logs are unaffected."
                     }
                     return
+                } catch DiagnosticsBrokerHTTP.Failure.inboxFull {
+                    if !Task.isCancelled, loopGeneration == generation {
+                        status = "Mac inbox is full. Archive received bundles on the Mac to resume delivery. Local logs and pending handoffs are retained."
+                    }
                 } catch {
                     if !Task.isCancelled, loopGeneration == generation { status = "Mac unavailable; local logs and pending handoffs are retained." }
                 }

@@ -94,6 +94,27 @@ class DiagnosticsBrokerTests(BrokerTLSTestCase):
         self.assertEqual(code,400)
         self.assertEqual(self.store.status()['bundles'],[])
         self.assertEqual(list((self.root/'pending').iterdir()),[])
+    def test_full_inbox_reports_capacity_and_preserves_retry_and_existing_receipts(self):
+        inner=self.parent/'inner.zip';chunk=v1_fixture(inner)
+        bundle=self.parent/'outer.zip';v2_fixture(bundle,inner,chunk)
+        data=bundle.read_bytes();sha=hashlib.sha256(data).hexdigest();identifier=str(uuid.uuid4())
+        headers={broker.TOKEN_HEADER:self.config['token'],'X-Content-SHA256':sha}
+        self.assertEqual(self.exchange('PUT',f'/v2/uploads/{identifier}',data,headers)[0],200)
+        # Fill only the accounting boundary; no large synthetic archive is needed.
+        accounting_id=str(uuid.uuid4())
+        with self.store.connect() as connection:
+            connection.execute('INSERT INTO bundles VALUES(?,?,?,?,?)',
+                (accounting_id,0,'0'*64,512*1024*1024,'{}'))
+        pending_id=str(uuid.uuid4())
+        code,response=self.exchange('PUT',f'/v2/uploads/{pending_id}',data,headers)
+        self.assertEqual((code,response),(507,{'schema':2,'error':'inbox_full'}))
+        self.assertFalse((self.root/'bundles'/f'{pending_id}.zip').exists())
+        self.assertEqual(list((self.root/'pending').iterdir()),[])
+        self.assertEqual(hashlib.sha256((self.root/'bundles'/f'{identifier}.zip').read_bytes()).hexdigest(),sha)
+        self.assertEqual(self.exchange('PUT',f'/v2/uploads/{identifier}',data,headers)[0],200)
+        with self.store.connect() as connection:
+            connection.execute('DELETE FROM bundles WHERE id=?',(accounting_id,))
+        self.assertEqual(self.exchange('PUT',f'/v2/uploads/{pending_id}',data,headers)[0],200)
     def test_commands_do_not_include_shell_flash_or_reboot(self):
         for kind in ('shell','flash','reboot','arbitrary','raw_payload'):
             with self.subTest(kind=kind):

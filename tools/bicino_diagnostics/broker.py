@@ -39,6 +39,10 @@ class PairingAuthorizationError(EvidenceError):
     pass
 
 
+class InboxCapacityError(EvidenceError):
+    pass
+
+
 def private_root(root: Path) -> Path:
     root = root.expanduser().absolute()
     # Refuse symlinks in existing ancestors, not only the final directory.
@@ -425,7 +429,7 @@ class BrokerStore:
                 return {'schema':2,'id':identifier,'sha256':sha,'accepted':True}
             count,total=c.execute('SELECT count(*),coalesce(sum(bytes),0) FROM bundles').fetchone()
             if count>=20 or total+size>512*1024*1024:
-                raise EvidenceError('inbox full; archive evidence explicitly before deleting')
+                raise InboxCapacityError('inbox full; archive evidence explicitly before deleting')
             destination=self.root/'bundles'/f'{identifier}.zip'
             if destination.exists():
                 # Recover a process interruption after rename, before SQLite COMMIT.
@@ -619,6 +623,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
             self.reply(200,result)
         except PairingAuthorizationError:
             self.reply(401,{'error':'unauthorized'})
+        except InboxCapacityError:
+            self.reply(507,{'schema':2,'error':'inbox_full'})
         except (EvidenceError,ValueError,TypeError,KeyError,AttributeError,OSError,sqlite3.Error,subprocess.SubprocessError,zipfile.BadZipFile,v1.DiagnosticError):
             try:
                 self.reply(400,{'error':'request_rejected'})
