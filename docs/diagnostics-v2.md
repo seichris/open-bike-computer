@@ -277,7 +277,10 @@ The recorder keeps eight reserved critical slots and 24 shared normal slots.
 Spilled critical records do not block normal admission into free shared slots.
 When both lanes are full, one bounded rotation evicts the oldest normal record,
 preserves every critical record and survivor sequence order, and appends the
-new critical record. The zero-wait producer lock and total capacity are unchanged.
+new critical record. Tail insertion uses the RTOS queue's synchronization; only
+full-queue eviction takes the writer's head-mutation mutex. A writer peek/receive
+therefore cannot reject an ordinary record or a critical record with free capacity.
+The zero-wait producer lock and total capacity are unchanged.
 `critical_spill` remains a recognizable historical loss reason.
 
 ## Live observations

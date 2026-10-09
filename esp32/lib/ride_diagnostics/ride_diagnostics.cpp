@@ -1214,12 +1214,30 @@ bool enqueue(QueuedEvent &event) {
     noteDrop(DropReason::QueueUnavailable);
     return false;
   }
-  if (xSemaphoreTake(queueMutationMutex, 0) != pdTRUE) {
-    noteDrop(DropReason::QueueBusy);
-    return false;
-  }
+  // The producer mutex serializes sequence assignment and tail insertion.
+  // FreeRTOS queues synchronize their own sends with the sole consumer, so
+  // appending never needs the writer's head-mutation lock. A new tail cannot
+  // precede either head the writer has already peeked.
+  bool mutationLocked = false;
   BaseType_t result = xQueueSend(target, &event, 0);
   if (result != pdTRUE && event.critical && normalQueue != nullptr) {
+    normalQueueCriticalCount.fetch_add(1, std::memory_order_acq_rel);
+    result = xQueueSend(normalQueue, &event, 0);
+    if (result != pdTRUE)
+      normalQueueCriticalCount.fetch_sub(1, std::memory_order_acq_rel);
+  }
+  if (result != pdTRUE && event.critical && normalQueue != nullptr) {
+    // Only eviction moves an existing head. Fence that bounded rotation
+    // against the writer's peek/receive pair without blocking a producer.
+    if (xSemaphoreTake(queueMutationMutex, 0) != pdTRUE) {
+      noteDrop(DropReason::QueueBusy);
+      return false;
+    }
+    mutationLocked = true;
+    // The consumer may have freed a reserved slot since the first send.
+    result = xQueueSend(criticalQueue, &event, 0);
+  }
+  if (result != pdTRUE && mutationLocked) {
     // Critical records may consume otherwise unused normal capacity. If both
     // lanes are full, evict one lower-priority record before dropping the
     // warning/error/lifecycle evidence that the reserved lane exists to keep.
@@ -1260,7 +1278,8 @@ bool enqueue(QueuedEvent &event) {
     }
   }
   if (result != pdTRUE) {
-    xSemaphoreGive(queueMutationMutex);
+    if (mutationLocked)
+      xSemaphoreGive(queueMutationMutex);
     noteDrop(DropReason::QueueFull);
     return false;
   }
@@ -1271,7 +1290,8 @@ bool enqueue(QueuedEvent &event) {
          !maxQueueDepth.compare_exchange_weak(previous,
                                                static_cast<uint16_t>(depth))) {
   }
-  xSemaphoreGive(queueMutationMutex);
+  if (mutationLocked)
+    xSemaphoreGive(queueMutationMutex);
   return true;
 }
 

@@ -69,8 +69,10 @@ int main() {
                         RECORDER.index("std::atomic<uint32_t> storageErrors")]
         enqueue = RECORDER[RECORDER.index("bool enqueue(QueuedEvent &event) {"):
                            RECORDER.index("bool enqueueFormattedEvent")]
+        peek = RECORDER[RECORDER.index("bool peekNextEvent("):
+                        RECORDER.index("bool completeSealIfReady()")]
         harness = (ROOT / "tools/tests/ride_diagnostics_queue_harness.cpp").read_text()
-        harness = harness.replace("// PRODUCTION_FUNCTIONS", note + enqueue)
+        harness = harness.replace("// PRODUCTION_FUNCTIONS", note + peek + enqueue)
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "queue.cpp"
             source.write_text(harness)

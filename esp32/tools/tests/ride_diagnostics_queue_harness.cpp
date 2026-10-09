@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cassert>
 #include <deque>
+#include <functional>
 
 using namespace ride_diagnostics;
 using queue_policy::DropReason;
@@ -16,13 +17,15 @@ constexpr int pdTRUE = 1, pdFALSE = 0;
 Queue normal{kNormalQueueCapacity, {}}, critical{kCriticalQueueCapacity, {}};
 QueueHandle_t normalQueue = &normal, criticalQueue = &critical;
 bool mutexAvailable = true;
+unsigned mutationLockAttempts = 0;
 int mutexStorage = 1;
 int *queueMutationMutex = &mutexStorage;
 std::atomic<uint32_t> enqueued{0}, dropped{0};
 std::atomic<uint16_t> normalQueueCriticalCount{0}, maxQueueDepth{0};
 constexpr std::size_t kDropReasonCount = static_cast<std::size_t>(DropReason::Count);
 std::atomic<uint32_t> dropsByReason[kDropReasonCount]{};
-int xSemaphoreTake(int *, int timeout) { assert(timeout == 0); return mutexAvailable ? pdTRUE : pdFALSE; }
+std::function<void()> afterNormalPeek;
+int xSemaphoreTake(int *, int timeout) { assert(timeout == 0); ++mutationLockAttempts; return mutexAvailable ? pdTRUE : pdFALSE; }
 void xSemaphoreGive(int *) {}
 UBaseType_t uxQueueMessagesWaiting(QueueHandle_t q) { return q->events.size(); }
 UBaseType_t uxQueueSpacesAvailable(QueueHandle_t q) { return q->capacity - q->events.size(); }
@@ -34,6 +37,15 @@ BaseType_t xQueueReceive(QueueHandle_t q, QueuedEvent *e, int) {
   if (q->events.empty()) return pdFALSE;
   *e = q->events.front(); q->events.pop_front(); return pdTRUE;
 }
+BaseType_t xQueuePeek(QueueHandle_t q, QueuedEvent *e, int) {
+  const bool found = !q->events.empty();
+  if (found) *e = q->events.front();
+  if (q == normalQueue && afterNormalPeek) {
+    auto hook = std::move(afterNormalPeek); afterNormalPeek = {};
+    hook();
+  }
+  return found ? pdTRUE : pdFALSE;
+}
 UBaseType_t queuedDepth() { return normal.events.size() + critical.events.size(); }
 // PRODUCTION_FUNCTIONS
 
@@ -42,14 +54,28 @@ void reset() {
   normal.events.clear(); critical.events.clear();
   normalQueue = &normal; criticalQueue = &critical;
   queueMutationMutex = &mutexStorage; mutexAvailable = true;
+  mutationLockAttempts = 0;
+  afterNormalPeek = {};
   enqueued = dropped = maxQueueDepth = normalQueueCriticalCount = 0;
   for (auto &counter : dropsByReason) counter = 0;
 }
 int main() {
   QueuedEvent ordinary{1, false}, important{2, true};
   mutexAvailable = false;
-  assert(!enqueue(ordinary) && queuedDepth() == 0);
+  assert(enqueue(ordinary) && enqueue(important));
+  assert(queuedDepth() == 2 && dropped == 0 && mutationLockAttempts == 0);
+  // Even reserved-lane overflow only appends to free shared space; a writer
+  // in its peek/receive section must not make that admission fail.
+  for (unsigned i=1; i<kCriticalQueueCapacity; ++i) assert(enqueue(important));
+  assert(enqueue(important) && normalQueueCriticalCount == 1);
+  assert(enqueue(ordinary) && dropped == 0 && mutationLockAttempts == 0);
+  reset();
+  for (unsigned i=0; i<kNormalQueueCapacity; ++i) assert(enqueue(ordinary));
+  for (unsigned i=0; i<kCriticalQueueCapacity; ++i) assert(enqueue(important));
+  mutexAvailable = false;
+  assert(!enqueue(important) && queuedDepth() == kQueueCapacity);
   assert(dropped == 1 && count(DropReason::QueueBusy) == 1);
+  assert(count(DropReason::NormalEvicted) == 0 && mutationLockAttempts == 1);
   reset(); normalQueue = nullptr;
   assert(!enqueue(ordinary) && count(DropReason::QueueUnavailable) == 1);
   reset();
@@ -91,4 +117,19 @@ int main() {
   for (unsigned i=0; i<kQueueCapacity; ++i) assert(enqueue(important));
   assert(!enqueue(important) && count(DropReason::QueueFull) == 1);
   assert(count(DropReason::NormalEvicted) == 0);
+  // Run the real writer selection with a producer inserting between the two
+  // peeks. An initially absent normal head cannot precede the older critical
+  // head; a new critical head cannot precede an already observed normal head.
+  for (bool oldCritical : {false, true}) {
+    reset();
+    QueuedEvent old{40, oldCritical}, appended{41, !oldCritical};
+    assert(enqueue(old));
+    mutexAvailable = false; // writer owns its head-mutation section
+    afterNormalPeek = [&] { assert(enqueue(appended)); };
+    QueuedEvent observed{}; QueueHandle_t selected = nullptr;
+    assert(peekNextEvent(observed, selected) && observed.sequence == 40);
+    assert(xQueueReceive(selected, &observed, 0) == pdTRUE);
+    assert(peekNextEvent(observed, selected) && observed.sequence == 41);
+    assert(dropped == 0 && mutationLockAttempts == 0);
+  }
 }
