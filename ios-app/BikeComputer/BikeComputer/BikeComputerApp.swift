@@ -373,8 +373,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         DiagnosticsBrokerClient.shared.setActive(isActive)
         coordinator.setApplicationActive(isActive)
         if isActive {
-            // SwiftUI scene transitions use this path even without the UIKit callback.
-            DiagnosticsCollectionCoordinator.shared.resumeIfPossible()
+            // SwiftUI can publish its phase before UIKit commits applicationState.
+            DispatchQueue.main.async {
+                DiagnosticsCollectionCoordinator.shared.resumeIfPossible()
+            }
         }
         if #available(iOS 17.0, *),
            let controller =
