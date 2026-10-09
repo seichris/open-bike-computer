@@ -1882,6 +1882,11 @@ struct ContentView: View {
                             )
                         )
                 }
+                .contextMenu {
+                    Button("Choose Recorder") {
+                        workoutSessionCoordinator.chooseRecorder()
+                    }
+                }
                 .buttonStyle(.plain)
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(1)

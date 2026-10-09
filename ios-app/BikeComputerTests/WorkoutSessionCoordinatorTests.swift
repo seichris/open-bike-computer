@@ -231,6 +231,29 @@ struct WorkoutSessionCoordinatorTests {
         check(watchCoordinator.record?.sessionID == id3 && watchCoordinator.record?.finishedChoice == nil,
               "Next Watch ride cannot inherit previous terminal disposition")
 
+        let (chooser, chooserWatch, chooserPhone, chooserAvailability, chooserDisk) = harness()
+        chooserAvailability.availability = .ready(isReachable: true)
+        chooser.recoverIfNeeded()
+        await spin { chooser.recoveryComplete }
+        let completedWatchID = UUID()
+        chooserWatch.emit(id: completedWatchID, state: .running)
+        chooserWatch.emit(id: completedWatchID, state: .ended, outcome: .saved)
+        chooser.chooseRecorder()
+        check(chooser.record == nil && chooserDisk.record == nil
+                  && chooser.notice?.kind == .chooseRecorder,
+              "Choosing after a completed ride acknowledges its tombstone and opens the chooser")
+        check(chooserWatch.starts == 0 && chooserPhone.starts == 0,
+              "Opening the recorder chooser must not start the default Watch")
+        check(chooser.requestStart(explicitOwner: .iphone),
+              "A paired Watch does not prevent an explicit phone choice")
+        await spin { chooserPhone.starts == 1 }
+        let explicitlySelectedPhoneID = chooser.record!.sessionID
+        chooser.chooseRecorder()
+        check(chooser.record?.sessionID == explicitlySelectedPhoneID
+                  && chooser.record?.owner == .iphone
+                  && chooserPhone.starts == 1 && chooserWatch.starts == 0,
+              "Choosing during a running ride cannot switch or start another recorder")
+
         let (unreachable, watch3, phone3, availability3, _) = harness()
         availability3.availability = .ready(isReachable: false)
         unreachable.recoverIfNeeded()

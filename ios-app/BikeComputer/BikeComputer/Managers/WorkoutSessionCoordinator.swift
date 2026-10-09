@@ -470,6 +470,9 @@ final class WorkoutSessionCoordinator: ObservableObject {
     }
 
     func chooseRecorder() {
+        if recoveryComplete, record?.phase == .finished {
+            guard resetTerminalPresentation() else { return }
+        }
         guard record == nil else { _ = requestStart(); return }
         notice = WorkoutRecordingNotice(kind: .chooseRecorder,
             message: "Choose the recorder for this ride. Check that Bicino is not already recording on the other device. This choice will not change when devices connect or disconnect.")
