@@ -15,6 +15,70 @@ MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
 
 
 class RideDiagnosticsSessionContractTests(unittest.TestCase):
+    def test_actual_loss_summary_is_bounded_and_preserves_failed_receipts(self):
+        start = RECORDER.index("  // Report cumulative per-reason counts")
+        stop = RECORDER.index("  if (static_cast<uint32_t>(nowMs - lastMemorySampleMs)", start)
+        summary = RECORDER[start:stop]
+        harness = r'''#include "ride_diagnostics_queue_policy.hpp"
+#include "ride_diagnostics_format.hpp"
+#include <atomic>
+#include <cassert>
+#include <string>
+namespace queue_policy = ride_diagnostics::queue_policy;
+using queue_policy::DropReason;
+constexpr unsigned kDropReasonCount = static_cast<unsigned>(DropReason::Count);
+std::atomic<unsigned> dropped{1}, dropsByReason[kDropReasonCount]{};
+unsigned lastReportedDrops[kDropReasonCount]{}, lastLossSummaryMs=0;
+unsigned depth=0, calls=0;
+bool accept=false;
+enum class Level { Info };
+unsigned queuedDepth() { return depth; }
+bool record(Level, const char *category, const char *event, const char *fields) {
+  assert(std::string(category)=="logger" && std::string(event)=="loss");
+  assert(ride_diagnostics::detail::validateFieldsJson(fields, std::strlen(fields)));
+  ++calls; return accept;
+}
+void process(unsigned nowMs) {
+// SUMMARY
+}
+int main() {
+  const unsigned reason=static_cast<unsigned>(DropReason::QueueBusy);
+  dropsByReason[reason]=1;
+  process(29999); assert(calls==0);
+  depth=1; process(30000); assert(calls==0 && lastLossSummaryMs==0);
+  depth=0; process(30001); assert(calls==1 && lastReportedDrops[reason]==0);
+  accept=true; process(60000); assert(calls==1);
+  process(60001); assert(calls==2 && lastReportedDrops[reason]==1);
+  assert(dropped==1 && dropsByReason[reason]==1);
+  process(90001); assert(calls==2);
+  dropsByReason[reason]=2; dropped=2;
+  process(120001); assert(calls==3 && lastReportedDrops[reason]==2);
+  assert(dropped==2 && dropsByReason[reason]==2);
+}
+'''.replace("// SUMMARY", summary)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "loss.cpp"
+            source.write_text(harness)
+            executable = Path(directory) / "loss"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "lib/ride_diagnostics"), str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
+    def test_actual_enqueue_accounts_for_each_admission_failure(self):
+        note = RECORDER[RECORDER.index("void noteDrop(DropReason reason) {"):
+                        RECORDER.index("std::atomic<uint32_t> storageErrors")]
+        enqueue = RECORDER[RECORDER.index("bool enqueue(QueuedEvent &event) {"):
+                           RECORDER.index("bool enqueueFormattedEvent")]
+        harness = (ROOT / "tools/tests/ride_diagnostics_queue_harness.cpp").read_text()
+        harness = harness.replace("// PRODUCTION_FUNCTIONS", note + enqueue)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "queue.cpp"
+            source.write_text(harness)
+            executable = Path(directory) / "queue"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "tools/tests"), str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
     def test_actual_maintenance_yields_at_every_filesystem_boundary(self):
         # Use the production loops, not a second implementation of retention.
         helpers = RECORDER[RECORDER.index("struct ChunkFileScan"):

@@ -149,6 +149,18 @@ std::atomic<uint32_t> enqueued{0};
 std::atomic<uint32_t> written{0};
 std::atomic<bool> retentionPrunedThisBoot{false};
 std::atomic<uint32_t> dropped{0};
+using queue_policy::DropReason;
+constexpr std::size_t kDropReasonCount =
+    static_cast<std::size_t>(DropReason::Count);
+std::atomic<uint32_t> dropsByReason[kDropReasonCount]{};
+uint32_t lastReportedDrops[kDropReasonCount]{};
+uint32_t lastLossSummaryMs = 0;
+
+void noteDrop(DropReason reason) {
+  dropped.fetch_add(1, std::memory_order_relaxed);
+  dropsByReason[static_cast<std::size_t>(reason)].fetch_add(
+      1, std::memory_order_relaxed);
+}
 std::atomic<uint32_t> storageErrors{0};
 std::atomic<uint32_t> faultCapsuleGeneration{0};
 std::atomic<uint32_t> faultCapsuleQueuedGeneration{0};
@@ -1199,9 +1211,12 @@ void startWriterTask() {
 
 bool enqueue(QueuedEvent &event) {
   QueueHandle_t target = event.critical ? criticalQueue : normalQueue;
-  if (target == nullptr || queueMutationMutex == nullptr ||
-      xSemaphoreTake(queueMutationMutex, 0) != pdTRUE) {
-    dropped.fetch_add(1);
+  if (target == nullptr || queueMutationMutex == nullptr) {
+    noteDrop(DropReason::QueueUnavailable);
+    return false;
+  }
+  if (xSemaphoreTake(queueMutationMutex, 0) != pdTRUE) {
+    noteDrop(DropReason::QueueBusy);
     return false;
   }
   // Spilled critical records occupy the tail of the normal queue. Holding
@@ -1210,7 +1225,7 @@ bool enqueue(QueuedEvent &event) {
   if (!event.critical &&
       normalQueueCriticalCount.load(std::memory_order_acquire) != 0) {
     xSemaphoreGive(queueMutationMutex);
-    dropped.fetch_add(1);
+    noteDrop(DropReason::CriticalSpill);
     return false;
   }
   BaseType_t result = xQueueSend(target, &event, 0);
@@ -1237,7 +1252,7 @@ bool enqueue(QueuedEvent &event) {
           // reorder a protected record if state is found inconsistent.
           (void)xQueueSend(normalQueue, &evicted, 0);
         } else {
-          dropped.fetch_add(1);
+          noteDrop(DropReason::NormalEvicted);
           normalQueueCriticalCount.fetch_add(1,
                                              std::memory_order_acq_rel);
           result = xQueueSend(normalQueue, &event, 0);
@@ -1250,7 +1265,7 @@ bool enqueue(QueuedEvent &event) {
   }
   if (result != pdTRUE) {
     xSemaphoreGive(queueMutationMutex);
-    dropped.fetch_add(1);
+    noteDrop(DropReason::QueueFull);
     return false;
   }
   enqueued.fetch_add(1);
@@ -1293,7 +1308,7 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
       static_cast<unsigned long>(firmwareFingerprint),
       hasDetail ? "," : "", detail);
   if (length <= 0 || static_cast<std::size_t>(length) >= sizeof(queued.line)) {
-    dropped.fetch_add(1);
+    noteDrop(DropReason::RecordTooLarge);
     return false;
   }
   queued.sequence = sequence;
@@ -1420,6 +1435,25 @@ void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe) {
 
 void process(uint32_t nowMs) {
 #if PERSISTENT_RIDE_DIAGNOSTICS
+  // Report cumulative per-reason counts only after the queue drains. The
+  // summaries themselves must not amplify an existing overload. Failed
+  // summaries remain eligible for the next bounded attempt.
+  if (static_cast<uint32_t>(nowMs - lastLossSummaryMs) >= 30'000U &&
+      queuedDepth() == 0) {
+    lastLossSummaryMs = nowMs;
+    for (std::size_t index = 0; index < kDropReasonCount; ++index) {
+      const uint32_t count = dropsByReason[index].load(std::memory_order_relaxed);
+      if (count == lastReportedDrops[index]) continue;
+      char fields[160] = {};
+      snprintf(fields, sizeof(fields),
+          "{\"dropReason\":\"%s\",\"eventCount\":%lu,\"droppedCount\":%lu}",
+          queue_policy::dropReasonName(static_cast<DropReason>(index)),
+          static_cast<unsigned long>(count),
+          static_cast<unsigned long>(dropped.load(std::memory_order_relaxed)));
+      if (record(Level::Info, "logger", "loss", fields))
+        lastReportedDrops[index] = count;
+    }
+  }
   if (static_cast<uint32_t>(nowMs - lastMemorySampleMs) >= 5000U) {
     lastMemorySampleMs = nowMs;
     portENTER_CRITICAL(&captureMux);
@@ -1527,7 +1561,7 @@ bool recordInternal(Level level, const char *category, const char *event,
   if (!policyAllows && (policyInstalled || !detailedCaptureEnabled()))
     return false;
   if (!validToken(category, 32) || !validToken(event, 64)) {
-    dropped.fetch_add(1);
+    noteDrop(DropReason::InvalidToken);
     return false;
   }
   const std::size_t fieldsLength =
@@ -1535,30 +1569,34 @@ bool recordInternal(Level level, const char *category, const char *event,
   if (fieldsLength < 2 || fieldsLength >= 320 || fieldsJson[0] != '{' ||
       fieldsJson[fieldsLength - 1] != '}' ||
       strchr(fieldsJson, '\n') != nullptr || strchr(fieldsJson, '\r') != nullptr) {
-    dropped.fetch_add(1);
+    noteDrop(DropReason::InvalidFields);
     return false;
   }
   if (!validateFieldsJson(fieldsJson, fieldsLength)) {
-    dropped.fetch_add(1);
+    noteDrop(DropReason::InvalidFields);
     return false;
   }
   if (storage == nullptr ||
       (!storage->getDiagnosticsSdLoaded() &&
        !storageTransitionRequested.load(std::memory_order_acquire))) {
-    dropped.fetch_add(1);
+    noteDrop(DropReason::StorageUnavailable);
     storageErrors.fetch_add(1);
     updateFaultCapsule(level, category, event, true);
     return false;
   }
-  if (producerMutex == nullptr ||
-      xSemaphoreTake(producerMutex, 0) != pdTRUE) {
-    dropped.fetch_add(1);
+  if (producerMutex == nullptr) {
+    noteDrop(DropReason::ProducerUnavailable);
+    updateFaultCapsule(level, category, event, false);
+    return false;
+  }
+  if (xSemaphoreTake(producerMutex, 0) != pdTRUE) {
+    noteDrop(DropReason::ProducerBusy);
     updateFaultCapsule(level, category, event, false);
     return false;
   }
   if (!initializePersistentBootSequenceIfNeeded()) {
     xSemaphoreGive(producerMutex);
-    dropped.fetch_add(1);
+    noteDrop(DropReason::BootIdentityUnavailable);
     storageErrors.fetch_add(1);
     updateFaultCapsule(level, category, event, true);
     return false;

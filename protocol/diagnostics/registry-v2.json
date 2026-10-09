@@ -26,6 +26,20 @@
   ],
   "eventFormatSchema": 1,
   "events": {
+    "gps.quality_checkpoint": {
+      "level": "info",
+      "optional": [],
+      "required": [
+        "fixValid",
+        "speedAvailable",
+        "accuracyAvailable",
+        "lastGapMs",
+        "maximumGapMs",
+        "sourceAgeKnown",
+        "sourceAgeMs",
+        "mailboxDelayMs"
+      ]
+    },
     "http.transport": {
       "level": "info",
       "optional": [],
@@ -53,6 +67,15 @@
         "maxQueueDepth",
         "available",
         "recorderReady"
+      ]
+    },
+    "logger.loss": {
+      "level": "info",
+      "optional": [],
+      "required": [
+        "dropReason",
+        "eventCount",
+        "droppedCount"
       ]
     },
     "logger.policy_applied": {
@@ -835,6 +858,12 @@
       "maxBytes": 256,
       "privacy": "diagnostic"
     },
+    "mailboxDelayMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
     "mapDetail": {
       "firmwareType": "number",
       "iosType": "string",
@@ -1221,6 +1250,18 @@
     },
     "sizeBucket": {
       "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "sourceAgeKnown": {
+      "firmwareType": "boolean",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "sourceAgeMs": {
+      "firmwareType": "number",
       "iosType": "string",
       "maxBytes": 256,
       "privacy": "diagnostic"

@@ -203,6 +203,21 @@ Delivery completeness and recording coverage are separate. Exit status 3 from
 `verify --require-complete` means valid evidence but insufficient delivery/source
 coverage. A completed download cannot prove that every desired provider was on.
 
+Firmware `gps.quality_checkpoint` includes fix/availability flags, packet-gap
+durations, and source/mailbox age. These are scalar timing and quality metadata;
+coordinates, speed values and raw GPS payloads are excluded.
+
+Firmware `logger.loss` reports `dropReason`, a boot-local cumulative
+`eventCount` for that reason, and the cumulative total `droppedCount`. Reasons
+distinguish invalid fields/tokens, unavailable storage/boot identity/queue,
+producer or queue lock contention, critical-lane spill, full queues, eviction
+of an ordinary record, and an oversized record. Counts are never reset by
+collection. Do not add repeated snapshots together or equate a `storage_gap`
+fault capsule with an SD write failure: it can also describe admission loss.
+Loss summaries are attempted at most once per 30 seconds after the queue
+drains; a continuously overloaded or interrupted recorder may not retain them.
+Policy filtering remains separate from dropped records.
+
 ## Live observations
 
 ```sh
