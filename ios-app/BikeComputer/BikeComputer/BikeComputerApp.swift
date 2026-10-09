@@ -213,7 +213,14 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                     !self.coordinator.isNavigating &&
                     !self.workoutSessionCoordinator.store.presentation.isWorkoutActive
             })
-        bleManager.$isNavigationReady.removeDuplicates()
+        Publishers.CombineLatest(
+            bleManager.$isNavigationReady,
+            bleManager.$supportsRideDiagnostics
+        )
+            // Authentication may finish before capability discovery. Either
+            // transition must wake a retained collection once both are ready.
+            .map { $0 && $1 }
+            .removeDuplicates()
             // Published emits during willSet. Resume reads the committed BLE
             // state, so deliver on the next main-queue turn rather than here.
             .receive(on: DispatchQueue.main)

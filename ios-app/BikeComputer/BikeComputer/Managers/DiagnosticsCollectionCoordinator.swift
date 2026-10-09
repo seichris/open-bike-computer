@@ -183,6 +183,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
         guard canCollect() else { recordResumeDeferral("riding_or_background"); return }
         guard let recorder, let bleManager, bleManager.isNavigationReady,
               let deviceID = bleManager.connectedDeviceID else { recordResumeDeferral("original_device_not_ready"); return }
+        guard bleManager.supportsRideDiagnostics else { recordResumeDeferral("logging_capability_not_ready"); return }
         lastResumeBlockReason = nil
         let digest = recorder.deviceDigest(for: deviceID)
         let generation = operationGeneration
