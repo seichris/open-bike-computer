@@ -15,7 +15,6 @@ import os
 from pathlib import Path
 import platform
 import re
-import secrets
 import shutil
 import sqlite3
 import sys
@@ -247,7 +246,13 @@ def parser() -> argparse.ArgumentParser:
     serve = b.add_parser('serve')
     serve.add_argument('--listen', default='127.0.0.1')
     b.add_parser('status')
-    b.add_parser('revoke')
+    b.add_parser('upgrade')
+    b.add_parser('pairings')
+    enrollment = b.add_parser('enroll')
+    enrollment.add_argument('--pairing-file', type=Path, required=True)
+    enrollment.add_argument('--hours', type=int, default=8, choices=range(1, 25))
+    revoke = b.add_parser('revoke')
+    revoke.add_argument('--credential-id', type=uuid.UUID)
     c = commands.add_parser('capture').add_subparsers(dest='capture_command', required=True)
     start = c.add_parser('start')
     start.add_argument('--device', type=target, required=True)
@@ -339,11 +344,18 @@ def run(args) -> tuple[dict | None, int]:
             broker.serve(existing_broker(root), args.listen)
             return None, 0
         store = broker.BrokerStore(existing_broker(root))
-        config = store.config()
-        config['expiresAt'] = 0
-        config['token'] = secrets.token_hex(32)
-        broker.write_private(store.root/'credentials.json', json.dumps(config,sort_keys=True).encode())
-        return {'schema':2, 'revoked':True, 'evidencePreserved':True}, 0
+        if args.broker_command == 'upgrade':
+            # A legacy process cannot read schema3 credentials. Refuse mutation
+            # until the running matching server advertises migration support.
+            support = broker.request(root, 'GET', '/v3/info')
+            if support.get('schema') != 3 or support.get('durablePairing') is not True:
+                raise EvidenceError('start the matching broker before upgrading credentials')
+            return store.upgrade_credentials(), 0
+        if args.broker_command == 'enroll':
+            return store.create_enrollment(args.pairing_file, args.hours), 0
+        if args.broker_command == 'pairings':
+            return {'schema':3, 'pairings':store.paired_phones()}, 0
+        return store.revoke(str(args.credential_id) if args.credential_id else None), 0
     if args.command == 'live':
         observed(root, args.device)
         return enqueue(root, 'live' if args.live_command == 'start' else 'stop_live', args.device,

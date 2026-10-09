@@ -42,7 +42,7 @@ nonisolated enum DiagnosticsBrokerKeychain {
 }
 
 nonisolated private enum DiagnosticsBrokerHTTP {
-    enum Failure: Error { case unavailable, invalidResponse }
+    enum Failure: Error { case unavailable, invalidResponse, authorizationDenied }
     static func request(_ pairing: DiagnosticsBrokerPairing, method: String, path: String,
                         body: Data? = nil, file: URL? = nil, digest: String? = nil) async throws -> Data {
         guard pairing.valid(), let base = pairing.baseURL else { throw Failure.unavailable }
@@ -61,7 +61,15 @@ nonisolated private enum DiagnosticsBrokerHTTP {
         defer { session.invalidateAndCancel() }
         var request = URLRequest(url: base.appendingPathComponent(path))
         request.httpMethod = method
-        request.setValue(pairing.token, forHTTPHeaderField: "X-Bicino-Diagnostics-Token")
+        let credential: String
+        if path == "v3/enroll" {
+            guard let enrollment = pairing.enrollment else { throw Failure.unavailable }
+            credential = enrollment.token
+        } else {
+            guard pairing.enrollment == nil else { throw Failure.unavailable }
+            credential = pairing.token
+        }
+        request.setValue(credential, forHTTPHeaderField: "X-Bicino-Diagnostics-Token")
         request.setValue(file == nil ? "application/json" : "application/zip", forHTTPHeaderField: "Content-Type")
         if let digest { request.setValue(digest, forHTTPHeaderField: "X-Content-SHA256") }
         if let file {
@@ -79,6 +87,7 @@ nonisolated private enum DiagnosticsBrokerHTTP {
             request.setValue(String(body?.count ?? 0), forHTTPHeaderField: "Content-Length")
         }
         let (stream, response) = try await session.bytes(for: request)
+        if (response as? HTTPURLResponse)?.statusCode == 401 { throw Failure.authorizationDenied }
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               response.expectedContentLength <= 64 * 1024 else { throw Failure.invalidResponse }
         var data = Data()
@@ -120,17 +129,18 @@ final class DiagnosticsBrokerClient: ObservableObject {
     private init() {
         root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BicinoDiagnosticsOutbox/v2", isDirectory: true)
+        let saved = try? DiagnosticsBrokerKeychain.read()
         let key = "diagnostics.broker.phone-id.v2"
         if let existing = UserDefaults.standard.string(forKey: key), let id = UUID(uuidString: existing) {
             phoneID = id
         } else {
-            phoneID = UUID()
+            phoneID = saved?.phoneID ?? UUID()
             UserDefaults.standard.set(phoneID.uuidString, forKey: key)
         }
         do {
             pairing = try DiagnosticsBrokerKeychain.read()
-            isPaired = pairing?.valid() == true
-            if pairing != nil { status = isPaired ? "Mac pairing loaded. Waiting for the app to be active." : "Mac pairing expired; retained logs are unaffected." }
+            isPaired = pairing?.valid() == true && (pairing?.phoneID == nil || pairing?.phoneID == phoneID)
+            if pairing != nil { status = isPaired ? "Mac pairing loaded. Waiting for the app to be active." : "Mac pairing is unavailable or expired; retained logs are unaffected." }
         } catch {
             status = "Mac pairing is unavailable. No credentials were sent."
         }
@@ -154,7 +164,21 @@ final class DiagnosticsBrokerClient: ObservableObject {
         guard (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max) <= 4096 else {
             throw DiagnosticsAcquisitionStore.Failure.invalidManifest
         }
-        let candidate = try JSONDecoder().decode(DiagnosticsBrokerPairing.self, from: Data(contentsOf: url))
+        let data = try Data(contentsOf: url)
+        struct Version: Decodable { let schema: Int }
+        let version = try JSONDecoder().decode(Version.self, from: data)
+        let candidate: DiagnosticsBrokerPairing
+        if version.schema == 3 {
+            let enrollment = try JSONDecoder().decode(DiagnosticsBrokerEnrollment.self, from: data)
+            var bytes = [UInt8](repeating: 0, count: 32)
+            guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+                throw DiagnosticsAcquisitionStore.Failure.invalidManifest
+            }
+            candidate = try enrollment.pairing(phoneID: phoneID,
+                credential: bytes.map { String(format: "%02x", $0) }.joined(), credentialID: UUID(), existing: pairing)
+        } else {
+            candidate = try JSONDecoder().decode(DiagnosticsBrokerPairing.self, from: data)
+        }
         guard candidate.valid() else { throw DiagnosticsAcquisitionStore.Failure.invalidManifest }
         try DiagnosticsBrokerKeychain.save(candidate)
         loopGeneration &+= 1
@@ -163,19 +187,44 @@ final class DiagnosticsBrokerClient: ObservableObject {
         pairing = candidate
         liveLeases.removeAll()
         isPaired = true
-        status = "Mac paired for private-LAN diagnostics until \(Date(timeIntervalSince1970: Double(candidate.expiresAt)).formatted())."
+        if let expiry = candidate.expiresAt {
+            status = "Temporary Mac pairing until \(Date(timeIntervalSince1970: Double(expiry)).formatted())."
+        } else {
+            status = candidate.enrollment == nil ? "Mac paired until you unpair or revoke it." : "Mac enrollment queued. Open the app on the Mac's LAN to finish pairing."
+        }
         setActive(active)
     }
 
-    func unpair() throws {
+    func unpair() async throws {
+        let previous = pairing
         try DiagnosticsBrokerKeychain.remove()
         pairing = nil
         liveLeases.removeAll()
         isPaired = false
         loopGeneration &+= 1
-        loop?.cancel()
-        loop = nil
-        status = "Mac unpaired. Local logs and pending handoffs were preserved."
+        let generation = loopGeneration
+        loop?.cancel(); loop = nil
+        status = "Mac unpaired locally. Local logs and pending handoffs were preserved."
+        guard let previous, previous.schema == 3,
+              let credentialID = previous.credentialID, let phoneID = previous.phoneID else { return }
+        // A pending enrollment may already have committed and lost its reply.
+        // Use its persisted phone secret only to revoke; never enroll on Unpair.
+        let revocation = DiagnosticsBrokerPairing(schema: 3, origin: previous.origin,
+            certificateSHA256: previous.certificateSHA256, token: previous.token,
+            brokerID: previous.brokerID, phoneID: phoneID, credentialID: credentialID,
+            enrollmentID: previous.enrollmentID)
+        let body: [String: Any] = ["schema":3, "credentialID":credentialID.uuidString, "phoneID":phoneID.uuidString]
+        var revoked = false
+        do {
+            _ = try await DiagnosticsBrokerHTTP.request(revocation, method: "POST", path: "v3/unpair",
+                body: JSONSerialization.data(withJSONObject: body))
+            revoked = true
+        } catch DiagnosticsBrokerHTTP.Failure.authorizationDenied {
+            revoked = true // The pinned broker has no active credential to revoke.
+        } catch { }
+        guard loopGeneration == generation, pairing == nil else { return }
+        status = revoked ? "Mac unpaired. Local logs and pending handoffs were preserved."
+            : "Unpaired on this iPhone. Mac unavailable; check and revoke its phone credential on the Mac. Local logs were preserved."
     }
 
     func setActive(_ value: Bool) {
@@ -189,19 +238,44 @@ final class DiagnosticsBrokerClient: ObservableObject {
                 if self?.loopGeneration == generation { self?.loop = nil }
             }
             while !Task.isCancelled {
-                guard let self, active, let pairing, pairing.valid() else { return }
+                guard let self, active, let candidate = pairing else { return }
+                guard candidate.valid(), candidate.phoneID == nil || candidate.phoneID == phoneID else {
+                    isPaired = false; status = "Temporary Mac pairing expired. Local logs and pending handoffs are retained."; return
+                }
                 do {
-                    try await poll(pairing)
+                    let confirmed: DiagnosticsBrokerPairing
+                    if let enrollment = candidate.enrollmentRequest {
+                        let response = try await DiagnosticsBrokerHTTP.request(candidate, method: "POST", path: "v3/enroll",
+                            body: JSONEncoder().encode(enrollment))
+                        try checkOwner(candidate, generation: generation)
+                        confirmed = try candidate.confirmed(by: JSONDecoder().decode(DiagnosticsBrokerEnrollmentReceipt.self, from: response))
+                        // The same phone-created credential remains in Keychain
+                        // across lost replies, process loss and enrollment expiry.
+                        try DiagnosticsBrokerKeychain.save(confirmed)
+                        pairing = confirmed
+                    } else { confirmed = candidate }
+                    try await poll(confirmed, generation: generation)
                     status = "Mac connected. Local recording remains independent."
+                } catch DiagnosticsBrokerHTTP.Failure.authorizationDenied {
+                    if !Task.isCancelled, loopGeneration == generation {
+                        isPaired = false
+                        status = "Mac enrollment expired or pairing was revoked. Import a fresh enrollment file; retained logs are unaffected."
+                    }
+                    return
                 } catch {
-                    if !Task.isCancelled { status = "Mac unavailable; local logs and pending handoffs are retained." }
+                    if !Task.isCancelled, loopGeneration == generation { status = "Mac unavailable; local logs and pending handoffs are retained." }
                 }
                 try? await Task.sleep(for: .seconds(5))
             }
         }
     }
 
-    private func poll(_ pairing: DiagnosticsBrokerPairing) async throws {
+    private func checkOwner(_ expected: DiagnosticsBrokerPairing, generation: UInt64) throws {
+        try Task.checkCancellation()
+        guard active, loopGeneration == generation, pairing == expected else { throw CancellationError() }
+    }
+
+    private func poll(_ pairing: DiagnosticsBrokerPairing, generation: UInt64) async throws {
         guard let recorder, let bleManager else { return }
         let journal: DiagnosticsBrokerCommandJournal
         if let existing = journals[pairing.certificateSHA256] {
@@ -231,26 +305,32 @@ final class DiagnosticsBrokerClient: ObservableObject {
         ]
         _ = try await DiagnosticsBrokerHTTP.request(pairing, method: "POST", path: "v2/phone",
             body: JSONSerialization.data(withJSONObject: observed, options: [.sortedKeys]))
+        try checkOwner(pairing, generation: generation)
         let commands = try await DiagnosticsBrokerHTTP.request(pairing, method: "GET", path: "v2/commands")
+        try checkOwner(pairing, generation: generation)
         struct Batch: Decodable { let schema: Int; let commands: [DiagnosticsBrokerCommand] }
         let batch = try JSONDecoder().decode(Batch.self, from: commands)
         guard batch.schema == 2, batch.commands.count <= 8 else { throw DiagnosticsAcquisitionStore.Failure.invalidManifest }
         for command in batch.commands {
             try Task.checkCancellation()
+            let claim = try await journal.claim(command)
+            try checkOwner(pairing, generation: generation)
             let acknowledgement: DiagnosticsBrokerAcknowledgement
-            if let previous = try await journal.existing(command.id) {
-                acknowledgement = previous
+            if !claim.shouldExecute {
+                acknowledgement = claim.receipt
             } else {
-                try await journal.save(DiagnosticsBrokerAcknowledgement(id: command.id,
-                    state: "interrupted", code: "execution_started"))
                 acknowledgement = execute(command, recorder: recorder, bleManager: bleManager)
-                try await journal.save(acknowledgement)
+                try await journal.complete(command, receipt: acknowledgement)
             }
+            try checkOwner(pairing, generation: generation)
             _ = try await DiagnosticsBrokerHTTP.request(pairing, method: "POST", path: "v2/ack",
                 body: encoder.encode(acknowledgement))
+            try checkOwner(pairing, generation: generation)
         }
-        try await publishLive(pairing)
-        try await uploadPending(pairing)
+        try checkOwner(pairing, generation: generation)
+        try await publishLive(pairing, generation: generation)
+        try checkOwner(pairing, generation: generation)
+        try await uploadPending(pairing, generation: generation)
     }
 
     private func execute(_ command: DiagnosticsBrokerCommand, recorder: RideDiagnosticsRecorder,
@@ -325,7 +405,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
         }
     }
 
-    private func publishLive(_ pairing: DiagnosticsBrokerPairing) async throws {
+    private func publishLive(_ pairing: DiagnosticsBrokerPairing, generation: UInt64) async throws {
         guard let recorder, let bleManager else { return }
         let now = ProcessInfo.processInfo.systemUptime
         liveLeases = liveLeases.filter { $0.value.deadline > now }
@@ -372,6 +452,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
             let bytes = try JSONSerialization.data(withJSONObject: batch, options: [.sortedKeys])
             guard bytes.count <= 48 * 1024 else { throw DiagnosticsAcquisitionStore.Failure.invalidManifest }
             _ = try await DiagnosticsBrokerHTTP.request(pairing, method: "POST", path: "v2/live", body: bytes)
+            try checkOwner(pairing, generation: generation)
             // Cancellation/stop during await must not revive a previous lease.
             if liveLeases[target]?.deadline == lease.deadline { liveLeases[target] = lease }
             if target != "iphone", !Task.isCancelled,
@@ -428,7 +509,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
         return true
     }
 
-    private func uploadPending(_ pairing: DiagnosticsBrokerPairing) async throws {
+    private func uploadPending(_ pairing: DiagnosticsBrokerPairing, generation: UInt64) async throws {
         let root = recipientRoot(pairing)
         guard FileManager.default.fileExists(atPath: root.path) else { return }
         let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey])
@@ -447,8 +528,10 @@ final class DiagnosticsBrokerClient: ObservableObject {
                 SHA256.hash(data: try Data(contentsOf: file, options: [.mappedIfSafe]))
                     .map { String(format: "%02x", $0) }.joined()
             }.value
+            try checkOwner(pairing, generation: generation)
             let response = try await DiagnosticsBrokerHTTP.request(pairing, method: "PUT",
                 path: "v2/uploads/\(id.uuidString.lowercased())", file: file, digest: hash)
+            try checkOwner(pairing, generation: generation)
             struct Receipt: Decodable { let schema: Int; let id: UUID; let sha256: String; let accepted: Bool }
             let receipt = try JSONDecoder().decode(Receipt.self, from: response)
             guard receipt.schema == 2, receipt.id == id, receipt.sha256 == hash, receipt.accepted else {

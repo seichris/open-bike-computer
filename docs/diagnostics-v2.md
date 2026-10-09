@@ -23,20 +23,75 @@ not port-forward the broker or expose it publicly. Import the pairing file via
 **Settings → Diagnostics → Pair Mac** on the iPhone, then securely delete that
 transfer copy. It contains a temporary bearer credential and exact TLS leaf pin;
 do not put it in Git, a prompt, shell history, an issue or a public artifact.
-The iPhone stores it in device-only Keychain. Pairing expires (maximum 24 hours),
-can be revoked by `diag broker revoke`, and can be removed on the phone.
+The **enrollment file** expires within 24 hours and can enroll one phone once.
+The iPhone generates an independent credential and saves it in device-only
+Keychain before contacting the pinned Mac. The Mac stores its hash, binds it to
+that phone and returns a matching receipt. Once confirmed, pairing lasts until
+the phone unpairs or the Mac revokes it; the enrollment deadline does not stop
+later handoffs. No owner credential is included in the import file.
 
-The certificate/private key, bearer and SQLite inbox live under
+Lost enrollment replies retry the same persisted phone credential and identity.
+An already-committed pairing can be confirmed after the enrollment deadline;
+an unused expired file cannot create one. Re-importing the same file preserves
+the existing credential. Revoked pairings cannot be restored by replaying a file.
+
+The certificate/private key, local owner credential and SQLite inbox live under
 `~/.local/share/bicino/diagnostics` with restrictive permissions. Override with
 `tools/bicino diag --broker-root /private/path ...`. A broker enrolls one phone;
 re-enrollment requires deliberate fresh pairing. The protocol accepts only
 bounded diagnostics commands. It cannot execute shell commands, reset, flash,
 change ownership, operate the UI, or request raw protected payloads.
 
+```sh
+tools/bicino diag broker pairings
+tools/bicino diag broker revoke --credential-id PHONE_CREDENTIAL_UUID
+# Revoke every phone and unused enrollment file, preserving retained evidence:
+tools/bicino diag broker revoke
+tools/bicino diag broker enroll --pairing-file /private/local/path/new-enrollment.json --hours 8
+```
+
+The phone credential can poll bounded commands, acknowledge them and submit its
+own status, live observations and verified bundles. It cannot enqueue commands
+or read the Mac's administrative status. An enrollment token cannot use these
+data endpoints. One phone is enrolled at a time; replacement requires deliberate
+revocation and a fresh file. Pairing history and unused enrollment admission are
+bounded. Revocation retires pending commands and clears the old phone observation
+without deleting recording or inbox evidence.
+
+For an existing temporary v2 pairing, run the matching broker version against
+its existing private directory first, then:
+
+```sh
+tools/bicino diag broker upgrade
+tools/bicino diag broker enroll --pairing-file /private/local/path/bicino-enrollment.json --hours 8
+```
+
+`upgrade` verifies the running server's v3 support and exact TLS pin before it
+changes credentials. The capability probe contains no phone or inbox data and
+sends no bearer credential, so upgrade also works after a legacy pairing expires.
+It preserves the server key, certificate, inbox and the
+legacy phone's original expiry. Successful durable enrollment permanently
+retires the shared legacy bearer. Old v2 import files remain temporary; they are
+never silently promoted into lasting credentials. Deploy the matching phone app
+and import the new file to finish migration. No device is needed for Mac setup,
+but source/host tests do not prove phone enrollment or Keychain behavior.
+
+Command receipts retain their original deadlines. Expired receipts can age out
+of the phone's bounded journal, so durable pairing does not fill it after 100
+historical commands. Expired commands remain rejected after their receipts age
+out. A process-loss receipt reports interrupted/unknown instead of executing
+the command again; completed receipts and deadlines cannot be changed by replay.
+Legacy receipts receive one frozen maximum-lifetime migration window.
+
 The phone polls only while foreground-active and paired. Files remain in a
 recipient-scoped, bounded outbox until the authenticated Mac verifies and
 acknowledges their exact hash. No claim is made that iOS permits arbitrary
 background execution. Reopen the app to resume an offline handoff.
+Unpair removes the local Keychain credential immediately and tries to revoke it
+on the pinned Mac. If the Mac is unreachable, use the Mac's revocation command;
+local logs and recipient-scoped pending handoffs remain preserved. The explicit
+LAN origin and TLS leaf pin stay fixed; endpoint or certificate changes require
+deliberate re-enrollment.
 
 ## Capture
 

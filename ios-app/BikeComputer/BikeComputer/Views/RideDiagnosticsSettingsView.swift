@@ -241,13 +241,15 @@ struct RideDiagnosticsSettingsView: View {
                 if broker.isPaired {
                     Button("Queue Handoff to Mac") { broker.enqueueExport(acquisitionID: nil) }
                     Button("Unpair Mac", role: .destructive) {
-                        do { try broker.unpair() }
-                        catch { statusMessage = "Mac pairing could not be removed." }
+                        Task {
+                            do { try await broker.unpair() }
+                            catch { statusMessage = "Mac pairing could not be removed." }
+                        }
                     }
                 }
             } header: { Text("Codex handoff") }
             footer: {
-                Text("Pair only with your own Mac. Until pairing expires, it may request privacy-safe captures and receive bundles on your private LAN while the app is active. No reset, flash, raw payloads or arbitrary commands are allowed. Recording works without the Mac.")
+                Text("Pair only with your own Mac. Import an enrollment file once to stay paired until you unpair or revoke it. The Mac may request privacy-safe captures and receive bundles on your private LAN while the app is active. No reset, flash, raw payloads or arbitrary commands are allowed. Recording works without the Mac.")
             }
 
             Section {

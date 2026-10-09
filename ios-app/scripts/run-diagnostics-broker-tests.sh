@@ -10,4 +10,4 @@ if command -v xcrun >/dev/null; then SWIFT=(xcrun swiftc); else SWIFT=(swiftc); 
  "$ROOT/ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift" \
  "$ROOT/ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsBrokerContract.swift" \
  "$ROOT/ios-app/BikeComputerTests/DiagnosticsBrokerContractTests.swift"
-"$OUT/broker"
+"$OUT/broker" "$@"
