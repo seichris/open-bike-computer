@@ -355,7 +355,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             state: "active"
         )
         coordinator.applicationDidBecomeActive()
-        DiagnosticsCollectionCoordinator.shared.resumeIfPossible()
         setApplicationActive(true)
     }
     
@@ -373,6 +372,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     func setApplicationActive(_ isActive: Bool) {
         DiagnosticsBrokerClient.shared.setActive(isActive)
         coordinator.setApplicationActive(isActive)
+        if isActive {
+            // SwiftUI scene transitions use this path even without the UIKit callback.
+            DiagnosticsCollectionCoordinator.shared.resumeIfPossible()
+        }
         if #available(iOS 17.0, *),
            let controller =
                workoutLiveActivityController

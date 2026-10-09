@@ -87,6 +87,9 @@ The phone polls only while foreground-active and paired. Files remain in a
 recipient-scoped, bounded outbox until the authenticated Mac verifies and
 acknowledges their exact hash. No claim is made that iOS permits arbitrary
 background execution. Reopen the app to resume an offline handoff.
+SwiftUI foreground transitions and authenticated BLE readiness recheck eligible
+retained collections. Resume revalidates cached chunks at the original saved
+cutoff; explicit cancellation and transport failures still require manual retry.
 When the Mac's bounded inbox is full, the pinned broker reports `507` with the
 typed `inbox_full` reason. The app asks the user to archive received bundles on
 the Mac and retains the pending ZIP for the same hash-verified retry. Existing
