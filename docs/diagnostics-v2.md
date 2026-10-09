@@ -210,13 +210,20 @@ coordinates, speed values and raw GPS payloads are excluded.
 Firmware `logger.loss` reports `dropReason`, a boot-local cumulative
 `eventCount` for that reason, and the cumulative total `droppedCount`. Reasons
 distinguish invalid fields/tokens, unavailable storage/boot identity/queue,
-producer or queue lock contention, critical-lane spill, full queues, eviction
+producer or queue lock contention, full queues, eviction
 of an ordinary record, and an oversized record. Counts are never reset by
 collection. Do not add repeated snapshots together or equate a `storage_gap`
 fault capsule with an SD write failure: it can also describe admission loss.
 Loss summaries are attempted at most once per 30 seconds after the queue
 drains; a continuously overloaded or interrupted recorder may not retain them.
 Policy filtering remains separate from dropped records.
+
+The recorder keeps eight reserved critical slots and 24 shared normal slots.
+Spilled critical records do not block normal admission into free shared slots.
+When both lanes are full, one bounded rotation evicts the oldest normal record,
+preserves every critical record and survivor sequence order, and appends the
+new critical record. The zero-wait producer lock and total capacity are unchanged.
+`critical_spill` remains a recognizable historical loss reason.
 
 ## Live observations
 

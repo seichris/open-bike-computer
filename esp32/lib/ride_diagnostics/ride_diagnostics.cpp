@@ -168,9 +168,8 @@ std::atomic<uint32_t> pendingFaultCapsuleQueuedChecksum{0};
 std::atomic<uint32_t> currentFaultCapsuleQueuedChecksum{0};
 std::atomic<uint16_t> maxQueueDepth{0};
 // When the reserved critical lane overflows, critical records may spill into
-// the normal queue. While any spill remains, normal producers are rejected so
-// noncritical records can never be appended behind a critical record and make
-// head eviction unsafe.
+// the normal queue. Count protected entries so a full mixed queue can evict
+// its oldest normal entry without sacrificing a spilled critical record.
 std::atomic<uint16_t> normalQueueCriticalCount{0};
 char activeCapture[48] = {};
 portMUX_TYPE captureMux = portMUX_INITIALIZER_UNLOCKED;
@@ -1219,15 +1218,6 @@ bool enqueue(QueuedEvent &event) {
     noteDrop(DropReason::QueueBusy);
     return false;
   }
-  // Spilled critical records occupy the tail of the normal queue. Holding
-  // normal traffic until they drain preserves the invariant that any
-  // noncritical records are at the head and can be evicted safely.
-  if (!event.critical &&
-      normalQueueCriticalCount.load(std::memory_order_acquire) != 0) {
-    xSemaphoreGive(queueMutationMutex);
-    noteDrop(DropReason::CriticalSpill);
-    return false;
-  }
   BaseType_t result = xQueueSend(target, &event, 0);
   if (result != pdTRUE && event.critical && normalQueue != nullptr) {
     // Critical records may consume otherwise unused normal capacity. If both
@@ -1244,22 +1234,28 @@ bool enqueue(QueuedEvent &event) {
       if (result != pdTRUE)
         normalQueueCriticalCount.fetch_sub(1, std::memory_order_acq_rel);
     } else if (overflow == queue_policy::CriticalOverflow::EvictNormal) {
-      QueuedEvent evicted = {};
-      if (xQueueReceive(normalQueue, &evicted, 0) == pdTRUE) {
-        if (evicted.critical) {
-          // Defensive invariant recovery. Queue mutation is serialized with
-          // the writer, so this should be unreachable, but never sacrifice or
-          // reorder a protected record if state is found inconsistent.
-          (void)xQueueSend(normalQueue, &evicted, 0);
-        } else {
+      // One bounded rotation restores the original order of every survivor.
+      // Producers and the writer share this mutex, and each receive frees a
+      // slot for its send. Normal traffic may therefore use free space even
+      // behind spill records without making head-only eviction unsafe.
+      const UBaseType_t entries = uxQueueMessagesWaiting(normalQueue);
+      bool evictedNormal = false;
+      QueuedEvent queued = {};
+      for (UBaseType_t index = 0; index < entries; ++index) {
+        if (xQueueReceive(normalQueue, &queued, 0) != pdTRUE)
+          break;
+        if (!evictedNormal && !queued.critical) {
+          evictedNormal = true;
           noteDrop(DropReason::NormalEvicted);
-          normalQueueCriticalCount.fetch_add(1,
-                                             std::memory_order_acq_rel);
-          result = xQueueSend(normalQueue, &event, 0);
-          if (result != pdTRUE)
-            normalQueueCriticalCount.fetch_sub(1,
-                                               std::memory_order_acq_rel);
+        } else {
+          (void)xQueueSend(normalQueue, &queued, 0);
         }
+      }
+      if (evictedNormal) {
+        normalQueueCriticalCount.fetch_add(1, std::memory_order_acq_rel);
+        result = xQueueSend(normalQueue, &event, 0);
+        if (result != pdTRUE)
+          normalQueueCriticalCount.fetch_sub(1, std::memory_order_acq_rel);
       }
     }
   }

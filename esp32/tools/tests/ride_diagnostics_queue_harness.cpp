@@ -59,13 +59,34 @@ int main() {
   for (unsigned i=0; i<kCriticalQueueCapacity; ++i) assert(enqueue(important));
   assert(enqueue(important));
   assert(normalQueueCriticalCount == 1);
-  assert(!enqueue(ordinary) && count(DropReason::CriticalSpill) == 1);
+  assert(enqueue(ordinary));
+  assert(normal.events.size() == 2 && normal.events.back().critical == false);
+  assert(dropped == 0 && count(DropReason::CriticalSpill) == 0);
   assert(count(DropReason::QueueFull) == 0);
   reset();
   for (unsigned i=0; i<kNormalQueueCapacity; ++i) assert(enqueue(ordinary));
   for (unsigned i=0; i<kCriticalQueueCapacity; ++i) assert(enqueue(important));
   assert(enqueue(important));
   assert(count(DropReason::NormalEvicted) == 1 && normal.events.front().critical == false);
+  // Mixed spill records must not suppress normal traffic or make the oldest
+  // protected head record an eviction victim. Keep survivor sequence order.
+  reset();
+  for (unsigned i=0; i<kCriticalQueueCapacity; ++i) {
+    QueuedEvent e{i+1, true}; assert(enqueue(e));
+  }
+  for (unsigned i=0; i<kNormalQueueCapacity; ++i) {
+    QueuedEvent e{i+9, i % 3 != 1}; assert(enqueue(e));
+  }
+  QueuedEvent replacement{33, true}; assert(enqueue(replacement));
+  assert(normal.events.front().sequence == 9 && normal.events.front().critical);
+  assert(normal.events.back().sequence == 33 && normal.events.back().critical);
+  assert(normal.events.size() == kNormalQueueCapacity);
+  unsigned previous = 0;
+  for (const auto &e : normal.events) {
+    assert(e.sequence > previous && e.sequence != 10); previous = e.sequence;
+  }
+  assert(count(DropReason::NormalEvicted) == 1 && dropped == 1);
+  assert(normalQueueCriticalCount == 17);
   reset();
   for (unsigned i=0; i<kQueueCapacity; ++i) assert(enqueue(important));
   assert(!enqueue(important) && count(DropReason::QueueFull) == 1);
