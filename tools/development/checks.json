@@ -758,7 +758,7 @@
       "name": "Durable map operation host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/device_transfer/durable_operation.cpp \\\n  tools/tests/test_durable_operation.cpp \\\n  -o ${TMPDIR}/test_durable_operation\n${TMPDIR}/test_durable_operation\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -Ilib/map_transfer -Ilib/device_transfer \\\n  tools/tests/test_map_selection_health.cpp \\\n  -o ${TMPDIR}/test_map_selection_health\n${TMPDIR}/test_map_selection_health\npython -m unittest tools.tests.test_map_operation_stack\n",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/device_transfer/durable_operation.cpp \\\n  tools/tests/test_durable_operation.cpp \\\n  -o ${TMPDIR}/test_durable_operation\n${TMPDIR}/test_durable_operation\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -Ilib/map_transfer -Ilib/device_transfer \\\n  tools/tests/test_map_selection_health.cpp \\\n  -o ${TMPDIR}/test_map_selection_health\n${TMPDIR}/test_map_selection_health\npython3 -m unittest tools.tests.test_map_operation_stack\n",
       "tools": [
         "python3",
         "g++"
