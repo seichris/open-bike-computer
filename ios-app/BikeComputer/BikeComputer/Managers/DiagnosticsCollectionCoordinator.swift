@@ -23,6 +23,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     private var restoreFailed = false
     private var selectionTask: Task<Void, Never>?
     private var operationGeneration: UInt64 = 0
+    private var lastResumeBlockReason: String?
     private var rideIsActive = false
     private struct RideContext {
         let requestID: UUID
@@ -162,10 +163,27 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
         }
     }
 
+    private func recordResumeDeferral(_ reason: String) {
+        guard let manifest, !manifest.deliveryComplete,
+              lastResumeBlockReason != reason else { return }
+        lastResumeBlockReason = reason
+        recorder?.record(category: .transfer, event: "diagnostics_resume_deferred", fields: [
+            "operationId": manifest.id.uuidString.lowercased(),
+            "phase": manifest.phase.rawValue,
+            "reason": reason,
+        ])
+    }
+
     func resumeIfPossible() {
-        guard restoreFinished, !restoreFailed, automaticRetryAllowed, !isRunning,
-              selectionTask == nil, canCollect(), let recorder, let bleManager,
-              bleManager.isNavigationReady, let deviceID = bleManager.connectedDeviceID else { return }
+        guard restoreFinished else { recordResumeDeferral("journal_loading"); return }
+        guard !restoreFailed else { recordResumeDeferral("journal_failed"); return }
+        guard automaticRetryAllowed else { recordResumeDeferral("manual_retry_required"); return }
+        guard !isRunning else { recordResumeDeferral("collection_running"); return }
+        guard selectionTask == nil else { recordResumeDeferral("selection_running"); return }
+        guard canCollect() else { recordResumeDeferral("riding_or_background"); return }
+        guard let recorder, let bleManager, bleManager.isNavigationReady,
+              let deviceID = bleManager.connectedDeviceID else { recordResumeDeferral("original_device_not_ready"); return }
+        lastResumeBlockReason = nil
         let digest = recorder.deviceDigest(for: deviceID)
         let generation = operationGeneration
         selectionTask = Task { [weak self] in
@@ -173,13 +191,15 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
             defer { selectionTask = nil }
             do {
                 let entries = try await store.manifests()
-                guard generation == operationGeneration, !isRunning, canCollect(),
-                      bleManager.connectedDeviceID == deviceID else { return }
+                guard generation == operationGeneration else { recordResumeDeferral("selection_superseded"); return }
+                guard !isRunning else { recordResumeDeferral("collection_running"); return }
+                guard canCollect() else { recordResumeDeferral("riding_or_background"); return }
+                guard bleManager.connectedDeviceID == deviceID else { recordResumeDeferral("original_device_changed"); return }
                 // A completed/cancelled job never opens a new inventory. Only
                 // independently persisted pending work can become runnable.
                 guard let pending = entries.first(where: {
                     $0.canResumeAutomatically(postRideEnabled: automaticPostRideCollection) && $0.deviceDigest == digest
-                }) else { return }
+                }) else { recordResumeDeferral("no_eligible_original_device_job"); return }
                 recorder.record(category: .transfer, event: "diagnostics_resume_selected", fields: [
                     "operationId": pending.id.uuidString.lowercased(),
                     "phase": pending.phase.rawValue,
@@ -204,6 +224,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
         if automatic, manifest?.canResumeAutomatically(postRideEnabled: automaticPostRideCollection) != true { return }
         guard canCollect(), bleManager.isNavigationReady, bleManager.supportsRideDiagnostics,
               let deviceID = bleManager.connectedDeviceID else {
+            if automatic { recordResumeDeferral("collection_conditions_not_ready") }
             if !automatic { status = "Stop the ride and connect the original Bicino before collecting." }
             return
         }
