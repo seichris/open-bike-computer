@@ -139,12 +139,20 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 storageFailed = false
                 if let phone {
                     if record?.owner == .watch, record?.phase != .finished {
-                        // Resume the reserved Watch ride through its mirrored
-                        // transport. A primary-iPhone recovery probe can fail
-                        // while that mirror is already attached; it must not
-                        // hide controls for the existing selected recorder.
-                        // Probe the phone before admitting any subsequent ride.
+                        // Native recovery can reattach a mirrored session after
+                        // process loss. Its primary-recorder check can also fail
+                        // while a valid Watch mirror is already attached. Keep
+                        // that assist, but do not hide the selected Watch's
+                        // controls on failure. Probe again before a new ride.
                         phoneRecoveryDeferredForWatch = true
+                        do { try await phone.recover(expected: record) }
+                        catch {
+                            // A discovered phone owner must still be reconciled;
+                            // only the reserved Watch ride can use this fallback.
+                            guard phone.record == nil, record?.owner == .watch else {
+                                throw error
+                            }
+                        }
                     } else {
                         try await phone.recover(expected: record)
                         phoneRecoveryDeferredForWatch = false

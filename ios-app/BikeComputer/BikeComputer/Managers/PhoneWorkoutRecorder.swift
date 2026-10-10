@@ -168,12 +168,30 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     /// A missing/corrupt record is not proof that HealthKit has no primary session.
     func recover(expected: WorkoutRecordingRecord?) async throws {
         guard session == nil else { return }
-        let recovered: HKWorkoutSession? = try await withCheckedThrowingContinuation { continuation in
-            healthStore.recoverActiveWorkoutSession { session, error in
-                if let error { continuation.resume(throwing: error) }
-                else { continuation.resume(returning: session) }
+        let recovered: HKWorkoutSession?
+        do {
+            recovered = try await withCheckedThrowingContinuation { continuation in
+                healthStore.recoverActiveWorkoutSession { session, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume(returning: session) }
+                }
             }
+        } catch {
+#if DEBUG
+            let native = error as NSError
+            NSLog("Bicino native recovery failed: HealthKit=%d code=%ld",
+                  native.domain == HKErrorDomain, native.code)
+#endif
+            throw error
         }
+#if DEBUG
+        let matchesExpectedStart = recovered?.startDate.flatMap { nativeStart in
+            expected?.startedAt.map { abs(nativeStart.timeIntervalSince($0)) < 2 }
+        } ?? false
+        NSLog("Bicino native recovery result: type=%ld state=%ld owner=%@ startMatchesOwner=%d",
+              recovered?.type.rawValue ?? -1, recovered?.state.rawValue ?? -1,
+              expected?.owner.rawValue ?? "none", matchesExpectedStart)
+#endif
         if let recovered, recovered.type == .mirrored {
             onRecoveredMirror(recovered)
             if expected?.owner == .iphone { throw RecorderError.identityMismatch }

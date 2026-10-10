@@ -355,8 +355,8 @@ struct WorkoutSessionCoordinatorTests {
         recoveredWatch.emit(id: recoveredWatchID, state: .paused)
         watchRecovery.recoverIfNeeded()
         await spin { watchRecovery.recoveryComplete }
-        check(deferredPhone.recoveries == 0,
-              "An existing Watch ride does not depend on primary iPhone recovery")
+        check(deferredPhone.recoveries == 1,
+              "Native recovery assists reattachment without blocking the selected Watch on failure")
         check(watchRecovery.record?.sessionID == recoveredWatchID
                 && watchRecovery.record?.phase == .paused && watchRecovery.notice == nil,
               "The credentialed paused Watch snapshot recovers its reserved identity")
@@ -370,7 +370,7 @@ struct WorkoutSessionCoordinatorTests {
         check(watchRecovery.resetTerminalPresentation(),
               "Only a confirmed Watch terminal disposition clears its owner")
         await spin { watchRecovery.notice?.kind == .recovery }
-        check(deferredPhone.recoveries == 1 && !watchRecovery.recoveryComplete,
+        check(deferredPhone.recoveries == 2 && !watchRecovery.recoveryComplete,
               "Clearing Watch ownership requires a fresh primary phone probe")
         check(!watchRecovery.requestStart(explicitOwner: .iphone)
                 && deferredPhone.starts == 0 && recoveredWatch.starts == 0,
@@ -378,7 +378,7 @@ struct WorkoutSessionCoordinatorTests {
         deferredPhone.recoveryFails = false
         watchRecovery.retryRecovery()
         await spin { watchRecovery.recoveryComplete }
-        check(deferredPhone.recoveries == 2 && watchRecovery.record == nil,
+        check(deferredPhone.recoveries == 3 && watchRecovery.record == nil,
               "A successful deferred probe releases only the finished owner")
 
         let (recovery, watch6, phone6, _, disk6) = harness()
