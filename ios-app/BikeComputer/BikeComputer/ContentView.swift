@@ -314,6 +314,14 @@ struct ContentView: View {
                     }
 
                     if !offlineMapManager.isMapAreaSelectionActive,
+                       shouldShowWorkoutRecoveryStatus {
+                        WorkoutRecordingStatusView(
+                            coordinator: workoutSessionCoordinator,
+                            store: workoutStore
+                        )
+                        .padding(.horizontal, 14)
+                        .padding(.top, 8)
+                    } else if !offlineMapManager.isMapAreaSelectionActive,
                        shouldShowWorkoutStatusCard {
                         WorkoutCompactCard(
                             store: workoutStore,
@@ -2018,6 +2026,13 @@ struct ContentView: View {
         formatter.numberFormatter.maximumFractionDigits = 1
         let minutes = max(Int((alternative.expectedTravelTime / 60).rounded()), 1)
         return "\(formatter.string(from: distance)) · \(minutes) min"
+    }
+
+    private var shouldShowWorkoutRecoveryStatus: Bool {
+        // A reserved Watch ride can have no native mirror at all after a
+        // restart. Keep its recovery actions visible even with an idle store.
+        workoutSessionCoordinator.record?.owner == .watch
+            && workoutSessionCoordinator.record?.phase == .unresolved
     }
 
     private var shouldShowWorkoutStatusCard: Bool {
