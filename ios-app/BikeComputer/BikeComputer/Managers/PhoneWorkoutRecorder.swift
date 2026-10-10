@@ -315,7 +315,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let data = try JSONEncoder().encode(SegmentBoundary(
+                let metadata = try WorkoutRecordingMetadataCodec.encode(SegmentBoundary(
                     completed: candidate.completedSegment,
                     elapsed: candidate.cumulativeElapsedTime,
                     distance: candidate.cumulativeDistanceMeters
@@ -323,7 +323,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 let event = HKWorkoutEvent(
                     type: .segment,
                     dateInterval: DateInterval(start: candidate.completedSegment.startedAt, end: candidate.completedSegment.endedAt),
-                    metadata: [Self.segmentMetadataKey: data]
+                    metadata: [Self.segmentMetadataKey: metadata]
                 )
                 try await builder.addWorkoutEvents([event])
                 guard self.builder === builder, record?.sessionID == id else { return }
@@ -578,7 +578,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         let hr = metric(currentHR?.doubleValue(for: heartUnit), .beatsPerMinute, at: hrDate)
         let avgHR = metric(averageHR?.doubleValue(for: heartUnit), .beatsPerMinute)
         let kcal = metric(energy?.doubleValue(for: .kilocalorie()), .kilocalories)
-        let distance = metric(distanceMeters, .meters, source: .iPhoneLocation)
+        // Both live and saved cumulative distance come from HealthKit statistics.
+        let distance = metric(distanceMeters, .meters)
         let speed = metric(location?.speed, .metersPerSecond, at: location?.capturedAt, source: .iPhoneLocation)
         var availability: WorkoutAvailabilityMaskV1 = []
         if elapsed != nil { availability.insert(.elapsedTime) }
@@ -623,9 +624,8 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private func restoreSegments(_ builder: HKLiveWorkoutBuilder) {
         guard let startDate else { return }
         segments.reset(workoutStart: startDate)
-        let boundaries = builder.workoutEvents.compactMap { event -> SegmentBoundary? in
-            guard let data = event.metadata?[Self.segmentMetadataKey] as? Data else { return nil }
-            return try? JSONDecoder().decode(SegmentBoundary.self, from: data)
+        let boundaries = builder.workoutEvents.compactMap { event in
+            WorkoutRecordingMetadataCodec.decode(SegmentBoundary.self, from: event.metadata?[Self.segmentMetadataKey])
         }
         if let last = boundaries.max(by: { $0.completed.index < $1.completed.index }) {
             segments.restore(workoutStart: startDate, lastCompletedSegment: last.completed,
