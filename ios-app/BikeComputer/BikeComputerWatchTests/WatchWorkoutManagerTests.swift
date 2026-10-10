@@ -2578,6 +2578,36 @@ final class WatchWorkoutManagerTests: XCTestCase {
         }
     }
 
+    func testLiveMirrorTimeoutRetriesLatestSnapshotWithoutEndingWorkout() async throws {
+        let probe = WatchMirrorTransportProbe()
+        let runtime = try makeMirrorRuntime(probe: probe, liveSendTimeout: 0.1)
+        runtime.manager.configureMirrorRuntimeForTesting(
+            session: runtime.session, identity: runtime.identity, state: .running)
+        runtime.manager.startMirroringForTesting()
+        probe.completeNextStart(succeeded: true)
+        await Task.yield()
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        let latest = runtime.manager.latestEnvelope
+        try await waitUntil { probe.startCallCount == 2 }
+        XCTAssertEqual(runtime.manager.state, .running)
+        XCTAssertEqual(probe.endSessionCallCount, 0)
+        XCTAssertEqual(runtime.store.recoveredIdentity?.sessionID, runtime.identity.sessionID)
+        probe.completeNextStart(succeeded: true)
+        try await waitUntil { probe.sentData.count == 2 }
+        XCTAssertEqual(try WorkoutContractCodec.decode(probe.sentData[1]), try latest.map {
+            try WorkoutContractCodec.decode(WorkoutContractCodec.encodeForPhone($0, peerVersion: nil))
+        })
+        probe.completeNextSend(succeeded: true)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertTrue(runtime.manager.mirrorSendIsInFlightForTesting,
+                      "The timed-out send's late completion cannot clear its replacement")
+        probe.completeNextSend(succeeded: true)
+        try await waitUntil { !runtime.manager.mirrorSendIsInFlightForTesting }
+        XCTAssertEqual(probe.endSessionCallCount, 0)
+    }
+
     func testSupersededLiveCallbackCannotCompleteFinalShutdownSend() async throws {
         for startFailure in [false, true] {
             let probe = WatchMirrorTransportProbe()
@@ -8693,6 +8723,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
     private func makeMirrorRuntime(
         probe: WatchMirrorTransportProbe,
         shutdownTimeout: TimeInterval = 10,
+        liveSendTimeout: TimeInterval = 10,
         workoutConfigurationHandler:
             (@MainActor (HKWorkoutConfiguration) -> Void)? = nil,
         builderElapsedTime:
@@ -8729,6 +8760,7 @@ final class WatchWorkoutManagerTests: XCTestCase {
             mirrorSendOperation: probe.send,
             mirrorShutdownEndSession: probe.endSession,
             mirrorRetryDelay: 0.01,
+            mirrorLiveSendTimeout: liveSendTimeout,
             mirrorShutdownDeliveryTimeout: shutdownTimeout,
             initializeOnLaunch: false
         )

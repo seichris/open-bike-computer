@@ -8,6 +8,7 @@ import UIKit
 protocol WorkoutMirroredSessionTransport: AnyObject {
     var healthKitSession: HKWorkoutSession? { get }
     var sessionStartDate: Date? { get }
+    var initialSessionState: WorkoutSessionStateV1? { get }
     func installDelegate(_ delegate: HKWorkoutSessionDelegate?)
     func pause()
     func resume()
@@ -15,6 +16,13 @@ protocol WorkoutMirroredSessionTransport: AnyObject {
         data: Data,
         completion: @escaping @Sendable (Bool, Error?) -> Void
     )
+}
+
+@available(iOS 17.0, *)
+extension WorkoutMirroredSessionTransport {
+    var initialSessionState: WorkoutSessionStateV1? {
+        healthKitSession.map { WorkoutMirrorManager.contractState(for: $0.state) }
+    }
 }
 
 @available(iOS 17.0, *)
@@ -869,6 +877,11 @@ final class WorkoutMirrorManager: NSObject {
         currentTransportStartDate = transport.sessionStartDate
         transport.installDelegate(self)
         store.attachMirroredSession(at: now())
+        if let state = transport.initialSessionState, state.isActive {
+            // A recovered transport need not emit a new state-change callback.
+            // Preserve its native state while waiting for credentialed metrics.
+            applyNativeSessionState(state, at: now(), from: transport)
+        }
         if let terminalFailureDrainCode {
             // A replacement HealthKit transport belongs to the same terminal
             // takeover drain. Keep the original bound and cause rather than
@@ -1483,7 +1496,7 @@ extension WorkoutMirrorManager: HKWorkoutSessionDelegate {
         }
     }
 
-    nonisolated private static func contractState(
+    nonisolated fileprivate static func contractState(
         for state: HKWorkoutSessionState
     ) -> WorkoutSessionStateV1 {
         switch state {

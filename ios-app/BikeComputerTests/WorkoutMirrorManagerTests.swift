@@ -3391,6 +3391,24 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         XCTAssertNil(manager.store.presentation.errorCode)
     }
 
+    func testRecoveredTransportSeedsItsExistingNativeState() async throws {
+        for state in [WorkoutSessionStateV1.running, .paused] {
+            let manager = WorkoutMirrorManager(watchLaunchTimeout: 0.02)
+            let transport = FakeMirroredSessionTransport()
+            transport.initialSessionState = state
+            manager.acceptMirroredTransport(transport)
+            XCTAssertEqual(manager.store.presentation.sessionState, state)
+            XCTAssertTrue(manager.store.presentation.isWorkoutActive)
+            try await Task.sleep(for: .milliseconds(50))
+            XCTAssertEqual(manager.store.presentation.connectionState, .disconnected)
+            XCTAssertEqual(manager.store.presentation.errorCode, .watchUnavailable)
+            XCTAssertTrue(transport.hasDelegate,
+                          "Recovery keeps the live transport for a late credentialed snapshot")
+            XCTAssertTrue(transport.sentData.isEmpty,
+                          "Native state alone cannot authorize a credentialed command")
+        }
+    }
+
     func testHungTerminalAttemptCannotBlockOrClearSameControlRetry() async throws {
         for (index, control) in [
             WorkoutControlV1.endAndSave,
@@ -4425,6 +4443,7 @@ private final class WatchLaunchProbe: @unchecked Sendable {
 private final class FakeMirroredSessionTransport:
     WorkoutMirroredSessionTransport {
     var sessionStartDate: Date?
+    var initialSessionState: WorkoutSessionStateV1?
     private(set) var sentData: [Data] = []
     private(set) var pauseCallCount = 0
     private(set) var resumeCallCount = 0

@@ -285,8 +285,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
 
     private func requestTransition(_ control: WorkoutControlV1) {
         guard let session, record?.finishChoice == nil,
-              (control == .pause && state == .running) || (control == .resume && state == .paused),
-              store.markPendingControl(control) else { return }
+              (control == .pause && state == .running) || (control == .resume && state == .paused) else { return }
+        store.releasePendingSegmentForLifecycleControl()
+        guard store.markPendingControl(control) else { return }
         pendingTransitionOrigin = .manual
         if control == .pause { session.pause() } else { session.resume() }
         let id = record?.sessionID
@@ -310,6 +311,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 cumulativeDistanceSource: .iPhoneLocation
               ), store.markPendingControl(.markSegment, sequence: sequence) else { return }
         let id = record?.sessionID
+        let segmentSequence = sequence
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -327,11 +329,11 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 guard self.builder === builder, record?.sessionID == id else { return }
                 _ = segments.commit(candidate)
                 // A local successful HealthKit write is the acknowledgement.
-                acknowledgeSegment()
+                acknowledgeSegment(sequence: segmentSequence)
                 publish()
             } catch {
                 guard record?.sessionID == id else { return }
-                store.failPendingControl(.markSegment, error: .segmentMarkFailed)
+                acknowledgeSegment(sequence: segmentSequence, error: .segmentMarkFailed)
             }
         }
     }
@@ -632,9 +634,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         }
     }
 
-    private func acknowledgeSegment() {
-        guard let record, let acknowledged = store.currentPendingControlSequence,
-              sequence < UInt64.max else { return }
+    private func acknowledgeSegment(sequence acknowledged: UInt64,
+                                    error: WorkoutSafeErrorCodeV1? = nil) {
+        guard let record, sequence < UInt64.max else { return }
         sequence += 1
         _ = store.ingestBatch([WorkoutEnvelopeV1(
             kind: .acknowledgement, sessionID: record.sessionID,
@@ -642,7 +644,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             sequence: sequence, capturedAt: Date(),
             acknowledgement: WorkoutAcknowledgementV1(
                 control: .markSegment, resultingState: state,
-                acknowledgedSequence: acknowledged
+                acknowledgedSequence: acknowledged, errorCode: error
             )
         )], receivedAt: Date())
     }

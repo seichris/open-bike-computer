@@ -352,6 +352,38 @@ struct WorkoutSessionCoordinatorTests {
         disk6.fails = true
         check(!recovery.requestStart(explicitOwner: .iphone), "Storage failure prevents native start")
         check(phone6.starts == 0, "No recording without durable owner")
+        for segmentError in [nil, WorkoutSafeErrorCodeV1.segmentMarkFailed] {
+            let local = WorkoutMetricsStore()
+            local.beginLocalWorkout()
+            let id = UUID(), start = Date().addingTimeInterval(-60)
+            let running = WorkoutEnvelopeV1(kind: .snapshot, sessionID: id,
+                sessionToken: 23, sequence: 1, capturedAt: Date(),
+                snapshot: WorkoutSnapshotV1(state: .running, startDate: start, availability: []))
+            _ = local.ingestBatch([running], receivedAt: Date())
+            check(local.markPendingControl(.markSegment, sequence: 1), "Native segment starts")
+            local.releasePendingSegmentForLifecycleControl()
+            check(local.currentUnconfirmedSegmentControlSequence == 1,
+                  "Releasing a native segment preserves its original acknowledgement identity")
+            check(!local.markPendingControl(.markSegment, sequence: 2),
+                  "An unknown native segment outcome cannot admit a duplicate mark")
+            check(local.markPendingControl(.pause, sequence: 2),
+                  "An unconfirmed native segment cannot block Pause")
+            let ack = WorkoutEnvelopeV1(kind: .acknowledgement, sessionID: id,
+                sessionToken: 23, sequence: 2, capturedAt: Date(),
+                acknowledgement: WorkoutAcknowledgementV1(control: .markSegment,
+                    resultingState: .running, acknowledgedSequence: 1, errorCode: segmentError))
+            let accepted = local.ingestBatch([ack], receivedAt: Date())
+            check(accepted.rejections.isEmpty && !local.isSegmentConfirmationPending,
+                  "Late success or failure resolves only the original native segment")
+            check(local.presentation.pendingControl == .pause,
+                  "A late segment acknowledgement cannot clear the newer Pause")
+            local.confirmSessionState(.paused, at: Date())
+            check(local.presentation.pendingControl == nil
+                      && local.presentation.sessionState == .paused,
+                  "Native paused state confirms its own lifecycle control")
+            check(local.markPendingControl(.markSegment, sequence: 3),
+                  "Only a confirmed segment outcome admits the next mark")
+        }
         print("Workout session coordinator: \(count) assertions passed")
     }
 
