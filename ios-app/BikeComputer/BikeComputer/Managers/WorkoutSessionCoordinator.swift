@@ -61,6 +61,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
     private var pendingAutomaticChoice = false
     private var storageFailed = false
     private var isResetting = false
+    private var phoneRecoveryDeferredForWatch = false
 
     init(
         watch: any WorkoutWatchRecording,
@@ -137,12 +138,22 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 if record == nil { record = persisted }
                 storageFailed = false
                 if let phone {
-                    try await phone.recover(expected: record)
-                    if let phoneRecord = phone.record {
-                        record = phoneRecord
-                        store.followWorkoutState(from: phone.store, owner: .iphone)
-                    } else if record?.owner == .iphone {
-                        record = try persistence.load()
+                    if record?.owner == .watch, record?.phase != .finished {
+                        // Resume the reserved Watch ride through its mirrored
+                        // transport. A primary-iPhone recovery probe can fail
+                        // while that mirror is already attached; it must not
+                        // hide controls for the existing selected recorder.
+                        // Probe the phone before admitting any subsequent ride.
+                        phoneRecoveryDeferredForWatch = true
+                    } else {
+                        try await phone.recover(expected: record)
+                        phoneRecoveryDeferredForWatch = false
+                        if let phoneRecord = phone.record {
+                            record = phoneRecord
+                            store.followWorkoutState(from: phone.store, owner: .iphone)
+                        } else if record?.owner == .iphone {
+                            record = try persistence.load()
+                        }
                     }
                 } else if record?.owner == .iphone {
                     throw WorkoutRecordingStore.StoreError.invalidRecord
@@ -460,7 +471,14 @@ final class WorkoutSessionCoordinator: ObservableObject {
             _ = watch.resetTerminalPresentation()
             notice = nil
             publishWatch()
+            recoverPhoneAfterWatchOwnershipClears()
         } catch { persistenceError() }
+    }
+
+    private func recoverPhoneAfterWatchOwnershipClears() {
+        guard phoneRecoveryDeferredForWatch else { return }
+        recoveryComplete = false
+        recoverIfNeeded()
     }
 
     func retryWatchStart() {
@@ -507,6 +525,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
         notice = nil
         isResetting = false
         receiveWatch(watch.store.presentation)
+        recoverPhoneAfterWatchOwnershipClears()
         return true
     }
 }
