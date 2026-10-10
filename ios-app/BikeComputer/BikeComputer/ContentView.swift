@@ -2021,8 +2021,15 @@ struct ContentView: View {
     }
 
     private var shouldShowWorkoutStatusCard: Bool {
-        !workoutStore.presentation.isWorkoutActive
-            && workoutStore.presentation.connectionState != .idle
+        switch workoutStore.presentation.connectionState {
+        case .awaitingFirstSnapshot, .stale, .disconnected, .failed:
+            // Recovery must remain reachable even if an automatic control
+            // sheet could not be presented during a background launch.
+            return true
+        default:
+            return !workoutStore.presentation.isWorkoutActive
+                && workoutStore.presentation.connectionState != .idle
+        }
     }
 
     private func navigationInstructionBanner(

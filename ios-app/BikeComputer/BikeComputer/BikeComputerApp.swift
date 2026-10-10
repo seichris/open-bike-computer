@@ -109,7 +109,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                 persistence: recordingStore,
                 locations: locationManager.$currentLocation.eraseToAnyPublisher(),
                 onRecoveredMirror: { [weak workoutMirrorManager] session in
-                    workoutMirrorManager?.acceptMirroredSession(session)
+                    workoutMirrorManager?.acceptMirroredSession(session, origin: .nativeRecovery)
                 },
                 canStartAfterAuthorization: { [weak workoutMirrorManager] in
                     guard let presentation = workoutMirrorManager?.store.presentation else { return false }
