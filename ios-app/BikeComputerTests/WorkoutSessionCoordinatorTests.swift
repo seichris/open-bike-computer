@@ -352,6 +352,11 @@ struct WorkoutSessionCoordinatorTests {
         let watchRecovery = WorkoutSessionCoordinator(watch: recoveredWatch,
             watchAvailability: FakeAvailability(), persistence: watchRecoveryDisk,
             phone: deferredPhone)
+        check(watchRecovery.record?.phase == .unresolved
+                && watchRecovery.notice?.kind == .watchUnresolved,
+              "A cold-launch unresolved Watch owner exposes its recovery actions")
+        check(!watchRecovery.canOfferNewWorkout,
+              "Exposing checked-idle recovery does not admit a replacement ride")
         recoveredWatch.emit(id: recoveredWatchID, state: .paused)
         watchRecovery.recoverIfNeeded()
         await spin { watchRecovery.recoveryComplete }

@@ -454,6 +454,15 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 do { try persistence.save(next) } catch { persistenceError() }
             }
         }
+        if record?.phase == .unresolved, record?.owner == .watch {
+            let unresolved = WorkoutRecordingNotice(kind: .watchUnresolved,
+                message: "The Watch start or finish is unconfirmed. A timeout does not prove the Watch is idle. Check Bicino on Watch before choosing a different recorder.")
+            if notice != unresolved { notice = unresolved }
+        } else if notice?.kind == .watchUnresolved,
+                  presentation.sessionID != nil,
+                  presentation.sessionID == record?.sessionID {
+            notice = nil
+        }
         publishWatch()
     }
 

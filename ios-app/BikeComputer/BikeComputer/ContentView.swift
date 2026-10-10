@@ -472,6 +472,9 @@ struct ContentView: View {
             synchronizeRideMetricsSheet()
             presentNearbyBicinoIfEligible()
             presentPendingBicinoSetupAppLinkIfEligible()
+            if workoutSessionCoordinator.notice != nil {
+                presentWorkoutAttention()
+            }
         }
         .onOpenURL { url in
             if BicinoAppLinkPolicy.isDeviceConnectionLink(url) {
