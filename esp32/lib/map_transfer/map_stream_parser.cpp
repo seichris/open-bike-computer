@@ -1193,8 +1193,21 @@ bool MapStreamIncrementalParser::feed(const uint8_t *data, size_t size) {
   return stage_ != Stage::Failed;
 }
 
+bool MapStreamIncrementalParser::readyToFinish() const {
+  return stage_ == Stage::AwaitingFinish && verifiedReady_ &&
+         fileIndex_ == verified_.manifest.files.size() && !fileStarted_ &&
+         receivedBytes_ == header_.totalBytes() &&
+         (options_.expectedContentBytes == std::numeric_limits<uint64_t>::max() ||
+          receivedBytes_ == options_.expectedContentBytes);
+}
+
+void MapStreamIncrementalParser::abort(MapStreamParserError error) {
+  if (stage_ != Stage::Complete && stage_ != Stage::Failed)
+    fail(error);
+}
+
 bool MapStreamIncrementalParser::finish() {
-  if (stage_ == Stage::AwaitingFinish) {
+  if (readyToFinish()) {
     if (!consumer_.onComplete(verified_))
       return fail(MapStreamParserError::ConsumerRejected);
     stage_ = Stage::Complete;

@@ -6,6 +6,16 @@
 #include <string>
 
 int main() {
+  {
+    device_transfer::HttpSecurityHeaders headers;
+    headers.accept("x-map-operation-id",std::string(32,'a'));
+    headers.accept("x-map-stream-sha256",std::string(64,'b'));
+    assert(headers.mapOperationSeen && headers.mapStreamSHA256Seen);
+    assert(!headers.hasAmbiguousFraming());
+    headers.accept("x-map-operation-id",std::string(32,'a'));
+    assert(headers.hasAmbiguousFraming());
+  }
+
   device_transfer::HttpHeaderBudget budget;
   for (size_t index = 0; index < device_transfer::HTTP_MAX_LINE_BYTES; index++)
     assert(budget.acceptDataByte());
@@ -60,17 +70,21 @@ int main() {
   assert(!device_transfer::shouldReuseAuthenticatedHttpConnection(
       true, true, false, true, false));
   const device_transfer::HttpResponseCompletionToken responseToken{
-      generation, "PUT", "/map-transfer/sessions/session-1/install-stream"};
+      generation, "PUT", "/map-transfer/sessions/session-1/install-stream", 42};
   assert(responseToken.matches(
-      generation, "PUT", "/map-transfer/sessions/session-1/install-stream"));
+      generation, "PUT", "/map-transfer/sessions/session-1/install-stream", 42));
   assert(!responseToken.matches(
       generation + 1, "PUT",
-      "/map-transfer/sessions/session-1/install-stream"));
+      "/map-transfer/sessions/session-1/install-stream", 42));
   assert(!responseToken.matches(
       generation, "POST",
-      "/map-transfer/sessions/session-1/install-stream"));
+      "/map-transfer/sessions/session-1/install-stream", 42));
   assert(!responseToken.matches(
-      generation, "PUT", "/map-transfer/sessions/session-2/install-stream"));
+      generation, "PUT", "/map-transfer/sessions/session-2/install-stream", 42));
+  assert(!responseToken.matches(
+      generation, "PUT", "/map-transfer/sessions/session-1/install-stream", 41));
+  assert(!responseToken.matches(
+      generation, "PUT", "/map-transfer/sessions/session-1/install-stream", 43));
   assert(device_transfer::validHttpHeaderName("Content-Length"));
   assert(device_transfer::validHttpHeaderName("x-bike_token.v2"));
   assert(!device_transfer::validHttpHeaderName("Content Length"));

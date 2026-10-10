@@ -80,6 +80,24 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
     def test_ios_and_firmware_benchmark_gates_are_identical(self):
         self.assertEqual(IOS_BENCHMARK_GATES, FIRMWARE_BENCHMARK_GATES)
 
+    def test_http_consumers_declare_direct_wifi_dependency_in_every_profile(self):
+        # PlatformIO deep LDF only copies a circular dependency's own include
+        # directory. HTTP public types embed WiFiServer/WiFiClient, so relying
+        # on the circular device_transfer edge drops WiFi/Network include dirs.
+        for relative in (
+            "device_debug/device_debug_http.hpp",
+            "firmware_update/firmware_update_http.hpp",
+            "map_transfer_http/map_transfer_http.hpp",
+            "ride_diagnostics/ride_diagnostics_http.hpp",
+        ):
+            header = (ROOT / "lib" / relative).read_text(encoding="utf-8")
+            direct = header.index("#include <WiFi.h>")
+            transport = header.index('#include "../device_transfer/device_transfer_http.hpp"')
+            self.assertLess(direct, transport, relative)
+            # Include must remain unconditional for ordinary/production stubs,
+            # not just the remote-debug or diagnostics profiles.
+            self.assertNotIn("#if", header[:direct], relative)
+
     def test_ordinary_builds_compile_only_route_free_debug_stubs(self):
         real_implementation = HTTP.index("#if DEVICE_REMOTE_DEBUG")
         route_registration = HTTP.index(
@@ -347,10 +365,12 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             flash_owner.index("case Operation::StartAccessPoint:") :
             flash_owner.index("case Operation::StopAccessPoint:")
         ]
-        self.assertIn("WiFi.persistent(false);", ap_operation)
-        self.assertIn("esp_wifi_set_storage(WIFI_STORAGE_RAM)", ap_operation)
-        self.assertIn("WiFi.softAP(networkSsid_, networkPassword_)", ap_operation)
-        self.assertNotIn("WiFi.softAP(networkSsid_)", ap_operation)
+        self.assertIn("wifi_.start(command.operation == Operation::StartStation,", ap_operation)
+        runtime = (ROOT / "lib/firmware_update/device_wifi_runtime.cpp").read_text()
+        self.assertIn("esp_wifi_set_storage(WIFI_STORAGE_RAM)", runtime)
+        self.assertIn("config.ap.authmode = WIFI_AUTH_WPA2_PSK", runtime)
+        self.assertIn("passwordLength < 8", runtime)
+        self.assertIn("std::memcpy(config.ap.password, password, passwordLength)", runtime)
         info = HTTP[
             HTTP.index("bool DeviceDebugHttp::handleInfo") :
             HTTP.index("bool DeviceDebugHttp::handleFrame")
@@ -405,9 +425,21 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
             IOS_TRANSFER_MANAGER.index("func exitRemoteDebug(") :
             IOS_TRANSFER_MANAGER.index("private func joinDeviceNetworkIfNeeded")
         ]
-        self.assertIn("deviceTransferStatusRevision != initialRevision", exit_method)
-        self.assertIn("deviceTransferMode.isEmpty", exit_method)
-        self.assertIn("deviceTransferSessionToken?.isEmpty != false", exit_method)
+        self.assertIn("guard operationLease != nil", exit_method)
+        self.assertIn("await cleanupOperation(bleManager: bleManager)", exit_method)
+        self.assertIn("Failure.cleanupUnresolved", exit_method)
+        cleanup = IOS_TRANSFER_MANAGER[
+            IOS_TRANSFER_MANAGER.index("private func cleanupOperation") :
+            IOS_TRANSFER_MANAGER.index("func releaseFirmwareAfterReboot")
+        ]
+        self.assertIn("DeviceOperationCleanupTask.start", cleanup)
+        self.assertIn("self.ownsConnection(bleManager)", cleanup)
+        self.assertIn("deviceTransferStatusRevision != revision", cleanup)
+        self.assertIn("deviceTransferMode.isEmpty", cleanup)
+        self.assertIn("deviceTransferSessionToken?.isEmpty != false", cleanup)
+        self.assertIn("self.coordinator.finish(lease, remoteClear: clear)", cleanup)
+        self.assertLess(cleanup.index("requestDeviceTransferExit()"),
+                        cleanup.index("deviceTransferStatusRevision != revision"))
 
     def test_disconnect_and_owner_recovery_revoke_debug_sessions(self):
         disconnect = BLE[

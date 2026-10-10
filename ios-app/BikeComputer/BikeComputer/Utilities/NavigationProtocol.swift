@@ -9,6 +9,96 @@ import Foundation
 import CoreLocation
 import MapKit
 
+// Pointer identity can be visible while the renderer ACK is still pending.
+nonisolated enum MapActivationVisibilityPolicy {
+    static func hidesActiveSelection(activeMapID: String, activeSessionID: String?,
+                                     activationStatus: String, activationMapID: String,
+                                     activationSessionID: String) -> Bool {
+        guard activationStatus != "installed", activationStatus != "idle" else { return false }
+        // Session identity is published at begin(), before activation mapID is
+        // known. A stale/empty mapID must not expose this provisional pointer.
+        if let activeSessionID, !activeSessionID.isEmpty, !activationSessionID.isEmpty {
+            return activeSessionID == activationSessionID
+        }
+        // Legacy descriptors without a session can only be fenced by map ID.
+        return !activationMapID.isEmpty && activeMapID == activationMapID
+    }
+}
+
+// Current renderer health is independent of a historical Installed receipt.
+nonisolated struct MapSelectionHealth: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let bootID: String
+    let revision: UInt64
+    let state: String
+    let root: String
+    let operationID: String
+    let mapID: String
+    let sessionID: String
+    let affectedOperationID: String
+
+    var isValid: Bool {
+        schemaVersion == 1 && MapOperationQueryPacket.make(operationID: bootID) != nil &&
+        ["unknown", "ready", "degraded", "rolling_back", "rollback_failed"].contains(state) &&
+        (operationID.isEmpty || MapOperationQueryPacket.make(operationID: operationID) != nil) &&
+        (affectedOperationID.isEmpty || MapOperationQueryPacket.make(operationID: affectedOperationID) != nil) &&
+        (root.isEmpty || Self.isInstallerRoot(root))
+    }
+
+    // Firmware reports installer roots without /sdcard, exactly as its
+    // safeActiveRoot() accepts them: /VECTMAP or /VECTMAP/.maps/<safe ID>.
+    static func isInstallerRoot(_ root: String) -> Bool {
+        if root == "/VECTMAP" { return true }
+        let prefix = "/VECTMAP/.maps/"
+        guard root.hasPrefix(prefix) else { return false }
+        let id = root.dropFirst(prefix.count)
+        return !id.isEmpty && id.utf8.count <= 80 && !id.hasPrefix(".") && !id.contains("..") &&
+            id.utf8.allSatisfy {
+                (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) ||
+                    $0 == 45 || $0 == 46 || $0 == 95
+            }
+    }
+}
+
+nonisolated struct MapSelectionHealthProjection {
+    private(set) var health: MapSelectionHealth?
+    private(set) var hasObservedHealth = false
+
+    // A changed boot requires a new authenticated connection epoch. Revision
+    // monotonicity is meaningful only within that pinned boot.
+    mutating func apply(_ incoming: MapSelectionHealth?, fieldPresent: Bool,
+                        activeRoot: String?, mapID: String?, sessionID: String?) -> Bool {
+        hasObservedHealth = hasObservedHealth || fieldPresent
+        guard let incoming else { return !hasObservedHealth } // old firmware only
+        guard incoming.isValid else { return false }
+        if let health {
+            guard incoming.bootID == health.bootID, incoming.revision >= health.revision,
+                  incoming.revision != health.revision || incoming == health else { return false }
+            if !health.operationID.isEmpty && incoming.root == health.root &&
+                incoming.mapID == health.mapID && incoming.sessionID == health.sessionID {
+                guard incoming.operationID == health.operationID else { return false }
+            }
+        }
+        guard (incoming.state == "unknown" && incoming.root.isEmpty) ||
+              (incoming.root == activeRoot && !incoming.root.isEmpty &&
+               incoming.mapID == mapID && incoming.sessionID == sessionID) else { return false }
+        health = incoming
+        return incoming.state == "ready" && incoming.revision > 0 &&
+            !incoming.mapID.isEmpty && (!incoming.sessionID.isEmpty || incoming.operationID.isEmpty)
+    }
+}
+
+// Durable operation queries are deliberately bounded and cannot carry delimiters.
+nonisolated enum MapOperationQueryPacket {
+    static func make(operationID: String) -> Data? {
+        guard operationID.utf8.count == 32,
+              operationID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            return nil
+        }
+        return Data("MOPQ|\(operationID)".utf8)
+    }
+}
+
 enum DeviceDestinationKind: String, Codable, Equatable {
     case favorite
     case recent
@@ -978,5 +1068,20 @@ struct NavigationSendTracker {
         }
 
         return abs(snapshot.distance - lastSentSnapshot.distance) >= distanceThreshold
+    }
+}
+
+// Exact SD-independent OTA result. Omitted/disabled status is never success.
+struct FirmwareOperationReceipt: Codable, Equatable, Sendable {
+    let protocolVersion: Int
+    let operationId: String?
+    let imageSha256: String?
+    let result: String?
+    let admissionRevision: UInt32?
+    let admissionEpoch: String?
+
+    func matches(operationID: String?, image: String?) -> Bool {
+        protocolVersion == 1 && operationID != nil && image != nil &&
+        operationId == operationID && imageSha256 == image
     }
 }

@@ -1,3 +1,5 @@
+#include "power.hpp"
+extern Power power;
 /**
  * @file firmUpgrade.cpp
  * @author Jordi Gauchía (jgauchia@jgauchia.com)
@@ -103,7 +105,7 @@ void onUpgrdEnd()
 {
   delay(500);
   ESP_LOGI(TAG, "Rebooting ESP32: ");
-  ESP.restart();
+  power.deviceRestart();
 }
 
 #endif // DISABLE_OTA_UPGRADE

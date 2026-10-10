@@ -212,6 +212,15 @@ final class WorkoutMetricsStore: ObservableObject {
         publish()
     }
 
+    /// Let native lifecycle controls proceed without admitting another segment
+    /// while the original HealthKit write still has an unknown outcome.
+    func releasePendingSegmentForLifecycleControl() {
+        guard presentation.pendingControl == .markSegment,
+              let sequence = currentPendingControlSequence else { return }
+        failPendingControl(.markSegment, sequence: sequence,
+                           error: .segmentMarkUnconfirmed)
+    }
+
     func failPendingControl(
         _ control: WorkoutControlV1,
         sequence: UInt64? = nil,

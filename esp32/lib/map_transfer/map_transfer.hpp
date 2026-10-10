@@ -104,6 +104,7 @@ struct ActiveMapSelection {
 };
 
 struct ReadyStreamMap {
+  std::string operationID;
   std::string sessionId;
   std::string mapId;
   std::string root;
@@ -146,6 +147,8 @@ struct MapActivationSnapshot {
   uint8_t progress = 0;
   std::string errorCode;
   std::string errorMessage;
+  std::array<char, 64> ownerRecoveryCode{};
+  std::array<char, 64> terminalCode{};
 };
 
 class MapActivationState {
@@ -156,9 +159,12 @@ public:
   void updateProgress(const ActivationProgress &progress);
   void finish(std::string status, std::string mapId,
               std::string errorCode, std::string errorMessage);
+  void rememberOwnerRecovery(const char *code) noexcept;
   bool acceptsUploads() const;
   MapActivationSnapshot snapshot() const;
   std::string json(bool compact = false) const;
+  const std::array<char, 64> &ownerRecoveryCode() const { return state_.ownerRecoveryCode; }
+  const std::array<char, 64> &terminalCode() const { return state_.terminalCode; }
 
 private:
   MapActivationSnapshot state_;
@@ -168,6 +174,21 @@ class MapTransferInstaller {
 public:
   explicit MapTransferInstaller(std::string storageRoot = "/sdcard");
   virtual ~MapTransferInstaller() = default;
+  InstallStatus readReadyStreamMap(const std::string &sessionId,
+                                   ReadyStreamMap &ready) const;
+  InstallStatus readPreparedOperation(const std::string &sessionId,
+                                      ReadyStreamMap &prepared) const;
+  InstallStatus cancelOperationStaging(const std::string &sessionId,
+                                       const std::string &operationID) const;
+  InstallStatus finalizeOperation(const std::string &sessionId,
+                                  const std::string &operationID) const;
+  InstallStatus promotePreparedOperation(const std::string &sessionId,
+                                         const std::string &operationID) const;
+  void setOperationDeviceID(std::string device) { operationDeviceID_ = std::move(device); }
+  using StorageProgressCallback = void (*)(void *);
+  void setStorageProgressCallback(StorageProgressCallback callback, void *context) {
+    storageProgressCallback_ = callback; storageProgressContext_ = context;
+  }
 
   InstallStatus validateManifestText(const std::string &manifestText,
                                      MapManifest &manifest) const;
@@ -192,11 +213,14 @@ public:
   activateStagedMap(const std::string &sessionId, const MapManifest &manifest,
                     const ActivationProgressCallback &onProgress = {}) const;
   InstallStatus recoverInterruptedActivation() const;
+  using ActivationRecoveryCallback = void (*)(void *, const char *);
   InstallStatus activateReadyStreamMap(
       const std::string &sessionId,
-      const ActivationProgressCallback &onProgress = {}) const;
+      const ActivationProgressCallback &onProgress = {},
+      ActivationRecoveryCallback onRecovery = nullptr, void *recoveryContext = nullptr) const;
   InstallStatus recoverPendingStreamActivation(
-      const ActivationProgressCallback &onProgress = {}) const;
+      const ActivationProgressCallback &onProgress = {},
+      ActivationRecoveryCallback onRecovery = nullptr, void *recoveryContext = nullptr) const;
   bool hasInterruptedActivation() const;
   InstallStatus readActiveMap(ActiveMapSelection &selection) const;
   // Signed streams persist their manifest receipt in the active pointer.
@@ -230,11 +254,34 @@ public:
   std::string stagedArchivePath(const std::string &sessionId) const;
 
 protected:
+  virtual int renameStoragePath(const char *from, const char *to) const;
+  // Exact mutation boundary seam for crash qualification. Production is a
+  // no-op; host faults can interrupt before or after the real IO operation.
+  virtual void storageMutationBoundary(const char *operation,
+                                       const std::string &path,
+                                       bool after) const {
+    (void)operation; (void)path; (void)after;
+  }
   virtual bool writeTextFileAtomic(const std::string &path,
                                    const std::string &text) const;
 
 private:
+  // These phases run on the fixed internal owner stack. Keep the selection
+  // locals out of recovery and unwind pending resolution before activation.
+  __attribute__((noinline)) InstallStatus recoverStreamSelection() const;
+  __attribute__((noinline)) InstallStatus selectReadyStreamMap(
+      const std::string &sessionId, const ActivationProgressCallback &onProgress,
+      bool &needsSelectionRecovery) const;
+  __attribute__((noinline)) InstallStatus resolvePendingStreamActivation(
+      std::string &sessionId) const;
+  __attribute__((noinline)) InstallStatus recoverActiveSelection() const;
+  bool preparationBlocksActivation(const ReadyStreamMap &ready) const;
+  InstallStatus readStreamMapMetadata(const std::string &sessionId,
+                                      ReadyStreamMap &ready, bool prepared) const;
   std::string storageRoot_;
+  std::string operationDeviceID_;
+  StorageProgressCallback storageProgressCallback_ = nullptr;
+  void *storageProgressContext_ = nullptr;
 
   // Share error-result construction across the many validation exits. Owning
   // parameters move into the result rather than allocating a second copy.
@@ -251,6 +298,7 @@ private:
   bool copyTree(const std::string &from, const std::string &to) const;
   bool movePath(const std::string &from, const std::string &to) const;
   bool removeTree(const std::string &path) const;
+
   std::string verificationPath(const std::string &sessionId,
                                const ManifestFile &file) const;
   bool publishStagedFiles(const std::string &sessionId,
@@ -267,11 +315,17 @@ private:
                                   const MapManifest &manifest) const;
   bool installedMapContentsMatch(const std::string &root,
                                  const MapManifest &manifest) const;
-  bool writeActiveMap(const ActiveMapSelection &selection) const;
-  InstallStatus readReadyStreamMap(const std::string &sessionId,
-                                   ReadyStreamMap &ready) const;
-  InstallStatus
+  __attribute__((noinline)) bool writeActiveMap(const ActiveMapSelection &selection) const;
+  __attribute__((noinline)) bool writeCanonicalActiveMap(const ActiveMapSelection &selection) const;
+  InstallStatus parseActiveMapText(const std::string &text, ActiveMapSelection &selection) const;
+  __attribute__((noinline)) bool persistPredecessorAnchor(const ActiveMapSelection &incoming) const;
+  InstallStatus recoverSelectionAnchor() const;
+  bool selectionAnchorProtectsRoot(const std::string &root) const;
+  __attribute__((noinline)) bool anchorSelectionVerified(const ActiveMapSelection &selection) const;
+  __attribute__((noinline)) InstallStatus
   recoverStreamActivationTransaction(const std::string &transaction) const;
+  __attribute__((noinline)) InstallStatus recoverLegacyActivationTransaction(
+      const std::string &transaction) const;
   bool clearPendingStreamActivation(const std::string &sessionId) const;
   bool markStreamActivationConsumed(const ReadyStreamMap &ready) const;
   bool rollbackRootMatches(const std::string &root, const std::string &mapId,

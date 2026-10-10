@@ -92,6 +92,8 @@ jobs:
             heavy_ci=false
           fi
           echo "heavy_ci=${heavy_ci}" >> "$GITHUB_OUTPUT"
+      - name: Verify generated diagnostics contract
+        run: python3 tools/generate_diagnostics_contract.py --check
       - name: Validate the protected partial gate scope
         if: >-
           github.event_name == 'workflow_dispatch' && inputs.scope == 'map' &&
@@ -247,7 +249,7 @@ jobs:
             has_radio=true
           fi
           case "$BUILD_ENVIRONMENT" in
-            *_PRODUCTION)
+            *_PRODUCTION|*_LIFECYCLE_QUALIFICATION)
               test "$has_radio" = false
               ;;
             *)
@@ -276,6 +278,28 @@ jobs:
                   "Missing persistent diagnostics markers: " + ", ".join(missing)
               )
           PY
+      - name: Verify nonshipping lifecycle adapter coverage
+        if: endsWith(matrix.target, '_LIFECYCLE_QUALIFICATION')
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          python3 - "${BUILD_ENVIRONMENT}" <<'PYTHON'
+          from pathlib import Path
+          import sys
+
+          profile = sys.argv[1]
+          firmware = (Path(".pio/build") / profile / "firmware.elf").read_bytes()
+          # These messages exist only inside FIRMWARE_OPERATIONS_V1_ENABLED.
+          # Keep the actual authenticated OTA adapter compiled, not only policies.
+          required = (
+              profile,
+              "fresh durable admission and operation identity required",
+              "durable OTA acceptance could not be confirmed",
+          )
+          missing = [marker for marker in required if marker.encode() + b"\0" not in firmware]
+          if missing:
+              raise SystemExit("Missing lifecycle qualification markers: " + ", ".join(missing))
+          PYTHON
       - name: Verify remote-debug artifacts include renderer metrics routes
         if: contains(matrix.target, '_REMOTE_DEBUG')
         run: |
@@ -313,6 +337,13 @@ jobs:
         working-directory: ios-app
       - name: Run ride diagnostics recorder tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-ride-diagnostics-recorder-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-ride-diagnostics-recorder-tests/results.json"
+        working-directory: ios-app
+      - name: Durable diagnostics acquisition contracts
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-durable-diagnostics-acquisition-contracts --report "$RUNNER_TEMP/dev-checks/ios-fast-durable-diagnostics-acquisition-contracts/results.json"
+      - name: Bounded diagnostics capture policy contracts
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-bounded-diagnostics-capture-policy-contracts --report "$RUNNER_TEMP/dev-checks/ios-fast-bounded-diagnostics-capture-policy-contracts/results.json"
+      - name: Paired diagnostics broker contracts
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-paired-diagnostics-broker-contracts --report "$RUNNER_TEMP/dev-checks/ios-fast-paired-diagnostics-broker-contracts/results.json"
         working-directory: ios-app
       - name: Run shared route and Watch BLE contract tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-shared-route-and-watch-ble-contract-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-shared-route-and-watch-ble-contract-tests/results.json"
@@ -411,6 +442,8 @@ jobs:
       - name: Firmware manifest tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-firmware-manifest-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-firmware-manifest-tests/results.json"
         working-directory: ${{ github.workspace }}
+      - name: Shutdown barrier executable fault tests
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-shutdown-barrier-executable-fault-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-shutdown-barrier-executable-fault-tests/results.json"
       - name: Runtime ownership and allocation recovery tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-runtime-ownership-and-allocation-recovery-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-runtime-ownership-and-allocation-recovery-tests/results.json"
       - name: Ride diagnostics and watchdog host tests
@@ -461,12 +494,16 @@ jobs:
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-map-profile-persistence-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-map-profile-persistence-host-tests/results.json"
       - name: Binary map block format host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-binary-map-block-format-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-binary-map-block-format-host-tests/results.json"
+      - name: Durable map operation host tests
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-durable-map-operation-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-durable-map-operation-host-tests/results.json"
       - name: Map transfer host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-map-transfer-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-map-transfer-host-tests/results.json"
       - name: Map stream format host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-map-stream-format-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-map-stream-format-host-tests/results.json"
       - name: Transfer control dispatch host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-transfer-control-dispatch-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-transfer-control-dispatch-host-tests/results.json"
+      - name: Firmware text size helper equivalence
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-firmware-text-size-helper-equivalence --report "$RUNNER_TEMP/dev-checks/esp32-host-firmware-text-size-helper-equivalence/results.json"
       - name: Device transfer HTTP limit host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-device-transfer-http-limit-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-device-transfer-http-limit-host-tests/results.json"
       - name: Sound protocol host tests

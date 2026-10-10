@@ -239,7 +239,7 @@ void gpioClickEvent(lv_event_t *event) {
   lv_obj_t *labelText = lv_msgbox_get_content(powerMsg);
   lv_obj_set_style_text_align(labelText, LV_TEXT_ALIGN_CENTER, 0);
   lv_msgbox_add_text(powerMsg,
-                     LV_SYMBOL_WARNING " This device will sleep shortly");
+                     LV_SYMBOL_WARNING " Manual sleep unavailable: safe resume pending");
   lv_obj_invalidate(powerMsg);
   lv_refr_now(display);
   vTaskDelay(2000);

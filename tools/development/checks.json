@@ -177,7 +177,7 @@
       "name": "Runtime ownership and allocation recovery tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror -pthread \\\n  tools/tests/test_runtime_ownership.cpp -o ${TMPDIR}/test_runtime_ownership\n${TMPDIR}/test_runtime_ownership\npython3 tools/tests/test_runtime_ownership_contract.py\npython3 tools/tests/test_runtime_rollback_failure.py\npython3 tools/tests/test_firmware_runtime_boundaries.py",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror -pthread \\\n  tools/tests/test_runtime_ownership.cpp -o ${TMPDIR}/test_runtime_ownership\n${TMPDIR}/test_runtime_ownership\npython3 tools/tests/test_runtime_ownership_contract.py\npython3 -m unittest tools.tests.test_caps_worker_retirement\npython3 tools/tests/test_runtime_rollback_failure.py\npython3 tools/tests/test_firmware_runtime_boundaries.py",
       "tools": [
         "python3",
         "g++"
@@ -188,7 +188,7 @@
       "name": "Ride diagnostics and watchdog host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "for test in \\\n  test_ride_diagnostics_format \\\n  test_runtime_watchdog_policy \\\n  test_ride_diagnostics_queue_policy \\\n  test_ride_diagnostics_control \\\n  test_ride_diagnostics_http_policy \\\n  test_sd_mount_retry_policy \\\n  test_storage_mount_policy; do\n  g++ -std=c++17 -Wall -Wextra -Werror \\\n    \"tools/tests/${test}.cpp\" -o \"${TMPDIR}/${test}\"\n  \"${TMPDIR}/${test}\"\ndone\npython3 tools/tests/test_watchdog_scheduler_contract.py",
+      "command": "for test in \\\n  test_ride_diagnostics_format \\\n  test_capture_policy_v2 \\\n  test_diagnostics_catalog_v2 \\\n  test_diagnostics_live_tail_v2 \\\n  test_lifecycle_resource_event \\\n  test_runtime_watchdog_policy \\\n  test_ride_diagnostics_queue_policy \\\n  test_ride_diagnostics_control \\\n  test_ride_diagnostics_http_policy \\\n  test_sd_mount_retry_policy \\\n  test_storage_mount_policy; do\n  g++ -std=c++17 -Wall -Wextra -Werror \\\n    \"tools/tests/${test}.cpp\" -o \"${TMPDIR}/${test}\"\n  \"${TMPDIR}/${test}\"\ndone\npython3 tools/tests/test_lifecycle_resources.py\npython3 tools/tests/test_watchdog_scheduler_contract.py\npython3 -m unittest tools.tests.test_ride_diagnostics_session_contract tools.tests.test_ride_diagnostics_storage_contract",
       "tools": [
         "python3",
         "g++"
@@ -236,7 +236,7 @@
       "name": "Display power and redraw policy host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_display_power_policy.cpp \\\n  -o ${TMPDIR}/test_display_power_policy\n${TMPDIR}/test_display_power_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_display_inactivity_policy.cpp \\\n  -o ${TMPDIR}/test_display_inactivity_policy\n${TMPDIR}/test_display_inactivity_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ui_scheduler_policy.cpp \\\n  -o ${TMPDIR}/test_ui_scheduler_policy\n${TMPDIR}/test_ui_scheduler_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_power_management_policy.cpp \\\n  -o ${TMPDIR}/test_power_management_policy\n${TMPDIR}/test_power_management_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_axp2101_register_policy.cpp \\\n  -o ${TMPDIR}/test_axp2101_register_policy\n${TMPDIR}/test_axp2101_register_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_boot_diagnostics_policy.cpp \\\n  -o ${TMPDIR}/test_boot_diagnostics_policy\n${TMPDIR}/test_boot_diagnostics_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_firmware_maintenance_policy.cpp \\\n  -o ${TMPDIR}/test_firmware_maintenance_policy\n${TMPDIR}/test_firmware_maintenance_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_firmware_internal_owner_policy.cpp \\\n  -o ${TMPDIR}/test_firmware_internal_owner_policy\n${TMPDIR}/test_firmware_internal_owner_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_firmware_update_policy.cpp \\\n  -o ${TMPDIR}/test_firmware_update_policy\n${TMPDIR}/test_firmware_update_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_status_json.cpp \\\n  lib/status_json/status_json.cpp \\\n  -o ${TMPDIR}/test_status_json\n${TMPDIR}/test_status_json\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_speaker_playback_policy.cpp \\\n  -o ${TMPDIR}/test_speaker_playback_policy\n${TMPDIR}/test_speaker_playback_policy\npython3 -m unittest tools.tests.test_speaker_pcm_assets\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_speaker_resource_state.cpp \\\n  -o ${TMPDIR}/test_speaker_resource_state\n${TMPDIR}/test_speaker_resource_state\ngcc -std=c11 -Wall -Wextra -Werror \\\n  -Itools/tests/host_stubs \\\n  -Ilib/esp_codec_dev/src \\\n  tools/tests/test_codec_interface_delete.c \\\n  lib/esp_codec_dev/src/esp_codec_dev_if.c \\\n  -o ${TMPDIR}/test_codec_interface_delete\n${TMPDIR}/test_codec_interface_delete\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1 \\\n  tools/tests/test_power_management_policy.cpp \\\n  -o ${TMPDIR}/test_power_management_policy_light_sleep\n${TMPDIR}/test_power_management_policy_light_sleep\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_active_low_wake_interrupt_gate.cpp \\\n  -o ${TMPDIR}/test_active_low_wake_interrupt_gate\n${TMPDIR}/test_active_low_wake_interrupt_gate\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy\n${TMPDIR}/test_ble_radio_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=3 \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy_p3\n${TMPDIR}/test_ble_radio_policy_p3\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=0 \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy_p0\n${TMPDIR}/test_ble_radio_policy_p0\nif g++ -std=c++17 -Wall -Wextra -Werror \\\n  -DBLE_TX_POWER_DBM=3 \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy_unsafe; then\n  echo \"Non-default TX power compiled without characterization\"\n  exit 1\nfi\nPYTHONPATH=tools python -m unittest \\\n  tools.tests.test_pioarduino_custom_core\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ui_update_policy.cpp \\\n  -o ${TMPDIR}/test_ui_update_policy\n${TMPDIR}/test_ui_update_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_render_policy.cpp \\\n  -o ${TMPDIR}/test_map_render_policy\n${TMPDIR}/test_map_render_policy\npython tools/tests/test_firmware_profile_config.py",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_display_power_policy.cpp \\\n  -o ${TMPDIR}/test_display_power_policy\n${TMPDIR}/test_display_power_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_display_inactivity_policy.cpp \\\n  -o ${TMPDIR}/test_display_inactivity_policy\n${TMPDIR}/test_display_inactivity_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ui_scheduler_policy.cpp \\\n  -o ${TMPDIR}/test_ui_scheduler_policy\n${TMPDIR}/test_ui_scheduler_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_power_management_policy.cpp \\\n  -o ${TMPDIR}/test_power_management_policy\n${TMPDIR}/test_power_management_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_axp2101_register_policy.cpp \\\n  -o ${TMPDIR}/test_axp2101_register_policy\n${TMPDIR}/test_axp2101_register_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_boot_diagnostics_policy.cpp \\\n  -o ${TMPDIR}/test_boot_diagnostics_policy\n${TMPDIR}/test_boot_diagnostics_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_firmware_maintenance_policy.cpp \\\n  -o ${TMPDIR}/test_firmware_maintenance_policy\n${TMPDIR}/test_firmware_maintenance_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_firmware_internal_owner_policy.cpp \\\n  -o ${TMPDIR}/test_firmware_internal_owner_policy\n${TMPDIR}/test_firmware_internal_owner_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_firmware_update_policy.cpp \\\n  -o ${TMPDIR}/test_firmware_update_policy\n${TMPDIR}/test_firmware_update_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_firmware_operation_receipt.cpp \\\n  -o ${TMPDIR}/test_firmware_operation_receipt\n${TMPDIR}/test_firmware_operation_receipt\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_status_json.cpp \\\n  lib/status_json/status_json.cpp \\\n  -o ${TMPDIR}/test_status_json\n${TMPDIR}/test_status_json\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_speaker_playback_policy.cpp \\\n  -o ${TMPDIR}/test_speaker_playback_policy\n${TMPDIR}/test_speaker_playback_policy\npython3 -m unittest tools.tests.test_speaker_pcm_assets\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_speaker_resource_state.cpp \\\n  -o ${TMPDIR}/test_speaker_resource_state\n${TMPDIR}/test_speaker_resource_state\ngcc -std=c11 -Wall -Wextra -Werror \\\n  -Itools/tests/host_stubs \\\n  -Ilib/esp_codec_dev/src \\\n  tools/tests/test_codec_interface_delete.c \\\n  lib/esp_codec_dev/src/esp_codec_dev_if.c \\\n  -o ${TMPDIR}/test_codec_interface_delete\n${TMPDIR}/test_codec_interface_delete\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DAUTOMATIC_LIGHT_SLEEP_EXPERIMENT=1 \\\n  tools/tests/test_power_management_policy.cpp \\\n  -o ${TMPDIR}/test_power_management_policy_light_sleep\n${TMPDIR}/test_power_management_policy_light_sleep\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_active_low_wake_interrupt_gate.cpp \\\n  -o ${TMPDIR}/test_active_low_wake_interrupt_gate\n${TMPDIR}/test_active_low_wake_interrupt_gate\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy\n${TMPDIR}/test_ble_radio_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=3 \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy_p3\n${TMPDIR}/test_ble_radio_policy_p3\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DBLE_RADIO_CHARACTERIZATION=1 -DBLE_TX_POWER_DBM=0 \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy_p0\n${TMPDIR}/test_ble_radio_policy_p0\nif g++ -std=c++17 -Wall -Wextra -Werror \\\n  -DBLE_TX_POWER_DBM=3 \\\n  tools/tests/test_ble_radio_policy.cpp \\\n  -o ${TMPDIR}/test_ble_radio_policy_unsafe; then\n  echo \"Non-default TX power compiled without characterization\"\n  exit 1\nfi\nPYTHONPATH=tools python -m unittest \\\n  tools.tests.test_pioarduino_custom_core\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ui_update_policy.cpp \\\n  -o ${TMPDIR}/test_ui_update_policy\n${TMPDIR}/test_ui_update_policy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_render_policy.cpp \\\n  -o ${TMPDIR}/test_map_render_policy\n${TMPDIR}/test_map_render_policy\npython tools/tests/test_firmware_profile_config.py",
       "tools": [
         "python3",
         "g++",
@@ -488,7 +488,7 @@
       "name": "Map transfer host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  tools/tests/test_map_transfer.cpp \\\n  -o ${TMPDIR}/test_map_transfer\n${TMPDIR}/test_map_transfer",
+      "command": "g++ -std=c++17 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  tools/tests/test_map_transfer.cpp \\\n  -o ${TMPDIR}/test_map_transfer\n${TMPDIR}/test_map_transfer",
       "tools": [
         "python3",
         "g++"
@@ -499,7 +499,7 @@
       "name": "Map stream format host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_parser.cpp \\\n  tools/tests/test_map_stream_format.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_format\n${TMPDIR}/test_map_stream_format\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  tools/tests/test_map_stream_compiled_trust.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_compiled_trust_production\n${TMPDIR}/test_map_stream_compiled_trust_production\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DMAP_STREAM_DEVELOPMENT_TRUST=1 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  tools/tests/test_map_stream_compiled_trust.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_compiled_trust_development\n${TMPDIR}/test_map_stream_compiled_trust_development\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_parser.cpp \\\n  lib/map_transfer/map_stream_install.cpp \\\n  lib/map_transfer/map_stream_receiver.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  tools/tests/test_map_stream_install.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_install\n${TMPDIR}/test_map_stream_install",
+      "command": "g++ -std=c++17 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_parser.cpp \\\n  tools/tests/test_map_stream_format.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_format\n${TMPDIR}/test_map_stream_format\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  tools/tests/test_map_stream_compiled_trust.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_compiled_trust_production\n${TMPDIR}/test_map_stream_compiled_trust_production\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DMAP_STREAM_DEVELOPMENT_TRUST=1 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  tools/tests/test_map_stream_compiled_trust.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_compiled_trust_development\n${TMPDIR}/test_map_stream_compiled_trust_development\nfor test in test_map_stream_install test_map_selection_anchors test_map_metadata_power_loss; do\n  test_flags=\"\"\n  if [ \"$test\" = test_map_selection_anchors ]; then\n    test_flags=\"-finstrument-functions -DMAP_RECOVERY_INSTRUMENT_FUNCTIONS=1\"\n  fi\n  g++ -std=c++17 -Wall -Wextra -Werror $test_flags \\\n    lib/map_transfer/map_transfer.cpp \\\n    lib/map_transfer/map_operation_journal.cpp \\\n    lib/device_transfer/durable_operation.cpp \\\n    lib/map_transfer/map_stream_format.cpp \\\n    lib/map_transfer/map_stream_crypto.cpp \\\n    lib/map_transfer/map_stream_sha.cpp \\\n    lib/map_transfer/map_stream_trust.cpp \\\n    lib/map_transfer/map_stream_parser.cpp \\\n    lib/map_transfer/map_stream_install.cpp \\\n    lib/map_transfer/map_stream_receiver.cpp \\\n    lib/map_transfer/map_stream_compiled_trust.cpp \\\n    lib/maps/src/mapBlockFormat.cpp \\\n    lib/maps/src/mapLabelBlock.cpp \\\n    lib/maps/src/mapFontAsset.cpp \\\n    lib/maps/src/mapFontAssetFormat.cpp \\\n    tools/tests/${test}.cpp \\\n    $(pkg-config --cflags --libs mbedcrypto) \\\n    -o ${TMPDIR}/${test}\n  ${TMPDIR}/${test}\ndone",
       "tools": [
         "python3",
         "g++",
@@ -520,7 +520,7 @@
       "name": "Transfer control dispatch host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "python -m unittest tools.tests.test_ble_notification_dispatch\ng++ -std=c++17 \\\n  tools/tests/test_transfer_control_dispatch.cpp \\\n  -o ${TMPDIR}/test_transfer_control_dispatch\n${TMPDIR}/test_transfer_control_dispatch\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_transfer_status_chunk_session.cpp \\\n  -o ${TMPDIR}/test_map_transfer_status_chunk_session\n${TMPDIR}/test_map_transfer_status_chunk_session",
+      "command": "python -m unittest tools.tests.test_ble_notification_dispatch tools.tests.test_device_transfer_status_refresh\ng++ -std=c++17 \\\n  tools/tests/test_transfer_control_dispatch.cpp \\\n  -o ${TMPDIR}/test_transfer_control_dispatch\n${TMPDIR}/test_transfer_control_dispatch\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_transfer_status_chunk_session.cpp \\\n  -o ${TMPDIR}/test_map_transfer_status_chunk_session\n${TMPDIR}/test_map_transfer_status_chunk_session",
       "tools": [
         "python3",
         "g++"
@@ -531,7 +531,7 @@
       "name": "Device transfer HTTP limit host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_failure_policy.cpp \\\n  -o ${TMPDIR}/test_device_transfer_failure_policy\n${TMPDIR}/test_device_transfer_failure_policy\npython -m unittest tools.tests.test_device_transfer_failure_contract\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_http_limits.cpp \\\n  -o ${TMPDIR}/test_device_transfer_http_limits\n${TMPDIR}/test_device_transfer_http_limits\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_network_protocol.cpp \\\n  -o ${TMPDIR}/test_device_transfer_network_protocol\n${TMPDIR}/test_device_transfer_network_protocol\npython -m unittest tools.tests.test_map_activation_handoff",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_failure_policy.cpp \\\n  -o ${TMPDIR}/test_device_transfer_failure_policy\n${TMPDIR}/test_device_transfer_failure_policy\npython -m unittest tools.tests.test_device_transfer_failure_contract\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_http_limits.cpp \\\n  -o ${TMPDIR}/test_device_transfer_http_limits\n${TMPDIR}/test_device_transfer_http_limits\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_network_protocol.cpp \\\n  -o ${TMPDIR}/test_device_transfer_network_protocol\n${TMPDIR}/test_device_transfer_network_protocol\npython -m unittest tools.tests.test_map_operation_contract\npython -m unittest tools.tests.test_map_commit_callbacks tools.tests.test_map_commit_recovery tools.tests.test_map_operation_control\npython -m unittest tools.tests.test_map_activation_handoff",
       "tools": [
         "python3",
         "g++"
@@ -699,6 +699,81 @@
       ],
       "evidenceBuild": true,
       "persistentBuildState": true
+    },
+    {
+      "id": "ios-fast-durable-diagnostics-acquisition-contracts",
+      "name": "Durable diagnostics acquisition contracts",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-diagnostics-acquisition-tests.sh",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ]
+    },
+    {
+      "id": "ios-fast-bounded-diagnostics-capture-policy-contracts",
+      "name": "Bounded diagnostics capture policy contracts",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-diagnostics-policy-tests.sh",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ]
+    },
+    {
+      "id": "ios-fast-paired-diagnostics-broker-contracts",
+      "name": "Paired diagnostics broker contracts",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-diagnostics-broker-tests.sh",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ]
+    },
+    {
+      "id": "esp32-host-shutdown-barrier-executable-fault-tests",
+      "name": "Shutdown barrier executable fault tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_shutdown_barrier.cpp -o ${TMPDIR}/test_shutdown_barrier\n${TMPDIR}/test_shutdown_barrier\n",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-durable-map-operation-host-tests",
+      "name": "Durable map operation host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/device_transfer/durable_operation.cpp \\\n  tools/tests/test_durable_operation.cpp \\\n  -o ${TMPDIR}/test_durable_operation\n${TMPDIR}/test_durable_operation\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -Ilib/map_transfer -Ilib/device_transfer \\\n  tools/tests/test_map_selection_health.cpp \\\n  -o ${TMPDIR}/test_map_selection_health\n${TMPDIR}/test_map_selection_health\npython3 -m unittest tools.tests.test_map_operation_stack\n",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
+      "id": "esp32-host-firmware-text-size-helper-equivalence",
+      "name": "Firmware text size helper equivalence",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "python -m unittest tools.tests.test_firmware_text_size",
+      "tools": [
+        "python3",
+        "g++"
+      ]
     }
   ]
 }

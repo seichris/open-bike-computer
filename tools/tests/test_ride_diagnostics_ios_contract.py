@@ -43,7 +43,52 @@ class RideDiagnosticsIOSContractTests(unittest.TestCase):
         self.assertIn("joinDeviceNetworkIfNeeded", enter)
         self.assertIn("exitDiagnostics(bleManager: bleManager)", enter)
         self.assertIn("requestDeviceTransferExit()", TRANSFER_MANAGER)
-        self.assertIn("removeJoinedAccessPointIfNeeded()", exit_flow)
+        self.assertIn("await cleanupOperation(bleManager: bleManager)", exit_flow)
+        self.assertIn("Failure.cleanupUnresolved", exit_flow)
+        self.assertNotIn("removeConfiguration", exit_flow)
+        cleanup = TRANSFER_MANAGER[
+            TRANSFER_MANAGER.index("private func cleanupOperation") :
+            TRANSFER_MANAGER.index("func releaseFirmwareAfterReboot")
+        ]
+        self.assertIn("DeviceOperationCleanupTask.start", cleanup)
+        self.assertIn("self.ownsConnection(bleManager)", cleanup)
+        self.assertIn("deviceTransferSessionToken == self.authorizationToken", cleanup)
+        self.assertIn("deviceTransferGeneration == self.authorizationGeneration", cleanup)
+        self.assertIn("deviceTransferStatusRevision != revision", cleanup)
+        self.assertIn("deviceTransferMode.isEmpty", cleanup)
+        self.assertIn("deviceTransferSessionToken?.isEmpty != false", cleanup)
+        self.assertLess(cleanup.index("requestDeviceTransferExit()"),
+                        cleanup.index("self.coordinator.finish(lease, remoteClear: clear)"))
+        registry = (REPO_ROOT / "ios-app/BikeComputer/BikeComputer/Managers/DeviceOperationCoordinator.swift").read_text()
+        final_release = registry[registry.index("private func finishIfUnused"):]
+        self.assertIn("guard claims.isEmpty, pendingApplies.isEmpty", final_release)
+        self.assertLess(final_release.index("guard claims.isEmpty"),
+                        final_release.index("removeConfiguration(ssid)"))
+
+    def test_all_consumers_share_acquisition_wide_cleanup(self):
+        for mode in ("MapTransfer", "FirmwareTransfer", "Diagnostics", "RemoteDebug"):
+            entry = TRANSFER_MANAGER[
+                TRANSFER_MANAGER.index(f"func enter{mode}(") :
+                TRANSFER_MANAGER.index(f"private func performEnter{mode}(")
+            ]
+            self.assertIn("beginOperation(", entry, mode)
+            self.assertIn("try Task.checkCancellation()", entry, mode)
+            self.assertIn("guard ownsConnection(bleManager)", entry, mode)
+            self.assertIn("session.operationLeaseID = operationLease?.id", entry, mode)
+            self.assertIn("await cleanupOperation(bleManager: bleManager)", entry, mode)
+        begin = TRANSFER_MANAGER[
+            TRANSFER_MANAGER.index("private func beginOperation") :
+            TRANSFER_MANAGER.index("private func ownsConnection")
+        ]
+        self.assertIn("operationLease == nil, cleanupTask == nil", begin)
+        self.assertIn("coordinator.reconcileClear(deviceID: deviceID)", begin)
+        cleanup = TRANSFER_MANAGER[
+            TRANSFER_MANAGER.index("private func cleanupOperation") :
+            TRANSFER_MANAGER.index("func releaseFirmwareAfterReboot")
+        ]
+        self.assertIn("if let cleanupTask { return await cleanupTask.value }", cleanup)
+        self.assertIn("let commandSent = alreadyClear", cleanup)
+        self.assertIn("? bleManager.requestDeviceTransferStatus()", cleanup)
 
     def test_navigation_host_harness_compiles_the_transfer_managers(self):
         registry = json.loads((REPO_ROOT / "tools/development/swift-sources.json").read_text())

@@ -231,6 +231,7 @@ final class WatchConnectivityCoordinator: NSObject {
         onDirectRidePreparationAvailabilityChanged?()
         cyclingSensorPublisher.flush()
         if let session {
+            flushPendingDirectRideReleases(using: session)
             flushPendingTransportDiagnostics(using: session)
         }
     }
@@ -266,10 +267,24 @@ final class WatchConnectivityCoordinator: NSObject {
         let inFlight = defaults.array(
             forKey: inFlightDirectRideReleaseKey
         ) as? [Data] ?? []
-        guard inFlight.isEmpty else { return }
         let pending = defaults.array(
             forKey: pendingDirectRideReleaseKey
         ) as? [Data] ?? []
+        // Retry the interactive path when reachability returns, including
+        // releases already owned by WatchConnectivity's durable transfer.
+        for payload in WatchDirectRidePreparationPolicyV1
+            .interactiveReleasePayloads(
+                pending: pending,
+                inFlight: inFlight,
+                activated: session.activationState == .activated,
+                reachable: session.isReachable
+            ) {
+            // Neither a lost reply nor a failed attempt removes the durable
+            // transfer. Duplicate releases use the phone's existing fences.
+            session.sendMessageData(payload, replyHandler: { _ in },
+                                    errorHandler: { _ in })
+        }
+        guard inFlight.isEmpty else { return }
         guard !pending.isEmpty else { return }
         defaults.set(pending, forKey: inFlightDirectRideReleaseKey)
         defaults.removeObject(forKey: pendingDirectRideReleaseKey)

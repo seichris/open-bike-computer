@@ -3,7 +3,287 @@ import Foundation
 
 @main
 enum RideDiagnosticsHostTests {
-    static func main() throws {
+    static func storedZIPChecksumsMatchKnownVectors() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let padded = Data([0xff] + Array("123456789".utf8) + [0xff])
+        let fixtures: [(String, Data, UInt32)] = [
+            ("empty", Data(), 0),
+            ("digits", padded[1..<10], 0xcbf4_3926),
+            ("binary", Data((0..<256).map { UInt8($0) }), 0x2905_8c73),
+        ]
+        let url = root.appendingPathComponent("vectors.zip")
+        try RideDiagnosticsStoredZipWriter.write(entries: fixtures.map { ($0.0, $0.1) }, to: url)
+        let archive = try Data(contentsOf: url)
+        func littleEndian32(at offset: Int) -> UInt32 {
+            (0..<4).reduce(UInt32(0)) { $0 | UInt32(archive[offset + $1]) << ($1 * 8) }
+        }
+        var offset = 0
+        for (name, body, checksum) in fixtures {
+            precondition(littleEndian32(at: offset) == 0x0403_4b50)
+            precondition(littleEndian32(at: offset + 14) == checksum,
+                         "local ZIP headers must retain the standard IEEE CRC")
+            let payloadStart = offset + 30 + name.utf8.count
+            precondition(archive[payloadStart..<(payloadStart + body.count)] == body)
+            offset = payloadStart + body.count
+        }
+        for (name, _, checksum) in fixtures {
+            precondition(littleEndian32(at: offset) == 0x0201_4b50)
+            precondition(littleEndian32(at: offset + 16) == checksum,
+                         "central ZIP headers must match the known checksum")
+            offset += 46 + name.utf8.count
+        }
+    }
+
+    static func oversizedAppSnapshotReportsCacheFull() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.record(category: .lifecycle, event: "snapshot_limit")
+        recorder.flush()
+        let capture = try require(recorder.currentCaptureID)
+        let original = try await recorder.appEvidenceSnapshot(captureID: capture)
+        let path = try require(original.keys.sorted().first)
+        let data = try require(original[path])
+        let directory = root.appendingPathComponent("app").appendingPathComponent(path).deletingLastPathComponent()
+        // Valid, original-capture chunks reach the request-count bound before
+        // the acquisition store or network can be entered.
+        for chunk in 1...257 {
+            try data.write(to: directory.appendingPathComponent(String(format: "events-%06d.jsonl", chunk)))
+        }
+        do {
+            _ = try await recorder.appEvidenceSnapshot(captureID: capture)
+            preconditionFailure("oversized app snapshot admitted")
+        } catch {
+            precondition((error as? DiagnosticsAcquisitionStore.Failure) == .storageFull)
+            precondition(DiagnosticsAcquisitionFailureReporting.code(for: error) == "cache_full")
+        }
+        let retained = try Data(contentsOf: root.appendingPathComponent("app").appendingPathComponent(path))
+        precondition(retained == data, "snapshot refusal must preserve original recorder evidence")
+    }
+
+    static func cacheAdmissionFailureIsRecorded() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root.appendingPathComponent("recorder"))
+        recorder.record(category: .lifecycle, event: "before_admission")
+        recorder.flush()
+        let capture = try require(recorder.currentCaptureID)
+        let store = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("cache"), maximumEvidenceBytes: 1)
+        let job = try await store.create(deviceDigest: "0123456789abcdef", captureID: capture)
+        let chunks = try await recorder.appEvidenceSnapshot(captureID: capture)
+        do {
+            try await store.retainAppEvidence(job.id, chunks: chunks)
+            preconditionFailure("original app evidence should exceed this cache")
+        } catch {
+            precondition((error as? DiagnosticsAcquisitionStore.Failure) == .storageFull)
+            // Use the same report as the coordinator before any transfer
+            // manager is entered. Actual recorder output must retain the code.
+            recorder.record(level: .warning, category: .transfer, event: "diagnostics_download_failed",
+                fields: DiagnosticsAcquisitionFailureReporting.fields(for: error, acquisitionID: job.id, phase: "app_evidence"))
+            try await store.interrupt(job.id, code: DiagnosticsAcquisitionFailureReporting.code(for: error))
+        }
+        recorder.flush()
+        let events = try require(FileManager.default.enumerator(at: root.appendingPathComponent("recorder/app"), includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "jsonl" }
+        let records = try events.flatMap { url in
+            try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+            }
+        }
+        let failure = try require(records.first { $0.event == "diagnostics_download_failed" })
+        precondition(failure.fields["code"] == "cache_full" && failure.fields["reason"] == "cache_full")
+        precondition(failure.fields["operationId"] == job.id.uuidString.lowercased())
+        precondition(failure.fields["phase"] == "app_evidence")
+        precondition(!failure.fields.values.contains { $0.contains(root.path) || $0.contains("http") })
+        let persisted = try await store.load(job.id)
+        precondition(persisted.failureCode == "cache_full" && persisted.indexData == nil && persisted.appEvidence == nil)
+        // Failure reporting must not consume or remove the original recorder
+        // history it failed to copy into the acquisition cache.
+        for (path, data) in chunks {
+            let original = try Data(contentsOf: root.appendingPathComponent("recorder/app").appendingPathComponent(path))
+            precondition(original == data)
+        }
+    }
+
+    /// Exercise the real queue, not a source-string assertion. The v1 sequence
+    /// remains storage order; emissionSequence and occurrence time identify ingress.
+    static func occurrenceTimeSurvivesWriterDelay() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diagnostics-clock-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        var wall = Date(timeIntervalSince1970: 1_790_000_000)
+        var monotonic: TimeInterval = 100
+        let recorder = RideDiagnosticsRecorder(rootURL: root, now: { wall }, uptime: { monotonic })
+        recorder.flush()
+        let capture = try require(recorder.currentCaptureID)
+        recorder.suspendWriterForTesting()
+        recorder.record(category: .ble, event: "before_delay")
+        wall.addTimeInterval(90)
+        monotonic += 90
+        // Queued mode change cannot relabel the record already admitted.
+        recorder.beginDetailedTrace()
+        recorder.record(category: .ble, event: "after_delay")
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        let urls = try require(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }.filter { $0.pathExtension == "jsonl" }
+        let records = try urls.flatMap { url in
+            try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+            }
+        }
+        let before = try require(records.first { $0.event == "before_delay" })
+        let after = try require(records.first { $0.event == "after_delay" })
+        precondition(before.uptimeMs == 0)
+        precondition(after.uptimeMs == 90_000)
+        precondition(before.captureId == capture.uuidString.lowercased())
+        precondition(after.captureId == capture.uuidString.lowercased())
+        precondition(before.fields["writerDelayMs"] == "90000")
+        precondition(before.wallTime != after.wallTime)
+        precondition(before.fields["emissionSequence"] != after.fields["emissionSequence"])
+    }
+
+    /// Reproduce a complete multi-boot acquisition followed by the ordinary
+    /// 20-capture prune, then export the original cutoff after a store restart.
+    static func acquisitionSurvivesCaptureRetention() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let sourceRecorder = RideDiagnosticsRecorder(rootURL: base.appendingPathComponent("v1"))
+        let storeRoot = base.appendingPathComponent("v2")
+        let store = DiagnosticsAcquisitionStore(root: storeRoot)
+        let device = "0123456789abcdef"
+        sourceRecorder.record(category: .ble, event: "retained_capture")
+        sourceRecorder.flush()
+        let originalCapture = try require(sourceRecorder.currentCaptureID)
+        var appEvidence = try await sourceRecorder.appEvidenceSnapshot(captureID: originalCapture)
+        precondition(!appEvidence.isEmpty)
+        // Simulate a previous process ending mid-record. Cache/export must
+        // preserve the raw tail and its degraded-coverage result, not discard it.
+        let crashedPath = appEvidence.keys.sorted()[0]
+        appEvidence[crashedPath]!.append(Data("{\"schema".utf8))
+        try appEvidence[crashedPath]!.write(to: base.appendingPathComponent("v1/app").appendingPathComponent(crashedPath))
+        let job = try await store.create(deviceDigest: device, captureID: originalCapture)
+        try await store.retainAppEvidence(job.id, chunks: appEvidence)
+        let recorder = RideDiagnosticsRecorder(rootURL: base.appendingPathComponent("v1"))
+        var expected: [DiagnosticsChunkReceipt] = []
+        var bodies: [Data] = []
+        var originals: [URL] = []
+        for boot in 1...39 {
+            let capture = boot == 1 ? originalCapture.uuidString.lowercased() : String(format: "00000000-0000-0000-0000-%012d", boot)
+            let data = Data("{\"schema\":1,\"source\":\"firmware\",\"sequence\":0,\"level\":\"info\",\"category\":\"boot\",\"event\":\"test\",\"captureId\":\"\(capture)\",\"fields\":{\"bootSequence\":\(boot),\"firmwareFingerprint\":\"A1B2C3D4\"}}\n".utf8)
+            let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            expected.append(DiagnosticsChunkReceipt(bootSequence: UInt32(boot), chunk: 1, bytes: data.count, sha256: hash))
+            bodies.append(data)
+            originals.append(try recorder.importDeviceChunk(deviceDigest: device, bootSequence: UInt32(boot),
+                chunk: 1, data: data, sha256: hash, enforceRetention: false))
+        }
+        let index: [String: Any] = ["schema": 1, "source": "firmware", "bootSequence": 39,
+            "activeChunk": 2, "stats": ["enqueued": 39, "written": 39, "dropped": 0, "storageErrors": 0],
+            "chunks": try JSONSerialization.jsonObject(with: JSONEncoder().encode(expected))]
+        let indexData = try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys])
+        _ = try await store.inventory(job.id, deviceDigest: device, index: indexData, chunks: expected)
+        for (receipt, data) in zip(expected, bodies) {
+            try await store.verified(job.id, receipt: receipt, data: data)
+        }
+        try await store.finish(job.id)
+        try recorder.enforceRetention()
+        precondition(originals.contains { !FileManager.default.fileExists(atPath: $0.path) },
+            "fixture must actually prune original acquired chunks")
+        // Simulate ordinary app retention removing every original member.
+        // The acquisition cache must survive independently of those files.
+        for path in appEvidence.keys {
+            let source = base.appendingPathComponent("v1/app").appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: source.path) { try FileManager.default.removeItem(at: source) }
+        }
+        let restarted = DiagnosticsAcquisitionStore(root: storeRoot)
+        let snapshot = try await restarted.exportSnapshot()
+        precondition(snapshot.manifests.first?.deliveryComplete == true && snapshot.chunks.count == 39)
+        precondition(snapshot.appChunks == appEvidence)
+        let archive = try recorder.exportBundle(additionalDeviceChunks: snapshot.chunks, additionalAppChunks: snapshot.appChunks)
+        defer { try? FileManager.default.removeItem(at: archive) }
+        let bytes = try Data(contentsOf: archive)
+        for (relative, body) in snapshot.chunks {
+            precondition(bytes.range(of: Data("device/\(relative)".utf8)) != nil)
+            precondition(bytes.range(of: body) != nil, "every original chunk must be present byte-for-byte")
+        }
+        let receiptName = "acquisitions/\(job.id.uuidString.lowercased()).json"
+        let envelope: [String: Any] = ["schema": 2, "eventFormatSchema": 1,
+            "registryDigest": DiagnosticsSchema.digest, "evidenceArchive": "evidence-v1.zip",
+            "evidenceSha256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            "acquisitions": [receiptName], "privacy": "diagnostic-no-raw-payloads"]
+        var entries: [(String, Data)] = [
+            ("manifest.json", try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])),
+            ("evidence-v1.zip", bytes), (receiptName, try JSONEncoder().encode(snapshot.manifests[0]))]
+        let checksums = entries.map { name, data in
+            "\(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())  \(name)\n"
+        }.joined()
+        entries.append(("checksums.sha256", Data(checksums.utf8)))
+        let portable = base.appendingPathComponent("retained-acquisition.zip")
+        try RideDiagnosticsStoredZipWriter.write(entries: entries, to: portable)
+        // Exercise the real host consumer, including its closed envelope schema,
+        // manifest validation and independently hashed delivery inventory.
+        let verify = Process()
+        verify.executableURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("tools/bicino")
+        verify.arguments = ["diag", "verify", portable.path, "--acquisition", job.id.uuidString.lowercased(),
+            "--require", "ios,firmware", "--require-complete", "--json"]
+        let output = Pipe()
+        verify.standardOutput = output
+        try verify.run()
+        let result = output.fileHandleForReading.readDataToEndOfFile()
+        verify.waitUntilExit()
+        guard verify.terminationStatus == 0 else {
+            throw RideDiagnosticsError.unavailable("Retention export failed host verification: \(String(decoding: result, as: UTF8.self))")
+        }
+        let report = try JSONSerialization.jsonObject(with: result) as! [String: Any]
+        let delivery = (report["delivery"] as! [[String: Any]])[0]
+        precondition(delivery["expectedChunks"] as? Int == 39 && delivery["state"] as? String == "complete")
+        precondition((report["missingRequiredSources"] as? [String])?.isEmpty == true)
+        precondition(report["recoverableTails"] as? Int == 1 && report["recordingCoverage"] as? String == "degraded")
+        let stillPruned = originals.filter { !FileManager.default.fileExists(atPath: $0.path) }
+        precondition(!stillPruned.isEmpty, "export must not resurrect evidence into ordinary retention")
+    }
+
+    static func main() async throws {
+        try storedZIPChecksumsMatchKnownVectors()
+        try await oversizedAppSnapshotReportsCacheFull()
+        try await cacheAdmissionFailureIsRecorded()
+        try await acquisitionSurvivesCaptureRetention()
+        try occurrenceTimeSurvivesWriterDelay()
+        precondition(RideDiagnosticsFieldPolicy.isAllowed("recorderReady"))
+        precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "recorderReady", value: NSNumber(value: true)))
+        precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "recorderReady", value: NSNumber(value: 1)))
+        // Match the bounded firmware resource producer's numeric/boolean/string
+        // types; retain the existing importer privacy and field-count limits.
+        for key in ["freeBytes", "largestBytes", "minimumFreeBytes",
+                    "minimumLargestBytes", "tlsStackBytes", "ownerStackBytes",
+                    "rendererStackBytes", "stackAvailableMask"] {
+            precondition(RideDiagnosticsFieldPolicy.isAllowed(key))
+            precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+                key: key, value: NSNumber(value: UInt32.max)))
+            precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+                key: key, value: NSNumber(value: true)))
+            precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+                key: key, value: "123"))
+        }
+        precondition(RideDiagnosticsFieldPolicy.isAllowed("cleanupFailed"))
+        precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "cleanupFailed", value: NSNumber(value: false)))
+        precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "cleanupFailed", value: NSNumber(value: 0)))
+        precondition(RideDiagnosticsFieldPolicy.isAllowed("operationId"))
+        precondition(RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "operationId", value: "123456781234abcdABCD123456789abc"))
+        precondition(!RideDiagnosticsFieldPolicy.isFirmwareFieldTypeValid(
+            key: "operationId", value: NSNumber(value: 1)))
+        for key in ["sessionToken", "password", "tlsCertificateSha256"] {
+            precondition(!RideDiagnosticsFieldPolicy.isAllowed(key))
+        }
+
         var now = Date()
         let defaultsSuite = "ride-diagnostics-host-\(UUID().uuidString)"
         let defaults = try require(UserDefaults(suiteName: defaultsSuite))

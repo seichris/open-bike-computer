@@ -27,6 +27,18 @@ int main() {
   assert(!parseIssueMarker("mark|1|7|connection|drop", marker));
   assert(!parseIssueMarker("mark|2|7|connection_drop", marker));
 
+  assert(parseIssueMarker("mark|2|8|other|123e4567-e89b-12d3-a456-426614174000", marker));
+  assert(marker.sequence == 8 && marker.code == "other");
+  assert(marker.incidentId == "123e4567-e89b-12d3-a456-426614174000");
+  for (const char *invalid : {
+      "mark|2|0|other|123e4567-e89b-12d3-a456-426614174000",
+      "mark|2|8|other|123e4567-e89b-12d3-a456-42661417400g",
+      "mark|2|8|other|123e4567-e89b-12d3-a456-426614174000|extra",
+      "mark|2|8|other|short", "mark|3|8|other|123e4567-e89b-12d3-a456-426614174000"}) {
+    assert(!parseIssueMarker(invalid, marker));
+  }
+  assert(parseIssueMarker("mark|1|9|other", marker) && marker.incidentId.empty());
+
   constexpr char captureA[] = "123e4567-e89b-12d3-a456-426614174000";
   constexpr char captureB[] = "123e4567-e89b-12d3-a456-426614174001";
   assert(!bindingRequiresChunkBoundary(

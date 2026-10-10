@@ -123,3 +123,17 @@ as server collection.
 Apple can change privacy definitions and allowed required-reason API codes.
 Validate these files with the shipping Xcode version and Apple's current
 documentation for every release.
+
+## Optional paired-Mac diagnostics handoff
+
+The diagnostics UI can import an explicitly selected pairing file for a temporary
+private-LAN Mac broker. The credential and certificate pin stay in device-only
+Keychain, are not logged, and expire within 24 hours. Removing pairing stops the
+connection without deleting local evidence. With pairing enabled, foreground
+polling accepts only bounded diagnostics commands and delivers privacy-reviewed
+local bundles to that Mac, not a vendor analytics backend. No arbitrary commands,
+remote UI actions, credentials, exact GPS, route text or raw health/sensor streams
+are exposed. Durable recipient-scoped outboxes retry after foreground/network
+restoration. Review the final App Store privacy answers and local-network usage
+description against this optional transfer, rather than claiming the app never
+transmits diagnostics under any circumstance.

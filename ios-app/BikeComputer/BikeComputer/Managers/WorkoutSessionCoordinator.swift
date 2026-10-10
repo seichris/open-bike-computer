@@ -61,6 +61,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
     private var pendingAutomaticChoice = false
     private var storageFailed = false
     private var isResetting = false
+    private var phoneRecoveryDeferredForWatch = false
 
     init(
         watch: any WorkoutWatchRecording,
@@ -137,12 +138,30 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 if record == nil { record = persisted }
                 storageFailed = false
                 if let phone {
-                    try await phone.recover(expected: record)
-                    if let phoneRecord = phone.record {
-                        record = phoneRecord
-                        store.followWorkoutState(from: phone.store, owner: .iphone)
-                    } else if record?.owner == .iphone {
-                        record = try persistence.load()
+                    if record?.owner == .watch, record?.phase != .finished {
+                        // Native recovery can reattach a mirrored session after
+                        // process loss. Its primary-recorder check can also fail
+                        // while a valid Watch mirror is already attached. Keep
+                        // that assist, but do not hide the selected Watch's
+                        // controls on failure. Probe again before a new ride.
+                        phoneRecoveryDeferredForWatch = true
+                        do { try await phone.recover(expected: record) }
+                        catch {
+                            // A discovered phone owner must still be reconciled;
+                            // only the reserved Watch ride can use this fallback.
+                            guard phone.record == nil, record?.owner == .watch else {
+                                throw error
+                            }
+                        }
+                    } else {
+                        try await phone.recover(expected: record)
+                        phoneRecoveryDeferredForWatch = false
+                        if let phoneRecord = phone.record {
+                            record = phoneRecord
+                            store.followWorkoutState(from: phone.store, owner: .iphone)
+                        } else if record?.owner == .iphone {
+                            record = try persistence.load()
+                        }
                     }
                 } else if record?.owner == .iphone {
                     throw WorkoutRecordingStore.StoreError.invalidRecord
@@ -435,6 +454,15 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 do { try persistence.save(next) } catch { persistenceError() }
             }
         }
+        if record?.phase == .unresolved, record?.owner == .watch {
+            let unresolved = WorkoutRecordingNotice(kind: .watchUnresolved,
+                message: "The Watch start or finish is unconfirmed. A timeout does not prove the Watch is idle. Check Bicino on Watch before choosing a different recorder.")
+            if notice != unresolved { notice = unresolved }
+        } else if notice?.kind == .watchUnresolved,
+                  presentation.sessionID != nil,
+                  presentation.sessionID == record?.sessionID {
+            notice = nil
+        }
         publishWatch()
     }
 
@@ -460,7 +488,14 @@ final class WorkoutSessionCoordinator: ObservableObject {
             _ = watch.resetTerminalPresentation()
             notice = nil
             publishWatch()
+            recoverPhoneAfterWatchOwnershipClears()
         } catch { persistenceError() }
+    }
+
+    private func recoverPhoneAfterWatchOwnershipClears() {
+        guard phoneRecoveryDeferredForWatch else { return }
+        recoveryComplete = false
+        recoverIfNeeded()
     }
 
     func retryWatchStart() {
@@ -470,6 +505,9 @@ final class WorkoutSessionCoordinator: ObservableObject {
     }
 
     func chooseRecorder() {
+        if recoveryComplete, record?.phase == .finished {
+            guard resetTerminalPresentation() else { return }
+        }
         guard record == nil else { _ = requestStart(); return }
         notice = WorkoutRecordingNotice(kind: .chooseRecorder,
             message: "Choose the recorder for this ride. Check that Bicino is not already recording on the other device. This choice will not change when devices connect or disconnect.")
@@ -504,6 +542,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
         notice = nil
         isResetting = false
         receiveWatch(watch.store.presentation)
+        recoverPhoneAfterWatchOwnershipClears()
         return true
     }
 }

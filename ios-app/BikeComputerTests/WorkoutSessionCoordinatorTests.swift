@@ -114,12 +114,14 @@ private final class FakePhone: PhoneWorkoutRecording {
     var record: WorkoutRecordingRecord?
     var message: String?
     var recoveryFails = false
+    var recoveries = 0
     var starts = 0
     var pauses = 0
     var saves = 0
     var sequence: UInt64 = 0
     init(_ persistence: MemoryRecordingStore) { self.persistence = persistence }
     func recover(expected: WorkoutRecordingRecord?) async throws {
+        recoveries += 1
         if recoveryFails { throw WorkoutRecordingStore.StoreError.invalidRecord }
         guard let expected, expected.owner == .iphone else { return }
         record = expected
@@ -231,6 +233,29 @@ struct WorkoutSessionCoordinatorTests {
         check(watchCoordinator.record?.sessionID == id3 && watchCoordinator.record?.finishedChoice == nil,
               "Next Watch ride cannot inherit previous terminal disposition")
 
+        let (chooser, chooserWatch, chooserPhone, chooserAvailability, chooserDisk) = harness()
+        chooserAvailability.availability = .ready(isReachable: true)
+        chooser.recoverIfNeeded()
+        await spin { chooser.recoveryComplete }
+        let completedWatchID = UUID()
+        chooserWatch.emit(id: completedWatchID, state: .running)
+        chooserWatch.emit(id: completedWatchID, state: .ended, outcome: .saved)
+        chooser.chooseRecorder()
+        check(chooser.record == nil && chooserDisk.record == nil
+                  && chooser.notice?.kind == .chooseRecorder,
+              "Choosing after a completed ride acknowledges its tombstone and opens the chooser")
+        check(chooserWatch.starts == 0 && chooserPhone.starts == 0,
+              "Opening the recorder chooser must not start the default Watch")
+        check(chooser.requestStart(explicitOwner: .iphone),
+              "A paired Watch does not prevent an explicit phone choice")
+        await spin { chooserPhone.starts == 1 }
+        let explicitlySelectedPhoneID = chooser.record!.sessionID
+        chooser.chooseRecorder()
+        check(chooser.record?.sessionID == explicitlySelectedPhoneID
+                  && chooser.record?.owner == .iphone
+                  && chooserPhone.starts == 1 && chooserWatch.starts == 0,
+              "Choosing during a running ride cannot switch or start another recorder")
+
         let (unreachable, watch3, phone3, availability3, _) = harness()
         availability3.availability = .ready(isReachable: false)
         unreachable.recoverIfNeeded()
@@ -317,6 +342,50 @@ struct WorkoutSessionCoordinatorTests {
         check(restart.notice == nil,
               "A successful restart does not request the workout attention sheet")
 
+        let watchRecoveryDisk = MemoryRecordingStore()
+        let recoveredWatchID = UUID()
+        watchRecoveryDisk.record = WorkoutRecordingRecord(owner: .watch,
+            sessionID: recoveredWatchID, requestedAt: Date().addingTimeInterval(-60))
+        let recoveredWatch = FakeWatch()
+        let deferredPhone = FakePhone(watchRecoveryDisk)
+        deferredPhone.recoveryFails = true
+        let watchRecovery = WorkoutSessionCoordinator(watch: recoveredWatch,
+            watchAvailability: FakeAvailability(), persistence: watchRecoveryDisk,
+            phone: deferredPhone)
+        check(watchRecovery.record?.phase == .unresolved
+                && watchRecovery.notice?.kind == .watchUnresolved,
+              "A cold-launch unresolved Watch owner exposes its recovery actions")
+        check(!watchRecovery.canOfferNewWorkout,
+              "Exposing checked-idle recovery does not admit a replacement ride")
+        recoveredWatch.emit(id: recoveredWatchID, state: .paused)
+        watchRecovery.recoverIfNeeded()
+        await spin { watchRecovery.recoveryComplete }
+        check(deferredPhone.recoveries == 1,
+              "Native recovery assists reattachment without blocking the selected Watch on failure")
+        check(watchRecovery.record?.sessionID == recoveredWatchID
+                && watchRecovery.record?.phase == .paused && watchRecovery.notice == nil,
+              "The credentialed paused Watch snapshot recovers its reserved identity")
+        watchRecovery.pause()
+        check(recoveredWatch.pauses == 1 && deferredPhone.pauses == 0,
+              "Recovered controls remain bound to Watch")
+        check(!watchRecovery.requestStart(explicitOwner: .iphone)
+                && deferredPhone.starts == 0 && recoveredWatch.starts == 0,
+              "Deferred phone recovery cannot admit a second recording")
+        recoveredWatch.emit(id: recoveredWatchID, state: .ended, outcome: .discarded)
+        check(watchRecovery.resetTerminalPresentation(),
+              "Only a confirmed Watch terminal disposition clears its owner")
+        await spin { watchRecovery.notice?.kind == .recovery }
+        check(deferredPhone.recoveries == 2 && !watchRecovery.recoveryComplete,
+              "Clearing Watch ownership requires a fresh primary phone probe")
+        check(!watchRecovery.requestStart(explicitOwner: .iphone)
+                && deferredPhone.starts == 0 && recoveredWatch.starts == 0,
+              "An unsuccessful deferred probe still blocks all new starts")
+        deferredPhone.recoveryFails = false
+        watchRecovery.retryRecovery()
+        await spin { watchRecovery.recoveryComplete }
+        check(deferredPhone.recoveries == 3 && watchRecovery.record == nil,
+              "A successful deferred probe releases only the finished owner")
+
         let (recovery, watch6, phone6, _, disk6) = harness()
         phone6.recoveryFails = true
         recovery.recoverIfNeeded()
@@ -329,6 +398,38 @@ struct WorkoutSessionCoordinatorTests {
         disk6.fails = true
         check(!recovery.requestStart(explicitOwner: .iphone), "Storage failure prevents native start")
         check(phone6.starts == 0, "No recording without durable owner")
+        for segmentError in [nil, WorkoutSafeErrorCodeV1.segmentMarkFailed] {
+            let local = WorkoutMetricsStore()
+            local.beginLocalWorkout()
+            let id = UUID(), start = Date().addingTimeInterval(-60)
+            let running = WorkoutEnvelopeV1(kind: .snapshot, sessionID: id,
+                sessionToken: 23, sequence: 1, capturedAt: Date(),
+                snapshot: WorkoutSnapshotV1(state: .running, startDate: start, availability: []))
+            _ = local.ingestBatch([running], receivedAt: Date())
+            check(local.markPendingControl(.markSegment, sequence: 1), "Native segment starts")
+            local.releasePendingSegmentForLifecycleControl()
+            check(local.currentUnconfirmedSegmentControlSequence == 1,
+                  "Releasing a native segment preserves its original acknowledgement identity")
+            check(!local.markPendingControl(.markSegment, sequence: 2),
+                  "An unknown native segment outcome cannot admit a duplicate mark")
+            check(local.markPendingControl(.pause, sequence: 2),
+                  "An unconfirmed native segment cannot block Pause")
+            let ack = WorkoutEnvelopeV1(kind: .acknowledgement, sessionID: id,
+                sessionToken: 23, sequence: 2, capturedAt: Date(),
+                acknowledgement: WorkoutAcknowledgementV1(control: .markSegment,
+                    resultingState: .running, acknowledgedSequence: 1, errorCode: segmentError))
+            let accepted = local.ingestBatch([ack], receivedAt: Date())
+            check(accepted.rejections.isEmpty && !local.isSegmentConfirmationPending,
+                  "Late success or failure resolves only the original native segment")
+            check(local.presentation.pendingControl == .pause,
+                  "A late segment acknowledgement cannot clear the newer Pause")
+            local.confirmSessionState(.paused, at: Date())
+            check(local.presentation.pendingControl == nil
+                      && local.presentation.sessionState == .paused,
+                  "Native paused state confirms its own lifecycle control")
+            check(local.markPendingControl(.markSegment, sequence: 3),
+                  "Only a confirmed segment outcome admits the next mark")
+        }
         print("Workout session coordinator: \(count) assertions passed")
     }
 

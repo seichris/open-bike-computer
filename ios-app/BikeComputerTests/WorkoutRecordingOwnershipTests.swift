@@ -104,6 +104,15 @@ struct WorkoutRecordingOwnershipTests {
         try store.save(terminal)
         try store.clear(sessionID: terminal.sessionID)
         check(try store.load() == nil, "Only matching acknowledged ride is cleared")
+        let metadata = try WorkoutRecordingMetadataCodec.encode(attempted)
+        check(WorkoutRecordingMetadataCodec.decode(WorkoutRecordingRecord.self, from: metadata) == attempted,
+              "HealthKit-compatible string metadata preserves the original typed recording data")
+        check(WorkoutRecordingMetadataCodec.decode(WorkoutRecordingRecord.self,
+              from: try JSONEncoder().encode(attempted)) == attempted,
+              "Legacy in-memory binary metadata remains readable")
+        check(WorkoutRecordingMetadataCodec.decode(WorkoutRecordingRecord.self, from: "invalid") == nil
+                  && WorkoutRecordingMetadataCodec.decode(WorkoutRecordingRecord.self, from: 7) == nil,
+              "Malformed or unsupported metadata cannot manufacture recording data")
         print("Workout recording ownership: \(assertions) assertions passed")
     }
 

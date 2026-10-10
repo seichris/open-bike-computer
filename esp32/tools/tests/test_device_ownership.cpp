@@ -939,6 +939,12 @@ int main() {
   preferences_test::put("bleOwner", "name", {'B', 'i', 'k', 'e'});
   const auto deterministicOwnerStore = preferences_test::stores;
   const std::string deterministicIdentity = identitySeed.deviceIdHex();
+  const auto beforeReadOnlyIdentity = preferences_test::stores;
+  assert(device_ownership::hardwareDeviceIdHex() == deterministicIdentity);
+  device_ownership::DeviceId bootIdentity{};
+  assert(device_ownership::deriveHardwareDeviceId(bootIdentity));
+  assert(bootIdentity == identitySeed.deviceId());
+  assert(preferences_test::stores == beforeReadOnlyIdentity);
   preferences_test::put("bleOwner", "deviceId",
                         preferences_test::Bytes(16, 0xA5));
   DeviceOwnership sameLengthCorruptIdentity;

@@ -2,6 +2,7 @@
 #include "../../lib/maps/src/mapBlockFormat.hpp"
 
 #include <cassert>
+#include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -465,6 +466,29 @@ static void testActivationStateTracksAttemptsAndCompactStatus() {
   assert(handedOffState.begin("stream-session", 3, 4) ==
          ActivationBeginResult::Started);
   assert(handedOffState.snapshot().sequence == 9);
+
+  MapActivationState recovering;
+  assert(recovering.begin("accepted-session", 3) == ActivationBeginResult::Started);
+  recovering.rememberOwnerRecovery("stream_active_write");
+  recovering.finish("recovering", "", "stream_transaction_recovery", "retry");
+  assert(recovering.begin("accepted-session", 3) == ActivationBeginResult::Started);
+  recovering.rememberOwnerRecovery("later_worker_error");
+  recovering.finish("failed", "map", "stream_finalization", "removed unselected staging");
+  for (bool compactStatus : {false, true}) {
+    const auto json = recovering.json(compactStatus);
+    assert(json.find("\"ownerRecoveryCode\":\"stream_active_write\"") != std::string::npos);
+    assert(json.find("\"terminalCode\":\"stream_finalization\"") != std::string::npos);
+  }
+  assert(recovering.begin("another-session", 3) == ActivationBeginResult::Started);
+  assert(recovering.snapshot().ownerRecoveryCode[0] == '\0');
+  assert(recovering.snapshot().terminalCode[0] == '\0');
+  const std::string oversized(1000, 'x');
+  recovering.rememberOwnerRecovery(oversized.c_str());
+  recovering.finish("failed", "map", oversized, "");
+  assert(std::strlen(recovering.snapshot().ownerRecoveryCode.data()) == 63);
+  assert(std::strlen(recovering.snapshot().terminalCode.data()) == 63);
+  assert(recovering.begin("another-session", 3) == ActivationBeginResult::Started);
+  assert(recovering.snapshot().ownerRecoveryCode[0] == '\0');
 }
 
 static void testRejectsUnsafeManifestPath() {
@@ -931,7 +955,7 @@ static void testPruningPreservesLiveDurableStreamReferences() {
   const std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string maps = root + "/VECTMAP/.maps";
-  for (const std::string &name :
+  for (const std::string name :
        {"active", "previous", "installing", "ready", "pending", "transaction",
         "transaction-previous", "obsolete"}) {
     assert(::system((std::string("mkdir -p ") + maps + "/" + name).c_str()) ==
@@ -952,7 +976,7 @@ static void testPruningPreservesLiveDurableStreamReferences() {
             "{\"root\":\"/VECTMAP/.maps/transaction\","
             "\"previousRoot\":\"/VECTMAP/.maps/transaction-previous\"}\n");
   assert(installer.pruneObsoleteInstalledMaps());
-  for (const std::string &name : {"active", "previous", "installing", "pending",
+  for (const std::string name : {"active", "previous", "installing", "pending",
                                   "transaction", "transaction-previous"}) {
     assert(exists(maps + "/" + name + "/map.fmb"));
   }

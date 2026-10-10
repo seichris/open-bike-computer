@@ -8,6 +8,7 @@ import UIKit
 protocol WorkoutMirroredSessionTransport: AnyObject {
     var healthKitSession: HKWorkoutSession? { get }
     var sessionStartDate: Date? { get }
+    var initialSessionState: WorkoutSessionStateV1? { get }
     func installDelegate(_ delegate: HKWorkoutSessionDelegate?)
     func pause()
     func resume()
@@ -15,6 +16,13 @@ protocol WorkoutMirroredSessionTransport: AnyObject {
         data: Data,
         completion: @escaping @Sendable (Bool, Error?) -> Void
     )
+}
+
+@available(iOS 17.0, *)
+extension WorkoutMirroredSessionTransport {
+    var initialSessionState: WorkoutSessionStateV1? {
+        healthKitSession.map { WorkoutMirrorManager.contractState(for: $0.state) }
+    }
 }
 
 @available(iOS 17.0, *)
@@ -114,6 +122,7 @@ final class SystemWorkoutBackgroundExecutionLease:
 /// mirrored HKWorkoutSession available on iOS 17 and later.
 @MainActor
 final class WorkoutMirrorManager: NSObject {
+    enum AttachmentOrigin: String { case mirroringHandler, nativeRecovery }
     nonisolated static let watchLaunchTimeout: TimeInterval = 15
     nonisolated static let defaultControlConfirmationTimeout: TimeInterval = 10
     nonisolated static let defaultFinalSnapshotTimeout: TimeInterval = 10
@@ -144,6 +153,11 @@ final class WorkoutMirrorManager: NSObject {
     ) -> Void
 
     private var isHandlerInstalled = false
+#if DEBUG
+    private var debugAttachmentCount = 0
+    private var debugAttachmentOrigin = AttachmentOrigin.mirroringHandler
+    private var debugCheckpointReason: String?
+#endif
     private var mirroredSessionStorage: AnyObject?
     private var launchTimeoutTask: Task<Void, Never>?
     private var firstSnapshotTimeoutTask: Task<Void, Never>?
@@ -594,6 +608,7 @@ final class WorkoutMirrorManager: NSObject {
                 firstSnapshotTimeoutTask = nil
                 firstSnapshotTimeoutAttemptID = nil
             }
+            recordMirrorDebugCheckpoint(reason: "firstSnapshotTimedOut")
         }
     }
 
@@ -837,16 +852,26 @@ final class WorkoutMirrorManager: NSObject {
     }
 
     @available(iOS 17.0, *)
-    func acceptMirroredSession(_ session: HKWorkoutSession) {
+    func acceptMirroredSession(
+        _ session: HKWorkoutSession,
+        origin: AttachmentOrigin = .mirroringHandler
+    ) {
         acceptMirroredTransport(
-            HealthKitMirroredSessionTransport(session: session)
+            HealthKitMirroredSessionTransport(session: session),
+            origin: origin
         )
     }
 
     @available(iOS 17.0, *)
     func acceptMirroredTransport(
-        _ transport: any WorkoutMirroredSessionTransport
+        _ transport: any WorkoutMirroredSessionTransport,
+        origin: AttachmentOrigin = .mirroringHandler
     ) {
+#if DEBUG
+        debugAttachmentCount = min(debugAttachmentCount + 1, 65_535)
+        debugAttachmentOrigin = origin
+        debugCheckpointReason = nil
+#endif
         launchTimeoutTask?.cancel()
         launchTimeoutTask = nil
 
@@ -869,6 +894,12 @@ final class WorkoutMirrorManager: NSObject {
         currentTransportStartDate = transport.sessionStartDate
         transport.installDelegate(self)
         store.attachMirroredSession(at: now())
+        if let state = transport.initialSessionState, state.isActive {
+            // A recovered transport need not emit a new state-change callback.
+            // Preserve its native state while waiting for credentialed metrics.
+            applyNativeSessionState(state, at: now(), from: transport)
+        }
+        recordMirrorDebugCheckpoint(reason: "attached")
         if let terminalFailureDrainCode {
             // A replacement HealthKit transport belongs to the same terminal
             // takeover drain. Keep the original bound and cause rather than
@@ -1234,6 +1265,8 @@ final class WorkoutMirrorManager: NSObject {
         if store.presentation.shouldAutomaticallyResetAfterDiscard {
             _ = resetTerminalPresentation()
         }
+        recordMirrorDebugCheckpoint(reason: result.latestSnapshotEnvelope == nil
+            ? "noAcceptedSnapshot" : "snapshotAccepted")
     }
 
     @available(iOS 17.0, *)
@@ -1254,6 +1287,27 @@ final class WorkoutMirrorManager: NSObject {
         }
         synchronizeControlTimeoutWithPresentation()
         synchronizeFinalSnapshotTimeoutWithPresentation()
+        recordMirrorDebugCheckpoint(reason: "nativeState")
+    }
+
+    private func recordMirrorDebugCheckpoint(reason: String) {
+#if DEBUG
+        guard debugCheckpointReason != reason else { return }
+        debugCheckpointReason = reason
+        // One bounded checkpoint, written only on changes: no identifiers,
+        // credentials, remote payloads or workout metrics.
+        UserDefaults.standard.set([
+            "schema": 1,
+            "reason": reason,
+            "attachmentCount": debugAttachmentCount,
+            "origin": debugAttachmentOrigin.rawValue,
+            "state": store.presentation.sessionState.rawValue,
+            "connection": store.presentation.connectionState.rawValue,
+            "hasCredentials": store.currentEnvelope != nil,
+            "hasTransport": mirroredSessionStorage != nil,
+            "capturedAt": now().timeIntervalSince1970,
+        ], forKey: "bicino.debug.phoneWorkoutMirror.v1")
+#endif
     }
 
     @available(iOS 17.0, *)
@@ -1278,6 +1332,7 @@ final class WorkoutMirrorManager: NSObject {
             cancelTerminalFailureDrainTimeout()
         }
         synchronizeFinalSnapshotTimeoutWithPresentation()
+        recordMirrorDebugCheckpoint(reason: "disconnected")
     }
 
     @available(iOS 17.0, *)
@@ -1455,11 +1510,17 @@ extension WorkoutMirrorManager: HKWorkoutSessionDelegate {
         let envelopes = data.compactMap { payload in
             try? WorkoutContractCodec.decode(payload)
         }
-        guard !envelopes.isEmpty else { return }
         Task { @MainActor [weak self] in
-            guard let self,
-                  isCurrentSession(workoutSession),
-                  let transport = mirroredTransport else { return }
+            guard let self else { return }
+            guard isCurrentSession(workoutSession) else {
+                recordMirrorDebugCheckpoint(reason: "ignoredOldTransport")
+                return
+            }
+            guard !envelopes.isEmpty else {
+                recordMirrorDebugCheckpoint(reason: "decodeRejected")
+                return
+            }
+            guard let transport = mirroredTransport else { return }
             applyRemoteEnvelopes(
                 envelopes,
                 receivedAt: now(),
@@ -1483,7 +1544,7 @@ extension WorkoutMirrorManager: HKWorkoutSessionDelegate {
         }
     }
 
-    nonisolated private static func contractState(
+    nonisolated fileprivate static func contractState(
         for state: HKWorkoutSessionState
     ) -> WorkoutSessionStateV1 {
         switch state {

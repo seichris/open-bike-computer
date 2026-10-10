@@ -115,9 +115,11 @@ artifact before rebuilding.
 
 **Start Workout** uses iPhone when WatchConnectivity has finished activation and
 confirmed that no Watch is paired. With a configured reachable Watch, the default
-is still Watch recording. **Choose Recorder** in the workout dashboard offers an
-explicit **Record with iPhone** choice; an unreachable or incompletely configured
-Watch opens this choice instead of silently falling back.
+is still Watch recording. Touch and hold **Start Workout**, then select
+**Choose Recorder**, or use the chooser in the workout dashboard, for an explicit
+**Record with iPhone** choice. Opening the chooser after a completed ride does not
+start another recording. A transient Watch connection problem never silently
+changes the recorder to iPhone.
 
 The recorder is fixed for the ride. Reconnection cannot migrate it, change which
 device saves, or start another workout. Finish and acknowledge the current ride
