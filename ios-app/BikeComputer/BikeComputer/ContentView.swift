@@ -532,6 +532,11 @@ struct ContentView: View {
             guard newValue == .active else { return }
             coordinator.applicationDidBecomeActive()
             workoutSessionCoordinator.refreshFreshness()
+            if workoutSessionCoordinator.notice != nil {
+                presentWorkoutAttention()
+            } else {
+                synchronizeRideMetricsSheet()
+            }
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
             routeLibrary.reload()
             stravaIntegrationCoordinator.activate()
@@ -1024,6 +1029,9 @@ struct ContentView: View {
     }
 
     private func synchronizeRideMetricsSheet() {
+        // HealthKit can recover a Watch mirror while this scene is still in
+        // the background. Present its controls when UIKit can show the sheet.
+        guard scenePhase == .active else { return }
         if workoutStore.presentation.isWorkoutActive {
             guard presentedSheet == nil,
                   savedRouteMapPreview == nil else { return }
@@ -1035,6 +1043,10 @@ struct ContentView: View {
     }
 
     private func restoreRideMetricsSheetIfNeeded() {
+        guard scenePhase == .active else {
+            isSheetDismissalInFlight = false
+            return
+        }
         guard workoutStore.presentation.isWorkoutActive,
               savedRouteMapPreview == nil else {
             isSheetDismissalInFlight = false
@@ -1043,7 +1055,8 @@ struct ContentView: View {
         }
         Task { @MainActor in
             await Task.yield()
-            guard presentedSheet == nil,
+            guard scenePhase == .active,
+                  presentedSheet == nil,
                   savedRouteMapPreview == nil,
                   workoutStore.presentation.isWorkoutActive else {
                 isSheetDismissalInFlight = false
@@ -1058,6 +1071,7 @@ struct ContentView: View {
     }
 
     private func presentWorkoutAttention() {
+        guard scenePhase == .active else { return }
         guard presentedSheet != .workoutDashboard else { return }
         if presentedSheet != nil {
             queuedSheetAfterDismiss = .workoutDashboard
