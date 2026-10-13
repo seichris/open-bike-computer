@@ -314,6 +314,14 @@ struct ContentView: View {
                     }
 
                     if !offlineMapManager.isMapAreaSelectionActive,
+                       shouldShowWorkoutRecoveryStatus {
+                        WorkoutRecordingStatusView(
+                            coordinator: workoutSessionCoordinator,
+                            store: workoutStore
+                        )
+                        .padding(.horizontal, 14)
+                        .padding(.top, 8)
+                    } else if !offlineMapManager.isMapAreaSelectionActive,
                        shouldShowWorkoutStatusCard {
                         WorkoutCompactCard(
                             store: workoutStore,
@@ -472,6 +480,9 @@ struct ContentView: View {
             synchronizeRideMetricsSheet()
             presentNearbyBicinoIfEligible()
             presentPendingBicinoSetupAppLinkIfEligible()
+            if workoutSessionCoordinator.notice != nil {
+                presentWorkoutAttention()
+            }
         }
         .onOpenURL { url in
             if BicinoAppLinkPolicy.isDeviceConnectionLink(url) {
@@ -529,6 +540,11 @@ struct ContentView: View {
             guard newValue == .active else { return }
             coordinator.applicationDidBecomeActive()
             workoutSessionCoordinator.refreshFreshness()
+            if workoutSessionCoordinator.notice != nil {
+                presentWorkoutAttention()
+            } else {
+                synchronizeRideMetricsSheet()
+            }
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
             routeLibrary.reload()
             stravaIntegrationCoordinator.activate()
@@ -1021,6 +1037,9 @@ struct ContentView: View {
     }
 
     private func synchronizeRideMetricsSheet() {
+        // HealthKit can recover a Watch mirror while this scene is still in
+        // the background. Present its controls when UIKit can show the sheet.
+        guard scenePhase == .active else { return }
         if workoutStore.presentation.isWorkoutActive {
             guard presentedSheet == nil,
                   savedRouteMapPreview == nil else { return }
@@ -1032,6 +1051,10 @@ struct ContentView: View {
     }
 
     private func restoreRideMetricsSheetIfNeeded() {
+        guard scenePhase == .active else {
+            isSheetDismissalInFlight = false
+            return
+        }
         guard workoutStore.presentation.isWorkoutActive,
               savedRouteMapPreview == nil else {
             isSheetDismissalInFlight = false
@@ -1040,7 +1063,8 @@ struct ContentView: View {
         }
         Task { @MainActor in
             await Task.yield()
-            guard presentedSheet == nil,
+            guard scenePhase == .active,
+                  presentedSheet == nil,
                   savedRouteMapPreview == nil,
                   workoutStore.presentation.isWorkoutActive else {
                 isSheetDismissalInFlight = false
@@ -1055,6 +1079,7 @@ struct ContentView: View {
     }
 
     private func presentWorkoutAttention() {
+        guard scenePhase == .active else { return }
         guard presentedSheet != .workoutDashboard else { return }
         if presentedSheet != nil {
             queuedSheetAfterDismiss = .workoutDashboard
@@ -1882,6 +1907,11 @@ struct ContentView: View {
                             )
                         )
                 }
+                .contextMenu {
+                    Button("Choose Recorder") {
+                        workoutSessionCoordinator.chooseRecorder()
+                    }
+                }
                 .buttonStyle(.plain)
                 .fixedSize(horizontal: true, vertical: false)
                 .layoutPriority(1)
@@ -1998,9 +2028,23 @@ struct ContentView: View {
         return "\(formatter.string(from: distance)) · \(minutes) min"
     }
 
+    private var shouldShowWorkoutRecoveryStatus: Bool {
+        // A reserved Watch ride can have no native mirror at all after a
+        // restart. Keep its recovery actions visible even with an idle store.
+        workoutSessionCoordinator.record?.owner == .watch
+            && workoutSessionCoordinator.record?.phase == .unresolved
+    }
+
     private var shouldShowWorkoutStatusCard: Bool {
-        !workoutStore.presentation.isWorkoutActive
-            && workoutStore.presentation.connectionState != .idle
+        switch workoutStore.presentation.connectionState {
+        case .awaitingFirstSnapshot, .stale, .disconnected, .failed:
+            // Recovery must remain reachable even if an automatic control
+            // sheet could not be presented during a background launch.
+            return true
+        default:
+            return !workoutStore.presentation.isWorkoutActive
+                && workoutStore.presentation.connectionState != .idle
+        }
     }
 
     private func navigationInstructionBanner(

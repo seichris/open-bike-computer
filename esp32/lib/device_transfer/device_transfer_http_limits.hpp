@@ -50,11 +50,13 @@ struct HttpResponseCompletionToken {
   uint32_t transferGeneration = 0;
   std::string method;
   std::string path;
+  uint64_t requestSequence = 0;
 
   bool matches(uint32_t generation, const std::string &requestMethod,
-               const std::string &requestPath) const {
+               const std::string &requestPath, uint64_t sequence) const {
     return transferGeneration != 0 && transferGeneration == generation &&
-           method == requestMethod && path == requestPath;
+           method == requestMethod && path == requestPath &&
+           requestSequence != 0 && requestSequence == sequence;
   }
 };
 
@@ -129,6 +131,23 @@ inline bool parseHttpUint64(const std::string &text, uint64_t &value) {
 }
 
 struct HttpSecurityHeaders {
+  std::string mapContentSession;
+  std::string mapLogicalID;
+  std::string mapManifestReceipt;
+  std::string mapSignedManifestReceipt;
+  std::string mapStreamBytes;
+  uint8_t operationIdentityHeadersSeen = 0;
+
+  std::string mapOperationID;
+  std::string mapOperationAdmissionEpoch;
+  bool mapOperationAdmissionEpochSeen = false;
+  uint64_t mapOperationAdmissionRevision = 0;
+  bool mapOperationAdmissionRevisionSeen = false;
+  bool hasMapOperationAdmissionRevision = false;
+  std::string mapStreamSHA256;
+  bool mapOperationSeen = false;
+  bool mapStreamSHA256Seen = false;
+  bool mapOperationDuplicate = false;
   std::string transferToken;
   std::string contentType;
   uint64_t contentLength = 0;
@@ -177,7 +196,44 @@ struct HttpSecurityHeaders {
   }
 
   void accept(const std::string &name, const std::string &value) {
-    if (name == "content-length") {
+    if (name == "x-map-content-session") {
+      mapOperationDuplicate = mapOperationDuplicate || (operationIdentityHeadersSeen & 1);
+      operationIdentityHeadersSeen |= 1;
+      mapContentSession = value;
+    } else if (name == "x-map-map-id") {
+      mapOperationDuplicate = mapOperationDuplicate || (operationIdentityHeadersSeen & 2);
+      operationIdentityHeadersSeen |= 2;
+      mapLogicalID = value;
+    } else if (name == "x-map-manifest-receipt") {
+      mapOperationDuplicate = mapOperationDuplicate || (operationIdentityHeadersSeen & 4);
+      operationIdentityHeadersSeen |= 4;
+      mapManifestReceipt = value;
+    } else if (name == "x-map-signed-manifest-receipt") {
+      mapOperationDuplicate = mapOperationDuplicate || (operationIdentityHeadersSeen & 8);
+      operationIdentityHeadersSeen |= 8;
+      mapSignedManifestReceipt = value;
+    } else if (name == "x-map-stream-bytes") {
+      mapOperationDuplicate = mapOperationDuplicate || (operationIdentityHeadersSeen & 16);
+      operationIdentityHeadersSeen |= 16;
+      mapStreamBytes = value;
+    } else if (name == "x-map-operation-admission-epoch") {
+      mapOperationDuplicate = mapOperationDuplicate || mapOperationAdmissionEpochSeen;
+      mapOperationAdmissionEpoch = mapOperationAdmissionEpochSeen ? "" : value;
+      mapOperationAdmissionEpochSeen = true;
+    } else if (name == "x-map-operation-admission-revision") {
+      mapOperationDuplicate = mapOperationDuplicate || mapOperationAdmissionRevisionSeen;
+      hasMapOperationAdmissionRevision = !mapOperationAdmissionRevisionSeen &&
+          parseHttpUint64(value,mapOperationAdmissionRevision);
+      mapOperationAdmissionRevisionSeen = true;
+    } else if (name == "x-map-operation-id") {
+      mapOperationDuplicate = mapOperationDuplicate || mapOperationSeen;
+      mapOperationID = mapOperationSeen ? "" : value;
+      mapOperationSeen = true;
+    } else if (name == "x-map-stream-sha256") {
+      mapOperationDuplicate = mapOperationDuplicate || mapStreamSHA256Seen;
+      mapStreamSHA256 = mapStreamSHA256Seen ? "" : value;
+      mapStreamSHA256Seen = true;
+    } else if (name == "content-length") {
       hasContentLength = !contentLengthSeen &&
                          parseHttpUint64(value, contentLength);
       contentLengthSeen = true;
@@ -208,7 +264,7 @@ struct HttpSecurityHeaders {
     }
   }
 
-  bool hasAmbiguousFraming() const { return transferEncodingSeen; }
+  bool hasAmbiguousFraming() const { return transferEncodingSeen || mapOperationDuplicate; }
 };
 
 } // namespace device_transfer

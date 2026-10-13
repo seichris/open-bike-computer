@@ -400,6 +400,28 @@ class RideDiagnosticsTests(unittest.TestCase):
         )
         self.assertEqual(gap["fields"]["storageErrorCount"], 2)
 
+    def test_lifecycle_resource_fields_preserve_types_and_privacy(self):
+        fields = {
+            "bootSequence": 7, "firmwareFingerprint": "A1B2C3D4",
+            "operationId": "123456781234abcdABCD123456789abc",
+            "cleanupFailed": False, "freeBytes": 0xffffffff,
+            "largestBytes": 500, "minimumFreeBytes": 600,
+            "minimumLargestBytes": 400, "tlsStackBytes": 0,
+            "ownerStackBytes": 1024, "rendererStackBytes": 2048,
+            "stackAvailableMask": 7,
+        }
+        self.assertEqual(ride_diagnostics.validate_event(firmware_event(fields=fields))["fields"], fields)
+        for key, invalid in (("operationId", 123), ("cleanupFailed", 0),
+                             ("freeBytes", True), ("largestBytes", "500"),
+                             ("minimumFreeBytes", {}), ("minimumLargestBytes", []),
+                             ("tlsStackBytes", "0"), ("ownerStackBytes", False),
+                             ("rendererStackBytes", "2048"), ("stackAvailableMask", True),
+                             ("operationId", "Bearer private"), ("operationId", "x" * 257),
+                             ("sessionToken", "private"), ("password", "private")):
+            invalid_fields = dict(fields, **{key: invalid})
+            with self.subTest(key=key, invalid=invalid), self.assertRaises(ride_diagnostics.DiagnosticError):
+                ride_diagnostics.validate_event(firmware_event(fields=invalid_fields))
+
     def test_rejects_source_specific_field_type_mismatches(self):
         with self.assertRaises(ride_diagnostics.DiagnosticError):
             ride_diagnostics.validate_event(

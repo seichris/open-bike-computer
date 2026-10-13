@@ -26,6 +26,8 @@ nonisolated struct DeviceTransferTLSChallengeEvaluation {
 
 nonisolated struct DeviceTransferPinnedSessionSnapshot: Equatable, Sendable {
     var tlsChallengeOutcome: DeviceTransferTLSChallengeOutcome? = nil
+    var metricsAvailable = false
+    var transactionCount = 0
     var waitedForConnectivity = false
     var connectStarted = false
     var connectCompleted = false
@@ -45,13 +47,17 @@ nonisolated struct DeviceTransferPinnedSessionSnapshot: Equatable, Sendable {
         var fields = [
             "tlsChallenge": tlsChallengeOutcome?.rawValue ?? "not_seen",
             "waitedForConnectivity": String(waitedForConnectivity),
-            "connectStarted": String(connectStarted),
-            "connectCompleted": String(connectCompleted),
-            "tlsStarted": String(tlsStarted),
-            "tlsCompleted": String(tlsCompleted),
-            "connectionReused": String(reusedConnection),
-            "proxyConnection": String(proxyConnection),
+            "metricsAvailable": String(metricsAvailable),
+            "transactionCount": String(transactionCount),
         ]
+        if metricsAvailable && transactionCount > 0 {
+            fields["connectStarted"] = String(connectStarted)
+            fields["connectCompleted"] = String(connectCompleted)
+            fields["tlsStarted"] = String(tlsStarted)
+            fields["tlsCompleted"] = String(tlsCompleted)
+            fields["connectionReused"] = String(reusedConnection)
+            fields["proxyConnection"] = String(proxyConnection)
+        }
         if let connectDurationMilliseconds {
             fields["connectDurationMs"] = String(connectDurationMilliseconds)
         }
@@ -122,6 +128,10 @@ nonisolated final class DeviceTransferPinnedSessionDiagnostics:
         expectedHost: String,
         expectedPort: Int
     ) {
+        lock.lock()
+        current.metricsAvailable = true
+        current.transactionCount = metrics.transactionMetrics.count
+        lock.unlock()
         guard let transaction = metrics.transactionMetrics.last else { return }
         let remoteEndpointMatched: Bool?
         if let remoteAddress = transaction.remoteAddress,

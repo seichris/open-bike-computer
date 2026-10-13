@@ -20,7 +20,8 @@ final class WatchWorkoutDeviceBridge {
 
     private func receive(_ envelope: WorkoutEnvelopeV1?) {
         switch forwardingState.receive(envelope) {
-        case let .forward(snapshot, sessionID, sessionToken):
+        case let .forward(snapshot, sessionID, sessionToken),
+             let .finish(snapshot, sessionID, sessionToken):
             guard let sample =
                     WorkoutDeviceTelemetrySampleMapperV1.directWatchSample(
                         snapshot: snapshot,
@@ -30,6 +31,10 @@ final class WatchWorkoutDeviceBridge {
             guard let frames = WorkoutDeviceFrameBuilder.frames(
                 for: sample
             ) else { return }
+            if snapshot.state == .ended || snapshot.state == .failed {
+                deviceLink.endWorkoutDemandAfterSending(frames)
+                return
+            }
             deviceLink.setWorkoutDemand(true)
             deviceLink.updateWorkout(
                 frames,
@@ -47,7 +52,7 @@ final class WatchWorkoutDeviceBridge {
                     isCurrentSnapshot: true
                 )
             ) else { return }
-            deviceLink.endWorkoutDemandAfterClearing(idle)
+            deviceLink.endWorkoutDemandAfterSending(idle)
         case .ignore:
             break
         }

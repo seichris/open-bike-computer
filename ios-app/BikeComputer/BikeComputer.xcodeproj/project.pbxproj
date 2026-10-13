@@ -35,7 +35,10 @@
 		57A00A012F00000100000001 /* RideDetectionSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00A002F00000100000001 /* RideDetectionSettingsStore.swift */; };
 		57A00B012F00000100000001 /* RideAutomationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00B002F00000100000001 /* RideAutomationCoordinator.swift */; };
 		57A00C012F00000100000001 /* RideDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C002F00000100000001 /* RideDiagnostics.swift */; };
+		57A01F012F00000100000001 /* DiagnosticsAcquisitionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A01F002F00000100000001 /* DiagnosticsAcquisitionStore.swift */; };
 		57A00C032F00000100000001 /* RideDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C022F00000100000001 /* RideDiagnosticsTests.swift */; };
+		57A00C092F00000100000001 /* DiagnosticsSchema.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C082F00000100000001 /* DiagnosticsSchema.generated.swift */; };
+		57A00C0B2F00000100000001 /* DiagnosticsCapturePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C0A2F00000100000001 /* DiagnosticsCapturePolicy.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -130,7 +133,10 @@
 		57A00A002F00000100000001 /* RideDetectionSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RideDetectionSettingsStore.swift (Tests)"; path = BikeComputer/Managers/RideDetectionSettingsStore.swift; sourceTree = "<group>"; };
 		57A00B002F00000100000001 /* RideAutomationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RideAutomationCoordinator.swift (Tests)"; path = BikeComputer/Managers/RideAutomationCoordinator.swift; sourceTree = "<group>"; };
 		57A00C002F00000100000001 /* RideDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Utilities/RideDiagnostics.swift; sourceTree = "<group>"; };
+		57A01F002F00000100000001 /* DiagnosticsAcquisitionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/DiagnosticsAcquisitionStore.swift; sourceTree = "<group>"; };
 		57A00C022F00000100000001 /* RideDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../BikeComputerTests/RideDiagnosticsTests.swift; sourceTree = "<group>"; };
+		57A00C082F00000100000001 /* DiagnosticsSchema.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Utilities/DiagnosticsSchema.generated.swift; sourceTree = "<group>"; };
+		57A00C0A2F00000100000001 /* DiagnosticsCapturePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Utilities/DiagnosticsCapturePolicy.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -293,6 +299,9 @@
 				57A00A002F00000100000001 /* RideDetectionSettingsStore.swift */,
 				57A00B002F00000100000001 /* RideAutomationCoordinator.swift */,
 				57A00C002F00000100000001 /* RideDiagnostics.swift */,
+				57A01F002F00000100000001 /* DiagnosticsAcquisitionStore.swift */,
+				57A00C0A2F00000100000001 /* DiagnosticsCapturePolicy.swift */,
+				57A00C082F00000100000001 /* DiagnosticsSchema.generated.swift */,
 				57A00C022F00000100000001 /* RideDiagnosticsTests.swift */,
 				57A006022F00000100000001 /* WatchHeartRateZoneSettingsReceiver.swift */,
 				57A005002F00000100000001 /* Assets.xcassets */,
@@ -606,6 +615,9 @@
 				57A009152F00000100000001 /* WorkoutLiveActivityIntentTests.swift in Sources */,
 				57A009162F00000100000001 /* WorkoutLiveActivityControllerTests.swift in Sources */,
 				57A00C012F00000100000001 /* RideDiagnostics.swift in Sources */,
+				57A01F012F00000100000001 /* DiagnosticsAcquisitionStore.swift in Sources */,
+				57A00C0B2F00000100000001 /* DiagnosticsCapturePolicy.swift in Sources */,
+				57A00C092F00000100000001 /* DiagnosticsSchema.generated.swift in Sources */,
 				57A00C032F00000100000001 /* RideDiagnosticsTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

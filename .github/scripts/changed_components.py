@@ -17,11 +17,13 @@ FIRMWARE_TARGETS = {
         "WAVESHARE_AMOLED_175",
         "WAVESHARE_AMOLED_175_REMOTE_DEBUG",
         "WAVESHARE_AMOLED_175_PRODUCTION",
+        "WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION",
     ),
     "206": (
         "WAVESHARE_AMOLED_206",
         "WAVESHARE_AMOLED_206_REMOTE_DEBUG",
         "WAVESHARE_AMOLED_206_PRODUCTION",
+        "WAVESHARE_AMOLED_206_LIFECYCLE_QUALIFICATION",
     ),
 }
 FULL_CI_PATHS = {
@@ -62,10 +64,12 @@ FIRMWARE_MANIFEST_PATHS = {
     "tools/firmware_manifest.py",
     "tools/tests/test_firmware_manifest.py",
 }
-RIDE_DIAGNOSTICS_TOOL_PATHS = {"tools/ride_diagnostics.py"}
+RIDE_DIAGNOSTICS_TOOL_PATHS = {"tools/ride_diagnostics.py", "tools/bicino"}
 SHARED_RIDE_BLE_CONTRACT_PATHS = {
     "protocol/ride-ble-contract-v1.json",
     "tools/generate_ride_ble_contract.py",
+    "protocol/diagnostics/registry-v2.json",
+    "tools/generate_diagnostics_contract.py",
 }
 FIRMWARE_RELEASE_TOOL_PATHS = {
     ".github/firmware-release-authority.json",
@@ -184,6 +188,7 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
             or path in FIRMWARE_CONTRACT_PATHS
             or path in FIRMWARE_RELEASE_TOOL_PATHS
             or path in RIDE_DIAGNOSTICS_TOOL_PATHS
+            or path.startswith("tools/bicino_diagnostics/")
         ):
             selected["firmware_host"] = True
 

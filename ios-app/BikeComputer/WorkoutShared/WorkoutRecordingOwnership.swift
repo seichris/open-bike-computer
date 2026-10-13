@@ -1,5 +1,21 @@
 import Foundation
 
+/// Segment boundaries stay in HealthKit metadata. HealthKit accepts strings,
+/// not arbitrary binary Data, as metadata values.
+nonisolated enum WorkoutRecordingMetadataCodec {
+    static func encode<T: Encodable>(_ value: T) throws -> String {
+        String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
+    }
+
+    static func decode<T: Decodable>(_ type: T.Type, from value: Any?) -> T? {
+        let data: Data
+        if let text = value as? String { data = Data(text.utf8) }
+        else if let legacy = value as? Data { data = legacy }
+        else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+}
+
 /// Recording ownership is a per-ride decision, never a connectivity heuristic.
 /// This is deliberately not a BLE version change or a Watch recording mode.
 nonisolated enum WorkoutRecordingOwner: String, Codable, Sendable {

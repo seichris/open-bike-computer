@@ -455,6 +455,23 @@ struct WatchDirectRidePreparationResponseV1: Codable, Equatable, Sendable {
 }
 
 enum WatchDirectRidePreparationPolicyV1 {
+    static func interactiveReleasePayloads(
+        pending: [Data],
+        inFlight: [Data],
+        activated: Bool,
+        reachable: Bool
+    ) -> [Data] {
+        guard activated, reachable else { return [] }
+        var seen = Set<Data>()
+        let candidates = Array(pending.prefix(16)) + Array(inFlight.prefix(16))
+        return candidates.filter { payload in
+            guard let request = try?
+                    WatchDirectRidePreparationRequestV1.decode(payload),
+                  request.operation == .release else { return false }
+            return seen.insert(payload).inserted
+        }
+    }
+
     static func rejectionCode(
         requestedDeviceID: String,
         selectedDeviceID: String?,

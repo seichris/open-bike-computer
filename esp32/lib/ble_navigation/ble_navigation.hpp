@@ -271,6 +271,7 @@ public:
    * @brief Process any pending BLE events (call from main loop)
    */
   void process();
+  bool pollShutdownQuiescence();
 
   /** Queue a fresh map-status snapshot after the renderer learns whether the
    * current location is covered by the active map. */

@@ -19,6 +19,7 @@ enum class MapStreamInstallState {
   Receiving,
   Paused,
   Finalizing,
+  Prepared,
   Ready,
   Failed,
 };
@@ -112,7 +113,8 @@ public:
                           MapStreamCheckpointPolicy checkpointPolicy = {},
                           MapStreamNowCallback now = {},
                           std::shared_ptr<MapStreamStorage> storage = {},
-                          MapStreamStatusCallback onStatus = {});
+                          MapStreamStatusCallback onStatus = {},
+                          std::string operationID = {});
   ~MapStreamInstallSession() override;
 
   bool onManifest(const VerifiedMapStreamManifest &manifest,
@@ -132,6 +134,7 @@ public:
 private:
   std::string storageRoot_;
   std::string sessionId_;
+  std::string operationID_;
   MapStreamCheckpointPolicy checkpointPolicy_;
   MapStreamNowCallback now_;
   std::shared_ptr<MapStreamStorage> storage_;
