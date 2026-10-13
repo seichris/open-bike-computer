@@ -850,6 +850,8 @@ final class RideDiagnosticsRecorder:
 #if HOST_TESTING
     func suspendWriterForTesting() { queue.suspend() }
     func resumeWriterForTesting() { queue.resume() }
+    private var retentionInventoryScans = 0
+    var retentionInventoryScansForTesting: Int { queue.sync { retentionInventoryScans } }
 #endif
 
     private func enqueue(_ pending: PendingRecord) {
@@ -1669,9 +1671,30 @@ final class RideDiagnosticsRecorder:
             .appendingPathComponent("app", isDirectory: true)
             .appendingPathComponent(processId.uuidString.lowercased(), isDirectory: true)
             .appendingPathComponent("manifest.json")
+        let previousBytes: Int
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize else {
+                throw RideDiagnosticsError.unavailable("Diagnostic manifest size is unavailable.")
+            }
+            previousBytes = size
+        } else {
+            previousBytes = 0
+        }
         try data.write(to: url, options: .atomic)
         applyFileProtection(to: url)
-        updateRetainedBytes()
+        // Routine 16-record checkpoints and flushes must not scan/sort every
+        // historical device chunk on the writer queue. Append/import/pruning
+        // own the other byte changes; only this sidecar was replaced here.
+        retainedBytesOnQueue += data.count - previousBytes
+        publishRetainedBytes(retainedBytesOnQueue)
+        if let chunk = currentChunkURL,
+           let date = try? chunk.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.oldestRetainedAt = min(self.oldestRetainedAt ?? date, date)
+                self.newestRetainedAt = max(self.newestRetainedAt ?? date, date)
+            }
+        }
         if enforceRetention {
             try pruneRetention()
         }
@@ -2192,6 +2215,9 @@ final class RideDiagnosticsRecorder:
     }
 
     private func allDiagnosticRetentionFiles() -> [URL] {
+#if HOST_TESTING
+        retentionInventoryScans += 1
+#endif
         let importedPrefix = rootURL
             .appendingPathComponent("imported-device", isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL.path + "/"

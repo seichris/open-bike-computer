@@ -246,7 +246,80 @@ enum RideDiagnosticsHostTests {
         precondition(!stillPruned.isEmpty, "export must not resurrect evidence into ordinary retention")
     }
 
+    /// Routine durability checkpoints must stay independent of historical
+    /// corpus size. Retention/import/export still perform full reconciliation.
+    static func routineCheckpointsAvoidHistoricalInventory() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diagnostics-checkpoints-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let historical = root.appendingPathComponent("imported-device/0123456789abcdef/1")
+        try FileManager.default.createDirectory(at: historical, withIntermediateDirectories: true)
+        for number in 1...64 {
+            try Data("historical evidence\n".utf8).write(to:
+                historical.appendingPathComponent(String(format: "events-%06d.jsonl", number)))
+        }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        let before = recorder.retentionInventoryScansForTesting
+        for number in 0..<48 {
+            recorder.record(category: .ble, event: "checkpoint_sample", fields: ["sequence": String(number)])
+        }
+        recorder.flush()
+        precondition(recorder.retentionInventoryScansForTesting == before,
+            "routine checkpoints must not walk unrelated retained files")
+        let files = try require(FileManager.default.enumerator(at: root,
+            includingPropertiesForKeys: [.fileSizeKey])).compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "jsonl" || $0.lastPathComponent == "manifest.json" }
+        let actualBytes = try files.reduce(0) { total, url in
+            total + (try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+        }
+        precondition(recorder.health.retainedBytes == actualBytes,
+            "incremental checkpoint accounting must match stored bytes")
+        let appRecords = try files.filter { $0.path.contains("/app/") && $0.pathExtension == "jsonl" }
+            .flatMap { url in
+                try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                    try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+                }
+            }
+        precondition(appRecords.filter { $0.event == "checkpoint_sample" }.count == 48)
+        precondition(recorder.health.droppedEventCount == 0)
+    }
+
+    static func queueOverflowRetainsCriticalEvidenceAndReportsLoss() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("diagnostics-overflow-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        recorder.suspendWriterForTesting()
+        for number in 0..<300 {
+            recorder.record(category: .ble, event: "overflow_sample", fields: ["sequence": String(number)])
+        }
+        recorder.record(level: .warning, category: .workout, event: "critical_after_overflow")
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        let files = try require(FileManager.default.enumerator(at: root,
+            includingPropertiesForKeys: nil)).compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "jsonl" }
+        let records = try files.flatMap { url in
+            try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+            }
+        }
+        precondition(records.filter { $0.event == "overflow_sample" }.count == 255)
+        precondition(records.filter { $0.event == "critical_after_overflow" }.count == 1,
+            "critical evidence must displace a normal record in a full queue")
+        precondition(recorder.health.droppedEventCount == 45)
+        let reportedDrops = records.filter { $0.event == "queue_dropped" }.reduce(0) {
+            $0 + (Int($1.fields["droppedCount"] ?? "") ?? 0)
+        }
+        precondition(reportedDrops == 45,
+            "persisted loss counters must include rejection and critical eviction")
+    }
+
     static func main() async throws {
+        try queueOverflowRetainsCriticalEvidenceAndReportsLoss()
+        try routineCheckpointsAvoidHistoricalInventory()
         try storedZIPChecksumsMatchKnownVectors()
         try await oversizedAppSnapshotReportsCacheFull()
         try await cacheAdmissionFailureIsRecorded()
