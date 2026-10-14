@@ -322,9 +322,10 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     }
 
     func markSegment() {
+        let endedAt = Date()
         guard let builder, state == .running, record?.finishChoice == nil,
               let candidate = segments.candidate(
-                endedAt: Date(), cumulativeElapsedTime: builder.elapsedTime,
+                endedAt: endedAt, cumulativeElapsedTime: builder.elapsedTime(at: endedAt),
                 cumulativeDistanceMeters: distanceMeters,
                 cumulativeDistanceSource: .iPhoneLocation
               ), store.markPendingControl(.markSegment, sequence: sequence) else { return }
@@ -592,7 +593,11 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
                 speed: raw.speed >= 0 ? raw.speed : nil
             )
         }
-        let elapsed = metric(savedWorkout?.duration ?? builder?.elapsedTime, .seconds)
+        // The live property reflects the builder's collected contents and can
+        // stay unchanged after recovery. Evaluate HealthKit's pause/resume
+        // history at this snapshot's date rather than publishing a cached time
+        // with a fresh capture timestamp.
+        let elapsed = metric(savedWorkout?.duration ?? builder?.elapsedTime(at: captured), .seconds)
         let hr = metric(currentHR?.doubleValue(for: heartUnit), .beatsPerMinute, at: hrDate)
         let avgHR = metric(averageHR?.doubleValue(for: heartUnit), .beatsPerMinute)
         let kcal = metric(energy?.doubleValue(for: .kilocalorie()), .kilocalories)

@@ -360,8 +360,8 @@ struct WorkoutSessionCoordinatorTests {
         recoveredWatch.emit(id: recoveredWatchID, state: .paused)
         watchRecovery.recoverIfNeeded()
         await spin { watchRecovery.recoveryComplete }
-        check(deferredPhone.recoveries == 1,
-              "Native recovery assists reattachment without blocking the selected Watch on failure")
+        check(deferredPhone.recoveries == 0,
+              "A reserved Watch workout reattaches without a concurrent primary recovery probe")
         check(watchRecovery.record?.sessionID == recoveredWatchID
                 && watchRecovery.record?.phase == .paused && watchRecovery.notice == nil,
               "The credentialed paused Watch snapshot recovers its reserved identity")
@@ -375,7 +375,7 @@ struct WorkoutSessionCoordinatorTests {
         check(watchRecovery.resetTerminalPresentation(),
               "Only a confirmed Watch terminal disposition clears its owner")
         await spin { watchRecovery.notice?.kind == .recovery }
-        check(deferredPhone.recoveries == 2 && !watchRecovery.recoveryComplete,
+        check(deferredPhone.recoveries == 1 && !watchRecovery.recoveryComplete,
               "Clearing Watch ownership requires a fresh primary phone probe")
         check(!watchRecovery.requestStart(explicitOwner: .iphone)
                 && deferredPhone.starts == 0 && recoveredWatch.starts == 0,
@@ -383,8 +383,39 @@ struct WorkoutSessionCoordinatorTests {
         deferredPhone.recoveryFails = false
         watchRecovery.retryRecovery()
         await spin { watchRecovery.recoveryComplete }
-        check(deferredPhone.recoveries == 3 && watchRecovery.record == nil,
+        check(deferredPhone.recoveries == 2 && watchRecovery.record == nil,
               "A successful deferred probe releases only the finished owner")
+
+        let retryDisk = MemoryRecordingStore()
+        retryDisk.record = WorkoutRecordingRecord(owner: .watch,
+            sessionID: UUID(), requestedAt: Date().addingTimeInterval(-60))
+        let retryWatch = FakeWatch()
+        let retryPhone = FakePhone(retryDisk)
+        retryPhone.recoveryFails = true
+        let guardedRetry = WorkoutSessionCoordinator(watch: retryWatch,
+            watchAvailability: FakeAvailability(), persistence: retryDisk,
+            phone: retryPhone)
+        guardedRetry.recoverIfNeeded()
+        await spin { guardedRetry.recoveryComplete }
+        check(retryPhone.recoveries == 0 && retryWatch.starts == 0,
+              "Cold Watch recovery leaves the primary probe deferred without starting a workout")
+        guardedRetry.retryWatchStart()
+        await spin { guardedRetry.notice?.kind == .recovery }
+        check(retryPhone.recoveries == 1 && retryWatch.starts == 0,
+              "An explicit Watch retry cannot start while primary recovery is unresolved")
+        check(!guardedRetry.requestStart(explicitOwner: .iphone)
+                && retryPhone.starts == 0,
+              "A failed retry probe cannot switch to a new phone recording")
+        await spin { retryPhone.recoveries == 2
+            && guardedRetry.notice?.kind == .recovery }
+        check(!guardedRetry.recoveryComplete && retryWatch.starts == 0,
+              "Automatic recovery after a failed retry must preserve the required primary probe")
+        retryPhone.recoveryFails = false
+        guardedRetry.retryWatchStart()
+        await spin { retryWatch.starts == 1 }
+        check(retryPhone.recoveries == 3 && retryWatch.starts == 1
+                && retryPhone.starts == 0,
+              "Only a successful explicit retry probe admits the reserved Watch recorder")
 
         let (recovery, watch6, phone6, _, disk6) = harness()
         phone6.recoveryFails = true

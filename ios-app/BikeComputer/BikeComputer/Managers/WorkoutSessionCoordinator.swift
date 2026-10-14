@@ -62,6 +62,8 @@ final class WorkoutSessionCoordinator: ObservableObject {
     private var storageFailed = false
     private var isResetting = false
     private var phoneRecoveryDeferredForWatch = false
+    private var pendingWatchRetrySessionID: UUID?
+    private var primaryRecoveryRequiredForWatch = false
 
     init(
         watch: any WorkoutWatchRecording,
@@ -138,30 +140,25 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 if record == nil { record = persisted }
                 storageFailed = false
                 if let phone {
-                    if record?.owner == .watch, record?.phase != .finished {
-                        // Native recovery can reattach a mirrored session after
-                        // process loss. Its primary-recorder check can also fail
-                        // while a valid Watch mirror is already attached. Keep
-                        // that assist, but do not hide the selected Watch's
-                        // controls on failure. Probe again before a new ride.
+                    if record?.owner == .watch, record?.phase != .finished,
+                       !primaryRecoveryRequiredForWatch {
+                        // The launch-time mirroring handler owns Watch recovery.
+                        // Do not run primary-session recovery concurrently with
+                        // that attachment. A reserved Watch owner already blocks
+                        // new recordings. Probe before an explicit Watch retry
+                        // or after the owner is finished or checked idle.
                         phoneRecoveryDeferredForWatch = true
-                        do { try await phone.recover(expected: record) }
-                        catch {
-                            // A discovered phone owner must still be reconciled;
-                            // only the reserved Watch ride can use this fallback.
-                            guard phone.record == nil, record?.owner == .watch else {
-                                throw error
-                            }
-                        }
                     } else {
                         try await phone.recover(expected: record)
-                        phoneRecoveryDeferredForWatch = false
+                        primaryRecoveryRequiredForWatch = false
                         if let phoneRecord = phone.record {
                             record = phoneRecord
                             store.followWorkoutState(from: phone.store, owner: .iphone)
                         } else if record?.owner == .iphone {
                             record = try persistence.load()
                         }
+                        phoneRecoveryDeferredForWatch = record?.owner == .watch
+                            && record?.phase != .finished
                     }
                 } else if record?.owner == .iphone {
                     throw WorkoutRecordingStore.StoreError.invalidRecord
@@ -169,6 +166,14 @@ final class WorkoutSessionCoordinator: ObservableObject {
                 recoveryComplete = true
                 receiveWatch(watch.store.presentation)
                 if notice?.kind == .recovery { notice = nil }
+                if let retryID = pendingWatchRetrySessionID {
+                    pendingWatchRetrySessionID = nil
+                    pendingAutomaticChoice = false
+                    if record?.owner == .watch, record?.sessionID == retryID,
+                       record?.phase == .unresolved, phone?.record == nil {
+                        _ = watch.startOutdoorCyclingOnWatch()
+                    }
+                }
                 if pendingAutomaticChoice {
                     pendingAutomaticChoice = false
                     requestStart()
@@ -182,6 +187,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
                     message: phone?.message ?? "Bicino could not reconcile the existing workout. Unlock iPhone and retry; no new recording has been started.")
                 recoveryComplete = false
                 pendingAutomaticChoice = false
+                pendingWatchRetrySessionID = nil
             }
         }
     }
@@ -499,7 +505,16 @@ final class WorkoutSessionCoordinator: ObservableObject {
     }
 
     func retryWatchStart() {
-        guard record?.owner == .watch, record?.phase == .unresolved else { return }
+        guard record?.owner == .watch, record?.phase == .unresolved,
+              recoveryTask == nil, startTask == nil else { return }
+        if phoneRecoveryDeferredForWatch {
+            // A retry can start a new primary workout on Watch. Resolve the
+            // deferred phone probe before admitting that explicit action.
+            pendingWatchRetrySessionID = record?.sessionID
+            primaryRecoveryRequiredForWatch = true
+            retryRecovery()
+            return
+        }
         // Retry only the original owner, never fall back to phone.
         _ = watch.startOutdoorCyclingOnWatch()
     }
