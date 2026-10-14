@@ -42,6 +42,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private var recoveredRoute = false
     private var insertedRoutePoints = 0
     private var startDate: Date?
+    private var nativeTransitionTask: Task<Void, Error>?
+    private var nativeTransitionTaskID: UUID?
+    private var nativeTransitionGeneration: UInt64 = 0
 #if DEBUG
     private var lastBuilderDebugCheckpoint: NSDictionary?
 #endif
@@ -90,6 +93,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
 
     deinit {
         timer?.cancel()
+        nativeTransitionTask?.cancel()
         controlTimeout?.cancel()
         finalization?.cancel()
         flushTask?.cancel()
@@ -272,6 +276,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         builder.delegate = self
         recordBuilderDebugCheckpoint(reason: "recoveredBeforeDataSource")
         configureDataSource(builder, configuration: recovered.workoutConfiguration)
+        try await drainNativeTransitions(builder: builder, sessionID: id)
         store.beginLocalWorkout()
         generation = UUID()
         sequence = 0
@@ -314,6 +319,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
 
     private func requestTransition(_ control: WorkoutControlV1) {
         guard let session, record?.finishChoice == nil,
+              record?.pendingNativeTransitions?.isEmpty != false,
               (control == .pause && state == .running) || (control == .resume && state == .paused) else { return }
         store.releasePendingSegmentForLifecycleControl()
         guard store.markPendingControl(control) else { return }
@@ -371,12 +377,25 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     func finish(_ choice: WorkoutRecordingDisposition) {
         guard let record, let session, let next = record.finishing(choice),
               finalization == nil, store.presentation.pendingControl != .markSegment else { return }
+        if choice == .save,
+           record.pendingNativeTransitions?.isEmpty == false || store.presentation.pendingControl != nil {
+            message = "The workout transition is still being recorded. Wait or reopen Bicino to recover it before saving."
+            store.recordingMessage = message
+            return
+        }
         if choice == .save, !collectionStarted {
             message = "This recording has not started collecting. Wait for startup, or explicitly discard the interrupted setup."
             store.recordingMessage = message
             return
         }
-        do { try persist(next) }
+        var admitted = next
+        if choice == .discard {
+            nativeTransitionTask?.cancel()
+            nativeTransitionTask = nil
+            nativeTransitionTaskID = nil
+            admitted.pendingNativeTransitions = nil
+        }
+        do { try persist(admitted) }
         catch {
             message = "The finish choice could not be stored safely. The workout has not been stopped. Try again after unlocking iPhone."
             store.recordingMessage = message
@@ -474,6 +493,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     }
 
     func resetFinished() {
+        nativeTransitionTask?.cancel()
+        nativeTransitionTask = nil
+        nativeTransitionTaskID = nil
         guard record == nil || record?.phase == .finished else { return }
         timer?.cancel(); timer = nil
         controlTimeout?.cancel(); controlTimeout = nil
@@ -502,6 +524,56 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         // simultaneously collect system-generated cycling distance samples.
         source.disableCollection(for: Self.distanceType)
         if builder.dataSource == nil { builder.dataSource = source }
+    }
+
+    private static let nativeTransitionMetadataKey = "bicinoPhoneNativeTransitionID.v1"
+
+    private func recordNativeTransition(paused: Bool, at date: Date) async throws {
+        guard let builder, let record, !builder.shouldCollectWorkoutEvents else { return }
+        let intent = WorkoutNativeTransitionIntent(id: UUID(), paused: paused, capturedAt: date)
+        guard let next = record.addingNativeTransition(intent) else {
+            throw RecorderError.identityMismatch
+        }
+        try persist(next)
+        try await drainNativeTransitions(builder: builder, sessionID: record.sessionID)
+    }
+
+    private func drainNativeTransitions(builder: HKLiveWorkoutBuilder, sessionID: UUID) async throws {
+        if let task = nativeTransitionTask { try await task.value; return }
+        let attemptID = UUID()
+        nativeTransitionTaskID = attemptID
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if nativeTransitionTaskID == attemptID {
+                    nativeTransitionTask = nil
+                    nativeTransitionTaskID = nil
+                }
+            }
+            while self.builder === builder, record?.sessionID == sessionID,
+                  record?.finishChoice != .discard,
+                  let intent = record?.pendingNativeTransitions?.first {
+                try Task.checkCancellation()
+                let type: HKWorkoutEventType = intent.paused ? .pause : .resume
+                let alreadyWritten = builder.workoutEvents.contains {
+                    $0.metadata?[Self.nativeTransitionMetadataKey] as? String == intent.id.uuidString
+                        || ($0.type == type && $0.dateInterval.start == intent.capturedAt)
+                }
+                if !alreadyWritten {
+                    try await builder.addWorkoutEvents([HKWorkoutEvent(
+                        type: type, dateInterval: DateInterval(start: intent.capturedAt, duration: 0),
+                        metadata: [Self.nativeTransitionMetadataKey: intent.id.uuidString]
+                    )])
+                }
+                guard self.builder === builder, var next = record,
+                      next.sessionID == sessionID, next.finishChoice != .discard else { return }
+                next.pendingNativeTransitions?.removeAll { $0.id == intent.id }
+                if next.pendingNativeTransitions?.isEmpty == true { next.pendingNativeTransitions = nil }
+                try persist(next)
+            }
+        }
+        nativeTransitionTask = task
+        try await task.value
     }
 
     private func recordBuilderDebugCheckpoint(reason: String) {
@@ -607,7 +679,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     }
 
     private func publish(error: WorkoutSafeErrorCodeV1? = nil) {
-        guard let record else { return }
+        guard let record, record.pendingNativeTransitions?.isEmpty != false else { return }
         let now = Date()
         let captured = endDate ?? now
         func metric(_ value: Double?, _ unit: WorkoutMetricUnitV1, at date: Date? = nil,
@@ -764,10 +836,28 @@ extension PhoneWorkoutRecorder: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDe
             switch toState {
             case .running, .paused:
                 guard record?.finishChoice == nil else { workoutSession.stopActivity(with: endDate ?? date); return }
+                nativeTransitionGeneration &+= 1
+                let transitionGeneration = nativeTransitionGeneration
+                let origin = pendingTransitionOrigin ?? (fromState == .prepared ? .manual : .unknown)
+                pendingTransitionOrigin = nil
+                if (toState == .paused && fromState == .running)
+                    || (toState == .running && fromState == .paused) {
+                    do {
+                        try await recordNativeTransition(paused: toState == .paused, at: date)
+                    } catch {
+                        guard session === workoutSession else { return }
+                        message = "The workout transition could not be recorded. Reopen Bicino to retry this original workout before saving."
+                        store.recordingMessage = message
+                        store.failPendingControl(toState == .paused ? .pause : .resume, error: .sessionFailed)
+                        return
+                    }
+                }
+                guard session === workoutSession,
+                      nativeTransitionGeneration == transitionGeneration else { return }
                 state = toState == .running ? .running : .paused
                 lastLocation = nil
                 timestampGate?.resume(at: date)
-                lastTransitionOrigin = pendingTransitionOrigin ?? (fromState == .prepared ? .manual : .unknown)
+                lastTransitionOrigin = origin
                 lastTransitionAt = date
                 pauseOrigin = state == .paused ? lastTransitionOrigin : nil
                 pendingTransitionOrigin = nil
