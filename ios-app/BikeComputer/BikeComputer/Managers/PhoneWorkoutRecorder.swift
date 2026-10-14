@@ -42,6 +42,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     private var recoveredRoute = false
     private var insertedRoutePoints = 0
     private var startDate: Date?
+#if DEBUG
+    private var lastBuilderDebugCheckpoint: NSDictionary?
+#endif
     private var endDate: Date?
     private var lastLocation: CLLocation?
     private var latestLocation: CLLocation?
@@ -121,6 +124,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             self.builder = builder
             session.delegate = self
             builder.delegate = self
+            builder.shouldCollectWorkoutEvents = true
             configureDataSource(builder, configuration: configuration)
             // The same identity is used on recovery and for save reconciliation.
             // Never construct a replacement builder for an interrupted ride.
@@ -203,6 +207,12 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             store.beginLocalWorkout()
             startDate = expected.startedAt
             if expected.phase == .finished {
+                if expected.finishedChoice == .save,
+                   let workout = try? await findSavedWorkout(id: expected.sessionID) {
+                    savedWorkout = workout
+                    startDate = workout.startDate
+                    endDate = workout.endDate
+                }
                 state = .ended
                 publish()
                 return
@@ -260,6 +270,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
         finishAttempted = next.saveAttempted
         recovered.delegate = self
         builder.delegate = self
+        recordBuilderDebugCheckpoint(reason: "recoveredBeforeDataSource")
         configureDataSource(builder, configuration: recovered.workoutConfiguration)
         store.beginLocalWorkout()
         generation = UUID()
@@ -485,11 +496,40 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
     }
 
     private func configureDataSource(_ builder: HKLiveWorkoutBuilder, configuration: HKWorkoutConfiguration) {
-        let source = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: configuration)
+        let source = builder.dataSource
+            ?? HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: configuration)
         // GPS distance is written exactly once by the pipeline below. Do not
         // simultaneously collect system-generated cycling distance samples.
         source.disableCollection(for: Self.distanceType)
-        builder.dataSource = source
+        if builder.dataSource == nil { builder.dataSource = source }
+    }
+
+    private func recordBuilderDebugCheckpoint(reason: String) {
+#if DEBUG
+        guard let builder else { return }
+        let events = builder.workoutEvents
+        let fields: [String: Any] = [
+            "schema": 1, "reason": reason, "state": state.rawValue,
+            "nativeState": session?.state.rawValue ?? -1,
+            "builderSessionState": builder.workoutSession?.state.rawValue ?? -1,
+            "builderSessionMatches": builder.workoutSession === session,
+            "hasDataSource": builder.dataSource != nil,
+            "collectsWorkoutEvents": builder.shouldCollectWorkoutEvents,
+            "collectionStarted": collectionStarted,
+            "collectionEnded": collectionEnded,
+            "hasBuilderStart": builder.startDate != nil,
+            "hasBuilderEnd": builder.endDate != nil,
+            "eventCount": events.count,
+            "pauseCount": events.filter { $0.type == .pause }.count,
+            "resumeCount": events.filter { $0.type == .resume }.count,
+        ]
+        let checkpoint = NSDictionary(dictionary: fields)
+        guard lastBuilderDebugCheckpoint != checkpoint else { return }
+        lastBuilderDebugCheckpoint = checkpoint
+        var persisted = fields
+        persisted["capturedAt"] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(persisted, forKey: "bicino.debug.phoneWorkoutBuilder.v1")
+#endif
     }
 
     private func attachRouteBuilder(_ builder: HKLiveWorkoutBuilder) {
@@ -622,7 +662,9 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             terminalOutcome: record.finishedChoice.map { $0 == .save ? .saved : .discarded },
             pauseOrigin: state == .paused ? pauseOrigin : nil,
             lastTransitionOrigin: lastTransitionOrigin, lastTransitionAt: lastTransitionAt,
-            wallElapsedTime: startDate.flatMap { metric(max(0, captured.timeIntervalSince($0)), .seconds) }
+            wallElapsedTime: (state.isActive || endDate != nil)
+                ? startDate.flatMap { metric(max(0, captured.timeIntervalSince($0)), .seconds) }
+                : nil
         )
         guard sequence < UInt64.max else { return }
         sequence += 1
@@ -631,6 +673,7 @@ final class PhoneWorkoutRecorder: NSObject, PhoneWorkoutRecording {
             transportGenerationID: generation, sequence: sequence, capturedAt: now, snapshot: snapshot
         )], receivedAt: now)
         store.recordingMessage = message
+        recordBuilderDebugCheckpoint(reason: "published")
     }
 
     private func startTimer() {
@@ -767,7 +810,13 @@ extension PhoneWorkoutRecorder: HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDe
         }
     }
 
-    nonisolated func workoutBuilderDidCollectEvent(_ workoutBuilder: HKLiveWorkoutBuilder) {}
+    nonisolated func workoutBuilderDidCollectEvent(_ workoutBuilder: HKLiveWorkoutBuilder) {
+        Task { @MainActor [weak self] in
+            guard let self, builder === workoutBuilder else { return }
+            recordBuilderDebugCheckpoint(reason: "builderEvent")
+            publish()
+        }
+    }
     nonisolated func workoutBuilder(_ workoutBuilder: HKLiveWorkoutBuilder, didCollectDataOf collectedTypes: Set<HKSampleType>) {
         Task { @MainActor [weak self] in
             guard let self, builder === workoutBuilder else { return }
