@@ -317,7 +317,37 @@ enum RideDiagnosticsHostTests {
             "persisted loss counters must include rejection and critical eviction")
     }
 
+    static func deletionDoesNotReuseRetainedChunkIdentity() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root.appendingPathComponent("v1"))
+        recorder.record(category: .ble, event: "before_deletion")
+        recorder.flush()
+        let oldCapture = try require(recorder.currentCaptureID)
+        let old = try await recorder.appEvidenceSnapshot(captureID: oldCapture)
+        let store = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("v2"))
+        let job = try await store.create(deviceDigest: "0123456789abcdef", captureID: oldCapture)
+        try await store.retainAppEvidence(job.id, chunks: old)
+        try recorder.deleteLocalLogs()
+        recorder.flush()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        precondition(!recorder.recentEvents.contains { $0.event == "before_deletion" })
+        let newCapture = try require(recorder.currentCaptureID)
+        let replacement = try await recorder.appEvidenceSnapshot(captureID: newCapture)
+        precondition(Set(old.keys).isDisjoint(with: replacement.keys))
+        // Even an independently retained pre-deletion snapshot cannot collide.
+        let exported = try recorder.exportBundle(additionalAppChunks: old)
+        try FileManager.default.removeItem(at: exported)
+        try await store.deleteAll()
+        let reloaded = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("v2"))
+        let remaining = try await reloaded.exportSnapshot()
+        precondition(remaining.manifests.isEmpty && remaining.appChunks.isEmpty && remaining.chunks.isEmpty)
+    }
+
     static func main() async throws {
+        try await deletionDoesNotReuseRetainedChunkIdentity()
         try queueOverflowRetainsCriticalEvidenceAndReportsLoss()
         try routineCheckpointsAvoidHistoricalInventory()
         try storedZIPChecksumsMatchKnownVectors()

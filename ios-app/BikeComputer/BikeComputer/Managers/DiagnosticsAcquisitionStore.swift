@@ -212,6 +212,10 @@ actor DiagnosticsAcquisitionStore {
         try handle.synchronize()
     }
 
+    func deleteAll() throws {
+        if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
+    }
+
     func manifests() throws -> [DiagnosticsAcquisitionManifest] {
         try prepare()
         let paths = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)

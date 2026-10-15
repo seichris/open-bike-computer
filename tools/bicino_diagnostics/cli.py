@@ -281,9 +281,10 @@ def parser() -> argparse.ArgumentParser:
     tail.add_argument('--limit', type=int, default=25, choices=range(1,51))
     inbox = commands.add_parser('inbox').add_subparsers(dest='inbox_command', required=True)
     inbox.add_parser('list')
-    get = inbox.add_parser('get')
-    get.add_argument('--id', type=uuid.UUID, required=True)
-    get.add_argument('--output', type=Path, required=True)
+    for name in ('get', 'archive'):
+        get = inbox.add_parser(name)
+        get.add_argument('--id', type=uuid.UUID, required=True)
+        get.add_argument('--output', type=Path, required=True)
     imp = commands.add_parser('import')
     imp.add_argument('bundle', type=Path)
     imp.add_argument('--output', type=Path, required=True)
@@ -398,7 +399,12 @@ def run(args) -> tuple[dict | None, int]:
         args.bundle = store.root/'bundles'/f'{args.id}.zip'
         if hashlib.sha256(args.bundle.read_bytes()).hexdigest() != selected['sha256']:
             raise EvidenceError('inbox bytes differ from their verified receipt')
-        return import_bundle(args), 0
+        if args.inbox_command == 'archive':
+            args.output = store.archive_destination(args.output)
+        result = import_bundle(args)
+        if args.inbox_command == 'archive':
+            result.update(store.retire(str(args.id), Path(result['path'])))
+        return result, 0
     if args.command == 'import': return import_bundle(args), 0
     if args.command == 'verify': return verify(args)
     if args.command == 'query': return query(args), 0

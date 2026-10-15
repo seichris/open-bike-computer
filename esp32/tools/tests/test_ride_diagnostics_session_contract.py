@@ -81,6 +81,34 @@ int main() {
                             "-I", str(ROOT / "tools/tests"), str(source), "-o", str(executable)], check=True)
             subprocess.run([str(executable)], check=True)
 
+    def test_fault_capsule_write_failure_retries_and_preserves_rtc(self):
+        update = RECORDER[RECORDER.index("void updateFaultCapsule("):RECORDER.index("bool utcNow(")]
+        flush = RECORDER[RECORDER.index("bool flushFaultCapsulesIfPossible() {"):RECORDER.index("uint16_t queuedDepth()")]
+        receipt = RECORDER[RECORDER.index("struct FaultCapsuleWriteReceipt {"):RECORDER.index("bool writeQueuedEvent(")]
+        self.run_production_harness("ride_diagnostics_fault_retry_harness.cpp", update + receipt + flush)
+
+    def test_backend_transition_allocates_new_namespace(self):
+        parse = RECORDER[RECORDER.index("bool parseUnsigned(const char *value, uint32_t &out) {"):RECORDER.index("void copyCapture")]
+        identity = RECORDER[RECORDER.index("uint32_t persistentBootSequence("):RECORDER.index("enum class ActiveFileCloseResult")]
+        paths = RECORDER[RECORDER.index("bool ensurePaths()"):RECORDER.index("void abandonActiveChunkAfterUncertainWrite()")]
+        start = RECORDER.index("bool isClosedChunk(")
+        closed = RECORDER[start:RECORDER.index("\n}", start) + 2]
+        end = RECORDER[RECORDER.index("bool beginStorageTransition("):RECORDER.index("bool prepareForShutdown(")]
+        start = RECORDER.index("    if (storageTransitionRequested.load(std::memory_order_acquire) &&\n        !sealRequested.load(std::memory_order_acquire)) {")
+        pause = RECORDER[start:RECORDER.index("    const uint32_t nowMs = millis();", start)]
+        pause = "void writerPauseIteration() { for (int pass=0; pass<1; ++pass) {" + pause + "}}"
+        self.run_production_harness("ride_diagnostics_backend_transition_harness.cpp", parse + identity + paths + closed + end + pause, filesystem=True)
+
+    def run_production_harness(self, name, functions, filesystem=False):
+        harness = (ROOT / "tools/tests" / name).read_text().replace("// PRODUCTION_FUNCTIONS", functions)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "recovery.cpp"
+            source.write_text(harness)
+            executable = Path(directory) / "recovery"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                "-I", str(ROOT / "lib/ride_diagnostics"), str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)] + ([str(Path(directory) / "data")] if filesystem else []), check=True)
+
     def test_actual_maintenance_yields_at_every_filesystem_boundary(self):
         # Use the production loops, not a second implementation of retention.
         helpers = RECORDER[RECORDER.index("struct ChunkFileScan"):

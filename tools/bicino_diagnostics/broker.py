@@ -5,6 +5,8 @@ command results, logs, URLs, or evidence. Recorders do not depend on this server
 """
 from __future__ import annotations
 from contextlib import closing
+import fcntl
+import io
 import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -32,6 +34,8 @@ from .live import LiveInbox
 TOKEN_HEADER = 'X-Bicino-Diagnostics-Token'
 MAX_JSON = 64 * 1024
 DEFAULT_ROOT = Path.home()/'.local/share/bicino/diagnostics'
+MAX_INBOX_BYTES = 512 * 1024 * 1024
+MAX_STAGING_BYTES = MAX_BYTES
 KINDS = {'capture', 'mark', 'collect', 'export', 'stop_capture', 'live', 'stop_live'}
 
 
@@ -161,6 +165,7 @@ class BrokerStore:
                     expires INTEGER NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, result TEXT);
                 CREATE TABLE IF NOT EXISTS status(id INTEGER PRIMARY KEY CHECK(id=1), updated INTEGER, body TEXT);
                 CREATE TABLE IF NOT EXISTS bundles(id TEXT PRIMARY KEY, created INTEGER, sha256 TEXT, bytes INTEGER, coverage TEXT);
+                CREATE TABLE IF NOT EXISTS archives(id TEXT PRIMARY KEY REFERENCES bundles(id), path TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS pairings(id TEXT PRIMARY KEY, phone TEXT NOT NULL,
                     token_hash TEXT UNIQUE NOT NULL, created INTEGER NOT NULL, revoked INTEGER);
                 CREATE TABLE IF NOT EXISTS enrollments(id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL,
@@ -370,10 +375,18 @@ class BrokerStore:
             c.execute('UPDATE commands SET result=? WHERE id=?',(encoded,value['id']))
 
     def status(self) -> dict:
+        def retained_coverage(raw):
+            saved = json.loads(raw)
+            result = {key:saved[key] for key in ('eventCount','sources','missingRequiredSources','recordingCoverage','deliveryEvidence')}
+            # Receipts survive upgrades. An old cached summary did not inspect
+            # retained health counters, so it cannot establish no detected loss.
+            if saved.get('lossAccountingVersion') != 2 and result['recordingCoverage'] == 'no_detected_loss':
+                result['recordingCoverage'] = 'unknown_legacy'
+            return result
         now=int(time.time())
         with closing(self.connect()) as c:
             row=c.execute('SELECT updated,body FROM status WHERE id=1').fetchone()
-            bundles=[{'id':r[0],'createdAt':r[1],'sha256':r[2],'bytes':r[3],'coverage':{key:json.loads(r[4])[key] for key in ('eventCount','sources','missingRequiredSources','recordingCoverage','deliveryEvidence')}} for r in c.execute('SELECT * FROM bundles ORDER BY created DESC LIMIT 20')]
+            bundles=[{'id':r[0],'createdAt':r[1],'sha256':r[2],'bytes':r[3],'coverage':retained_coverage(r[4])} for r in c.execute('SELECT * FROM bundles WHERE id NOT IN (SELECT id FROM archives) ORDER BY created DESC LIMIT 20')]
             commands=[{'command':json.loads(r[0]),'result':json.loads(r[1]) if r[1] else None} for r in c.execute('SELECT body,result FROM commands ORDER BY created DESC LIMIT 20')]
         return {'schema':2,'phone':json.loads(row[1]) if row else None,
                 'phoneStatusAgeSeconds':now-row[0] if row else None,'bundles':bundles,'commands':commands}
@@ -423,13 +436,14 @@ class BrokerStore:
             if existing:
                 if existing[0]!=sha:
                     raise EvidenceError('upload identity reused with different bytes')
-                retained = self.root/'bundles'/f'{identifier}.zip'
+                archived = c.execute('SELECT path FROM archives WHERE id=?', (identifier,)).fetchone()
+                retained = Path(archived[0]) if archived else self.root/'bundles'/f'{identifier}.zip'
                 if not retained.is_file() or retained.is_symlink() or hashlib.sha256(retained.read_bytes()).hexdigest() != sha:
                     raise EvidenceError('acknowledged inbox evidence is missing or damaged')
                 return {'schema':2,'id':identifier,'sha256':sha,'accepted':True}
-            count,total=c.execute('SELECT count(*),coalesce(sum(bytes),0) FROM bundles').fetchone()
-            if count>=20 or total+size>512*1024*1024:
-                raise InboxCapacityError('inbox full; archive evidence explicitly before deleting')
+            count,total=self.inbox_usage(c, excluding=identifier)
+            if count>=20 or total+size>MAX_INBOX_BYTES:
+                raise InboxCapacityError('inbox full; use inbox archive to reclaim capacity')
             destination=self.root/'bundles'/f'{identifier}.zip'
             if destination.exists():
                 # Recover a process interruption after rename, before SQLite COMMIT.
@@ -438,8 +452,76 @@ class BrokerStore:
             else:
                 os.replace(incoming,destination)
                 os.chmod(destination,0o600)
+                sync_directory(destination.parent)
             c.execute('INSERT INTO bundles VALUES(?,?,?,?,?)',(identifier,int(time.time()),sha,size,json.dumps(coverage)))
         return {'schema':2,'id':identifier,'sha256':sha,'accepted':True}
+
+
+    def inbox_usage(self, connection, *, excluding: str):
+        rows = list(connection.execute('SELECT id,bytes FROM bundles WHERE id NOT IN (SELECT id FROM archives)'))
+        identifiers = {identifier for identifier, _ in rows}
+        count, total = len(rows), sum(size for _, size in rows)
+        # A process can die after rename and before receipt COMMIT. Preserve
+        # those files for idempotent recovery, but never make them quota-free.
+        for path in (self.root/'bundles').iterdir():
+            if path.is_symlink() or not path.is_file():
+                raise EvidenceError('unsafe inbox member')
+            if path.name not in {identifier + '.zip' for identifier in identifiers} and path.name != excluding + '.zip':
+                count += 1
+                total += path.stat().st_size
+        return count, total
+
+    def archive_destination(self, archive: Path) -> Path:
+        archive = archive.expanduser().absolute()
+        if archive.is_symlink() or any(p.is_symlink() for p in archive.parents) or self.root == archive or self.root in archive.parents:
+            raise EvidenceError('archive must be outside the broker without symlink ancestors')
+        return archive
+
+    def retire(self, identifier: str, archive: Path) -> dict:
+        """Retire only after a verified, durable copy exists outside the inbox."""
+        identifier = str(uuid.UUID(identifier))
+        archive = self.archive_destination(archive)
+        with closing(self.connect()) as c, c:
+            c.execute('BEGIN IMMEDIATE')
+            row = c.execute('SELECT sha256,bytes FROM bundles WHERE id=?', (identifier,)).fetchone()
+            if row is None or not archive.is_file() or archive.stat().st_size != row[1] or hashlib.sha256(archive.read_bytes()).hexdigest() != row[0]:
+                raise EvidenceError('archive differs from the verified receipt')
+            with archive.open('rb') as handle:
+                os.fsync(handle.fileno())
+            sync_directory(archive.parent)
+            c.execute('INSERT OR REPLACE INTO archives VALUES(?,?)', (identifier, str(archive)))
+        # A crash here leaves a redundant verified inbox file, never an absent
+        # acknowledged bundle. Startup under the server lock completes cleanup.
+        (self.root/'bundles'/f'{identifier}.zip').unlink(missing_ok=True)
+        sync_directory(self.root/'bundles')
+        return {'schema':2, 'id':identifier, 'sha256':row[0], 'archived':True}
+
+    def recover_staging(self):
+        # Called only while holding the exclusive server lifetime lock. CLI
+        # clients may open BrokerStore without disturbing an active upload.
+        for path in (self.root/'pending').glob('.upload-*'):
+            path.unlink()
+        with closing(self.connect()) as c:
+            for identifier, archive, sha in c.execute('SELECT bundles.id,archives.path,sha256 FROM bundles JOIN archives USING(id)'):
+                retained = self.root/'bundles'/f'{identifier}.zip'
+                copy = Path(archive)
+                if retained.is_file() and not retained.is_symlink() and copy.is_file() and not copy.is_symlink() and hashlib.sha256(copy.read_bytes()).hexdigest() == sha and hashlib.sha256(retained.read_bytes()).hexdigest() == sha:
+                    retained.unlink()
+
+    def admit_staging(self, expected: int):
+        # Staging is a separate single-upload budget so a lost ACK can still
+        # retry at a full inbox. Include any unexpected residue conservatively.
+        used = sum(path.stat().st_size for path in (self.root/'pending').iterdir())
+        if used + expected > MAX_STAGING_BYTES:
+            raise InboxCapacityError('upload staging full')
+
+
+def sync_directory(path: Path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def request(root: Path, method: str, path: str, body: dict | None = None) -> dict:
@@ -468,17 +550,51 @@ def request(root: Path, method: str, path: str, body: dict | None = None) -> dic
         connection.close()
 
 
+class DeadlineReader(io.RawIOBase):
+    """Enforce a total read budget even when a peer continuously drips bytes."""
+    def __init__(self, sock, seconds):
+        self.sock = sock
+        self.reset(seconds)
+    def reset(self, seconds):
+        self.deadline = time.monotonic() + seconds
+    def readable(self):
+        return True
+    def readinto(self, buffer):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('request deadline exceeded')
+        self.sock.settimeout(remaining)
+        return self.sock.recv_into(buffer)
+
+
 class BrokerHTTPServer(HTTPServer):
     # One serialized request worker bounds RAM and concurrent uploads. A client
     # cannot hold it indefinitely: handshake, header and body have deadlines.
     allow_reuse_address=True
+    header_timeout=15
+    body_timeout=120
+    json_timeout=15
     def __init__(self,address,store:BrokerStore):
         self.store=store
         self.rejected_connections=0
         self.context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.context.minimum_version=ssl.TLSVersion.TLSv1_2
         self.context.load_cert_chain(store.root/'server.crt',store.root/'server.key')
-        super().__init__(address,BrokerHandler)
+        owner = os.open(store.root/'server.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        self.owner = os.fdopen(owner, 'a+b')
+        os.fchmod(owner, 0o600)
+        try:
+            fcntl.flock(self.owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            store.recover_staging()
+            super().__init__(address,BrokerHandler)
+        except Exception:
+            self.owner.close()
+            raise
+    def server_close(self):
+        try:
+            super().server_close()
+        finally:
+            self.owner.close()
     def handle_error(self, request, client_address):
         # Peer disconnects are expected (including pin rejection). Never print
         # socket addresses, headers or exception bodies into agent-visible logs.
@@ -495,10 +611,17 @@ class BrokerHTTPServer(HTTPServer):
 
 class BrokerHandler(BaseHTTPRequestHandler):
     protocol_version='HTTP/1.1'
+    def setup(self):
+        super().setup()
+        self.rfile.close()
+        self.deadline_reader = DeadlineReader(self.connection, self.server.header_timeout)
+        self.rfile = io.BufferedReader(self.deadline_reader)
+
     def log_message(self,*args):
         pass # never log credentials, paths or arbitrary request content
     def reply(self,code:int,value:dict):
         raw=json.dumps(value,sort_keys=True).encode()
+        self.connection.settimeout(15)
         self.send_response(code)
         self.send_header('Content-Type','application/json')
         self.send_header('Content-Length',str(len(raw)))
@@ -531,6 +654,7 @@ class BrokerHandler(BaseHTTPRequestHandler):
         return length
     def json_body(self):
         length=self.body_length(MAX_JSON)
+        self.deadline_reader.reset(self.server.json_timeout)
         raw=self.rfile.read(length)
         if len(raw)!=length:
             raise EvidenceError('truncated request')
@@ -603,6 +727,8 @@ class BrokerHandler(BaseHTTPRequestHandler):
                 identifier=self.path.rsplit('/',1)[1]
                 uuid.UUID(identifier)
                 expected=self.body_length(MAX_BYTES)
+                store.admit_staging(expected)
+                self.deadline_reader.reset(self.server.body_timeout)
                 fd,name=tempfile.mkstemp(prefix='.upload-',dir=store.root/'pending')
                 incoming=Path(name)
                 deadline=time.monotonic()+120
