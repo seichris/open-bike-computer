@@ -307,3 +307,33 @@ nonisolated enum DiagnosticsOutboxAdmission {
             additionalBytes <= maximumBytes - existingBytes
     }
 }
+
+
+/// Completed acquisition manifests are durable handoff intent. A deterministic
+/// ZIP name closes the publication/receipt crash window; delivered hashes keep
+/// relaunch from recreating an already acknowledged acquisition for a recipient.
+nonisolated enum DiagnosticsHandoffReceipt {
+    static func isQueuedOrDelivered(_ id: UUID, root: URL) throws -> Bool {
+        let file = root.appendingPathComponent(id.uuidString.lowercased() + ".zip")
+        if FileManager.default.fileExists(atPath: file.path) { return true }
+        let receipt = root.appendingPathComponent("delivered-" + id.uuidString.lowercased() + ".txt")
+        guard FileManager.default.fileExists(atPath: receipt.path) else { return false }
+        guard let size = try receipt.resourceValues(forKeys: [.fileSizeKey]).fileSize, size == 64,
+              DiagnosticsBrokerAddress.hex(try String(contentsOf: receipt, encoding: .utf8)) else {
+            throw DiagnosticsAcquisitionStore.Failure.invalidManifest
+        }
+        return true
+    }
+    static func acknowledge(_ id: UUID, sha256: String, root: URL) throws {
+        guard DiagnosticsBrokerAddress.hex(sha256) else { throw DiagnosticsAcquisitionStore.Failure.invalidManifest }
+        try Data(sha256.utf8).write(to: root.appendingPathComponent("delivered-" + id.uuidString.lowercased() + ".txt"), options: .atomic)
+    }
+    static func prune(retaining ids: Set<UUID>, root: URL) throws {
+        guard FileManager.default.fileExists(atPath: root.path) else { return }
+        for file in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            where file.lastPathComponent.hasPrefix("delivered-") && file.pathExtension == "txt" {
+            let raw = file.deletingPathExtension().lastPathComponent.dropFirst("delivered-".count)
+            if let id = UUID(uuidString: String(raw)), !ids.contains(id) { try FileManager.default.removeItem(at: file) }
+        }
+    }
+}

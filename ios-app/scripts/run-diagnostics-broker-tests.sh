@@ -3,11 +3,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
-if command -v xcrun >/dev/null; then SWIFT=(xcrun swiftc); else SWIFT=(swiftc); fi
-"${SWIFT[@]}" -parse-as-library -o "$OUT/broker" \
- "$ROOT/ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift" \
- "$ROOT/ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift" \
- "$ROOT/ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift" \
- "$ROOT/ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsBrokerContract.swift" \
- "$ROOT/ios-app/BikeComputerTests/DiagnosticsBrokerContractTests.swift"
+python3 "$ROOT/tools/development/swift_compile.py" diagnostics-broker-tests -- \
+ -parse-as-library -o "$OUT/broker"
 "$OUT/broker" "$@"
+if [ "$#" -eq 0 ] && [ "$(uname)" = "Darwin" ]; then
+ python3 "$ROOT/ios-app/tests/diagnostics-lifecycle-host/run.py"
+fi

@@ -625,6 +625,22 @@
       "groups": [
         "common-4"
       ]
+    },
+    "diagnostics-broker-contracts": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsSchema.generated.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsCapturePolicy.swift",
+        "ios-app/BikeComputer/BikeComputer/Managers/DiagnosticsAcquisitionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/DiagnosticsBrokerContract.swift"
+      ]
+    },
+    "diagnostics-broker-tests": {
+      "groups": [
+        "diagnostics-broker-contracts"
+      ],
+      "sources": [
+        "ios-app/BikeComputerTests/DiagnosticsBrokerContractTests.swift"
+      ]
     }
   }
 }

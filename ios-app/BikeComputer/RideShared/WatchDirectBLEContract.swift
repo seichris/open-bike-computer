@@ -779,9 +779,15 @@ struct WatchBLETransportDiagnosticBatchV1: Codable, Equatable, Sendable {
 
     let schema: Int
     let events: [WatchBLETransportDiagnosticEventV1]
+    let producerID: UUID?
+    let droppedEventCount: Int?
 
-    init(events: [WatchBLETransportDiagnosticEventV1]) {
+    init(events: [WatchBLETransportDiagnosticEventV1], producerID: UUID? = nil, droppedEventCount: Int = 0) {
         schema = Self.schemaVersion
+        self.producerID = producerID
+        let limit = Int(clamping: UInt32.max)
+        let removed = min(limit, max(0, events.count - Self.maximumEvents))
+        self.droppedEventCount = min(max(0, droppedEventCount), limit - removed) + removed
         self.events = Array(events.suffix(Self.maximumEvents))
     }
 
@@ -793,6 +799,7 @@ struct WatchBLETransportDiagnosticBatchV1: Codable, Equatable, Sendable {
         guard data.count <= 64 * 1024,
               let batch = try? JSONDecoder().decode(Self.self, from: data),
               batch.schema == Self.schemaVersion,
+              batch.droppedEventCount.map({ (0...Int(clamping: UInt32.max)).contains($0) }) ?? true,
               !batch.events.isEmpty,
               batch.events.count <= maximumEvents,
               batch.events.allSatisfy({ event in

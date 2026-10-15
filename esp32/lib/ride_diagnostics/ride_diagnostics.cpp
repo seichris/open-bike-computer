@@ -190,10 +190,13 @@ std::atomic<transfer_policy::SealPreparation> sealPreparationResult{
 std::atomic<bool> clockAnchorEmitted{false};
 std::atomic<bool> checkpointRequested{false};
 std::atomic<bool> storageTransitionRequested{false};
+std::atomic<bool> storageTransitionIdle{false};
 std::atomic<uint32_t> retentionLeaseDeadlineMs{0};
 SemaphoreHandle_t retentionMutex = nullptr;
 StorageRecoveryAllowedProbe storageRecoveryAllowedProbe = nullptr;
 uint32_t runtimeBootSequence = 0;
+uint32_t storageBootFloor = 1;
+uint32_t transitionMountGeneration = 0;
 uint32_t captureGeneration = 0;
 uint32_t lastCheckpointMs = 0;
 ChunkFile retentionFiles[kMaximumRetainedFiles] = {};
@@ -419,8 +422,7 @@ void updateFaultCapsule(Level level, const char *category, const char *event,
                         bool storageFailure) {
   const uint32_t selectedBootSequence = bootSequence.load();
   portENTER_CRITICAL(&faultCapsuleMux);
-  if (!validFaultCapsuleEnvelope(currentFaultCapsule) ||
-      currentFaultCapsule.bootSequence != selectedBootSequence) {
+  if (!validFaultCapsuleEnvelope(currentFaultCapsule)) {
     memset(&currentFaultCapsule, 0, sizeof(currentFaultCapsule));
     currentFaultCapsule.bootSequence = selectedBootSequence;
   }
@@ -447,7 +449,8 @@ void updateFaultCapsule(Level level, const char *category, const char *event,
   }
   currentFaultCapsule.droppedCount = dropped.load();
   sealFaultCapsule(currentFaultCapsule);
-  retainedFaultCapsule = currentFaultCapsule;
+  if (!pendingFaultCapsuleValid)
+    retainedFaultCapsule = currentFaultCapsule;
   faultCapsuleGeneration.fetch_add(1, std::memory_order_release);
   portEXIT_CRITICAL(&faultCapsuleMux);
 }
@@ -467,13 +470,17 @@ void clearFaultCapsule(uint32_t capsuleBoot, uint32_t capsuleChecksum) {
     // written by the current boot while the old record was queued.
     if (faultCapsuleIdentityMatches(retainedFaultCapsule, capsuleBoot,
                                     capsuleChecksum)) {
-      memset(&retainedFaultCapsule, 0, sizeof(retainedFaultCapsule));
+      if (validFaultCapsule(currentFaultCapsule))
+        retainedFaultCapsule = currentFaultCapsule;
+      else
+        memset(&retainedFaultCapsule, 0, sizeof(retainedFaultCapsule));
     }
   }
   if (faultCapsuleIdentityMatches(currentFaultCapsule, capsuleBoot,
                                   capsuleChecksum)) {
     memset(&currentFaultCapsule, 0, sizeof(currentFaultCapsule));
-    memset(&retainedFaultCapsule, 0, sizeof(retainedFaultCapsule));
+    if (!pendingFaultCapsuleValid)
+      memset(&retainedFaultCapsule, 0, sizeof(retainedFaultCapsule));
     currentFaultCapsuleQueuedChecksum.store(0, std::memory_order_release);
   }
   portEXIT_CRITICAL(&faultCapsuleMux);
@@ -514,9 +521,9 @@ uint32_t persistentBootSequence(uint32_t requested) {
 bool initializePersistentBootSequenceIfNeeded() {
   if (persistentBootSequenceReady.load(std::memory_order_acquire))
     return true;
-  if (storage == nullptr || !storage->getDiagnosticsSdLoaded())
+  if (storage == nullptr || !storage->getDiagnosticsSdLoaded() || storageBootFloor == 0)
     return false;
-  const uint32_t selected = persistentBootSequence(runtimeBootSequence);
+  const uint32_t selected = persistentBootSequence(std::max(runtimeBootSequence, storageBootFloor));
   if (selected == 0)
     return false;
   bootSequence.store(selected, std::memory_order_release);
@@ -622,8 +629,8 @@ bool openActiveFile() {
     return true;
   if (!ensurePaths())
     return false;
-  // Preserve any legacy/failed chunk that already reached the hard limit.
-  // Never append to it: the transfer contract rejects oversized chunks.
+  // Every newly opened chunk belongs to exactly one stream. Preserve any
+  // existing bytes, including a shorter legacy/uncertain chunk, without appending.
   for (std::size_t attempt = 0; attempt < kMaximumRetainedFiles; ++attempt) {
     snprintf(activePath, sizeof(activePath),
              "%s/BICINO/DIAGNOSTICS/v1/boots/%lu/events-%06lu.jsonl",
@@ -631,7 +638,7 @@ bool openActiveFile() {
              static_cast<unsigned long>(bootSequence.load()),
              static_cast<unsigned long>(activeChunk));
     const uint64_t existingBytes = storage->size(activePath);
-    if (existingBytes >= kChunkBytes) {
+    if (existingBytes > 0) {
       ++activeChunk;
       activeChunkSnapshot.store(activeChunk);
       continue;
@@ -642,8 +649,7 @@ bool openActiveFile() {
     activeFileBytes = static_cast<uint32_t>(existingBytes);
     mbedtls_sha256_free(&activeHash);
     mbedtls_sha256_init(&activeHash);
-    // Reopened legacy bytes must be hashed by the reader; do not advertise a
-    // digest over only this process's appended suffix.
+    // Only a fresh empty file can begin a new writer-owned hash.
     activeHashValid = existingBytes == 0 && mbedtls_sha256_starts(&activeHash, 0) == 0;
     return true;
   }
@@ -839,7 +845,21 @@ bool prepareChunkWriteReserve() {
   return hasChunkWriteReserve();
 }
 
+struct FaultCapsuleWriteReceipt {
+  const QueuedEvent &event;
+  bool durable = false;
+  ~FaultCapsuleWriteReceipt() {
+    if (durable || !event.clearsFaultCapsule) return;
+    uint32_t expected = event.faultCapsuleChecksum;
+    pendingFaultCapsuleQueuedChecksum.compare_exchange_strong(expected, 0);
+    expected = event.faultCapsuleChecksum;
+    currentFaultCapsuleQueuedChecksum.compare_exchange_strong(expected, 0);
+    faultCapsuleQueuedGeneration.store(UINT32_MAX, std::memory_order_release);
+  }
+};
+
 bool writeQueuedEvent(const QueuedEvent &event) {
+  FaultCapsuleWriteReceipt receipt{event};
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
   runtime_watchdog_diagnostics::notePhase(
       runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
@@ -937,6 +957,7 @@ bool writeQueuedEvent(const QueuedEvent &event) {
                                               alreadyPrunedThisBoot)) {
     pruneRetention();
   }
+  receipt.durable = true;
   if (event.clearsFaultCapsule) {
     clearFaultCapsule(event.faultCapsuleBoot,
                       event.faultCapsuleChecksum);
@@ -985,11 +1006,14 @@ bool flushFaultCapsulesIfPossible() {
     char fields[512] = {};
     if (!formatFaultCapsuleFields(capsule, fields, sizeof(fields)))
       return false;
+    queuedChecksum.store(capsule.checksum, std::memory_order_release);
     const bool queued = recordInternal(
         Level::Warning, "storage", "storage_gap", fields, true,
         capsule.bootSequence, capsule.eventCount, capsule.checksum);
-    if (queued)
-      queuedChecksum.store(capsule.checksum, std::memory_order_release);
+    if (!queued) {
+      uint32_t expected = capsule.checksum;
+      queuedChecksum.compare_exchange_strong(expected, 0);
+    }
     return queued;
   };
 
@@ -1128,10 +1152,14 @@ void writerTask(void *) {
     if (storage == nullptr)
       continue;
     // A map-storage remount owns the backend after the seal completes. Keep
-    // newly queued records in RAM until the caller resumes the writer so no
+    // ordinary admission fenced until the caller resumes the writer so no
     // FILE can be opened between the seal and SD.end()/FFat.end().
     if (storageTransitionRequested.load(std::memory_order_acquire) &&
         !sealRequested.load(std::memory_order_acquire)) {
+      if (!storageTransitionIdle.load(std::memory_order_acquire)) {
+        (void)closeAndAdvanceActiveChunk();
+        storageTransitionIdle.store(true, std::memory_order_release);
+      }
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
@@ -1182,7 +1210,7 @@ void writerTask(void *) {
     const bool available = storage->getDiagnosticsSdLoaded();
     const bool wasAvailable =
         lastStorageAvailable.exchange(available, std::memory_order_acq_rel);
-    if (available && !wasAvailable)
+    if (available && (!wasAvailable || faultCapsuleGeneration.load() != faultCapsuleQueuedGeneration.load()))
       (void)flushFaultCapsulesIfPossible();
   }
 }
@@ -1214,11 +1242,13 @@ bool enqueue(QueuedEvent &event) {
     noteDrop(DropReason::QueueUnavailable);
     return false;
   }
-  // The producer mutex serializes sequence assignment and tail insertion.
-  // FreeRTOS queues synchronize their own sends with the sole consumer, so
-  // appending never needs the writer's head-mutation lock. A new tail cannot
-  // precede either head the writer has already peeked.
-  bool mutationLocked = false;
+  // Publishing either lane and selecting both heads must be one coherent
+  // snapshot. RTOS per-queue locks alone cannot protect an initially empty lane.
+  // Keep admission zero-wait and account contention explicitly.
+  if (xSemaphoreTake(queueMutationMutex, 0) != pdTRUE) {
+    noteDrop(DropReason::QueueBusy);
+    return false;
+  }
   BaseType_t result = xQueueSend(target, &event, 0);
   if (result != pdTRUE && event.critical && normalQueue != nullptr) {
     normalQueueCriticalCount.fetch_add(1, std::memory_order_acq_rel);
@@ -1227,17 +1257,6 @@ bool enqueue(QueuedEvent &event) {
       normalQueueCriticalCount.fetch_sub(1, std::memory_order_acq_rel);
   }
   if (result != pdTRUE && event.critical && normalQueue != nullptr) {
-    // Only eviction moves an existing head. Fence that bounded rotation
-    // against the writer's peek/receive pair without blocking a producer.
-    if (xSemaphoreTake(queueMutationMutex, 0) != pdTRUE) {
-      noteDrop(DropReason::QueueBusy);
-      return false;
-    }
-    mutationLocked = true;
-    // The consumer may have freed a reserved slot since the first send.
-    result = xQueueSend(criticalQueue, &event, 0);
-  }
-  if (result != pdTRUE && mutationLocked) {
     // Critical records may consume otherwise unused normal capacity. If both
     // lanes are full, evict one lower-priority record before dropping the
     // warning/error/lifecycle evidence that the reserved lane exists to keep.
@@ -1278,8 +1297,7 @@ bool enqueue(QueuedEvent &event) {
     }
   }
   if (result != pdTRUE) {
-    if (mutationLocked)
-      xSemaphoreGive(queueMutationMutex);
+    xSemaphoreGive(queueMutationMutex);
     noteDrop(DropReason::QueueFull);
     return false;
   }
@@ -1290,8 +1308,7 @@ bool enqueue(QueuedEvent &event) {
          !maxQueueDepth.compare_exchange_weak(previous,
                                                static_cast<uint16_t>(depth))) {
   }
-  if (mutationLocked)
-    xSemaphoreGive(queueMutationMutex);
+  xSemaphoreGive(queueMutationMutex);
   return true;
 }
 
@@ -1514,6 +1531,10 @@ bool enqueueEventWithProducerLockHeld(
     uint32_t faultEventCount, const char *captureOverride = nullptr,
     bool rotateBeforeWrite = false, bool rotateAfterWrite = false,
     uint32_t faultChecksum = 0) {
+  if (!clearsFaultCapsule && storageTransitionRequested.load(std::memory_order_acquire)) {
+    noteDrop(DropReason::StorageTransition);
+    return false;
+  }
   char capture[48] = {};
   bool pendingBoundary = false;
   if (captureOverride != nullptr) {
@@ -1608,6 +1629,11 @@ bool recordInternal(Level level, const char *category, const char *event,
   if (xSemaphoreTake(producerMutex, 0) != pdTRUE) {
     noteDrop(DropReason::ProducerBusy);
     updateFaultCapsule(level, category, event, false);
+    return false;
+  }
+  if (!clearsFaultCapsule && storageTransitionRequested.load(std::memory_order_acquire)) {
+    xSemaphoreGive(producerMutex);
+    noteDrop(DropReason::StorageTransition);
     return false;
   }
   if (!initializePersistentBootSequenceIfNeeded()) {
@@ -2027,9 +2053,38 @@ bool beginStorageTransition(uint32_t timeoutMs) {
                                           std::memory_order_acq_rel)) {
     return false;
   }
-  if (storage == nullptr || !storage->getDiagnosticsSdLoaded())
+  storageTransitionIdle.store(false, std::memory_order_release);
+  transitionMountGeneration = storage == nullptr ? 0 : storage->mountGeneration();
+  const uint32_t started = millis();
+  const auto waitForIdle = [started, timeoutMs]() {
+    while (writerTaskHandle != nullptr && !storageTransitionIdle.load(std::memory_order_acquire)) {
+      if (static_cast<uint32_t>(millis() - started) >= timeoutMs) return false;
+      vTaskDelay(pdMS_TO_TICKS(5));
+    }
     return true;
-  if (sealActiveChunk(timeoutMs))
+  };
+  if (storage == nullptr || !storage->getDiagnosticsSdLoaded()) {
+    if (!waitForIdle()) {
+      storageTransitionRequested.store(false, std::memory_order_release);
+      return false;
+    }
+    // The previous medium is unavailable, so queued records cannot be sealed
+    // there. Report their loss before changing identity; never write old JSONL
+    // into the next medium's namespace.
+    SemaphoreGuard producer(producerMutex);
+    SemaphoreGuard queues(queueMutationMutex);
+    for (QueueHandle_t lane : {normalQueue, criticalQueue}) {
+      QueuedEvent event = {};
+      while (lane != nullptr && xQueueReceive(lane, &event, 0) == pdTRUE) {
+        FaultCapsuleWriteReceipt receipt{event};
+        noteDrop(DropReason::StorageTransition);
+        updateFaultCapsule(Level::Warning, "storage", "remount_queue_lost", false);
+      }
+    }
+    normalQueueCriticalCount.store(0, std::memory_order_release);
+    return true;
+  }
+  if (sealActiveChunk(timeoutMs) && waitForIdle())
     return true;
   storageTransitionRequested.store(false, std::memory_order_release);
   return false;
@@ -2037,6 +2092,22 @@ bool beginStorageTransition(uint32_t timeoutMs) {
 }
 
 void endStorageTransition() {
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  // The sealed writer is still paused and ordinary producers are fenced.
+  // A mount attempt may restore FFat or expose a different SD namespace, even
+  // when the backend enum is unchanged. Allocate above both namespaces.
+  SemaphoreGuard guard(producerMutex);
+  if (storage != nullptr && storage->mountGeneration() != transitionMountGeneration) {
+    storageBootFloor = bootSequence.load() == UINT32_MAX ? 0 : bootSequence.load() + 1;
+    persistentBootSequenceReady.store(false, std::memory_order_release);
+    activeChunk = 1;
+    activeChunkSnapshot.store(activeChunk);
+    activePath[0] = '\0';
+    activeFileBytes = 0;
+    retentionPrunedThisBoot.store(false, std::memory_order_release);
+    (void)initializePersistentBootSequenceIfNeeded();
+  }
+#endif
   storageTransitionRequested.store(false, std::memory_order_release);
 }
 

@@ -270,6 +270,7 @@ bool Storage::ensureSdMounted(bool allowInternalFallback) {
       xSemaphoreGive(mountMutex);
       return false;
     }
+    mountGeneration_.fetch_add(1, std::memory_order_acq_rel);
     isSdLoaded = false;
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206) ||          \
     defined(SPI_SHARED)
