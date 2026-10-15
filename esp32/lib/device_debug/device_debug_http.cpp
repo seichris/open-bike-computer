@@ -5,6 +5,7 @@
 #include "../firmware_metadata/firmware_metadata.hpp"
 #include "../renderer_diagnostics/renderer_diagnostics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
+#include "../status_json/json_builder.hpp"
 
 #include <ArduinoJson.h>
 #include <esp_heap_caps.h>
@@ -13,7 +14,6 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
-#include <sstream>
 
 namespace device_debug {
 
@@ -286,7 +286,7 @@ bool DeviceDebugHttp::handleInfo(device_transfer::TransferClient &client) {
   char deviceId[17] = {};
   std::snprintf(deviceId, sizeof(deviceId), "%016llx",
                 static_cast<unsigned long long>(ESP.getEfuseMac()));
-  std::ostringstream body;
+  status_json::JsonBuilder body;
   body << "{\"ok\":true,\"schema\":1,\"session\":{\"active\":true,"
           "\"mode\":\"debug\"},\"target\":\""
        << targetName()
@@ -331,7 +331,7 @@ bool DeviceDebugHttp::handleInfo(device_transfer::TransferClient &client) {
        << ",\"snapshotBytes\":"
        << static_cast<uint32_t>(geometry.width) * geometry.height * 2U
        << "}}";
-  return device_transfer::sendHttpJson(client, 200, body.str());
+  return device_transfer::sendHttpJson(client, 200, body.take());
 }
 
 void DeviceDebugHttp::updateRendererDebugOverhead() {
@@ -502,9 +502,9 @@ bool DeviceDebugHttp::handleRendererWindow(
   }
   lastRendererWindowRequestMs_ = nowMs;
   ui_scheduler::notify(ui_scheduler::WakeReason::RemoteDebug);
-  std::ostringstream response;
+  status_json::JsonBuilder response;
   response << "{\"ok\":true,\"requestId\":" << requestId << "}";
-  return device_transfer::sendHttpJson(client, 202, response.str());
+  return device_transfer::sendHttpJson(client, 202, response.take());
 }
 
 bool DeviceDebugHttp::handleFrame(

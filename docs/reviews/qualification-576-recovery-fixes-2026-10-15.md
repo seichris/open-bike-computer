@@ -50,10 +50,23 @@ recovery, synchronous preparation reclamation, cancellation and unchanged
 low-memory rejection. Exact commands/results and the review ledger are retained
 outside Git for this local run.
 
-No fix in this patch is yet physically qualified. Re-run paused/running Watch
-recovery and diagnostics entry on both 1.75 profiles using matching clean build
-identities before claiming either physical blocker resolved. Keep issue #576's
-longer ride/map logging, retained evidence handoff, resource endurance, stack,
+Matching builds at `ede93b48` passed paused/running Watch recovery and ordinary
+1.75 diagnostics delivery (138/138 inventoried chunks). The Watch bench was
+discarded and both native stores confirmed cleanup. The remote-debug profile
+still rejected its first diagnostics attempt with `wifi_memory` before inventory.
+
+The remote-debug ELF also linked C++ locale/stream state absent from the ordinary
+image: internal-DRAM data symbols alone differed by 4,164 bytes. Its two debug JSON
+responses used `std::ostringstream`, pulling that state into every boot even
+before a debug request. They now reuse the renderer's stream-free JSON builder,
+with the same response fields and integer/escaping behavior. The shared builder
+reserves response storage above Arduino's internal-allocation threshold. No
+Wi-Fi, TLS, credential or owner stack moves to PSRAM, and all four Wi-Fi memory
+safety floors remain unchanged. Confirm the removed locale symbols in the final
+ELF and retest first-attempt diagnostics without live polling on the matching
+remote-debug image before claiming this remaining physical blocker resolved.
+
+Keep issue #576's longer ride/map logging, retained evidence handoff, resource endurance, stack,
 OTA and map/power durability rows open. The user excluded the 2.06-inch and
 three-card campaigns; they are not qualified. No production rollout or factory
 image is authorized by these local fixes.
