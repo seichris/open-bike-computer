@@ -191,6 +191,25 @@ int main() {
         self.assertLess(failure, fallback)
         self.assertLess(fallback, record)
 
+    def test_completed_preparation_reclaims_stack_before_network_admission(self):
+        begin = BLE.index("static void processCompletedDiagnosticsSessionStart()")
+        end = BLE.index("static bool startDiagnosticsSessionAsync()", begin)
+        function = BLE[begin:end]
+        shutdown = BLE[BLE.index("bool BLENavigationServer::pollShutdownQuiescence()"):
+                       BLE.index("void BLENavigationServer::process()")]
+        shutdown = shutdown.replace("BLENavigationServer::", "")
+        harness = (ROOT / "tools/tests/diagnostics_preparation_handoff_harness.cpp").read_text()
+        harness = harness.replace("// PRODUCTION_SHUTDOWN", shutdown)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "handoff.cpp"
+            source.write_text(harness.replace("// PRODUCTION_FUNCTION", function))
+            executable = Path(directory) / "handoff"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "lib/ride_diagnostics"),
+                            "-I", str(ROOT / "lib/device_transfer"),
+                            str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
     def test_preseal_lease_publication_never_waits_behind_pruning(self):
         arm = RECORDER[
             RECORDER.index("void armTransferSnapshotLease") :

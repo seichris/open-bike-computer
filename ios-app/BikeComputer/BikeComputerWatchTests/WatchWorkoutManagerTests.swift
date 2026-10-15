@@ -2578,6 +2578,40 @@ final class WatchWorkoutManagerTests: XCTestCase {
         }
     }
 
+    func testColdPhoneRequestsCurrentSnapshotOnNativeSession() async throws {
+        for state in [WorkoutSessionStateV1.paused, .running] {
+            let probe = WatchMirrorTransportProbe()
+            let runtime = try makeMirrorRuntime(probe: probe)
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session, identity: runtime.identity, state: state)
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+            await Task.yield()
+            runtime.manager.workoutSession(runtime.session,
+                didReceiveDataFromRemoteWorkoutSession:
+                    [Data("bicino.workout.snapshot-request.v1".utf8)])
+            try await waitUntil { probe.sentData.count == 1 }
+            let snapshot = try WorkoutContractCodec.decode(XCTUnwrap(probe.sentData.first))
+            XCTAssertEqual(snapshot.sessionID, runtime.identity.sessionID)
+            XCTAssertEqual(snapshot.snapshot?.state, state)
+            XCTAssertEqual(runtime.manager.state, state)
+            XCTAssertEqual(probe.endSessionCallCount, 0)
+            XCTAssertEqual(runtime.store.recoveredIdentity?.sessionID, runtime.identity.sessionID)
+            let latest = runtime.manager.latestEnvelope
+            let unrelated = try makeMirrorRuntime(probe: WatchMirrorTransportProbe())
+            runtime.manager.workoutSession(unrelated.session,
+                didReceiveDataFromRemoteWorkoutSession: [WorkoutMirrorSnapshotRequest.data])
+            runtime.manager.workoutSession(runtime.session,
+                didReceiveDataFromRemoteWorkoutSession:
+                    [Data("bicino.workout.snapshot-request.v1.invalid".utf8)])
+            await Task.yield()
+            await Task.yield()
+            XCTAssertEqual(runtime.manager.latestEnvelope, latest,
+                           "Other sessions and malformed requests cannot publish credentials")
+        }
+    }
+
     func testMirrorStartTimeoutRetriesWithoutEndingPausedWorkout() async throws {
         let probe = WatchMirrorTransportProbe()
         let runtime = try makeMirrorRuntime(probe: probe, startTimeout: 0.1)

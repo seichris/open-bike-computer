@@ -283,6 +283,12 @@ static char pendingTlsRotationFingerprint[
 static std::atomic<bool> diagnosticsSessionStartInProgress{false};
 static std::atomic<uint32_t> diagnosticsSessionStartGeneration{0};
 static std::atomic<uint32_t> diagnosticsSessionActiveGeneration{0};
+// The main-loop owner reclaims the completed internal-stack task before
+// admitting Wi-Fi. Self deletion leaves that RAM pending idle-task cleanup.
+static TaskHandle_t diagnosticsSessionStartTaskHandle = nullptr;
+static std::atomic<bool> diagnosticsSessionPreparationComplete{false};
+static ride_diagnostics::transfer_policy::StoragePreparation diagnosticsStorageResult{};
+static ride_diagnostics::transfer_policy::SealPreparation diagnosticsSealResult{};
 static portMUX_TYPE destinationPickerMux = portMUX_INITIALIZER_UNLOCKED;
 static DestinationCatalogSnapshot destinationCatalog;
 static DestinationPickerStatusSnapshot destinationPickerStatus;
@@ -3560,9 +3566,31 @@ static void diagnosticsSessionStartTask(void *context) {
   observePreparation(storageReady ? "seal_returned" : "seal_skipped", millis() - sealStarted,
       storageReady ? ride_diagnostics::transfer_policy::sealFailure(sealResult).code
                    : ride_diagnostics::transfer_policy::storageFailure(storageResult).code);
-  const bool ready = storageReady &&
-                     ride_diagnostics::transfer_policy::sealReady(sealResult);
+  diagnosticsStorageResult = storageResult;
+  diagnosticsSealResult = sealResult;
+  diagnosticsSessionPreparationComplete.store(true, std::memory_order_release);
+  // Publish only plain results, then park. No resources or callouts remain.
+  for (;;)
+    vTaskSuspend(nullptr);
+}
 
+static void processCompletedDiagnosticsSessionStart() {
+  if (!diagnosticsSessionPreparationComplete.load(std::memory_order_acquire) ||
+      diagnosticsSessionStartTaskHandle == nullptr ||
+      eTaskGetState(diagnosticsSessionStartTaskHandle) != eSuspended) {
+    return;
+  }
+  // A suspended, non-current task is reclaimed synchronously. Merely observing
+  // a completed bit (or waiting a fixed delay) does not prove its stack is free.
+  vTaskDelete(diagnosticsSessionStartTaskHandle);
+  diagnosticsSessionStartTaskHandle = nullptr;
+  diagnosticsSessionPreparationComplete.store(false, std::memory_order_release);
+  const uint32_t generation =
+      diagnosticsSessionActiveGeneration.load(std::memory_order_acquire);
+  const auto storageResult = diagnosticsStorageResult;
+  const auto sealResult = diagnosticsSealResult;
+  const bool storageReady = ride_diagnostics::transfer_policy::storageReady(storageResult);
+  const bool ready = storageReady && ride_diagnostics::transfer_policy::sealReady(sealResult);
   bool stillCurrent = false;
   bool keepSnapshotLease = false;
   if (diagnosticsSessionMutex != nullptr &&
@@ -3571,6 +3599,7 @@ static void diagnosticsSessionStartTask(void *context) {
         diagnosticsSessionStartGeneration.load(std::memory_order_acquire) ==
             generation &&
         bleNavServer.isConnected() &&
+        !shutdownWritesClosed.load(std::memory_order_acquire) &&
         bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire);
     if (ready && stillCurrent && !deviceTransferHttp.status().enabled) {
       const bool enabled = deviceTransferHttp.setEnabled(true, "diagnostics");
@@ -3638,7 +3667,6 @@ static void diagnosticsSessionStartTask(void *context) {
     diagnosticsSessionStartInProgress.store(false,
                                             std::memory_order_release);
   }
-  vTaskDelete(nullptr);
 }
 
 static bool startDiagnosticsSessionAsync() {
@@ -3662,7 +3690,7 @@ static bool startDiagnosticsSessionAsync() {
   if (xTaskCreatePinnedToCore(
           diagnosticsSessionStartTask, "diagnostics_start", 6144,
           reinterpret_cast<void *>(static_cast<uintptr_t>(generation)), 1,
-          nullptr, 0) != pdPASS) {
+          &diagnosticsSessionStartTaskHandle, 0) != pdPASS) {
     diagnosticsSessionStartInProgress.store(false,
                                             std::memory_order_release);
     diagnosticsSessionActiveGeneration.store(0,
@@ -7066,11 +7094,17 @@ void BLENavigationServer::init(const char *deviceName) {
 }
 
 bool BLENavigationServer::pollShutdownQuiescence() {
-  shutdownWritesClosed.store(true);
-  return shutdownWritesInFlight.load() == 0;
+  if (!shutdownWritesClosed.exchange(true, std::memory_order_acq_rel))
+    cancelDiagnosticsSessionStart();
+  // Preparation can still own storage work after the BLE callback returned.
+  // Drain its result and lease before storage shutdown may advance.
+  processCompletedDiagnosticsSessionStart();
+  return shutdownWritesInFlight.load() == 0 &&
+         !diagnosticsSessionStartInProgress.load(std::memory_order_acquire);
 }
 
 void BLENavigationServer::process() {
+  processCompletedDiagnosticsSessionStart();
   scheduleDeferredNotificationEvent();
   if (deviceOwnershipReady) {
     bool pairingExpired = false;

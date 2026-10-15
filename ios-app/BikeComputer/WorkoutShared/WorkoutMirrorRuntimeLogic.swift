@@ -10,6 +10,13 @@ nonisolated final class WorkoutWeakReference<Object: AnyObject>: @unchecked Send
     }
 }
 
+/// State-neutral bootstrap on the system-provided HealthKit mirror only.
+/// A relaunched phone has no custom envelope credentials yet. This request
+/// asks the existing primary session to publish them; it cannot control it.
+nonisolated enum WorkoutMirrorSnapshotRequest {
+    static let data = Data("bicino.workout.snapshot-request.v1".utf8)
+}
+
 /// Produces iPhone-to-Watch controls in the same monotonic sequence space used
 /// by the current Watch snapshot. Basing every control on the newest received
 /// Watch sequence makes a newly launched iPhone process advance beyond the
