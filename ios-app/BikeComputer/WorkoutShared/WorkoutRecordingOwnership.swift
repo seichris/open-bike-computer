@@ -30,6 +30,14 @@ nonisolated enum WorkoutRecordingDisposition: String, Codable, Sendable {
     case discard
 }
 
+/// A native state callback can precede its HealthKit event write. Keep that
+/// exact transition recoverable until the builder contains its receipt.
+nonisolated struct WorkoutNativeTransitionIntent: Codable, Equatable, Sendable {
+    let id: UUID
+    let paused: Bool
+    let capturedAt: Date
+}
+
 /// Only identity and lifecycle bookkeeping are persisted here. Health samples
 /// and route coordinates remain in HealthKit, not UserDefaults or diagnostics.
 nonisolated struct WorkoutRecordingRecord: Codable, Equatable, Sendable {
@@ -47,6 +55,7 @@ nonisolated struct WorkoutRecordingRecord: Codable, Equatable, Sendable {
     var finishedChoice: WorkoutRecordingDisposition?
     // Written before crossing the potentially ambiguous HealthKit save boundary.
     var saveAttempted: Bool = false
+    var pendingNativeTransitions: [WorkoutNativeTransitionIntent]?
 
     var isValid: Bool {
         schemaVersion == 1
@@ -56,14 +65,36 @@ nonisolated struct WorkoutRecordingRecord: Codable, Equatable, Sendable {
             && (finishedChoice == nil || (phase == .finished && finishedChoice == finishChoice))
             && (phase != .finished || finishedChoice != nil)
             && (!saveAttempted || finishChoice == .save)
+            && (pendingNativeTransitions?.count ?? 0) <= 32
+            && Set(pendingNativeTransitions?.map(\.id) ?? []).count == (pendingNativeTransitions?.count ?? 0)
+            && (pendingNativeTransitions?.allSatisfy {
+                owner == .iphone && $0.id != UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+                    && $0.capturedAt.timeIntervalSinceReferenceDate.isFinite
+                    && $0.capturedAt >= (startedAt ?? requestedAt)
+            } ?? true)
+            && (phase != .finished || pendingNativeTransitions?.isEmpty != false)
+    }
+
+    func addingNativeTransition(_ intent: WorkoutNativeTransitionIntent) -> Self? {
+        guard owner == .iphone, phase != .finished, finishChoice == nil else { return nil }
+        var next = self
+        var pending = pendingNativeTransitions ?? []
+        if !pending.contains(where: { $0.paused == intent.paused && $0.capturedAt == intent.capturedAt }) {
+            guard pending.count < 32 else { return nil }
+            pending.append(intent)
+        }
+        next.pendingNativeTransitions = pending.sorted { $0.capturedAt < $1.capturedAt }
+        return next.isValid ? next : nil
     }
 
     /// Persist the returned value BEFORE stopping or finalizing HealthKit.
     /// Once accepted, a Save can never become Discard (or vice versa).
     func finishing(_ choice: WorkoutRecordingDisposition) -> Self? {
         guard isValid, phase != .finished,
-              finishChoice == nil || finishChoice == choice else { return nil }
+              finishChoice == nil || finishChoice == choice,
+              choice != .save || pendingNativeTransitions?.isEmpty != false else { return nil }
         var next = self
+        if choice == .discard { next.pendingNativeTransitions = nil }
         next.finishChoice = choice
         next.phase = .finishing
         return next

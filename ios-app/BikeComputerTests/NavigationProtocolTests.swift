@@ -9070,17 +9070,17 @@ struct NavigationProtocolTests {
 
     static func testStreetLabelMapContract() {
         let sha = String(repeating: "1", count: 64)
-        let manifest = Data((
-            "{\"files\":[" +
-            "{\"bytes\":4,\"path\":\"VECTMAP/label-map/+0000+0000/0_0.fmb\",\"sha256\":\"\(sha)\"}," +
-            "{\"bytes\":4,\"path\":\"VECTMAP/label-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}]," +
-            "\"mapId\":\"label-map\"," +
-            "\"producer\":{\"buildSha256\":\"\(sha)\",\"imageDigest\":\"sha256:\(sha)\"}," +
-            "\"schemaVersion\":1," +
-            "\"target\":{\"formatVersion\":2,\"internationalFallback\":\"en\"," +
-            "\"labelLanguages\":[\"zh-Hant\",\"en\"],\"labelProfileVersion\":1," +
+        let manifest = Data([
+            "{\"files\":[",
+            "{\"bytes\":4,\"path\":\"VECTMAP/label-map/+0000+0000/0_0.fmb\",\"sha256\":\"\(sha)\"},",
+            "{\"bytes\":4,\"path\":\"VECTMAP/label-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}],",
+            "\"mapId\":\"label-map\",",
+            "\"producer\":{\"buildSha256\":\"\(sha)\",\"imageDigest\":\"sha256:\(sha)\"},",
+            "\"schemaVersion\":1,",
+            "\"target\":{\"formatVersion\":2,\"internationalFallback\":\"en\",",
+            "\"labelLanguages\":[\"zh-Hant\",\"en\"],\"labelProfileVersion\":1,",
             "\"renderer\":\"esp32-fmb\"}}"
-        ).utf8)
+        ].joined().utf8)
         let header = BikeMapStreamFormat.Header(
             formatVersion: 1,
             flags: 0,
@@ -9101,21 +9101,21 @@ struct NavigationProtocolTests {
             assert(false, "valid target-2 manifest is accepted: \(error)")
         }
 
-        let buildingManifest = Data((
-            "{\"buildings\":{" +
-            "\"classDefaultHeightCount\":0,\"explicitHeightCount\":1," +
-            "\"inheritedHeightCount\":0,\"levelsHeightCount\":0," +
-            "\"localMedianHeightCount\":0,\"recordCount\":1}," +
-            "\"files\":[" +
-            "{\"bytes\":4,\"path\":\"VECTMAP/building-map/+0000+0000/0_0.fmb\",\"sha256\":\"\(sha)\"}," +
-            "{\"bytes\":4,\"path\":\"VECTMAP/building-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}]," +
-            "\"mapId\":\"building-map\"," +
-            "\"producer\":{\"buildSha256\":\"\(sha)\",\"imageDigest\":\"sha256:\(sha)\"}," +
-            "\"schemaVersion\":1," +
-            "\"target\":{\"buildingProfileVersion\":1,\"formatVersion\":3," +
-            "\"internationalFallback\":\"en\",\"labelLanguages\":[\"en\"]," +
+        let buildingManifest = Data([
+            "{\"buildings\":{",
+            "\"classDefaultHeightCount\":0,\"explicitHeightCount\":1,",
+            "\"inheritedHeightCount\":0,\"levelsHeightCount\":0,",
+            "\"localMedianHeightCount\":0,\"recordCount\":1},",
+            "\"files\":[",
+            "{\"bytes\":4,\"path\":\"VECTMAP/building-map/+0000+0000/0_0.fmb\",\"sha256\":\"\(sha)\"},",
+            "{\"bytes\":4,\"path\":\"VECTMAP/building-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}],",
+            "\"mapId\":\"building-map\",",
+            "\"producer\":{\"buildSha256\":\"\(sha)\",\"imageDigest\":\"sha256:\(sha)\"},",
+            "\"schemaVersion\":1,",
+            "\"target\":{\"buildingProfileVersion\":1,\"formatVersion\":3,",
+            "\"internationalFallback\":\"en\",\"labelLanguages\":[\"en\"],",
             "\"labelProfileVersion\":1,\"renderer\":\"esp32-fmb\"}}"
-        ).utf8)
+        ].joined().utf8)
         do {
             let decoded = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
                 buildingManifest,
