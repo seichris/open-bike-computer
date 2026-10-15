@@ -66,6 +66,22 @@ safety floors remain unchanged. Confirm the removed locale symbols in the final
 ELF and retest first-attempt diagnostics without live polling on the matching
 remote-debug image before claiming this remaining physical blocker resolved.
 
+The locale-only build `ef9053f3` recovered 3,924 bytes of internal data, but its
+first physical diagnostics attempt still hit the memory guard. The generic BLE
+status producer also attempted whole-response protection for a roughly 2 KB
+body despite the negotiated MTU and 256-byte notification limit, then retained
+duplicate full bodies for retransmission identity and chunk transmission.
+It now checks both wire limits before allocating/protecting a direct response
+and moves one owned body into the chunk sender. Exact-byte comparison preserves
+stable retransmission IDs; in-flight data remains immutable under backpressure.
+Mode and authorization boundaries wipe/release the retained plaintext while
+preserving the sequence counter. Map and renderer chunk paths keep their existing
+behavior. Host allocation tests verify ownership without another allocation,
+stable/changed IDs, rejected replacement, and release at the boundary. Station
+startup failures now also report the already-classified numeric memory snapshot,
+without network identities or credentials. Physical retesting of this additional
+lifetime repair remains required; none of the memory floors changes.
+
 Keep issue #576's longer ride/map logging, retained evidence handoff, resource endurance, stack,
 OTA and map/power durability rows open. The user excluded the 2.06-inch and
 three-card campaigns; they are not qualified. No production rollout or factory

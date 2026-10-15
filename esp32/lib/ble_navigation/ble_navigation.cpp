@@ -3195,16 +3195,21 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
 
-  const std::string body = genericTransferStatusJson();
-  const std::string response = "DSTS" + body;
-  if (notifyAuthenticatedNavigation(
-          pChar, reinterpret_cast<const uint8_t *>(response.data()),
-          response.size())) {
-    Serial.printf("BLE Device Transfer: status notified (%u bytes)\n",
-                  static_cast<unsigned>(response.size()));
-    return;
-  }
+  std::string body = genericTransferStatusJson();
   const uint16_t peerMtu = activePeerMtu.load(std::memory_order_acquire);
+  // Do not allocate/protect a whole DSTS response that cannot fit the ATT MTU.
+  // This path runs concurrently with first Wi-Fi admission on the HTTP worker.
+  if (map_transfer_status_protocol::fitsAuthenticatedNotification(
+          body.size() + 4U, peerMtu, kDeferredNotificationBytes)) {
+    const std::string response = "DSTS" + body;
+    if (notifyAuthenticatedNavigation(
+            pChar, reinterpret_cast<const uint8_t *>(response.data()),
+            response.size())) {
+      Serial.printf("BLE Device Transfer: status notified (%u bytes)\n",
+                    static_cast<unsigned>(response.size()));
+      return;
+    }
+  }
   const size_t chunkBytes =
       map_transfer_status_protocol::chunkPayloadBytes(peerMtu);
   const size_t chunkCount =
@@ -3216,10 +3221,8 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
         static_cast<unsigned>(body.size()));
     return;
   }
-  static map_transfer_status_protocol::ChunkSession chunkSession;
-  const uint8_t transferId = chunkSession.transferIdFor(body);
-  if (!pendingDeviceTransferStatusChunks.begin(body, transferId,
-                                               chunkBytes)) {
+  if (!pendingDeviceTransferStatusChunks.beginStable(std::move(body),
+                                                     chunkBytes)) {
     Serial.printf("BLE Device Transfer: status too large (%u bytes)\n",
                   static_cast<unsigned>(body.size()));
     return;
@@ -3238,7 +3241,7 @@ static void pumpPendingDeviceTransferStatusChunks() {
   if (!bleSessionAuthenticated ||
       activeConnHandle == BLE_HS_CONN_HANDLE_NONE ||
       mapTransferStatusCharacteristic == nullptr) {
-    pendingDeviceTransferStatusChunks.reset();
+    pendingDeviceTransferStatusChunks.discardStable();
     pendingDeviceTransferStatusRefresh = false;
     pendingDeviceTransferStatusContinuation.store(false,
                                                   std::memory_order_release);
@@ -3263,7 +3266,7 @@ static void pumpPendingDeviceTransferStatusChunks() {
   if (!pendingDeviceTransferStatusChunks.active()) {
     const size_t bodySize = pendingDeviceTransferStatusChunks.bodySize();
     const size_t chunkCount = pendingDeviceTransferStatusChunks.chunkCount();
-    pendingDeviceTransferStatusChunks.reset();
+    pendingDeviceTransferStatusChunks.finishStable();
     pendingDeviceTransferStatusContinuation.store(false,
                                                   std::memory_order_release);
     Serial.printf(
@@ -3279,7 +3282,7 @@ static void pumpPendingDeviceTransferStatusChunks() {
 }
 
 static void resetPendingDeviceTransferStatusChunks() {
-  pendingDeviceTransferStatusChunks.reset();
+  pendingDeviceTransferStatusChunks.discardStable();
   pendingDeviceTransferStatusRefresh = false;
   pendingDeviceTransferStatusContinuation.store(false,
                                                 std::memory_order_release);

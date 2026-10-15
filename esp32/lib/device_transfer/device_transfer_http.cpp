@@ -703,8 +703,21 @@ bool HttpTransferServer::startNetwork() {
     observeResources("after_wifi_station");
     observeNetwork("station_start_returned", true);
     if (!stationStart.ok()) {
-      setLastError(networkStartCode(stationStart.failedStep),
-                   "could not start transfer Wi-Fi station safely; see Wi-Fi startup status for the failed step and memory snapshot");
+      char message[300] = {};
+      std::snprintf(message, sizeof(message),
+                    "Wi-Fi station startup failed at %s (esp=%ld, internal=%lu/%lu to %lu/%lu, DMA=%lu/%lu to %lu/%lu).",
+                    networkStartCode(stationStart.failedStep),
+                    static_cast<long>(stationStart.espError),
+                    static_cast<unsigned long>(stationStart.before.internalFree),
+                    static_cast<unsigned long>(stationStart.before.internalLargest),
+                    static_cast<unsigned long>(stationStart.after.internalFree),
+                    static_cast<unsigned long>(stationStart.after.internalLargest),
+                    static_cast<unsigned long>(stationStart.before.dmaFree),
+                    static_cast<unsigned long>(stationStart.before.dmaLargest),
+                    static_cast<unsigned long>(stationStart.after.dmaFree),
+                    static_cast<unsigned long>(stationStart.after.dmaLargest));
+      setLastError(networkStartCode(stationStart.failedStep), message);
+      Serial.printf("DEVICE_TRANSFER_HTTP: %s\n", message);
       return false;
     }
     const uint32_t started = millis();
