@@ -26,6 +26,48 @@ def function(source, signature):
 
 
 class DeviceTransferStatusRefreshTests(unittest.TestCase):
+    def test_status_response_avoids_always_internal_allocations(self):
+        source = (ROOT / "lib/ble_navigation/ble_navigation.cpp").read_text()
+        producer = function(source, "static std::string genericTransferStatusJson() {")
+        # Execute the real initial allocation with observed wire-body sizes.
+        # Arduino puts allocations up to 4096 bytes in scarce internal RAM.
+        prefix = producer[:producer.index('  body = "{')]
+        fixture = r'''
+#include <cassert>
+#include <cstdlib>
+#include <new>
+#include <string>
+static size_t internalAllocations = 0;
+void *operator new(size_t bytes) {
+  if (bytes <= 4096) ++internalAllocations;
+  if (void *value = std::malloc(bytes)) return value;
+  throw std::bad_alloc();
+}
+void operator delete(void *value) noexcept { std::free(value); }
+#if defined(__cpp_sized_deallocation)
+void operator delete(void *value, size_t) noexcept { std::free(value); }
+#endif
+namespace device_transfer { struct HttpTransferStatus {}; }
+struct Server { device_transfer::HttpTransferStatus status() { return {}; } } deviceTransferHttp;
+'''
+        fixture += prefix + r'''
+  (void)transferStatus;
+  body.append(2428, 'x');
+  return body;
+}
+int main() {
+  const std::string body = genericTransferStatusJson();
+  assert(body.size() == 2428 && internalAllocations == 0);
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "status-allocation.cpp"
+            path.write_text(fixture)
+            executable = Path(directory) / "status-allocation"
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(path), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
     def test_status_body_has_one_owner_and_is_released(self):
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "status-ownership"

@@ -143,6 +143,9 @@ public:
     if (body_ != body)
       ++transferId_;
     body_ = std::move(body);
+    // libstdc++ may leave the old destination allocation in the moved-from
+    // producer. Release it here, before pumping frames or starting Wi-Fi.
+    std::string{}.swap(body);
     chunkPayloadBytes_ = chunkPayloadBytes;
     chunkCount_ = count;
     nextIndex_ = 0;

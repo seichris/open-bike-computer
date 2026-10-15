@@ -2786,7 +2786,12 @@ static std::string genericTransferStatusJson() {
   device_transfer::HttpTransferStatus transferStatus =
       deviceTransferHttp.status();
   std::string body;
-  body.reserve(1536);
+  // The full plaintext status stays on the Arduino task and is never passed
+  // to a cache-disabling operation. Reserve beyond Arduino's 4096-byte
+  // always-internal allocation ceiling, as the renderer status builder does,
+  // so this retained response uses PSRAM instead of fragmenting DMA memory
+  // while the internal operation owner admits first Wi-Fi startup.
+  body.reserve(4096);
   body = "{\"configured\":";
   body += transferStatus.configured ? "true" : "false";
   status_json::appendBoolField(body, "enabled", transferStatus.enabled);

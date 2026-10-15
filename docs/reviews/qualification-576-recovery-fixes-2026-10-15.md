@@ -82,6 +82,17 @@ startup failures now also report the already-classified numeric memory snapshot,
 without network identities or credentials. Physical retesting of this additional
 lifetime repair remains required; none of the memory floors changes.
 
+The `8941f4a5` physical retry measured 66,511 free internal bytes and a
+32,756-byte largest internal/DMA block at the unchanged admission guard. It
+still refused startup, 12 bytes below the 32 KiB contiguous-block floor.
+Generic BLE status now reserves its plaintext response above Arduino's
+always-internal allocation ceiling, following the existing renderer builder;
+neither that task nor this response performs cache-disabling operations. The
+sender also explicitly releases any old allocation left in the moved-from
+producer by libstdc++, before pumping notifications. Allocation tests cover the
+actual producer's initial reserve, observed response size, and both C++ library
+implementations. No safety threshold or Wi-Fi/OTA owner stack changes.
+
 Keep issue #576's longer ride/map logging, retained evidence handoff, resource endurance, stack,
 OTA and map/power durability rows open. The user excluded the 2.06-inch and
 three-card campaigns; they are not qualified. No production rollout or factory
