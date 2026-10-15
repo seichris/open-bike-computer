@@ -23,7 +23,8 @@ unsigned millis() { return 10000; }
 std::vector<unsigned> admittedBoots;
 bool accept = true;
 bool recordInternal(Level,const char*,const char*,const char*,bool,unsigned boot,unsigned,unsigned) {
- if (accept) admittedBoots.push_back(boot); return accept;
+ if (accept) { admittedBoots.push_back(boot); }
+ return accept;
 }
 struct QueuedEvent { bool clearsFaultCapsule; unsigned faultCapsuleChecksum; };
 // PRODUCTION_FUNCTIONS
