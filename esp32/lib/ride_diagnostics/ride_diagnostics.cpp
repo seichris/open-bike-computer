@@ -93,6 +93,7 @@ FaultCapsuleState retainedFaultCapsule = {};
 FaultCapsuleState currentFaultCapsule = {};
 FaultCapsuleState pendingFaultCapsule = {};
 bool pendingFaultCapsuleValid = false;
+std::atomic<bool> faultCapsulesInitialized{false};
 portMUX_TYPE faultCapsuleMux = portMUX_INITIALIZER_UNLOCKED;
 
 constexpr std::size_t kMaximumRetainedFiles = 256;
@@ -416,10 +417,14 @@ void initializeFaultCapsules() {
 #endif
   sealFaultCapsule(currentFaultCapsule);
   portEXIT_CRITICAL(&faultCapsuleMux);
+  faultCapsulesInitialized.store(true, std::memory_order_release);
 }
 
 void updateFaultCapsule(Level level, const char *category, const char *event,
                         bool storageFailure) {
+  // Maintenance can emit before begin. Never replace retained previous-boot
+  // evidence with the default boot identity.
+  if (!faultCapsulesInitialized.load(std::memory_order_acquire)) return;
   const uint32_t selectedBootSequence = bootSequence.load();
   portENTER_CRITICAL(&faultCapsuleMux);
   if (!validFaultCapsuleEnvelope(currentFaultCapsule)) {
@@ -547,7 +552,7 @@ ActiveFileCloseResult closeActiveFile() {
       nextSequence.load(std::memory_order_relaxed));
 #endif
   const int flushResult =
-      storage != nullptr ? storage->flush(activeFile) : fflush(activeFile);
+      storage != nullptr ? storage->sync(activeFile) : fflush(activeFile);
   const int closeResult =
       storage != nullptr ? storage->close(activeFile) : fclose(activeFile);
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
@@ -931,14 +936,15 @@ bool writeQueuedEvent(const QueuedEvent &event) {
     activeHashValid = false;
   activeFileBytes += static_cast<uint32_t>(result);
   const uint32_t nowMs = millis();
-  if (event.critical || static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) {
+  if (event.critical || event.clearsFaultCapsule ||
+      static_cast<uint32_t>(nowMs - lastCheckpointMs) >= 5000U) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
     runtime_watchdog_diagnostics::notePhase(
         runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
         runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
         event.sequence);
 #endif
-    if (storage->flush(activeFile) != 0) {
+    if (storage->sync(activeFile) != 0) {
       abandonActiveChunkAfterUncertainWrite();
       storage->markDiagnosticsSdUnavailable();
       storageErrors.fetch_add(1);
@@ -957,11 +963,6 @@ bool writeQueuedEvent(const QueuedEvent &event) {
                                               alreadyPrunedThisBoot)) {
     pruneRetention();
   }
-  receipt.durable = true;
-  if (event.clearsFaultCapsule) {
-    clearFaultCapsule(event.faultCapsuleBoot,
-                      event.faultCapsuleChecksum);
-  }
   if (event.rotateAfterWrite) {
     const ActiveFileCloseResult closeResult = closeAndAdvanceActiveChunk();
     if (closeResult != ActiveFileCloseResult::Ready) {
@@ -971,6 +972,11 @@ bool writeQueuedEvent(const QueuedEvent &event) {
                          closeFailureEvent(closeResult), true);
       return false;
     }
+  }
+  receipt.durable = true;
+  if (event.clearsFaultCapsule) {
+    clearFaultCapsule(event.faultCapsuleBoot,
+                      event.faultCapsuleChecksum);
   }
   if (faultCapsuleGeneration.load(std::memory_order_acquire) !=
       faultCapsuleQueuedGeneration.load(std::memory_order_acquire))
@@ -1173,7 +1179,7 @@ void writerTask(void *) {
           runtime_watchdog_diagnostics::Phase::DiagnosticsFlush,
           nextSequence.load(std::memory_order_relaxed));
 #endif
-      if (storage->flush(activeFile) == 0) {
+      if (storage->sync(activeFile) == 0) {
         lastCheckpointMs = nowMs;
       } else {
         abandonActiveChunkAfterUncertainWrite();

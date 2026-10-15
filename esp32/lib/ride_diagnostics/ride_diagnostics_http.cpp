@@ -245,9 +245,9 @@ ChunkIndex listChunks(
       if (chunks.size() < kMaximumChunks) {
         chunks.push_back(std::move(candidate));
       } else {
-        auto oldest = std::min_element(chunks.begin(), chunks.end(), chunkOlder);
-        if (oldest != chunks.end() && chunkOlder(*oldest, candidate))
-          *oldest = std::move(candidate);
+        // The bounded response must never masquerade as the full inventory.
+        // Pruning may be deferred by a snapshot lease; retry after it expires.
+        index.readable = false;
       }
     }
     closedir(dir);
@@ -528,7 +528,7 @@ bool RideDiagnosticsHttp::handleRequest(
       endTransferSnapshotLease();
       return device_transfer::sendHttpError(
           client, 500, "diagnostics_index_unreadable",
-          "one or more non-empty diagnostic chunks could not be read safely");
+          "diagnostic inventory is oversized or contains unreadable non-empty chunks");
     }
     const Stats snapshot = stats();
     return sendIndex(client, index, snapshot, server_, request);

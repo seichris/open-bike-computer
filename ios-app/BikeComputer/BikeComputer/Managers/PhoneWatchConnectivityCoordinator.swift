@@ -297,10 +297,11 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             received.append(eventID)
         }
         if let count = batch.droppedEventCount, count > 0 {
-            var fields = ["origin": "watch", "reason": "producer_overflow", "droppedCount": String(count)]
+            var fields = ["origin": "watch", "reason": "producer_overflow", "droppedCount": String(count),
+                "originCaptureAssociation": "unknown", "timeBasis": "phone_receipt"]
             if let producerID = batch.producerID { fields["attemptId"] = producerID.uuidString }
             diagnosticsRecorder?.record(level: .warning, category: .ble,
-                event: "watch_ble_diagnostics_loss", fields: fields)
+                event: "watch_ble_diagnostics_loss", fields: fields, captureId: diagnosticsRecorder?.processId)
         }
         for event in batch.events {
             let eventID = "\(event.attemptID.uuidString):\(event.sequence)"
@@ -308,6 +309,9 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             received.append(eventID)
             var fields: [String: String] = [
                 "origin": "watch",
+                "timeBasis": "phone_receipt",
+                "originCaptureAssociation": "unknown",
+                "originClockUncertainty": "unknown",
                 "controllerRole": "scoped_watch",
                 "attemptId": event.attemptID.uuidString,
                 "watchSequence": String(event.sequence),
@@ -320,6 +324,12 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
                 "replacedCount": String(event.replacedGroups),
                 "rejectedCount": String(event.rejectedGroups),
             ]
+            if let wallTime = event.originUnixTimeMs {
+                fields["originUnixTimeMs"] = String(wallTime)
+            }
+            if let processID = event.originProcessID {
+                fields["originProcessId"] = processID.uuidString.lowercased()
+            }
             if let queueBytes = event.queueBytes {
                 fields["queueBytes"] = String(queueBytes)
             }
@@ -338,7 +348,10 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
                     ? .warning : .info,
                 category: .ble,
                 event: "watch_ble_\(event.kind.rawValue)",
-                fields: fields
+                fields: fields,
+                // Queued Watch events have no trustworthy phone ride binding.
+                // Keep receipt time on the envelope and origin time separately.
+                captureId: diagnosticsRecorder?.processId
             )
         }
         received = Array(received.suffix(512))

@@ -379,8 +379,9 @@ class BrokerStore:
             saved = json.loads(raw)
             result = {key:saved[key] for key in ('eventCount','sources','missingRequiredSources','recordingCoverage','deliveryEvidence')}
             # Receipts survive upgrades. An old cached summary did not inspect
-            # retained health counters, so it cannot establish no detected loss.
-            if saved.get('lossAccountingVersion') != 2 and result['recordingCoverage'] == 'no_detected_loss':
+            # retained health counters or unsealed boot tails, so it cannot
+            # establish no detected loss under current coverage rules.
+            if saved.get('lossAccountingVersion') != 3 and result['recordingCoverage'] == 'no_detected_loss':
                 result['recordingCoverage'] = 'unknown_legacy'
             return result
         now=int(time.time())
