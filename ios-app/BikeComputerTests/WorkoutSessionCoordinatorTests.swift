@@ -70,6 +70,7 @@ private final class FakeWatch: WorkoutWatchRecording {
     var saves = 0
     var startAdmission: (() -> Void)?
     var sequence: UInt64 = 0
+    var launchID = UUID()
     let date = Date().addingTimeInterval(-60)
     var startDates: [UUID: Date] = [:]
     var rideAutomationPresentation: WorkoutMirrorPresentationV1 { store.presentation }
@@ -77,7 +78,8 @@ private final class FakeWatch: WorkoutWatchRecording {
     func startOutdoorCyclingOnWatch() -> Bool {
         startAdmission?()
         starts += 1
-        return store.beginWatchLaunch(id: UUID(), at: Date(), timeout: 15)
+        launchID = UUID()
+        return store.beginWatchLaunch(id: launchID, at: Date(), timeout: 15)
     }
     func pause() { pauses += 1 }
     func resume() {}
@@ -205,6 +207,28 @@ struct WorkoutSessionCoordinatorTests {
         check(disk.record?.sessionID == watchID, "Unsolicited Watch adoption persists")
         coordinator.pause()
         check(watch.pauses == 1, "Controls now target adopted Watch")
+
+        // Exercise the actual failed/expired launch reducers, rather than
+        // replacing the presentation with the generic failSession helper.
+        for timedOut in [false, true] {
+            let (checked, checkedWatch, _, checkedAvailability, checkedDisk) = harness()
+            checkedAvailability.availability = .ready(isReachable: true)
+            checked.recoverIfNeeded()
+            await spin { checked.recoveryComplete }
+            check(checked.requestStart(), "Reserve Watch before failed launch")
+            if timedOut {
+                _ = checkedWatch.store.timeOutWatchLaunch(id: checkedWatch.launchID,
+                    at: Date().addingTimeInterval(20))
+            } else {
+                _ = checkedWatch.store.completeWatchLaunch(id: checkedWatch.launchID,
+                    succeeded: false, error: .watchUnavailable)
+            }
+            check(checked.record?.phase == .unresolved, "Failed native launch remains unresolved")
+            checked.confirmNoWorkoutOnWatch()
+            check(checked.record == nil && checkedDisk.record == nil,
+                  "Checked-idle acknowledgement clears actual failed launch without restarting")
+            check(checked.canOfferNewWorkout, "Checked idle restores new-ride admission")
+        }
 
         let (watchCoordinator, watch2, phone2, availability2, disk2) = harness()
         availability2.availability = .ready(isReachable: true)

@@ -7567,15 +7567,23 @@ extension WatchWorkoutManager: HKWorkoutSessionDelegate {
         _ workoutSession: HKWorkoutSession,
         didReceiveDataFromRemoteWorkoutSession data: [Data]
     ) {
+        let requestsSnapshot = data.contains(WorkoutMirrorSnapshotRequest.data)
         let envelopes = data.compactMap { payload in
             try? WorkoutContractCodec.decode(payload)
         }
-        guard !envelopes.isEmpty else { return }
+        guard requestsSnapshot || !envelopes.isEmpty else { return }
         Task { @MainActor [weak self] in
-            self?.handleRemoteWorkoutEnvelopes(
-                envelopes,
-                from: workoutSession
-            )
+            guard let self, self.session === workoutSession else { return }
+            if requestsSnapshot, lifecycle.state == .running || lifecycle.state == .paused {
+                // Only the current native mirror may bootstrap a fresh phone.
+                // No token, replay gate or lifecycle command is accepted here.
+                // A prior failed send may have scheduled a mirror restart; the
+                // peer's request proves a snapshot can now be attempted.
+                if publishSnapshotImmediately() {
+                    drainMirrorEnvelopeBuffer(forceAttempt: true)
+                }
+            }
+            handleRemoteWorkoutEnvelopes(envelopes, from: workoutSession)
         }
     }
 

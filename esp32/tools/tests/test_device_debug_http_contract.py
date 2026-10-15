@@ -1,5 +1,8 @@
 from pathlib import Path
 import unittest
+import json
+import subprocess
+import tempfile
 
 
 ROOT = Path(__file__).parents[2]
@@ -17,6 +20,7 @@ INPUT = (ROOT / "lib/device_debug/device_debug_input.cpp").read_text(
 )
 MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
 MAIN_SCREEN = (ROOT / "lib/gui/src/mainScr.cpp").read_text(encoding="utf-8")
+JSON_BUILDER = (ROOT / "lib/status_json/json_builder.hpp").read_text(encoding="utf-8")
 RENDERER_DIAGNOSTICS = (
     ROOT / "lib/renderer_diagnostics/renderer_diagnostics.cpp"
 ).read_text(encoding="utf-8")
@@ -51,6 +55,23 @@ LV_CONFIG_TEMPLATE = (ROOT / "tools/lv_conf_template.h").read_text(
 
 
 class DeviceDebugHttpContractTests(unittest.TestCase):
+    def test_shared_json_builder_preserves_wire_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "json-builder"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                str(ROOT / "tools/tests/json_builder_harness.cpp"),
+                "-o", str(executable)], check=True)
+            result = subprocess.run([str(executable)], check=True,
+                                    capture_output=True, text=True)
+        decoded = json.loads(result.stdout)
+        self.assertEqual(decoded["unsigned"], 18446744073709551615)
+        self.assertEqual(decoded["signed"], -9223372036854775808)
+        self.assertEqual(decoded["byte"], 255)
+        self.assertEqual(decoded["text"], '"\\\b\f\n\r\t' + chr(1) + "é")
+        self.assertEqual(decoded["nullText"], "")
+        self.assertEqual(decoded["view"], "prefix")
+        self.assertEqual(decoded["requestId"], 4294967295)
+
     def test_ios_secure_benchmark_keeps_session_credentials_in_memory(self):
         self.assertTrue(IOS_SECURE_BENCHMARK.startswith("#if DEBUG\n"))
         for contract in (
@@ -245,10 +266,12 @@ class DeviceDebugHttpContractTests(unittest.TestCase):
         self.assertIn("setFrameTransferActive(false)", HTTP)
 
     def test_renderer_metrics_serialize_without_small_internal_stream_buffers(self):
-        self.assertIn("class JsonBuilder", RENDERER_DIAGNOSTICS)
-        self.assertIn("body_.reserve(4096);", RENDERER_DIAGNOSTICS)
-        self.assertIn("std::to_chars", RENDERER_DIAGNOSTICS)
-        self.assertIn("struct EscapedText", RENDERER_DIAGNOSTICS)
+        self.assertIn("using status_json::JsonBuilder;", RENDERER_DIAGNOSTICS)
+        self.assertIn("status_json::JsonBuilder body;", HTTP)
+        self.assertIn("class JsonBuilder", JSON_BUILDER)
+        self.assertIn("body_.reserve(4096);", JSON_BUILDER)
+        self.assertIn("std::to_chars", JSON_BUILDER)
+        self.assertIn("struct EscapedText", JSON_BUILDER)
         self.assertNotIn("std::string jsonEscape", RENDERER_DIAGNOSTICS)
         self.assertNotIn("std::ostringstream", RENDERER_DIAGNOSTICS)
 

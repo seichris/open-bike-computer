@@ -807,6 +807,34 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
 @available(iOS 17.0, *)
 @MainActor
 final class WorkoutMirrorManagerProductionTests: XCTestCase {
+    func testColdNativeAttachmentRequestsSnapshotWithoutCredentials() async throws {
+        for state in [WorkoutSessionStateV1.paused, .running] {
+            let manager = WorkoutMirrorManager()
+            let transport = FakeMirroredSessionTransport()
+            transport.initialSessionState = state
+            manager.acceptMirroredTransport(transport)
+            XCTAssertTrue(transport.hasDelegate)
+            XCTAssertNil(manager.store.currentEnvelope)
+            XCTAssertEqual(transport.sentData,
+                [Data("bicino.workout.snapshot-request.v1".utf8)])
+            XCTAssertEqual(transport.pauseCallCount, 0)
+            XCTAssertEqual(transport.resumeCallCount, 0)
+            XCTAssertEqual(manager.store.presentation.sessionState, state)
+            transport.completeNext(succeeded: false)
+            await Task.yield()
+            XCTAssertNil(manager.store.presentation.pendingControl)
+            XCTAssertEqual(manager.store.presentation.sessionState, state)
+            let snapshot = makeSnapshotEnvelope(sequence: 20, capturedAt: Date(), state: state)
+            manager.applyRemoteEnvelopes([snapshot], receivedAt: Date(), from: transport)
+            XCTAssertEqual(manager.store.presentation.sessionID, snapshot.sessionID)
+            if state == .paused { manager.resume() } else { manager.pause() }
+            let control = try WorkoutContractCodec.decode(XCTUnwrap(transport.sentData.last))
+            XCTAssertEqual(control.sessionID, snapshot.sessionID)
+            XCTAssertEqual(control.sessionToken, snapshot.sessionToken)
+            XCTAssertEqual(control.control, state == .paused ? .resume : .pause)
+        }
+    }
+
     func testNativeTakeoverFailureDrainsAuthoritativeTerminalSnapshot() async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_399_900)
         let manager = WorkoutMirrorManager(
@@ -3404,8 +3432,8 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             XCTAssertEqual(manager.store.presentation.errorCode, .watchUnavailable)
             XCTAssertTrue(transport.hasDelegate,
                           "Recovery keeps the live transport for a late credentialed snapshot")
-            XCTAssertTrue(transport.sentData.isEmpty,
-                          "Native state alone cannot authorize a credentialed command")
+            XCTAssertEqual(transport.sentData, [WorkoutMirrorSnapshotRequest.data],
+                           "Native state permits only a state-neutral snapshot bootstrap")
         }
     }
 

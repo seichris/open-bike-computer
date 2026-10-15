@@ -26,6 +26,56 @@ def function(source, signature):
 
 
 class DeviceTransferStatusRefreshTests(unittest.TestCase):
+    def test_status_response_avoids_always_internal_allocations(self):
+        source = (ROOT / "lib/ble_navigation/ble_navigation.cpp").read_text()
+        producer = function(source, "static std::string genericTransferStatusJson() {")
+        # Execute the real initial allocation with observed wire-body sizes.
+        # Arduino puts allocations up to 4096 bytes in scarce internal RAM.
+        prefix = producer[:producer.index('  body = "{')]
+        fixture = r'''
+#include <cassert>
+#include <cstdlib>
+#include <new>
+#include <string>
+static size_t internalAllocations = 0;
+void *operator new(size_t bytes) {
+  if (bytes <= 4096) ++internalAllocations;
+  if (void *value = std::malloc(bytes)) return value;
+  throw std::bad_alloc();
+}
+void operator delete(void *value) noexcept { std::free(value); }
+#if defined(__cpp_sized_deallocation)
+void operator delete(void *value, size_t) noexcept { std::free(value); }
+#endif
+namespace device_transfer { struct HttpTransferStatus {}; }
+struct Server { device_transfer::HttpTransferStatus status() { return {}; } } deviceTransferHttp;
+'''
+        fixture += prefix + r'''
+  (void)transferStatus;
+  body.append(2428, 'x');
+  return body;
+}
+int main() {
+  const std::string body = genericTransferStatusJson();
+  assert(body.size() == 2428 && internalAllocations == 0);
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "status-allocation.cpp"
+            path.write_text(fixture)
+            executable = Path(directory) / "status-allocation"
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(path), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
+    def test_status_body_has_one_owner_and_is_released(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "status-ownership"
+            subprocess.run(["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            str(ROOT / "tools/tests/test_status_body_ownership.cpp"),
+                            "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
     def test_changed_policy_is_delivered_after_inflight_status(self):
         compiler = shutil.which("c++")
         self.assertIsNotNone(compiler)
@@ -52,7 +102,9 @@ static std::string currentBody;
 static std::deque<std::string> transport;
 static std::vector<std::string> delivered;
 static constexpr size_t capacity = 2;
+static constexpr size_t kDeferredNotificationBytes = 256;
 static bool rejectNextChunk = false;
+static size_t oversizedProtectionAttempts = 0;
 struct SerialStub { template<class... Args> void printf(const char *, Args...) {} } Serial;
 namespace ui_scheduler {
 enum class WakeReason { Ble };
@@ -61,8 +113,11 @@ void notify(WakeReason) {}
 static std::string genericTransferStatusJson() { return currentBody; }
 static uint8_t deferredNotificationAvailableCapacity() { return capacity - transport.size(); }
 static bool notifyAuthenticatedNavigation(NimBLECharacteristic *, const uint8_t *data, size_t size) {
+  if (size + 22U + 3U > activePeerMtu.load() || size + 22U > kDeferredNotificationBytes)
+    ++oversizedProtectionAttempts;
   if (!bleSessionAuthenticated || activeConnHandle == BLE_HS_CONN_HANDLE_NONE ||
-      transport.size() == capacity || size + 22 > activePeerMtu.load() - 3U) return false;
+      transport.size() == capacity || size + 22 > activePeerMtu.load() - 3U ||
+      size + 22 > kDeferredNotificationBytes) return false;
   const std::string frame(reinterpret_cast<const char *>(data), size);
   if (frame.substr(0, 4) == "DSTC" && rejectNextChunk) {
     rejectNextChunk = false;
@@ -117,9 +172,18 @@ static void clear() {
   mapTransferStatusCharacteristic = &characteristic; rejectNextChunk = false;
 }
 int main() {
+  activePeerMtu = 512;
+  currentBody = std::string(300, 'q'); // fits MTU, exceeds deferred frame storage
+  notifyGenericTransferStatus(nullptr);
+  assert(oversizedProtectionAttempts == 0);
+  drain();
+  assert(delivered.size() == 1 && delivered[0] == currentBody);
+  clear();
+  activePeerMtu = 185;
   const std::string oldBody(700, 'o'), acknowledged(750, 'a'), newest(800, 'n');
   currentBody = oldBody; notifyGenericTransferStatus(nullptr);
   assert(pendingDeviceTransferStatusChunks.active());
+  assert(oversizedProtectionAttempts == 0); // no doomed whole-body encryption
   const auto progress = pendingDeviceTransferStatusChunks.nextIndex();
   currentBody = acknowledged;
   for (unsigned poll = 0; poll < 10; ++poll) notifyGenericTransferStatus(nullptr);

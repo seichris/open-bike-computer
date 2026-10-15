@@ -920,6 +920,15 @@ final class WorkoutMirrorManager: NSObject {
         enqueueUnconfirmedSegmentReplayIfNeeded()
         if store.currentEnvelope?.snapshot?.state.isActive == true {
             enqueueSnapshotRequestIfPossible()
+        } else if pendingTerminalFailureCode == nil,
+                  store.currentEnvelope == nil,
+                  transport.initialSessionState == .running
+                    || transport.initialSessionState == .paused {
+            // A cold phone cannot build a credentialed request before its
+            // first snapshot. Signal only that this native mirror's delegate
+            // is ready. Completion never confirms a control or changes state;
+            // the existing first-snapshot timeout still bounds recovery.
+            transport.send(data: WorkoutMirrorSnapshotRequest.data) { _, _ in }
         }
         drainRemoteQueue()
     }
