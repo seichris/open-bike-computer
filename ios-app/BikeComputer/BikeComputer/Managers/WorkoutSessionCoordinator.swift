@@ -64,6 +64,9 @@ final class WorkoutSessionCoordinator: ObservableObject {
     private var phoneRecoveryDeferredForWatch = false
     private var pendingWatchRetrySessionID: UUID?
     private var primaryRecoveryRequiredForWatch = false
+#if DEBUG
+    private var lastRecoveryDebugCheckpoint: NSDictionary?
+#endif
 
     init(
         watch: any WorkoutWatchRecording,
@@ -90,7 +93,11 @@ final class WorkoutSessionCoordinator: ObservableObject {
     /// Register callbacks only after every stored property has been initialized.
     private func installObservers() {
         watch.store.$presentation.sink { [weak self] presentation in
-            self?.receiveWatch(presentation)
+            guard let self else { return }
+            receiveWatch(presentation)
+#if DEBUG
+            recordRecoveryDebugCheckpoint(observed: presentation)
+#endif
         }.store(in: &subscriptions)
         if let phone {
             phone.store.$presentation.dropFirst().sink { [weak self, weak phone] _ in
@@ -476,6 +483,32 @@ final class WorkoutSessionCoordinator: ObservableObject {
         guard record?.owner != .iphone else { return }
         store.followWorkoutState(from: watch.store, owner: .watch)
     }
+
+#if DEBUG
+    private func recordRecoveryDebugCheckpoint(observed: WorkoutMirrorPresentationV1) {
+        let fields: [String: Any] = [
+            "schema": 1,
+            "recoveryComplete": recoveryComplete,
+            "storageFailed": storageFailed,
+            "recordOwner": record?.owner.rawValue ?? "none",
+            "recordPhase": record?.phase.rawValue ?? "none",
+            "observedState": observed.sessionState.rawValue,
+            "observedConnection": observed.connectionState.rawValue,
+            "outputState": store.presentation.sessionState.rawValue,
+            "outputConnection": store.presentation.connectionState.rawValue,
+            "outputIsActive": store.presentation.isWorkoutActive,
+            "outputOwner": store.recordingOwner.rawValue,
+            "phoneRecoveryDeferredForWatch": phoneRecoveryDeferredForWatch,
+            "startInFlight": startTask != nil,
+        ]
+        let checkpoint = fields as NSDictionary
+        guard lastRecoveryDebugCheckpoint != checkpoint else { return }
+        lastRecoveryDebugCheckpoint = checkpoint
+        var persisted = fields
+        persisted["capturedAt"] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(persisted, forKey: "bicino.debug.workoutSelection.v1")
+    }
+#endif
 
     private func persistenceError() {
         storageFailed = true

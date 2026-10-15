@@ -1032,11 +1032,24 @@ struct ContentView: View {
             .presentationContentInteraction(.resizes)
             .presentationCornerRadius(32)
             .interactiveDismissDisabled()
+            .onAppear {
+#if DEBUG
+                recordWorkoutPresentationCheckpoint(reason: "rideMetricsDidAppear", visible: true)
+#endif
+            }
+            .onDisappear {
+#if DEBUG
+                recordWorkoutPresentationCheckpoint(reason: "rideMetricsDidDisappear", visible: false)
+#endif
+            }
 
         }
     }
 
     private func synchronizeRideMetricsSheet() {
+#if DEBUG
+        defer { recordWorkoutPresentationCheckpoint(reason: "synchronize") }
+#endif
         // HealthKit can recover a Watch mirror while this scene is still in
         // the background. Present its controls when UIKit can show the sheet.
         guard scenePhase == .active else { return }
@@ -1049,6 +1062,46 @@ struct ContentView: View {
             presentedSheet = nil
         }
     }
+
+#if DEBUG
+    private func recordWorkoutPresentationCheckpoint(reason: String, visible: Bool? = nil) {
+        let key = "bicino.debug.workoutPresentation.v1"
+        let previous = UserDefaults.standard.dictionary(forKey: key) ?? [:]
+        let processID = Int(ProcessInfo.processInfo.processIdentifier)
+        let previousWasVisible = previous["processID"] as? Int == processID
+            && (previous["rideMetricsVisible"] as? Bool ?? false)
+        func kind(_ destination: ContentSheetDestination?) -> String {
+            guard let destination else { return "none" }
+            if destination == .rideMetrics { return "rideMetrics" }
+            if destination == .workoutDashboard { return "workoutDashboard" }
+            return "other"
+        }
+        let fields: [String: Any] = [
+            "schema": 1,
+            "processID": processID,
+            "reason": reason,
+            "sceneActive": scenePhase == .active,
+            "selectedState": workoutStore.presentation.sessionState.rawValue,
+            "selectedConnection": workoutStore.presentation.connectionState.rawValue,
+            "selectedIsActive": workoutStore.presentation.isWorkoutActive,
+            "selectedOwner": workoutStore.recordingOwner.rawValue,
+            "recoveryComplete": workoutSessionCoordinator.recoveryComplete,
+            "recordPhase": workoutSessionCoordinator.record?.phase.rawValue ?? "none",
+            "presentedSheet": kind(presentedSheet),
+            "activeSheet": kind(activeSheetDestination),
+            "queuedSheet": kind(queuedSheetAfterDismiss),
+            "dismissalInFlight": isSheetDismissalInFlight,
+            "savedPreviewReserved": savedRouteMapPreview != nil,
+            "rideMetricsVisible": visible ?? previousWasVisible,
+        ]
+        let comparable = previous.filter { $0.key != "capturedAt" } as NSDictionary
+        let checkpoint = fields as NSDictionary
+        guard comparable != checkpoint else { return }
+        var persisted = fields
+        persisted["capturedAt"] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(persisted, forKey: key)
+    }
+#endif
 
     private func restoreRideMetricsSheetIfNeeded() {
         guard scenePhase == .active else {
