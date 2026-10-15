@@ -299,6 +299,12 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             where receivedSet.insert(eventID).inserted {
             received.append(eventID)
         }
+        if let count = batch.droppedEventCount, count > 0 {
+            var fields = ["origin": "watch", "reason": "producer_overflow", "droppedCount": String(count)]
+            if let producerID = batch.producerID { fields["attemptId"] = producerID.uuidString }
+            diagnosticsRecorder?.record(level: .warning, category: .ble,
+                event: "watch_ble_diagnostics_loss", fields: fields)
+        }
         for event in batch.events {
             let eventID = "\(event.attemptID.uuidString):\(event.sequence)"
             guard receivedSet.insert(eventID).inserted else { continue }

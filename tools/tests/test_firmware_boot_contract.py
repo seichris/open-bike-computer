@@ -25,14 +25,14 @@ constexpr int ESP_OK = 0, ESP_ERR_NOT_FOUND = 1;
 esp_partition_t partition;
 bool hasPartition = true;
 int queryResult = ESP_OK, markResult = ESP_OK, marks = 0, rejects = 0, restarts = 0;
-bool persist = true;
+bool persist = true, receiptReadable = true, receiptWritable = true;
 esp_ota_img_states_t state = ESP_OTA_IMG_PENDING_VERIFY;
 const esp_partition_t *esp_ota_get_running_partition() { return hasPartition ? &partition : nullptr; }
 int esp_ota_get_state_partition(const esp_partition_t *, esp_ota_img_states_t *out) { *out = state; return queryResult; }
 int esp_ota_mark_app_valid_cancel_rollback() { ++marks; if (markResult == ESP_OK && persist) state = ESP_OTA_IMG_VALID; return markResult; }
 int esp_ota_mark_app_invalid_rollback_and_reboot() { ++rejects; return -1; }
 struct { void restart() { ++restarts; } } ESP;
-class FirmwareUpdateHttpServer { public: bool markRunningAppValid(); void rejectRunningApp(); };
+class FirmwareUpdateHttpServer { public: bool reconcileOperationReceipt(bool terminal) { return terminal ? receiptWritable : receiptReadable; } bool markRunningAppValid(); void rejectRunningApp(); };
 extern "C" bool verifyRollbackLater() __attribute__((weak));
 extern "C" bool verifyRollbackLater() { return false; }
 ''' + bodies + r'''
@@ -41,14 +41,18 @@ int main() {
   // Pinned Arduino initArduino's first-boot decision, before setup executes.
   if (!verifyRollbackLater()) esp_ota_mark_app_valid_cancel_rollback();
   assert(marks == 0 && state == ESP_OTA_IMG_PENDING_VERIFY);
+  receiptReadable = false;
+  assert(!app.markRunningAppValid() && marks == 0); // exact bytes before validity
+  receiptReadable = true;
   markResult = -2;
   assert(!app.markRunningAppValid() && state == ESP_OTA_IMG_PENDING_VERIFY);
   app.rejectRunningApp(); assert(rejects == 1 && restarts == 1);
   markResult = ESP_OK; persist = false;
   assert(!app.markRunningAppValid()); // reported success without durable VALID
-  persist = true;
+  persist = true; receiptWritable = false;
   assert(app.markRunningAppValid() && state == ESP_OTA_IMG_VALID);
-  int prior = marks; assert(app.markRunningAppValid() && marks == prior);
+  int prior = marks; assert(app.markRunningAppValid() && marks == prior); // no receipt-write reboot loop
+  receiptWritable = true;
   app.rejectRunningApp(); assert(rejects == 1); // do not invalidate confirmed boots
   queryResult = -3; assert(!app.markRunningAppValid());
   queryResult = ESP_ERR_NOT_FOUND; assert(app.markRunningAppValid()); // USB first boot

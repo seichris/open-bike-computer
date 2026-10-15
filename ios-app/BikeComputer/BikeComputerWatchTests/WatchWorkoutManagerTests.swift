@@ -1624,30 +1624,6 @@ final class WatchWorkoutManagerTests: XCTestCase {
         XCTAssertTrue(unavailableManager.hasUnavailableRecoveryState)
     }
 
-    func testMissingLiveMirrorCompletionRetriesNewestSnapshotAndIgnoresLateCallback() async throws {
-        let probe = WatchMirrorTransportProbe()
-        let runtime = try makeMirrorRuntime(probe: probe, sendTimeout: 0.03)
-        runtime.manager.configureMirrorRuntimeForTesting(session: runtime.session,
-                                                         identity: runtime.identity, state: .running)
-        runtime.manager.startMirroringForTesting()
-        probe.completeNextStart(succeeded: true)
-        await Task.yield()
-        await Task.yield()
-        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
-        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
-        try await waitUntil { probe.startCallCount == 2 }
-        probe.completeNextStart(succeeded: true)
-        try await waitUntil { probe.sentData.count == 2 }
-        let old = try WorkoutContractCodec.decode(probe.sentData[0])
-        let latest = try WorkoutContractCodec.decode(probe.sentData[1])
-        XCTAssertGreaterThan(latest.sequence, old.sequence)
-        probe.completeNextSend(succeeded: true)
-        await Task.yield()
-        XCTAssertTrue(runtime.manager.mirrorSendIsInFlightForTesting)
-        probe.completeNextSend(succeeded: true)
-        try await waitUntil { !runtime.manager.mirrorSendIsInFlightForTesting }
-    }
-
     func testProductionMirrorStartRetryAndBackpressure() async throws {
         let probe = WatchMirrorTransportProbe()
         let runtime = try makeMirrorRuntime(probe: probe)
@@ -2600,6 +2576,95 @@ final class WatchWorkoutManagerTests: XCTestCase {
                 "a late HealthKit completion must not repeat cleanup"
             )
         }
+    }
+
+    func testColdPhoneRequestsCurrentSnapshotOnNativeSession() async throws {
+        for state in [WorkoutSessionStateV1.paused, .running] {
+            let probe = WatchMirrorTransportProbe()
+            let runtime = try makeMirrorRuntime(probe: probe)
+            runtime.manager.configureMirrorRuntimeForTesting(
+                session: runtime.session, identity: runtime.identity, state: state)
+            runtime.manager.startMirroringForTesting()
+            probe.completeNextStart(succeeded: true)
+            await Task.yield()
+            await Task.yield()
+            runtime.manager.workoutSession(runtime.session,
+                didReceiveDataFromRemoteWorkoutSession:
+                    [Data("bicino.workout.snapshot-request.v1".utf8)])
+            try await waitUntil { probe.sentData.count == 1 }
+            let snapshot = try WorkoutContractCodec.decode(XCTUnwrap(probe.sentData.first))
+            XCTAssertEqual(snapshot.sessionID, runtime.identity.sessionID)
+            XCTAssertEqual(snapshot.snapshot?.state, state)
+            XCTAssertEqual(runtime.manager.state, state)
+            XCTAssertEqual(probe.endSessionCallCount, 0)
+            XCTAssertEqual(runtime.store.recoveredIdentity?.sessionID, runtime.identity.sessionID)
+            let latest = runtime.manager.latestEnvelope
+            let unrelated = try makeMirrorRuntime(probe: WatchMirrorTransportProbe())
+            runtime.manager.workoutSession(unrelated.session,
+                didReceiveDataFromRemoteWorkoutSession: [WorkoutMirrorSnapshotRequest.data])
+            runtime.manager.workoutSession(runtime.session,
+                didReceiveDataFromRemoteWorkoutSession:
+                    [Data("bicino.workout.snapshot-request.v1.invalid".utf8)])
+            await Task.yield()
+            await Task.yield()
+            XCTAssertEqual(runtime.manager.latestEnvelope, latest,
+                           "Other sessions and malformed requests cannot publish credentials")
+        }
+    }
+
+    func testMirrorStartTimeoutRetriesWithoutEndingPausedWorkout() async throws {
+        let probe = WatchMirrorTransportProbe()
+        let runtime = try makeMirrorRuntime(probe: probe, startTimeout: 0.1)
+        runtime.manager.configureMirrorRuntimeForTesting(
+            session: runtime.session, identity: runtime.identity, state: .paused)
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        runtime.manager.startMirroringForTesting()
+        try await waitUntil { probe.startCallCount == 2 }
+        XCTAssertEqual(runtime.manager.state, .paused)
+        XCTAssertEqual(probe.endSessionCallCount, 0)
+        XCTAssertEqual(runtime.store.recoveredIdentity?.sessionID, runtime.identity.sessionID)
+        probe.completeNextStart(succeeded: true)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertTrue(probe.sentData.isEmpty,
+                      "A timed-out start's late callback cannot attach its replacement")
+        probe.completeNextStart(succeeded: true)
+        try await waitUntil { probe.sentData.count == 1 }
+        XCTAssertEqual(try WorkoutContractCodec.decode(probe.sentData[0]).snapshot?.state, .paused)
+        probe.completeNextSend(succeeded: true)
+        try await waitUntil { !runtime.manager.mirrorSendIsInFlightForTesting }
+        XCTAssertEqual(runtime.manager.state, .paused)
+        XCTAssertEqual(probe.endSessionCallCount, 0)
+    }
+
+    func testLiveMirrorTimeoutRetriesLatestSnapshotWithoutEndingWorkout() async throws {
+        let probe = WatchMirrorTransportProbe()
+        let runtime = try makeMirrorRuntime(probe: probe, liveSendTimeout: 0.1)
+        runtime.manager.configureMirrorRuntimeForTesting(
+            session: runtime.session, identity: runtime.identity, state: .running)
+        runtime.manager.startMirroringForTesting()
+        probe.completeNextStart(succeeded: true)
+        await Task.yield()
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        XCTAssertTrue(runtime.manager.publishMirrorSnapshotForTesting())
+        let latest = runtime.manager.latestEnvelope
+        try await waitUntil { probe.startCallCount == 2 }
+        XCTAssertEqual(runtime.manager.state, .running)
+        XCTAssertEqual(probe.endSessionCallCount, 0)
+        XCTAssertEqual(runtime.store.recoveredIdentity?.sessionID, runtime.identity.sessionID)
+        probe.completeNextStart(succeeded: true)
+        try await waitUntil { probe.sentData.count == 2 }
+        XCTAssertEqual(try WorkoutContractCodec.decode(probe.sentData[1]), try latest.map {
+            try WorkoutContractCodec.decode(WorkoutContractCodec.encodeForPhone($0, peerVersion: nil))
+        })
+        probe.completeNextSend(succeeded: true)
+        await Task.yield()
+        await Task.yield()
+        XCTAssertTrue(runtime.manager.mirrorSendIsInFlightForTesting,
+                      "The timed-out send's late completion cannot clear its replacement")
+        probe.completeNextSend(succeeded: true)
+        try await waitUntil { !runtime.manager.mirrorSendIsInFlightForTesting }
+        XCTAssertEqual(probe.endSessionCallCount, 0)
     }
 
     func testSupersededLiveCallbackCannotCompleteFinalShutdownSend() async throws {
@@ -8717,7 +8782,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
     private func makeMirrorRuntime(
         probe: WatchMirrorTransportProbe,
         shutdownTimeout: TimeInterval = 10,
-        sendTimeout: TimeInterval = 8,
+        startTimeout: TimeInterval = 10,
+        liveSendTimeout: TimeInterval = 10,
         workoutConfigurationHandler:
             (@MainActor (HKWorkoutConfiguration) -> Void)? = nil,
         builderElapsedTime:
@@ -8754,7 +8820,8 @@ final class WatchWorkoutManagerTests: XCTestCase {
             mirrorSendOperation: probe.send,
             mirrorShutdownEndSession: probe.endSession,
             mirrorRetryDelay: 0.01,
-            mirrorSendTimeout: sendTimeout,
+            mirrorStartTimeout: startTimeout,
+            mirrorLiveSendTimeout: liveSendTimeout,
             mirrorShutdownDeliveryTimeout: shutdownTimeout,
             initializeOnLaunch: false
         )

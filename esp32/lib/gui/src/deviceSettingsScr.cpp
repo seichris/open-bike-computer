@@ -7,6 +7,15 @@
  */
 
 #include "deviceSettingsScr.hpp"
+#if PERSISTENT_RIDE_DIAGNOSTICS
+#include "../../ride_diagnostics/ride_diagnostics.hpp"
+static lv_obj_t *diagnosticMarkerStatus = nullptr;
+static void diagnosticMarkerEvent(lv_event_t *) {
+  const bool queued = ride_diagnostics::markLocalIssue("other");
+  lv_label_set_text_static(diagnosticMarkerStatus,
+      queued ? "Marker queued; export logs later" : "Recorder unavailable; marker not saved");
+}
+#endif
 #ifdef USE_ARDUINO_GFX
 #include "../../display_power/display_power.hpp"
 #endif
@@ -163,6 +172,17 @@ void createDeviceSettingsScr() {
   lv_obj_t *list;
   lv_obj_t *btn;
   lv_obj_t *dropdown;
+
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  // Accessible without an iPhone or network; stays off the power-button path.
+  btn = lv_list_add_btn(deviceSettingsOptions, LV_SYMBOL_WARNING, "Mark diagnostic issue");
+  lv_obj_set_style_text_font(btn, fontOptions, 0);
+  lv_obj_add_event_cb(btn, diagnosticMarkerEvent, LV_EVENT_CLICKED, nullptr);
+  diagnosticMarkerStatus = lv_label_create(deviceSettingsOptions);
+  lv_label_set_text_static(diagnosticMarkerStatus, "Records an incident ID; does not start Wi-Fi");
+  lv_obj_set_width(diagnosticMarkerStatus, TFT_WIDTH - 45);
+  lv_label_set_long_mode(diagnosticMarkerStatus, LV_LABEL_LONG_WRAP);
+#endif
 
   // GPS Speed
   list = lv_list_add_btn(deviceSettingsOptions, NULL, "GPS\nSpeed");

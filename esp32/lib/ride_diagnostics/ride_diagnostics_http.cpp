@@ -5,6 +5,7 @@
 #include "ride_diagnostics.hpp"
 #include "ride_diagnostics_http_policy.hpp"
 #include "ride_diagnostics_index_policy.hpp"
+#include "catalog_v2.hpp"
 
 #include <Arduino.h>
 #include <dirent.h>
@@ -34,6 +35,7 @@ struct Chunk {
   uint32_t number = 0;
   uint32_t bytes = 0;
   std::string path;
+  std::string cachedDigest{};
 };
 
 struct ChunkIndex {
@@ -236,6 +238,10 @@ ChunkIndex listChunks(
       }
       Chunk candidate = {boot, chunkNumber,
                          static_cast<uint32_t>(metadata.st_size), path};
+      catalog_v2::Descriptor descriptor;
+      if (catalog_v2::read(storage, path, boot, chunkNumber, candidate.bytes, descriptor))
+        candidate.cachedDigest = catalog_v2::hex(descriptor);
+
       if (chunks.size() < kMaximumChunks) {
         chunks.push_back(std::move(candidate));
       } else {
@@ -322,7 +328,7 @@ bool sendIndex(device_transfer::TransferClient &client,
   std::size_t contentLength = prefix.size() + suffix.size();
   for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
     contentLength += (chunkIndex == 0 ? 0 : 1) +
-                     indexHashProgressCharacters(chunks[chunkIndex].bytes) +
+                     (chunks[chunkIndex].cachedDigest.empty() ? indexHashProgressCharacters(chunks[chunkIndex].bytes) : 0) +
                      indexEntryPrefix(chunks[chunkIndex]).size() +
                      kDigestCharacters + kEntrySuffixCharacters;
     if (contentLength > kMaximumIndexBytes) {
@@ -354,10 +360,10 @@ bool sendIndex(device_transfer::TransferClient &client,
       return false;
     }
     const Chunk &chunk = chunks[chunkIndex];
-    uint32_t bytes = 0;
-    std::string digest;
-    if (!sha256File(chunk.path.c_str(), digest, bytes, chunk.bytes, client,
-                    server, request) ||
+    uint32_t bytes = chunk.bytes;
+    std::string digest = chunk.cachedDigest;
+    if ((digest.empty() && !sha256File(chunk.path.c_str(), digest, bytes, chunk.bytes, client,
+                    server, request)) ||
         bytes == 0 || bytes != chunk.bytes || bytes > kChunkBytes ||
         digest.size() != kDigestCharacters) {
       endTransferSnapshotLease();
@@ -496,6 +502,9 @@ bool RideDiagnosticsHttp::handleRequest(
     return device_transfer::sendHttpError(client, 404, "not_found",
                                           "diagnostic endpoint not found");
   }
+  if (route.kind == http_policy::RouteKind::Policy) {
+    return sendBody(client, capturePolicyJson(), "application/json", server_, request);
+  }
   if (route.kind == http_policy::RouteKind::Status) {
     const Stats snapshot = stats();
     const std::string body =
@@ -537,8 +546,11 @@ bool RideDiagnosticsHttp::handleRequest(
   }
 
   if (route.kind == http_policy::RouteKind::ActiveTail) {
-    return device_transfer::sendHttpError(client, 404, "active_tail_disabled",
-                                          "active diagnostic tail is not exposed");
+    std::string tail;
+    if (!liveTailJson(route.boot, route.chunk, tail))
+      return device_transfer::sendHttpError(client, 503, "live_tail_unavailable",
+                                            "bounded observation cache is busy or unavailable");
+    return sendBody(client, tail, "application/json", server_, request);
   }
 
   if (route.kind == http_policy::RouteKind::Exit) {

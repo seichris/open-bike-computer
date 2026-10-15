@@ -9,6 +9,7 @@
 #pragma once
 
 #include "../power_management/power_management.hpp"
+#include "storage_stream_admission.hpp"
 #include "Stream.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdspi_host.h"
@@ -129,6 +130,11 @@ private:
 class Storage {
 private:
   std::atomic<bool> isSdLoaded;
+  mutable storage_shutdown::StreamAdmission streamAdmission_;
+  std::atomic<bool> shutdownAdmissionClosed_{false};
+  std::atomic<bool> shutdownStarted_{false};
+  std::atomic<bool> shutdownComplete_{false};
+  static void shutdownTask(void *context);
   // True when /sdcard is currently backed by the main-branch FFat fallback.
   // Diagnostics must not treat this as removable-SD availability, but a
   // failed SD retry must restore it so the rest of the application keeps the
@@ -141,6 +147,7 @@ private:
   // use the historical isolated SPI transport only when native SDMMC fails
   // during the HSPI-to-SDMMC migration boot.
   std::atomic<StorageBackend> mountedBackend{StorageBackend::Unavailable};
+  std::atomic<uint32_t> mountGeneration_{0};
   std::atomic<ride_diagnostics::transfer_policy::StoragePreparation>
       lastDiagnosticsMountResult{
           ride_diagnostics::transfer_policy::StoragePreparation::MountFailed};
@@ -148,8 +155,12 @@ private:
   SemaphoreHandle_t mountMutex = nullptr;
 
 public:
+  uint32_t mountGeneration() const { return mountGeneration_.load(std::memory_order_acquire); }
   Storage();
 
+  // Called only after transfer, renderer and diagnostics producer ACKs.
+  // Starts a dedicated internal-stack unmount task; never waits on the UI.
+  bool pollShutdownQuiescence();
   esp_err_t initSD();
   // Remount the removable card when requested. Existing callers retain the
   // FFat fallback by default. Diagnostics keeps whichever backend owns
@@ -173,6 +184,10 @@ public:
   esp_err_t initSPIFFS();
   SDCardInfo getSDCardInfo();
   bool getSdLoaded() const;
+  // Registered streams hold shutdown admission through their complete
+  // fopen -> fclose lifetime. Only close streams returned by this instance.
+  // Exhaustion/shutdown rejects open before reaching the backend; unknown or
+  // already-closing streams return EOF rather than closing a foreign handle.
   FILE *open(const char *path, const char *mode);
   int close(FILE *file);
   bool exists(const char *path);

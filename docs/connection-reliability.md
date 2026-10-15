@@ -1,7 +1,7 @@
 # Companion connection reliability
 
-Implementation base: `645350373f37e9474ad8967e794dadd69cd55953` (GitHub main).
-Publication base: `0f6fc8c6f0238d5508df199f2a50b1482b62ca1d`; the intervening
+Original implementation base: `645350373f37e9474ad8967e794dadd69cd55953` (GitHub main).
+Original publication base (2 October): `0f6fc8c6f0238d5508df199f2a50b1482b62ca1d`; the intervening
 commit updates map-workflow action versions without overlapping this change.
 Scope: firmware BLE, iPhone CoreBluetooth, Watch direct BLE, HealthKit mirroring,
 and WatchConnectivity control/file delivery. Topology and application security
@@ -10,6 +10,38 @@ mode remain unchanged.
 Review: standard, publish, sequential-local, P0/P1/P2 gate. The primary checkout
 and all pre-existing changes are excluded. Only this isolated branch is owned by
 the implementation loop.
+
+## Refresh on 15 October 2026
+
+Integration base: `4fc844bdf5f64164fedc06c9db08d14a0f7245e4` (94 commits
+newer than the original base). The existing PR branch merges this mainline
+history without rewriting its published commits.
+
+The update preserves mainline workout recovery, diagnostics startup and device
+operation handling. Watch mirroring uses mainline's ten-second startup/live-send
+watchdogs and shared disconnect recovery, including its retained-session and
+late-callback tests; the superseded eight-second Watch timer and duplicate test
+are removed. iPhone send liveness retains its separate eight-second deadline.
+Phone clear/adoption regressions move into `NavigationProtocolRideTests.swift`
+without restoring tests that mainline split out. Both protocol-document additions
+are retained.
+
+The refreshed integration passed local verification. Its published commit and
+GitHub CI must be checked independently; the October 2 results below remain
+historical. Review profile: standard; mode: publish; strategy: sequential-local;
+gate: P0/P1/P2; no delegated review agents.
+
+The current-main baseline passed shared contracts, Watch source typechecking,
+and both native simulator suites. The refreshed merge passed the full phone
+navigation suite (215 route checks), shared contracts and actual Watch adapter
+(48 cases / 241 assertions), full Watch typechecking/persistence, native iPhone
+and Watch suites, and Development/Release app-container validation. Firmware
+ownership, lease, automation, source-admission guards, and the full firmware host
+suite also passed. The first host run lacked the YAML test prerequisite; the
+same check passed after installing that package in a task-owned virtual
+environment without changing source. Current firmware image builds are delegated
+to this refreshed PR's CI; no local firmware build or device action was performed
+for this refresh.
 
 ## Finding ledger
 
@@ -25,7 +57,7 @@ the implementation loop.
 | F8 | Controller revocation leaves durable outbox before receiver application | fixed+verified | Production outbox model: persistence/restart, rejected cleanup, wrong request, duplicate intent, exact applied receipt; native packaging |
 | F9 | Deferred automation commands lack an explicit authorization lifetime | fixed+verified | Session/lease generation rejection matrix, ownership-lock application wiring, firmware build and existing lease/state tests |
 
-## Evidence
+## Historical evidence from 2 October
 
 The unmodified base passed the shared route and actual Watch BLE adapter suite,
 Watch offline persistence suite, firmware controller lease suite, and automation
@@ -35,7 +67,8 @@ The final implementation review used two sequential passes covering correctness,
 regressions, authorization, lifecycle, persistence, compatibility, and packaging.
 The first closed the eviction-receipt deletion retry edge case; the confirming
 pass found no remaining P0/P1/P2 issue. No implementation subagents were used.
-All nine entries are fixed and verified; none is deferred or invalidated.
+At original publication all nine entries were fixed and verified. The refreshed
+ledger above is supported by the separate October 15 checks.
 
 The frozen implementation (excluding documentation) has SHA-256
 `1f6c29e6a4c8dc84703d2d1e9c59372bb145ed74dfb691752b2d741a193fa776` using sorted

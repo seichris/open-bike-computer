@@ -1,4 +1,7 @@
 #include "map_transfer.hpp"
+#include "map_operation_journal.hpp"
+#include "map_selection_anchor.hpp"
+#include "map_activation_workspace.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 #include "../maps/src/mapFontAsset.hpp"
 #include "../maps/src/mapLabelBlock.hpp"
@@ -15,13 +18,23 @@
 #include <fcntl.h>
 #include <fstream>
 #include <limits>
-#include <sstream>
+#include <memory>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
 
 namespace map_transfer {
 namespace {
+
+struct FileCloser { void operator()(FILE *file) const { std::fclose(file); } };
+using FileHandle = std::unique_ptr<FILE, FileCloser>;
+
+struct ActivationOperationWorkspace {
+  MapOperationStorage storage;
+  operation::Store store;
+  ActivationOperationWorkspace(const std::string &root, const std::string &device)
+      : storage(root), store(storage, device) {}
+};
 
 constexpr const char *kVectMapPrefix = "VECTMAP/";
 constexpr const char *kActiveMapFile = "/VECTMAP/active-map.json";
@@ -612,7 +625,7 @@ static bool targetMetadataMatches(const MapTargetMetadata &left,
              right.topographySourcePolicySha256;
 }
 
-static MapTargetMetadata targetMetadataFromJson(const std::string &json,
+static __attribute__((noinline)) MapTargetMetadata targetMetadataFromJson(const std::string &json,
                                                 const std::string &prefix,
                                                 bool *valid = nullptr) {
   MapTargetMetadata target;
@@ -743,6 +756,41 @@ static std::string targetMetadataJson(const MapTargetMetadata &target,
   return json;
 }
 
+static void appendJsonString(std::string &body, const char *key, const std::string &value) {
+  body += ",\"";
+  body += key;
+  body += "\":\"";
+  body += jsonEscape(value);
+  body += '"';
+}
+
+// Bound serialization temporaries independently of selection/recovery frames.
+static __attribute__((noinline)) std::string streamActivationTransaction(
+    const ReadyStreamMap &ready, const MapTargetMetadata &target,
+    const ActiveMapSelection &previous, const char *phase, bool retained = false) {
+  std::string body = "{\"protocolVersion\":2";
+  if (retained) {
+    appendJsonString(body, "phase", phase);
+    body += ",\"retainedSelection\":1";
+  }
+  appendJsonString(body, "operationID", ready.operationID);
+  appendJsonString(body, "sessionId", ready.sessionId);
+  appendJsonString(body, "mapId", ready.mapId);
+  appendJsonString(body, "root", ready.root);
+  body += targetMetadataJson(target, "");
+  appendJsonString(body, "manifestReceipt", ready.manifestReceipt);
+  appendJsonString(body, "signedManifestReceipt", ready.signedManifestReceipt);
+  appendJsonString(body, "previousMapId", retained ? previous.previousMapId : previous.mapId);
+  appendJsonString(body, "previousSessionId", retained ? previous.previousSessionId : previous.sessionId);
+  appendJsonString(body, "previousRoot", retained ? previous.previousRoot : previous.root);
+  body += targetMetadataJson(retained ? previous.previousTarget : previous.target, "previous");
+  appendJsonString(body, "previousManifestReceipt", retained ? previous.previousManifestReceipt : previous.manifestReceipt);
+  appendJsonString(body, "previousSignedManifestReceipt", retained ? previous.previousSignedManifestReceipt : previous.signedManifestReceipt);
+  if (!retained) appendJsonString(body, "phase", phase);
+  body += "}\n";
+  return body;
+}
+
 static std::vector<std::string> fileObjects(const std::string &json) {
   std::vector<std::string> objects;
   size_t filesPos = json.find("\"files\"");
@@ -819,11 +867,12 @@ static bool isHexSha256(const std::string &value) {
 }
 
 static bool hasHiddenPathComponent(const std::string &path) {
-  std::stringstream stream(path);
-  std::string part;
-  while (std::getline(stream, part, '/')) {
-    if (!part.empty() && part[0] == '.')
-      return true;
+  size_t start = 0;
+  while (start < path.size()) {
+    if (path[start] == '.') return true;
+    const size_t slash = path.find('/', start);
+    if (slash == std::string::npos) break;
+    start = slash + 1;
   }
   return false;
 }
@@ -943,6 +992,12 @@ ActivationBeginResult MapActivationState::begin(const std::string &sessionId,
   if (state_.status == "installed" && state_.sessionId == sessionId) {
     return ActivationBeginResult::AlreadyInstalled;
   }
+  // Retry of this accepted session retains the first owner failure. A new
+  // session or a completed attempt starts a separate diagnostic identity.
+  if (state_.sessionId != sessionId || state_.terminalCode[0] != '\0') {
+    state_.ownerRecoveryCode.fill(0);
+    state_.terminalCode.fill(0);
+  }
   state_.running = true;
   const uint32_t nextSequence =
       state_.sequence == UINT32_MAX ? UINT32_MAX : state_.sequence + 1;
@@ -984,6 +1039,18 @@ void MapActivationState::finish(std::string status, std::string mapId,
   }
   state_.errorCode = std::move(errorCode);
   state_.errorMessage = std::move(errorMessage);
+  if (state_.status == "failed" || state_.status == "installed") {
+    state_.terminalCode.fill(0);
+    const auto &code = state_.errorCode.empty() ? state_.status : state_.errorCode;
+    std::copy_n(code.data(), std::min(code.size(), state_.terminalCode.size() - 1),
+                state_.terminalCode.data());
+  }
+}
+
+void MapActivationState::rememberOwnerRecovery(const char *code) noexcept {
+  if (!code || state_.ownerRecoveryCode[0] != '\0') return;
+  for (size_t i = 0; i + 1 < state_.ownerRecoveryCode.size() && code[i]; ++i)
+    state_.ownerRecoveryCode[i] = code[i];
 }
 
 bool MapActivationState::acceptsUploads() const { return !state_.running; }
@@ -1008,6 +1075,10 @@ std::string MapActivationState::json(bool compact) const {
       body += ",\"message\":\"" + jsonEscape(state_.errorMessage) + "\"";
     body += "}";
   }
+  if (state_.ownerRecoveryCode[0])
+    body += ",\"ownerRecoveryCode\":\"" + jsonEscape(state_.ownerRecoveryCode.data()) + "\"";
+  if (state_.terminalCode[0])
+    body += ",\"terminalCode\":\"" + jsonEscape(state_.terminalCode.data()) + "\"";
   body += "}";
   return body;
 }
@@ -1427,7 +1498,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
   }
   manifestOutput.close();
   if (!manifestOutput.good() || !removeTree(manifestPath) ||
-      ::rename(manifestTemp.c_str(), manifestPath.c_str()) != 0) {
+      renameStoragePath(manifestTemp.c_str(), manifestPath.c_str()) != 0) {
     removeTree(manifestTemp);
     return fail("archive_write", "could not finish extracted manifest");
   }
@@ -1571,7 +1642,7 @@ InstallStatus MapTransferInstaller::prepareStagedArchive(
         return fail("file_sha256", "archive map file sha256 mismatch: " + path);
       }
       if (!removeTree(destination) ||
-          ::rename(tempDestination.c_str(), destination.c_str()) != 0) {
+          renameStoragePath(tempDestination.c_str(), destination.c_str()) != 0) {
         removeTree(tempDestination);
         return fail("archive_write", "could not publish extracted map file");
       }
@@ -1769,6 +1840,16 @@ InstallStatus MapTransferInstaller::activateStagedMap(
 InstallStatus
 MapTransferInstaller::readReadyStreamMap(const std::string &sessionId,
                                          ReadyStreamMap &ready) const {
+  return readStreamMapMetadata(sessionId, ready, false);
+}
+
+InstallStatus MapTransferInstaller::readPreparedOperation(
+    const std::string &sessionId, ReadyStreamMap &prepared) const {
+  return readStreamMapMetadata(sessionId, prepared, true);
+}
+
+InstallStatus MapTransferInstaller::readStreamMapMetadata(
+    const std::string &sessionId, ReadyStreamMap &ready, bool prepared) const {
   ready = ReadyStreamMap();
   if (!safeId(sessionId))
     return fail("stream_session_id", "stream session ID is invalid");
@@ -1784,6 +1865,7 @@ MapTransferInstaller::readReadyStreamMap(const std::string &sessionId,
     candidate.sessionId = sessionId;
     candidate.root = std::string("/VECTMAP/.maps/") + sessionId;
     candidate.mapId = jsonStringValue(marker, "mapId");
+    candidate.operationID = jsonStringValue(marker, "operationID");
     candidate.manifestReceipt = jsonStringValue(marker, "manifestReceipt");
     candidate.signedManifestReceipt =
         jsonStringValue(marker, "signedManifestReceipt");
@@ -1807,9 +1889,15 @@ MapTransferInstaller::readReadyStreamMap(const std::string &sessionId,
   };
   std::string value;
   bool markerFound = false;
-  for (const std::string &path : candidates(joinPath(root, kStreamReadyFile))) {
+  const bool operationReady = prepared || fileExists(joinPath(root, ".operation-ready")) ||
+                              fileExists(joinPath(root, ".operation-ready.bak"));
+  for (const std::string &path : candidates(joinPath(root, prepared ? ".operation-prepared" : (operationReady ? ".operation-ready" : kStreamReadyFile)))) {
     ReadyStreamMap candidate;
-    if (readTextFile(path, value, 2048) && parseMarker(value, candidate)) {
+    if (readTextFile(path, value, 2048) && parseMarker(value, candidate) &&
+        (!operationReady || (candidate.operationID.size() == 32 &&
+          std::all_of(candidate.operationID.begin(), candidate.operationID.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+          })))) {
       ready = std::move(candidate);
       markerFound = true;
       break;
@@ -1877,6 +1965,139 @@ MapTransferInstaller::readReadyStreamMap(const std::string &sessionId,
   return {true, "stream_ready", ""};
 }
 
+InstallStatus MapTransferInstaller::promotePreparedOperation(
+    const std::string &sessionId, const std::string &operationID) const {
+  ReadyStreamMap metadata;
+  auto status = readPreparedOperation(sessionId, metadata);
+  if (!status.ok) {
+    // A prior promotion may have completed before its response was lost.
+    status = readReadyStreamMap(sessionId, metadata);
+    if (!status.ok) return status;
+  }
+  if (metadata.operationID != operationID || operationID.empty() ||
+      !acceptedMapOperation(storageRoot_, operationDeviceID_, operationID,
+                            sessionId, metadata.manifestReceipt, metadata.signedManifestReceipt))
+    return fail("operation_not_accepted", "prepared map has no matching accepted commit");
+  const std::string root = joinPath(storageRoot_, metadata.root);
+  std::string marker;
+  if ((!readTextFile(joinPath(root, ".operation-prepared"), marker, 2048) &&
+       !readTextFile(joinPath(root, ".operation-prepared.bak"), marker, 2048)) &&
+      (!readTextFile(joinPath(root, ".operation-ready"), marker, 2048) &&
+       !readTextFile(joinPath(root, ".operation-ready.bak"), marker, 2048)))
+    return fail("operation_prepared_missing", "prepared metadata cannot be read");
+  if (!writeTextFileAtomic(joinPath(root, ".operation-ready"), marker))
+    return fail("operation_ready_write", "accepted map ready marker needs recovery");
+  const std::string pending =
+      "{\"manifestReceipt\":\"" + metadata.manifestReceipt + "\",\"mapId\":\"" +
+      jsonEscape(metadata.mapId) + "\",\"root\":\"" + metadata.root +
+      "\",\"sessionId\":\"" + jsonEscape(sessionId) + "\",\"signedManifestReceipt\":\"" +
+      metadata.signedManifestReceipt + "\"}\n";
+  if (!writeTextFileAtomic(joinPath(storageRoot_, kPendingStreamActivationFile), pending))
+    return fail("operation_pending_write", "accepted map activation intent needs recovery");
+  if (!removeTree(joinPath(root,kStreamConsumedFile)) ||
+      !removeTree(joinPath(root,kStreamConsumedFile)+".bak") ||
+      !removeTree(joinPath(root,kStreamConsumedFile)+".tmp"))
+    return fail("operation_consumed_reset","accepted operation consumed-state reset must retry");
+  return {true, "operation_accepted", ""};
+}
+
+InstallStatus MapTransferInstaller::cancelOperationStaging(
+    const std::string &sessionId, const std::string &operationID) const {
+  if (!safeId(sessionId)) return fail("operation_identity","invalid cancellation identity");
+  MapOperationStorage storage(storageRoot_); operation::Store store(storage,operationDeviceID_);
+  if (store.restore()!=operation::Result::Ok) return fail("operation_storage","cancellation ledger unavailable");
+  bool cancelled=false;
+  for (const auto &record : store.records()) {
+    if (record.identity.operation==operationID && record.identity.session==sessionId &&
+        record.phase==operation::Phase::Cancelled) cancelled=true;
+    if (record.identity.operation!=operationID && record.identity.session==sessionId &&
+        (record.phase==operation::Phase::Receiving || record.phase==operation::Phase::Prepared || record.phase==operation::Phase::Accepted))
+      return fail("operation_cleanup_conflict","another attempt uses the same content root");
+  }
+  if (!cancelled) return fail("operation_not_cancelled","cancellation must persist before staging cleanup");
+  ReadyStreamMap prepared;
+  const auto root=joinPath(storageRoot_,std::string("/VECTMAP/.maps/")+sessionId);
+  const bool marker=fileExists(joinPath(root,".operation-prepared")) || fileExists(joinPath(root,".operation-prepared.bak"));
+  if (marker && (!readPreparedOperation(sessionId,prepared).ok || prepared.operationID!=operationID))
+    return fail("operation_cleanup_conflict","prepared metadata belongs to another attempt");
+  ActiveMapSelection active; const auto selected=readActiveMap(active);
+  const auto relative=std::string("/VECTMAP/.maps/")+sessionId;
+  if (selected.ok && (active.root==relative || active.previousRoot==relative)) {
+    // Preparing/retransmitting identical bytes does not own the pre-existing
+    // selected or rollback map. Cancel only this attempt's separate envelope.
+    if (!marker || (removeTree(joinPath(root,".operation-prepared")) &&
+                    removeTree(joinPath(root,".operation-prepared.bak")) &&
+                    removeTree(joinPath(root,".operation-prepared.tmp"))))
+      return {true,"operation_cancelled_staging",""};
+    return fail("operation_cleanup","cancelled envelope cleanup must retry");
+  }
+  if (!selected.ok && selected.code!="active_missing") return selected;
+  return discardUnselectedStreamMap(sessionId);
+}
+
+InstallStatus MapTransferInstaller::finalizeOperation(
+    const std::string &sessionId, const std::string &operationID) const {
+  if (!safeId(sessionId) || operationID.empty()) return fail("operation_identity","invalid terminal operation");
+  struct Workspace : ActivationOperationWorkspace {
+    ReadyStreamMap ready;
+    ActiveMapSelection selected;
+    using ActivationOperationWorkspace::ActivationOperationWorkspace;
+  };
+  const auto workspace = makeActivationWorkspace<Workspace>(storageRoot_, operationDeviceID_);
+  auto &store = workspace->store;
+  if (store.restore()!=operation::Result::Ok) return fail("operation_storage","terminal ledger unavailable");
+  const operation::Record *record=nullptr;
+  for (const auto &candidate : store.records())
+    if (candidate.identity.operation==operationID && candidate.identity.session==sessionId) record=&candidate;
+  if (!record || (record->phase!=operation::Phase::Installed && record->phase!=operation::Phase::Failed))
+    return fail("operation_not_terminal","renderer result is not persisted");
+  const auto transactionPath=joinPath(storageRoot_,kActivationTransactionFile);
+  for (const auto &path : {transactionPath,transactionPath+".bak"}) {
+    std::string transaction;
+    if (!fileExists(path)) continue;
+    if (!readTextFile(path,transaction,2048) || jsonStringValue(transaction,"sessionId")!=sessionId ||
+        jsonStringValue(transaction,"operationID")!=operationID)
+      return fail("operation_cleanup_conflict","another transaction owns recovery evidence");
+  }
+  if (record->phase==operation::Phase::Installed) {
+    auto &ready = workspace->ready;
+    auto &selected = workspace->selected;
+    if (!readReadyStreamMap(sessionId,ready).ok || ready.operationID!=operationID ||
+        ready.manifestReceipt!=record->identity.manifest || ready.signedManifestReceipt!=record->identity.signedManifest ||
+        !readActiveMap(selected).ok || selected.root!=ready.root || selected.sessionId!=sessionId ||
+        selected.mapId!=record->identity.map || selected.manifestReceipt!=ready.manifestReceipt || selected.signedManifestReceipt!=ready.signedManifestReceipt)
+      return fail("operation_cleanup_selection","terminal selection does not match persisted receipt");
+    const auto root=joinPath(storageRoot_,ready.root);
+    if (!markStreamActivationConsumed(ready) || !clearPendingStreamActivation(sessionId) ||
+        !removeTree(joinPath(root,kStreamCheckpointFile)) || !removeTree(joinPath(root,kStreamInstallingFile)) ||
+        !removeTree(joinPath(root,".operation-prepared")) || !removeTree(joinPath(root,".operation-prepared.bak")))
+      return fail("operation_cleanup","confirmed operation cleanup must retry");
+  } else {
+    std::string transaction;
+    auto &selected = workspace->selected;
+    const bool retained=readTextFile(transactionPath,transaction,2048) &&
+        jsonUintValue(transaction,"retainedSelection")==1 && readActiveMap(selected).ok &&
+        selected.sessionId==sessionId && selected.manifestReceipt==record->identity.manifest &&
+        selected.signedManifestReceipt==record->identity.signedManifest;
+    if (retained) {
+      const auto root=joinPath(storageRoot_,selected.root);
+      auto &ready = workspace->ready;
+      if (!readReadyStreamMap(sessionId,ready).ok || ready.operationID!=operationID ||
+          !markStreamActivationConsumed(ready))
+        return fail("operation_cleanup","failed retained selection disposition must retry");
+      if (!clearPendingStreamActivation(sessionId) || !removeTree(joinPath(root,".operation-prepared")) ||
+          !removeTree(joinPath(root,".operation-prepared.bak")))
+        return fail("operation_cleanup","retained map cleanup must retry");
+    } else {
+      const auto discarded=discardUnselectedStreamMap(sessionId);
+      if (!discarded.ok) return discarded;
+    }
+  }
+  if (!removeTree(transactionPath+".tmp") || !removeTree(transactionPath+".bak") || !removeTree(transactionPath))
+    return fail("operation_cleanup","terminal journal cleanup must retry");
+  return {true,"operation_terminal_cleaned",""};
+}
+
 bool MapTransferInstaller::clearPendingStreamActivation(
     const std::string &sessionId) const {
   const std::string path = joinPath(storageRoot_, kPendingStreamActivationFile);
@@ -1898,35 +2119,93 @@ bool MapTransferInstaller::markStreamActivationConsumed(
       std::string("{\"manifestReceipt\":\"") + ready.manifestReceipt +
       "\",\"mapId\":\"" + jsonEscape(ready.mapId) + "\",\"sessionId\":\"" +
       jsonEscape(ready.sessionId) + "\",\"signedManifestReceipt\":\"" +
-      ready.signedManifestReceipt + "\"}\n";
+      ready.signedManifestReceipt + "\",\"operationID\":\"" + ready.operationID + "\"}\n";
   return writeTextFileAtomic(
       joinPath(joinPath(storageRoot_, ready.root), kStreamConsumedFile),
       marker);
 }
 
-InstallStatus MapTransferInstaller::activateReadyStreamMap(
-    const std::string &sessionId,
-    const ActivationProgressCallback &onProgress) const {
+bool MapTransferInstaller::preparationBlocksActivation(const ReadyStreamMap &ready) const {
+  const auto root=joinPath(storageRoot_,ready.root);
+  if (!fileExists(joinPath(root,".operation-prepared")) &&
+      !fileExists(joinPath(root,".operation-prepared.bak"))) return false;
+  ReadyStreamMap prepared;
+  // A new preparation must not inherit an older legacy or consumed operation's
+  // ready authority merely because signed content reuses the same root/session.
+  return !readPreparedOperation(ready.sessionId,prepared).ok ||
+      ready.operationID.empty() || prepared.operationID!=ready.operationID;
+}
+
+InstallStatus MapTransferInstaller::recoverStreamSelection() const {
+  if (!hasInterruptedActivation()) {
+    ActiveMapSelection canonical;
+    if (!readActiveMap(canonical).ok) {
+      const auto anchored = recoverSelectionAnchor();
+      if (!anchored.ok) return anchored;
+    }
+  }
   if (hasInterruptedActivation()) {
     InstallStatus recovered = recoverInterruptedActivation();
     if (!recovered.ok)
       return recovered;
   }
-  ReadyStreamMap ready;
+  return {true, "ok", ""};
+}
+
+InstallStatus MapTransferInstaller::activateReadyStreamMap(
+    const std::string &sessionId,
+    const ActivationProgressCallback &onProgress,
+    ActivationRecoveryCallback onRecovery, void *recoveryContext) const {
+  const auto recovered = recoverStreamSelection();
+  if (!recovered.ok) return recovered;
+  bool needsSelectionRecovery = false;
+  const auto selected = selectReadyStreamMap(sessionId, onProgress,
+                                            needsSelectionRecovery);
+  if (needsSelectionRecovery) {
+    if (onRecovery) onRecovery(recoveryContext, selected.code.c_str());
+    // A failed canonical write can require a full predecessor rehash. The
+    // selection phase must return before recovery reserves its own frame.
+    const auto recovery = recoverInterruptedActivation();
+    if (!recovery.ok) return recovery;
+  }
+  return selected;
+}
+
+InstallStatus MapTransferInstaller::selectReadyStreamMap(
+    const std::string &sessionId,
+    const ActivationProgressCallback &onProgress,
+    bool &needsSelectionRecovery) const {
+  struct Workspace {
+    ReadyStreamMap ready;
+    MapManifest manifest;
+    MapTargetMetadata target;
+    ActiveMapSelection previous, selected;
+  };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  auto &ready = workspace->ready;
   InstallStatus readyStatus = readReadyStreamMap(sessionId, ready);
   if (!readyStatus.ok)
     return readyStatus;
-  MapManifest readyManifest;
+  if (preparationBlocksActivation(ready))
+    return fail("operation_prepared_uncommitted","prepared map requires its own explicit commit");
+  if (!ready.operationID.empty() &&
+      !acceptedMapOperation(storageRoot_, operationDeviceID_, ready.operationID,
+                            ready.sessionId, ready.manifestReceipt, ready.signedManifestReceipt))
+    return fail("operation_not_accepted", "map operation authorization requires reconciliation");
+  auto &readyManifest = workspace->manifest;
   const InstallStatus manifestStatus =
       readInstalledManifest(ready.root, readyManifest);
   if (!manifestStatus.ok)
     return manifestStatus;
+  if (readyManifest.mapId!=ready.mapId)
+    return fail("stream_manifest_identity","ready metadata map ID does not match signed content");
   const InstallStatus labelStatus = validateLabelContracts(
       joinPath(storageRoot_, ready.root), readyManifest, false);
   if (!labelStatus.ok)
     return labelStatus;
-  const MapTargetMetadata selectedTarget = targetMetadata(readyManifest);
-  ActiveMapSelection previous;
+  workspace->target = targetMetadata(readyManifest);
+  const auto &selectedTarget = workspace->target;
+  auto &previous = workspace->previous;
   InstallStatus previousStatus = readActiveMap(previous);
   if (!previousStatus.ok && previousStatus.code != "active_missing")
     return previousStatus;
@@ -1941,6 +2220,12 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
       if (!writeActiveMap(previous))
         return fail("stream_active_write",
                     "could not refresh active map target metadata");
+    }
+    if (!ready.operationID.empty()) {
+      const std::string transaction = streamActivationTransaction(ready, selectedTarget, previous, "ready", true);
+      if (!writeTextFileAtomic(joinPath(storageRoot_,kActivationTransactionFile),transaction))
+        return fail("operation_transaction","could not retain renderer recovery evidence");
+      return {true,"operation_selected_pending_renderer",""};
     }
     const bool cleaned = markStreamActivationConsumed(ready) &&
                          clearPendingStreamActivation(sessionId) &&
@@ -1971,29 +2256,14 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
   const std::string transactionPath =
       joinPath(storageRoot_, kActivationTransactionFile);
   const auto transaction = [&](const char *phase) {
-    std::string value =
-        std::string("{\"protocolVersion\":2,\"sessionId\":\"") +
-        ready.sessionId + "\",\"mapId\":\"" + ready.mapId + "\",\"root\":\"" +
-        ready.root + "\"" + targetMetadataJson(selectedTarget, "") +
-        ",\"manifestReceipt\":\"" + ready.manifestReceipt +
-        "\",\"signedManifestReceipt\":\"" + ready.signedManifestReceipt +
-        "\",\"previousMapId\":\"" + jsonEscape(previous.mapId) +
-        "\",\"previousSessionId\":\"" + jsonEscape(previous.sessionId) +
-        "\",\"previousRoot\":\"" + jsonEscape(previous.root) +
-        "\"" + targetMetadataJson(previous.target, "previous") +
-        ",\"previousManifestReceipt\":\"" +
-        jsonEscape(previous.manifestReceipt) +
-        "\",\"previousSignedManifestReceipt\":\"" +
-        jsonEscape(previous.signedManifestReceipt) + "\",\"phase\":\"" + phase +
-        "\"}\n";
-    return value;
+    return streamActivationTransaction(ready, selectedTarget, previous, phase);
   };
   if (!writeTextFileAtomic(transactionPath, transaction("ready")))
     return fail("stream_transaction_write",
                 "could not start stream activation transaction");
   if (onProgress)
     onProgress({3, 3, 1, 3});
-  ActiveMapSelection selected;
+  auto &selected = workspace->selected;
   selected.mapId = ready.mapId;
   selected.sessionId = ready.sessionId;
   selected.root = ready.root;
@@ -2009,13 +2279,13 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
     selected.previousSignedManifestReceipt = previous.signedManifestReceipt;
   }
   if (!writeActiveMap(selected)) {
-    InstallStatus recovered = recoverInterruptedActivation();
-    return recovered.ok
-               ? fail("stream_active_write", "could not select ready map")
-               : recovered;
+    needsSelectionRecovery = true;
+    return fail("stream_active_write", "could not select ready map");
   }
   if (onProgress)
     onProgress({3, 3, 2, 3});
+  if (!ready.operationID.empty())
+    return {true,"operation_selected_pending_renderer",""};
   if (!markStreamActivationConsumed(ready))
     return {true, "cleanup_pending",
             "stream map selected; consumed marker will retry"};
@@ -2038,12 +2308,18 @@ InstallStatus MapTransferInstaller::activateReadyStreamMap(
 }
 
 InstallStatus MapTransferInstaller::recoverPendingStreamActivation(
-    const ActivationProgressCallback &onProgress) const {
-  if (hasInterruptedActivation()) {
-    InstallStatus recovered = recoverInterruptedActivation();
-    if (!recovered.ok)
-      return recovered;
-  }
+    const ActivationProgressCallback &onProgress,
+    ActivationRecoveryCallback onRecovery, void *recoveryContext) const {
+  const auto recovered = recoverStreamSelection();
+  if (!recovered.ok) return recovered;
+  std::string sessionId;
+  const auto pending = resolvePendingStreamActivation(sessionId);
+  if (!pending.ok || sessionId.empty()) return pending;
+  return activateReadyStreamMap(sessionId, onProgress, onRecovery, recoveryContext);
+}
+
+InstallStatus MapTransferInstaller::resolvePendingStreamActivation(
+    std::string &sessionId) const {
   std::string pending;
   const std::string pendingPath =
       joinPath(storageRoot_, kPendingStreamActivationFile);
@@ -2064,7 +2340,7 @@ InstallStatus MapTransferInstaller::recoverPendingStreamActivation(
       if (name == "." || name == ".." || !safeId(name))
         continue;
       ReadyStreamMap ready;
-      if (!readReadyStreamMap(name, ready).ok)
+      if (!readReadyStreamMap(name, ready).ok || preparationBlocksActivation(ready))
         continue;
       const std::string readyRoot = joinPath(mapsRoot, name);
       if (fileExists(joinPath(readyRoot, kStreamConsumedFile)) ||
@@ -2096,39 +2372,67 @@ InstallStatus MapTransferInstaller::recoverPendingStreamActivation(
       return fail("stream_pending_recovery",
                   "could not restore pending stream activation");
   }
-  const std::string sessionId = jsonStringValue(pending, "sessionId");
+  sessionId = jsonStringValue(pending, "sessionId");
   if (!safeId(sessionId))
     return fail("stream_pending_invalid", "pending stream session is invalid");
-  return activateReadyStreamMap(sessionId, onProgress);
+  return {true, "ok", ""};
 }
 
 InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
     const std::string &transaction) const {
-  const std::string sessionId = jsonStringValue(transaction, "sessionId");
-  const std::string mapId = jsonStringValue(transaction, "mapId");
-  const std::string root = jsonStringValue(transaction, "root");
+  struct Workspace {
+    ReadyStreamMap ready;
+    MapManifest manifest;
+    ActiveMapSelection active, selected, rollback;
+    std::string sessionId;
+    std::string mapId;
+    std::string root;
+    std::string manifestReceipt;
+    std::string signedManifestReceipt;
+    std::string previousMapId;
+    std::string previousSessionId;
+    std::string previousRoot;
+    std::string previousManifestReceipt;
+    std::string previousSignedManifestReceipt;
+    std::string phase;
+    std::string transactionPath;
+    std::string installedRoot;
+    MapTargetMetadata transactionTarget;
+    MapTargetMetadata previousTarget;
+    MapTargetMetadata installedTarget;
+  };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  workspace->sessionId = jsonStringValue(transaction, "sessionId");
+  const auto &sessionId = workspace->sessionId;
+  workspace->mapId = jsonStringValue(transaction, "mapId");
+  const auto &mapId = workspace->mapId;
+  workspace->root = jsonStringValue(transaction, "root");
+  const auto &root = workspace->root;
   bool transactionTargetParsed = false;
-  const MapTargetMetadata transactionTarget =
-      targetMetadataFromJson(transaction, "", &transactionTargetParsed);
-  const std::string manifestReceipt =
-      jsonStringValue(transaction, "manifestReceipt");
-  const std::string signedManifestReceipt =
-      jsonStringValue(transaction, "signedManifestReceipt");
-  const std::string previousMapId =
-      jsonStringValue(transaction, "previousMapId");
-  const std::string previousSessionId =
-      jsonStringValue(transaction, "previousSessionId");
-  const std::string previousRoot = jsonStringValue(transaction, "previousRoot");
-  const std::string previousManifestReceipt =
-      jsonStringValue(transaction, "previousManifestReceipt");
-  const std::string previousSignedManifestReceipt =
-      jsonStringValue(transaction, "previousSignedManifestReceipt");
+  workspace->transactionTarget = targetMetadataFromJson(transaction, "", &transactionTargetParsed);
+  const auto &transactionTarget = workspace->transactionTarget;
+  workspace->manifestReceipt = jsonStringValue(transaction, "manifestReceipt");
+  const auto &manifestReceipt = workspace->manifestReceipt;
+  workspace->signedManifestReceipt = jsonStringValue(transaction, "signedManifestReceipt");
+  const auto &signedManifestReceipt = workspace->signedManifestReceipt;
+  workspace->previousMapId = jsonStringValue(transaction, "previousMapId");
+  const auto &previousMapId = workspace->previousMapId;
+  workspace->previousSessionId = jsonStringValue(transaction, "previousSessionId");
+  const auto &previousSessionId = workspace->previousSessionId;
+  workspace->previousRoot = jsonStringValue(transaction, "previousRoot");
+  const auto &previousRoot = workspace->previousRoot;
+  workspace->previousManifestReceipt = jsonStringValue(transaction, "previousManifestReceipt");
+  const auto &previousManifestReceipt = workspace->previousManifestReceipt;
+  workspace->previousSignedManifestReceipt = jsonStringValue(transaction, "previousSignedManifestReceipt");
+  const auto &previousSignedManifestReceipt = workspace->previousSignedManifestReceipt;
   bool previousTargetParsed = false;
-  const MapTargetMetadata previousTarget = targetMetadataFromJson(
+  workspace->previousTarget = targetMetadataFromJson(
       transaction, "previous", &previousTargetParsed);
-  const std::string phase = jsonStringValue(transaction, "phase");
-  const std::string transactionPath =
-      joinPath(storageRoot_, kActivationTransactionFile);
+  const auto &previousTarget = workspace->previousTarget;
+  workspace->phase = jsonStringValue(transaction, "phase");
+  const auto &phase = workspace->phase;
+  workspace->transactionPath = joinPath(storageRoot_, kActivationTransactionFile);
+  const auto &transactionPath = workspace->transactionPath;
   if (!safeId(sessionId) || !safeMapId(mapId) ||
       root != std::string("/VECTMAP/.maps/") + sessionId ||
       !isHexSha256(manifestReceipt) || !isHexSha256(signedManifestReceipt) ||
@@ -2152,20 +2456,39 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
     return fail("stream_transaction_invalid",
                 "stream activation transaction is invalid");
   }
-  ReadyStreamMap ready;
+  const auto transactionOperationID=jsonStringValue(transaction,"operationID");
+  bool transactionFailed = false;
+  if (!transactionOperationID.empty()) {
+    const auto operationWorkspace = makeActivationWorkspace<ActivationOperationWorkspace>(
+        storageRoot_, operationDeviceID_);
+    auto &store = operationWorkspace->store;
+    if (store.restore()!=operation::Result::Ok) return fail("operation_storage","operation recovery ledger unavailable");
+    for (const auto &record : store.records())
+      if (record.identity.operation==transactionOperationID && record.identity.session==sessionId && record.phase==operation::Phase::Failed)
+        transactionFailed = true;
+  }
+  if (transactionFailed) return finalizeOperation(sessionId,transactionOperationID);
+  auto &ready = workspace->ready;
   InstallStatus readyStatus = readReadyStreamMap(sessionId, ready);
-  MapManifest installedManifest;
+  if (readyStatus.ok && preparationBlocksActivation(ready))
+    return fail("operation_prepared_uncommitted","prepared map requires its own explicit commit");
+  if (readyStatus.ok && !ready.operationID.empty() &&
+      !acceptedMapOperation(storageRoot_, operationDeviceID_, ready.operationID,
+                            ready.sessionId, ready.manifestReceipt, ready.signedManifestReceipt))
+    return fail("operation_not_accepted", "map operation authorization requires reconciliation");
+  auto &installedManifest = workspace->manifest;
   const InstallStatus installedStatus =
       readyStatus.ok ? readInstalledManifest(root, installedManifest)
                      : InstallStatus{};
-  const MapTargetMetadata installedTarget = targetMetadata(installedManifest);
+  workspace->installedTarget = targetMetadata(installedManifest);
+  const auto &installedTarget = workspace->installedTarget;
   if (!readyStatus.ok || !installedStatus.ok || ready.mapId != mapId ||
       ready.root != root || installedManifest.mapId != mapId ||
       ready.manifestReceipt != manifestReceipt ||
       ready.signedManifestReceipt != signedManifestReceipt ||
       (!targetMetadataEmpty(transactionTarget) &&
        !targetMetadataMatches(transactionTarget, installedTarget))) {
-    ActiveMapSelection active;
+    auto &active = workspace->active;
     InstallStatus activeStatus = readActiveMap(active);
     if (!activeStatus.ok &&
         (activeStatus.code == "active_invalid" ||
@@ -2176,7 +2499,7 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
                                previousSignedManifestReceipt))
         return fail("stream_transaction_recovery",
                     "invalid active pointer and no verified previous map");
-      ActiveMapSelection rollback;
+      auto &rollback = workspace->rollback;
       rollback.mapId = previousMapId;
       rollback.sessionId = previousSessionId;
       rollback.root = previousRoot;
@@ -2192,7 +2515,7 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
           rollbackRootMatches(previousRoot, previousMapId,
                               previousManifestReceipt,
                               previousSignedManifestReceipt)) {
-        ActiveMapSelection rollback;
+        auto &rollback = workspace->rollback;
         rollback.mapId = previousMapId;
         rollback.sessionId = previousSessionId;
         rollback.root = previousRoot;
@@ -2217,7 +2540,7 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
                    : fail("stream_transaction_cleanup",
                           "could not clean invalid stream transaction");
   }
-  ActiveMapSelection selected;
+  auto &selected = workspace->selected;
   selected.mapId = mapId;
   selected.sessionId = sessionId;
   selected.root = root;
@@ -2232,7 +2555,7 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
     selected.previousManifestReceipt = previousManifestReceipt;
     selected.previousSignedManifestReceipt = previousSignedManifestReceipt;
   }
-  ActiveMapSelection active;
+  auto &active = workspace->active;
   InstallStatus activeStatus = readActiveMap(active);
   if (!activeStatus.ok &&
       (activeStatus.code == "active_invalid" ||
@@ -2247,7 +2570,7 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
       return fail("stream_transaction_recovery",
                   "invalid active pointer and no verified previous map");
     }
-    ActiveMapSelection rollback;
+    auto &rollback = workspace->rollback;
     rollback.mapId = previousMapId;
     rollback.sessionId = previousSessionId;
     rollback.root = previousRoot;
@@ -2296,7 +2619,14 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
       return fail("stream_transaction_recovery",
                   "could not complete stream pointer transaction");
   }
-  const std::string installedRoot = joinPath(storageRoot_, root);
+  if (!ready.operationID.empty()) {
+    const auto cleaned=finalizeOperation(sessionId,ready.operationID);
+    if (cleaned.ok) return cleaned;
+    if (cleaned.code!="operation_not_terminal") return cleaned;
+    return {true,"operation_selected_pending_renderer",""};
+  }
+  workspace->installedRoot = joinPath(storageRoot_, root);
+  const auto &installedRoot = workspace->installedRoot;
   const bool cleaned =
       markStreamActivationConsumed(ready) &&
       clearPendingStreamActivation(sessionId) &&
@@ -2310,66 +2640,76 @@ InstallStatus MapTransferInstaller::recoverStreamActivationTransaction(
                         "could not finish stream activation cleanup");
 }
 
+InstallStatus MapTransferInstaller::recoverActiveSelection() const {
+  const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
+  ActiveMapSelection selected;
+  InstallStatus active = readActiveMap(selected);
+  if (!active.ok && active.code == "active_missing") {
+    const auto anchor = recoverSelectionAnchor();
+    if (anchor.code != "selection_anchor_none") return anchor;
+  }
+  if (!active.ok || activeRootExists(selected.root)) {
+    if (active.ok || active.code == "active_missing")
+      return {true, "ok", ""};
+    if (active.code == "active_invalid") {
+      const std::string activeBackup = activePath + ".bak";
+      removeTree(activePath);
+      if (fileExists(activeBackup) &&
+          renameStoragePath(activeBackup.c_str(), activePath.c_str()) == 0) {
+        ActiveMapSelection backup;
+        InstallStatus backupStatus = readActiveMap(backup);
+        if (backupStatus.ok && activeRootExists(backup.root)) {
+          removeTree(activePath + ".tmp");
+          return {true, "recovered_rollback",
+                  "restored valid active map metadata backup"};
+        }
+        removeTree(activePath);
+      }
+      const auto anchor = recoverSelectionAnchor();
+      if (anchor.code != "selection_anchor_none") return anchor;
+      removeTree(activeBackup);
+      removeTree(activePath + ".tmp");
+      return {true, "recovered_rollback",
+              "cleared invalid active map metadata"};
+    }
+    return active;
+  }
+  if (!selected.previousRoot.empty() &&
+      rollbackRootMatches(selected.previousRoot, selected.previousMapId,
+                          selected.previousManifestReceipt,
+                          selected.previousSignedManifestReceipt)) {
+    ActiveMapSelection rollback;
+    rollback.mapId = selected.previousMapId;
+    rollback.sessionId = selected.previousSessionId;
+    rollback.root = selected.previousRoot;
+    rollback.target = selected.previousTarget;
+    rollback.manifestReceipt = selected.previousManifestReceipt;
+    rollback.signedManifestReceipt = selected.previousSignedManifestReceipt;
+    if (!writeActiveMap(rollback))
+      return fail("active_recovery",
+                  "could not restore previous map selection");
+    return {true, "recovered_rollback", "restored previous map selection"};
+  }
+  if (!removeTree(activePath) || !removeTree(activePath + ".bak") ||
+      !removeTree(activePath + ".tmp")) {
+    return fail("active_recovery",
+                "could not clear missing active map selection");
+  }
+  return {true, "recovered_rollback",
+          "cleared missing active map selection"};
+}
+
 InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   const std::string transactionPath =
       joinPath(storageRoot_, kActivationTransactionFile);
-  const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
   std::string transaction;
   if (!readTextFile(transactionPath, transaction, 2048)) {
     const std::string backupPath = transactionPath + ".bak";
     if (!fileExists(backupPath)) {
       removeTree(transactionPath + ".tmp");
-      ActiveMapSelection selected;
-      InstallStatus active = readActiveMap(selected);
-      if (!active.ok || activeRootExists(selected.root)) {
-        if (active.ok || active.code == "active_missing")
-          return {true, "ok", ""};
-        if (active.code == "active_invalid") {
-          const std::string activeBackup = activePath + ".bak";
-          removeTree(activePath);
-          if (fileExists(activeBackup) &&
-              ::rename(activeBackup.c_str(), activePath.c_str()) == 0) {
-            ActiveMapSelection backup;
-            InstallStatus backupStatus = readActiveMap(backup);
-            if (backupStatus.ok && activeRootExists(backup.root)) {
-              removeTree(activePath + ".tmp");
-              return {true, "recovered_rollback",
-                      "restored valid active map metadata backup"};
-            }
-            removeTree(activePath);
-          }
-          removeTree(activeBackup);
-          removeTree(activePath + ".tmp");
-          return {true, "recovered_rollback",
-                  "cleared invalid active map metadata"};
-        }
-        return active;
-      }
-      if (!selected.previousRoot.empty() &&
-          rollbackRootMatches(selected.previousRoot, selected.previousMapId,
-                              selected.previousManifestReceipt,
-                              selected.previousSignedManifestReceipt)) {
-        ActiveMapSelection rollback;
-        rollback.mapId = selected.previousMapId;
-        rollback.sessionId = selected.previousSessionId;
-        rollback.root = selected.previousRoot;
-        rollback.target = selected.previousTarget;
-        rollback.manifestReceipt = selected.previousManifestReceipt;
-        rollback.signedManifestReceipt = selected.previousSignedManifestReceipt;
-        if (!writeActiveMap(rollback))
-          return fail("active_recovery",
-                      "could not restore previous map selection");
-        return {true, "recovered_rollback", "restored previous map selection"};
-      }
-      if (!removeTree(activePath) || !removeTree(activePath + ".bak") ||
-          !removeTree(activePath + ".tmp")) {
-        return fail("active_recovery",
-                    "could not clear missing active map selection");
-      }
-      return {true, "recovered_rollback",
-              "cleared missing active map selection"};
+      return recoverActiveSelection();
     }
-    if (::rename(backupPath.c_str(), transactionPath.c_str()) != 0 ||
+    if (renameStoragePath(backupPath.c_str(), transactionPath.c_str()) != 0 ||
         !readTextFile(transactionPath, transaction, 2048)) {
       return fail("transaction_recovery",
                   "could not recover map activation journal");
@@ -2378,6 +2718,15 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
 
   if (jsonUintValue(transaction, "protocolVersion") == 2)
     return recoverStreamActivationTransaction(transaction);
+
+  // Dispatch before reserving any legacy recovery locals on the v2 path.
+  return recoverLegacyActivationTransaction(transaction);
+}
+
+InstallStatus MapTransferInstaller::recoverLegacyActivationTransaction(
+    const std::string &transaction) const {
+  const auto transactionPath = joinPath(storageRoot_, kActivationTransactionFile);
+  const auto activePath = joinPath(storageRoot_, kActiveMapFile);
 
   const std::string sessionId = jsonStringValue(transaction, "sessionId");
   const std::string mapId = jsonStringValue(transaction, "mapId");
@@ -2470,7 +2819,7 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
     if (!clearInvalidTransaction())
       return fail("transaction_invalid",
                   "could not clear invalid map activation transaction");
-    InstallStatus recovered = recoverInterruptedActivation();
+    InstallStatus recovered = recoverActiveSelection();
     if (!recovered.ok)
       return recovered;
     return {true, "recovered_rollback",
@@ -2565,6 +2914,18 @@ MapTransferInstaller::rollbackActiveMap(const std::string &sessionId) const {
   if (selected.sessionId != sessionId)
     return fail("active_rollback_conflict",
                 "active map no longer matches renderer rollback session");
+  std::string operationTransaction;
+  if (readTextFile(joinPath(storageRoot_,kActivationTransactionFile),operationTransaction,2048) &&
+      jsonUintValue(operationTransaction,"retainedSelection")==1 &&
+      jsonStringValue(operationTransaction,"sessionId")==sessionId &&
+      jsonStringValue(operationTransaction,"root")==selected.root &&
+      jsonStringValue(operationTransaction,"manifestReceipt")==selected.manifestReceipt &&
+      jsonStringValue(operationTransaction,"signedManifestReceipt")==selected.signedManifestReceipt &&
+      !jsonStringValue(operationTransaction,"operationID").empty()) {
+    // This attempt reused verified bytes of the pre-existing selected map.
+    // A failed reload must not delete or deselect that previous usable content.
+    return {true,"active_retained","retained selection from before same-content attempt"};
+  }
   if (selected.previousRoot.empty()) {
     const std::string activePath =
         joinPath(storageRoot_, kActiveMapFile);
@@ -2605,7 +2966,8 @@ InstallStatus MapTransferInstaller::discardIncompleteStreamMap(
   ActiveMapSelection selected;
   const InstallStatus active = readActiveMap(selected);
   if (active.ok &&
-      (selected.root == relativeRoot || selected.previousRoot == relativeRoot)) {
+      (selected.root == relativeRoot || selected.previousRoot == relativeRoot ||
+       selectionAnchorProtectsRoot(relativeRoot))) {
     return fail("stream_discard_active",
                 "cannot discard an active or rollback map root");
   }
@@ -2632,7 +2994,8 @@ InstallStatus MapTransferInstaller::discardUnselectedStreamMap(
   ActiveMapSelection selected;
   const InstallStatus active = readActiveMap(selected);
   if (active.ok &&
-      (selected.root == relativeRoot || selected.previousRoot == relativeRoot)) {
+      (selected.root == relativeRoot || selected.previousRoot == relativeRoot ||
+       selectionAnchorProtectsRoot(relativeRoot))) {
     return fail("stream_discard_active",
                 "cannot discard an active or rollback map root");
   }
@@ -2684,7 +3047,7 @@ InstallStatus MapTransferInstaller::discardAllUnselectedStreamMaps() const {
       const std::string relativeRoot =
           std::string("/VECTMAP/.maps/") + sessionId;
       if (relativeRoot == selected.root ||
-          relativeRoot == selected.previousRoot) {
+          relativeRoot == selected.previousRoot || selectionAnchorProtectsRoot(relativeRoot)) {
         continue;
       }
       const std::string root = joinPath(mapsRoot, sessionId);
@@ -2725,6 +3088,12 @@ MapTransferInstaller::readActiveMap(ActiveMapSelection &selection) const {
   std::string text;
   if (!readTextFile(activePath, text, 2048))
     return fail("active_missing", "active map metadata is missing");
+  return parseActiveMapText(text, selection);
+}
+
+InstallStatus MapTransferInstaller::parseActiveMapText(
+    const std::string &text, ActiveMapSelection &selection) const {
+  selection = ActiveMapSelection();
   selection.mapId = jsonStringValue(text, "mapId");
   selection.sessionId = jsonStringValue(text, "sessionId");
   selection.root = jsonStringValue(text, "root");
@@ -2962,11 +3331,13 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps(
     const bool freshReady =
         !consumed &&
         (fileExists(joinPath(candidatePath, kStreamReadyFile)) ||
-         fileExists(joinPath(candidatePath, kStreamReadyFile) + ".bak")) &&
+         fileExists(joinPath(candidatePath, kStreamReadyFile) + ".bak") ||
+         fileExists(joinPath(candidatePath, ".operation-ready")) ||
+         fileExists(joinPath(candidatePath, ".operation-ready.bak"))) &&
         readReadyStreamMap(name, recoverableReady).ok;
     if (candidate == selected.root || candidate == selected.previousRoot ||
         candidate == pendingRoot || candidate == transactionRoot ||
-        candidate == transactionPreviousRoot ||
+        candidate == transactionPreviousRoot || selectionAnchorProtectsRoot(candidate) ||
         freshReady ||
         ((keepInstallingSessionId.empty() ||
           name == keepInstallingSessionId) &&
@@ -3091,11 +3462,15 @@ bool MapTransferInstaller::safeRelativePath(const std::string &path) const {
       path.find('\\') != std::string::npos ||
       path.find("//") != std::string::npos)
     return false;
-  std::stringstream stream(path);
-  std::string part;
-  while (std::getline(stream, part, '/')) {
-    if (part.empty() || part == "." || part == "..")
+  size_t start = 0;
+  while (start < path.size()) {
+    const size_t slash = path.find('/', start);
+    const size_t length = slash == std::string::npos ? path.size() - start : slash - start;
+    if (length == 0 || (length == 1 && path[start] == '.') ||
+        (length == 2 && path[start] == '.' && path[start + 1] == '.'))
       return false;
+    if (slash == std::string::npos) break;
+    start = slash + 1;
   }
   return path.find("..") == std::string::npos;
 }
@@ -3129,26 +3504,17 @@ bool MapTransferInstaller::mkdirs(const std::string &path) const {
 
 bool MapTransferInstaller::copyFile(const std::string &from,
                                     const std::string &to) const {
-  std::ifstream input(from, std::ios::binary);
-  if (!input)
-    return false;
-  std::ofstream output(to, std::ios::binary | std::ios::trunc);
-  if (!output)
-    return false;
+  FileHandle input(std::fopen(from.c_str(), "rb"));
+  if (!input) return false;
+  FileHandle output(std::fopen(to.c_str(), "wb"));
+  if (!output) return false;
   std::array<char, 4096> buffer = {};
-  while (input.good()) {
-    input.read(buffer.data(), buffer.size());
-    const std::streamsize count = input.gcount();
-    if (count > 0)
-      output.write(buffer.data(), count);
-    if (!output.good())
-      return false;
+  size_t count = 0;
+  while ((count = std::fread(buffer.data(), 1, buffer.size(), input.get())) > 0) {
+    if (std::fwrite(buffer.data(), 1, count, output.get()) != count) return false;
   }
-  output.flush();
-  if (!input.eof() || !output.good())
-    return false;
-  output.close();
-  return !output.fail();
+  if (std::ferror(input.get()) || std::fflush(output.get()) != 0) return false;
+  return std::fclose(output.release()) == 0;
 }
 
 bool MapTransferInstaller::copyTree(const std::string &from,
@@ -3181,19 +3547,33 @@ bool MapTransferInstaller::movePath(const std::string &from,
                                     const std::string &to) const {
   if (!mkdirs(dirnameOf(to)))
     return false;
-  if (::rename(from.c_str(), to.c_str()) == 0)
+  if (renameStoragePath(from.c_str(), to.c_str()) == 0)
     return true;
   if (!copyTree(from, to))
     return false;
   return removeTree(from);
 }
 
+int MapTransferInstaller::renameStoragePath(const char *from, const char *to) const {
+  storageMutationBoundary("rename", to, false);
+  const int result = ::rename(from, to);
+  storageMutationBoundary("rename", to, true);
+  return result;
+}
+
 bool MapTransferInstaller::removeTree(const std::string &path) const {
+  const std::string mapsPrefix = joinPath(storageRoot_, "/VECTMAP/.maps/");
+  if (startsWith(path, mapsPrefix) && path.find('/', mapsPrefix.size()) == std::string::npos &&
+      selectionAnchorProtectsRoot(path.substr(storageRoot_.size()))) return false;
   struct stat st;
   if (::stat(path.c_str(), &st) != 0)
     return true;
-  if (!S_ISDIR(st.st_mode))
-    return ::unlink(path.c_str()) == 0;
+  if (!S_ISDIR(st.st_mode)) {
+    storageMutationBoundary("unlink", path, false);
+    const bool removed = ::unlink(path.c_str()) == 0;
+    storageMutationBoundary("unlink", path, true);
+    return removed;
+  }
   DIR *dir = ::opendir(path.c_str());
   if (!dir)
     return false;
@@ -3208,7 +3588,10 @@ bool MapTransferInstaller::removeTree(const std::string &path) const {
     }
   }
   ::closedir(dir);
-  return ::rmdir(path.c_str()) == 0;
+  storageMutationBoundary("rmdir", path, false);
+  const bool removed = ::rmdir(path.c_str()) == 0;
+  storageMutationBoundary("rmdir", path, true);
+  return removed;
 }
 
 std::string
@@ -3346,21 +3729,21 @@ InstallStatus MapTransferInstaller::validateLabelContracts(
     const std::string path = resolvedPath(file);
     if (path.empty())
       return fail("label_block_path", "label-aware block path is invalid");
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-    if (!input || input.tellg() <= 0 ||
-        static_cast<uint64_t>(input.tellg()) >
-            map_block_format::kMaximumBlockBytes)
+    uint64_t size = 0;
+    if (!fileSize(path, size) || size == 0 ||
+        size > map_block_format::kMaximumBlockBytes)
       return fail("label_block_open", "could not read label-aware FMB block");
-    const size_t size = static_cast<size_t>(input.tellg());
-    input.seekg(0, std::ios::beg);
-    std::vector<uint8_t> bytes(size);
-    input.read(reinterpret_cast<char *>(bytes.data()),
-               static_cast<std::streamsize>(bytes.size()));
+    FileHandle input(std::fopen(path.c_str(), "rb"));
+    if (!input)
+      return fail("label_block_open", "could not read label-aware FMB block");
+    std::vector<uint8_t> bytes(static_cast<size_t>(size));
+    const bool readOk = std::fread(bytes.data(), 1, bytes.size(), input.get()) == bytes.size() &&
+                        !std::ferror(input.get());
     const uint8_t expectedBlockVersion =
         manifest.formatVersion == 4
             ? 5
             : (manifest.formatVersion == 3 ? 4 : 3);
-    if (!input || bytes.size() < 4 || bytes[3] != expectedBlockVersion)
+    if (!readOk || bytes.size() < 4 || bytes[3] != expectedBlockVersion)
       return fail("label_block_version",
                   "map block version does not match renderer target");
     map_label_block::Block labels;
@@ -3430,6 +3813,145 @@ bool MapTransferInstaller::installedMapContentsMatch(
   return true;
 }
 
+bool MapTransferInstaller::anchorSelectionVerified(const ActiveMapSelection &selection) const {
+  const auto verified = [&](const std::string &root, const std::string &mapId,
+                            const std::string &receipt, const std::string &signedReceipt,
+                            const MapTargetMetadata &target) {
+    const std::string prefix="/VECTMAP/.maps/";
+    if (!startsWith(root,prefix) || !isHexSha256(receipt) || !isHexSha256(signedReceipt)) return false;
+    struct Workspace { ReadyStreamMap ready; MapManifest manifest; };
+    const auto workspace = makeActivationWorkspace<Workspace>();
+    auto &ready = workspace->ready;
+    if (!readReadyStreamMap(root.substr(prefix.size()),ready).ok || ready.root!=root ||
+        ready.mapId!=mapId || ready.manifestReceipt!=receipt || ready.signedManifestReceipt!=signedReceipt)
+      return false;
+    auto &manifest = workspace->manifest;
+    if (!readInstalledManifest(root,manifest).ok || manifest.mapId!=mapId ||
+        (!targetMetadataEmpty(target) && !targetMetadataMatches(target,targetMetadata(manifest)))) return false;
+    for (const auto &file : manifest.files) {
+      if (!startsWith(file.publishPath,kVectMapPrefix)) return false;
+      const auto path=joinPath(joinPath(storageRoot_,root),file.publishPath.substr(std::strlen(kVectMapPrefix)));
+      std::string digest; uint64_t bytes=0;
+      if (!fileSize(path,bytes) || bytes!=file.bytes || !fileSha256Hex(path,digest) || digest!=file.sha256)
+        return false;
+    }
+    return true;
+  };
+  return verified(selection.root,selection.mapId,selection.manifestReceipt,
+                  selection.signedManifestReceipt,selection.target) &&
+      (selection.previousRoot.empty() || verified(selection.previousRoot,selection.previousMapId,
+           selection.previousManifestReceipt,selection.previousSignedManifestReceipt,selection.previousTarget));
+}
+
+bool MapTransferInstaller::selectionAnchorProtectsRoot(const std::string &root) const {
+  for (unsigned slot=0;slot<2;++slot) {
+    std::string bytes;
+    const auto path=joinPath(storageRoot_,"/VECTMAP/.selection-anchor-"+std::to_string(slot));
+    if (!readTextFile(path,bytes,selection_anchor::kMaximumBytes)) {
+      if (fileExists(path)) return true; // Oversized/unreadable evidence is not disposable.
+      continue;
+    }
+    selection_anchor::Record record;
+    const auto decoded=selection_anchor::decode(bytes,record);
+    if (decoded==selection_anchor::Decode::Unsupported) return true; // No destructive downgrade.
+    ActiveMapSelection selection;
+    if (decoded==selection_anchor::Decode::Valid && parseActiveMapText(record.selection,selection).ok &&
+        (selection.root==root || selection.previousRoot==root)) return true;
+  }
+  return false;
+}
+
+bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &incoming) const {
+  // Same-root refreshes and rollback writes cannot bless a provisional map as
+  // a predecessor. Only preserve the canonical predecessor explicitly named
+  // by a replacement transaction; never scan ready roots to manufacture one.
+  uint64_t highest=0; unsigned newest=1;
+  std::string latest;
+  for(unsigned slot=0;slot<2;++slot) {
+    std::string bytes;
+    const auto path=joinPath(storageRoot_,"/VECTMAP/.selection-anchor-"+std::to_string(slot));
+    if (!readTextFile(path,bytes,selection_anchor::kMaximumBytes)) {
+      if (fileExists(path)) return false;
+      continue;
+    }
+    selection_anchor::Record record;
+    const auto decoded=selection_anchor::decode(bytes,record);
+    if(decoded==selection_anchor::Decode::Unsupported) return false;
+    if(decoded!=selection_anchor::Decode::Valid) continue;
+    if(!record.device.empty() && record.device!=operationDeviceID_) return false;
+    if(record.sequence==highest && record.selection!=latest) return false;
+    if(record.sequence>highest) { highest=record.sequence; newest=slot; latest=record.selection; }
+  }
+  if (incoming.previousRoot.empty() || incoming.previousRoot==incoming.root) return true;
+  struct Workspace { ActiveMapSelection prior; ReadyStreamMap ready; };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  auto &prior = workspace->prior;
+  if (!readActiveMap(prior).ok || prior.root!=incoming.previousRoot ||
+      prior.mapId!=incoming.previousMapId || prior.manifestReceipt!=incoming.previousManifestReceipt ||
+      prior.signedManifestReceipt!=incoming.previousSignedManifestReceipt) return true;
+  // Unsigned legacy /VECTMAP state is not invented into a verified anchor.
+  if (!anchorSelectionVerified(prior)) return true;
+  std::string selection;
+  if (!readTextFile(joinPath(storageRoot_,kActiveMapFile),selection,2048)) return false;
+  if (highest!=0 && latest==selection) return true;
+  if (highest==std::numeric_limits<uint64_t>::max()) return false;
+  auto &ready = workspace->ready;
+  if (!readReadyStreamMap(prior.sessionId,ready).ok) return false;
+  selection_anchor::Record record{highest+1,operationDeviceID_,ready.operationID,selection};
+  const auto bytes=selection_anchor::encode(record);
+  const auto path=joinPath(storageRoot_,"/VECTMAP/.selection-anchor-"+std::to_string(newest^1U));
+  // Write only the older/inactive slot. No rename/backup deletion can destroy
+  // the other verified record. Readback proves consistency, NOT SD persistence.
+  if(bytes.empty() || !writeTextFile(path,bytes)) return false;
+  std::string readback;
+  selection_anchor::Record decoded;
+  return readTextFile(path,readback,selection_anchor::kMaximumBytes) && readback==bytes &&
+      selection_anchor::decode(readback,decoded)==selection_anchor::Decode::Valid;
+}
+
+InstallStatus MapTransferInstaller::recoverSelectionAnchor() const {
+  uint64_t highest=0, observedSequence=0;
+  std::string selectedText, observedSelection;
+  bool present=false;
+  for(unsigned slot=0;slot<2;++slot) {
+    const auto path=joinPath(storageRoot_,"/VECTMAP/.selection-anchor-"+std::to_string(slot));
+    if(!fileExists(path)) continue;
+    present=true;
+    std::string bytes;
+    if(!readTextFile(path,bytes,selection_anchor::kMaximumBytes))
+      return fail("selection_anchor_read","selection anchor is oversized or unreadable");
+    selection_anchor::Record record;
+    const auto decoded=selection_anchor::decode(bytes,record);
+    if(decoded==selection_anchor::Decode::Unsupported)
+      return fail("selection_anchor_schema","selection anchor requires newer firmware");
+    if(decoded!=selection_anchor::Decode::Valid) continue;
+    if(!record.device.empty() && record.device!=operationDeviceID_)
+      return fail("selection_anchor_device","selection anchor belongs to another device");
+    if(record.sequence==observedSequence && record.selection!=observedSelection)
+      return fail("selection_anchor_conflict","same-sequence selection anchors disagree");
+    observedSequence=record.sequence; observedSelection=record.selection;
+    ActiveMapSelection candidate;
+    if(!parseActiveMapText(record.selection,candidate).ok || !anchorSelectionVerified(candidate)) continue;
+    ReadyStreamMap ready;
+    if(!readReadyStreamMap(candidate.sessionId,ready).ok || ready.operationID!=record.operation) continue;
+    if(record.sequence==highest && record.selection!=selectedText)
+      return fail("selection_anchor_conflict","same-sequence selection anchors disagree");
+    if(record.sequence>highest) { highest=record.sequence; selectedText=record.selection; }
+  }
+  if(highest==0)
+    return present ? fail("selection_anchor_invalid","no exact verified predecessor anchor remains")
+                   : InstallStatus{true,"selection_anchor_none",""};
+  const auto activePath=joinPath(storageRoot_,kActiveMapFile);
+  if(!writeTextFileAtomic(activePath,selectedText))
+    return fail("selection_anchor_write","predecessor selection recovery must retry");
+  std::string readback;
+  if(!readTextFile(activePath,readback,2048) || readback!=selectedText)
+    return fail("selection_anchor_readback","predecessor selection readback must retry");
+  // This is availability recovery only. It issues no commit grant, renderer
+  // acknowledgement, terminal receipt, or new-operation installed result.
+  return {true,"recovered_anchor","restored exact verified predecessor selection"};
+}
+
 bool MapTransferInstaller::writeActiveMap(
     const ActiveMapSelection &selection) const {
   if (!safeMapId(selection.mapId) || !safeActiveRoot(selection.root) ||
@@ -3459,6 +3981,14 @@ bool MapTransferInstaller::writeActiveMap(
         !isHexSha256(selection.signedManifestReceipt)))) {
     return false;
   }
+  // Predecessor validation/rehashing must finish before canonical serialization
+  // and readback reserve their frames. The anchor still precedes pointer writes.
+  if (!persistPredecessorAnchor(selection)) return false;
+  return writeCanonicalActiveMap(selection);
+}
+
+bool MapTransferInstaller::writeCanonicalActiveMap(
+    const ActiveMapSelection &selection) const {
   std::string json = std::string("{\"mapId\":\"") +
                      jsonEscape(selection.mapId) + "\",\"sessionId\":\"" +
                      jsonEscape(selection.sessionId) + "\",\"root\":\"" +
@@ -3516,7 +4046,8 @@ bool MapTransferInstaller::activeRootExists(const std::string &root) const {
   const bool installing =
       fileExists(joinPath(path, kStreamInstallingFile)) ||
       fileExists(joinPath(path, kStreamInstallingFile) + ".bak");
-  const bool readyMarker =
+  const bool readyMarker = fileExists(joinPath(path, ".operation-ready")) ||
+      fileExists(joinPath(path, ".operation-ready.bak")) ||
       fileExists(joinPath(path, kStreamReadyFile)) ||
       fileExists(joinPath(path, kStreamReadyFile) + ".bak");
   if (installing && !readyMarker) {
@@ -3570,19 +4101,27 @@ bool MapTransferInstaller::fileSize(const std::string &path,
 
 bool MapTransferInstaller::fileSha256Hex(const std::string &path,
                                          std::string &hex) const {
-  std::ifstream input(path, std::ios::binary);
-  if (!input)
-    return false;
-  Sha256Hasher sha;
-  std::array<uint8_t, 1024> buffer = {};
-  while (input.good()) {
-    input.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
-    std::streamsize n = input.gcount();
-    if (n > 0)
-      sha.update(buffer.data(), static_cast<size_t>(n));
+  struct Workspace {
+    Sha256Hasher sha;
+    std::array<uint8_t, 1024> buffer;
+  };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  FileHandle input(std::fopen(path.c_str(), "rb"));
+  if (!input) return false;
+  auto &sha = workspace->sha;
+  auto &buffer = workspace->buffer;
+  size_t count = 0, progressBytes = 0;
+  while ((count = std::fread(buffer.data(), 1, buffer.size(), input.get())) > 0) {
+    sha.update(buffer.data(), count);
+    progressBytes += count;
+    if (storageProgressCallback_ != nullptr && progressBytes >= 64U * 1024U) {
+      storageProgressCallback_(storageProgressContext_);
+      progressBytes = 0;
+    }
   }
-  if (!input.eof())
-    return false;
+  if (std::ferror(input.get())) return false;
+  if (storageProgressCallback_ != nullptr && progressBytes != 0)
+    storageProgressCallback_(storageProgressContext_);
   hex = sha.finalHex();
   return true;
 }
@@ -3591,15 +4130,21 @@ bool MapTransferInstaller::writeTextFile(const std::string &path,
                                          const std::string &text) const {
   if (!mkdirs(dirnameOf(path)))
     return false;
-  std::ofstream output(path, std::ios::binary | std::ios::trunc);
-  if (!output)
-    return false;
-  output << text;
-  output.flush();
-  if (!output.good())
-    return false;
-  output.close();
-  return !output.fail();
+  storageMutationBoundary("open_truncate", path, false);
+  FileHandle output(std::fopen(path.c_str(), "wb"));
+  storageMutationBoundary("open_truncate", path, true);
+  if (!output) return false;
+  storageMutationBoundary("write", path, false);
+  const bool written = std::fwrite(text.data(), 1, text.size(), output.get()) == text.size();
+  storageMutationBoundary("write", path, true);
+  storageMutationBoundary("flush", path, false);
+  const bool flushed = std::fflush(output.get()) == 0;
+  storageMutationBoundary("flush", path, true);
+  if (!written || !flushed) return false;
+  storageMutationBoundary("close", path, false);
+  const bool closed = std::fclose(output.release()) == 0;
+  storageMutationBoundary("close", path, true);
+  return closed;
 }
 
 bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
@@ -3613,20 +4158,20 @@ bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
   // POSIX filesystems replace the destination atomically. Some embedded FAT
   // implementations reject replacement, so retain a recoverable backup while
   // using their two-rename fallback.
-  if (::rename(temporaryPath.c_str(), path.c_str()) == 0) {
+  if (renameStoragePath(temporaryPath.c_str(), path.c_str()) == 0) {
     removeTree(backupPath);
     return true;
   }
 
   removeTree(backupPath);
   const bool hadPrevious = fileExists(path);
-  if (hadPrevious && ::rename(path.c_str(), backupPath.c_str()) != 0) {
+  if (hadPrevious && renameStoragePath(path.c_str(), backupPath.c_str()) != 0) {
     removeTree(temporaryPath);
     return false;
   }
-  if (::rename(temporaryPath.c_str(), path.c_str()) != 0) {
+  if (renameStoragePath(temporaryPath.c_str(), path.c_str()) != 0) {
     if (hadPrevious)
-      ::rename(backupPath.c_str(), path.c_str());
+      renameStoragePath(backupPath.c_str(), path.c_str());
     removeTree(temporaryPath);
     return false;
   }
@@ -3640,12 +4185,11 @@ bool MapTransferInstaller::readTextFile(const std::string &path,
   uint64_t size = 0;
   if (!fileSize(path, size) || size > maxBytes)
     return false;
-  std::ifstream input(path, std::ios::binary);
-  if (!input)
-    return false;
-  text.assign((std::istreambuf_iterator<char>(input)),
-              std::istreambuf_iterator<char>());
-  return true;
+  FileHandle input(std::fopen(path.c_str(), "rb"));
+  if (!input) return false;
+  text.resize(static_cast<size_t>(size));
+  const size_t read = size == 0 ? 0 : std::fread(&text[0], 1, text.size(), input.get());
+  return read == size && std::fgetc(input.get()) == EOF && !std::ferror(input.get());
 }
 
 } // namespace map_transfer

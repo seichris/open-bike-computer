@@ -21,6 +21,7 @@
 		57A004052F00000100000001 /* WorkoutMirrorManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */; };
 		57A006012F00000100000001 /* WorkoutWatchAvailabilityMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A006002F00000100000001 /* WorkoutWatchAvailabilityMonitor.swift */; };
 		57A006032F00000100000001 /* WatchHeartRateZoneSettingsReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A006022F00000100000001 /* WatchHeartRateZoneSettingsReceiver.swift */; };
+		57A020012F00000100000001 /* HealthKitWorkoutZoneAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A020002F00000100000001 /* HealthKitWorkoutZoneAdapter.swift */; };
 		57A005012F00000100000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 57A005002F00000100000001 /* Assets.xcassets */; };
 		57A0070C2F00000100000001 /* BikeComputerWatchComplications.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 57A007012F00000100000001 /* BikeComputerWatchComplications.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		57A0070D2F00000100000001 /* WatchWorkoutLaunchRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A007122F00000100000001 /* WatchWorkoutLaunchRequest.swift */; };
@@ -35,7 +36,10 @@
 		57A00A012F00000100000001 /* RideDetectionSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00A002F00000100000001 /* RideDetectionSettingsStore.swift */; };
 		57A00B012F00000100000001 /* RideAutomationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00B002F00000100000001 /* RideAutomationCoordinator.swift */; };
 		57A00C012F00000100000001 /* RideDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C002F00000100000001 /* RideDiagnostics.swift */; };
+		57A01F012F00000100000001 /* DiagnosticsAcquisitionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A01F002F00000100000001 /* DiagnosticsAcquisitionStore.swift */; };
 		57A00C032F00000100000001 /* RideDiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C022F00000100000001 /* RideDiagnosticsTests.swift */; };
+		57A00C092F00000100000001 /* DiagnosticsSchema.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C082F00000100000001 /* DiagnosticsSchema.generated.swift */; };
+		57A00C0B2F00000100000001 /* DiagnosticsCapturePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57A00C0A2F00000100000001 /* DiagnosticsCapturePolicy.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -116,6 +120,7 @@
 		57A004022F00000100000001 /* WorkoutMirrorManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../BikeComputerTests/WorkoutMirrorManagerTests.swift; sourceTree = "<group>"; };
 		57A006002F00000100000001 /* WorkoutWatchAvailabilityMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WorkoutWatchAvailabilityMonitor.swift (Tests)"; path = BikeComputer/Managers/WorkoutWatchAvailabilityMonitor.swift; sourceTree = "<group>"; };
 		57A006022F00000100000001 /* WatchHeartRateZoneSettingsReceiver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchHeartRateZoneSettingsReceiver.swift (Tests)"; path = BikeComputerWatch/Managers/WatchHeartRateZoneSettingsReceiver.swift; sourceTree = "<group>"; };
+		57A020002F00000100000001 /* HealthKitWorkoutZoneAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "HealthKitWorkoutZoneAdapter.swift (Tests)"; path = BikeComputerWatch/Managers/HealthKitWorkoutZoneAdapter.swift; sourceTree = "<group>"; };
 		57A005002F00000100000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = BikeComputer/Assets.xcassets; sourceTree = "<group>"; };
 		57A007012F00000100000001 /* BikeComputerWatchComplications.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = BikeComputerWatchComplications.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		57A007122F00000100000001 /* WatchWorkoutLaunchRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "WatchWorkoutLaunchRequest.swift (Complication)"; path = WorkoutShared/WatchWorkoutLaunchRequest.swift; sourceTree = "<group>"; };
@@ -130,7 +135,10 @@
 		57A00A002F00000100000001 /* RideDetectionSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RideDetectionSettingsStore.swift (Tests)"; path = BikeComputer/Managers/RideDetectionSettingsStore.swift; sourceTree = "<group>"; };
 		57A00B002F00000100000001 /* RideAutomationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = "RideAutomationCoordinator.swift (Tests)"; path = BikeComputer/Managers/RideAutomationCoordinator.swift; sourceTree = "<group>"; };
 		57A00C002F00000100000001 /* RideDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Utilities/RideDiagnostics.swift; sourceTree = "<group>"; };
+		57A01F002F00000100000001 /* DiagnosticsAcquisitionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Managers/DiagnosticsAcquisitionStore.swift; sourceTree = "<group>"; };
 		57A00C022F00000100000001 /* RideDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../BikeComputerTests/RideDiagnosticsTests.swift; sourceTree = "<group>"; };
+		57A00C082F00000100000001 /* DiagnosticsSchema.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Utilities/DiagnosticsSchema.generated.swift; sourceTree = "<group>"; };
+		57A00C0A2F00000100000001 /* DiagnosticsCapturePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BikeComputer/Utilities/DiagnosticsCapturePolicy.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -293,6 +301,9 @@
 				57A00A002F00000100000001 /* RideDetectionSettingsStore.swift */,
 				57A00B002F00000100000001 /* RideAutomationCoordinator.swift */,
 				57A00C002F00000100000001 /* RideDiagnostics.swift */,
+				57A01F002F00000100000001 /* DiagnosticsAcquisitionStore.swift */,
+				57A00C0A2F00000100000001 /* DiagnosticsCapturePolicy.swift */,
+				57A00C082F00000100000001 /* DiagnosticsSchema.generated.swift */,
 				57A00C022F00000100000001 /* RideDiagnosticsTests.swift */,
 				57A006022F00000100000001 /* WatchHeartRateZoneSettingsReceiver.swift */,
 				57A005002F00000100000001 /* Assets.xcassets */,
@@ -606,6 +617,9 @@
 				57A009152F00000100000001 /* WorkoutLiveActivityIntentTests.swift in Sources */,
 				57A009162F00000100000001 /* WorkoutLiveActivityControllerTests.swift in Sources */,
 				57A00C012F00000100000001 /* RideDiagnostics.swift in Sources */,
+				57A01F012F00000100000001 /* DiagnosticsAcquisitionStore.swift in Sources */,
+				57A00C0B2F00000100000001 /* DiagnosticsCapturePolicy.swift in Sources */,
+				57A00C092F00000100000001 /* DiagnosticsSchema.generated.swift in Sources */,
 				57A00C032F00000100000001 /* RideDiagnosticsTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -617,6 +631,7 @@
 				57A001042F00000100000001 /* WorkoutContractTests.swift in Sources */,
 				57A002022F00000100000001 /* WatchWorkoutRecoveryStore.swift in Sources */,
 				57A003032F00000100000001 /* WatchWorkoutManager.swift in Sources */,
+				57A020012F00000100000001 /* HealthKitWorkoutZoneAdapter.swift in Sources */,
 				57A003042F00000100000001 /* WatchRouteRecorder.swift in Sources */,
 				57A003052F00000100000001 /* WatchWorkoutManagerTests.swift in Sources */,
 				57A003062F00000100000001 /* WatchLocationService.swift in Sources */,
@@ -812,7 +827,7 @@
 				CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES;
 				CODE_SIGN_ENTITLEMENTS = BikeComputer/BikeComputer.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -856,7 +871,7 @@
 				CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES;
 				CODE_SIGN_ENTITLEMENTS = BikeComputer/BikeComputer.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -897,7 +912,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = BikeComputerWatch/BikeComputerWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -929,7 +944,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = BikeComputerWatch/BikeComputerWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -961,7 +976,7 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = BikeComputerWatchComplications/Info.plist;
@@ -992,7 +1007,7 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = BikeComputerWatchComplications/Info.plist;
@@ -1024,7 +1039,7 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = BikeComputerLiveActivity/Info.plist;
@@ -1058,7 +1073,7 @@
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = 4H5PK8686H;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = BikeComputerLiveActivity/Info.plist;

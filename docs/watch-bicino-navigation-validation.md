@@ -38,6 +38,25 @@ Required evidence remains:
 
 Status: **not yet physically validated**.
 
+## Workout finish handback
+
+An ended or failed workout sends its final device frames and releases workout
+demand without waiting for **Done** on the Watch summary. The existing adapter
+waits for the terminal group's application acknowledgement before releasing the
+controller lease. Independent active Watch navigation keeps its connection.
+Repeated terminal snapshots, delayed active snapshots for the finished session,
+and later summary dismissal must not reacquire the device.
+
+The Watch admits the phone release into its durable outbox and also attempts an
+interactive release when the phone is reachable. Losing the interactive reply
+does not remove the durable transfer; duplicate releases retain the existing
+exact-preparation and tombstone checks.
+
+Physical confirmation of this follow-up requires leaving the completed summary
+open while verifying that the iPhone reconnects, then testing a second workout
+and an independent active Watch navigation session. Source and host tests alone
+do not establish that result on the installed Watch app.
+
 ## Deep review ledger
 
 ### Phase 0 software spike

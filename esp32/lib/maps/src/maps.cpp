@@ -8,6 +8,7 @@
  */
 
 #include "maps.hpp"
+#include <esp_memory_utils.h>
 #include "mapBlockFormat.hpp"
 #include "mapByteOrder.hpp"
 #include "mapBuildingRenderer.hpp"
@@ -26,6 +27,7 @@
 #include "../../power_management/power_management.hpp"
 #include "../../power_metrics/power_metrics.hpp"
 #include "../../renderer_diagnostics/renderer_diagnostics.hpp"
+#include "renderer_stack_metrics.hpp"
 #include "../../runtime_watchdog_diagnostics/runtime_watchdog_diagnostics.hpp"
 #include "../../utils/src/line_rasterizer.hpp"
 #include "../../ui_scheduler/ui_scheduler.hpp"
@@ -4370,6 +4372,9 @@ bool Maps::renderResultStillCurrent(const RenderResult &result) const {
 }
 
 bool Maps::startRenderWorker() {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
+  if (renderWorkerExited.load(std::memory_order_acquire) &&
+      !reclaimRenderWorker()) return false;
   if (renderWorkerTaskHandle != nullptr) {
     return !renderWorkerShutdown.load(std::memory_order_acquire);
   }
@@ -4416,6 +4421,49 @@ bool Maps::startRenderWorker() {
   return true;
 }
 
+bool Maps::pollShutdownQuiescence() {
+  // Called only after transfer activation, rollback and their UI mailboxes
+  // are terminal. Never stop the sole storage owner before it ACKs that work.
+  shutdownAdmissionClosed_.store(true, std::memory_order_release);
+  (void)reclaimRenderWorker();
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, 0) != pdTRUE) return false;
+  const bool pending = pendingStorageControl_ != nullptr ||
+                       pendingVectorMapActivationValid;
+  if (pending) {
+    if (renderStateMutex != nullptr) xSemaphoreGive(renderStateMutex);
+    return false;
+  }
+  renderWorkerRestartAfterExit.store(false, std::memory_order_release);
+  renderWorkerShutdown.store(true, std::memory_order_release);
+  gMapRenderWorkerShutdown.store(true, std::memory_order_release);
+  const TaskHandle_t worker = renderWorkerTaskHandle;
+  if (worker != nullptr) xTaskNotifyGive(worker);
+  const bool stopped = worker == nullptr &&
+      renderWorkerExited.load(std::memory_order_acquire);
+  if (renderStateMutex != nullptr) xSemaphoreGive(renderStateMutex);
+  return stopped;
+}
+
+bool Maps::reclaimRenderWorker() {
+  uint32_t stackMarker = 0;
+  if (!esp_ptr_internal(&stackMarker)) return false;
+  if (renderStateMutex != nullptr &&
+      xSemaphoreTake(renderStateMutex, 0) != pdTRUE) return false;
+  const TaskHandle_t worker = renderWorkerTaskHandle;
+  const bool ready = worker == nullptr ||
+      (renderWorkerExited.load(std::memory_order_acquire) &&
+       worker != xTaskGetCurrentTaskHandle());
+  if (worker != nullptr && ready) {
+    // Only the owner reclaims the finished PSRAM worker. Publishing a null
+    // handle before deletion would allow a restart to race the old task.
+    vTaskDeleteWithCaps(worker);
+    renderWorkerTaskHandle = nullptr;
+  }
+  if (renderStateMutex != nullptr) xSemaphoreGive(renderStateMutex);
+  return ready;
+}
+
 bool Maps::stopRenderWorker() {
   TaskHandle_t worker = renderWorkerTaskHandle;
   if (worker == nullptr) {
@@ -4445,6 +4493,10 @@ bool Maps::stopRenderWorker() {
     ESP_LOGE(TAG, "Map render worker did not stop cleanly; state preserved");
     return false;
   }
+  if (!reclaimRenderWorker()) {
+    renderWorkerRestartAfterExit.store(true, std::memory_order_release);
+    return false;
+  }
   renderWorkerRestartAfterExit.store(false, std::memory_order_release);
   gMapRenderWorkerShutdown.store(false, std::memory_order_release);
   renderWorkerShutdown.store(false, std::memory_order_release);
@@ -4464,11 +4516,14 @@ bool Maps::recoverRenderWorkerIfNeeded() {
 
 void Maps::renderWorkerTaskThunk(void *argument) {
   auto *maps = static_cast<Maps *>(argument);
-  if (maps != nullptr)
+  if (maps != nullptr) {
     maps->renderWorkerLoop();
-  // Must match xTaskCreatePinnedToCoreWithCaps so the PSRAM stack and static
-  // task control block are reclaimed correctly.
-  vTaskDeleteWithCaps(nullptr);
+    maps->renderWorkerExited.store(true, std::memory_order_release);
+  }
+  // All logging, stack sampling and renderer cleanup precede this publication.
+  // The internal owner deletes this parked task with the matching WithCaps API.
+  for (;;)
+    vTaskSuspend(nullptr);
 }
 
 bool Maps::prepareMapScene(const RenderRequest &request, RenderResult &result) {
@@ -4516,12 +4571,23 @@ bool Maps::prepareMapScene(const RenderRequest &request, RenderResult &result) {
 }
 
 void Maps::renderWorkerLoop() {
+  uint32_t lastStackSampleMs = 0;
+  const auto sampleStack = [&lastStackSampleMs](bool force) {
+    const uint32_t now = millis();
+    if (force || static_cast<uint32_t>(now - lastStackSampleMs) >= 1000U) {
+      renderer_diagnostics::sampleRendererStackBytes(
+          static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr)));
+      lastStackSampleMs = now;
+    }
+  };
+  sampleStack(true);
   gMapRenderWorkerTaskHandle = xTaskGetCurrentTaskHandle();
   runtime_watchdog_diagnostics::registerCurrentTask(
       runtime_watchdog_diagnostics::Role::MapRender,
       runtime_watchdog_diagnostics::Phase::Waiting);
   MAPIO_LOG("MAPIO: render-worker started core=%d\n", xPortGetCoreID());
   while (!renderWorkerShutdown.load(std::memory_order_acquire)) {
+    sampleStack(false);
     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
     if (renderWorkerShutdown.load(std::memory_order_acquire))
       break;
@@ -4738,6 +4804,7 @@ void Maps::renderWorkerLoop() {
           runtime_watchdog_diagnostics::Role::MapRender,
           runtime_watchdog_diagnostics::Phase::Waiting,
           request.version.sequence);
+      sampleStack(false);
       taskYIELD();
       if (processPendingStorageControl() || processPendingVectorMapActivation())
         break;
@@ -4756,14 +4823,11 @@ void Maps::renderWorkerLoop() {
     renderJobs.cancelActive();
     readyRenderResultValid = false;
     latestRenderRequestValid = false;
-    renderWorkerTaskHandle = nullptr;
     xSemaphoreGive(renderStateMutex);
-  } else {
-    renderWorkerTaskHandle = nullptr;
   }
+  sampleStack(true);
   gMapRenderWorkerTaskHandle = nullptr;
   gMapRenderControlOperation.store(false, std::memory_order_release);
-  renderWorkerExited.store(true, std::memory_order_release);
   MAPIO_LOG("MAPIO: render-worker stopped\n");
 }
 
@@ -5844,6 +5908,7 @@ Maps::probeVectorMapFolderOnStorageOwner(const std::string &folder) {
 }
 
 bool Maps::requestStorageControl(void (*work)(void *), void *context) {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
   if (work == nullptr || renderWorkerShutdown.load(std::memory_order_acquire))
     return false;
   if (renderWorkerTaskHandle == nullptr && !startRenderWorker())
@@ -5896,6 +5961,7 @@ bool Maps::processPendingStorageControl() {
 }
 
 bool Maps::requestVectorMapFolderActivation(const std::string &folder) try {
+  if (shutdownAdmissionClosed_.load(std::memory_order_acquire)) return false;
   std::string ownedFolder = folder; // Allocate before taking the render mutex.
   if (folder.empty())
     return false;

@@ -347,6 +347,49 @@ private final class FakeRideAutomationWorkoutController:
 @available(iOS 17.0, *)
 @MainActor
 final class RideAutomationCoordinatorProductionTests: XCTestCase {
+    func testStaleConfigurationRejectionDoesNotAdvanceMatchingGeneration()
+        async throws
+    {
+        let (defaults, settingsStore) = try makeSettingsStore(
+            persistence: FakeRideDecisionPersistence())
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName(defaults)) }
+        let ble = FakeRideAutomationBLETransport()
+        let coordinator = RideAutomationCoordinator(
+            bleManager: ble,
+            workoutManager: FakeRideAutomationWorkoutController(),
+            settingsStore: settingsStore)
+        var sentFrames: [RideAutomationFrame] = []
+        ble.connect(deviceID: "bicino-175") { sentFrames.append($0); return true }
+        try await waitUntil("initial resynchronization") {
+            sentFrames.contains { $0.kind == .resynchronize }
+        }
+        let generation = settingsStore.generation
+        let settings = settingsStore.settings
+        // A queued older request is rejected, but the reply reports the
+        // device's current configuration, not the rejected request's generation.
+        for _ in 0..<3 {
+            ble.receive(RideAutomationFrame(
+                kind: .configurationAcknowledgement, result: .rejected,
+                rideGeneration: 7, profileVersion: 1,
+                watermarkOrConfigGeneration: generation,
+                startMode: settings.startMode,
+                autoPauseEnabled: settings.autoPauseEnabled,
+                alertMode: settings.alertMode, monotonicSeconds: 100))
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(settingsStore.generation, generation)
+        XCTAssertNil(coordinator.confirmedDeviceSettings,
+                     "A rejection must not be promoted to an acknowledgement")
+        XCTAssertFalse(sentFrames.contains { $0.kind == .configuration },
+                       "Stale replies must not create an immediate retry loop")
+        acknowledgeConfiguration(on: ble, settingsStore: settingsStore,
+                                 rideGeneration: 7, monotonicSeconds: 101)
+        try await waitUntil("later accepted acknowledgement") {
+            coordinator.confirmedDeviceSettings == settings
+        }
+        XCTAssertEqual(settingsStore.generation, generation)
+    }
+
     func testPromptOutboxIsDurableBeforePublicationAndCancellationClearsIt()
         async throws
     {
@@ -764,6 +807,34 @@ final class RideAutomationCoordinatorProductionTests: XCTestCase {
 @available(iOS 17.0, *)
 @MainActor
 final class WorkoutMirrorManagerProductionTests: XCTestCase {
+    func testColdNativeAttachmentRequestsSnapshotWithoutCredentials() async throws {
+        for state in [WorkoutSessionStateV1.paused, .running] {
+            let manager = WorkoutMirrorManager()
+            let transport = FakeMirroredSessionTransport()
+            transport.initialSessionState = state
+            manager.acceptMirroredTransport(transport)
+            XCTAssertTrue(transport.hasDelegate)
+            XCTAssertNil(manager.store.currentEnvelope)
+            XCTAssertEqual(transport.sentData,
+                [Data("bicino.workout.snapshot-request.v1".utf8)])
+            XCTAssertEqual(transport.pauseCallCount, 0)
+            XCTAssertEqual(transport.resumeCallCount, 0)
+            XCTAssertEqual(manager.store.presentation.sessionState, state)
+            transport.completeNext(succeeded: false)
+            await Task.yield()
+            XCTAssertNil(manager.store.presentation.pendingControl)
+            XCTAssertEqual(manager.store.presentation.sessionState, state)
+            let snapshot = makeSnapshotEnvelope(sequence: 20, capturedAt: Date(), state: state)
+            manager.applyRemoteEnvelopes([snapshot], receivedAt: Date(), from: transport)
+            XCTAssertEqual(manager.store.presentation.sessionID, snapshot.sessionID)
+            if state == .paused { manager.resume() } else { manager.pause() }
+            let control = try WorkoutContractCodec.decode(XCTUnwrap(transport.sentData.last))
+            XCTAssertEqual(control.sessionID, snapshot.sessionID)
+            XCTAssertEqual(control.sessionToken, snapshot.sessionToken)
+            XCTAssertEqual(control.control, state == .paused ? .resume : .pause)
+        }
+    }
+
     func testNativeTakeoverFailureDrainsAuthoritativeTerminalSnapshot() async throws {
         let now = Date(timeIntervalSinceReferenceDate: 800_399_900)
         let manager = WorkoutMirrorManager(
@@ -3374,6 +3445,24 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         XCTAssertNil(manager.store.presentation.errorCode)
     }
 
+    func testRecoveredTransportSeedsItsExistingNativeState() async throws {
+        for state in [WorkoutSessionStateV1.running, .paused] {
+            let manager = WorkoutMirrorManager(watchLaunchTimeout: 0.02)
+            let transport = FakeMirroredSessionTransport()
+            transport.initialSessionState = state
+            manager.acceptMirroredTransport(transport)
+            XCTAssertEqual(manager.store.presentation.sessionState, state)
+            XCTAssertTrue(manager.store.presentation.isWorkoutActive)
+            try await Task.sleep(for: .milliseconds(50))
+            XCTAssertEqual(manager.store.presentation.connectionState, .disconnected)
+            XCTAssertEqual(manager.store.presentation.errorCode, .watchUnavailable)
+            XCTAssertTrue(transport.hasDelegate,
+                          "Recovery keeps the live transport for a late credentialed snapshot")
+            XCTAssertEqual(transport.sentData, [WorkoutMirrorSnapshotRequest.data],
+                           "Native state permits only a state-neutral snapshot bootstrap")
+        }
+    }
+
     func testHungTerminalAttemptCannotBlockOrClearSameControlRetry() async throws {
         for (index, control) in [
             WorkoutControlV1.endAndSave,
@@ -4408,6 +4497,7 @@ private final class WatchLaunchProbe: @unchecked Sendable {
 private final class FakeMirroredSessionTransport:
     WorkoutMirroredSessionTransport {
     var sessionStartDate: Date?
+    var initialSessionState: WorkoutSessionStateV1?
     private(set) var sentData: [Data] = []
     private(set) var pauseCallCount = 0
     private(set) var resumeCallCount = 0

@@ -1,3 +1,5 @@
+#include "power.hpp"
+extern Power power;
 /**
  * @file lvglFuncs.cpp
  * @author Jordi Gauchía (jgauchia@jgauchia.com)
@@ -67,7 +69,7 @@ void objUnselect(_lv_obj_t *obj)
 void restartTimerCb(lv_timer_t *timer)
 {
   if (lv_timer_get_idle() != 0)
-    ESP.restart();
+    power.deviceRestart();
 }
 
 /**

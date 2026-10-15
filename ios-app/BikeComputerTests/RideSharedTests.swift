@@ -1432,6 +1432,13 @@ enum RideSharedTests {
             uptimeMs: 12_345,
             latencyMs: 8_000
         )
+        let truncated = WatchBLETransportDiagnosticBatchV1(events: Array(repeating: diagnostic, count: 66), producerID: UUID())
+        try expect(truncated.events.count == 64 && truncated.droppedEventCount == 2,
+            "bounded Watch diagnostics retain producer loss accounting")
+        try expect(WatchBLETransportDiagnosticBatchV1.decode(try truncated.encoded()) == truncated,
+            "Watch loss survives transport serialization")
+        let saturatedLoss = WatchBLETransportDiagnosticBatchV1(events: Array(repeating: diagnostic, count: 66), droppedEventCount: Int.max)
+        try expect(saturatedLoss.droppedEventCount == Int(clamping: UInt32.max), "producer loss saturation cannot overflow platform Int")
         let diagnosticBatch = WatchBLETransportDiagnosticBatchV1(
             events: [diagnostic]
         )
@@ -1786,6 +1793,46 @@ enum RideSharedTests {
                 request: staleRelease
             ),
             "a delayed release from an older ride cannot cancel a new yield"
+        )
+
+        let currentReleaseBytes = try currentRelease.encoded()
+        let staleReleaseBytes = try staleRelease.encoded()
+        let preparationBytes = try preparationRequest.encoded()
+        let interactiveReleases = WatchDirectRidePreparationPolicyV1
+            .interactiveReleasePayloads(
+                pending: [preparationBytes, Data([0]), currentReleaseBytes],
+                inFlight: [currentReleaseBytes, staleReleaseBytes],
+                activated: true,
+                reachable: true
+            )
+        expect(
+            interactiveReleases == [currentReleaseBytes, staleReleaseBytes],
+            "foreground handback retries exact durable release bytes, excluding invalid or prepare messages and duplicates"
+        )
+        for (activated, reachable) in [(false, false), (false, true), (true, false)] {
+            expect(
+                WatchDirectRidePreparationPolicyV1.interactiveReleasePayloads(
+                    pending: [currentReleaseBytes],
+                    inFlight: [staleReleaseBytes],
+                    activated: activated,
+                    reachable: reachable
+                ).isEmpty,
+                "unavailable interactive delivery leaves releases for the durable path"
+            )
+        }
+        let burst = try (0..<40).map { _ in
+            try WatchDirectRidePreparationRequestV1(
+                preparationID: UUID(), operation: .release, deviceID: deviceID
+            ).encoded()
+        }
+        expect(
+            WatchDirectRidePreparationPolicyV1.interactiveReleasePayloads(
+                pending: burst,
+                inFlight: [],
+                activated: true,
+                reachable: true
+            ) == Array(burst.prefix(16)),
+            "interactive retry stays within the durable outbox batch bound"
         )
 
         let availableWatch = WatchControllerAvailabilityV1(
