@@ -541,9 +541,9 @@ struct ContentView: View {
             coordinator.applicationDidBecomeActive()
             workoutSessionCoordinator.refreshFreshness()
             if workoutSessionCoordinator.notice != nil {
-                presentWorkoutAttention()
+                presentWorkoutAttention(for: newValue)
             } else {
-                synchronizeRideMetricsSheet()
+                synchronizeRideMetricsSheet(for: newValue)
             }
             offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
             routeLibrary.reload()
@@ -1046,13 +1046,15 @@ struct ContentView: View {
         }
     }
 
-    private func synchronizeRideMetricsSheet() {
+    private func synchronizeRideMetricsSheet(for phase: ScenePhase? = nil) {
 #if DEBUG
-        defer { recordWorkoutPresentationCheckpoint(reason: "synchronize") }
+        defer { recordWorkoutPresentationCheckpoint(reason: "synchronize", phase: phase) }
 #endif
         // HealthKit can recover a Watch mirror while this scene is still in
         // the background. Present its controls when UIKit can show the sheet.
-        guard scenePhase == .active else { return }
+        // The iOS 16 onChange closure captures the previous environment, so
+        // its activation callback must pass the new phase through explicitly.
+        guard (phase ?? scenePhase) == .active else { return }
         if workoutStore.presentation.isWorkoutActive {
             guard presentedSheet == nil,
                   savedRouteMapPreview == nil else { return }
@@ -1064,7 +1066,11 @@ struct ContentView: View {
     }
 
 #if DEBUG
-    private func recordWorkoutPresentationCheckpoint(reason: String, visible: Bool? = nil) {
+    private func recordWorkoutPresentationCheckpoint(
+        reason: String,
+        visible: Bool? = nil,
+        phase: ScenePhase? = nil
+    ) {
         let key = "bicino.debug.workoutPresentation.v1"
         let previous = UserDefaults.standard.dictionary(forKey: key) ?? [:]
         let processID = Int(ProcessInfo.processInfo.processIdentifier)
@@ -1080,7 +1086,7 @@ struct ContentView: View {
             "schema": 1,
             "processID": processID,
             "reason": reason,
-            "sceneActive": scenePhase == .active,
+            "sceneActive": (phase ?? scenePhase) == .active,
             "selectedState": workoutStore.presentation.sessionState.rawValue,
             "selectedConnection": workoutStore.presentation.connectionState.rawValue,
             "selectedIsActive": workoutStore.presentation.isWorkoutActive,
@@ -1131,8 +1137,8 @@ struct ContentView: View {
         }
     }
 
-    private func presentWorkoutAttention() {
-        guard scenePhase == .active else { return }
+    private func presentWorkoutAttention(for phase: ScenePhase? = nil) {
+        guard (phase ?? scenePhase) == .active else { return }
         guard presentedSheet != .workoutDashboard else { return }
         if presentedSheet != nil {
             queuedSheetAfterDismiss = .workoutDashboard
