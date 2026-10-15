@@ -25,6 +25,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     private var operationGeneration: UInt64 = 0
     private var lastResumeBlockReason: String?
     private var rideIsActive = false
+    private var deleting = false
     private struct RideContext {
         let requestID: UUID
         let captureID: UUID
@@ -51,10 +52,13 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
         self.canCollect = canCollect
         guard !restoreStarted else { return }
         restoreStarted = true
+        let generation = operationGeneration
         Task { [weak self] in
             guard let self else { return }
             do {
-                manifest = try await store.manifests().first(where: { $0.phase.canResumeAutomatically })
+                let restored = try await store.manifests().first(where: { $0.phase.canResumeAutomatically })
+                guard generation == operationGeneration, !deleting else { restoreFinished = true; return }
+                manifest = restored
                 if manifest?.failureCode == "cache_full" {
                     status = DiagnosticsAcquisitionFailureReporting.status(for: DiagnosticsAcquisitionStore.Failure.storageFull)
                 } else if manifest != nil {
@@ -89,6 +93,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     /// Called for ride transitions and authenticated reconnect/capture changes.
     /// Recording itself never depends on this opt-in delivery convenience.
     func observeRide(active: Bool) {
+        guard !deleting else { return }
         if active {
             if !rideIsActive {
                 operationGeneration &+= 1
@@ -175,6 +180,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     }
 
     func resumeIfPossible() {
+        guard !deleting else { return }
         guard restoreFinished else { recordResumeDeferral("journal_loading"); return }
         guard !restoreFailed else { recordResumeDeferral("journal_failed"); return }
         guard automaticRetryAllowed else { recordResumeDeferral("manual_retry_required"); return }
@@ -217,6 +223,7 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     }
 
     func start(newCutoff: Bool = false, automatic: Bool = false) {
+        guard !deleting else { return }
         guard restoreFinished, !restoreFailed else {
             if !automatic { status = "Collection journal is not ready. Existing evidence was left unchanged." }
             return
@@ -309,8 +316,12 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     /// One portable handoff wraps the byte-for-byte v1 bundle and acquisition
     /// receipts. The v1 reader remains supported; the v2 CLI independently checks
     /// receipt claims against actual archive bytes before reporting completeness.
-    func exportForCodex(recorder: RideDiagnosticsRecorder) async throws -> URL {
+    func exportForCodex(recorder: RideDiagnosticsRecorder, requiring acquisitionID: UUID? = nil) async throws -> URL {
+        guard !deleting else { throw CancellationError() }
         let snapshot = try await store.exportSnapshot()
+        if let acquisitionID, !snapshot.manifests.contains(where: { $0.id == acquisitionID && $0.deliveryComplete }) {
+            throw DiagnosticsAcquisitionStore.Failure.invalidManifest
+        }
         let evidenceURL = try await recorder.exportBundleAsync(additionalDeviceChunks: snapshot.chunks, additionalAppChunks: snapshot.appChunks)
         defer { try? FileManager.default.removeItem(at: evidenceURL) }
         let acquisitions = snapshot.manifests
@@ -347,6 +358,27 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
                 throw error
             }
         }.value
+    }
+
+    func deleteRetainedDiagnostics(recorder: RideDiagnosticsRecorder) async throws {
+        guard !deleting else { throw CancellationError() }
+        deleting = true
+        defer {
+            deleting = false
+            DiagnosticsBrokerClient.shared.resumeAfterDeletion()
+        }
+        operationGeneration &+= 1
+        selectionTask?.cancel(); rideJournalTask?.cancel(); task?.cancel()
+        await DiagnosticsBrokerClient.shared.suspendForDeletion()
+        await selectionTask?.value
+        await rideJournalTask?.value
+        await task?.value
+        try DiagnosticsBrokerClient.shared.deleteRetainedHandoffs()
+        try await store.deleteAll()
+        try recorder.deleteLocalLogs()
+        manifest = nil
+        rideContexts.removeAll()
+        status = "Retained iPhone diagnostics, acquisition cache and pending handoffs deleted."
     }
 
     func cancel() {

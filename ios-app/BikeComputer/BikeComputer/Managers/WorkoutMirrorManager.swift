@@ -156,7 +156,7 @@ final class WorkoutMirrorManager: NSObject {
 #if DEBUG
     private var debugAttachmentCount = 0
     private var debugAttachmentOrigin = AttachmentOrigin.mirroringHandler
-    private var debugCheckpointReason: String?
+    private var debugCheckpointFields: NSDictionary?
 #endif
     private var mirroredSessionStorage: AnyObject?
     private var launchTimeoutTask: Task<Void, Never>?
@@ -870,7 +870,7 @@ final class WorkoutMirrorManager: NSObject {
 #if DEBUG
         debugAttachmentCount = min(debugAttachmentCount + 1, 65_535)
         debugAttachmentOrigin = origin
-        debugCheckpointReason = nil
+        debugCheckpointFields = nil
 #endif
         launchTimeoutTask?.cancel()
         launchTimeoutTask = nil
@@ -1292,11 +1292,9 @@ final class WorkoutMirrorManager: NSObject {
 
     private func recordMirrorDebugCheckpoint(reason: String) {
 #if DEBUG
-        guard debugCheckpointReason != reason else { return }
-        debugCheckpointReason = reason
         // One bounded checkpoint, written only on changes: no identifiers,
         // credentials, remote payloads or workout metrics.
-        UserDefaults.standard.set([
+        var fields: [String: Any] = [
             "schema": 1,
             "reason": reason,
             "attachmentCount": debugAttachmentCount,
@@ -1305,8 +1303,11 @@ final class WorkoutMirrorManager: NSObject {
             "connection": store.presentation.connectionState.rawValue,
             "hasCredentials": store.currentEnvelope != nil,
             "hasTransport": mirroredSessionStorage != nil,
-            "capturedAt": now().timeIntervalSince1970,
-        ], forKey: "bicino.debug.phoneWorkoutMirror.v1")
+        ]
+        guard debugCheckpointFields?.isEqual(to: fields) != true else { return }
+        debugCheckpointFields = fields as NSDictionary
+        fields["capturedAt"] = now().timeIntervalSince1970
+        UserDefaults.standard.set(fields, forKey: "bicino.debug.phoneWorkoutMirror.v1")
 #endif
     }
 

@@ -120,6 +120,8 @@ final class DiagnosticsBrokerClient: ObservableObject {
     private var active = false
     private var loop: Task<Void, Never>?
     private var exportTask: Task<Void, Never>?
+    private var reconciliationTask: Task<Void, Never>?
+    private var deleting = false
     private var cancellables = Set<AnyCancellable>()
     private let root: URL
     private var journals: [String: DiagnosticsBrokerCommandJournal] = [:]
@@ -161,8 +163,9 @@ final class DiagnosticsBrokerClient: ObservableObject {
             .compactMap { $0 }
             .removeDuplicates { $0.id == $1.id && $0.phase == $1.phase }
             .filter(\.deliveryComplete)
-            .sink { [weak self] manifest in self?.enqueueExport(acquisitionID: manifest.id) }
+            .sink { [weak self] _ in self?.reconcileCompletedHandoffs() }
             .store(in: &cancellables)
+        reconcileCompletedHandoffs()
     }
 
     func pair(from url: URL) throws {
@@ -236,7 +239,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
 
     func setActive(_ value: Bool) {
         active = value
-        if !value || !isPaired { loopGeneration &+= 1; loop?.cancel(); loop = nil; return }
+        if deleting || !value || !isPaired { loopGeneration &+= 1; loop?.cancel(); loop = nil; return }
         guard loop == nil else { return }
         loopGeneration &+= 1
         let generation = loopGeneration
@@ -342,6 +345,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
         try await publishLive(pairing, generation: generation)
         try checkOwner(pairing, generation: generation)
         try await uploadPending(pairing, generation: generation)
+        reconcileCompletedHandoffs()
     }
 
     private func execute(_ command: DiagnosticsBrokerCommand, recorder: RideDiagnosticsRecorder,
@@ -480,18 +484,21 @@ final class DiagnosticsBrokerClient: ObservableObject {
 
     @discardableResult
     func enqueueExport(acquisitionID: UUID?) -> Bool {
-        guard isPaired, exportTask == nil, let recorder, let pairing, pairing.valid() else { return false }
+        guard !deleting, isPaired, exportTask == nil, let recorder, let pairing, pairing.valid() else { return false }
         let root = recipientRoot(pairing)
         exportTask = Task { [weak self] in
             guard let self else { return }
-            defer { exportTask = nil }
+            var published = false
+            defer {
+                exportTask = nil
+                if published { reconcileCompletedHandoffs() }
+            }
             do {
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
                 try FileManager.default.setAttributes(
                     [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: root.path)
-                let marker = root.appendingPathComponent("last-acquisition.txt")
-                if let acquisitionID,
-                   (try? String(contentsOf: marker, encoding: .utf8)) == acquisitionID.uuidString { return }
+                let bundleID = acquisitionID ?? UUID()
+                if let acquisitionID, try DiagnosticsHandoffReceipt.isQueuedOrDelivered(acquisitionID, root: root) { return }
                 let existing = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.fileSizeKey])
                     .filter { $0.pathExtension == "zip" }
                 let bytes = existing.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
@@ -499,7 +506,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
                     status = "Mac handoff outbox is full. Retained evidence was not deleted."
                     return
                 }
-                let prepared = try await DiagnosticsCollectionCoordinator.shared.exportForCodex(recorder: recorder)
+                let prepared = try await DiagnosticsCollectionCoordinator.shared.exportForCodex(recorder: recorder, requiring: acquisitionID)
                 defer { try? FileManager.default.removeItem(at: prepared) }
                 let preparedBytes = try prepared.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
                 guard DiagnosticsOutboxAdmission.allows(existingCount: existing.count,
@@ -507,17 +514,77 @@ final class DiagnosticsBrokerClient: ObservableObject {
                     status = "Mac handoff would exceed the outbox budget. Source evidence was retained."
                     return
                 }
-                let destination = root.appendingPathComponent(UUID().uuidString.lowercased() + ".zip")
+                let destination = root.appendingPathComponent(bundleID.uuidString.lowercased() + ".zip")
                 try FileManager.default.moveItem(at: prepared, to: destination)
                 var values = URLResourceValues(); values.isExcludedFromBackup = true
                 var excludedRoot = root; try excludedRoot.setResourceValues(values)
-                if let acquisitionID { try Data(acquisitionID.uuidString.utf8).write(to: marker, options: .atomic) }
+                published = true
                 status = "Verified-evidence handoff queued for the paired Mac."
             } catch {
                 status = "Handoff could not be prepared. Source logs were left unchanged."
             }
         }
         return true
+    }
+
+    private func reconcileCompletedHandoffs() {
+        guard !deleting, isPaired, exportTask == nil, reconciliationTask == nil,
+              let pairing, pairing.valid() else { return }
+        let root = recipientRoot(pairing)
+        reconciliationTask = Task { [weak self] in
+            guard let self else { return }
+            defer { reconciliationTask = nil }
+            do {
+                let completed = try await DiagnosticsCollectionCoordinator.shared.store.manifests()
+                    .filter(\.deliveryComplete)
+                try Task.checkCancellation()
+                guard !deleting, self.pairing == pairing else { return }
+                try DiagnosticsHandoffReceipt.prune(retaining: Set(completed.map(\.id)), root: root)
+                for acquisition in completed {
+                    if try !DiagnosticsHandoffReceipt.isQueuedOrDelivered(acquisition.id, root: root) {
+                        _ = enqueueExport(acquisitionID: acquisition.id)
+                        break
+                    }
+                }
+            } catch {
+                status = "Completed handoff reconciliation failed. Retained evidence is unchanged."
+            }
+        }
+    }
+
+    func suspendForDeletion() async {
+        deleting = true
+        loopGeneration &+= 1
+        loop?.cancel(); exportTask?.cancel(); reconciliationTask?.cancel()
+        await loop?.value
+        await exportTask?.value
+        await reconciliationTask?.value
+        loop = nil; exportTask = nil; reconciliationTask = nil
+    }
+
+    func deleteRetainedHandoffs() throws {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: root.path) else { return }
+        for recipient in try manager.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) {
+            let attributes = try recipient.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            if attributes.isDirectory == true && attributes.isSymbolicLink != true {
+                // These small functional receipts prevent re-executing a Mac
+                // command after a lost ACK. They contain no diagnostic bodies.
+                for file in try manager.contentsOfDirectory(at: recipient, includingPropertiesForKeys: nil)
+                    where file.lastPathComponent != "commands.json" {
+                    try manager.removeItem(at: file)
+                }
+                if try manager.contentsOfDirectory(atPath: recipient.path).isEmpty { try manager.removeItem(at: recipient) }
+            } else {
+                try manager.removeItem(at: recipient)
+            }
+        }
+        if try manager.contentsOfDirectory(atPath: root.path).isEmpty { try manager.removeItem(at: root) }
+    }
+
+    func resumeAfterDeletion() {
+        deleting = false
+        setActive(active)
     }
 
     private func uploadPending(_ pairing: DiagnosticsBrokerPairing, generation: UInt64) async throws {
@@ -548,6 +615,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
             guard receipt.schema == 2, receipt.id == id, receipt.sha256 == hash, receipt.accepted else {
                 throw DiagnosticsAcquisitionStore.Failure.invalidManifest
             }
+            try DiagnosticsHandoffReceipt.acknowledge(id, sha256: hash, root: root)
             try FileManager.default.removeItem(at: file)
         }
     }

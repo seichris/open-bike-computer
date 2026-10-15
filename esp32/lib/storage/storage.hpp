@@ -147,6 +147,7 @@ private:
   // use the historical isolated SPI transport only when native SDMMC fails
   // during the HSPI-to-SDMMC migration boot.
   std::atomic<StorageBackend> mountedBackend{StorageBackend::Unavailable};
+  std::atomic<uint32_t> mountGeneration_{0};
   std::atomic<ride_diagnostics::transfer_policy::StoragePreparation>
       lastDiagnosticsMountResult{
           ride_diagnostics::transfer_policy::StoragePreparation::MountFailed};
@@ -154,6 +155,7 @@ private:
   SemaphoreHandle_t mountMutex = nullptr;
 
 public:
+  uint32_t mountGeneration() const { return mountGeneration_.load(std::memory_order_acquire); }
   Storage();
 
   // Called only after transfer, renderer and diagnostics producer ACKs.

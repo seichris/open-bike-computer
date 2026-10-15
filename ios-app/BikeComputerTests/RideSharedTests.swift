@@ -1432,6 +1432,13 @@ enum RideSharedTests {
             uptimeMs: 12_345,
             latencyMs: 8_000
         )
+        let truncated = WatchBLETransportDiagnosticBatchV1(events: Array(repeating: diagnostic, count: 66), producerID: UUID())
+        try expect(truncated.events.count == 64 && truncated.droppedEventCount == 2,
+            "bounded Watch diagnostics retain producer loss accounting")
+        try expect(WatchBLETransportDiagnosticBatchV1.decode(try truncated.encoded()) == truncated,
+            "Watch loss survives transport serialization")
+        let saturatedLoss = WatchBLETransportDiagnosticBatchV1(events: Array(repeating: diagnostic, count: 66), droppedEventCount: Int.max)
+        try expect(saturatedLoss.droppedEventCount == Int(clamping: UInt32.max), "producer loss saturation cannot overflow platform Int")
         let diagnosticBatch = WatchBLETransportDiagnosticBatchV1(
             events: [diagnostic]
         )

@@ -62,20 +62,16 @@ void reset() {
 int main() {
   QueuedEvent ordinary{1, false}, important{2, true};
   mutexAvailable = false;
-  assert(enqueue(ordinary) && enqueue(important));
-  assert(queuedDepth() == 2 && dropped == 0 && mutationLockAttempts == 0);
-  // Even reserved-lane overflow only appends to free shared space; a writer
-  // in its peek/receive section must not make that admission fail.
-  for (unsigned i=1; i<kCriticalQueueCapacity; ++i) assert(enqueue(important));
-  assert(enqueue(important) && normalQueueCriticalCount == 1);
-  assert(enqueue(ordinary) && dropped == 0 && mutationLockAttempts == 0);
+  assert(!enqueue(ordinary) && !enqueue(important));
+  assert(queuedDepth() == 0 && dropped == 2 && count(DropReason::QueueBusy) == 2);
+  reset();
   reset();
   for (unsigned i=0; i<kNormalQueueCapacity; ++i) assert(enqueue(ordinary));
   for (unsigned i=0; i<kCriticalQueueCapacity; ++i) assert(enqueue(important));
   mutexAvailable = false;
   assert(!enqueue(important) && queuedDepth() == kQueueCapacity);
   assert(dropped == 1 && count(DropReason::QueueBusy) == 1);
-  assert(count(DropReason::NormalEvicted) == 0 && mutationLockAttempts == 1);
+  assert(count(DropReason::NormalEvicted) == 0 && mutationLockAttempts == kQueueCapacity + 1);
   reset(); normalQueue = nullptr;
   assert(!enqueue(ordinary) && count(DropReason::QueueUnavailable) == 1);
   reset();
@@ -117,19 +113,21 @@ int main() {
   for (unsigned i=0; i<kQueueCapacity; ++i) assert(enqueue(important));
   assert(!enqueue(important) && count(DropReason::QueueFull) == 1);
   assert(count(DropReason::NormalEvicted) == 0);
-  // Run the real writer selection with a producer inserting between the two
-  // peeks. An initially absent normal head cannot precede the older critical
-  // head; a new critical head cannot precede an already observed normal head.
-  for (bool oldCritical : {false, true}) {
-    reset();
-    QueuedEvent old{40, oldCritical}, appended{41, !oldCritical};
-    assert(enqueue(old));
-    mutexAvailable = false; // writer owns its head-mutation section
-    afterNormalPeek = [&] { assert(enqueue(appended)); };
-    QueuedEvent observed{}; QueueHandle_t selected = nullptr;
-    assert(peekNextEvent(observed, selected) && observed.sequence == 40);
-    assert(xQueueReceive(selected, &observed, 0) == pdTRUE);
-    assert(peekNextEvent(observed, selected) && observed.sequence == 41);
-    assert(dropped == 0 && mutationLockAttempts == 0);
-  }
+  // A writer owns the shared publication fence across both peeks. Try the
+  // previously missed empty/empty -> ordinary40 -> critical41 interleaving.
+  reset();
+  mutexAvailable = false;
+  afterNormalPeek = [&] {
+    QueuedEvent n{40, false}, c{41, true};
+    assert(!enqueue(n) && !enqueue(c));
+  };
+  QueuedEvent observed{}; QueueHandle_t selected = nullptr;
+  assert(!peekNextEvent(observed, selected));
+  assert(dropped == 2 && count(DropReason::QueueBusy) == 2);
+  mutexAvailable = true;
+  QueuedEvent n{42, false}, c{43, true};
+  assert(enqueue(n) && enqueue(c));
+  assert(peekNextEvent(observed, selected) && observed.sequence == 42);
+  assert(xQueueReceive(selected, &observed, 0) == pdTRUE);
+  assert(peekNextEvent(observed, selected) && observed.sequence == 43);
 }

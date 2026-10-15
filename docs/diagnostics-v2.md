@@ -86,7 +86,12 @@ Legacy receipts receive one frozen maximum-lifetime migration window.
 The phone polls only while foreground-active and paired. Files remain in a
 recipient-scoped, bounded outbox until the authenticated Mac verifies and
 acknowledges their exact hash. No claim is made that iOS permits arbitrary
-background execution. Reopen the app to resume an offline handoff.
+background execution. Reopen the app to resume an offline handoff. Completed acquisition manifests
+also remain durable automatic handoff intent: startup, completed exports and
+foreground polling reconcile them against recipient-scoped ZIPs and hash
+receipts. A busy export or full outbox does not consume a completion. ZIP names
+bind automatic handoffs to acquisition IDs, closing the process-loss window
+between publication and receipt bookkeeping.
 SwiftUI foreground transitions and the combination of BLE authentication and
 logging capability discovery recheck eligible retained collections. Resume
 revalidates cached chunks at the original saved
@@ -95,6 +100,23 @@ When the Mac's bounded inbox is full, the pinned broker reports `507` with the
 typed `inbox_full` reason. The app asks the user to archive received bundles on
 the Mac and retains the pending ZIP for the same hash-verified retry. Existing
 acknowledged uploads can still replay their receipts at the capacity limit.
+Use the explicit archive operation to verify a new copy outside the broker and
+retire the active inbox copy while preserving its receipt:
+
+```sh
+tools/bicino diag inbox archive --id BUNDLE_ID --output /private/archive/ride.zip --json
+```
+
+Keep that archive at the recorded path: duplicate uploads recheck its exact hash.
+`inbox get` remains a copy operation and does not free capacity. The 20-bundle /
+512 MiB active payload budget includes unindexed renamed files after process
+loss. One serialized upload has a separate 104 MiB staging budget, allowing a
+lost receipt to retry even when the active inbox is full. The broker takes an
+exclusive server lock before reclaiming abandoned partial uploads at startup;
+opening the CLI never cleans up an active request. Archive receipt metadata is
+retained separately from active payload capacity. TLS handshakes and HTTP
+headers have 15-second deadlines, JSON bodies 15 seconds, and upload bodies
+120 seconds, including time spent continuously receiving small fragments.
 Unpair removes the local Keychain credential immediately and tries to revoke it
 on the pinned Mac. If the Mac is unreachable, use the Mac's revocation command;
 local logs and recipient-scoped pending handoffs remain preserved. The explicit
@@ -262,7 +284,27 @@ a firmware Wi-Fi session. An iPhone-only policy is never forwarded to a device.
 The Mac outbox checks the prospective byte total, including the prepared file,
 before publication. It never exceeds eight files / 400 MiB through admission.
 
-Delivery completeness and recording coverage are separate. Exit status 3 from
+Deleting retained iPhone diagnostics first stops and joins collection and
+handoff tasks, then erases acquisition manifests/cache, every local recipient
+outbox and the recorder. Pairing and bounded command anti-replay receipts remain
+so deleting logs cannot replay an unacknowledged command. Already delivered
+Mac/archive copies remain separate.
+Replacement chunks retain a monotonically advancing process-local namespace,
+so an independently held pre-deletion snapshot cannot alias new bytes.
+
+Watch transport batches carry an optional stable producer UUID and cumulative
+truncation count. These survive queued retries/relaunch and are imported as
+privacy-bounded `watch_ble_diagnostics_loss` events; older batches remain
+readable. Producer truncation is distinct from BLE payload queue counters.
+
+Delivery completeness and recording coverage are separate. Retained firmware
+health/index storage errors and drops, and historical iPhone process drop counters, degrade
+coverage even if their original events have aged out. Firmware health snapshots
+use the maximum per device/boot, never a sum of repeated cumulative snapshots.
+Counters are labelled with their boot/process scope rather than attributed to
+an arbitrary selected capture interval. Old cached inbox summaries that predate
+this accounting report `unknown_legacy` instead of claiming no detected loss;
+verify their archive with the current CLI to compute current coverage. Exit status 3 from
 `verify --require-complete` means valid evidence but insufficient delivery/source
 coverage. A completed download cannot prove that every desired provider was on.
 
@@ -285,10 +327,18 @@ The recorder keeps eight reserved critical slots and 24 shared normal slots.
 Spilled critical records do not block normal admission into free shared slots.
 When both lanes are full, one bounded rotation evicts the oldest normal record,
 preserves every critical record and survivor sequence order, and appends the
-new critical record. Tail insertion uses the RTOS queue's synchronization; only
-full-queue eviction takes the writer's head-mutation mutex. A writer peek/receive
-therefore cannot reject an ordinary record or a critical record with free capacity.
-The zero-wait producer lock and total capacity are unchanged.
+new critical record. Publication into either lane shares the writer's bounded
+cross-lane head-selection fence. Contended admission never waits and increments
+`queue_busy`; free space alone is not an admission guarantee. This prevents a
+new critical event overtaking an unseen older ordinary event when both lanes
+were initially empty. The zero-wait producer lock and total capacity are unchanged.
+Explicit storage transitions fence ordinary admission (`storage_transition`),
+seal the old medium and park its writer before remount. If the old medium is
+unavailable, queued losses become a fault capsule before changing identity.
+A remount allocates a namespace above both media's retained boot IDs. Existing
+nonempty chunks are never reopened for append. Failed fault-capsule writes
+release their exact in-flight receipt for retry; old RTC evidence remains until
+its durable write acknowledgement.
 `critical_spill` remains a recognizable historical loss reason.
 
 ## Live observations

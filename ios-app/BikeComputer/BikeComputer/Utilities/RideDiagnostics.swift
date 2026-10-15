@@ -1438,8 +1438,9 @@ final class RideDiagnosticsRecorder:
             try FileManager.default.removeItem(at: rootURL)
             captureIDCache.removeAll(keepingCapacity: true)
             try prepareStorage()
-            sequence = 0
-            chunkNumber = 1
+            // Keep the process-local sequence and chunk namespace monotonic.
+            // A pre-deletion immutable snapshot can never alias new bytes.
+            chunkNumber += 1
             currentChunkURL = nil
             currentChunkBytes = 0
             preDetailedContextURL = nil
@@ -1448,6 +1449,7 @@ final class RideDiagnosticsRecorder:
             detailedTraceExpiry = nil
             beginNewStandardCapture()
             totalDropped = 0
+            DispatchQueue.main.async { [weak self] in self?.recentEvents.removeAll() }
             publishDropCount()
             recordOnQueue(
                 category: .lifecycle,

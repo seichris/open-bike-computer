@@ -273,11 +273,13 @@ struct RideDiagnosticsSettingsView: View {
             titleVisibility: .visible
         ) {
             Button("Delete iPhone Logs", role: .destructive) {
-                do {
-                    try recorder.deleteLocalLogs()
-                    statusMessage = "iPhone diagnostics deleted."
-                } catch {
-                    statusMessage = error.localizedDescription
+                isExporting = true
+                Task {
+                    defer { isExporting = false }
+                    do {
+                        try await collection.deleteRetainedDiagnostics(recorder: recorder)
+                        statusMessage = "iPhone diagnostics, cached acquisitions and pending handoffs deleted."
+                    } catch { statusMessage = error.localizedDescription }
                 }
             }
             Button("Cancel", role: .cancel) {}

@@ -206,11 +206,36 @@ class Evidence:
             count = self.manifest.get(key, 0)
             if type(count) is int and count > 0:
                 counters.append({'stream': 'manifest.json', 'source': 'host', 'field': key, 'count': count, 'scope': 'bundle_global'})
+        # Health snapshots survive event retention. Keep maxima per boot rather
+        # than adding cumulative snapshots from sidecars and acquisition indexes.
+        health = {}
+        def retain_health(value, member, device):
+            for field in ('storageErrors', 'dropped'):
+                identity = (device, value['bootSequence'], field)
+                count = value['stats'][field]
+                if count > health.get(identity, {}).get('count', 0):
+                    health[identity] = {'stream': member, 'source': 'firmware',
+                        'field': field, 'count': count, 'device': device,
+                        'bootSequence': value['bootSequence'], 'scope': 'boot_global'}
         # Check actual evidence, not only the phone's possibly stale receipts.
         deliveries = []
         with zipfile.ZipFile(self.source) as archive:
             members = {m.filename: m for m in archive.infolist()}
+            for name in members:
+                if re.fullmatch(r'app/[0-9a-f-]{36}/manifest\.json', name):
+                    process = json.loads(archive.read(name))
+                    count = process['droppedEventCount']
+                    if count and process['processId'] != self.manifest['appProcessId']:
+                        counters.append({'stream':name, 'source':'ios', 'field':'droppedEventCount',
+                            'count':count, 'processId':process['processId'], 'scope':'process_global'})
+                if v1.DEVICE_HEALTH_MEMBER_RE.fullmatch(name):
+                    device = name.split('/')[1]
+                    if scope['device'] in (None, device):
+                        retain_health(json.loads(archive.read(name)), name, device)
             for acquisition in acquisitions:
+                if acquisition.get('indexData') is not None:
+                    retain_health(json.loads(base64.b64decode(acquisition['indexData'])),
+                        'acquisitions/' + acquisition['id'].lower() + '.json', acquisition['deviceDigest'])
                 missing = []
                 for item in acquisition['expected']:
                     name = (f"device/{acquisition['deviceDigest']}/{item['bootSequence']}/"
@@ -222,6 +247,7 @@ class Evidence:
                     'state':'complete' if acquisition.get('indexData') is not None and not missing else 'incomplete',
                     'expectedChunks':len(acquisition['expected']), 'missingChunks':missing,
                     'reportedPhase':acquisition['phase']})
+        counters.extend(health.values())
         degraded = bool(missing_sources or gaps or tails or counters)
         return {'schema':2, 'bundleSha256':self.sha256, 'scope':scope, 'eventCount':len(events),
                 'sources':sorted(sources), 'missingRequiredSources':missing_sources,
@@ -229,6 +255,7 @@ class Evidence:
                 'recordingCoverage':'degraded' if degraded else 'no_detected_loss',
                 'coverageCaveat':'No detected loss is not proof that every requested provider was enabled.',
                 'sequenceGaps':gaps, 'recoverableTails':tails, 'lossCounters':counters[:100],
+                'lossAccountingVersion':2,
                 'lossAccountingScope':'selected_streams_and_bundle_global_counters' if scoped else 'bundle',
                 'nativeCrashEvidence':'not_in_standard_bundle',
                 'buildIdentity':{'app':self.manifest.get('appBuildIdentity'), 'firmware':self.manifest.get('firmwareBuildIdentities')}}

@@ -10,7 +10,7 @@ namespace ride_diagnostics::queue_policy {
 enum class DropReason : uint8_t {
   InvalidToken, InvalidFields, StorageUnavailable, ProducerUnavailable, ProducerBusy,
   BootIdentityUnavailable, QueueUnavailable, QueueBusy, CriticalSpill,
-  QueueFull, NormalEvicted, RecordTooLarge, Count,
+  QueueFull, NormalEvicted, RecordTooLarge, StorageTransition, Count,
 };
 
 inline const char *dropReasonName(DropReason reason) {
@@ -27,6 +27,7 @@ inline const char *dropReasonName(DropReason reason) {
   case DropReason::QueueFull: return "queue_full";
   case DropReason::NormalEvicted: return "normal_evicted";
   case DropReason::RecordTooLarge: return "record_too_large";
+  case DropReason::StorageTransition: return "storage_transition";
   case DropReason::Count: break;
   }
   return "unknown";
