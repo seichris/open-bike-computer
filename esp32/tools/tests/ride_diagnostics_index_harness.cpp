@@ -36,5 +36,12 @@ int main(int argc, char **argv) {
  }
  const auto index=listChunks(&server,request);
  assert(!index.readable && index.chunks.size()==256);
- printf("Oversized closed-chunk inventory fails explicitly within the 256-entry bound\n");
+ // A truncated root must not alias an existing directory and advertise an
+ // empty but apparently readable inventory from the wrong path.
+ root += "/" + std::string(200, 'x');
+ const auto truncated = (root + "/BICINO/DIAGNOSTICS/v1/boots").substr(0, 191);
+ std::filesystem::create_directories(truncated + "/1");
+ { std::ofstream file(truncated + "/1/events-000001.jsonl"); file << "{}\n"; }
+ assert(!listChunks(&server,request).readable);
+ printf("Oversized inventories and truncated index paths fail explicitly within fixed bounds\n");
 }

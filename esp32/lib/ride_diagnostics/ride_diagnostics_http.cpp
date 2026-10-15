@@ -176,9 +176,13 @@ ChunkIndex listChunks(
   std::vector<Chunk> &chunks = index.chunks;
   chunks.reserve(kMaximumChunks);
   char bootsRoot[192] = {};
-  snprintf(bootsRoot, sizeof(bootsRoot),
+  const int rootLength = snprintf(bootsRoot, sizeof(bootsRoot),
            "%s/BICINO/DIAGNOSTICS/v1/boots",
            storage.diagnosticsRootPath());
+  if (rootLength < 0 || static_cast<std::size_t>(rootLength) >= sizeof(bootsRoot)) {
+    index.readable = false;
+    return index;
+  }
   DIR *boots = opendir(bootsRoot);
   if (boots == nullptr) {
     index.readable = false;
@@ -194,8 +198,12 @@ ChunkIndex listChunks(
     if (!parseUnsigned(bootEntry->d_name, boot))
       continue;
     char directory[192] = {};
-    snprintf(directory, sizeof(directory), "%s/%s", bootsRoot,
+    const int directoryLength = snprintf(directory, sizeof(directory), "%s/%s", bootsRoot,
              bootEntry->d_name);
+    if (directoryLength < 0 || static_cast<std::size_t>(directoryLength) >= sizeof(directory)) {
+      index.readable = false;
+      continue;
+    }
     DIR *dir = opendir(directory);
     if (dir == nullptr) {
       index.readable = false;
@@ -218,7 +226,11 @@ ChunkIndex listChunks(
           !isClosedChunk(boot, chunkNumber))
         continue;
       char path[220] = {};
-      snprintf(path, sizeof(path), "%s/%s", directory, name.c_str());
+      const int pathLength = snprintf(path, sizeof(path), "%s/%s", directory, name.c_str());
+      if (pathLength < 0 || static_cast<std::size_t>(pathLength) >= sizeof(path)) {
+        index.readable = false;
+        continue;
+      }
       struct stat metadata = {};
       if (::stat(path, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
         index.readable = false;
