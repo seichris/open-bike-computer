@@ -198,11 +198,14 @@ struct RideDiagnosticsSettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                 if let manifest = collection.manifest {
+                    LabeledContent("Saved cutoff", value: manifest.createdAt.formatted(date: .abbreviated, time: .shortened))
                     LabeledContent("Verified chunks", value: "\(manifest.verified.count) / \(manifest.expected.count)")
                     LabeledContent("Delivery", value: manifest.deliveryComplete ? "Complete at saved cutoff" : "Incomplete")
                     Text("Recording coverage is evaluated separately by the host validator.")
                         .font(.footnote)
                     if !collection.isRunning && !manifest.deliveryComplete {
+                        Button("Export Partial Evidence") { exportSupportBundle() }
+                        Button("Release Incomplete Collection") { collection.releaseIncompleteCollection() }
                         Button("Start New Collection Cutoff") { collection.start(newCutoff: true) }
                     }
                 }
@@ -215,10 +218,15 @@ struct RideDiagnosticsSettingsView: View {
                             Text("Preparing Support Bundle…")
                         }
                     } else {
-                        Label("Export Support Bundle", systemImage: "square.and.arrow.up")
+                        Label(collection.manifest == nil ? "Export Support Bundle" : "Export Selected Collection", systemImage: "square.and.arrow.up")
                     }
                 }
                 .disabled(isExporting)
+                Text("Collection exports contain the saved cutoff. Export recorder history separately for newer iPhone events.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Button("Export Recorder History") { exportSupportBundle(recorderHistoryOnly: true) }
+                    .disabled(isExporting)
                 if let exportURL {
                     ShareLink(item: exportURL) {
                         Label("Share Latest Export", systemImage: "square.and.arrow.up.circle")
@@ -327,14 +335,16 @@ struct RideDiagnosticsSettingsView: View {
             : "\(minutes)m \(remainingSeconds)s"
     }
 
-    private func exportSupportBundle() {
+    private func exportSupportBundle(recorderHistoryOnly: Bool = false) {
         guard !isExporting else { return }
         isExporting = true
         statusMessage = "Preparing the support bundle…"
         exportTask = Task { @MainActor in
             defer { isExporting = false }
             do {
-                let completedURL = try await collection.exportForCodex(recorder: recorder)
+                let completedURL: URL
+                if recorderHistoryOnly { completedURL = try await recorder.exportBundleAsync() }
+                else { completedURL = try await collection.exportForCodex(recorder: recorder) }
                 guard !Task.isCancelled else {
                     try? FileManager.default.removeItem(at: completedURL)
                     return

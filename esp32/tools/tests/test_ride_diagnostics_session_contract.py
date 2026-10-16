@@ -87,6 +87,16 @@ int main() {
         receipt = RECORDER[RECORDER.index("struct FaultCapsuleWriteReceipt {"):RECORDER.index("bool writeQueuedEvent(")]
         self.run_production_harness("ride_diagnostics_fault_retry_harness.cpp", update + receipt + flush)
 
+    def test_oversized_index_cannot_claim_complete_inventory(self):
+        http = (ROOT / "lib/ride_diagnostics/ride_diagnostics_http.cpp").read_text()
+        types = http[http.index("struct Chunk {"):http.index("std::string jsonEscape")]
+        listing = http[http.index("ChunkIndex listChunks("):http.index("bool writeBodySegment")]
+        self.run_production_harness("ride_diagnostics_index_harness.cpp", types + listing, filesystem=True)
+
+    def test_checked_checkpoints_precede_fault_acknowledgement(self):
+        writer = RECORDER[RECORDER.index("struct FaultCapsuleWriteReceipt {"):RECORDER.index("bool flushFaultCapsulesIfPossible() {")]
+        self.run_production_harness("ride_diagnostics_checkpoint_harness.cpp", writer)
+
     def test_backend_transition_allocates_new_namespace(self):
         parse = RECORDER[RECORDER.index("bool parseUnsigned(const char *value, uint32_t &out) {"):RECORDER.index("void copyCapture")]
         identity = RECORDER[RECORDER.index("uint32_t persistentBootSequence("):RECORDER.index("enum class ActiveFileCloseResult")]

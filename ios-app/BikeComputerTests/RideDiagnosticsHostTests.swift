@@ -201,9 +201,13 @@ enum RideDiagnosticsHostTests {
         let snapshot = try await restarted.exportSnapshot()
         precondition(snapshot.manifests.first?.deliveryComplete == true && snapshot.chunks.count == 39)
         precondition(snapshot.appChunks == appEvidence)
-        let archive = try recorder.exportBundle(additionalDeviceChunks: snapshot.chunks, additionalAppChunks: snapshot.appChunks)
+        recorder.record(category: .lifecycle, event: "outside_frozen_cutoff")
+        recorder.flush()
+        let archive = try recorder.exportBundle(additionalDeviceChunks: snapshot.chunks, additionalAppChunks: snapshot.appChunks, acquisitionOnly: true)
         defer { try? FileManager.default.removeItem(at: archive) }
         let bytes = try Data(contentsOf: archive)
+        precondition(bytes.range(of: Data("outside_frozen_cutoff".utf8)) == nil,
+            "scoped acquisition exports must not duplicate unrelated recorder history")
         for (relative, body) in snapshot.chunks {
             precondition(bytes.range(of: Data("device/\(relative)".utf8)) != nil)
             precondition(bytes.range(of: body) != nil, "every original chunk must be present byte-for-byte")
@@ -346,7 +350,29 @@ enum RideDiagnosticsHostTests {
         precondition(remaining.manifests.isEmpty && remaining.appChunks.isEmpty && remaining.chunks.isEmpty)
     }
 
+    static func legacyAcquisitionExportPreservesReferencedEvidence() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.record(category: .lifecycle, event: "legacy_original_app")
+        recorder.flush()
+        let capture = recorder.currentCaptureID!
+        let data = Data("{\"schema\":1,\"source\":\"firmware\",\"sequence\":0,\"level\":\"info\",\"category\":\"boot\",\"event\":\"legacy_original_device\",\"fields\":{\"bootSequence\":1,\"firmwareFingerprint\":\"A1B2C3D4\"}}\n".utf8)
+        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        _ = try recorder.importDeviceChunk(deviceDigest: "0123456789abcdef", bootSequence: 1, chunk: 1, data: data, sha256: hash)
+        let item = DiagnosticsChunkReceipt(bootSequence: 1, chunk: 1, bytes: data.count, sha256: hash)
+        let legacy = DiagnosticsAcquisitionManifest(schema: 2, id: UUID(), captureID: capture,
+            deviceDigest: "0123456789abcdef", createdAt: Date(), updatedAt: Date(), phase: .complete,
+            indexData: Data(), expected: [item], verified: [item.key], failureCode: nil)
+        let archive = try await recorder.exportAcquisitionBundleAsync(manifests: [legacy], deviceChunks: [:], appChunks: [:])
+        defer { try? FileManager.default.removeItem(at: archive) }
+        let bytes = try Data(contentsOf: archive)
+        precondition(bytes.range(of: data) != nil && bytes.range(of: Data("legacy_original_app".utf8)) != nil,
+            "pre-cache receipts retain their original device and app evidence in scoped exports")
+    }
+
     static func main() async throws {
+        try await legacyAcquisitionExportPreservesReferencedEvidence()
         try await deletionDoesNotReuseRetainedChunkIdentity()
         try queueOverflowRetainsCriticalEvidenceAndReportsLoss()
         try routineCheckpointsAvoidHistoricalInventory()

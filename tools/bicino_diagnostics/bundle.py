@@ -248,14 +248,26 @@ class Evidence:
                     'expectedChunks':len(acquisition['expected']), 'missingChunks':missing,
                     'reportedPhase':acquisition['phase']})
         counters.extend(health.values())
+        firmware_boots = {}
+        for event in events:
+            if event['source'] == 'firmware':
+                identity = (str(Path(event['rawReference']['member']).parent),
+                            str(event.get('fields', {}).get('bootSequence', 'unknown')))
+                firmware_boots.setdefault(identity, False)
+                if event.get('event') == 'controlled_shutdown':
+                    firmware_boots[identity] = True
+        unsealed = [{'stream': identity[0], 'bootSequence': identity[1]}
+                    for identity, sealed in sorted(firmware_boots.items()) if not sealed]
         degraded = bool(missing_sources or gaps or tails or counters)
         return {'schema':2, 'bundleSha256':self.sha256, 'scope':scope, 'eventCount':len(events),
                 'sources':sorted(sources), 'missingRequiredSources':missing_sources,
                 'delivery':deliveries, 'deliveryEvidence': 'inventoried' if deliveries else 'no_acquisition_manifest',
-                'recordingCoverage':'degraded' if degraded else 'no_detected_loss',
-                'coverageCaveat':'No detected loss is not proof that every requested provider was enabled.',
+                'recordingCoverage':'degraded' if degraded else ('unknown_unsealed_boot' if unsealed else 'no_detected_loss'),
+                'unsealedFirmwareBoots':unsealed,
+                'unwrittenTailEventCount':None if unsealed else 0,
+                'coverageCaveat':'An unsealed boot may have an unmeasurable unwritten tail. No detected loss is not proof that every requested provider was enabled.',
                 'sequenceGaps':gaps, 'recoverableTails':tails, 'lossCounters':counters[:100],
-                'lossAccountingVersion':2,
+                'lossAccountingVersion':3,
                 'lossAccountingScope':'selected_streams_and_bundle_global_counters' if scoped else 'bundle',
                 'nativeCrashEvidence':'not_in_standard_bundle',
                 'buildIdentity':{'app':self.manifest.get('appBuildIdentity'), 'firmware':self.manifest.get('firmwareBuildIdentities')}}

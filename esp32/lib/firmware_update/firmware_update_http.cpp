@@ -1032,7 +1032,7 @@ void FirmwareUpdateHttpServer::handleCancel(device_transfer::TransferClient &cli
   if (firmware_maintenance::active() &&
       !firmware_maintenance::exitRequested()) {
     (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "maintenance", "exit_http_cancel", "{}");
+                                   "ota", "exit_http_cancel", "{}");
     firmware_maintenance::requestExit();
   }
   transferServer_->noteStatusChanged("cancelled");

@@ -1002,6 +1002,30 @@
       "maxBytes": 256,
       "privacy": "diagnostic"
     },
+    "originCaptureAssociation": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "originClockUncertainty": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "originProcessId": {
+      "firmwareType": "string",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "originUnixTimeMs": {
+      "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
     "otaState": {
       "firmwareType": "string",
       "iosType": "string",
@@ -1316,6 +1340,12 @@
     },
     "taskCount": {
       "firmwareType": "number",
+      "iosType": "string",
+      "maxBytes": 256,
+      "privacy": "diagnostic"
+    },
+    "timeBasis": {
+      "firmwareType": "string",
       "iosType": "string",
       "maxBytes": 256,
       "privacy": "diagnostic"

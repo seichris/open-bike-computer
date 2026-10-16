@@ -54,10 +54,11 @@ class BrokerReliabilityTests(BrokerTLSTestCase):
         incoming.write_bytes(data)
         identifier = str(uuid.uuid4())
         self.store.accept_upload(identifier, incoming, sha)
-        self.assertEqual(self.store.status()['bundles'][0]['coverage']['recordingCoverage'], 'no_detected_loss')
+        self.assertEqual(self.store.status()['bundles'][0]['coverage']['recordingCoverage'], 'unknown_unsealed_boot')
         with self.store.connect() as connection:
             saved = json.loads(connection.execute('SELECT coverage FROM bundles WHERE id=?', (identifier,)).fetchone()[0])
-            saved.pop('lossAccountingVersion')
+            saved['lossAccountingVersion'] = 2
+            saved['recordingCoverage'] = 'no_detected_loss'
             connection.execute('UPDATE bundles SET coverage=? WHERE id=?', (json.dumps(saved), identifier))
         self.assertEqual(self.store.status()['bundles'][0]['coverage']['recordingCoverage'], 'unknown_legacy')
 

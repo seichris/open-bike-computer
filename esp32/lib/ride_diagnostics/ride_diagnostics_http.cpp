@@ -176,9 +176,13 @@ ChunkIndex listChunks(
   std::vector<Chunk> &chunks = index.chunks;
   chunks.reserve(kMaximumChunks);
   char bootsRoot[192] = {};
-  snprintf(bootsRoot, sizeof(bootsRoot),
+  const int rootLength = snprintf(bootsRoot, sizeof(bootsRoot),
            "%s/BICINO/DIAGNOSTICS/v1/boots",
            storage.diagnosticsRootPath());
+  if (rootLength < 0 || static_cast<std::size_t>(rootLength) >= sizeof(bootsRoot)) {
+    index.readable = false;
+    return index;
+  }
   DIR *boots = opendir(bootsRoot);
   if (boots == nullptr) {
     index.readable = false;
@@ -194,8 +198,12 @@ ChunkIndex listChunks(
     if (!parseUnsigned(bootEntry->d_name, boot))
       continue;
     char directory[192] = {};
-    snprintf(directory, sizeof(directory), "%s/%s", bootsRoot,
+    const int directoryLength = snprintf(directory, sizeof(directory), "%s/%s", bootsRoot,
              bootEntry->d_name);
+    if (directoryLength < 0 || static_cast<std::size_t>(directoryLength) >= sizeof(directory)) {
+      index.readable = false;
+      continue;
+    }
     DIR *dir = opendir(directory);
     if (dir == nullptr) {
       index.readable = false;
@@ -218,7 +226,11 @@ ChunkIndex listChunks(
           !isClosedChunk(boot, chunkNumber))
         continue;
       char path[220] = {};
-      snprintf(path, sizeof(path), "%s/%s", directory, name.c_str());
+      const int pathLength = snprintf(path, sizeof(path), "%s/%s", directory, name.c_str());
+      if (pathLength < 0 || static_cast<std::size_t>(pathLength) >= sizeof(path)) {
+        index.readable = false;
+        continue;
+      }
       struct stat metadata = {};
       if (::stat(path, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
         index.readable = false;
@@ -245,9 +257,9 @@ ChunkIndex listChunks(
       if (chunks.size() < kMaximumChunks) {
         chunks.push_back(std::move(candidate));
       } else {
-        auto oldest = std::min_element(chunks.begin(), chunks.end(), chunkOlder);
-        if (oldest != chunks.end() && chunkOlder(*oldest, candidate))
-          *oldest = std::move(candidate);
+        // The bounded response must never masquerade as the full inventory.
+        // Pruning may be deferred by a snapshot lease; retry after it expires.
+        index.readable = false;
       }
     }
     closedir(dir);
@@ -528,7 +540,7 @@ bool RideDiagnosticsHttp::handleRequest(
       endTransferSnapshotLease();
       return device_transfer::sendHttpError(
           client, 500, "diagnostics_index_unreadable",
-          "one or more non-empty diagnostic chunks could not be read safely");
+          "diagnostic inventory is oversized or contains unreadable non-empty chunks");
     }
     const Stats snapshot = stats();
     return sendIndex(client, index, snapshot, server_, request);

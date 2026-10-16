@@ -18,6 +18,7 @@ struct StorageMock { bool getDiagnosticsSdLoaded() const { return true; } } stor
 StorageMock *storage=&storageObject;
 FaultCapsuleState currentFaultCapsule{}, pendingFaultCapsule{}, retainedFaultCapsule{};
 bool pendingFaultCapsuleValid=true;
+std::atomic<bool> faultCapsulesInitialized{true};
 std::atomic<unsigned> bootSequence{52}, dropped{0}, faultCapsuleGeneration{0}, faultCapsuleQueuedGeneration{UINT32_MAX}, pendingFaultCapsuleQueuedChecksum{0}, currentFaultCapsuleQueuedChecksum{0};
 unsigned millis() { return 10000; }
 std::vector<unsigned> admittedBoots;
@@ -33,6 +34,11 @@ int main() {
  pendingFaultCapsule.bootSequence=51; pendingFaultCapsule.eventCount=3;
  sealFaultCapsule(pendingFaultCapsule); retainedFaultCapsule=pendingFaultCapsule;
  const auto oldChecksum=pendingFaultCapsule.checksum;
+ faultCapsulesInitialized=false;
+ updateFaultCapsule(Level::Info,"ble","maintenance_event",true);
+ assert(faultCapsuleIdentityMatches(retainedFaultCapsule,51,oldChecksum));
+ assert(currentFaultCapsule.eventCount==0);
+ faultCapsulesInitialized=true;
  assert(flushFaultCapsulesIfPossible());
  assert(admittedBoots.size()==1 && admittedBoots[0]==51);
  {

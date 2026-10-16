@@ -48,7 +48,7 @@ def main():
     # this substitute removes only platform networking/Keychain dependencies.
     methods = methods.replace('DiagnosticsBrokerPairing', 'DiagnosticsBrokerPairingFixture').replace('private func', 'func')
     fixture = (HERE/'Handoff.swift.inc').read_text().replace('// CLIENT_METHODS', methods)
-    fixture = fixture.replace('// COORDINATOR_DELETE', section(coordinator, '    func deleteRetainedDiagnostics(', '    func cancel('))
+    fixture = fixture.replace('// COORDINATOR_DELETE', declaration(coordinator, '    func deleteRetainedDiagnostics('))
     with tempfile.TemporaryDirectory(prefix='diagnostics-lifecycle-host-') as directory:
         directory = Path(directory)
         source, binary = directory/'main.swift', directory/'handoff'
@@ -56,6 +56,13 @@ def main():
         subprocess.run(['python3', str(ROOT/'tools/development/swift_compile.py'), 'diagnostics-broker-contracts', '--',
             '-parse-as-library', str(source), '-o', str(binary)], check=True)
         subprocess.run([str(binary)], check=True, timeout=30)
+        outbox = (HERE/'Outbox.swift.inc').read_text().replace('// UPLOAD_METHOD',
+            declaration(client, '    private func uploadPending(').replace('private func', 'func').replace('DiagnosticsBrokerPairing', 'Pairing'))
+        outbox_source, outbox_binary = directory/'outbox.swift', directory/'outbox'
+        outbox_source.write_text(outbox)
+        subprocess.run(['python3', str(ROOT/'tools/development/swift_compile.py'), 'diagnostics-broker-contracts', '--',
+            '-parse-as-library', str(outbox_source), '-o', str(outbox_binary)], check=True)
+        subprocess.run([str(outbox_binary)], check=True, timeout=30)
         other_regressions(directory)
 
 if __name__ == '__main__':
