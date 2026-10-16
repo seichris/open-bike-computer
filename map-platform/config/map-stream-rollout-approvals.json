@@ -130,6 +130,32 @@
           "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
         }
       ]
+    },
+    {
+      "promotionId": "msr-20261003-bicino-build25",
+      "candidateGitSha": "839f997ee0029b85a159f4c1158d62e2cc144b8b",
+      "producerBuildSha256": "83e0dac465b76fbbf06d3eb1c465224d708885a4cc8d19a25460f47ffb199046",
+      "workerImageDigest": "sha256:1030d2c361cfdbc5ef506938c80938086053df9321895576ee1a3923082afafd",
+      "firmwareVersion": "0.3.4",
+      "firmwareBuild": 101,
+      "firmwareGitSha": "309791611ad7125dcea9ea69abedbc66342434e2",
+      "iosBuild": "25",
+      "iosGitSha": "1c2c36d85d89489a259d4ccc9f8e2aedd4d4b95c",
+      "iosBuildSha256": "d20c409cc7541982f7cc4517f69b2c9783b9ec3c3c0963d6eee25e6955f90e18",
+      "reportSha256": "71c6a0dfe9fd8f83e9a8456ac25199933771726df1263fdfb23407d6adadae44",
+      "requirementsSha256": "05e65f81f161d27bfd3f32f28fda42a5ca8519632d95846c6791b57a30dd08ae",
+      "approvedAt": "2026-10-03T01:38:42Z",
+      "approvedBy": "seichris",
+      "targets": [
+        "WAVESHARE_AMOLED_175",
+        "WAVESHARE_AMOLED_206"
+      ],
+      "signingKeys": [
+        {
+          "keyId": "map-prod-2026-08",
+          "publicKeySha256": "8042e4bbac215fcebb44a157849b252a844f195e634f89a9b8fdd989cf681c12"
+        }
+      ]
     }
   ]
 }

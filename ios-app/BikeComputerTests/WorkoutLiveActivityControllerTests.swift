@@ -197,6 +197,7 @@ private final class FakeWorkoutBackgroundExecutionLease:
     private(set) var isActive = false
     private(set) var beginCount = 0
     private(set) var endCount = 0
+    var onEnd: (() -> Void)?
     private var expirationHandler:
         (@MainActor @Sendable () -> Void)?
 
@@ -214,6 +215,7 @@ private final class FakeWorkoutBackgroundExecutionLease:
         isActive = false
         endCount += 1
         expirationHandler = nil
+        onEnd?()
     }
 
     func expireSynchronously() {
@@ -936,6 +938,8 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         client.recordsValue = [record("orphan", mapped: mapped)]
         let scheduler = WorkoutLiveActivityWaitScheduler()
         let lease = FakeWorkoutBackgroundExecutionLease()
+        let leaseEnded = expectation(description: "reconciliation lease ended")
+        lease.onEnd = { leaseEnded.fulfill() }
         let controller = makeController(
             source: source,
             client: client,
@@ -952,7 +956,7 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         XCTAssertEqual(scheduler.requestedIntervals, [3])
 
         await scheduler.resumeNext()
-        await settle()
+        await fulfillment(of: [leaseEnded], timeout: 3)
 
         XCTAssertFalse(lease.isActive)
         XCTAssertEqual(client.endings.map(\.0), ["orphan"])
@@ -1254,7 +1258,11 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         await settle()
 
         await scheduler.resumeNext()
-        await settle()
+        // Resuming the grace wait takes several scheduler hops; under parallel
+        // CI load a fixed number of yields is not a reliable barrier.
+        try await waitUntil("orphan end attempt") {
+            client.endAttempts == ["existing"]
+        }
         XCTAssertEqual(client.endAttempts, ["existing"])
 
         source.send(active)
@@ -1265,7 +1273,9 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
         )
 
         client.resumeSuspendedEnd()
-        await settle()
+        try await waitUntil("serialized recovery request") {
+            client.requests.count == 1
+        }
 
         XCTAssertEqual(client.endings.map(\.0), ["existing"])
         XCTAssertEqual(client.requests.count, 1)
@@ -1660,6 +1670,22 @@ final class WorkoutLiveActivityControllerTests: XCTestCase {
     private func settle() async {
         for _ in 0..<8 {
             await Task.yield()
+        }
+    }
+
+    private func waitUntil(
+        _ label: String,
+        timeout: Duration = .seconds(2),
+        condition: @MainActor () -> Bool
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while !condition() {
+            guard clock.now < deadline else {
+                XCTFail("Timed out waiting for \(label)")
+                return
+            }
+            try await Task.sleep(for: .milliseconds(10))
         }
     }
 }

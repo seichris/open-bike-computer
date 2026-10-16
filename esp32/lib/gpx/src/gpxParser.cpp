@@ -17,9 +17,7 @@
  */
 std::string formatDouble(double value, int precision) 
 {
-  std::ostringstream out;
-  out << std::fixed << std::setprecision(precision) << value;
-  return out.str();
+  return gpx_value_format::fixed(value, precision);
 }
 
 GPXParser::GPXParser(const char* filePath) : filePath(filePath) {}

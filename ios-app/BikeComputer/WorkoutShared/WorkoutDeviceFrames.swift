@@ -312,14 +312,20 @@ nonisolated enum WorkoutDeviceForwardingDecisionV1: Equatable, Sendable {
         sessionID: UUID,
         sessionToken: UInt16
     )
+    case finish(
+        snapshot: WorkoutSnapshotV1,
+        sessionID: UUID,
+        sessionToken: UInt16
+    )
     case clear
 }
 
 /// Drives the direct-Watch device relay from versioned workout envelopes.
-/// Terminal snapshots remain forwarded until the manager publishes an
-/// explicit idle boundary (represented by clearing its latest envelope).
+/// Deliver the final workout state before releasing workout demand. Keeping
+/// the summary open must not retain BLE ownership or replay the finished ride.
 nonisolated struct WorkoutDeviceForwardingStateV1: Sendable {
     private(set) var forwardedSessionID: UUID?
+    private(set) var finishedSessionID: UUID?
 
     mutating func receive(
         _ envelope: WorkoutEnvelopeV1?
@@ -331,10 +337,20 @@ nonisolated struct WorkoutDeviceForwardingStateV1: Sendable {
         }
         guard envelope.kind == .snapshot,
               let snapshot = envelope.snapshot else { return .ignore }
+        guard envelope.sessionID != finishedSessionID else { return .ignore }
         guard snapshot.state != .idle else {
             guard forwardedSessionID != nil else { return .ignore }
             forwardedSessionID = nil
             return .clear
+        }
+        if snapshot.state == .ended || snapshot.state == .failed {
+            forwardedSessionID = nil
+            finishedSessionID = envelope.sessionID
+            return .finish(
+                snapshot: snapshot,
+                sessionID: envelope.sessionID,
+                sessionToken: envelope.sessionToken
+            )
         }
         forwardedSessionID = envelope.sessionID
         return .forward(

@@ -1432,6 +1432,13 @@ enum RideSharedTests {
             uptimeMs: 12_345,
             latencyMs: 8_000
         )
+        let truncated = WatchBLETransportDiagnosticBatchV1(events: Array(repeating: diagnostic, count: 66), producerID: UUID())
+        try expect(truncated.events.count == 64 && truncated.droppedEventCount == 2,
+            "bounded Watch diagnostics retain producer loss accounting")
+        try expect(WatchBLETransportDiagnosticBatchV1.decode(try truncated.encoded()) == truncated,
+            "Watch loss survives transport serialization")
+        let saturatedLoss = WatchBLETransportDiagnosticBatchV1(events: Array(repeating: diagnostic, count: 66), droppedEventCount: Int.max)
+        try expect(saturatedLoss.droppedEventCount == Int(clamping: UInt32.max), "producer loss saturation cannot overflow platform Int")
         let diagnosticBatch = WatchBLETransportDiagnosticBatchV1(
             events: [diagnostic]
         )
@@ -1500,6 +1507,42 @@ enum RideSharedTests {
                 response,
             "Watch controller response round-trips"
         )
+        let revoke = WatchControllerRequestV1(operation: .revoke, deviceID: deviceID,
+                                               controllerID: controllerID)
+        let applied = WatchControllerRevocationReceiptV1(
+            request: revoke, response: .init(requestID: revoke.requestID, accepted: true))
+        try expect(try WatchControllerRevocationReceiptV1.decode(applied.encoded()) == applied,
+                   "receiver applied cleanup receipt round trips exact identifiers")
+        var outbox = WatchControllerRevocationOutboxV1()
+        try expect(outbox.enqueue(revoke), "cleanup intent is admitted")
+        let duplicate = WatchControllerRequestV1(operation: .revoke, deviceID: deviceID, controllerID: controllerID)
+        try expect(!outbox.enqueue(duplicate), "repeated cleanup retains its original receipt identity")
+        let persisted = try PropertyListEncoder().encode(outbox.requests)
+        var restarted = WatchControllerRevocationOutboxV1(requests:
+            try PropertyListDecoder().decode([WatchControllerRequestV1].self, from: persisted))
+        try expect(!restarted.apply(.init(request: revoke,
+            response: .init(requestID: revoke.requestID, accepted: false, errorCode: "keychain_locked"))),
+            "receiver keychain failure cannot settle cleanup")
+        try expect(!restarted.apply(.init(request: duplicate,
+            response: .init(requestID: duplicate.requestID, accepted: true))),
+            "late receipt for another request cannot settle the durable operation")
+        try expect(restarted.requests == [revoke], "restart and failed receipts preserve exact intent")
+        try expect(restarted.apply(applied) && restarted.requests.isEmpty,
+                   "only the exact receiver applied receipt removes cleanup")
+        var legacy = WatchControllerRevocationOutboxV1(requests: [revoke])
+        try expect(!legacy.settleDelivered(duplicate),
+                   "delivery of another request cannot settle a pre-receipt Watch's cleanup")
+        try expect(legacy.settleDelivered(revoke) && legacy.requests.isEmpty,
+                   "a pre-receipt Watch settles its exact delivered request")
+        expectThrows(WatchControllerContractError.invalidEnvelope,
+                     "receipt cannot acknowledge a different request") {
+            _ = try WatchControllerRevocationReceiptV1(request: revoke,
+                response: .init(requestID: UUID(), accepted: true)).encoded()
+        }
+        expectThrows(WatchControllerContractError.invalidEnvelope,
+                     "enrollment material cannot enter cleanup receipts") {
+            _ = try WatchControllerRevocationReceiptV1(request: request, response: response).encoded()
+        }
         expectThrows(
             WatchControllerContractError.invalidControllerID,
             "all-zero controller IDs are rejected"
@@ -1755,6 +1798,46 @@ enum RideSharedTests {
                 request: staleRelease
             ),
             "a delayed release from an older ride cannot cancel a new yield"
+        )
+
+        let currentReleaseBytes = try currentRelease.encoded()
+        let staleReleaseBytes = try staleRelease.encoded()
+        let preparationBytes = try preparationRequest.encoded()
+        let interactiveReleases = WatchDirectRidePreparationPolicyV1
+            .interactiveReleasePayloads(
+                pending: [preparationBytes, Data([0]), currentReleaseBytes],
+                inFlight: [currentReleaseBytes, staleReleaseBytes],
+                activated: true,
+                reachable: true
+            )
+        expect(
+            interactiveReleases == [currentReleaseBytes, staleReleaseBytes],
+            "foreground handback retries exact durable release bytes, excluding invalid or prepare messages and duplicates"
+        )
+        for (activated, reachable) in [(false, false), (false, true), (true, false)] {
+            expect(
+                WatchDirectRidePreparationPolicyV1.interactiveReleasePayloads(
+                    pending: [currentReleaseBytes],
+                    inFlight: [staleReleaseBytes],
+                    activated: activated,
+                    reachable: reachable
+                ).isEmpty,
+                "unavailable interactive delivery leaves releases for the durable path"
+            )
+        }
+        let burst = try (0..<40).map { _ in
+            try WatchDirectRidePreparationRequestV1(
+                preparationID: UUID(), operation: .release, deviceID: deviceID
+            ).encoded()
+        }
+        expect(
+            WatchDirectRidePreparationPolicyV1.interactiveReleasePayloads(
+                pending: burst,
+                inFlight: [],
+                activated: true,
+                reachable: true
+            ) == Array(burst.prefix(16)),
+            "interactive retry stays within the durable outbox batch bound"
         )
 
         let availableWatch = WatchControllerAvailabilityV1(

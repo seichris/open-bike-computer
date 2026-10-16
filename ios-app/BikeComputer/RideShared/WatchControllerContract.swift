@@ -205,6 +205,64 @@ struct WatchControllerResponseV1: Codable, Equatable, Sendable {
     }
 }
 
+/// Receipt for keychain application, distinct from WatchConnectivity delivery.
+/// The echoed revoke request carries identifiers only; validation forbids keys.
+struct WatchControllerRevocationReceiptV1: Codable, Equatable, Sendable {
+    static let userInfoPayloadKey = "watchControllerRevocationReceiptV1"
+    /// Application-context flag from Watch builds that send applied receipts.
+    static let supportedContextKey = "bicino.controller.revocationReceipt"
+    let request: WatchControllerRequestV1
+    let response: WatchControllerResponseV1
+
+    func validated() throws -> Self {
+        _ = try request.validated()
+        _ = try response.validated()
+        guard request.operation == .revoke, request.requestID == response.requestID,
+              response.proof == nil else { throw WatchControllerContractError.invalidEnvelope }
+        return self
+    }
+    func encoded() throws -> Data { try PropertyListEncoder().encode(validated()) }
+    static func decode(_ data: Data) throws -> Self {
+        try PropertyListDecoder().decode(Self.self, from: data).validated()
+    }
+}
+
+/// Persist `requests` before transport submission. Transport admission/completion
+/// never changes this state; only the exact applied receipt can settle an intent.
+struct WatchControllerRevocationOutboxV1 {
+    private(set) var requests: [WatchControllerRequestV1]
+
+    init(requests: [WatchControllerRequestV1] = []) {
+        self.requests = requests.filter { $0.operation == .revoke && (try? $0.validated()) != nil }
+    }
+
+    @discardableResult
+    mutating func enqueue(_ request: WatchControllerRequestV1) -> Bool {
+        guard request.operation == .revoke, (try? request.validated()) != nil,
+              !requests.contains(where: { $0.deviceID == request.deviceID &&
+                  $0.controllerID == request.controllerID }) else { return false }
+        requests.append(request)
+        return true
+    }
+
+    /// Settles a request on WatchConnectivity delivery. Only for Watch builds
+    /// that do not advertise applied receipts.
+    @discardableResult
+    mutating func settleDelivered(_ request: WatchControllerRequestV1) -> Bool {
+        guard requests.contains(request) else { return false }
+        requests.removeAll { $0 == request }
+        return true
+    }
+
+    @discardableResult
+    mutating func apply(_ receipt: WatchControllerRevocationReceiptV1) -> Bool {
+        guard (try? receipt.validated()) != nil, receipt.response.accepted,
+              requests.contains(receipt.request) else { return false }
+        requests.removeAll { $0 == receipt.request }
+        return true
+    }
+}
+
 enum WatchControllerCryptographyV1 {
     static func enrollmentProof(
         credential: WatchControllerCredentialV1,
@@ -455,6 +513,23 @@ struct WatchDirectRidePreparationResponseV1: Codable, Equatable, Sendable {
 }
 
 enum WatchDirectRidePreparationPolicyV1 {
+    static func interactiveReleasePayloads(
+        pending: [Data],
+        inFlight: [Data],
+        activated: Bool,
+        reachable: Bool
+    ) -> [Data] {
+        guard activated, reachable else { return [] }
+        var seen = Set<Data>()
+        let candidates = Array(pending.prefix(16)) + Array(inFlight.prefix(16))
+        return candidates.filter { payload in
+            guard let request = try?
+                    WatchDirectRidePreparationRequestV1.decode(payload),
+                  request.operation == .release else { return false }
+            return seen.insert(payload).inserted
+        }
+    }
+
     static func rejectionCode(
         requestedDeviceID: String,
         selectedDeviceID: String?,
@@ -649,6 +724,8 @@ struct PhoneWatchConnectivityStateV1: Equatable, Sendable {
     var isWatchAppInstalled = false
     var isReachable = false
     var watchMetadata: WatchDeviceMetadataV1?
+    var routeSyncSchemaVersion = 1
+    var pendingControllerCleanupDeviceIDs: Set<String> = []
 
     var controllerAvailability: WatchControllerAvailabilityV1 {
         WatchControllerAvailabilityV1(

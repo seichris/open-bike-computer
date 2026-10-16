@@ -6,16 +6,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
+#include "capture_policy_v2.hpp"
 
 class Storage;
 
 namespace ride_diagnostics {
 
 enum class Level : uint8_t {
-  Debug = 0,
-  Info = 1,
-  Warning = 2,
-  Error = 3,
+  Trace = 0, Debug = 1, Info = 2, Warning = 3, Error = 4, Fatal = 5,
 };
 
 struct Stats {
@@ -67,6 +66,11 @@ inline bool expiredByWallClock(uint64_t nowEpoch, uint64_t modifiedEpoch,
 inline bool snapshotLeaseActive(uint32_t nowMs, uint32_t deadlineMs) {
   return deadlineMs != 0 &&
          static_cast<int32_t>(deadlineMs - nowMs) > 0;
+}
+
+inline bool maintenanceMustYield(uint32_t nowMs, uint32_t deadlineMs,
+                                 bool sealing) {
+  return sealing || snapshotLeaseActive(nowMs, deadlineMs);
 }
 
 inline bool shouldPruneAfterWrite(uint32_t writtenCount,
@@ -127,9 +131,17 @@ void setStorageRecoveryAllowedProbe(StorageRecoveryAllowedProbe probe);
 
 bool record(Level level, const char *category, const char *event,
             const char *fieldsJson = "{}");
+// Runtime controls are compiled into ordinary and production images. SDK/raw
+// providers and the existing RAUT detailed producer remain separately gated.
+bool applyCapturePolicy(const policy_v2::Request &request);
+std::string capturePolicyJson();
 bool recordHealth(const char *reason);
+// Bounded live observation only; never reports enqueued bytes as durable.
+bool liveTailJson(uint32_t boot, uint32_t after, std::string &output);
 bool recordClockAnchor();
-bool markIssue(const char *code, uint32_t markerSequence);
+bool markIssue(const char *code, uint32_t markerSequence, const char *incidentId = nullptr);
+// Nonblocking local marker admission, not an acknowledgement of stable storage.
+bool markLocalIssue(const char *code);
 bool bindCapture(const char *captureId, bool detailed = false);
 void clearCapture();
 DetailedCaptureLease detailedCaptureLease();
@@ -144,6 +156,10 @@ bool sealActiveChunk(uint32_t timeoutMs = 2000);
 bool beginStorageTransition(uint32_t timeoutMs = 2000);
 void endStorageTransition();
 bool prepareForShutdown(uint32_t timeoutMs = 2000);
+// One-shot internal-stack seal; UI only polls its exact ACK.
+bool pollShutdownQuiescence();
+// RTC-only supporting evidence; never opens storage during a failed barrier.
+void noteShutdownDeferred(uint8_t stage);
 // Publish a lease before requesting a writer-owned seal. The subsequent seal
 // is the synchronization point with any retention pass already in progress.
 void armTransferSnapshotLease(uint32_t durationMs = 10U * 60U * 1000U);

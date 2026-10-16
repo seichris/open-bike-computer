@@ -27,6 +27,12 @@ int main() {
       42811, 14836, 35179, 14836};
   assert(!device_transfer::wifiStartupMemoryAboveObservedFailure(
       observedFailure));
+  // Physical 175 observation after a first Wi-Fi cycle: ample total free
+  // memory does not make a fragmented internal/DMA heap safe to initialize.
+  const device_transfer::NetworkMemorySnapshot fragmentedAfterCycle{
+      85443, 22516, 77703, 22516};
+  assert(!device_transfer::wifiStartupMemoryAboveObservedFailure(
+      fragmentedAfterCycle));
   const device_transfer::NetworkMemorySnapshot admitted{
       60U * 1024U, 32U * 1024U, 48U * 1024U, 32U * 1024U};
   assert(device_transfer::wifiStartupMemoryAboveObservedFailure(admitted));
