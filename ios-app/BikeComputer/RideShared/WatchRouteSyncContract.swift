@@ -33,8 +33,16 @@ nonisolated struct WatchRouteIdentityV1: Codable, Equatable, Hashable, Sendable 
     }
 }
 
+/// An operation identity is independent of the content revision. A deliberate
+/// reinstall of identical bytes has a new generation; duplicate delivery does not.
+nonisolated struct WatchRouteOperationV2: Codable, Equatable, Sendable {
+    let generation: UInt64
+    let id: UUID
+}
+
 nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
     static let schemaVersion: UInt16 = 1
+    static let supportedSchemaContextKey = "bicino.route.supportedSchema"
 
     let operation: WatchRouteSyncOperationV1
     let identity: WatchRouteIdentityV1
@@ -42,6 +50,7 @@ nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
     let errorCode: String?
     let encodedByteCount: Int?
     let deleteAfter: Date?
+    let deliveryOperation: WatchRouteOperationV2?
 
     init(
         operation: WatchRouteSyncOperationV1,
@@ -49,7 +58,8 @@ nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
         status: WatchRouteSyncStatusV1? = nil,
         errorCode: String? = nil,
         encodedByteCount: Int? = nil,
-        deleteAfter: Date? = nil
+        deleteAfter: Date? = nil,
+        deliveryOperation: WatchRouteOperationV2? = nil
     ) {
         self.operation = operation
         self.identity = identity
@@ -57,11 +67,12 @@ nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
         self.errorCode = errorCode.map { String($0.prefix(128)) }
         self.encodedByteCount = encodedByteCount
         self.deleteAfter = deleteAfter
+        self.deliveryOperation = deliveryOperation
     }
 
     var propertyList: [String: Any] {
         var value: [String: Any] = [
-            Keys.schema: Int(Self.schemaVersion),
+            Keys.schema: deliveryOperation == nil ? Int(Self.schemaVersion) : 2,
             Keys.operation: operation.rawValue,
             Keys.routeID: identity.routeID.uuidString.lowercased(),
             // Keep the fixed-width revision intact on 32-bit watchOS. An
@@ -69,6 +80,10 @@ nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
             Keys.revision: NSNumber(value: identity.revision),
             Keys.contentHash: identity.contentHash
         ]
+        if let deliveryOperation {
+            value[Keys.operationGeneration] = String(deliveryOperation.generation)
+            value[Keys.operationID] = deliveryOperation.id.uuidString.lowercased()
+        }
         if let status {
             value[Keys.status] = status.rawValue
         }
@@ -86,7 +101,7 @@ nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
 
     init?(propertyList: [String: Any]) {
         guard let schema = Self.integer(propertyList[Keys.schema]),
-              schema == Int(Self.schemaVersion),
+              (schema == Int(Self.schemaVersion) || schema == 2),
               let operationRaw = propertyList[Keys.operation] as? String,
               let operation = WatchRouteSyncOperationV1(rawValue: operationRaw),
               let routeIDRaw = propertyList[Keys.routeID] as? String,
@@ -99,6 +114,18 @@ nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
                   (48...57).contains(byte) || (97...102).contains(byte)
               }) else {
             return nil
+        }
+        let deliveryOperation: WatchRouteOperationV2?
+        if schema == 2 {
+            guard let generationRaw = propertyList[Keys.operationGeneration] as? String,
+                  let generation = UInt64(generationRaw), generation > 0,
+                  let idRaw = propertyList[Keys.operationID] as? String,
+                  let id = UUID(uuidString: idRaw) else { return nil }
+            deliveryOperation = .init(generation: generation, id: id)
+        } else {
+            guard propertyList[Keys.operationGeneration] == nil,
+                  propertyList[Keys.operationID] == nil else { return nil }
+            deliveryOperation = nil
         }
         let status: WatchRouteSyncStatusV1?
         if let raw = propertyList[Keys.status] as? String {
@@ -155,7 +182,8 @@ nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
             status: status,
             errorCode: errorCode,
             encodedByteCount: encodedByteCount,
-            deleteAfter: deleteAfter
+            deleteAfter: deleteAfter,
+            deliveryOperation: deliveryOperation
         )
     }
 
@@ -175,6 +203,8 @@ nonisolated struct WatchRouteSyncMessageV1: Equatable, Sendable {
     }
 
     private enum Keys {
+        static let operationGeneration = "bicino.route.operationGeneration"
+        static let operationID = "bicino.route.operationID"
         static let schema = "bicino.route.schema"
         static let operation = "bicino.route.operation"
         static let routeID = "bicino.route.id"

@@ -504,6 +504,12 @@ final class TestBLEManager: BLEManager {
         return true
     }
 
+    override func clearRouteGeometry() {
+        // This double records NavigationEngine intent. Actual BLE clear
+        // lifecycle/ACK/reconnect behavior has separate manager tests.
+        _ = sendRouteGeometry(Data())
+    }
+
     override func sendGPSPosition(
         lat: Double,
         lon: Double,
@@ -894,6 +900,9 @@ struct NavigationProtocolTests {
         testDeviceOwnershipProtocol()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testRideApplicationAcknowledgementWaitsForATTCallback()
+        testFailedClearRetiresSiblingsAndReplaysIntent()
+        testRideRecoveryKeepsSpecificFailureReason()
+        testPhoneConnectionAdoptionOwnsGeneration()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()
         testBLEManagerGatesTopographicContourVisibility()

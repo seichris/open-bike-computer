@@ -1110,9 +1110,12 @@ struct WatchBLEOutboundQueueV1: Equatable {
 }
 
 enum WatchRidePacketEncoderV1 {
+    /// Exact maneuver packet firmware accepts as the navigation-clear member.
+    static let navigationIdlePacket = "1|0|Navigation idle"
+
     static func maneuver(_ snapshot: NavigationSnapshotV1?) -> Data {
         guard let snapshot else {
-            return Data("1|0|Navigation idle".utf8)
+            return Data(navigationIdlePacket.utf8)
         }
         let distance = min(
             max(Int(snapshot.distanceToManeuverMeters.rounded()), 0),
