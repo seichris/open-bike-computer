@@ -452,6 +452,7 @@ final class WatchConnectivityCoordinator: NSObject {
         var merged = session.applicationContext
         merged[WatchDeviceMetadataV1.applicationContextKey] = data
         merged[WatchRouteSyncMessageV1.supportedSchemaContextKey] = 2
+        merged[WatchControllerRevocationReceiptV1.supportedContextKey] = 1
         if let workoutHealthSetupSnapshot,
            let healthData = try? workoutHealthSetupSnapshot.encoded() {
             merged[WorkoutHealthSetupSnapshotV1.applicationContextKey] =

@@ -1530,7 +1530,11 @@ class BLEManager: NSObject, ObservableObject {
 #if HOST_TESTING
     private var navigationClearEndpointForTesting: NavigationWriteEndpoint?
 #endif
+#if HOST_TESTING
+    private var rideApplicationAcknowledgementTimeout: TimeInterval = 5
+#else
     private let rideApplicationAcknowledgementTimeout: TimeInterval = 5
+#endif
 #if HOST_TESTING
     private var navigationWriteResponseTimeout: TimeInterval = 60
 #else
@@ -4000,7 +4004,9 @@ class BLEManager: NSObject, ObservableObject {
     /// Send navigation data to ESP32
     @discardableResult
     func sendNavigationData(_ data: String) -> Bool {
-        if data != "1|0|Navigation idle" { supersedePendingNavigationClear() }
+        if data != WatchRidePacketEncoderV1.navigationIdlePacket {
+            supersedePendingNavigationClear()
+        }
         guard let endpoint = navigationWriteEndpoint,
               isConnected,
               isNavigationReady else {
@@ -4741,7 +4747,9 @@ class BLEManager: NSObject, ObservableObject {
         // acknowledged the clear.
         navigationWriteQueue.removePendingWrites(ofClass: .route)
         navigationWriteQueue.removePendingWrites(ofClass: .navigationSnapshot)
-        let payloads = [Data(), Data("1|0|Navigation idle".utf8)]
+        let payloads = [
+            Data(), Data(WatchRidePacketEncoderV1.navigationIdlePacket.utf8)
+        ]
         let intentID = pendingNavigationClear?.id
         return enqueueAcknowledgedRideApplicationGroup(
             commandType: .navigationClear,
@@ -4831,7 +4839,10 @@ class BLEManager: NSObject, ObservableObject {
                 { [weak self] in
                     self?.finishRideApplicationDelivery(
                         commandID: commandID,
-                        outcome: .transportFailure
+                        outcome: .transportFailure(
+                            reason: "critical command ATT failure",
+                            failureReason: .applicationRejected
+                        )
                     )
                 }
             ) else {
@@ -4870,7 +4881,12 @@ class BLEManager: NSObject, ObservableObject {
     private enum RideApplicationDeliveryOutcome {
         case acknowledged
         case dropped
-        case transportFailure
+        /// Carries the caller's diagnosis: the recovery it starts is the only
+        /// one that takes effect, because it clears navigation readiness.
+        case transportFailure(
+            reason: String,
+            failureReason: RideBLETransportFailureReasonV1
+        )
     }
 
     private func noteRideApplicationMemberDispatched(
@@ -4925,11 +4941,10 @@ class BLEManager: NSObject, ObservableObject {
                     // regenerate the complete logical state instead.
                     self.finishRideApplicationDelivery(
                         commandID: commandID,
-                        outcome: .transportFailure
-                    )
-                    self.recoverFromRideApplicationFailure(
-                        "ATT callback and application acknowledgement were both lost",
-                        failureReason: .attTimeout
+                        outcome: .transportFailure(
+                            reason: "ATT callback and application acknowledgement were both lost",
+                            failureReason: .attTimeout
+                        )
                     )
                     return
                 }
@@ -4949,11 +4964,10 @@ class BLEManager: NSObject, ObservableObject {
                     .enqueuePrioritizedAtomically(current.writes) else {
                     self.finishRideApplicationDelivery(
                         commandID: commandID,
-                        outcome: .transportFailure
-                    )
-                    self.recoverFromRideApplicationFailure(
-                        "critical retry admission failed",
-                        failureReason: .criticalAdmissionFailed
+                        outcome: .transportFailure(
+                            reason: "critical retry admission failed",
+                            failureReason: .criticalAdmissionFailed
+                        )
                     )
                     return
                 }
@@ -4964,11 +4978,10 @@ class BLEManager: NSObject, ObservableObject {
             case .recoverTransport:
                 self.finishRideApplicationDelivery(
                     commandID: commandID,
-                    outcome: .transportFailure
-                )
-                self.recoverFromRideApplicationFailure(
-                    "application acknowledgement timed out",
-                    failureReason: .applicationTimeout
+                    outcome: .transportFailure(
+                        reason: "application acknowledgement timed out",
+                        failureReason: .applicationTimeout
+                    )
                 )
             }
         }
@@ -4989,10 +5002,13 @@ class BLEManager: NSObject, ObservableObject {
             pending.completionHandlers.forEach { $0() }
         case .dropped:
             pending.dropHandlers.forEach { $0() }
-        case .transportFailure:
+        case let .transportFailure(reason, failureReason):
             // The shared owner retires every sibling before external callbacks
             // or queue flushing. ATT success alone never completes the group.
-            recoverFromRideApplicationFailure("critical command ATT failure")
+            recoverFromRideApplicationFailure(
+                reason,
+                failureReason: failureReason
+            )
             pending.failureHandlers.forEach { $0() }
         }
         if pendingRideApplicationDeliveries.isEmpty,
@@ -6729,11 +6745,17 @@ class BLEManager: NSObject, ObservableObject {
         guard adoptConnectionContext(peripheral) else { return }
         centralManager.connect(peripheral, options: nil)
         log("Connecting to: \(peripheral.name ?? "Unknown")")
-        if BLEConnectionPersistence.shouldCancelTimedOutConnection(
+        startConnectionTimeoutIfBounded(for: peripheral)
+    }
+
+    /// Trusted-device connects stay pending in CoreBluetooth so iOS can finish
+    /// them when the accessory returns, including while suspended. Only
+    /// interactive pairing attempts are bounded.
+    private func startConnectionTimeoutIfBounded(for peripheral: CBPeripheral) {
+        guard BLEConnectionPersistence.shouldCancelTimedOutConnection(
             isPairing: pendingPairingSession != nil
-        ) {
-            startConnectionTimeout(for: peripheral)
-        }
+        ) else { return }
+        startConnectionTimeout(for: peripheral)
     }
 
     /// Fresh and restored platform links receive the same generation, queues,
@@ -8185,8 +8207,12 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func completeAuthentication(for peripheral: CBPeripheral) {
-        guard rideTransportStateMachine.phase == .authenticating,
-              let characteristic = navigationCharacteristic,
+        guard rideTransportStateMachine.phase == .authenticating else {
+            // A recovered or retired attempt must not install a write path.
+            log("Ignoring authentication completion outside the authenticating phase")
+            return
+        }
+        guard let characteristic = navigationCharacteristic,
               let navigationWriteType = preferredWriteType(for: characteristic) else {
             log("Navigation characteristic is not writable after authentication")
             return
@@ -8201,6 +8227,15 @@ class BLEManager: NSObject, ObservableObject {
         )
         guard payloadMaximum > 0 else {
             failAuthentication("The BLE connection is too small for protected device commands.", peripheral: peripheral)
+            return
+        }
+        // Commit the lifecycle transition before any authenticated side effect
+        // so a rejected transition cannot leave a half-authenticated session.
+        let transportGeneration = rideTransportStateMachine.generation
+        guard reduceRideTransport(.authenticated(
+            generation: transportGeneration
+        )) == .applied else {
+            log("Ignoring authentication completion for a retired transport generation")
             return
         }
         installNavigationWriteEndpoint(NavigationWriteEndpoint(
@@ -8220,10 +8255,6 @@ class BLEManager: NSObject, ObservableObject {
 
         pendingAuthNonce = nil
         authFlowState = .authenticated
-        let transportGeneration = rideTransportStateMachine.generation
-        guard reduceRideTransport(.authenticated(
-            generation: transportGeneration
-        )) == .applied else { return }
         // Owner authentication atomically claims or renews the firmware ride
         // lease. The legacy auth response does not expose its numeric lease
         // generation, so 1 is a local nonzero readiness sentinel only; wire
@@ -9178,6 +9209,9 @@ class BLEManager: NSObject, ObservableObject {
         isNavigationReady = true
     }
     var pendingNavigationClearForTesting: Bool { pendingNavigationClear != nil }
+    func setRideApplicationAcknowledgementTimeoutForTesting(_ timeout: TimeInterval) {
+        rideApplicationAcknowledgementTimeout = timeout
+    }
     func retryNavigationClearForTesting() { retryPendingNavigationClear() }
     func adoptConnectionForTesting(connected: Bool) -> Bool {
         guard adoptConnectionContext(nil) else { return false }
@@ -9548,8 +9582,9 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         case .connected:
             centralManager(central, didConnect: restored)
         case .connecting:
-            // The pending OS attempt now belongs to the adopted generation.
-            startConnectionTimeout(for: restored)
+            // The pending OS attempt now belongs to the adopted generation and
+            // keeps the same persistence policy as a fresh trusted connect.
+            startConnectionTimeoutIfBounded(for: restored)
         case .disconnected:
             connectToPeripheral(restored)
         case .disconnecting:
@@ -10886,10 +10921,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         case .invalidLeaseGeneration:
             finishRideApplicationDelivery(
                 commandID: acknowledgement.commandID,
-                outcome: .transportFailure
-            )
-            recoverFromRideApplicationFailure(
-                "invalid lease generation in application acknowledgement"
+                outcome: .transportFailure(
+                    reason: "invalid lease generation in application acknowledgement",
+                    failureReason: .applicationRejected
+                )
             )
             return
         case .completed(let result):
@@ -10934,10 +10969,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         case .rejected(let result):
             finishRideApplicationDelivery(
                 commandID: acknowledgement.commandID,
-                outcome: .transportFailure
-            )
-            recoverFromRideApplicationFailure(
-                "firmware rejected critical state result=\(result.rawValue)"
+                outcome: .transportFailure(
+                    reason: "firmware rejected critical state result=\(result.rawValue)",
+                    failureReason: .applicationRejected
+                )
             )
         }
     }

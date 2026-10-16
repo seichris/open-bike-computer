@@ -3662,6 +3662,27 @@ extension NavigationProtocolTests {
         }
     }
 
+    static func testRideRecoveryKeepsSpecificFailureReason() {
+        let manager = BLEManager()
+        var writes: [Data] = []
+        var recoveries = 0
+        let endpoint = NavigationWriteEndpoint(maximumWriteLength: 185,
+            expectsWriteResponse: true, canSend: { true }, write: { writes.append($0) })
+        assert(manager.adoptConnectionForTesting(connected: true), "transport can record a failure")
+        manager.configureNavigationClearForTesting(endpoint)
+        manager.installNavigationWriteStallRecoveryForTesting(timeout: 60) { recoveries += 1 }
+        manager.setRideApplicationAcknowledgementTimeoutForTesting(0.01)
+        manager.clearRouteGeometry()
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.count, 2, "both clear members were dispatched")
+        // The maneuver member's ATT callback never arrives before the ACK deadline.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        assertEqual(recoveries, 1, "lost ATT callback and ACK recover once")
+        assertEqual(manager.rideTransportFailureReason, .attTimeout,
+                    "the caller's diagnosis is not replaced by a generic ATT failure")
+        manager.clearConnectionStateForTesting()
+    }
+
     static func testPhoneConnectionAdoptionOwnsGeneration() {
         for alreadyConnected in [false, true] {
             let manager = BLEManager()

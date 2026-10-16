@@ -518,6 +518,34 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         }
     }
 
+    /// Watch builds that predate applied receipts never send one. For them,
+    /// WatchConnectivity delivery is the strongest available confirmation, so
+    /// settle the exact delivered request instead of retrying forever.
+    private func controllerRevocationTransferDidFinish(
+        _ payload: Data,
+        delivered: Bool
+    ) {
+        if delivered, !watchSendsControllerRevocationReceipts,
+           let request = try? WatchControllerRequestV1.decode(payload),
+           controllerRevocations.settleDelivered(request) {
+            controllerRevocationNextAttempt.removeValue(forKey: request.requestID)
+            persistPendingControllerRevocations()
+            if controllerRevocations.requests.isEmpty {
+                controllerRevocationRetryAttempt = 0
+                controllerRevocationRetryTask?.cancel()
+                controllerRevocationRetryTask = nil
+            }
+            return
+        }
+        scheduleControllerRevocationRetry()
+    }
+
+    private var watchSendsControllerRevocationReceipts: Bool {
+        (session?.receivedApplicationContext[
+            WatchControllerRevocationReceiptV1.supportedContextKey
+        ] as? Int ?? 0) >= 1
+    }
+
     @discardableResult
     func receiveControllerRevocationReceipt(_ data: Data) -> Bool {
         guard let receipt = try? WatchControllerRevocationReceiptV1.decode(data),
@@ -783,11 +811,17 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         ) else { return false }
         session.sendMessage(message) { [weak self] response in
             Task { @MainActor [weak self] in
-                guard let receipt = WatchRouteSyncMessageV1(propertyList: response),
-                      receipt.deliveryOperation == install.deliveryOperation else {
-                    self?.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
-                        operation: .acknowledge, identity: install.identity, status: .rejected,
-                        errorCode: "watch_update_required", deliveryOperation: install.deliveryOperation))
+                // An empty or undecodable reply proves nothing about the
+                // queued file transfer, which stays the durable fallback.
+                guard let receipt = WatchRouteSyncMessageV1(propertyList: response) else { return }
+                guard receipt.deliveryOperation == install.deliveryOperation else {
+                    // Only a token-less receipt identifies a pre-schema-2 Watch;
+                    // a different token is a stale reply for another attempt.
+                    if receipt.deliveryOperation == nil {
+                        self?.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+                            operation: .acknowledge, identity: install.identity, status: .rejected,
+                            errorCode: "watch_update_required", deliveryOperation: install.deliveryOperation))
+                    }
                     return
                 }
                 self?.receiveAcknowledgement(response)
@@ -1049,8 +1083,16 @@ extension PhoneWatchConnectivityCoordinator: WCSessionDelegate {
         didFinish userInfoTransfer: WCSessionUserInfoTransfer,
         error: Error?
     ) {
-        if userInfoTransfer.userInfo[WatchControllerTransportV1.userInfoPayloadKey] != nil {
-            Task { @MainActor [weak self] in self?.scheduleControllerRevocationRetry() }
+        if let payload = userInfoTransfer.userInfo[
+            WatchControllerTransportV1.userInfoPayloadKey
+        ] as? Data {
+            let delivered = error == nil
+            Task { @MainActor [weak self] in
+                self?.controllerRevocationTransferDidFinish(
+                    payload,
+                    delivered: delivered
+                )
+            }
             return
         }
         guard let data = userInfoTransfer.userInfo[

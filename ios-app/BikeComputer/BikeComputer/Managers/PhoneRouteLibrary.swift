@@ -11,7 +11,6 @@ enum PhoneRouteWatchSyncStateV1: Equatable {
 
 enum PhoneRouteLibraryError: Error, Equatable {
     case watchUnavailable
-    case watchUpdateRequired
     case transferInProgress
     case stravaBookmarkMissing
     case stravaBookmarkConflict
@@ -67,6 +66,11 @@ final class PhoneRouteLibrary: ObservableObject {
     private var expiryTask: Task<Void, Never>?
     private var pendingInstallExpiryTask: Task<Void, Never>?
     private var deletionRetryTask: Task<Void, Never>?
+    private var deletionRetryAttempt = 0
+    /// Watch rejections that mean the sent operation token is superseded.
+    private static let operationFenceRejections: Set<String> = [
+        "stale_operation", "operation_conflict",
+    ]
 
     convenience init(connectivity: PhoneWatchConnectivityCoordinator) {
         let base = FileManager.default.urls(
@@ -150,7 +154,13 @@ final class PhoneRouteLibrary: ObservableObject {
             .sink { [weak self] isWatchAvailable in
                 guard isWatchAvailable else { return }
                 Task { @MainActor [weak self] in
-                    self?.autoQueueEligibleRoutes()
+                    guard let self else { return }
+                    self.autoQueueEligibleRoutes()
+                    // Deletions queued while the Watch was absent or outdated
+                    // travel as background user info; reachability is optional.
+                    self.deletionRetryAttempt = 0
+                    self.queuedProviderDeletions.removeAll()
+                    self.retryProviderDeletions()
                 }
             }
             .store(in: &cancellables)
@@ -588,13 +598,22 @@ final class PhoneRouteLibrary: ObservableObject {
             reload()
             return
         }
-        guard connectivity.state.routeSyncSchemaVersion >= 2 else {
-            watchSyncState[identity] = .rejected("watch_update_required")
-            throw PhoneRouteLibraryError.watchUpdateRequired
-        }
+        // Journal the fence before any submission so it survives restart.
         let operation = try operations.issue(.delete, identity: identity)
-        guard connectivity.requestRouteDeletion(identity, deliveryOperation: operation) != nil else {
-            throw PhoneRouteLibraryError.watchUnavailable
+        guard connectivity.state.routeSyncSchemaVersion >= 2,
+              connectivity.requestRouteDeletion(identity, deliveryOperation: operation) != nil else {
+            // An unavailable or outdated Watch must not keep the route on the
+            // phone. Like a provider deletion, remove local bytes now and let
+            // the journaled fence be delivered when an updated Watch returns.
+            var removedLocally = true
+            for record in store.recordsIncludingExpired()
+            where WatchRouteIdentityV1(archive: record.archive) == identity {
+                if !removeArchiveAndQueueWatchDeletion(record) { removedLocally = false }
+            }
+            watchSyncState.removeValue(forKey: identity)
+            reload()
+            guard removedLocally else { throw NavigationRouteFileStoreError.ioFailure }
+            return
         }
         pendingDeletionKeys.insert(key)
         persistPendingDeletions()
@@ -722,6 +741,7 @@ final class PhoneRouteLibrary: ObservableObject {
             // ownership. Ignore unsolicited deletion acknowledgements.
             if message.status == .deleted && !deletionRequested { return }
             if deletionRequested {
+                deletionRetryAttempt = 0
                 localDeletionTombstones.insert(identity)
                 persistLocalDeletionTombstones()
                 _ = finishLocalDeletion(identity)
@@ -743,6 +763,12 @@ final class PhoneRouteLibrary: ObservableObject {
             if (try? operations.entry(message.identity)?.operation) == .delete {
                 queuedProviderDeletions.remove(message.identity)
                 watchSyncState[message.identity] = .rejected(message.errorCode ?? "watch_rejected")
+                if Self.operationFenceRejections.contains(message.errorCode ?? "") {
+                    // The Watch holds a newer or conflicting fence, so this
+                    // exact token can never apply. Advance the generation
+                    // before the next attempt instead of resending it forever.
+                    _ = try? operations.issue(.delete, identity: message.identity, renew: true)
+                }
                 scheduleDeletionRetry()
                 return
             }
@@ -932,8 +958,12 @@ final class PhoneRouteLibrary: ObservableObject {
 
     private func scheduleDeletionRetry() {
         guard deletionRetryTask == nil else { return }
+        // Back off while the Watch keeps rejecting or stays silent; a delivered
+        // deletion receipt or a returning Watch resets the delay.
+        let delay = min(30 * pow(2, Double(deletionRetryAttempt)), 1_800)
+        deletionRetryAttempt = min(deletionRetryAttempt + 1, 6)
         deletionRetryTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .seconds(30)) } catch { return }
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
             guard let self else { return }
             deletionRetryTask = nil
             queuedProviderDeletions.removeAll()
@@ -1173,15 +1203,5 @@ final class PhoneRouteLibrary: ObservableObject {
 
     private static func receiptKey(_ identity: WatchRouteIdentityV1) -> String {
         "\(identity.routeID.uuidString.lowercased())|\(identity.revision)|\(identity.contentHash)"
-    }
-}
-
-
-extension PhoneRouteLibraryError: LocalizedError {
-    var errorDescription: String? {
-        switch self {
-        case .watchUpdateRequired: "Update Bicino on Apple Watch before syncing routes."
-        default: nil
-        }
     }
 }

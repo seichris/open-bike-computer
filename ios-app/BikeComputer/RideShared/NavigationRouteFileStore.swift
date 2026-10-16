@@ -552,17 +552,38 @@ final class WatchRouteOperationJournalV2 {
     }
     enum Failure: Error, Equatable { case staleOperation, conflict, exhausted }
     let fileURL: URL
+    /// Route lists consult the journal per row. Reuse the last validated decode
+    /// while the file is unchanged; atomic replacement changes its file number,
+    /// so a write through any instance invalidates this cache.
+    private var cache: (stamp: FileStamp, entries: [Entry])?
+
+    private struct FileStamp: Equatable {
+        let fileNumber: String
+        let size: String
+        let modified: Date?
+    }
 
     init(rootDirectory: URL) {
         fileURL = rootDirectory.appendingPathComponent(".route-operations-v2.plist")
     }
 
     func entries() throws -> [Entry] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            cache = nil
+            return []
+        }
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let stamp = FileStamp(
+            fileNumber: String(describing: attributes[.systemFileNumber] ?? ""),
+            size: String(describing: attributes[.size] ?? ""),
+            modified: attributes[.modificationDate] as? Date
+        )
+        if let cache, cache.stamp == stamp { return cache.entries }
         let values = try PropertyListDecoder().decode([Entry].self, from: Data(contentsOf: fileURL))
         guard Set(values.map(\.identity)).count == values.count,
               values.allSatisfy({ $0.operation != .acknowledge && ($0.token?.generation ?? 1) > 0 })
         else { throw Failure.conflict }
+        cache = (stamp, values)
         return values
     }
 

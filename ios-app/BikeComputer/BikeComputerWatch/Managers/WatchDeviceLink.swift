@@ -396,8 +396,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         }
         // A negative handoff retires the platform connection through the same
         // cancellation boundary as any other failed attempt. A timer cannot
-        // invalidate CoreBluetooth's outstanding callbacks.
-        disconnectingForBusyLease = true
+        // invalidate CoreBluetooth's outstanding callbacks. Without a
+        // peripheral no disconnect callback will consume the busy marker.
+        disconnectingForBusyLease = peripheral != nil
         fail(message, reason: .leaseBusy)
         state = .busy
     }

@@ -57,6 +57,32 @@ for this refresh.
 | F8 | Controller revocation leaves durable outbox before receiver application | fixed+verified | Production outbox model: persistence/restart, rejected cleanup, wrong request, duplicate intent, exact applied receipt; native packaging |
 | F9 | Deferred automation commands lack an explicit authorization lifetime | fixed+verified | Session/lease generation rejection matrix, ownership-lock application wiring, firmware build and existing lease/state tests |
 
+## Review follow-up on 16 October 2026
+
+An extra-high-effort review of published head
+`b779eff2dccd2002360c0f6ba21df8f569cff73c` reported 13 findings. One was
+withdrawn after reading the complete auth handler: when ownership is unavailable,
+legacy authentication already answers `ERROR|ownership_unavailable` instead of
+opening a session. The other twelve are fixed:
+
+| ID | Defect | Resolution |
+| --- | --- | --- |
+| R1 | Restored `connecting` links got an 8 s deadline that cancelled the OS-held trusted reconnect | Restoration uses the same pairing-only deadline as a fresh connect |
+| R2 | The inner recovery for `.transportFailure` replaced each caller's failure reason | The outcome carries the caller's reason; its single recovery records it |
+| R3 | Configuration and start-suppression NVS writes ran under the ownership mutex | Flash writes run after unlock; the configuration ACK is built after persistence |
+| R4 | Deleting a synced route required a reachable schema-2 Watch | The iPhone copy goes immediately; the journaled fence is sent when an updated Watch is available |
+| R5 | `stale_operation`/`operation_conflict` deletions resent the same token every 30 s | The generation advances first; retries back off from 30 s to 30 min |
+| R6 | Watch builds without receipts left key cleanup pending forever | The Watch advertises receipt support; builds without it settle on exact delivery |
+| R7 | A rejected handoff with no peripheral left a stale busy-lease marker | The marker is set only when a disconnect callback can consume it |
+| R8 | Any empty or mismatched immediate reply was shown as "Update Watch app" | Only a token-less receipt reports that; other replies defer to the file transfer |
+| R9 | Auth completion logged the wrong cause and could half-commit a session | Phase and characteristic checks are separate; the transition commits before side effects |
+| R10 | The operation journal was read and decoded on every lookup | The validated decode is cached by file number, size and modification date |
+| R11 | Notification MTU math hard-coded protocol sizes | It uses `PROTECTED_FRAME_OVERHEAD` and `FALLBACK_PREFIX_SIZE` |
+| R12 | The navigation idle packet was duplicated as a literal | `WatchRidePacketEncoderV1.navigationIdlePacket` is shared |
+
+R1 restoration scheduling and R6 delivery semantics still depend on operating
+system behavior that host tests cannot reproduce.
+
 ## Historical evidence from 2 October
 
 The unmodified base passed the shared route and actual Watch BLE adapter suite,

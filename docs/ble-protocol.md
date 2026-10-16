@@ -823,10 +823,14 @@ Queue admission is provisional. Every automation frame carries the admission
 session and lease generations. The runtime revalidates them under the ownership
 mutex immediately before applying the command, serializing application against
 release, expiry, disconnect, and revocation. Configuration becomes durable only
-after this check and successful persistence. A disconnect before application
-invalidates configuration and live controls alike; the controller retries or
-resynchronizes on the new lease. Responses are generated under that transaction
-and sent after unlocking, still fenced to its original session/lease.
+after this check and successful persistence. Flash writes (configuration and
+start suppression) run after the ownership mutex is released, because BLE host
+callbacks wait at most 100 ms for it; the single runtime consumer finishes them
+before it dequeues the next command, so command order is unchanged. A disconnect
+before application invalidates configuration and live controls alike; the
+controller retries or resynchronizes on the new lease. Responses are generated
+by that consumer, the configuration acknowledgement after persistence, and sent
+after unlocking, still fenced to its original session/lease.
 
 Notifications select a subscribed channel before encryption: native RAUT first,
 otherwise navigation fallback, only if the cached peer MTU fits the protected
@@ -2509,7 +2513,8 @@ renderer ACK with failed receipt persistence cannot confer operation success.
 
 Fresh and CoreBluetooth-restored iPhone connections enter the same generation
 and authentication lifecycle. Connected restorations enter service discovery;
-connecting restorations retain the system attempt; disconnecting restorations
+connecting restorations retain the system attempt without a new deadline
+(only interactive pairing attempts time out); disconnecting restorations
 wait for the real callback with the existing bounded cancellation deadline.
 Neither an authentication callback nor elapsed time revives a retiring attempt.
 Rejected Watch phone preparation uses the same cancellation boundary.
@@ -2553,15 +2558,24 @@ ready. Eviction and error receipts also identify their operation. The sender
 cancels redundant file transfers after an exact ready receipt. The sender also
 replays journaled deletion intent after a crash before UI bookkeeping, and
 finishes local unlink after a crash following the receiver receipt. Rejection
-keeps deletion pending for retry; only a new explicit import after completed
-cleanup can restore identical content.
+keeps deletion pending for retry with 30-second to 30-minute backoff; a
+`stale_operation` or `operation_conflict` rejection advances the deletion's
+generation first, because resending the same token can never apply. When the
+Watch is unavailable or predates schema 2, deleting a synced route removes the
+iPhone copy immediately and delivers the journaled deletion once an updated
+Watch is available, without waiting for reachability. Only a new explicit import
+after completed cleanup can restore identical content.
 
 Watch controller keychain cleanup uses a separate applied receipt containing the
 exact validated revoke request and its response (`watchControllerRevocationReceiptV1`).
 No owner key or controller credential is included. The phone retains its persisted
 outbox until an accepted matching receipt arrives, including after restart.
-WatchConnectivity enqueue/didFinish never settles cleanup. Outstanding system
+Watch builds that send receipts advertise `bicino.controller.revocationReceipt = 1`
+in application context; for them, WatchConnectivity enqueue/didFinish never
+settles cleanup. A Watch without that flag predates receipts, so a successful
+didFinish for the exact request is its strongest confirmation and settles it,
+instead of retrying forever. Outstanding system
 transfers are deduplicated, and absent/rejected receipts retry with 30–300 second
 backoff when activated. Repeated keychain deletion is idempotent and scoped to the
 same DeviceID and ControllerID; an old receipt cannot revoke a successor key.
-Bike settings expose pending cleanup until that matching receipt is applied.
+Bike settings expose pending cleanup until it settles.

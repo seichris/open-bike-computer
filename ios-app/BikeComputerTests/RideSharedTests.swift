@@ -1529,6 +1529,11 @@ enum RideSharedTests {
         try expect(restarted.requests == [revoke], "restart and failed receipts preserve exact intent")
         try expect(restarted.apply(applied) && restarted.requests.isEmpty,
                    "only the exact receiver applied receipt removes cleanup")
+        var legacy = WatchControllerRevocationOutboxV1(requests: [revoke])
+        try expect(!legacy.settleDelivered(duplicate),
+                   "delivery of another request cannot settle a pre-receipt Watch's cleanup")
+        try expect(legacy.settleDelivered(revoke) && legacy.requests.isEmpty,
+                   "a pre-receipt Watch settles its exact delivered request")
         expectThrows(WatchControllerContractError.invalidEnvelope,
                      "receipt cannot acknowledge a different request") {
             _ = try WatchControllerRevocationReceiptV1(request: revoke,

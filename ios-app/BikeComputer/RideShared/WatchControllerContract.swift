@@ -209,6 +209,8 @@ struct WatchControllerResponseV1: Codable, Equatable, Sendable {
 /// The echoed revoke request carries identifiers only; validation forbids keys.
 struct WatchControllerRevocationReceiptV1: Codable, Equatable, Sendable {
     static let userInfoPayloadKey = "watchControllerRevocationReceiptV1"
+    /// Application-context flag from Watch builds that send applied receipts.
+    static let supportedContextKey = "bicino.controller.revocationReceipt"
     let request: WatchControllerRequestV1
     let response: WatchControllerResponseV1
 
@@ -240,6 +242,15 @@ struct WatchControllerRevocationOutboxV1 {
               !requests.contains(where: { $0.deviceID == request.deviceID &&
                   $0.controllerID == request.controllerID }) else { return false }
         requests.append(request)
+        return true
+    }
+
+    /// Settles a request on WatchConnectivity delivery. Only for Watch builds
+    /// that do not advertise applied receipts.
+    @discardableResult
+    mutating func settleDelivered(_ request: WatchControllerRequestV1) -> Bool {
+        guard requests.contains(request) else { return false }
+        requests.removeAll { $0 == request }
         return true
     }
 

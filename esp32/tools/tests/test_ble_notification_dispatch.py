@@ -56,6 +56,16 @@ class BLENotificationDispatchTests(unittest.TestCase):
         self.assertLess(drain.index("applyAuthorizedRideCommand"),
                         drain.index("processInboundTransportFrame"))
         self.assertIn("inbound.authorization", drain)
+        # BLE host callbacks wait at most 100 ms for the ownership lock, so NVS
+        # writes happen only after the locked apply returns.
+        locked_apply = function_body(runtime, "bool processInboundTransportFrame(")
+        for flash_write in ("persistConfiguration(", "persistStartSuppression(",
+                            "snoozeStartAndPersist("):
+            self.assertNotIn(flash_write, locked_apply)
+        self.assertLess(drain.index("applyAuthorizedRideCommand"),
+                        drain.index("commitDeferredConfiguration"))
+        self.assertLess(drain.index("commitDeferredConfiguration"),
+                        drain.index("sendTransportFrame"))
 
     def test_producers_queue_and_host_task_owns_transport_apis(self):
         enqueue = function_body(

@@ -901,6 +901,7 @@ struct NavigationProtocolTests {
         testBLEManagerRequiresNavigationReadinessForWrites()
         testRideApplicationAcknowledgementWaitsForATTCallback()
         testFailedClearRetiresSiblingsAndReplaysIntent()
+        testRideRecoveryKeepsSpecificFailureReason()
         testPhoneConnectionAdoptionOwnsGeneration()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()

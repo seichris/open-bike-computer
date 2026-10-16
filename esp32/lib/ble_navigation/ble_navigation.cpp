@@ -1454,7 +1454,8 @@ static bool decodeOwnershipHandshake(const std::string &frame,
 }
 
 // Execution and revocation are serialized by the ownership mutex. Admission to
-// the queue is provisional; even configuration becomes durable only at apply.
+// the queue is provisional; configuration persists only after an authorized
+// apply, and the caller performs that flash write after this lock is released.
 bool BLENavigationServer::applyAuthorizedRideCommand(
     ride_command_admission::Authorization admitted,
     bool (*apply)(void *), void *context) {

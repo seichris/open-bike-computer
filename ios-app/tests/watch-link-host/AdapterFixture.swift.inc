@@ -154,4 +154,10 @@ extension WatchDeviceLink {
         phonePreparationSubmissionOutstanding = true
         connect(peer, credential: savedCredential)
     }
+    func testStartPendingPreparationWithoutPeripheral() {
+        resetTransport(keepingPeripheral: false)
+        phonePreparationAccepted = false
+        phonePreparationSubmissionOutstanding = true
+    }
+    var testBusyLeaseDisconnectPending: Bool { disconnectingForBusyLease }
 }

@@ -80,6 +80,20 @@ enum Tests {
             }
         }
 
+        await run("rejected preparation without a link leaves no busy disconnect marker") {
+            let f = Fixture(); defer { f.close() }
+            f.link.testStartPendingPreparationWithoutPeripheral()
+            let request = try! WatchDirectRidePreparationRequestV1(
+                preparationID: f.id, operation: .prepare,
+                deviceID: "00112233445566778899aabbccddeeff")
+            f.link.directRidePreparationDidRespond(request: request,
+                response: .init(requestID: request.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            expect(f.link.state == .busy, "rejection still reports the iPhone controller")
+            expect(!f.link.testBusyLeaseDisconnectPending,
+                   "no disconnect callback exists to consume a busy marker")
+        }
+
         await run("unchanged route suppression preserves replacement and reconnect") {
             let f = Fixture(); defer { f.close() }
             for _ in 0..<20 {

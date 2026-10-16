@@ -269,7 +269,8 @@ public:
   /** True when the current BLE connection completed owner authentication. */
   bool isAuthenticated() const;
 
-  // Callback runs under the ownership lock; it must defer transport responses.
+  // Callback runs under the ownership lock; it must defer transport responses
+  // and flash writes until the lock is released.
   bool applyAuthorizedRideCommand(ride_command_admission::Authorization admitted,
                                   bool (*apply)(void *), void *context);
 

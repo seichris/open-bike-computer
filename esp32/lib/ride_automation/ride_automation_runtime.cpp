@@ -506,10 +506,61 @@ bool matchesOutstandingResponse(
       hasOutstandingDecision, outstandingDecision, frame);
 }
 
+// Flash writes never run under the ownership lock: BLE host callbacks wait at
+// most 100 ms (0 ms inside NimBLE callbacks) for it, and an NVS page erase can
+// exceed that. Authorization and in-memory application happen under the lock;
+// this single queue consumer then persists and acknowledges the same command
+// before it dequeues the next one, so command order is unchanged.
+struct DeferredFlashEffects {
+  bool persistStartSuppression = false;
+  bool configurationAcknowledgement = false;
+  bool hasConfigurationCandidate = false;
+  ride_automation::Settings configurationSettings{};
+  uint8_t configurationAlertMode = 0;
+  uint32_t configurationGeneration = 0;
+};
+
+void snoozeStartDeferringPersistence(uint32_t nowMs,
+                                     DeferredFlashEffects &deferred) {
+  runtime.policy().snoozeStart(nowMs);
+  deferred.persistStartSuppression = true;
+}
+
+void commitDeferredConfiguration(const DeferredFlashEffects &deferred) {
+  if (!deferred.hasConfigurationCandidate ||
+      !persistConfiguration(deferred.configurationSettings,
+                            deferred.configurationAlertMode,
+                            deferred.configurationGeneration))
+    return;
+  configuredSettings = deferred.configurationSettings;
+  configuredAlertMode = deferred.configurationAlertMode;
+  configGeneration = deferred.configurationGeneration;
+}
+
+ride_automation_protocol::Frame configurationAcknowledgement(
+    const ride_automation_protocol::Frame &frame, uint32_t receivedAtMs) {
+  ride_automation_protocol::Frame response;
+  response.kind =
+      ride_automation_protocol::Kind::ConfigurationAcknowledgement;
+  response.result =
+      frame.rideGeneration == rideGeneration &&
+              frame.watermarkOrConfigGeneration == configGeneration
+          ? ride_automation_protocol::Result::Accepted
+          : ride_automation_protocol::Result::Rejected;
+  response.rideGeneration = rideGeneration;
+  response.profileVersion = ride_automation::kRideDetectionProfile.version;
+  response.watermarkOrConfigGeneration = configGeneration;
+  response.startMode = static_cast<uint8_t>(configuredSettings.startMode);
+  response.autoPauseEnabled = configuredSettings.autoPauseEnabled;
+  response.alertMode = configuredAlertMode;
+  response.monotonicSeconds = receivedAtMs / 1'000;
+  return response;
+}
+
 template <typename SendResponse>
 bool processInboundTransportFrame(
     const ride_automation_protocol::Frame &frame, uint32_t receivedAtMs,
-    SendResponse sendResponse) {
+    DeferredFlashEffects &deferred, SendResponse sendResponse) {
   if (ride_automation_protocol::isDuplicateOrOutOfOrderInbound(
           hasInboundFrame, lastInboundFrame, frame)) {
     return false;
@@ -534,7 +585,7 @@ bool processInboundTransportFrame(
       }
       if (!accepted) {
         showTransportError(frame.result, receivedAtMs);
-        snoozeStartAndPersist(receivedAtMs);
+        snoozeStartDeferringPersistence(receivedAtMs, deferred);
         hasOutstandingDecision = false;
         decisionAcknowledged = false;
         promptAccepted = false;
@@ -572,7 +623,7 @@ bool processInboundTransportFrame(
       if (frame.kind == ride_automation_protocol::Kind::Confirmation &&
           outstandingDecision.transition ==
               ride_automation_protocol::Transition::Start) {
-        snoozeStartAndPersist(receivedAtMs);
+        snoozeStartDeferringPersistence(receivedAtMs, deferred);
       } else {
         runtime.policy().rejectPending(receivedAtMs);
       }
@@ -608,7 +659,7 @@ bool processInboundTransportFrame(
     promptResponded = true;
     promptAccepted = resolution.accepted;
     if (resolution.shouldSnooze)
-      snoozeStartAndPersist(receivedAtMs);
+      snoozeStartDeferringPersistence(receivedAtMs, deferred);
 
     ride_automation_protocol::Frame response = frame;
     response.kind = ride_automation_protocol::Kind::Acknowledgement;
@@ -630,31 +681,15 @@ bool processInboundTransportFrame(
     candidateSettings.startMode = normalizedStartMode(
         static_cast<ride_automation::StartMode>(frame.startMode));
     candidateSettings.autoPauseEnabled = frame.autoPauseEnabled;
-    if (persistConfiguration(candidateSettings, frame.alertMode,
-                             frame.watermarkOrConfigGeneration)) {
-      configuredSettings = candidateSettings;
-      configuredAlertMode = frame.alertMode;
-      configGeneration = frame.watermarkOrConfigGeneration;
-    }
+    deferred.hasConfigurationCandidate = true;
+    deferred.configurationSettings = candidateSettings;
+    deferred.configurationAlertMode = frame.alertMode;
+    deferred.configurationGeneration = frame.watermarkOrConfigGeneration;
   }
   if (frame.kind == ride_automation_protocol::Kind::Configuration) {
-    ride_automation_protocol::Frame response;
-    response.kind =
-        ride_automation_protocol::Kind::ConfigurationAcknowledgement;
-    response.result =
-        configurationTargetsCurrentBoot &&
-                frame.watermarkOrConfigGeneration == configGeneration
-            ? ride_automation_protocol::Result::Accepted
-            : ride_automation_protocol::Result::Rejected;
-    response.rideGeneration = rideGeneration;
-    response.profileVersion =
-        ride_automation::kRideDetectionProfile.version;
-    response.watermarkOrConfigGeneration = configGeneration;
-    response.startMode = static_cast<uint8_t>(configuredSettings.startMode);
-    response.autoPauseEnabled = configuredSettings.autoPauseEnabled;
-    response.alertMode = configuredAlertMode;
-    response.monotonicSeconds = receivedAtMs / 1'000;
-    sendResponse(response);
+    // The acknowledgement reports the persisted result, so it is built after
+    // commitDeferredConfiguration() outside the ownership lock.
+    deferred.configurationAcknowledgement = true;
   } else if (frame.kind == ride_automation_protocol::Kind::Resynchronize) {
     ride_automation_protocol::Frame response;
     response.kind = ride_automation_protocol::Kind::Resynchronize;
@@ -739,6 +774,7 @@ void processFirmwareShadow(uint32_t nowMs) {
          xQueueReceive(inboundTransportQueue, &inbound, 0) == pdTRUE) {
     struct Application {
       InboundTransportFrame inbound;
+      DeferredFlashEffects deferred{};
       ride_automation_protocol::Frame response{};
       bool hasResponse = false;
     } application{inbound};
@@ -746,15 +782,26 @@ void processFirmwareShadow(uint32_t nowMs) {
         inbound.authorization, [](void *context) {
           auto &value = *static_cast<Application *>(context);
           return processInboundTransportFrame(
-              value.inbound.frame, value.inbound.receivedAtMs,
+              value.inbound.frame, value.inbound.receivedAtMs, value.deferred,
               [&value](const ride_automation_protocol::Frame &response) {
                 value.response = response;
                 value.hasResponse = true;
               });
         }, &application);
+    if (!applied)
+      continue;
+    // Flash I/O follows the authorized apply after the lock is released.
+    if (application.deferred.persistStartSuppression)
+      persistStartSuppression(true);
+    if (application.deferred.configurationAcknowledgement) {
+      commitDeferredConfiguration(application.deferred);
+      application.response =
+          configurationAcknowledgement(inbound.frame, inbound.receivedAtMs);
+      application.hasResponse = true;
+    }
     // Notify only after releasing ownership; notification encryption acquires
     // the same lock. A lost response is recovered by the protocol retry.
-    if (applied && application.hasResponse)
+    if (application.hasResponse)
       sendTransportFrame(application.response, inbound.authorization);
   }
   if (traceInitialized && nowMs - lastTraceMs < 1'000)

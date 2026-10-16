@@ -237,6 +237,7 @@ struct OfflineRouteSaveTests {
 
     static func main() throws {
         try operationReceiptAndCrashRecovery()
+        try unavailableWatchDeletionAndFenceRenewal()
         try sourceAndValidation()
         try saveIdentityRestartAndDuplicates()
         try interactionCancellationAndStorageFailure()
@@ -288,6 +289,42 @@ struct OfflineRouteSaveTests {
         try afterReceiptCrash.sendToWatch(imported)
         check(afterReceiptCrash.watchSyncState[identity] == .rejected("watch_update_required"),
               "older Watch requires update instead of an unacknowledgeable transfer")
+    }
+
+    static func unavailableWatchDeletionAndFenceRenewal() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let summary = try f.library.importGPX(gpx(), fileName: "Away.gpx")
+        let identity = WatchRouteIdentityV1(archive: try f.library.offlineArchive(for: summary))
+        try f.library.sendToWatch(summary)
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
+            operation: .acknowledge, identity: identity, status: .ready))
+        f.watch.acceptsDeletion = false
+        try f.library.delete(summary)
+        check(f.library.routes.isEmpty && f.store.records(now: f.now).isEmpty,
+              "An unavailable Watch does not keep a deleted route on iPhone")
+        let journal = WatchRouteOperationJournalV2(rootDirectory: f.root)
+        let fence = try journal.entry(identity)
+        check(fence?.operation == .delete && fence?.applied == false,
+              "The journaled deletion waits for the Watch")
+        f.watch.acceptsDeletion = true
+        f.watch.operations[identity] = nil
+        f.watch.state = .init(isActivated: true, isPaired: true, isWatchAppInstalled: true)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        check(fence?.token != nil && f.watch.operations[identity] == fence?.token,
+              "A returning Watch receives the exact persisted deletion without reachability")
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
+            operation: .acknowledge, identity: identity, status: .rejected,
+            errorCode: "stale_operation"))
+        let renewed = try journal.entry(identity)
+        check(renewed?.operation == .delete && renewed?.applied == false &&
+              (renewed?.token?.generation ?? 0) > (fence?.token?.generation ?? 0),
+              "A superseded fence advances its generation instead of resending forever")
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: .acknowledge, identity: identity, status: .deleted,
+            deliveryOperation: renewed?.token))
+        let settled = try journal.entry(identity)
+        check(settled?.applied == true && settled?.token == renewed?.token,
+              "Only the renewed operation's receipt settles the deletion")
     }
 
     static func sourceAndValidation() throws {
