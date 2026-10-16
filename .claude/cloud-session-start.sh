@@ -8,6 +8,11 @@ fi
 
 cd "${CLAUDE_PROJECT_DIR:?Claude project directory is required}"
 repo_root="$PWD"
+
+# Cloud clones may track only the selected branch. dev-check compares against
+# origin/main, so materialize that ref explicitly without changing the checkout.
+git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main' >&2
+
 venv="$repo_root/.claude/.venv"
 stamp="$venv/requirements.sha256"
 
@@ -21,7 +26,7 @@ if [[ ! -x "$venv/bin/python3" ]]; then
 fi
 if [[ ! -f "$stamp" ]] || [[ "$(cat "$stamp")" != "$fingerprint" ]]; then
   "$venv/bin/python3" -m pip install --disable-pip-version-check \
-    -r tools/development/requirements.txt
+    -r tools/development/requirements.txt >&2
   printf '%s\n' "$fingerprint" > "$stamp"
 fi
 

@@ -11,7 +11,10 @@ and add a personal cloud environment named **Open Bike Computer**.
 - Select a branch containing this setup. `CLAUDE.md` imports `AGENTS.md`, and
   `.claude/settings.json` runs the cloud-only dependency hook after checkout.
 
-The hook installs `tools/development/requirements.txt` in `.claude/.venv` and
+The hook fetches `main` into `origin/main` without changing the checkout. Claude
+cloud clones may initially track only the selected branch, while `dev-check`
+needs `origin/main` for its comparison. The hook then installs
+`tools/development/requirements.txt` in `.claude/.venv` and
 persists its PATH using `CLAUDE_ENV_FILE`. It skips installation when its inputs
 are unchanged, and does nothing in local sessions. Environment setup is cached;
 the repository hook checks dependencies again on startup and resume.
