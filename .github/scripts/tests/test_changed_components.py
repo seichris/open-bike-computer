@@ -81,6 +81,12 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertTrue(all(changed_components.classify_paths([changed_components.CHECK_REGISTRY]).values()))
         self.assertTrue(changed_components.native_ios_required([changed_components.CHECK_REGISTRY]))
 
+    def test_development_environment_entry_points_select_all_components(self):
+        for path in ("tools/dev-setup", "tools/dev-env", "tools/development/environment.py"):
+            with self.subTest(path=path):
+                self.assertTrue(all(changed_components.classify_paths([path]).values()))
+                self.assertTrue(changed_components.native_ios_required([path]))
+
     def test_development_unit_tests_do_not_select_product_builds(self):
         self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))
         self.assertFalse(changed_components.native_ios_required(["tools/development/tests/test_development_checks.py"]))
