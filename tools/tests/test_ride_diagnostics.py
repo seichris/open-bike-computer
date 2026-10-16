@@ -885,7 +885,11 @@ class RideDiagnosticsTests(unittest.TestCase):
         anchor["event"] = "clock_anchor"
         anchor["uptimeMs"] = 200
         correlated = ride_diagnostics._correlate_events([before, anchor])
-        self.assertEqual(correlated[0]["clockUncertaintyMs"], 1000)
+        self.assertIsNone(correlated[0]["clockUncertaintyMs"])
+        self.assertIsNone(correlated[1]["clockUncertaintyMs"])
+        self.assertEqual(correlated[1]["clockResolutionMs"], 1000)
+        distant = dict(before, uptimeMs=3_600_200)
+        self.assertIsNone(ride_diagnostics._correlate_events([distant, anchor])[0]["clockUncertaintyMs"])
         self.assertLess(
             ride_diagnostics._event_timestamp(correlated[0]),
             ride_diagnostics._event_timestamp(correlated[1]),

@@ -5209,6 +5209,45 @@ extension NavigationProtocolTests {
         } catch {
             assert(false, "cache failure fixture and reporting succeed: \(error)")
         }
+
+        // Twenty older uncorrelated boots used to enter ordinary retention with
+        // today's mtime and evict the phone's newer captures.
+        do {
+            for _ in 0..<15 {
+                recorder.endRideCapture()
+                recorder.record(category: .lifecycle, event: "newer_phone_history")
+                recorder.flush()
+            }
+            let appRoot = root.appendingPathComponent("app")
+            let before = (FileManager.default.enumerator(at: appRoot, includingPropertiesForKeys: nil)!.allObjects as! [URL])
+                .filter { $0.pathExtension == "jsonl" }
+            var bodies: [UInt32: Data] = [:]
+            var receipts: [DiagnosticsChunkReceipt] = []
+            for boot in UInt32(1)...20 {
+                let data = Data("{\"schema\":1,\"source\":\"firmware\",\"sequence\":0,\"level\":\"info\",\"category\":\"boot\",\"event\":\"old_boot\",\"wallTime\":\"2000-01-01T00:00:00Z\",\"fields\":{\"bootSequence\":\(boot),\"firmwareFingerprint\":\"A1B2C3D4\"}}\n".utf8)
+                bodies[boot] = data
+                receipts.append(.init(bootSequence: boot, chunk: 1, bytes: data.count,
+                    sha256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()))
+            }
+            let index = try JSONSerialization.data(withJSONObject: ["schema": 1, "source": "firmware",
+                "bootSequence": 20, "activeChunk": 2,
+                "stats": ["enqueued": 1, "written": 1, "dropped": 0, "storageErrors": 0],
+                "chunks": try JSONSerialization.jsonObject(with: JSONEncoder().encode(receipts))])
+            OfflineMapTestURLProtocol.configure { request in
+                if request.url?.path == "/device-diagnostics/v1/index" { return (200, index) }
+                if let parts = request.url?.path.split(separator: "/"), parts.count == 5,
+                   let boot = UInt32(parts[3]), let body = bodies[boot] { return (200, body) }
+                return (200, Data("{\"ok\":true}".utf8))
+            }
+            let cache = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("owned-acquisition"))
+            let job = try await cache.create(deviceDigest: recorder.deviceDigest(for: bleManager.connectedDeviceID!), captureID: nil)
+            _ = try await manager.downloadDeviceLogs(bleManager: bleManager, recorder: recorder,
+                acquisitionStore: cache, acquisitionID: job.id, status: { _ in })
+            let acquired = try await cache.load(job.id)
+            assert(acquired.deliveryComplete && acquired.verified.count == 20, "acquisition owns every old firmware body")
+            assert(before.allSatisfy { FileManager.default.fileExists(atPath: $0.path) },
+                "old firmware acquisition cannot evict newer ordinary phone history")
+        } catch { assert(false, "cross-source acquisition retention succeeds: \(error)") }
     }
 
     static func testDeviceTransferManagerWaitsForFreshDebugToken() async {

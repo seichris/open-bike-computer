@@ -2,9 +2,11 @@ import CryptoKit
 import Foundation
 
 nonisolated enum DiagnosticsAcquisitionEvidencePolicy {
-    // Recorder + acquisition evidence + manifests stay within the existing
-    // 100 MiB archive-reader bound (ordinary recorder retention is 50 MiB).
-    static let maximumBytes = 32 * 1024 * 1024
+    // A collection supports the full 32 MiB device history plus a bounded
+    // 32 MiB app snapshot. Scoped exports omit the ordinary recorder copy,
+    // keeping the archive below the unchanged 100 MiB reader bound.
+    static let maximumAppBytes = 32 * 1024 * 1024
+    static let maximumBytes = 64 * 1024 * 1024
 }
 
 /// One failure vocabulary for journal receipts, UI and privacy-safe events,
@@ -110,7 +112,7 @@ actor DiagnosticsAcquisitionStore {
         var errorDescription: String? {
             switch self {
             case .storageFull:
-                return "Diagnostics cache is full (32 MiB limit). This collection could not retain more evidence. Incomplete collections and their saved evidence were preserved."
+                return "Diagnostics cache is full (64 MiB limit). This collection could not retain more evidence. Incomplete collections and their saved evidence were preserved."
             case .invalidManifest: return "Retained diagnostics evidence could not be validated."
             case .inventoryChanged: return "Diagnostics evidence does not match the saved collection."
             case .notFound: return "The saved diagnostics collection could not be found."
@@ -276,6 +278,21 @@ actor DiagnosticsAcquisitionStore {
         return value
     }
 
+    /// Reserve all outstanding frozen inventories before downloading. A valid
+    /// cutoff either fits as a whole or fails visibly before consuming network.
+    func reserveInventory(_ id: UUID) throws {
+        let value = try load(id)
+        guard value.indexData != nil else { throw Failure.invalidManifest }
+        var incoming: [String: Int] = [:]
+        for entry in try manifests() where entry.id == id || entry.phase.canResumeAutomatically {
+            for item in entry.expected {
+                incoming[evidenceName(device: entry.deviceDigest, receipt: item)] = item.bytes
+            }
+            for item in entry.appEvidence ?? [] { incoming["app-\(item.sha256).jsonl"] = item.bytes }
+        }
+        try admitEvidence(incoming, protecting: id)
+    }
+
     private func evidenceName(device: String, receipt: DiagnosticsChunkReceipt) -> String {
         "\(device)-\(receipt.bootSequence)-\(receipt.chunk)-\(receipt.sha256).jsonl"
     }
@@ -338,6 +355,11 @@ actor DiagnosticsAcquisitionStore {
         // Preserve prospective references even if their last old owner is
         // evicted before the new app-evidence receipt is atomically published.
         for name in incoming.keys { references[name, default: 0] += 1 }
+        for entry in entries where entry.phase.canResumeAutomatically {
+            for item in entry.expected {
+                sizes[evidenceName(device: entry.deviceDigest, receipt: item)] = item.bytes
+            }
+        }
         var bytes = 0, files = 0
         for (name, size) in sizes where references[name, default: 0] > 0 {
             bytes += size
@@ -369,7 +391,8 @@ actor DiagnosticsAcquisitionStore {
     func retainAppEvidence(_ id: UUID, chunks: [String: Data]) throws {
         var value = try load(id)
         guard value.appEvidence == nil else { return }
-        guard chunks.count <= 256, let capture = value.captureID else {
+        guard chunks.count <= 256, chunks.values.reduce(0, { $0 + $1.count }) <= DiagnosticsAcquisitionEvidencePolicy.maximumAppBytes,
+              let capture = value.captureID else {
             throw Failure.invalidManifest
         }
         var receipts: [DiagnosticsAppChunkReceipt] = []
@@ -483,9 +506,10 @@ actor DiagnosticsAcquisitionStore {
     }
 
     /// Actor-isolated immutable Data prevents eviction racing recorder snapshot
-    /// creation. At most 32 MiB; every returned chunk is rehashed on export.
-    func exportSnapshot() throws -> (manifests: [DiagnosticsAcquisitionManifest], chunks: [String: Data], appChunks: [String: Data]) {
-        let entries = try manifests()
+    /// creation. At most 64 MiB; every returned chunk is rehashed on export.
+    func exportSnapshot(acquisitionID: UUID? = nil) throws -> (manifests: [DiagnosticsAcquisitionManifest], chunks: [String: Data], appChunks: [String: Data]) {
+        let entries = try manifests().filter { acquisitionID == nil || $0.id == acquisitionID }
+        if acquisitionID != nil && entries.isEmpty { throw Failure.notFound }
         var chunks: [String: Data] = [:]
         var appChunks: [String: Data] = [:]
         var bytes = 0

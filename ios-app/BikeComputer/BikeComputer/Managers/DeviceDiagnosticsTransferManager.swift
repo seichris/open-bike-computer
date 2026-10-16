@@ -238,14 +238,19 @@ final class DeviceDiagnosticsTransferManager {
                 indexData = frozenIndex
             }
             let index = try decodeIndex(indexData)
+            if let acquisitionStore, let acquisitionID {
+                try await acquisitionStore.reserveInventory(acquisitionID)
+            }
             // Persist the original cutoff before receiving any chunk. A failed
             // transfer must leave the expected inventory, not just orphan bytes.
-            try await recorder.importDeviceRecorderHealthAsync(
-                deviceDigest: deviceDigest,
-                bootSequence: index.bootSequence,
-                data: indexData,
-                enforceRetention: false
-            )
+            if acquisitionStore == nil {
+                try await recorder.importDeviceRecorderHealthAsync(
+                    deviceDigest: deviceDigest,
+                    bootSequence: index.bootSequence,
+                    data: indexData,
+                    enforceRetention: false
+                )
+            }
             var imported = 0
             var previousSequenceByBoot: [UInt32: UInt64] = [:]
             var firmwareFingerprintByBoot: [UInt32: String] = [:]
@@ -332,7 +337,7 @@ final class DeviceDiagnosticsTransferManager {
                 ) else {
                     throw DeviceDiagnosticsTransferError.malformedChunk
                 }
-                if existing == nil {
+                if existing == nil && acquisitionStore == nil {
                     _ = try await recorder.importDeviceChunkAsync(
                         deviceDigest: deviceDigest,
                         bootSequence: chunk.bootSequence,
@@ -341,8 +346,8 @@ final class DeviceDiagnosticsTransferManager {
                         sha256: chunk.sha256,
                         enforceRetention: false
                     )
-                    imported += 1
                 }
+                if existing == nil { imported += 1 }
                 if let acquisitionStore, let acquisitionID {
                     try await acquisitionStore.verified(acquisitionID,
                         receipt: receipt, data: data)

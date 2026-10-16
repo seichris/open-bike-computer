@@ -35,7 +35,9 @@ class DiagnosticsCLITests(unittest.TestCase):
         status,result=self.invoke('verify',self.bundle,'--require-complete')
         self.assertEqual(status,0,result)
         self.assertEqual(result['delivery'][0]['state'],'complete')
-        self.assertEqual(result['recordingCoverage'],'no_detected_loss')
+        self.assertEqual(result['recordingCoverage'],'unknown_unsealed_boot')
+        self.assertIsNone(result['unwrittenTailEventCount'])
+        self.assertEqual(len(result['unsealedFirmwareBoots']), 1)
         self.assertEqual(result['sources'],['firmware','ios'])
     def test_unknown_scope_cannot_borrow_another_rides_evidence(self):
         unknown='00000000-0000-0000-0000-000000000123'

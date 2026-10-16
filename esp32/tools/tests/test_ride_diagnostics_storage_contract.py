@@ -1,5 +1,7 @@
 from pathlib import Path
 import unittest
+import subprocess
+import tempfile
 
 
 ROOT = Path(__file__).parents[2]
@@ -17,6 +19,44 @@ POLICY = (
 
 
 class RideDiagnosticsStorageContractTests(unittest.TestCase):
+    def test_checked_sync_commits_vfs_and_propagates_each_failure(self):
+        function = STORAGE[STORAGE.index("int Storage::sync(FILE *file)"):STORAGE.index("/**", STORAGE.index("int Storage::sync(FILE *file)"))]
+        harness = r"""
+#include <cassert>
+#include <cstdio>
+#include <vector>
+namespace power_management {
+ enum class LockDomain { Storage };
+ struct ScopedLock { explicit ScopedLock(LockDomain) {} };
+}
+struct Storage { int sync(FILE*); };
+std::vector<int> calls;
+int flushResult=0, descriptor=3, syncResult=0;
+int test_fflush(FILE*) { calls.push_back(1); return flushResult; }
+int test_fileno(FILE*) { calls.push_back(2); return descriptor; }
+int test_fsync(int value) { assert(value==descriptor); calls.push_back(3); return syncResult; }
+#define fflush test_fflush
+#define fileno test_fileno
+#define fsync test_fsync
+// FUNCTION
+int main() {
+ Storage store; FILE *file=reinterpret_cast<FILE*>(1);
+ assert(store.sync(file)==0 && calls==std::vector<int>({1,2,3}));
+ calls.clear(); flushResult=-1;
+ assert(store.sync(file)!=0 && calls==std::vector<int>({1}));
+ calls.clear(); flushResult=0; descriptor=-1;
+ assert(store.sync(file)!=0 && calls==std::vector<int>({1,2}));
+ calls.clear(); descriptor=3; syncResult=-1;
+ assert(store.sync(file)!=0 && calls==std::vector<int>({1,2,3}));
+ calls.clear(); assert(store.sync(nullptr)!=0 && calls.empty());
+}
+""".replace("// FUNCTION", function)
+        with tempfile.TemporaryDirectory() as directory:
+            source, executable = Path(directory)/"sync.cpp", Path(directory)/"sync"
+            source.write_text(harness)
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
     def test_transfer_preparation_probes_the_stable_recorder_backend(self):
         self.assertIn("writableProbeSucceeded", STORAGE)
         self.assertIn("prepareDiagnosticsStorage", STORAGE)

@@ -318,11 +318,20 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
     /// receipt claims against actual archive bytes before reporting completeness.
     func exportForCodex(recorder: RideDiagnosticsRecorder, requiring acquisitionID: UUID? = nil) async throws -> URL {
         guard !deleting else { throw CancellationError() }
-        let snapshot = try await store.exportSnapshot()
+        // Export the selected immutable cutoff, including partial evidence.
+        // Broad recorder history is a separate export when no cutoff is selected.
+        let selectedID = acquisitionID ?? manifest?.id
+        let snapshot = try await store.exportSnapshot(acquisitionID: selectedID)
         if let acquisitionID, !snapshot.manifests.contains(where: { $0.id == acquisitionID && $0.deliveryComplete }) {
             throw DiagnosticsAcquisitionStore.Failure.invalidManifest
         }
-        let evidenceURL = try await recorder.exportBundleAsync(additionalDeviceChunks: snapshot.chunks, additionalAppChunks: snapshot.appChunks)
+        let evidenceURL: URL
+        if snapshot.manifests.isEmpty {
+            evidenceURL = try await recorder.exportBundleAsync()
+        } else {
+            evidenceURL = try await recorder.exportAcquisitionBundleAsync(manifests: snapshot.manifests,
+                deviceChunks: snapshot.chunks, appChunks: snapshot.appChunks)
+        }
         defer { try? FileManager.default.removeItem(at: evidenceURL) }
         let acquisitions = snapshot.manifests
         let output = FileManager.default.temporaryDirectory
@@ -379,6 +388,21 @@ final class DiagnosticsCollectionCoordinator: ObservableObject {
         manifest = nil
         rideContexts.removeAll()
         status = "Retained iPhone diagnostics, acquisition cache and pending handoffs deleted."
+    }
+
+    func releaseIncompleteCollection() {
+        guard !isRunning, !deleting, let id = manifest?.id, manifest?.deliveryComplete != true else { return }
+        isRunning = true
+        task = Task { [weak self] in
+            guard let self else { return }
+            defer { isRunning = false; task = nil }
+            do {
+                try Task.checkCancellation()
+                try await store.interrupt(id, cancelled: true, code: "cancelled")
+                manifest = try await store.load(id)
+                status = "Collection released. Saved evidence remains exportable until cache reclamation. Start a new cutoff to collect again."
+            } catch { status = error.localizedDescription }
+        }
     }
 
     func cancel() {

@@ -13,8 +13,10 @@ final class WatchProbe {
 enum Level { case info, warning }
 enum Category { case ble }
 final class Recorder {
+    let processId = UUID()
+    var captures: [UUID?] = []
     var records: [(String, [String: String])] = []
-    func record(level: Level, category: Category, event: String, fields: [String: String]) { records.append((event, fields)) }
+    func record(level: Level, category: Category, event: String, fields: [String: String], captureId: UUID? = nil) { records.append((event, fields)); captures.append(captureId) }
 }
 final class PhoneProbe {
     static let receivedTransportDiagnosticIDsDefaultsKey = "received"
@@ -50,3 +52,17 @@ restarted.mergePendingTransportDiagnostics(data)
 let retried = WatchBLETransportDiagnosticBatchV1.decode(defaults.data(forKey: "pending")!)!
 precondition(retried.droppedEventCount! >= 3 && retried.producerID == batch.producerID)
 print("Watch overflow survives batching, queued retry, preference reload and phone recorder import")
+
+precondition(phone.diagnosticsRecorder!.records.filter { $0.0 != "watch_ble_diagnostics_loss" }.allSatisfy {
+    $0.1["originCaptureAssociation"] == "unknown" && $0.1["timeBasis"] == "phone_receipt"
+})
+precondition(phone.diagnosticsRecorder!.captures.allSatisfy { $0 == phone.diagnosticsRecorder!.processId })
+var timed = event(100)
+timed.originUnixTimeMs = 1_800_000_000_123
+timed.originProcessID = UUID()
+let delayed = try WatchBLETransportDiagnosticBatchV1(events: [timed]).encoded()
+precondition(phone.receiveTransportDiagnostics([WatchBLETransportDiagnosticBatchV1.userInfoPayloadKey: delayed]))
+let recorded = phone.diagnosticsRecorder!.records.last!.1
+precondition(recorded["originUnixTimeMs"] == "1800000000123")
+precondition(recorded["originProcessId"] == timed.originProcessID!.uuidString.lowercased())
+print("Delayed and legacy Watch events retain origin/receipt distinction without inheriting current ride")

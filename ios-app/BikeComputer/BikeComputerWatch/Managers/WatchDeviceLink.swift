@@ -91,6 +91,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var protectedSession: WatchAuthenticatedBLESessionV1?
     private var capabilities: WatchDeviceCapabilitiesV1?
     private var connectionGeneration: UInt64 = 0
+    private static let diagnosticsProcessID = UUID()
     private var transportAttemptID = UUID()
     private var transportDiagnosticSequence: UInt32 = 0
     private var transportStateMachine = RideBLETransportStateMachineV1(
@@ -2039,7 +2040,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             uptimeMs: max(0, Int(
                 ProcessInfo.processInfo.systemUptime * 1_000
             )),
-            latencyMs: latencyMs
+            latencyMs: latencyMs,
+            originUnixTimeMs: Int64(Date().timeIntervalSince1970 * 1_000),
+            originProcessID: Self.diagnosticsProcessID
         ))
     }
 

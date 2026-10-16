@@ -9,6 +9,7 @@
 #include "storage.hpp"
 
 #include <cerrno>
+#include <unistd.h>
 #include "sd_mount_retry_policy.hpp"
 #include "storage_mount_policy.hpp"
 #include "waveshare_storage_migration_policy.hpp"
@@ -1078,6 +1079,16 @@ int Storage::flush(FILE *file) {
   power_management::ScopedLock powerLock(
       power_management::LockDomain::Storage);
   return file == nullptr ? EOF : fflush(file);
+}
+
+// fflush only drains libc. fsync commits FAT data, allocation and directory
+// size through the mounted VFS; callers must check both boundaries.
+int Storage::sync(FILE *file) {
+  power_management::ScopedLock powerLock(
+      power_management::LockDomain::Storage);
+  if (file == nullptr || fflush(file) != 0) return EOF;
+  const int descriptor = fileno(file);
+  return descriptor < 0 ? EOF : fsync(descriptor);
 }
 
 /**
