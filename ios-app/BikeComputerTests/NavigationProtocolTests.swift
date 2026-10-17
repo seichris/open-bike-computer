@@ -802,6 +802,13 @@ struct NavigationProtocolTests {
     }
 
     static func main() async {
+#if BLUETOOTH_RESTORATION_ADAPTER_TESTING
+        if CommandLine.arguments.contains("--bluetooth-restoration-adapter-only") {
+            testBluetoothRestorationAdapter()
+            print("Bluetooth restoration adapter regressions passed (host API double; no radio)")
+            return
+        }
+#endif
         if CommandLine.arguments.contains("--background-upload-state-only") {
             await testBackgroundMapUploadStateObserverReentrancy()
             testBackgroundMapUploadRestorationState()

@@ -131,6 +131,19 @@ a captured handshake unusable on a later connection. No navigation, map,
 settings, workout, rename, or deregistration command is accepted before this
 completes.
 
+CoreBluetooth can restore a connected physical link after the iPhone app process
+exits. The new process does not retain the prior session's ephemeral keys or
+counters. After Bluetooth becomes powered on, iOS retires that restored link,
+waits for local disconnection through the bounded recovery lifecycle, then scans
+for a fresh bike advertisement before connecting and authenticating a new session.
+CoreBluetooth's local disconnect callback alone does not prove physical teardown;
+this firmware stops advertising while connected and restarts only after resetting
+the secure session. A cached or manual reconnect cannot bypass that advertisement
+barrier. The trusted scan stays active in the background without a pairing timeout.
+The app does not send a plaintext
+handshake on the retained authenticated link or weaken firmware frame checks.
+Restored pending connections remain owned by CoreBluetooth until they connect.
+
 1. iOS writes `OWNER|<OwnerID>|<ClientNonce>`.
 2. ESP32 notifies
    `SERVER2|<DeviceID>|<ClientNonce>|<ServerNonce>|<HMAC-SHA256(OwnerKey, "server2|<DeviceID>|<OwnerID>|<ClientNonce>|<ServerNonce>")>`.

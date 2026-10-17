@@ -56,6 +56,8 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-5 -- \
 
 "${OUT}"
 
+bash "${SCRIPT_DIR}/run-bluetooth-restoration-tests.sh"
+
 bash "${SCRIPT_DIR}/run-world-radio-tests.sh"
 
 CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
