@@ -3683,6 +3683,77 @@ extension NavigationProtocolTests {
         manager.clearConnectionStateForTesting()
     }
 
+    static func testPhoneRestorationWaitsForBluetoothReadiness() {
+        let manager = BLEManager()
+        let driver = BLEScanDriverForTesting()
+        driver.isPoweredOn = false
+        manager.installScanDriverForTesting(driver)
+        var discoveryStarts = 0
+        manager.restoreBluetoothWhenReadyForTesting(isPoweredOn: false) {
+            assert(driver.isPoweredOn,
+                   "restored platform work requires a powered-on central")
+            assert(manager.adoptConnectionForTesting(connected: true),
+                   "restoration adopts one real manager connection generation")
+            discoveryStarts += 1
+        }
+        assertEqual(discoveryStarts, 0,
+                    "willRestoreState cannot start discovery before poweredOn")
+        assertEqual(manager.rideTransportPhase, .idle,
+                    "a deferred snapshot cannot start the authentication deadline")
+        manager.setBluetoothStateForTesting(.unknown)
+        assertEqual(discoveryStarts, 0,
+                    "initial unknown state preserves the pending restoration")
+        manager.setBluetoothPoweredOnForTesting(true)
+        assertEqual(discoveryStarts, 1,
+                    "the actual poweredOn handler resumes restoration")
+        let generation = manager.rideConnectionGenerationForTesting
+        assertEqual(manager.rideTransportPhase, .authenticating,
+                    "discovery begins in the adopted connection lifecycle")
+        manager.setBluetoothPoweredOnForTesting(true)
+        assertEqual(discoveryStarts, 1,
+                    "duplicate poweredOn callbacks cannot restart discovery")
+        assertEqual(manager.rideConnectionGenerationForTesting, generation,
+                    "duplicate readiness cannot replace the connection generation")
+        manager.clearConnectionStateForTesting()
+
+        var immediateStarts = 0
+        manager.restoreBluetoothWhenReadyForTesting(isPoweredOn: true) {
+            immediateStarts += 1
+        }
+        assertEqual(immediateStarts, 1,
+                    "already-powered-on restoration has no artificial delay")
+    }
+
+    static func testPhoneRestorationIsRetiredWithItsConnection() {
+        for state in [CBManagerState.poweredOff, .resetting, .unauthorized, .unsupported] {
+            let manager = BLEManager()
+            let driver = BLEScanDriverForTesting()
+            driver.isPoweredOn = false
+            manager.installScanDriverForTesting(driver)
+            var staleStarts = 0
+            manager.restoreBluetoothWhenReadyForTesting(isPoweredOn: false) {
+                staleStarts += 1
+            }
+            manager.setBluetoothStateForTesting(state)
+            manager.setBluetoothPoweredOnForTesting(true)
+            assertEqual(staleStarts, 0,
+                        "radio invalidation cannot resurrect a stale restoration")
+        }
+
+        let manager = BLEManager()
+        let driver = BLEScanDriverForTesting()
+        driver.isPoweredOn = false
+        manager.installScanDriverForTesting(driver)
+        var staleStarts = 0
+        manager.restoreBluetoothWhenReadyForTesting(isPoweredOn: false) {
+            staleStarts += 1
+        }
+        manager.clearConnectionStateForTesting()
+        manager.setBluetoothPoweredOnForTesting(true)
+        assertEqual(staleStarts, 0,
+                    "explicit connection cleanup retires pending platform work")
+    }
+
     static func testPhoneConnectionAdoptionOwnsGeneration() {
         for alreadyConnected in [false, true] {
             let manager = BLEManager()

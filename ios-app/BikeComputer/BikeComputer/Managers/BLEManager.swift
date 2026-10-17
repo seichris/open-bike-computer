@@ -1345,6 +1345,7 @@ class BLEManager: NSObject, ObservableObject {
     
     // MARK: - Private Properties
     private var centralManager: CBCentralManager!
+    private var pendingBluetoothRestoration: (() -> Void)?
     private var connectedPeripheral: CBPeripheral?
     private var navigationCharacteristic: CBCharacteristic?
     private var authCharacteristic: CBCharacteristic?
@@ -2326,9 +2327,20 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     func setBluetoothPoweredOnForTesting(_ isPoweredOn: Bool) {
+        setBluetoothStateForTesting(isPoweredOn ? .poweredOn : .poweredOff)
+    }
+
+    func setBluetoothStateForTesting(_ state: CBManagerState) {
         guard let scanDriverForTesting else { return }
-        scanDriverForTesting.isPoweredOn = isPoweredOn
-        handleCentralStateChange(isPoweredOn ? .poweredOn : .poweredOff)
+        scanDriverForTesting.isPoweredOn = state == .poweredOn
+        handleCentralStateChange(state)
+    }
+
+    func restoreBluetoothWhenReadyForTesting(
+        isPoweredOn: Bool,
+        resume: @escaping () -> Void
+    ) {
+        restoreBluetoothWhenReady(isPoweredOn: isPoweredOn, resume: resume)
     }
 
     func setFirmwareBootCheckpointForTesting(
@@ -6836,7 +6848,10 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    private func clearConnectionState() {
+    private func clearConnectionState(preservingPendingRestoration: Bool = false) {
+        if !preservingPendingRestoration {
+            pendingBluetoothRestoration = nil
+        }
         deviceScreenConfigurationController.disconnect(
             deviceID: connectedDeviceID,
             generation: rideDeliveryConnectionGeneration
@@ -9541,6 +9556,38 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         _ central: CBCentralManager,
         willRestoreState dict: [String: Any]
     ) {
+        restoreBluetoothWhenReady(isPoweredOn: central.state == .poweredOn) {
+            [weak self, weak central] in
+            guard let self, let central else { return }
+            self.restoreBluetoothState(central, dict: dict)
+        }
+    }
+
+    private func restoreBluetoothWhenReady(
+        isPoweredOn: Bool,
+        resume: @escaping () -> Void
+    ) {
+        // willRestoreState can precede the first powered-on callback. Issuing
+        // GATT discovery at that point can silently lose the request and leave
+        // authentication waiting for its timeout instead of making progress.
+        pendingBluetoothRestoration = resume
+        if isPoweredOn {
+            resumePendingBluetoothRestoration()
+        } else {
+            log("Deferring CoreBluetooth restoration until Bluetooth is powered on")
+        }
+    }
+
+    private func resumePendingBluetoothRestoration() {
+        let resume = pendingBluetoothRestoration
+        pendingBluetoothRestoration = nil
+        resume?()
+    }
+
+    private func restoreBluetoothState(
+        _ central: CBCentralManager,
+        dict: [String: Any]
+    ) {
         // Core Bluetooth may restore a system-owned scan before this
         // instance's shadow state has observed it. Stop unconditionally at
         // the restoration boundary before accepting any connection.
@@ -9553,6 +9600,18 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
                 as? [CBPeripheral],
               !peripherals.isEmpty else {
             log("CoreBluetooth restored without a Bike Computer peripheral")
+            return
+        }
+        if watchDirectRidePreparedDeviceID == nil,
+           hasActiveBLESession,
+           let currentIdentifier = connectedPeripheral?.identifier {
+            // A repeated restoration delivery must not replace the active
+            // generation or restart its authentication deadline.
+            for peripheral in peripherals
+            where peripheral.identifier != currentIdentifier {
+                central.cancelPeripheralConnection(peripheral)
+            }
+            log("Keeping the active Bike Computer connection during restoration")
             return
         }
         guard let selectedIdentifier = BLERestorationPolicy.selectedIdentifier(
@@ -9632,6 +9691,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         case .poweredOn:
             centralStateDescription = "powered on"
             log("Bluetooth powered on")
+            resumePendingBluetoothRestoration()
             // Attempt to reconnect to last device, or start scanning
             if watchDirectRidePreparedDeviceID != nil {
                 stopPhysicalScan(
@@ -9683,7 +9743,10 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             centralStateDescription = "unknown"
             log("Bluetooth unknown state")
             stopPhysicalScan(reason: "Bluetooth state unknown")
-            clearConnectionState()
+            // The initial unknown state is part of restoration startup, not a
+            // radio-loss boundary. Retire any old transport, but keep the
+            // snapshot until the first usable state arrives.
+            clearConnectionState(preservingPendingRestoration: true)
             
         @unknown default:
             centralStateDescription = "unknown"
