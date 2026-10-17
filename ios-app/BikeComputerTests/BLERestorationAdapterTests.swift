@@ -20,6 +20,7 @@ extension NavigationProtocolTests {
             let extra = CBPeripheral()
             extra.central = central
             extra.state = .connected
+            central.knownPeripherals = [trusted, extra]
             manager.installScanDriverForTesting(driver, trustedPeripheralIdentifier: trusted.identifier)
             manager.installCentralManagerForTesting(central)
             return (manager, driver, central, trusted, extra)
@@ -53,17 +54,29 @@ extension NavigationProtocolTests {
                         "rejected restored links are cancelled when the radio is ready")
             switch state {
             case .connected:
-                assertEqual(trusted.serviceDiscoveries, 1, "restored connected link discovers once")
-                assertEqual(manager.rideTransportPhase, .authenticating, "real didConnect starts authentication")
+                assertEqual(trusted.serviceDiscoveries, 0, "old secure session cannot accept a fresh plaintext handshake")
+                assertEqual(central.cancellations.filter { $0 == trusted.identifier }.count, 1,
+                            "retained secure link is retired once at readiness")
+                assertEqual(manager.rideTransportPhase, .recovering, "wait for confirmed teardown")
                 let generation = manager.rideConnectionGenerationForTesting
                 powerOn(manager, driver, central)
                 restore(manager, central, [trusted])
+                assertEqual(central.cancellations.filter { $0 == trusted.identifier }.count, 1,
+                            "duplicate readiness/restoration cannot restart cancellation")
+                assert(central.connections.isEmpty, "never reconnect before the disconnect callback")
+                trusted.state = .disconnected
+                manager.centralManager(central, didDisconnectPeripheral: trusted, error: nil)
+                assertEqual(central.connections, [trusted.identifier], "confirmed disconnect starts the fresh connection")
+                assert(manager.rideConnectionGenerationForTesting > generation,
+                       "fresh session uses a new generation")
+                trusted.state = .connected
+                manager.centralManager(central, didConnect: trusted)
+                assertEqual(manager.rideTransportPhase, .authenticating, "real new connection starts authentication")
+                let freshGeneration = manager.rideConnectionGenerationForTesting
                 manager.centralManager(central, didConnect: trusted)
                 assertEqual(trusted.serviceDiscoveries, 1, "duplicate callbacks cannot restart discovery")
-                assertEqual(manager.rideConnectionGenerationForTesting, generation,
+                assertEqual(manager.rideConnectionGenerationForTesting, freshGeneration,
                             "duplicate restoration cannot replace the active generation")
-                assert(central.connections.isEmpty && !central.cancellations.contains(trusted.identifier),
-                       "a restored connected link needs no extra connect or cancellation")
             case .connecting:
                 assert(central.connections.isEmpty, "keep the OS-owned pending connect")
                 assertEqual(trusted.serviceDiscoveries, 0, "connecting waits for the real connection callback")
@@ -90,8 +103,8 @@ extension NavigationProtocolTests {
             assert(central.commands.isEmpty && central.droppedCommands.isEmpty,
                    "early restored didConnect cannot cancel or discover before readiness")
             powerOn(manager, driver, central)
-            assertEqual(trusted.serviceDiscoveries, 1, "replay observes the now-connected peripheral")
-            assert(central.cancellations.isEmpty, "early callback preserves the restored link")
+            assertEqual(trusted.serviceDiscoveries, 0, "replay observes and retires the retained secure link")
+            assertEqual(central.cancellations, [trusted.identifier], "early callback is retired only after readiness")
             manager.clearConnectionStateForTesting()
         }
 
@@ -132,7 +145,8 @@ extension NavigationProtocolTests {
             driver.isPoweredOn = true
             central.state = .poweredOn
             restore(manager, central, [trusted])
-            assertEqual(trusted.serviceDiscoveries, 1, "already-powered-on restoration runs immediately")
+            assertEqual(central.cancellations, [trusted.identifier], "already-powered-on restoration retires immediately")
+            assertEqual(trusted.serviceDiscoveries, 0, "no plaintext handshake on a retained session")
             manager.clearConnectionStateForTesting()
         }
     }

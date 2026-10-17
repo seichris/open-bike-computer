@@ -9643,7 +9643,12 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         log("Restored Bike Computer connection state: \(restored.state.rawValue)")
         switch restored.state {
         case .connected:
-            centralManager(central, didConnect: restored)
+            // CoreBluetooth preserves the physical link across process loss,
+            // but this process has none of its ephemeral session keys/counters.
+            // Firmware must keep rejecting plaintext on that authenticated
+            // link. Confirm its teardown before creating a fresh secure session.
+            log("Retiring restored link before establishing a fresh secure session")
+            retireRestoredConnection(restored)
         case .connecting:
             // The pending OS attempt now belongs to the adopted generation and
             // keeps the same persistence policy as a fresh trusted connect.
