@@ -101,6 +101,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         let renderer: String
         let rendererFormatVersion: Int
         let firmwareVersion: String?
+        var terrainProfileVersion: Int? = nil
     }
 
     struct LabelProfile: Encodable, Equatable {
@@ -168,7 +169,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         )
     }
 
-    func withTopography(_ enabled: Bool) -> OfflineMapJobRequest {
+    func withTopography(_ enabled: Bool, terrain: Bool = false) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
             mode: mode,
             bbox: bbox,
@@ -178,7 +179,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             clientInstallationId: clientInstallationId,
             clientRequestId: clientRequestId,
             installOnDevice: installOnDevice,
-            target: enabled ? Self.targetFour : Self.targetThree,
+            target: enabled ? RendererTarget(renderer: "esp32-fmb", rendererFormatVersion: 4, firmwareVersion: nil, terrainProfileVersion: terrain ? 1 : nil) : Self.targetThree,
             labels: labels ?? Self.defaultLabelProfile
         )
     }
@@ -260,7 +261,8 @@ struct OfflineMapJobRequest: Encodable, Equatable {
             target: RendererTarget(
                 renderer: "esp32-fmb",
                 rendererFormatVersion: target?.rendererFormatVersion ?? 3,
-                firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion
+                firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion,
+                terrainProfileVersion: target?.terrainProfileVersion
             ),
             labels: labels ?? Self.defaultLabelProfile
         )

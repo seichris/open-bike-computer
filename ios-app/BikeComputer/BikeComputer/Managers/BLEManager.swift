@@ -1067,6 +1067,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsStreetLabels: Bool = false
     @Published private(set) var supports3DBuildings: Bool = false
     @Published private(set) var supportsMapNavigationOrientation = false
+    @Published private(set) var supportsTerrainExperiments = false
     @Published private(set) var supportsTopographicContours = false
     @Published private(set) var supportsExplicitInvalidGPSHeading: Bool = false
     @Published private(set) var supportsScopedWatchController: Bool = false
@@ -5624,6 +5625,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsStreetLabels = false
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
+        supportsTerrainExperiments = false
         supportsTopographicContours = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
@@ -7040,6 +7042,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsStreetLabels = false
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
+        supportsTerrainExperiments = false
         supportsTopographicContours = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
@@ -10520,6 +10523,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsStreetLabels = false
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
+        supportsTerrainExperiments = false
         supportsTopographicContours = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
@@ -10814,6 +10818,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supports3DBuildings = has3DBuildings
         supportsMapNavigationOrientation = flags &
             RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature != 0
+        supportsTerrainExperiments = flags & RideBLEGeneratedProtocolV1.terrainExperimentsFeature != 0
         supportsTopographicContours = hasTopographicContours
         supportsRideAutomation = hasRideAutomation
         supportsExplicitInvalidGPSHeading = hasExplicitInvalidGPSHeading

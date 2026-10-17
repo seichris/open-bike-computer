@@ -3396,20 +3396,6 @@ private struct RemoteDeviceDebugSettingsSection: View {
                 }
             }
         }
-        .task(id: bleManager.deviceTransferMode) {
-            guard bleManager.deviceTransferMode ==
-                    DeviceTransferSession.Mode.debug.rawValue else { return }
-            while !Task.isCancelled,
-                  bleManager.deviceTransferMode ==
-                    DeviceTransferSession.Mode.debug.rawValue {
-                do {
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
-                } catch {
-                    return
-                }
-                _ = bleManager.requestDeviceTransferStatus()
-            }
-        }
     }
 
     private var activeSession: DeviceTransferSession? {

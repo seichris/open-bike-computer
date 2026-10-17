@@ -92,6 +92,12 @@ int main() {
       map_profile_protocol::VISIBILITY_CONTOURS;
   assert(validate(document) == ValidationError::None);
 
+  auto terrainDocument = document;
+  terrainDocument.instances[2].mapProfile.visibilityMask |= 1u << 17;
+  assert((validate(terrainDocument) == ValidationError::None) == (FIRMWARE_DIAGNOSTICS != 0));
+  terrainDocument.instances[0].mapProfile.visibilityMask |= 1u << 17;
+  assert(validate(terrainDocument) != ValidationError::None);
+
   std::array<uint8_t, MAX_DOCUMENT_BYTES> encoded{};
   const std::size_t size =
       encodeDocument(document, encoded.data(), encoded.size());

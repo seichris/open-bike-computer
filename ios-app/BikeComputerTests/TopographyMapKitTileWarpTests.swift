@@ -5,6 +5,23 @@ import ImageIO
 @main
 struct TopographyMapKitTileWarpTests {
     static func main() async throws {
+        var coverage = ContourLabelCoverage()
+        let visible = CGRect(x: 100, y: 100, width: 300, height: 300)
+        precondition(coverage.queryRect(for: visible) != nil)
+        for _ in 0..<100 { precondition(coverage.queryRect(for: visible) == nil) }
+        precondition(coverage.queryRect(for: visible.offsetBy(dx: 10, dy: 10)) == nil)
+        precondition(coverage.queryRect(for: visible.offsetBy(dx: 300, dy: 0)) != nil)
+        precondition(coverage.queryRect(for: CGRect(x: 100, y: 100, width: 10, height: 10)) != nil)
+        var route = ContourRouteOccupancy(bounds: CGRect(x: 0, y: 0, width: 400, height: 400))
+        for i in 0..<10000 {
+            route.add(CGPoint(x: -1000, y: i), CGPoint(x: -900, y: i + 1))
+        }
+        precondition(!route.intersects(CGRect(x: 40, y: 40, width: 50, height: 20)))
+        route.add(CGPoint(x: -100, y: -100), CGPoint(x: 500, y: 500))
+        precondition(route.intersects(CGRect(x: 180, y: 180, width: 50, height: 20)))
+        precondition(!route.intersects(CGRect(x: 50, y: 300, width: 50, height: 20)), "diagonal bbox is not occupied")
+        route.add(CGPoint(x: 200, y: 100), CGPoint(x: 200, y: 100))
+        precondition(route.intersects(CGRect(x: 195, y: 95, width: 10, height: 10)))
         for scale in [1, 2] {
             try await chinaControlPoint(scale: scale)
         }
