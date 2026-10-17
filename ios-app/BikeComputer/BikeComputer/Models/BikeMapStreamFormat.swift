@@ -158,6 +158,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let fileCount: Int
     let payloadBytes: Int64
     let rendererFormatVersion: Int
+    let containsTerrain: Bool
     let topography: VerifiedBikeMapTopography?
 
     fileprivate init(
@@ -182,6 +183,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         fileCount: Int,
         payloadBytes: Int64,
         rendererFormatVersion: Int,
+        containsTerrain: Bool,
         topography: VerifiedBikeMapTopography?
     ) {
         self.url = url
@@ -205,6 +207,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         self.fileCount = fileCount
         self.payloadBytes = payloadBytes
         self.rendererFormatVersion = rendererFormatVersion
+        self.containsTerrain = containsTerrain
         self.topography = topography
     }
 }
@@ -759,6 +762,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
             fileCount: manifest.files.count,
             payloadBytes: Int64(header.payloadBytes),
             rendererFormatVersion: manifest.target.formatVersion,
+            containsTerrain: manifest.files.contains { $0.path.hasSuffix(".fme") },
             topography: manifest.topography.map { topography in
                 VerifiedBikeMapTopography(
                     profileVersion: topography.profileVersion,

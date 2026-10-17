@@ -446,8 +446,7 @@ private struct DeviceScreenMapProfileEditor: View {
                 Picker("Terrain", selection: Binding(
                     get: { TerrainMapStyle(rawValue: profile.visibilityMask & DeviceScreenMapProfile.terrainVisibilityMask) ?? .none },
                     set: { value in
-                        profile.visibilityMask = (profile.visibilityMask & ~DeviceScreenMapProfile.terrainVisibilityMask) | value.rawValue
-                        if value == .terrain3D { profile.visibilityMask = DeviceScreenMapProfile.defaultVisibilityMask | value.rawValue; profile.labelDensity = 0 }
+                        profile.setTerrainVisibility(value.rawValue)
                     }
                 )) {
                     ForEach(TerrainMapStyle.allCases) { Text($0.title).tag($0) }

@@ -1599,8 +1599,11 @@ nonisolated enum SavedMapRendererCompatibilityPolicy {
         rendererFormatVersion: Int?,
         supportsStreetLabels: Bool,
         supports3DBuildings: Bool,
-        supportsTopographicContours: Bool
+        supportsTopographicContours: Bool,
+        containsTerrain: Bool = false,
+        supportsTerrainExperiments: Bool = false
     ) -> Bool {
+        guard !containsTerrain || supportsTerrainExperiments else { return false }
         switch rendererFormatVersion {
         case nil, 1:
             return true
@@ -4410,15 +4413,7 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
-    private static var terrainExperimentsForPhone: Bool {
-#if DEBUG
-        true
-#else
-        false
-#endif
-    }
-
-    func makeCustomBBoxRequest() throws -> OfflineMapJobRequest {
+    func makeCustomBBoxRequest(supportsTerrainExperiments: Bool = false) throws -> OfflineMapJobRequest {
         guard let latitude = Double(centerLatitude),
               let longitude = Double(centerLongitude),
               let sizeKm = Double(sideLengthKm) else {
@@ -4430,7 +4425,7 @@ final class OfflineMapManager: ObservableObject {
         )
         return OfflineMapJobRequest
             .customBBox(bounds)
-            .withTopography(includeTopographyInNewMaps, terrain: Self.terrainExperimentsForPhone)
+            .withTopography(includeTopographyInNewMaps, terrain: supportsTerrainExperiments)
     }
 
     private func createJobAndDownload(request: OfflineMapJobRequest) {
@@ -5957,7 +5952,9 @@ final class OfflineMapManager: ObservableObject {
                supportsStreetLabels: bleManager.supportsStreetLabels,
                supports3DBuildings: bleManager.supports3DBuildings,
                supportsTopographicContours:
-                   bleManager.supportsTopographicContours
+                   bleManager.supportsTopographicContours,
+               containsTerrain: prepared.artifact.containsTerrain,
+               supportsTerrainExperiments: bleManager.supportsTerrainExperiments
            ) {
             throw OfflineMapPlatformError.invalidPack(
                 "This saved map is not compatible with the connected device. Regenerate it for this firmware."

@@ -2316,7 +2316,16 @@ Tint & Slope, and 3D Terrain. There are no new screen IDs or larger legacy masks
 The instance's UInt32 visibility field uses bits 14 hillshade, 15 elevation tint,
 16 slope shading, and 17 terrain height exploration. Tint combines bits 14+15;
 slope uses bit 16 independently. Ordinary Map and Map+Navigation defaults do not
-change. Production rejects these experimental visibility bits.
+change. Terrain bits are valid only on Map instances; incoming production
+commands reject them. Loading a local diagnostics-era layout on production
+masks these bits while preserving the revision, instances, and other settings.
+Signed FME1 sidecars remain accepted and fully validated on production so
+saved maps and activation recovery work across a firmware change. Production
+does not load or render the terrain grids. The phone still requires the
+terrain capability before transferring a terrain-bearing saved artifact, since
+older contour-capable firmware cannot accept FME1. This check uses the verified
+signed manifest, including for saved maps without terrain metadata. Custom
+cutouts require an explicit terrain opt-in instead of assuming a diagnostics peer.
 
 Contour numbers follow bit 13 in both existing map screens, independently of
 street-label density. Firmware-owned numeric glyphs support existing font packs.

@@ -43,7 +43,7 @@ def encode_grid(bx: int, by: int, nodes) -> bytes:
     return data
 
 
-def grids_from_mosaic(mosaic, grid, bounds, cancel=lambda: None) -> list[str]:
+def grids_from_mosaic(mosaic, grid, bounds, cancel=lambda: None, *, selection=None) -> list[str]:
     """Sample globally aligned nodes and a one-node derivative halo per block.
 
     The mosaic must include its processing halo. Unsupported samples remain
@@ -55,11 +55,12 @@ def grids_from_mosaic(mosaic, grid, bounds, cancel=lambda: None) -> list[str]:
     xs, ys = transform("EPSG:4326", "EPSG:3857", [bounds[0], bounds[2]], [bounds[1], bounds[3]])
     xkeys = range(math.floor(xs[0] / BLOCK), math.floor(xs[1] / BLOCK) + 1)
     ykeys = range(math.floor(ys[0] / BLOCK), math.floor(ys[1] / BLOCK) + 1)
-    if len(xkeys) * len(ykeys) > MAX_BLOCKS:
+    if selection is None and len(xkeys) * len(ykeys) > MAX_BLOCKS:
         raise ValueError("terrain exceeds 256 block budget")
     height, width = mosaic.shape
     outputs = []
-    for bx, by in ((x, y) for y in ykeys for x in xkeys):
+    region = prepare_selection(selection) if selection is not None else None
+    for bx, by in selected_block_keys(xkeys, ykeys, region, cancel):
         cancel()
         wx, wy = np.meshgrid(bx * BLOCK + np.arange(-1, SIDE + 1) * STEP,
                              by * BLOCK + np.arange(-1, SIDE + 1) * STEP)
@@ -98,16 +99,61 @@ def grids_from_mosaic(mosaic, grid, bounds, cancel=lambda: None) -> list[str]:
                 shade = max(0, (gx * 0.5 - gy * 0.5 + math.sqrt(0.5)) / math.sqrt(1+gx*gx+gy*gy))
                 nodes.append((round(float(window[1,1])), round(shade*255), round(math.degrees(math.atan(math.hypot(gx,gy))))))
         if any(node[0] != NODATA for node in nodes):
-            outputs.append(base64.b64encode(encode_grid(bx, by, nodes)).decode("ascii"))
+            data = encode_grid(bx, by, nodes)
+            if region is not None:
+                data = clip_grid(data, region, cancel)
+            if any(h != NODATA for h, _, _ in struct.iter_unpack("<hBB", data[16:])):
+                outputs.append(base64.b64encode(data).decode("ascii"))
+                if len(outputs) > MAX_BLOCKS:
+                    raise ValueError("terrain exceeds 256 block budget")
     return outputs
 
 
-def clip_grid(data: bytes, selection: dict) -> bytes:
-    from shapely.geometry import Point, shape
+def prepare_selection(selection):
+    from shapely.geometry import shape
+    from shapely.prepared import prep
+    return prep(shape(selection)) if isinstance(selection, dict) else selection
+
+
+def selected_block_keys(xkeys, ykeys, region, cancel):
+    """Skip empty rows and gaps between polygon components before DEM sampling."""
+    from shapely.geometry import box
+    for by in ykeys:
+        cancel()
+        if region is None:
+            intervals = [(xkeys.start, xkeys.stop - 1)]
+        else:
+            strip = region.context.intersection(box(xkeys.start * BLOCK, by * BLOCK,
+                                                     xkeys.stop * BLOCK, (by + 1) * BLOCK))
+            def parts(geometry):
+                if geometry.is_empty:
+                    return
+                if hasattr(geometry, "geoms"):
+                    for child in geometry.geoms:
+                        yield from parts(child)
+                else:
+                    yield geometry
+            intervals = sorted((max(xkeys.start, math.floor(part.bounds[0] / BLOCK)),
+                                min(xkeys.stop - 1, math.floor(part.bounds[2] / BLOCK)))
+                               for part in parts(strip))
+        previous = xkeys.start - 1
+        for start, end in intervals:
+            for bx in range(max(start, previous + 1), end + 1):
+                cancel()
+                if region is None or region.intersects(box(bx * BLOCK, by * BLOCK,
+                                                            (bx + 1) * BLOCK, (by + 1) * BLOCK)):
+                    yield bx, by
+            previous = max(previous, end)
+
+
+def clip_grid(data: bytes, selection, cancel=lambda: None) -> bytes:
+    from shapely.geometry import Point
     bx, by = validate_grid(data)
-    region = shape(selection)
+    region = prepare_selection(selection)
     nodes = []
     for i, node in enumerate(struct.iter_unpack("<hBB", data[16:])):
+        if i % SIDE == 0:
+            cancel()
         point = Point(bx*BLOCK+(i % SIDE)*STEP, by*BLOCK+(i // SIDE)*STEP)
         nodes.append(node if region.covers(point) else (NODATA, 0, 0))
     return encode_grid(bx, by, nodes)

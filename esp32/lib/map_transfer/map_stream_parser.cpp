@@ -813,12 +813,8 @@ bool safeMapPath(std::string_view path, const std::string &mapId,
   const auto extension = filename.size() >= 4
                              ? filename.substr(filename.size() - 4)
                              : std::string_view{};
-#if FIRMWARE_DIAGNOSTICS
-  const bool block = extension == ".fme" || extension == ".fmb" ||
+const bool block = extension == ".fme" || extension == ".fmb" ||
                      extension == ".fmp";
-#else
-  const bool block = extension == ".fmb" || extension == ".fmp";
-#endif
   if (!fontAsset &&
       (filename.size() < 5 || !block)) {
     return false;
@@ -1094,10 +1090,8 @@ bool parseMapStreamManifest(std::string_view manifestText,
     size_t filenameBytes = 0;
     if (!safeMapPath(path, parsed.metadata.mapId, tileOffset, tileBytes,
                      filenameOffset, filenameBytes) ||
-#if FIRMWARE_DIAGNOSTICS
         (endsWith(path, ".fme") &&
          (parsed.metadata.formatVersion != 4 || file.bytes != 4372)) ||
-#endif
         file.bytes == 0 ||
         file.bytes >
             (endsWith(path, "/assets/street-labels.fma")

@@ -153,3 +153,14 @@ annotations use its low display priority and collision handling plus explicit
 route/marker exclusions. Exact Apple-label interactions still need visual QA.
 The 3D device renderer uses a capped painter-ordered surface; steep-relief
 occlusion and navigation draping are separate exploration questions.
+
+
+Review follow-up: iPhone contour candidates are distributed across viewport
+cells, cached across small camera movements, and applied as annotation changes.
+Route exclusions use a screen-sized occupancy grid with clipped segments,
+including long routes. Experiment style changes retain the panned terrain and
+centre. Terrain generation budgets the selected populated grids, uses prepared
+selection geometry, and checks cancellation during clipping. Production accepts
+validated signed FME1 sidecars for map compatibility while keeping all terrain
+rendering and controls disabled; a local screen-layout migration strips only
+unsupported terrain bits without resetting the layout or revision.

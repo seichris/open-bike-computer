@@ -8,9 +8,7 @@
 #include <string>
 #include <vector>
 
-#ifndef FIRMWARE_DIAGNOSTICS
-#define FIRMWARE_DIAGNOSTICS 1
-#endif
+#include "../../ble_navigation/firmware_diagnostics_config.hpp"
 
 // #include "../../compass/compass.hpp" // Circular dependency if not careful,
 // but likely needed for getHeading

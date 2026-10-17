@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import base64
-from .terrain import validate_grid, clip_grid, ALGORITHM
+from .terrain import validate_grid, clip_grid, prepare_selection, ALGORITHM
 import os
 import re
 import struct
@@ -62,14 +62,16 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
         raise ValueError("terrain grid count exceeds bound")
     if encoded_grids and sample.get("terrainAlgorithm") != ALGORITHM:
         raise ValueError("unsupported terrain algorithm")
+    terrain_selection = prepare_selection(compiled.terrain_selection) if compiled.terrain_selection else None
     for encoded in encoded_grids:
+        cancel()
         if not isinstance(encoded, str) or len(encoded) > 6000:
             raise ValueError("terrain grid encoding exceeds bound")
         data = base64.b64decode(encoded, validate=True)
         key = validate_grid(data)
         if key in terrain_grids:
             raise ValueError("duplicate terrain grid")
-        clipped = clip_grid(data, compiled.terrain_selection) if compiled.terrain_selection else data
+        clipped = clip_grid(data, terrain_selection, cancel) if terrain_selection is not None else data
         if any(height != -32768 for height, _, _ in struct.iter_unpack("<hBB", clipped[16:])):
             terrain_grids[key] = clipped
     # Device coverage is clipped by the same selection as vector/contour data.

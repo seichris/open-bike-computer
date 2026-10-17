@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "firmware_diagnostics_config.hpp"
 
 // Development qualification only. Production profiles deliberately omit this.
 #ifndef MAP_STABLE_CAMERA
@@ -68,8 +69,9 @@ constexpr uint32_t VISIBILITY_SERVICE_ROADS = 1u << 10;
 constexpr uint32_t VISIBILITY_TRACKS = 1u << 11;
 constexpr uint32_t VISIBILITY_EXTENDED_MARKER = 1u << 12;
 constexpr uint32_t VISIBILITY_CONTOURS = 1u << 13;
-#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
-constexpr uint32_t VISIBILITY_TERRAIN = 0x3c000;
+constexpr uint32_t TERRAIN_EXPERIMENT_MASK = 0x3c000;
+#if FIRMWARE_DIAGNOSTICS
+constexpr uint32_t VISIBILITY_TERRAIN = TERRAIN_EXPERIMENT_MASK;
 #else
 constexpr uint32_t VISIBILITY_TERRAIN = 0;
 #endif

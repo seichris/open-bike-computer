@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-from map_platform.terrain import ALGORITHM, SIZE, NODATA, encode_grid, validate_grid, grids_from_mosaic
+from map_platform.terrain import ALGORITHM, SIZE, NODATA, encode_grid, validate_grid, grids_from_mosaic, clip_grid
 from map_platform.topography_artifacts import Contour, ContourSection
 from map_platform.topography_geometry import CompiledTopography
 from map_platform.topography_companion import write_companion, validate_companion
@@ -36,6 +36,51 @@ class TerrainTests(unittest.TestCase):
     def test_grid_budget_is_checked_before_sampling(self):
         with self.assertRaisesRegex(ValueError, "256 block"):
             grids_from_mosaic(None, None, [-170, -80, 170, 80])
+
+    def test_corridor_budget_counts_selected_blocks_and_checks_cancellation(self):
+        from shapely.geometry import LineString
+        from unittest.mock import patch
+        grid = SimpleNamespace(crs='EPSG:3857', left=-1024, top=131072, resolution=512)
+        mosaic = np.full((260, 260), 800, dtype='float32')
+        # 28x28 bounding blocks, but only a thin diagonal corridor is selected.
+        selection = LineString([(512, 512), (110000, 110000)]).buffer(200).__geo_interface__
+        calls = 0
+        def cancel():
+            nonlocal calls
+            calls += 1
+            if calls > 2:
+                raise InterruptedError('cancelled')
+        with self.assertRaises(InterruptedError):
+            grids_from_mosaic(mosaic, grid, [.001, .001, 1, 1], cancel, selection=selection)
+        result = grids_from_mosaic(mosaic, grid, [.001, .001, 1, 1], selection=selection)
+        self.assertGreater(len(result), 20)
+        self.assertLess(len(result), 100)
+        # The budget still applies to populated selected blocks, not only bboxes.
+        with patch('map_platform.terrain.MAX_BLOCKS', 1), self.assertRaisesRegex(ValueError, '256 block'):
+            grids_from_mosaic(mosaic, grid, [.001, .001, 1, 1], selection=selection)
+
+    def test_clipping_cancels_within_a_grid(self):
+        from shapely.geometry import box
+        data = encode_grid(0, 0, [(100, 180, 0)] * 1089)
+        calls = 0
+        def cancel():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise InterruptedError('cancelled')
+        with self.assertRaises(InterruptedError):
+            clip_grid(data, box(0, 0, 4096, 4096).__geo_interface__, cancel)
+        self.assertEqual(calls, 2)
+
+    def test_northwest_light_is_geographic(self):
+        grid = SimpleNamespace(crs='EPSG:3857', left=-1024, top=6144, resolution=32)
+        east = np.tile(np.arange(384, dtype='float32') * 8, (224, 1))
+        north = np.tile((224 - np.arange(224, dtype='float32'))[:, None] * 8, (1, 384))
+        def shade(mosaic):
+            data = base64.b64decode(grids_from_mosaic(mosaic, grid, [.001, .001, .03, .03])[0])
+            return list(struct.iter_unpack('<hBB', data[16:]))[16*33+16][1]
+        self.assertGreater(shade(east), shade(-east))
+        self.assertGreater(shade(-north), shade(north))
 
     def test_codec_bounds_crc_and_nodata(self):
         data = encode_grid(-1, 2, [(100, 180, 0)] * 1089)

@@ -359,6 +359,21 @@ class TopographyGeometryTests(unittest.TestCase):
         receipt["bytes"] = terrain.stat().st_size
         receipt_path.write_text(json.dumps(receipt))
         self.assertEqual(read(terrain), f"ok {metadata['tileCount']}")
+        # Exercise the real Swift SQLite query with >512 anchors in one viewport.
+        from map_platform.topography_artifacts import Contour, ContourSection
+        from dataclasses import replace
+        dense = self.root / "dense-labels.btopo"
+        section = ContourSection(20, 100, tuple(Contour(800, 1, ((0, 64*y), (4096, 64*y))) for y in range(1, 63)))
+        dense_compiled = replace(compiled, sections={(0, 0): section})
+        dense_metadata = write_companion(dense, dense_compiled, map_id="test-map",
+            source_policy_sha256="a" * 64, attribution_sha256="b" * 64,
+            bounds_e7=self.sample["boundsE7"],
+            terrain_grids={(0, 0): encode_grid(0, 0, [(100, 180, 0)] * 1089)})
+        receipt["sha256"] = hashlib.sha256(dense.read_bytes()).hexdigest()
+        receipt["bytes"] = dense.stat().st_size
+        receipt_path.write_text(json.dumps(receipt))
+        self.assertEqual(subprocess.run([str(executable), str(dense), str(receipt_path), "labels"],
+            check=True, text=True, capture_output=True).stdout.strip(), f"ok {dense_metadata['tileCount']}")
         with sqlite3.connect(terrain) as database:
             database.execute("UPDATE terrain SET grid = zeroblob(4372)")
         receipt["sha256"] = hashlib.sha256(terrain.read_bytes()).hexdigest()

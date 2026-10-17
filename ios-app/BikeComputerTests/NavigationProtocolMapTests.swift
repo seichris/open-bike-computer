@@ -3942,6 +3942,10 @@ extension NavigationProtocolTests {
             4,
             "topographic map detail requests format 4 independently of iPhone visibility"
         )
+        assertEqual(try? manager.makeCustomBBoxRequest().target?.terrainProfileVersion,
+                    nil, "custom cutouts must not assume a diagnostics peer")
+        assertEqual(try? manager.makeCustomBBoxRequest(supportsTerrainExperiments: true).target?.terrainProfileVersion,
+                    1, "terrain requires an explicit compatible-peer choice")
         let restored = OfflineMapManager(defaults: defaults)
         assert(restored.includeTopographyInNewMaps,
                "topographic map detail remains selected on the supported production server")

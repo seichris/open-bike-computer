@@ -52,6 +52,29 @@ def _lines(geometry):
             yield from _lines(part)
 
 
+def project_selection(selection, bounds, working_crs, corridor_width_m=0):
+    """Use the same working-CRS corridor buffer for contours and terrain."""
+    from rasterio.warp import transform as warp
+    region = shape(selection)
+    def project(source, target):
+        return lambda x, y, z=None: warp(source, target, x, y)
+    selected = transform(project("EPSG:4326", working_crs), region)
+    if region.geom_type == "LineString":
+        if (
+            isinstance(corridor_width_m, bool)
+            or not isinstance(corridor_width_m, (int, float))
+            or not math.isfinite(float(corridor_width_m))
+            or not 1 <= corridor_width_m <= 50_000
+        ):
+            raise ValueError("route requires a bounded full corridor width in metres")
+        selected = selected.buffer(corridor_width_m / 2, resolution=8)
+        if not transform(project("EPSG:4326", working_crs), box(*bounds)).covers(selected):
+            raise ValueError("contour mosaic does not cover the buffered route")
+    elif corridor_width_m:
+        raise ValueError("polygon must not have a corridor width")
+    return selected
+
+
 def compile_contours(sample: dict, selection: dict, *, corridor_width_m: float = 0,
                      cancel: Callable[[], None] = lambda: None) -> CompiledTopography:
     from rasterio.warp import transform as warp
@@ -83,20 +106,7 @@ def compile_contours(sample: dict, selection: dict, *, corridor_width_m: float =
     def project(source, target):
         return lambda x, y, z=None: warp(source, target, x, y)
 
-    selected = transform(project("EPSG:4326", working_crs), region)
-    if region.geom_type == "LineString":
-        if (
-            isinstance(corridor_width_m, bool)
-            or not isinstance(corridor_width_m, (int, float))
-            or not math.isfinite(float(corridor_width_m))
-            or not 1 <= corridor_width_m <= 50_000
-        ):
-            raise ValueError("route requires a bounded full corridor width in metres")
-        selected = selected.buffer(corridor_width_m / 2, resolution=8)
-        if not transform(project("EPSG:4326", working_crs), box(*bounds)).covers(selected):
-            raise ValueError("contour mosaic does not cover the buffered route")
-    elif corridor_width_m:
-        raise ValueError("polygon must not have a corridor width")
+    selected = project_selection(selection, bounds, working_crs, corridor_width_m)
     records: dict[tuple[int, int], set[Contour]] = {}
     total_points = 0
     input_points = 0

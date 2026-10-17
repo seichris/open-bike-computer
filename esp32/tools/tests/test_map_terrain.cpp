@@ -32,6 +32,23 @@ int main() {
   for (uint8_t b : data)
     assert(stream.feed(&b, 1));
   assert(stream.finish());
+  for (int cancelAt : {1, 3, 6, 7}) {
+    std::vector<uint8_t> buffer(BYTES);
+    size_t offset = 0;
+    int checks = 0;
+    const auto result = loadGrid(buffer.data(), grid,
+        [&](uint8_t *out, size_t count) {
+          const auto n = std::min(count, size_t(1000));
+          memcpy(out, data.data() + offset, n);
+          offset += n;
+          return int(n);
+        }, [&] { return ++checks >= cancelAt; });
+    assert(result == LoadResult::Cancelled);
+  }
+  std::vector<uint8_t> buffer(BYTES);
+  assert(loadGrid(buffer.data(), grid, [&](uint8_t *out, size_t count) {
+    memcpy(out, data.data(), count); return int(count);
+  }, [] { return false; }) == LoadResult::Complete);
   data.back() = 91;
   assert(!grid.decode(data.data(), data.size()));
   using namespace map_contour_labels;

@@ -1364,18 +1364,17 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
           if (::fstat(terrainFD, &terrainStat) == 0 &&
               terrainStat.st_size == map_terrain::BYTES) {
             bytes.resize(map_terrain::BYTES);
-            size_t received = 0;
-            while (received < bytes.size() && !shouldCancelMapRenderWork()) {
-              const auto n = ::read(terrainFD, bytes.data() + received,
-                                    bytes.size() - received);
-              if (n <= 0)
-                break;
-              received += size_t(n);
-            }
-            if (received == bytes.size()) {
-              mblock->terrain.resize(1);
-              if (!mblock->terrain[0].decode(bytes.data(), bytes.size()))
-                mblock->terrain.clear();
+            mblock->terrain.resize(1);
+            const auto loaded = map_terrain::loadGrid(bytes.data(), mblock->terrain[0],
+                [&](uint8_t *destination, size_t count) {
+                  return ::read(terrainFD, destination, count);
+                }, [] { return shouldCancelMapRenderWork(); });
+            if (loaded != map_terrain::LoadResult::Complete)
+              mblock->terrain.clear();
+            if (loaded == map_terrain::LoadResult::Cancelled) {
+              free(file);
+              Maps::isMapFound = false;
+              return mblock;
             }
           }
         }
@@ -1385,6 +1384,11 @@ Maps::MapBlock *Maps::readMapBlock(String fileName) {
         mblock->terrain.clear();
       }
 #endif
+      if (shouldCancelMapRenderWork()) {
+        free(file);
+        Maps::isMapFound = false;
+        return mblock;
+      }
       const uint32_t parseGridMs = MAPIO_TIME_MS() - parseStartMs;
       MAPIO_LOG("MAPIO: block ok=1 file=%s format=binary size=%u "
                 "openMs=%lu statMs=%lu readMs=%lu parseGridMs=%lu "
@@ -2069,6 +2073,10 @@ bool Maps::getMapBlocks(BBox &bbox, Maps::MemCache &memCache) {
 
     std::unique_ptr<MapBlock> blockOwner(Maps::readMapBlock(fileName));
     MapBlock *newBlock = blockOwner.get();
+    if (shouldCancelMapRenderWork()) {
+      Maps::isMapFound = false;
+      return false;
+    }
     if (Maps::isMapFound.load(std::memory_order_acquire)) {
       newBlock->inView = true;
       newBlock->offset = req;

@@ -113,3 +113,14 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-9 -- \
   -o "${PREVIEW_CATALYST_OUT}"
 
 "${PREVIEW_CATALYST_OUT}"
+
+CONTOUR_LABEL_OUT="${TMPDIR:-/tmp}/open-bike-contour-label-tests"
+python3 "${DEV_SWIFT_COMPILER}" navigation-10 -- \
+  -parse-as-library \
+  -target "$(uname -m)-apple-ios16.4-macabi" \
+  -sdk "${MACOS_SDK}" \
+  -F "${IOS_SUPPORT}/System/Library/Frameworks" \
+  -I "${IOS_SUPPORT}/usr/lib/swift" \
+  -L "${IOS_SUPPORT}/usr/lib/swift" \
+  -o "${CONTOUR_LABEL_OUT}"
+"${CONTOUR_LABEL_OUT}"

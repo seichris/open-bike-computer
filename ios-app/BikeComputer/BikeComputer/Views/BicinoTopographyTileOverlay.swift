@@ -185,9 +185,11 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
 final class BicinoContourLabelAnnotation: NSObject, MKAnnotation {
   let coordinate: CLLocationCoordinate2D
   let title: String?
-  init(coordinate: CLLocationCoordinate2D, elevation: Int) {
+  let anchor: ContourLabelAnchor
+  init(coordinate: CLLocationCoordinate2D, anchor: ContourLabelAnchor) {
+    self.anchor = anchor
     self.coordinate = coordinate
-    self.title = "\(elevation) m"
+    self.title = "\(anchor.elevation) m"
   }
   static func view(on mapView: MKMapView, annotation: BicinoContourLabelAnnotation)
     -> MKAnnotationView
@@ -219,15 +221,23 @@ final class BicinoContourLabelAnnotation: NSObject, MKAnnotation {
 @MainActor final class BicinoContourLabels {
   private var task: Task<Void, Never>?
   private var generation = UUID()
+  private var source: BicinoTopographyTileOverlay?
+  private var coverage = ContourLabelCoverage()
+  private var anchors: [ContourLabelAnchor] = []
+  private var lastFrame: [Double] = []
+  private var lastRoutes: [MKPolyline] = []
   func clear(on mapView: MKMapView) {
     task?.cancel()
     generation = UUID()
+    source = nil
+    coverage = ContourLabelCoverage()
+    anchors = []
+    lastFrame = []
+    lastRoutes = []
     mapView.removeAnnotations(
       mapView.annotations.compactMap { $0 as? BicinoContourLabelAnnotation })
   }
   func update(on mapView: MKMapView, overlay: BicinoTopographyTileOverlay?) {
-    task?.cancel()
-    generation = UUID()
     guard let overlay, overlay.hasTerrainFeatures else {
       clear(on: mapView)
       return
@@ -237,31 +247,56 @@ final class BicinoContourLabelAnnotation: NSObject, MKAnnotation {
       clear(on: mapView)
       return
     }
-    let token = generation
     let rect = mapView.visibleMapRect
+    let routes = mapView.overlays.compactMap { $0 as? MKPolyline }
+    let markers = mapView.annotations.filter { !($0 is BicinoContourLabelAnnotation) }
+    let frame: [Double] = [rect.minX, rect.minY, rect.width, rect.height,
+                 mapView.camera.heading, Double(mapView.camera.pitch),
+                 Double(mapView.bounds.width), Double(mapView.bounds.height)] +
+      markers.flatMap { [$0.coordinate.latitude, $0.coordinate.longitude] }
+    let routeIDs = routes.map { ObjectIdentifier($0) }
+    guard source !== overlay || lastFrame != frame || lastRoutes.map({ ObjectIdentifier($0) }) != routeIDs else { return }
+    if source !== overlay {
+      coverage = ContourLabelCoverage()
+      anchors = []
+    }
+    source = overlay
+    lastFrame = frame
+    lastRoutes = routes
+    task?.cancel()
+    generation = UUID()
+    let token = generation
     task = Task { [weak self, weak mapView] in
       do {
         try await Task.sleep(nanoseconds: 100_000_000)
-        let anchors = try await overlay.labelAnchors(in: rect)
-        try Task.checkCancellation()
         guard let self, let mapView, token == self.generation else { return }
+        // Commit coverage only after the actor query succeeds: cancellation
+        // must not mark a region as cached while retaining stale anchors.
+        var coverage = self.coverage
+        if let query = coverage.queryRect(for: CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height)) {
+          let values = try await overlay.labelAnchors(in: MKMapRect(x: query.minX, y: query.minY, width: query.width, height: query.height))
+          try Task.checkCancellation()
+          guard token == self.generation else { return }
+          self.anchors = values
+          self.coverage = coverage
+        }
+        let anchors = self.anchors
         var reserved = mapView.annotations.filter { !($0 is BicinoContourLabelAnnotation) }.map {
           let p = mapView.convert($0.coordinate, toPointTo: mapView)
           return CGRect(x: p.x - 28, y: p.y - 28, width: 56, height: 56)
         }
-        var segments: [(CGPoint, CGPoint)] = []
-        for line in mapView.overlays.compactMap({ $0 as? MKPolyline }) {
-          guard segments.count + line.pointCount <= 4096 else {
-            self.clear(on: mapView)
-            return
-          }
-          if line.pointCount < 2 { continue }
+        var routeOccupancy = ContourRouteOccupancy(bounds: mapView.bounds.insetBy(dx: -12, dy: -12))
+        let visible = mapView.visibleMapRect
+        for line in routes where line.pointCount >= 2 && line.boundingMapRect.intersects(visible) {
+          let points = line.points()
           for i in 1..<line.pointCount {
-            segments.append(
-              (
-                mapView.convert(line.points()[i - 1].coordinate, toPointTo: mapView),
-                mapView.convert(line.points()[i].coordinate, toPointTo: mapView)
-              ))
+            let a = points[i - 1], b = points[i]
+            // Skip offscreen vertices before the relatively costly MapKit
+            // conversion. Do not drop labels because a route is long.
+            guard max(a.x, b.x) >= visible.minX, min(a.x, b.x) <= visible.maxX,
+                  max(a.y, b.y) >= visible.minY, min(a.y, b.y) <= visible.maxY else { continue }
+            routeOccupancy.add(mapView.convert(a.coordinate, toPointTo: mapView),
+                               mapView.convert(b.coordinate, toPointTo: mapView))
           }
         }
         var annotations: [BicinoContourLabelAnnotation] = []
@@ -275,21 +310,17 @@ final class BicinoContourLabelAnnotation: NSObject, MKAnnotation {
           guard mapView.bounds.insetBy(dx: 12, dy: 12).contains(box),
             !reserved.contains(where: { $0.intersects(box) })
           else { continue }
-          let routeHit = segments.contains { a, b in
-            let bounds = CGRect(
-              x: min(a.x, b.x) - 12, y: min(a.y, b.y) - 12, width: abs(a.x - b.x) + 24,
-              height: abs(a.y - b.y) + 24)
-            return bounds.intersects(box)
-          }
-          if routeHit { continue }
+          if routeOccupancy.intersects(box) { continue }
           annotations.append(
-            BicinoContourLabelAnnotation(coordinate: coordinate, elevation: anchor.elevation))
+            BicinoContourLabelAnnotation(coordinate: coordinate, anchor: anchor))
           reserved.append(box.insetBy(dx: -30, dy: -24))
           if annotations.count == 24 { break }
         }
-        mapView.removeAnnotations(
-          mapView.annotations.compactMap { $0 as? BicinoContourLabelAnnotation })
-        mapView.addAnnotations(annotations)
+        let existing = mapView.annotations.compactMap { $0 as? BicinoContourLabelAnnotation }
+        let desired = Set(annotations.map(\.anchor))
+        let retained = Set(existing.map(\.anchor))
+        mapView.removeAnnotations(existing.filter { !desired.contains($0.anchor) })
+        mapView.addAnnotations(annotations.filter { !retained.contains($0.anchor) })
       } catch is CancellationError {} catch {
         if let self, let mapView, self.generation == token { self.clear(on: mapView) }
       }
@@ -303,6 +334,7 @@ struct BicinoTerrainExperimentView: View {
   @State var style: TerrainMapStyle
   @State private var contours = true
   @State private var grids: [TerrainGrid] = []
+  @State private var terrainCenter: CLLocationCoordinate2D?
   @State private var loading = true
   @State private var failure = false
   var body: some View {
@@ -328,7 +360,7 @@ struct BicinoTerrainExperimentView: View {
           .font(.footnote).foregroundStyle(.secondary).padding()
         } else {
           Toggle("Contours and elevation numbers", isOn: $contours).padding(.horizontal)
-          BicinoTerrainMap(overlay: overlay, grids: grids, style: style, contours: contours)
+          BicinoTerrainMap(overlay: overlay, grids: $grids, center: $terrainCenter, style: style, contours: contours)
           Text(
             style == .slope
               ? "Slope: green 0° → brown 45° and steeper"
@@ -350,7 +382,7 @@ struct BicinoTerrainExperimentView: View {
   }
 }
 
-private final class TerrainReliefOverlay: NSObject, MKOverlay {
+final class TerrainReliefOverlay: NSObject, MKOverlay {
   struct Cell {
     let points: [MKMapPoint]
     let shade: CGFloat
@@ -420,48 +452,59 @@ private final class TerrainReliefRenderer: MKOverlayRenderer {
   }
 }
 
-private struct BicinoTerrainMap: UIViewRepresentable {
+struct BicinoTerrainMap: UIViewRepresentable {
   let overlay: BicinoTopographyTileOverlay
-  let grids: [TerrainGrid]
+  @Binding var grids: [TerrainGrid]
+  @Binding var center: CLLocationCoordinate2D?
   let style: TerrainMapStyle
   let contours: Bool
-  func makeCoordinator() -> Coordinator { Coordinator() }
+  func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
   func makeUIView(context: Context) -> MKMapView {
     let map = MKMapView()
     map.delegate = context.coordinator
     context.coordinator.source = overlay
+    context.coordinator.grids = grids
     if let grid = grids.first {
       map.setRegion(
         MKCoordinateRegion(
-          center: overlay.coordinate(
+          center: center ?? overlay.coordinate(
             worldX: Double(grid.x * 4096 + 2048), worldY: Double(grid.y * 4096 + 2048)),
           latitudinalMeters: 4000, longitudinalMeters: 4000), animated: false)
     }
     return map
   }
   func updateUIView(_ map: MKMapView, context: Context) {
-    guard context.coordinator.style != style || context.coordinator.contours != contours else {
-      return
-    }
-    map.removeOverlays(map.overlays)
-    context.coordinator.style = style
-    context.coordinator.contours = contours
-    let terrain = TerrainReliefOverlay(source: overlay, grids: grids)
-    map.addOverlay(terrain, level: .aboveRoads)
-    if contours { map.addOverlay(overlay, level: .aboveRoads) }
-    context.coordinator.labels.update(on: map, overlay: contours ? overlay : nil)
+    context.coordinator.parent = self
+    context.coordinator.applyStyle(style, contours: contours, to: map)
   }
+
   static func dismantleUIView(_ map: MKMapView, coordinator: Coordinator) {
     coordinator.terrainTask?.cancel()
     coordinator.labels.clear(on: map)
     map.delegate = nil
   }
   @MainActor final class Coordinator: NSObject, MKMapViewDelegate {
+    var parent: BicinoTerrainMap
+    init(parent: BicinoTerrainMap) {
+      self.parent = parent
+      self.source = parent.overlay
+      self.grids = parent.grids
+    }
     var source: BicinoTopographyTileOverlay?
     var style: TerrainMapStyle?
     var contours = false
     var terrainTask: Task<Void, Never>?
+    var grids: [TerrainGrid] = []
     let labels = BicinoContourLabels()
+    func applyStyle(_ style: TerrainMapStyle, contours: Bool, to map: MKMapView) {
+      guard self.style != style || self.contours != contours, let source else { return }
+      map.removeOverlays(map.overlays)
+      self.style = style
+      self.contours = contours
+      map.addOverlay(TerrainReliefOverlay(source: source, grids: grids), level: .aboveRoads)
+      if contours { map.addOverlay(source, level: .aboveRoads) }
+      labels.update(on: map, overlay: contours ? source : nil)
+    }
     func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
       if let relief = overlay as? TerrainReliefOverlay {
         return TerrainReliefRenderer(overlay: relief, style: style ?? .hillshade)
@@ -480,6 +523,9 @@ private struct BicinoTerrainMap: UIViewRepresentable {
           let grids = try await source.terrain(near: center)
           try Task.checkCancellation()
           guard let self, let mapView else { return }
+          self.grids = grids
+          self.parent.grids = grids
+          self.parent.center = center
           mapView.removeOverlays(mapView.overlays.filter { $0 is TerrainReliefOverlay })
           mapView.insertOverlay(
             TerrainReliefOverlay(source: source, grids: grids), at: 0, level: .aboveRoads)

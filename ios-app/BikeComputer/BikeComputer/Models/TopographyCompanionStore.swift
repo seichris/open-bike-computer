@@ -467,9 +467,24 @@ actor TopographyCompanionStore {
 
     func labels(west: Int, south: Int, east: Int, north: Int) throws -> [ContourLabelAnchor] {
         guard let database, metadata?.schemaVersion == 2 else { return [] }
-        let row = try database.prepare("SELECT x,y,elevation FROM labels WHERE x>=? AND x<=? AND y>=? AND y<=? ORDER BY x,y,elevation LIMIT 512")
+        // Round-robin spatial cells before the global bound, with stable centre
+        // preference inside each cell. Dense western contours cannot starve
+        // the rest of the viewport.
+        let row = try database.prepare("""
+            SELECT x,y,elevation FROM (
+              SELECT x,y,elevation,
+                ROW_NUMBER() OVER (
+                  PARTITION BY ((x-?)*8/?),((y-?)*8/?)
+                  ORDER BY (x-?)*(x-?)+(y-?)*(y-?),x,y,elevation
+                ) AS cell_rank
+              FROM labels WHERE x>=? AND x<=? AND y>=? AND y<=?
+            ) ORDER BY cell_rank,(x-?)*(x-?)+(y-?)*(y-?),x,y,elevation LIMIT 512
+            """)
         defer { sqlite3_finalize(row) }
-        for (i,v) in [west,east,south,north].enumerated() { sqlite3_bind_int64(row, Int32(i+1), Int64(v)) }
+        let cx = west + (east - west) / 2, cy = south + (north - south) / 2
+        let parameters = [west, max(1, east-west+1), south, max(1, north-south+1),
+                          cx, cx, cy, cy, west, east, south, north, cx, cx, cy, cy]
+        for (i,v) in parameters.enumerated() { sqlite3_bind_int64(row, Int32(i+1), Int64(v)) }
         var output: [ContourLabelAnchor] = []
         var result = sqlite3_step(row)
         while result == SQLITE_ROW {
@@ -575,7 +590,7 @@ nonisolated struct TerrainGrid: Sendable {
         nodes = result
     }
 }
-nonisolated struct ContourLabelAnchor: Sendable {
+nonisolated struct ContourLabelAnchor: Hashable, Sendable {
     let x: Int
     let y: Int
     let elevation: Int

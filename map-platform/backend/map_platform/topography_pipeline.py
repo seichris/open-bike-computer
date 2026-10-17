@@ -107,7 +107,8 @@ def extract_contours(mosaic, grid, minor: int, index: int, cancel=lambda: None):
 
 
 def contour_sample(policy: TopographySourcePolicy, cache: ElevationCache,
-                   bounds: list[float], *, maximum_tiles: int = 8, terrain: bool = False) -> dict[str, Any]:
+                   bounds: list[float], *, maximum_tiles: int = 8, terrain: bool = False,
+                   terrain_selection: dict | None = None, corridor_width_m: float = 0) -> dict[str, Any]:
     # Import optional native libraries only for this explicit operator command.
     import contourpy
     import numpy as np
@@ -153,7 +154,15 @@ def contour_sample(policy: TopographySourcePolicy, cache: ElevationCache,
     terrain_fields = {}
     if terrain:
         from .terrain import ALGORITHM, grids_from_mosaic
-        terrain_fields = {"terrainAlgorithm": ALGORITHM, "terrainGrids": grids_from_mosaic(mosaic, grid, bounds, cache.cancel)}
+        selection = None
+        if terrain_selection is not None:
+            from .topography_geometry import project_selection
+            from shapely.ops import transform
+            from rasterio.warp import transform as warp
+            selected = project_selection(terrain_selection, bounds, crs, corridor_width_m)
+            selection = transform(lambda x, y, z=None: warp(crs, "EPSG:3857", x, y), selected).__geo_interface__
+        terrain_fields = {"terrainAlgorithm": ALGORITHM, "terrainGrids": grids_from_mosaic(
+            mosaic, grid, bounds, cache.cancel, selection=selection)}
     return {
         **terrain_fields,
         "schemaVersion": 1, "kind": "bicino-contour-evidence-v1", "access": "free",

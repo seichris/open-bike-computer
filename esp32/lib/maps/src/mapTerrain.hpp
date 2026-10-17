@@ -112,6 +112,25 @@ struct Grid {
     return true;
   }
 };
+// A superseded render must discard the whole block, including a fully read
+// sidecar cancelled during decoding. The caller owns the bounded PSRAM buffer.
+enum class LoadResult { Complete, Unavailable, Cancelled };
+template <typename Read, typename Cancel>
+LoadResult loadGrid(uint8_t *bytes, Grid &grid, Read read, Cancel cancelled) {
+  size_t received = 0;
+  while (received < BYTES) {
+    if (cancelled()) return LoadResult::Cancelled;
+    const auto n = read(bytes + received, BYTES - received);
+    if (n <= 0 || size_t(n) > BYTES - received)
+      return cancelled() ? LoadResult::Cancelled : LoadResult::Unavailable;
+    received += size_t(n);
+  }
+  if (cancelled()) return LoadResult::Cancelled;
+  const bool valid = grid.decode(bytes, BYTES);
+  if (cancelled()) return LoadResult::Cancelled;
+  return valid ? LoadResult::Complete : LoadResult::Unavailable;
+}
+
 inline uint16_t color(Node n, uint32_t mode, uint16_t base) {
   int r = (base >> 11) * 255 / 31, g = ((base >> 5) & 63) * 255 / 63,
       b = (base & 31) * 255 / 31;

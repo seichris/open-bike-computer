@@ -9016,6 +9016,15 @@ struct NavigationProtocolTests {
     }
 
     static func testSavedMapRendererCompatibilityPolicy() {
+        assert(!SavedMapRendererCompatibilityPolicy.isCompatible(
+            rendererFormatVersion: 4, supportsStreetLabels: true,
+            supports3DBuildings: true, supportsTopographicContours: true,
+            containsTerrain: true, supportsTerrainExperiments: false),
+            "terrain-bearing saved maps require an explicitly negotiated peer before transfer")
+        assert(SavedMapRendererCompatibilityPolicy.isCompatible(
+            rendererFormatVersion: 4, supportsStreetLabels: true,
+            supports3DBuildings: true, supportsTopographicContours: true,
+            containsTerrain: true, supportsTerrainExperiments: true))
         assert(
             SavedMapRendererCompatibilityPolicy.isCompatible(
                 rendererFormatVersion: 1,

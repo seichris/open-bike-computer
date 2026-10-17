@@ -63,11 +63,8 @@ static bool isMapBlockPath(std::string_view path) {
   if (path.size() < 4)
     return false;
   const auto extension = path.substr(path.size() - 4);
-#if FIRMWARE_DIAGNOSTICS
+// Terrain sidecars remain authenticated on production, which ignores their rendering.
   return extension == ".fme" || extension == ".fmb" || extension == ".fmp";
-#else
-  return extension == ".fmb" || extension == ".fmp";
-#endif
 }
 
 static bool isFontAssetPath(const std::string &path,
@@ -1194,12 +1191,10 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
     if (file.publishPath == std::string(kActiveMapFile).substr(1))
       return fail("manifest_path", "manifest may not overwrite active map");
     const bool isFontAsset = isFontAssetPath(file.path, manifest.mapId);
-#if FIRMWARE_DIAGNOSTICS
     if (file.path.size() >= 4 &&
         file.path.compare(file.path.size() - 4, 4, ".fme") == 0 &&
         (manifest.formatVersion != 4 || file.bytes != map_terrain::BYTES))
       return fail("manifest_terrain", "terrain requires renderer 4 and a complete grid");
-#endif
     const bool isBlock = isMapBlockPath(file.path);
     if (!isBlock && !isFontAsset)
       return fail("manifest_path", "manifest contains an unsupported map file");
