@@ -497,20 +497,28 @@ def _assertion_extension_values(
     allowed = {"validationCategory", "bundleVersion"}
     if not set(extensions).issubset(allowed):
         raise AppAttestError(
-            "app_attest_invalid_extensions", "App Attest extensions are invalid"
+            "app_attest_invalid_extensions",
+            "App Attest assertion extensions contain unsupported fields",
         )
     validation_category_value = extensions.get("validationCategory")
     bundle_version = extensions.get("bundleVersion")
     if validation_category_value is None and bundle_version is None:
         return None, None
     validation_category = _validation_category(validation_category_value)
-    if (
-        validation_category is None
-        or not isinstance(bundle_version, str)
-        or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", bundle_version)
-    ):
+    if validation_category is None:
         raise AppAttestError(
-            "app_attest_invalid_extensions", "App Attest extensions are invalid"
+            "app_attest_invalid_extensions",
+            "App Attest assertion extensions have a missing or invalid category",
+        )
+    if not isinstance(bundle_version, str):
+        raise AppAttestError(
+            "app_attest_invalid_extensions",
+            "App Attest assertion extensions require a bundle-version string",
+        )
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", bundle_version):
+        raise AppAttestError(
+            "app_attest_invalid_extensions",
+            "App Attest assertion extensions have an invalid bundle-version format",
         )
     return validation_category, bundle_version
 
