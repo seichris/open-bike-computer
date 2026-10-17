@@ -89,7 +89,9 @@ public final class CBCentralManager: NSObject {
     public private(set) var scans = 0
     public private(set) var isScanning = false
     public init(delegate: CBCentralManagerDelegate?, queue: DispatchQueue?, options: [String: Any]?) { self.delegate = delegate }
-    public func scanForPeripherals(withServices: [CBUUID]?, options: [String: Any]?) { scans += 1; isScanning = true }
+    public func scanForPeripherals(withServices: [CBUUID]?, options: [String: Any]?) {
+        if record("scan") { scans += 1; isScanning = true }
+    }
     public func stopScan() { if record("stopScan") { isScanning = false } }
     public func retrievePeripherals(withIdentifiers ids: [UUID]) -> [CBPeripheral] { knownPeripherals.filter { ids.contains($0.identifier) } }
     public func connect(_ peripheral: CBPeripheral, options: [String: Any]? = nil) {

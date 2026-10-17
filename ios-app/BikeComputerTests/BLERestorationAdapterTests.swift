@@ -21,7 +21,8 @@ extension NavigationProtocolTests {
             extra.central = central
             extra.state = .connected
             central.knownPeripherals = [trusted, extra]
-            manager.installScanDriverForTesting(driver, trustedPeripheralIdentifier: trusted.identifier)
+            manager.installScanDriverForTesting(driver, trustedPeripheralIdentifier: trusted.identifier,
+                                                shouldAutoReconnect: true)
             manager.installCentralManagerForTesting(central)
             return (manager, driver, central, trusted, extra)
         }
@@ -36,6 +37,15 @@ extension NavigationProtocolTests {
             driver.isPoweredOn = true
             central.state = .poweredOn
             manager.centralManagerDidUpdateState(central)
+        }
+        func advertise(_ manager: BLEManager, _ central: CBCentralManager,
+                       _ peripheral: CBPeripheral) {
+            for _ in 0..<20 where !central.isScanning {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+            assert(central.isScanning, "fresh trusted scan remains active while awaiting physical teardown")
+            manager.centralManager(central, didDiscover: peripheral,
+                                   advertisementData: [:], rssi: -50)
         }
         for state in [CBPeripheralState.connected, .connecting, .disconnected, .disconnecting] {
             let (manager, driver, central, trusted, extra) = fixture(state)
@@ -66,7 +76,13 @@ extension NavigationProtocolTests {
                 assert(central.connections.isEmpty, "never reconnect before the disconnect callback")
                 trusted.state = .disconnected
                 manager.centralManager(central, didDisconnectPeripheral: trusted, error: nil)
-                assertEqual(central.connections, [trusted.identifier], "confirmed disconnect starts the fresh connection")
+                assert(central.connections.isEmpty, "local disconnect does not prove physical teardown")
+                manager.reconnectToLastDevice()
+                manager.reconnect()
+                assert(central.connections.isEmpty && trusted.serviceDiscoveries == 0,
+                       "cached and manual reconnect cannot bypass the physical advertisement barrier")
+                advertise(manager, central, trusted)
+                assertEqual(central.connections, [trusted.identifier], "fresh advertisement admits the new connection")
                 assert(manager.rideConnectionGenerationForTesting > generation,
                        "fresh session uses a new generation")
                 trusted.state = .connected
@@ -84,7 +100,9 @@ extension NavigationProtocolTests {
                 manager.centralManager(central, didConnect: trusted)
                 assertEqual(trusted.serviceDiscoveries, 1, "real connect resumes discovery")
             case .disconnected:
-                assertEqual(central.connections, [trusted.identifier], "disconnected restoration connects once")
+                assert(central.connections.isEmpty, "disconnected restoration does not assume cached link is fresh")
+                advertise(manager, central, trusted)
+                assertEqual(central.connections, [trusted.identifier], "advertising disconnected restoration connects once")
                 trusted.state = .connected
                 manager.centralManager(central, didConnect: trusted)
                 assertEqual(trusted.serviceDiscoveries, 1, "new connection discovers once")
@@ -115,7 +133,7 @@ extension NavigationProtocolTests {
             manager.centralManagerDidUpdateState(central)
             powerOn(manager, driver, central)
             assertEqual(trusted.serviceDiscoveries, 0, "radio invalidation retires the old snapshot")
-            assert(central.commands.isEmpty && central.droppedCommands.isEmpty,
+            assert(central.connections.isEmpty && central.cancellations.isEmpty && central.droppedCommands.isEmpty,
                    "invalidated peripherals receive no later operations")
             manager.clearConnectionStateForTesting()
         }

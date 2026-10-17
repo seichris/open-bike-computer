@@ -1347,6 +1347,7 @@ class BLEManager: NSObject, ObservableObject {
     private var centralManager: CBCentralManager!
     private var pendingBluetoothRestoration: (() -> Void)?
     private var pendingRestoredPeripheralIdentifiers: Set<UUID> = []
+    private var restoredSessionAwaitingAdvertisement: UUID?
     private var connectedPeripheral: CBPeripheral?
     private var navigationCharacteristic: CBCharacteristic?
     private var authCharacteristic: CBCharacteristic?
@@ -2241,7 +2242,7 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Public Methods
 
     private var hasScanDriver: Bool {
-#if HOST_TESTING
+#if HOST_TESTING && !BLUETOOTH_RESTORATION_ADAPTER_TESTING
         scanDriverForTesting != nil
 #else
         centralManager != nil
@@ -2249,7 +2250,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private var isScanDriverPoweredOn: Bool {
-#if HOST_TESTING
+#if HOST_TESTING && !BLUETOOTH_RESTORATION_ADAPTER_TESTING
         scanDriverForTesting?.isPoweredOn == true
 #else
         centralManager != nil && centralManager.state == .poweredOn
@@ -2257,7 +2258,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private var isScanDriverScanning: Bool {
-#if HOST_TESTING
+#if HOST_TESTING && !BLUETOOTH_RESTORATION_ADAPTER_TESTING
         scanDriverForTesting?.isScanning == true
 #else
         centralManager != nil && centralManager.isScanning
@@ -2268,7 +2269,7 @@ class BLEManager: NSObject, ObservableObject {
         serviceUUIDs: [CBUUID],
         allowsDuplicates: Bool
     ) {
-#if HOST_TESTING
+#if HOST_TESTING && !BLUETOOTH_RESTORATION_ADAPTER_TESTING
         scanDriverForTesting?.start(
             serviceUUIDs: serviceUUIDs,
             allowsDuplicates: allowsDuplicates
@@ -2285,10 +2286,12 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func stopScanDriver() {
-#if HOST_TESTING
+#if HOST_TESTING && !BLUETOOTH_RESTORATION_ADAPTER_TESTING
         scanDriverForTesting?.stop()
 #else
-        centralManager?.stopScan()
+        if centralManager?.state == .poweredOn {
+            centralManager.stopScan()
+        }
 #endif
     }
 
@@ -6713,6 +6716,13 @@ class BLEManager: NSObject, ObservableObject {
             log("Skipping reconnect: connection already active")
             return
         }
+        if let identifier = restoredSessionAwaitingAdvertisement {
+            if identifier == lastConnectedPeripheralIdentifier {
+                reconcileScanning(reason: "waiting for restored session teardown advertisement")
+                return
+            }
+            restoredSessionAwaitingAdvertisement = nil
+        }
 
         guard let uuid = lastConnectedPeripheralIdentifier else {
             log("No last connected device")
@@ -6748,6 +6758,10 @@ class BLEManager: NSObject, ObservableObject {
             log("Skipping connect: connection already active")
             return
         }
+        guard restoredSessionAwaitingAdvertisement != peripheral.identifier else {
+            reconcileScanning(reason: "cached link cannot prove restored session teardown")
+            return
+        }
 
         guard adoptConnectionContext(peripheral) else { return }
         centralManager.connect(peripheral, options: nil)
@@ -6769,6 +6783,7 @@ class BLEManager: NSObject, ObservableObject {
     /// authentication reset and delegate ownership before accepting callbacks.
     private func adoptConnectionContext(_ peripheral: CBPeripheral?) -> Bool {
         guard reduceRideTransport(.beginConnection) == .applied else { return false }
+        restoredSessionAwaitingAdvertisement = nil
         stopPhysicalScan(reason: "connection attempt starting")
         connectedPeripheral = peripheral
         isConnected = false
@@ -6814,6 +6829,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func retireRestoredConnection(_ peripheral: CBPeripheral) {
+        restoredSessionAwaitingAdvertisement = peripheral.identifier
         pendingConnectionAfterDisconnect = peripheral.identifier
         _ = reduceRideTransport(.failed(generation: rideTransportStateMachine.generation,
                                         reason: .connectionFailed))
@@ -9654,7 +9670,8 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             // keeps the same persistence policy as a fresh trusted connect.
             startConnectionTimeoutIfBounded(for: restored)
         case .disconnected:
-            connectToPeripheral(restored)
+            restoredSessionAwaitingAdvertisement = restored.identifier
+            reconcileScanning(reason: "restored disconnected link needs fresh advertisement")
         case .disconnecting:
             retireRestoredConnection(restored)
         @unknown default:
@@ -9799,6 +9816,10 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             "\(purpose.logDescription) " +
             "(RSSI: \(RSSI))"
         )
+        if purpose != .none,
+           restoredSessionAwaitingAdvertisement == peripheral.identifier {
+            restoredSessionAwaitingAdvertisement = nil
+        }
 
         switch purpose {
         case .selectedPeripheral(let pendingIdentifier):
@@ -10005,6 +10026,13 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         if let nextIdentifier = BLEPendingHandoffPolicy.consume(
             &pendingConnectionAfterDisconnect
         ) {
+            if restoredSessionAwaitingAdvertisement == nextIdentifier {
+                // CoreBluetooth confirms only this app's local cancellation.
+                // This single-link firmware advertises after resetting its
+                // secure session, so wait for that evidence before connecting.
+                reconcileScanning(reason: "restored local disconnect awaits bike advertisement")
+                return
+            }
             connectDiscoveredPeripheral(identifier: nextIdentifier)
             return
         }

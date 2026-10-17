@@ -134,8 +134,13 @@ completes.
 CoreBluetooth can restore a connected physical link after the iPhone app process
 exits. The new process does not retain the prior session's ephemeral keys or
 counters. After Bluetooth becomes powered on, iOS retires that restored link,
-waits for confirmed disconnection through the bounded recovery lifecycle, then
-connects again and authenticates a fresh session. It does not send a plaintext
+waits for local disconnection through the bounded recovery lifecycle, then scans
+for a fresh bike advertisement before connecting and authenticating a new session.
+CoreBluetooth's local disconnect callback alone does not prove physical teardown;
+this firmware stops advertising while connected and restarts only after resetting
+the secure session. A cached or manual reconnect cannot bypass that advertisement
+barrier. The trusted scan stays active in the background without a pairing timeout.
+The app does not send a plaintext
 handshake on the retained authenticated link or weaken firmware frame checks.
 Restored pending connections remain owned by CoreBluetooth until they connect.
 
