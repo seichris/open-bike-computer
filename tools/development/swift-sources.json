@@ -115,7 +115,8 @@
         "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
         "ios-app/BikeComputerTests/NavigationProtocolMapTests.swift",
-        "ios-app/BikeComputerTests/NavigationProtocolRideTests.swift"
+        "ios-app/BikeComputerTests/NavigationProtocolRideTests.swift",
+        "ios-app/BikeComputerTests/BLERestorationAdapterTests.swift"
       ],
       "groups": [
         "common-1",
@@ -658,6 +659,11 @@
         "ios-app/BikeComputer/BikeComputer/Utilities/ContourLabelLayout.swift",
         "ios-app/BikeComputer/BikeComputer/Models/TerrainMapStyle.swift",
         "ios-app/BikeComputerTests/ContourLabelLifecycleTests.swift"
+      ]
+    },
+    "bluetooth-restoration-corebluetooth-double": {
+      "sources": [
+        "ios-app/tests/ble-restoration-host/CoreBluetooth.swift"
       ]
     }
   }
