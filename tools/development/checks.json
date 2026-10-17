@@ -674,6 +674,17 @@
       ]
     },
     {
+      "id": "social-riders-host-tests",
+      "name": "Social rider image transport and safe-boundary host tests",
+      "component": "firmware_host",
+      "cwd": ".",
+      "command": "python3 esp32/tools/run_social_riders_tests.py",
+      "tools": [
+        "python3",
+        "c++"
+      ]
+    },
+    {
       "id": "ios-build-containers",
       "name": "Build and validate Debug/Release iOS containers",
       "component": "ios_native",

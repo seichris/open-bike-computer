@@ -184,8 +184,23 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             load_xcconfig(IOS_PROJECT / "Configuration" / "HealthKitZones.xcconfig"),
             expected_zone_flags,
         )
-        self.assertEqual(development, {**expected_zone_flags, **expected_development})
-        self.assertEqual(production, {**expected_zone_flags, **expected_production})
+        expected_social_defaults = {
+            "BICINO_SOCIAL_ENABLED": "NO",
+            "BICINO_FIREBASE_APP_ID": "",
+            "BICINO_FIREBASE_SENDER_ID": "",
+            "BICINO_FIREBASE_API_KEY": "",
+            "BICINO_FIREBASE_PROJECT_ID": "",
+            "BICINO_GOOGLE_CLIENT_ID": "",
+            "BICINO_GOOGLE_REVERSED_CLIENT_ID": "",
+        }
+        self.assertEqual(development, {
+            **expected_zone_flags, **expected_development,
+            **expected_social_defaults, "BICINO_APNS_ENVIRONMENT": "development",
+        })
+        self.assertEqual(production, {
+            **expected_zone_flags, **expected_production,
+            **expected_social_defaults, "BICINO_APNS_ENVIRONMENT": "production",
+        })
 
         development_key_id = development[
             "BICINO_MAP_DEVELOPMENT_SIGNING_KEY_ID"
@@ -366,13 +381,20 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             "$(BICINO_URL_SCHEME)",
         )
         self.assertEqual(
-            ios_info["CFBundleURLTypes"][0]["CFBundleURLSchemes"],
-            ["$(BICINO_URL_SCHEME)"],
+            sorted(scheme for entry in ios_info["CFBundleURLTypes"]
+                   for scheme in entry["CFBundleURLSchemes"]),
+            ["$(BICINO_GOOGLE_REVERSED_CLIENT_ID)", "$(BICINO_URL_SCHEME)"],
         )
         self.assertEqual(
             ios_info["LSApplicationQueriesSchemes"],
             ["strava"],
         )
+        self.assertEqual(ios_entitlements["aps-environment"], "$(BICINO_APNS_ENVIRONMENT)")
+        self.assertEqual(ios_entitlements["com.apple.developer.applesignin"], ["Default"])
+        self.assertEqual(ios_entitlements["keychain-access-groups"], [
+            "$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)",
+            "$(AppIdentifierPrefix)LetItRide.BikeComputer.map-library",
+        ])
         self.assertTrue(ios_entitlements["com.apple.developer.healthkit"])
         self.assertTrue(watch_entitlements["com.apple.developer.healthkit"])
 
@@ -474,6 +496,10 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
                 "NSPrivacyCollectedDataTypeUserID",
                 "NSPrivacyCollectedDataTypeOtherUserContent",
                 "NSPrivacyCollectedDataTypeProductInteraction",
+                "NSPrivacyCollectedDataTypeName",
+                "NSPrivacyCollectedDataTypeEmailAddress",
+                "NSPrivacyCollectedDataTypePhotosorVideos",
+                "NSPrivacyCollectedDataTypeFitness",
             },
         )
         for entry in collected.values():

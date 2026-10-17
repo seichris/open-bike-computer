@@ -241,6 +241,13 @@ nonisolated struct NavigationRouteArchiveV1: Codable, Equatable {
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Exact bytes for server-side verification without cross-language JSON
+    /// floating-point re-encoding. The receiver also compares decoded content.
+    func socialHashPayload() throws -> Data {
+        try Self.encoder().encode(HashPayload(schemaVersion: schemaVersion, route: route,
+                                              createdAt: createdAt, deleteAfter: deleteAfter))
+    }
+
     private static func normalizedMilliseconds(_ date: Date) -> Date {
         Date(
             timeIntervalSince1970:

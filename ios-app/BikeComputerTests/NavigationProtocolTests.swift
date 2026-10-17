@@ -4915,6 +4915,21 @@ struct NavigationProtocolTests {
         let coldClient = TestLocationManagerClient(authorizationLevel: .whenInUse)
         let coldManager = CurrentLocationManager(locationManager: coldClient,
             applicationIsActive: { false })
+        foreground = true
+        manager.setSocialRideSharing(true)
+        assertEqual(client.startUpdatingLocationCallCount, 2,
+                    "Explicit social consent starts the existing GPS manager")
+        foreground = false
+        manager.applicationStateDidChange()
+        assertEqual(client.stopUpdatingLocationCallCount, 1,
+                    "Social sharing continues a foreground-started stream while locked")
+        manager.setSocialRideSharing(false)
+        assertEqual(client.stopUpdatingLocationCallCount, 2,
+                    "Stopping social sharing releases its location demand")
+        coldManager.setSocialRideSharing(true)
+        assertEqual(coldClient.startUpdatingLocationCallCount, 0,
+                    "Social consent cannot cold-start When-In-Use GPS in background")
+        coldManager.setSocialRideSharing(false)
         coldManager.setWorkoutActive(true, phoneOwned: true)
         assertEqual(coldClient.startUpdatingLocationCallCount, 0,
                     "Cold background recovery does not pretend When-In-Use is Always")

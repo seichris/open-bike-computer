@@ -2016,4 +2016,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="map pack file not found")
         return FileResponse(pack_path, media_type="application/zip", filename=pack_path.name)
 
+    if os.environ.get("BICINO_SOCIAL_ENABLED", "false").lower() == "true":
+        from .social.api import create_app as create_social_app
+        app.mount("/v1/social", create_social_app())
+
     return app

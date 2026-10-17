@@ -1,3 +1,4 @@
+#include "../social_riders/social_riders.hpp"
 #include "../firmware_update/firmware_metadata_compatibility.hpp"
 #include "power.hpp"
 extern Power power;
@@ -147,6 +148,7 @@ static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
 static std::atomic<bool> bleSessionSupportsWorkoutZones{false};
+static std::atomic<bool> bleSessionSupportsGroupRiders{false};
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 static std::atomic<bool> bleSessionSupportsWorldRadio{false};
 #endif
@@ -1413,6 +1415,8 @@ static bool decodeSessionPayload(
   if (authenticationStateDiverged) {
     bleSessionAuthenticated = false;
     clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
@@ -2240,6 +2244,8 @@ static void handleAuthPayload(const std::string &frame) {
     if (bleSessionAuthenticated && !ownershipSessionAuthenticated) {
       bleSessionAuthenticated = false;
       clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
       bleSessionSupportsExplicitInvalidGpsHeading.store(
           false, std::memory_order_release);
       bleSessionSupportsRendererDiagnostics.store(false,
@@ -2283,6 +2289,8 @@ static void handleAuthPayload(const std::string &frame) {
                 break;
               case device_ownership::Event::LeaseReleased:
                 clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
                 rideDeliveryLeaseGenerationSnapshot.store(
                     0, std::memory_order_release);
                 advanceRidePayloadGeneration();
@@ -2296,6 +2304,8 @@ static void handleAuthPayload(const std::string &frame) {
               case device_ownership::Event::Unpaired:
                 bleSessionAuthenticated = false;
                 clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
                 bleSessionSupportsExplicitInvalidGpsHeading.store(
                     false, std::memory_order_release);
                 bleSessionSupportsRendererDiagnostics.store(
@@ -2368,6 +2378,8 @@ static void handleAuthPayload(const std::string &frame) {
     char response[112];
     bleSessionAuthenticated = false;
     clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
@@ -4302,6 +4314,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE;
     }
+    const bool supportsGroup = activePeerMtu.load(std::memory_order_acquire) >= 150 && clientVersion >= ride_ble_protocol_generated::GROUP_RIDERS_V1_MINIMUM_CLIENT_VERSION && social_riders::ready();
+    bleSessionSupportsGroupRiders.store(supportsGroup, std::memory_order_release);
+    if (supportsGroup) {
+      featureFlags |= ride_ble_protocol_generated::GROUP_RIDERS_V1_FEATURE;
+    }
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -5943,6 +5960,8 @@ public:
 
   void acceptConnection() {
     clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     resetScreenConfigurationTransport();
     server->connected = true;
     bleSessionAuthenticated = false;
@@ -6098,6 +6117,8 @@ public:
         std::memory_order_release);
     clearRendererWindowRequest();
     clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -6246,6 +6267,17 @@ public:
       return;
     }
 #endif
+
+    if (value.size() >= 4 && std::memcmp(value.data(), "GRUP", 4) == 0) {
+      if (scopedWatchSession || !requireAuthenticated("group riders") ||
+          !bleSessionSupportsGroupRiders.load(std::memory_order_acquire)) return;
+      uint8_t acknowledgement[17] = {};
+      if (social_riders::ingest(reinterpret_cast<const uint8_t *>(value.data()), value.size(), acknowledgement)) {
+        notifyAuthenticatedNavigation(pChar, acknowledgement, sizeof(acknowledgement));
+        ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+      }
+      return;
+    }
 
     if (handleDestinationPickerPayload(value, "destination picker")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
@@ -7519,6 +7551,8 @@ bool BLENavigationServer::forgetOwner() {
       std::memory_order_release);
   clearRendererWindowRequest();
   clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
   bleDebugStats.updateWith([](BLEDebugStats &stats) {
     stats.authenticated = false;
   });

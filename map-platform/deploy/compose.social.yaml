@@ -1,0 +1,64 @@
+# Optional isolated social stack. Never add a mutable application tag here.
+# Route /v1/social/* on the map API origin to social-api:8080, including WSS.
+# BICINO_SOCIAL_IMAGE must be the CI-produced ghcr image@sha256 digest.
+x-social: &social
+  image: ${BICINO_SOCIAL_IMAGE:?set verified application image@sha256 digest}
+  env_file: ${BICINO_SOCIAL_ENV_FILE:?set absolute social runtime env file}
+  environment:
+    GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/firebase.json
+  secrets:
+    - source: social-firebase
+      target: firebase.json
+  restart: unless-stopped
+  networks: [social]
+  mem_limit: 1g
+  cpus: 1
+services:
+  social-postgres:
+    image: postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    environment:
+      POSTGRES_DB: bicino_social
+      POSTGRES_USER: social_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-password
+    secrets: [postgres-password]
+    volumes: [social-postgres:/var/lib/postgresql/data]
+    networks: [social]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U social_admin -d bicino_social]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+    mem_limit: 1g
+  social-migrate:
+    <<: *social
+    profiles: [migration]
+    restart: "no"
+    command: [bicino-social, migrate]
+    depends_on:
+      social-postgres: {condition: service_healthy}
+  social-api:
+    <<: *social
+    command: [uvicorn, --factory, map_platform.social.server:app, --host, 0.0.0.0, --port, "8080", --no-access-log]
+    expose: ["8080"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8080/v1/social/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      social-postgres: {condition: service_healthy}
+  social-worker:
+    <<: *social
+    command: [bicino-social, worker]
+    depends_on:
+      social-postgres: {condition: service_healthy}
+volumes:
+  social-postgres:
+networks:
+  social:
+secrets:
+  social-firebase:
+    file: ${BICINO_SOCIAL_FIREBASE_FILE:?set Firebase service account JSON file}
+  postgres-password:
+    file: ${BICINO_SOCIAL_POSTGRES_PASSWORD_FILE:?set Postgres admin password file}
