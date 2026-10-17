@@ -53,6 +53,47 @@ enum Tests {
     }
     static var location: NavigationLocationSampleV1 { .init(coordinate: .init(latitude: 1, longitude: 2), horizontalAccuracyMeters: 3, courseDegrees: 4, speedMetersPerSecond: 5, altitudeMeters: 6, timestamp: Date(timeIntervalSince1970: 0)) }
     static func main() async {
+        await run("rejected preparation waits for a real cancellation boundary") {
+            for finishBeforeRetry in [false, true] {
+                let f = Fixture(); defer { f.close() }
+                f.link.testStartPendingPreparation(f.peer)
+                let request = try! WatchDirectRidePreparationRequestV1(
+                    preparationID: f.id, operation: .prepare,
+                    deviceID: "00112233445566778899aabbccddeeff")
+                f.link.directRidePreparationDidRespond(request: request,
+                    response: .init(requestID: request.requestID, accepted: false,
+                                    errorCode: "phone_navigation_active"))
+                expect(f.link.testCentral.cancellations.count == 1,
+                       "rejection cancels the outstanding connection")
+                if finishBeforeRetry { f.link.testFinishReconnect(f.peer) }
+                await settle()
+                f.clock.advance(by: .seconds(2)); await settle()
+                expect(f.link.testCentral.connections.count == 1,
+                       "no reconnect before disconnect callback")
+                expect(!f.link.state.isReady,
+                       "late setup callbacks cannot revive a retired attempt")
+                f.link.testDrop(f.peer)
+                await settle()
+                f.clock.advance(by: .seconds(1)); await settle()
+                expect(f.link.testCentral.connections.count == 2,
+                       "real disconnect permits retry")
+            }
+        }
+
+        await run("rejected preparation without a link leaves no busy disconnect marker") {
+            let f = Fixture(); defer { f.close() }
+            f.link.testStartPendingPreparationWithoutPeripheral()
+            let request = try! WatchDirectRidePreparationRequestV1(
+                preparationID: f.id, operation: .prepare,
+                deviceID: "00112233445566778899aabbccddeeff")
+            f.link.directRidePreparationDidRespond(request: request,
+                response: .init(requestID: request.requestID, accepted: false,
+                                errorCode: "phone_navigation_active"))
+            expect(f.link.state == .busy, "rejection still reports the iPhone controller")
+            expect(!f.link.testBusyLeaseDisconnectPending,
+                   "no disconnect callback exists to consume a busy marker")
+        }
+
         await run("unchanged route suppression preserves replacement and reconnect") {
             let f = Fixture(); defer { f.close() }
             for _ in 0..<20 {
@@ -257,7 +298,7 @@ enum Tests {
             await run("terminal workout and clear application ACK ordering \(appBeforeATT)") {
                 let f = Fixture(); defer { f.close() }
                 f.link.setWorkoutDemand(true)
-                f.link.endWorkoutDemandAfterClearing(.init(identity: .init(state: .ended)))
+                f.link.endWorkoutDemandAfterSending(.init(identity: .init(state: .ended)))
                 let group = f.link.testActiveGroup!
                 f.link.testATT(on: f.peer) // first member
                 if appBeforeATT { f.link.testAcknowledge(group, on: f.peer) }
@@ -278,6 +319,31 @@ enum Tests {
                 f.link.testAcknowledge(clear, on: f.peer)
                 expect(f.peer.writes.last?.data == Data("LEASE_RELEASE".utf8), "lease follows terminal and clear acceptance")
             }
+        }
+        await run("finished workout releases without summary dismissal") {
+            let f = Fixture(); defer { f.close() }
+            f.link.setDemand(navigation: false, workout: true)
+            f.link.endWorkoutDemandAfterSending(.init(identity: .init(state: .ended)))
+            guard let terminal = f.link.testActiveGroup else {
+                expect(false, "final workout state is submitted before handback")
+                return
+            }
+            f.link.testDrainATT(on: f.peer)
+            expect(f.link.testDemand.workoutReleasePending,
+                   "transport writes alone cannot discard final-state delivery")
+            expect(f.releases.isEmpty, "the phone reservation remains until the device accepts the terminal state")
+            f.link.testAcknowledge(terminal, on: f.peer)
+            expect(!f.link.testDemand.requiresConnection,
+                   "accepting the terminal state releases workout demand without Done")
+            expect(f.peer.writes.last?.data == Data("LEASE_RELEASE".utf8),
+                   "controller release follows terminal-state acceptance")
+            expect(f.releases.isEmpty, "device lease acknowledgement precedes phone handback")
+            f.link.testAuth("LEASE_RELEASED", on: f.peer)
+            expect(f.releases == [f.id], "the exact completed ride returns ownership to the phone")
+            f.link.testDrop(f.peer)
+            await settle()
+            expect(f.link.transportPhase == .idle && !f.link.testDemand.requiresConnection,
+                   "keeping the completed summary open cannot reconnect the Watch")
         }
         await run("workout independently retains demand after navigation clear") {
             let f = Fixture(); defer { f.close() }

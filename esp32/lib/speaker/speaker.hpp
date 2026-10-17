@@ -10,6 +10,8 @@ namespace waveshare_board::speaker {
 bool begin();
 bool isAvailable();
 bool isPlaying();
+// Sticky admission close; ACK only after the playback task releases codec IO.
+bool pollShutdownQuiescence();
 bool requestPlay(Sound sound,
                  uint8_t volumePercent = DEFAULT_VOLUME_PERCENT);
 bool requestPlayTracked(Sound sound, uint8_t volumePercent,

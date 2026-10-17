@@ -57,3 +57,7 @@ backend/data/
 
 # waveshare_demo/
 waveshare_demo//IceNav-v3/
+
+# Private diagnostics evidence and local broker state; never commit pairing files.
+artifacts/diagnostics/
+.bicino-diagnostics/

@@ -3,6 +3,10 @@
 #include "device_debug_frame_store.hpp"
 #include "device_debug_input.hpp"
 #include "renderer_diagnostics_request.hpp"
+// HttpTransferServer embeds WiFi types. Keep this a direct dependency: the
+// PlatformIO deep-LDF cycle through renderer/BLE diagnostics cannot propagate
+// transitive WiFi include paths along a circular library edge.
+#include <WiFi.h>
 #include "../device_transfer/device_transfer_http.hpp"
 
 #include <atomic>

@@ -1,4 +1,7 @@
 #include "../social_riders/social_riders.hpp"
+#include "../firmware_update/firmware_metadata_compatibility.hpp"
+#include "power.hpp"
+extern Power power;
 /**
  * @file ble_navigation.cpp
  * @brief BLE navigation server implementation
@@ -14,6 +17,7 @@
 #define FIRMWARE_DIAGNOSTICS 1
 #endif
 #include "ble_connection_policy.hpp"
+#include "ride_command_admission.hpp"
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
 #include "ownership_ui_dispatch_policy.hpp"
@@ -178,6 +182,8 @@ static std::atomic<bool> pendingMapAvailabilityStatus{false};
 static map_transfer_status_protocol::ChunkTransmission
     pendingDeviceTransferStatusChunks;
 static std::atomic<bool> pendingDeviceTransferStatusContinuation{false};
+// Only the Arduino owner task touches the chunk stream and this refresh bit.
+static bool pendingDeviceTransferStatusRefresh = false;
 static map_transfer_status_protocol::ChunkTransmission
     pendingRendererDiagnosticsChunks;
 static std::atomic<bool> pendingRendererDiagnosticsContinuation{false};
@@ -204,6 +210,10 @@ static std::atomic<uint16_t> radioConnectionHandle{BLE_HS_CONN_HANDLE_NONE};
 // not deliver the latter callback even though their ATT MTU is already larger
 // than 23. Chunking must never call getPeerMTU() outside the host task.
 static std::atomic<uint16_t> activePeerMtu{23};
+// Updated only by host subscription callbacks; producers never call NimBLE.
+static std::atomic<uint8_t> rideNotificationSubscriptions{0};
+static constexpr uint8_t kNavigationSubscription = 1;
+static constexpr uint8_t kAutomationSubscription = 2;
 static std::atomic<uint32_t> lastConnectionParameterSampleMs{0};
 struct RadioDebugSnapshot {
   bool connectionParametersValid = false;
@@ -253,6 +263,8 @@ static std::atomic<bool> deferredNotificationEventPending{false};
 // gate and can race the owner task with the pinned host task.
 static std::atomic<bool> deferredNotificationEventScheduled{false};
 static std::atomic<TaskHandle_t> nimbleCallbackTask{nullptr};
+static std::atomic<bool> shutdownWritesClosed{false};
+static std::atomic<uint32_t> shutdownWritesInFlight{0};
 static std::atomic<uint32_t> deferredNotificationDrops{0};
 static StaticSemaphore_t diagnosticsSessionMutexStorage;
 static SemaphoreHandle_t diagnosticsSessionMutex = nullptr;
@@ -278,6 +290,12 @@ static char pendingTlsRotationFingerprint[
 static std::atomic<bool> diagnosticsSessionStartInProgress{false};
 static std::atomic<uint32_t> diagnosticsSessionStartGeneration{0};
 static std::atomic<uint32_t> diagnosticsSessionActiveGeneration{0};
+// The main-loop owner reclaims the completed internal-stack task before
+// admitting Wi-Fi. Self deletion leaves that RAM pending idle-task cleanup.
+static TaskHandle_t diagnosticsSessionStartTaskHandle = nullptr;
+static std::atomic<bool> diagnosticsSessionPreparationComplete{false};
+static ride_diagnostics::transfer_policy::StoragePreparation diagnosticsStorageResult{};
+static ride_diagnostics::transfer_policy::SealPreparation diagnosticsSealResult{};
 static portMUX_TYPE destinationPickerMux = portMUX_INITIALIZER_UNLOCKED;
 static DestinationCatalogSnapshot destinationCatalog;
 static DestinationPickerStatusSnapshot destinationPickerStatus;
@@ -341,6 +359,8 @@ static void scheduleDeferredNotificationEvent();
 static void deferredNotificationEventHandler(struct ble_npl_event *event);
 static void pumpPendingMapTransferStatusChunks();
 static void pumpPendingDeviceTransferStatusChunks();
+static void queueTransferControl(ble_transfer::Action action,
+                                 uint8_t notifications);
 static void pumpPendingRendererDiagnosticsChunks();
 
 static void clearRendererWindowRequest() {
@@ -1341,23 +1361,25 @@ static bool requireAuthenticated(const char *payloadName) {
   return false;
 }
 
-static bool unwrapOwnerAuthenticatedPayload(
+static bool decodeSessionPayload(
     device_ownership::AuthenticatedChannel channel, const std::string &frame,
     std::string &payload, const char *payloadName,
-    bool *wasScopedWatchSession = nullptr) {
+    bool handshake, bool *wasScopedWatchSession = nullptr) {
   if (wasScopedWatchSession != nullptr) {
     *wasScopedWatchSession = false;
   }
   if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     payload = frame;
-    return !deviceOwnershipReady;
+    return handshake && !deviceOwnershipReady;
   }
   const bool requiresFrame = deviceOwnership.isSessionAuthenticated();
   const bool authenticationStateDiverged =
       bleSessionAuthenticated && !requiresFrame;
   const bool validFrame =
       !authenticationStateDiverged &&
+      ride_command_admission::mayDecode(handshake, deviceOwnershipReady,
+                                        bleSessionAuthenticated, requiresFrame) &&
       (!requiresFrame ||
        deviceOwnership.unwrapAuthenticatedPayload(channel, frame, payload));
   const uint32_t nowMs = millis();
@@ -1419,6 +1441,45 @@ static bool unwrapOwnerAuthenticatedPayload(
                   payloadName == nullptr ? "payload" : payloadName);
   }
   return accepted;
+}
+
+// Deliberately distinct APIs: feature code cannot opt into handshake decoding.
+static bool decodeProtectedCommand(
+    device_ownership::AuthenticatedChannel channel, const std::string &frame,
+    std::string &payload, const char *name, bool *scopedWatch = nullptr) {
+  if (channel == device_ownership::AuthenticatedChannel::Auth) return false;
+  return decodeSessionPayload(channel, frame, payload, name, false, scopedWatch);
+}
+
+static bool decodeOwnershipHandshake(const std::string &frame,
+                                     std::string &payload) {
+  return decodeSessionPayload(device_ownership::AuthenticatedChannel::Auth,
+                              frame, payload, "ownership command", true);
+}
+
+// Execution and revocation are serialized by the ownership mutex. Admission to
+// the queue is provisional; configuration persists only after an authorized
+// apply, and the caller performs that flash write after this lock is released.
+bool BLENavigationServer::applyAuthorizedRideCommand(
+    ride_command_admission::Authorization admitted,
+    bool (*apply)(void *), void *context) {
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, portMAX_DELAY) != pdTRUE) return false;
+  const ride_command_admission::Authorization current{
+      ridePayloadGeneration.load(std::memory_order_acquire),
+      deviceOwnership.authenticatedRideLeaseGeneration(millis())};
+  const bool accepted = ride_command_admission::mayApply(
+      admitted, current, bleSessionAuthenticated &&
+                            deviceOwnership.isSessionAuthenticated()) &&
+      apply(context);
+  xSemaphoreGive(deviceOwnershipMutex);
+  return accepted;
+}
+
+static bool admitRideAutomationFrame(const uint8_t *data, size_t length) {
+  return ride_automation_runtime::ingestTransportFrame(data, length, millis(),
+      {ridePayloadGeneration.load(std::memory_order_acquire),
+       rideDeliveryLeaseGenerationSnapshot.load(std::memory_order_acquire)});
 }
 
 static bool isHexNonce(const char *nonce) {
@@ -1716,7 +1777,8 @@ static void completeBleSessionAuthentication() {
 static bool notifyAuthenticatedPayload(
     NimBLECharacteristic *characteristic,
     device_ownership::AuthenticatedChannel channel, const uint8_t *data,
-    size_t length, const char *label) {
+    size_t length, const char *label,
+    ride_command_admission::Authorization expected = {}) {
   (void)label;
   if (characteristic == nullptr || data == nullptr ||
       !bleSessionAuthenticated || !deviceOwnershipReady ||
@@ -1724,6 +1786,14 @@ static bool notifyAuthenticatedPayload(
       xSemaphoreTake(deviceOwnershipMutex,
                      isNimbleCallbackContext() ? 0 : pdMS_TO_TICKS(100)) !=
           pdTRUE) {
+    return false;
+  }
+  if (expected.sessionGeneration != 0 &&
+      !ride_command_admission::mayApply(
+          expected, {ridePayloadGeneration.load(std::memory_order_acquire),
+                     deviceOwnership.authenticatedRideLeaseGeneration(millis())},
+          deviceOwnership.isSessionAuthenticated())) {
+    xSemaphoreGive(deviceOwnershipMutex);
     return false;
   }
   std::string frame;
@@ -2071,24 +2141,33 @@ static RideDeliveryDecodeResult decodeRideDeliveryPayload(
   return RideDeliveryDecodeResult::Decoded;
 }
 
-bool BLENavigationServer::notifyRideAutomationFrame(const uint8_t *data,
-                                                    size_t length) {
+bool BLENavigationServer::notifyRideAutomationFrame(
+    const uint8_t *data, size_t length,
+    ride_command_admission::Authorization expected) {
   if (data == nullptr || length != ride_automation_protocol::FRAME_SIZE)
     return false;
-  const bool native = notifyAuthenticatedPayload(
-      pRideAutomationCharacteristic,
-      device_ownership::AuthenticatedChannel::RideAutomation, data, length,
-      "ride automation");
-  if (native)
-    return true;
+  const uint8_t subscriptions =
+      rideNotificationSubscriptions.load(std::memory_order_acquire);
+  const auto channel = ride_command_admission::notificationChannel(
+      subscriptions & kAutomationSubscription,
+      subscriptions & kNavigationSubscription,
+      activePeerMtu.load(std::memory_order_acquire), length);
+  if (channel == ride_command_admission::NotificationChannel::None)
+    return false;
+  if (channel == ride_command_admission::NotificationChannel::Native)
+    return notifyAuthenticatedPayload(
+        pRideAutomationCharacteristic,
+        device_ownership::AuthenticatedChannel::RideAutomation, data, length,
+        "ride automation", expected);
   uint8_t fallback[ride_automation_protocol::FALLBACK_PREFIX_SIZE +
                    ride_automation_protocol::FRAME_SIZE]{};
   std::memcpy(fallback, ride_automation_protocol::FALLBACK_PREFIX,
               ride_automation_protocol::FALLBACK_PREFIX_SIZE);
   std::memcpy(fallback + ride_automation_protocol::FALLBACK_PREFIX_SIZE, data,
               length);
-  return notifyAuthenticatedNavigation(mapTransferStatusCharacteristic,
-                                       fallback, sizeof(fallback));
+  return notifyAuthenticatedPayload(mapTransferStatusCharacteristic,
+      device_ownership::AuthenticatedChannel::Navigation, fallback,
+      sizeof(fallback), "ride automation fallback", expected);
 }
 
 static void logAuthPayloadPreview(const std::string &value) {
@@ -2110,9 +2189,7 @@ static void logAuthPayloadPreview(const std::string &value) {
 
 static void handleAuthPayload(const std::string &frame) {
   std::string value;
-  if (!unwrapOwnerAuthenticatedPayload(
-          device_ownership::AuthenticatedChannel::Auth, frame, value,
-          "ownership command")) {
+  if (!decodeOwnershipHandshake(frame, value)) {
     return;
   }
   if (value.length() == 2 &&
@@ -2671,6 +2748,7 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
           (transferStatus.secureTransferV1 ? "true" : "false") +
           ",\"signedMapStreamV1\":" +
           (transferStatus.signedMapStreamV1 ? "true" : "false") +
+          ",\"mapOperationsV1\":" + (mapTransferHttp.operationsSupported() ? "true" : "false") +
           ",\"legacyArchivePolicy\":\"" +
           status_json::escape(transferStatus.legacyArchivePolicy) + "\"}";
 
@@ -2698,6 +2776,7 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
   }
   if (activeMapStatus.available) {
     body += ",\"activeMapId\":\"" + status_json::escape(activeMap.mapId) + "\"";
+    body += ",\"activeRoot\":\"" + status_json::escape(activeMap.root) + "\"";
     if (!activeMap.sessionId.empty()) {
       body += ",\"activeSessionId\":\"" +
               status_json::escape(activeMap.sessionId) + "\"";
@@ -2752,7 +2831,10 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
             "\"}";
   }
 
+  body += ",\"selectionHealth\":" + mapTransferHttp.selectionHealthJson();
   body += ",\"activation\":" + mapTransferHttp.activationStatusJson(true);
+  const auto operation=mapTransferHttp.operationStatusJson();
+  if (!operation.empty()) body += ",\"operation\":" + operation;
 
   if (!transferStatus.lastErrorCode.empty() &&
       !mapTransferHttp.activationHasError()) {
@@ -2769,11 +2851,21 @@ static std::string mapTransferStatusJson() {
   return composeMapTransferStatusJson(readActiveMapStatusSnapshot());
 }
 
+static std::atomic<bool> diagnosticsLiveRequested{false};
+static std::atomic<uint32_t> diagnosticsLiveBoot{0};
+static std::atomic<uint32_t> diagnosticsLiveAfter{0};
+static std::atomic<uint32_t> diagnosticsLiveLastRequest{0};
+
 static std::string genericTransferStatusJson() {
   device_transfer::HttpTransferStatus transferStatus =
       deviceTransferHttp.status();
   std::string body;
-  body.reserve(1536);
+  // The full plaintext status stays on the Arduino task and is never passed
+  // to a cache-disabling operation. Reserve beyond Arduino's 4096-byte
+  // always-internal allocation ceiling, as the renderer status builder does,
+  // so this retained response uses PSRAM instead of fragmenting DMA memory
+  // while the internal operation owner admits first Wi-Fi startup.
+  body.reserve(4096);
   body = "{\"configured\":";
   body += transferStatus.configured ? "true" : "false";
   status_json::appendBoolField(body, "enabled", transferStatus.enabled);
@@ -2791,11 +2883,27 @@ static std::string genericTransferStatusJson() {
                         transferStatus.tlsCertificateSha256);
   body += "}";
 
+#if PERSISTENT_RIDE_DIAGNOSTICS
+  status_json::appendFieldPrefix(body, "diagnosticsPolicy");
+  body += ride_diagnostics::capturePolicyJson();
+  if (diagnosticsLiveRequested.exchange(false)) {
+    std::string tail;
+    if (ride_diagnostics::liveTailJson(diagnosticsLiveBoot.load(), diagnosticsLiveAfter.load(), tail)) {
+      status_json::appendFieldPrefix(body, "diagnosticsLive");
+      body += tail;
+    }
+  }
+#endif
+
+  status_json::appendFieldPrefix(body, "firmwareOperation");
+  body += firmwareUpdateHttp.operationReceiptJson();
+
   status_json::appendFieldPrefix(body, "capabilities");
   body += "{\"secureTransferV1\":";
   body += transferStatus.secureTransferV1 ? "true" : "false";
   status_json::appendBoolField(body, "signedMapStreamV1",
                       transferStatus.signedMapStreamV1);
+  status_json::appendBoolField(body, "mapOperationsV1", mapTransferHttp.operationsSupported());
   status_json::appendBoolField(body, "firmwareMaintenanceV1",
                       kFirmwareMaintenanceSupported);
   status_json::appendStringField(body, "legacyArchivePolicy",
@@ -3158,20 +3266,29 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
   if (pendingDeviceTransferStatusChunks.active()) {
+    // Finish the accepted stream first, then answer with current state. A
+    // policy command or poll arriving under backpressure must not lose its
+    // response, and restarting here would starve the central's reassembly.
+    pendingDeviceTransferStatusRefresh = true;
     pumpPendingDeviceTransferStatusChunks();
     return;
   }
 
-  const std::string body = genericTransferStatusJson();
-  const std::string response = "DSTS" + body;
-  if (notifyAuthenticatedNavigation(
-          pChar, reinterpret_cast<const uint8_t *>(response.data()),
-          response.size())) {
-    Serial.printf("BLE Device Transfer: status notified (%u bytes)\n",
-                  static_cast<unsigned>(response.size()));
-    return;
-  }
+  std::string body = genericTransferStatusJson();
   const uint16_t peerMtu = activePeerMtu.load(std::memory_order_acquire);
+  // Do not allocate/protect a whole DSTS response that cannot fit the ATT MTU.
+  // This path runs concurrently with first Wi-Fi admission on the HTTP worker.
+  if (map_transfer_status_protocol::fitsAuthenticatedNotification(
+          body.size() + 4U, peerMtu, kDeferredNotificationBytes)) {
+    const std::string response = "DSTS" + body;
+    if (notifyAuthenticatedNavigation(
+            pChar, reinterpret_cast<const uint8_t *>(response.data()),
+            response.size())) {
+      Serial.printf("BLE Device Transfer: status notified (%u bytes)\n",
+                    static_cast<unsigned>(response.size()));
+      return;
+    }
+  }
   const size_t chunkBytes =
       map_transfer_status_protocol::chunkPayloadBytes(peerMtu);
   const size_t chunkCount =
@@ -3183,10 +3300,8 @@ static void notifyGenericTransferStatus(NimBLECharacteristic *pChar) {
         static_cast<unsigned>(body.size()));
     return;
   }
-  static map_transfer_status_protocol::ChunkSession chunkSession;
-  const uint8_t transferId = chunkSession.transferIdFor(body);
-  if (!pendingDeviceTransferStatusChunks.begin(body, transferId,
-                                               chunkBytes)) {
+  if (!pendingDeviceTransferStatusChunks.beginStable(std::move(body),
+                                                     chunkBytes)) {
     Serial.printf("BLE Device Transfer: status too large (%u bytes)\n",
                   static_cast<unsigned>(body.size()));
     return;
@@ -3205,7 +3320,8 @@ static void pumpPendingDeviceTransferStatusChunks() {
   if (!bleSessionAuthenticated ||
       activeConnHandle == BLE_HS_CONN_HANDLE_NONE ||
       mapTransferStatusCharacteristic == nullptr) {
-    pendingDeviceTransferStatusChunks.reset();
+    pendingDeviceTransferStatusChunks.discardStable();
+    pendingDeviceTransferStatusRefresh = false;
     pendingDeviceTransferStatusContinuation.store(false,
                                                   std::memory_order_release);
     return;
@@ -3229,18 +3345,24 @@ static void pumpPendingDeviceTransferStatusChunks() {
   if (!pendingDeviceTransferStatusChunks.active()) {
     const size_t bodySize = pendingDeviceTransferStatusChunks.bodySize();
     const size_t chunkCount = pendingDeviceTransferStatusChunks.chunkCount();
-    pendingDeviceTransferStatusChunks.reset();
+    pendingDeviceTransferStatusChunks.finishStable();
     pendingDeviceTransferStatusContinuation.store(false,
                                                   std::memory_order_release);
     Serial.printf(
         "BLE Device Transfer: status notified (%u bytes, %u chunks)\n",
         static_cast<unsigned>(bodySize),
         static_cast<unsigned>(chunkCount));
+    if (pendingDeviceTransferStatusRefresh) {
+      pendingDeviceTransferStatusRefresh = false;
+      queueTransferControl(ble_transfer::Action::None,
+                           ble_transfer::NotifyGeneric);
+    }
   }
 }
 
 static void resetPendingDeviceTransferStatusChunks() {
-  pendingDeviceTransferStatusChunks.reset();
+  pendingDeviceTransferStatusChunks.discardStable();
+  pendingDeviceTransferStatusRefresh = false;
   pendingDeviceTransferStatusContinuation.store(false,
                                                 std::memory_order_release);
 }
@@ -3493,6 +3615,20 @@ static void cancelDiagnosticsSessionStart() {
 static void diagnosticsSessionStartTask(void *context) {
   const uint32_t generation = static_cast<uint32_t>(
       reinterpret_cast<uintptr_t>(context));
+  const auto observePreparation = [generation](const char *phase, uint32_t elapsed, const char *code) {
+    const auto stats = ride_diagnostics::stats();
+    char fields[320] = {};
+    const int bytes = snprintf(fields, sizeof(fields),
+        "{\"generation\":%lu,\"phase\":\"%s\",\"durationMs\":%lu,\"code\":\"%s\","
+        "\"queueDepth\":%u,\"droppedCount\":%lu,\"writtenCount\":%lu,\"storageErrorCount\":%lu}",
+        static_cast<unsigned long>(generation), phase, static_cast<unsigned long>(elapsed), code,
+        static_cast<unsigned>(stats.queueDepth), static_cast<unsigned long>(stats.dropped),
+        static_cast<unsigned long>(stats.written), static_cast<unsigned long>(stats.storageErrors));
+    if (bytes > 0 && static_cast<size_t>(bytes) < sizeof(fields))
+      (void)ride_diagnostics::record(ride_diagnostics::Level::Info, "transfer", "diagnostics_preparation", fields);
+  };
+  const uint32_t preparationStarted = millis();
+  observePreparation("requested", 0, "");
   // Own the retained-file snapshot before asking the writer to seal. The
   // writer serializes pruning and sealing, so completion proves that a prune
   // which began before this lease has finished while every later prune is
@@ -3502,13 +3638,41 @@ static void diagnosticsSessionStartTask(void *context) {
       storage.prepareDiagnosticsStorage();
   const bool storageReady =
       ride_diagnostics::transfer_policy::storageReady(storageResult);
+  observePreparation("storage_returned", millis() - preparationStarted,
+      ride_diagnostics::transfer_policy::storageFailure(storageResult).code);
+  const uint32_t sealStarted = millis();
   const ride_diagnostics::transfer_policy::SealPreparation sealResult =
       storageReady ? ride_diagnostics::sealActiveChunkForTransfer()
                    : ride_diagnostics::transfer_policy::SealPreparation::
                          StorageUnavailable;
-  const bool ready = storageReady &&
-                     ride_diagnostics::transfer_policy::sealReady(sealResult);
+  observePreparation(storageReady ? "seal_returned" : "seal_skipped", millis() - sealStarted,
+      storageReady ? ride_diagnostics::transfer_policy::sealFailure(sealResult).code
+                   : ride_diagnostics::transfer_policy::storageFailure(storageResult).code);
+  diagnosticsStorageResult = storageResult;
+  diagnosticsSealResult = sealResult;
+  diagnosticsSessionPreparationComplete.store(true, std::memory_order_release);
+  // Publish only plain results, then park. No resources or callouts remain.
+  for (;;)
+    vTaskSuspend(nullptr);
+}
 
+static void processCompletedDiagnosticsSessionStart() {
+  if (!diagnosticsSessionPreparationComplete.load(std::memory_order_acquire) ||
+      diagnosticsSessionStartTaskHandle == nullptr ||
+      eTaskGetState(diagnosticsSessionStartTaskHandle) != eSuspended) {
+    return;
+  }
+  // A suspended, non-current task is reclaimed synchronously. Merely observing
+  // a completed bit (or waiting a fixed delay) does not prove its stack is free.
+  vTaskDelete(diagnosticsSessionStartTaskHandle);
+  diagnosticsSessionStartTaskHandle = nullptr;
+  diagnosticsSessionPreparationComplete.store(false, std::memory_order_release);
+  const uint32_t generation =
+      diagnosticsSessionActiveGeneration.load(std::memory_order_acquire);
+  const auto storageResult = diagnosticsStorageResult;
+  const auto sealResult = diagnosticsSealResult;
+  const bool storageReady = ride_diagnostics::transfer_policy::storageReady(storageResult);
+  const bool ready = storageReady && ride_diagnostics::transfer_policy::sealReady(sealResult);
   bool stillCurrent = false;
   bool keepSnapshotLease = false;
   if (diagnosticsSessionMutex != nullptr &&
@@ -3517,6 +3681,7 @@ static void diagnosticsSessionStartTask(void *context) {
         diagnosticsSessionStartGeneration.load(std::memory_order_acquire) ==
             generation &&
         bleNavServer.isConnected() &&
+        !shutdownWritesClosed.load(std::memory_order_acquire) &&
         bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire);
     if (ready && stillCurrent && !deviceTransferHttp.status().enabled) {
       const bool enabled = deviceTransferHttp.setEnabled(true, "diagnostics");
@@ -3584,7 +3749,6 @@ static void diagnosticsSessionStartTask(void *context) {
     diagnosticsSessionStartInProgress.store(false,
                                             std::memory_order_release);
   }
-  vTaskDelete(nullptr);
 }
 
 static bool startDiagnosticsSessionAsync() {
@@ -3601,10 +3765,14 @@ static bool startDiagnosticsSessionAsync() {
       1;
   diagnosticsSessionActiveGeneration.store(generation,
                                            std::memory_order_release);
+  // The next DSTS revision represents this attempt, even while its worker is
+  // sealing. A previous attempt's rejection must not cancel an admitted retry.
+  // Clear before task creation so a fast failure from the new worker survives.
+  deviceTransferHttp.setLastError("", "");
   if (xTaskCreatePinnedToCore(
           diagnosticsSessionStartTask, "diagnostics_start", 6144,
           reinterpret_cast<void *>(static_cast<uintptr_t>(generation)), 1,
-          nullptr, 0) != pdPASS) {
+          &diagnosticsSessionStartTaskHandle, 0) != pdPASS) {
     diagnosticsSessionStartInProgress.store(false,
                                             std::memory_order_release);
     diagnosticsSessionActiveGeneration.store(0,
@@ -3724,6 +3892,9 @@ static void processPendingTransferControl() {
       deviceTransferHttp.setLastError(
           "transfer_busy",
           "finish the active device transfer before installing firmware");
+    } else if (!firmware_update::metadata_compatibility::allowsReader(UINT32_MAX)) {
+      deviceTransferHttp.setLastError(
+          "metadata_floor_unavailable", "resolve map metadata compatibility before firmware maintenance");
     } else if (!firmware.otaEligible) {
       deviceTransferHttp.setLastError(
           firmware.eligibilityCode,
@@ -4670,6 +4841,46 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
     return;
   }
 
+  if (command.rfind("live|2|", 0) == 0) {
+    const std::string cursor = command.substr(7);
+    const std::size_t separator = cursor.find('|');
+    uint32_t boot = 0, after = 0;
+    auto parseCursor = [](const std::string &text, uint32_t &out) {
+      if (text.empty() || text.size() > 10) return false;
+      uint64_t number = 0;
+      for (char c : text) {
+        if (c < '0' || c > '9') return false;
+        number = number * 10 + static_cast<unsigned>(c - '0');
+        if (number > UINT32_MAX) return false;
+      }
+      out = static_cast<uint32_t>(number); return true;
+    };
+    const uint32_t now = millis();
+    if (bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) &&
+        separator != std::string::npos &&
+        parseCursor(cursor.substr(0, separator), boot) &&
+        parseCursor(cursor.substr(separator + 1), after) &&
+        static_cast<uint32_t>(now - diagnosticsLiveLastRequest.load()) >= 1000U) {
+      diagnosticsLiveLastRequest.store(now);
+      diagnosticsLiveBoot.store(boot); diagnosticsLiveAfter.store(after);
+      diagnosticsLiveRequested.store(true);
+      queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyGeneric);
+    }
+    return;
+  }
+
+  if (command.rfind("policy|", 0) == 0) {
+    ride_diagnostics::policy_v2::Request policy;
+    if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
+        !ride_diagnostics::policy_v2::parse(command, policy) ||
+        !ride_diagnostics::applyCapturePolicy(policy)) {
+      deviceTransferHttp.setLastError("diagnostics_policy_rejected",
+          "policy registry, capture, generation or resource limits did not match");
+    }
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyGeneric);
+    return;
+  }
+
   if (command.rfind("capture|", 0) == 0) {
     ride_diagnostics::control::CaptureBinding binding;
     if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
@@ -4690,7 +4901,8 @@ static void handleGenericTransferControlPayload(const uint8_t *data, size_t len,
     ride_diagnostics::control::IssueMarker marker;
     if (!bleSessionSupportsRideDiagnostics.load(std::memory_order_acquire) ||
         !ride_diagnostics::control::parseIssueMarker(command, marker) ||
-        !ride_diagnostics::markIssue(marker.code.c_str(), marker.sequence)) {
+        !ride_diagnostics::markIssue(marker.code.c_str(), marker.sequence,
+            marker.incidentId.empty() ? nullptr : marker.incidentId.c_str())) {
       deviceTransferHttp.setLastError("marker_rejected",
                                       "issue marker was malformed or unsupported");
     }
@@ -5219,7 +5431,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
   case 5:
     Serial.println("BLE Settings: Reboot command received! Restarting...");
     delay(500);
-    ESP.restart();
+    power.deviceRestart();
     return;
   case 6:
     mapRenderSettings.mapRotationMode =
@@ -5606,6 +5818,7 @@ public:
   TaskHandle_t previousTask = nullptr;
 
   ScopedNimbleCallback() {
+    shutdownWritesInFlight.fetch_add(1);
     previousTask = nimbleCallbackTask.exchange(
         xTaskGetCurrentTaskHandle(), std::memory_order_acq_rel);
     const uint16_t connectionHandle = activeConnHandle;
@@ -5619,6 +5832,7 @@ public:
   }
   ~ScopedNimbleCallback() {
     nimbleCallbackTask.store(previousTask, std::memory_order_release);
+    shutdownWritesInFlight.fetch_sub(1);
   }
 };
 
@@ -5672,6 +5886,7 @@ class MyMaintenanceRejectedCharacteristicCallbacks
 public:
   void onWrite(NimBLECharacteristic *) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     Serial.println(
         "BLE maintenance: rejected write to inactive riding characteristic");
   }
@@ -5723,6 +5938,7 @@ public:
     }
     radioConnectionHandle.store(desc->conn_handle, std::memory_order_release);
     activePeerMtu.store(23, std::memory_order_release);
+    rideNotificationSubscriptions.store(0, std::memory_order_release);
 #if BLE_RADIO_CHARACTERIZATION
     radioRequestedConnectionProfile.store(
         static_cast<uint8_t>(ble_radio_policy::ConnectionProfile::Unset),
@@ -5822,6 +6038,7 @@ public:
     radioConnectionHandle.store(BLE_HS_CONN_HANDLE_NONE,
                                 std::memory_order_release);
     activePeerMtu.store(23, std::memory_order_release);
+    rideNotificationSubscriptions.store(0, std::memory_order_release);
     portENTER_CRITICAL(&radioDebugMux);
     radioDebugSnapshot.connectionParametersValid = false;
     portEXIT_CRITICAL(&radioDebugMux);
@@ -5861,6 +6078,10 @@ public:
           ride_diagnostics::Level::Warning, "transfer",
           "maintenance_ble_detached", "{}");
     }
+    diagnosticsLiveRequested.store(false);
+    diagnosticsLiveBoot.store(0);
+    diagnosticsLiveAfter.store(0);
+    diagnosticsLiveLastRequest.store(0);
     server->connected = false;
     bleSessionAuthenticated = false;
     bleSessionUsesIndependentMapProfiles = false;
@@ -5947,15 +6168,27 @@ public:
 
 class MyNavCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
+  void onSubscribe(NimBLECharacteristic *, ble_gap_conn_desc *desc,
+                   uint16_t subscriptions) override {
+    if (desc == nullptr || desc->conn_handle !=
+        radioConnectionHandle.load(std::memory_order_acquire)) return;
+    if ((subscriptions & 1U) != 0)
+      rideNotificationSubscriptions.fetch_or(kNavigationSubscription, std::memory_order_acq_rel);
+    else
+      rideNotificationSubscriptions.fetch_and(
+          static_cast<uint8_t>(~kNavigationSubscription), std::memory_order_acq_rel);
+  }
+
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     if (frame.empty()) {
       return;
     }
     std::string value;
     bool scopedWatchSession = false;
-    if (!unwrapOwnerAuthenticatedPayload(
+    if (!decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::Navigation, frame, value,
             "navigation characteristic", &scopedWatchSession)) {
       return;
@@ -6060,10 +6293,10 @@ public:
                             ride_automation_protocol::FRAME_SIZE &&
         std::memcmp(value.data(), ride_automation_protocol::FALLBACK_PREFIX,
                     ride_automation_protocol::FALLBACK_PREFIX_SIZE) == 0) {
-      if (!ride_automation_runtime::ingestTransportFrame(
+      if (!admitRideAutomationFrame(
               reinterpret_cast<const uint8_t *>(value.data()) +
                   ride_automation_protocol::FALLBACK_PREFIX_SIZE,
-              ride_automation_protocol::FRAME_SIZE, millis()))
+              ride_automation_protocol::FRAME_SIZE))
         Serial.println("BLE Ride Automation: rejected navigation fallback frame");
       return;
     }
@@ -6117,6 +6350,12 @@ public:
       }
       handleMapTransferControlPayload((const uint8_t *)value.data() + 4,
                                       value.length() - 4, pChar);
+      return;
+    }
+
+    if (hasPrefix(value, "MOPQ|")) {
+      if (requireAuthenticated("map operation query"))
+        mapTransferHttp.requestOperationStatus(value.substr(5));
       return;
     }
 
@@ -6193,10 +6432,11 @@ public:
   void onWrite(NimBLECharacteristic *pChar) override {
     DeliveryCallbackScope timing(1);
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     timing.setupComplete();
     const std::string frame = pChar->getValue();
     std::string value;
-    if (!unwrapOwnerAuthenticatedPayload(
+    if (!decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::Route, frame, value,
             "route characteristic")) {
       return;
@@ -6256,11 +6496,12 @@ public:
   void onWrite(NimBLECharacteristic *pChar) override {
     DeliveryCallbackScope timing(2);
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     timing.setupComplete();
     const std::string frame = pChar->getValue();
     const uint32_t receivedAtMs = millis();
     std::string value;
-    if (!unwrapOwnerAuthenticatedPayload(
+    if (!decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::Gps, frame, value,
             "GPS characteristic")) {
 #if FIRMWARE_DIAGNOSTICS
@@ -6345,11 +6586,12 @@ class MyWorkoutTelemetryCharacteristicCallbacks
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     workout_telemetry_transport::dispatchAuthenticatedNativeFrame(
         frame,
         [](const std::string &protectedFrame, std::string &payload) {
-          return unwrapOwnerAuthenticatedPayload(
+          return decodeProtectedCommand(
               device_ownership::AuthenticatedChannel::Workout,
               protectedFrame, payload, "workout telemetry characteristic");
         },
@@ -6433,18 +6675,29 @@ public:
 class MyRideAutomationCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
+  void onSubscribe(NimBLECharacteristic *, ble_gap_conn_desc *desc,
+                   uint16_t subscriptions) override {
+    if (desc == nullptr || desc->conn_handle !=
+        radioConnectionHandle.load(std::memory_order_acquire)) return;
+    if ((subscriptions & 1U) != 0)
+      rideNotificationSubscriptions.fetch_or(kAutomationSubscription, std::memory_order_acq_rel);
+    else
+      rideNotificationSubscriptions.fetch_and(
+          static_cast<uint8_t>(~kAutomationSubscription), std::memory_order_acq_rel);
+  }
+
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     std::string payload;
-    if (!unwrapOwnerAuthenticatedPayload(
+    if (!decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::RideAutomation, frame,
             payload, "ride automation characteristic") ||
         !requireAuthenticated("ride automation"))
       return;
-    if (!ride_automation_runtime::ingestTransportFrame(
-            reinterpret_cast<const uint8_t *>(payload.data()), payload.size(),
-            millis()))
+    if (!admitRideAutomationFrame(
+            reinterpret_cast<const uint8_t *>(payload.data()), payload.size()))
       Serial.println("BLE Ride Automation: rejected native frame");
   }
 };
@@ -6454,10 +6707,11 @@ class MyScreenConfigurationCharacteristicCallbacks
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     std::string payload;
     if (!screen_configuration::isReady() ||
-        !unwrapOwnerAuthenticatedPayload(
+        !decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::ScreenConfiguration,
             frame, payload, "screen configuration characteristic") ||
         !requireAuthenticated("screen configuration")) {
@@ -6545,10 +6799,11 @@ class MySettingsCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     std::string value;
     bool scopedWatchSession = false;
-    if (!unwrapOwnerAuthenticatedPayload(
+    if (!decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::Settings, frame, value,
             "settings characteristic", &scopedWatchSession)) {
       return;
@@ -6564,10 +6819,10 @@ public:
                             ride_automation_protocol::FRAME_SIZE &&
         std::memcmp(value.data(), ride_automation_protocol::FALLBACK_PREFIX,
                     ride_automation_protocol::FALLBACK_PREFIX_SIZE) == 0) {
-      if (!ride_automation_runtime::ingestTransportFrame(
+      if (!admitRideAutomationFrame(
               reinterpret_cast<const uint8_t *>(value.data()) +
                   ride_automation_protocol::FALLBACK_PREFIX_SIZE,
-              ride_automation_protocol::FRAME_SIZE, millis()))
+              ride_automation_protocol::FRAME_SIZE))
         Serial.println("BLE Ride Automation: rejected fallback frame");
       return;
     }
@@ -6590,6 +6845,12 @@ public:
       handleMapTransferControlPayload((const uint8_t *)value.data() + 4,
                                       value.length() - 4,
                                       mapTransferStatusCharacteristic);
+      return;
+    }
+
+    if (hasPrefix(value, "MOPQ|")) {
+      if (requireAuthenticated("map operation query"))
+        mapTransferHttp.requestOperationStatus(value.substr(5));
       return;
     }
 
@@ -6657,6 +6918,7 @@ class MyAuthCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
+    if (shutdownWritesClosed.load()) return;
     std::string value = pChar->getValue();
     if (!value.empty()) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Auth);
@@ -6808,6 +7070,8 @@ void BLENavigationServer::init(const char *deviceName) {
     xSemaphoreGive(deviceOwnershipMutex);
   }
   if (deviceOwnershipReady) {
+    mapTransferHttp.setOperationDeviceID(stableDeviceId);
+    firmwareUpdateHttp.setOperationDeviceID(stableDeviceId);
     Serial.printf("BLE: Ownership identity=%s claimed=%d name='%s'\n",
                   stableDeviceId.c_str(), ownershipClaimed,
                   effectiveDeviceName.c_str());
@@ -6954,7 +7218,18 @@ void BLENavigationServer::init(const char *deviceName) {
                 effectiveDeviceName.c_str());
 }
 
+bool BLENavigationServer::pollShutdownQuiescence() {
+  if (!shutdownWritesClosed.exchange(true, std::memory_order_acq_rel))
+    cancelDiagnosticsSessionStart();
+  // Preparation can still own storage work after the BLE callback returned.
+  // Drain its result and lease before storage shutdown may advance.
+  processCompletedDiagnosticsSessionStart();
+  return shutdownWritesInFlight.load() == 0 &&
+         !diagnosticsSessionStartInProgress.load(std::memory_order_acquire);
+}
+
 void BLENavigationServer::process() {
+  processCompletedDiagnosticsSessionStart();
   scheduleDeferredNotificationEvent();
   if (deviceOwnershipReady) {
     bool pairingExpired = false;
@@ -7015,9 +7290,11 @@ void BLENavigationServer::process() {
       static_cast<uint32_t>(millis() - ownershipRestartRequestedMs) >= 500) {
     Serial.println("BLE: Restarting after ownership removal");
     Serial.flush();
-    ESP.restart();
+    power.deviceRestart();
   }
   processPendingTransferControl();
+  if (mapTransferHttp.takeOperationStatusNotification())
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
   pumpPendingMapTransferStatusChunks();
   if (pendingMapAvailabilityStatus.load(std::memory_order_acquire) &&
       !pendingMapTransferStatusChunks.active() && bleSessionAuthenticated &&
