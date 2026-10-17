@@ -5727,6 +5727,64 @@ extension NavigationProtocolTests {
         }
     }
 
+    static func testBrowserDebugExitReleasesLeaseAfterFreshConfirmation() async {
+        let suiteName = "browser-debug-exit.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let coordinator = DeviceOperationCoordinator(defaults: defaults)
+        let manager = DeviceTransferManager(coordinator: coordinator)
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        _ = bleManager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 1, 0])
+        )
+        var packets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64, canSend: { true }, write: { packets.append($0) }
+        ))
+        let entry = Task {
+            try await manager.enterRemoteDebug(bleManager: bleManager, status: { _ in })
+        }
+        for _ in 0..<100 where !packets.contains(Data("DTRNenter|debug".utf8)) {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let pin = String(repeating: "a", count: 64)
+        let active = """
+        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"https://192.168.31.195:8080","networkTransport":"lan","sessionToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tls":{"identityVersion":1,"certificateSha256":"\(pin)"},"transferGeneration":1,"capabilities":{"secureTransferV1":true}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(active.utf8)
+        )
+        do { _ = try await entry.value }
+        catch { assert(false, "browser-exit fixture enters debug: \(error)"); return }
+        packets.removeAll()
+        await manager.reconcileEndedRemoteDebug(bleManager: bleManager)
+        assert(packets.isEmpty && coordinator.lease?.mode == "debug",
+               "an active browser session retains its root")
+        let stopped = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+        _ = bleManager.handleDeviceTransferStatusNotification(stopped)
+        let cleanup = Task { await manager.reconcileEndedRemoteDebug(bleManager: bleManager) }
+        for _ in 0..<100 where !packets.contains(Data("DSTS".utf8)) {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assert(packets.contains(Data("DSTS".utf8)) && coordinator.lease != nil,
+               "browser exit must obtain a fresh authenticated confirmation before releasing ownership")
+        assert(!packets.contains(Data("DTRNexit".utf8)),
+               "external exit cleanup cannot send a stale exit command")
+        _ = bleManager.handleDeviceTransferStatusNotification(stopped)
+        await cleanup.value
+        assert(coordinator.isCleanupComplete, "confirmed browser exit releases the debug root")
+        do {
+            let map = try coordinator.acquire(deviceID: "device-a", mode: "map", epoch: 1)
+            await manager.reconcileEndedRemoteDebug(bleManager: bleManager)
+            assert(coordinator.owns(map), "late browser cleanup cannot displace a new map operation")
+            coordinator.finish(map, remoteClear: true)
+        } catch { assert(false, "map transfer must be admitted after browser exit: \(error)") }
+    }
+
     static func testDeviceTransferManagerCompensatesCancelledDebugEntry() async {
         let suiteName = "transfer-fixture.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

@@ -1001,6 +1001,7 @@ struct NavigationProtocolTests {
         await testDeviceTransferManagerKeepsConfirmedLANDebugSession()
         await testDeviceTransferManagerCompensatesCancelledDebugEntry()
         await testDeviceTransferManagerConfirmsDebugExit()
+        await testBrowserDebugExitReleasesLeaseAfterFreshConfirmation()
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
         await testFirmwareTransferSurvivesNetworkStartupReconnect()
         await testFirmwareTransferSurfacesFreshRejectionAndExits()

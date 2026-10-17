@@ -2057,6 +2057,18 @@ final class DeviceTransferManager {
         }
     }
 
+    /// The device page can end its own session. Retire our local root only
+    /// after another authenticated empty status confirms the same device is
+    /// clear; never send a stale exit to a successor operation.
+    func reconcileEndedRemoteDebug(bleManager: BLEManager) async {
+        guard operationLease?.mode == DeviceTransferSession.Mode.debug.rawValue,
+              authorizationToken != nil,
+              bleManager.isNavigationReady,
+              bleManager.deviceTransferMode.isEmpty,
+              bleManager.deviceTransferSessionToken?.isEmpty != false else { return }
+        _ = await cleanupOperation(bleManager: bleManager)
+    }
+
     private func joinDeviceNetworkIfNeeded(
         session: DeviceTransferSession,
         statusPath: String,

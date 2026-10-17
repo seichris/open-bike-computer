@@ -3398,7 +3398,12 @@ private struct RemoteDeviceDebugSettingsSection: View {
         }
         .task(id: bleManager.deviceTransferMode) {
             guard bleManager.deviceTransferMode ==
-                    DeviceTransferSession.Mode.debug.rawValue else { return }
+                    DeviceTransferSession.Mode.debug.rawValue else {
+                await remoteDebugTransferManager.reconcileEndedRemoteDebug(
+                    bleManager: bleManager
+                )
+                return
+            }
             while !Task.isCancelled,
                   bleManager.deviceTransferMode ==
                     DeviceTransferSession.Mode.debug.rawValue {
