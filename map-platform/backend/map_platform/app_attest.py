@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -1278,6 +1279,21 @@ class AppAttestStore:
             raise AppAttestError(
                 "app_attest_invalid_assertion", "App Attest assertion is invalid"
             )
+        client_data_hash = hashlib.sha256(client_data).digest()
+        nonce = hashlib.sha256(auth_data + client_data_hash).digest()
+        try:
+            public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+                ec.SECP256R1(), public_key_x963
+            )
+            public_key.verify(
+                signature,
+                nonce,
+                ec.ECDSA(hashes.SHA256()),
+            )
+        except (ValueError, InvalidSignature) as exc:
+            raise AppAttestError(
+                "app_attest_invalid_signature", "App Attest signature is invalid"
+            ) from exc
         parsed = parse_authenticator_data(auth_data, attestation=False)
         expected_rp_id = hashlib.sha256(app_id.encode("utf-8")).digest()
         if not secrets.compare_digest(parsed.rp_id_hash, expected_rp_id):
@@ -1288,9 +1304,24 @@ class AppAttestStore:
             raise AppAttestError(
                 "app_attest_counter_replay", "App Attest assertion was replayed"
             )
-        validation_category, bundle_version = _assertion_extension_values(
-            parsed.extensions
-        )
+        try:
+            validation_category, bundle_version = _assertion_extension_values(
+                parsed.extensions
+            )
+        except AppAttestError:
+            # Signed schema metadata only: never emit extension values, credentials,
+            # challenges, signatures, or the authenticator payload itself.
+            fields = []
+            for name, value in (parsed.extensions or {}).items():
+                label = name if isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "nonstandard-field"
+                kind = type(value).__name__
+                size = f"[{len(value)}]" if isinstance(value, (bytes, str, list, dict)) else ""
+                fields.append(f"{label}:{kind}{size}")
+            logging.getLogger(__name__).warning(
+                "App Attest signed assertion extension schema rejected fields=%s",
+                ",".join(sorted(fields)[:8]),
+            )
+            raise
         if (
             parsed.assertion_at_flag
             and parsed.extensions is not None
@@ -1312,21 +1343,6 @@ class AppAttestStore:
                     "app_attest_invalid_extensions",
                     "App Attest assertion identity is invalid",
                 )
-        client_data_hash = hashlib.sha256(client_data).digest()
-        nonce = hashlib.sha256(auth_data + client_data_hash).digest()
-        try:
-            public_key = ec.EllipticCurvePublicKey.from_encoded_point(
-                ec.SECP256R1(), public_key_x963
-            )
-            public_key.verify(
-                signature,
-                nonce,
-                ec.ECDSA(hashes.SHA256()),
-            )
-        except (ValueError, InvalidSignature) as exc:
-            raise AppAttestError(
-                "app_attest_invalid_signature", "App Attest signature is invalid"
-            ) from exc
         return parsed.counter
 
     @staticmethod
