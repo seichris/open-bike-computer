@@ -495,7 +495,21 @@ def _assertion_extension_values(
 ) -> tuple[int | None, str | None]:
     if extensions is None:
         return None, None
-    allowed = {"validationCategory", "bundleVersion"}
+    category_field, version_field = "validationCategory", "bundleVersion"
+    prefixed_fields = {"apple_validation_category_01", "apple_bundle_version_01"}
+    if set(extensions) & prefixed_fields:
+        # The connected iPhone also uses Apple's attestation-style names in
+        # signed assertions. Require one complete naming family, never combine
+        # partial families or silently prefer one identity over another.
+        if set(extensions) & {category_field, version_field}:
+            raise AppAttestError(
+                "app_attest_invalid_extensions",
+                "App Attest assertion extensions mix identity field formats",
+            )
+        category_field, version_field = (
+            "apple_validation_category_01", "apple_bundle_version_01"
+        )
+    allowed = {category_field, version_field}
     # Apple may add optional client properties. Accept additive metadata only
     # alongside both known identity fields, which are validated below. The
     # signature verifier still authenticates the complete bounded CBOR data,
@@ -505,8 +519,8 @@ def _assertion_extension_values(
             "app_attest_invalid_extensions",
             "App Attest assertion extensions lack required identity fields",
         )
-    validation_category_value = extensions.get("validationCategory")
-    bundle_version = extensions.get("bundleVersion")
+    validation_category_value = extensions.get(category_field)
+    bundle_version = extensions.get(version_field)
     if validation_category_value is None and bundle_version is None:
         return None, None
     validation_category = _validation_category(validation_category_value)
