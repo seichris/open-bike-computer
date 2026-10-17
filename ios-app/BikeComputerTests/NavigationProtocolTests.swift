@@ -802,12 +802,13 @@ struct NavigationProtocolTests {
     }
 
     static func main() async {
-        if CommandLine.arguments.contains("--bluetooth-restoration-only") {
-            testPhoneRestorationWaitsForBluetoothReadiness()
-            testPhoneRestorationIsRetiredWithItsConnection()
-            print("Bluetooth restoration regressions passed")
+#if BLUETOOTH_RESTORATION_ADAPTER_TESTING
+        if CommandLine.arguments.contains("--bluetooth-restoration-adapter-only") {
+            testBluetoothRestorationAdapter()
+            print("Bluetooth restoration adapter regressions passed (host API double; no radio)")
             return
         }
+#endif
         if CommandLine.arguments.contains("--background-upload-state-only") {
             await testBackgroundMapUploadStateObserverReentrancy()
             testBackgroundMapUploadRestorationState()
@@ -909,8 +910,6 @@ struct NavigationProtocolTests {
         testFailedClearRetiresSiblingsAndReplaysIntent()
         testRideRecoveryKeepsSpecificFailureReason()
         testPhoneConnectionAdoptionOwnsGeneration()
-        testPhoneRestorationWaitsForBluetoothReadiness()
-        testPhoneRestorationIsRetiredWithItsConnection()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()
         testBLEManagerGatesTopographicContourVisibility()

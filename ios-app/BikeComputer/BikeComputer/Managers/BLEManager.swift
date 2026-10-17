@@ -1346,6 +1346,7 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Private Properties
     private var centralManager: CBCentralManager!
     private var pendingBluetoothRestoration: (() -> Void)?
+    private var pendingRestoredPeripheralIdentifiers: Set<UUID> = []
     private var connectedPeripheral: CBPeripheral?
     private var navigationCharacteristic: CBCharacteristic?
     private var authCharacteristic: CBCharacteristic?
@@ -1577,7 +1578,8 @@ class BLEManager: NSObject, ObservableObject {
     private var lastSentPhoneBatteryCharging: Bool?
     private var suppressNextReconnect: Bool = false
     private var hasActiveBLESession: Bool {
-        isConnected || isConnecting || connectedPeripheral != nil
+        pendingBluetoothRestoration != nil ||
+            isConnected || isConnecting || connectedPeripheral != nil
     }
 
     var hasActiveTransportSession: Bool { hasActiveBLESession }
@@ -2327,20 +2329,13 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     func setBluetoothPoweredOnForTesting(_ isPoweredOn: Bool) {
-        setBluetoothStateForTesting(isPoweredOn ? .poweredOn : .poweredOff)
-    }
-
-    func setBluetoothStateForTesting(_ state: CBManagerState) {
         guard let scanDriverForTesting else { return }
-        scanDriverForTesting.isPoweredOn = state == .poweredOn
-        handleCentralStateChange(state)
+        scanDriverForTesting.isPoweredOn = isPoweredOn
+        handleCentralStateChange(isPoweredOn ? .poweredOn : .poweredOff)
     }
 
-    func restoreBluetoothWhenReadyForTesting(
-        isPoweredOn: Bool,
-        resume: @escaping () -> Void
-    ) {
-        restoreBluetoothWhenReady(isPoweredOn: isPoweredOn, resume: resume)
+    func installCentralManagerForTesting(_ central: CBCentralManager) {
+        centralManager = central
     }
 
     func setFirmwareBootCheckpointForTesting(
@@ -6851,6 +6846,7 @@ class BLEManager: NSObject, ObservableObject {
     private func clearConnectionState(preservingPendingRestoration: Bool = false) {
         if !preservingPendingRestoration {
             pendingBluetoothRestoration = nil
+            pendingRestoredPeripheralIdentifiers.removeAll()
         }
         deviceScreenConfigurationController.disconnect(
             deviceID: connectedDeviceID,
@@ -9556,7 +9552,12 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         _ central: CBCentralManager,
         willRestoreState dict: [String: Any]
     ) {
-        restoreBluetoothWhenReady(isPoweredOn: central.state == .poweredOn) {
+        let restored = dict[CBCentralManagerRestoredStatePeripheralsKey]
+            as? [CBPeripheral] ?? []
+        restoreBluetoothWhenReady(
+            isPoweredOn: central.state == .poweredOn,
+            peripheralIdentifiers: Set(restored.map(\.identifier))
+        ) {
             [weak self, weak central] in
             guard let self, let central else { return }
             self.restoreBluetoothState(central, dict: dict)
@@ -9565,12 +9566,14 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
 
     private func restoreBluetoothWhenReady(
         isPoweredOn: Bool,
+        peripheralIdentifiers: Set<UUID>,
         resume: @escaping () -> Void
     ) {
         // willRestoreState can precede the first powered-on callback. Issuing
         // GATT discovery at that point can silently lose the request and leave
         // authentication waiting for its timeout instead of making progress.
         pendingBluetoothRestoration = resume
+        pendingRestoredPeripheralIdentifiers = peripheralIdentifiers
         if isPoweredOn {
             resumePendingBluetoothRestoration()
         } else {
@@ -9581,6 +9584,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
     private func resumePendingBluetoothRestoration() {
         let resume = pendingBluetoothRestoration
         pendingBluetoothRestoration = nil
+        pendingRestoredPeripheralIdentifiers.removeAll()
         resume?()
     }
 
@@ -9852,6 +9856,14 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
     }
     
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        if pendingBluetoothRestoration != nil,
+           pendingRestoredPeripheralIdentifiers.contains(peripheral.identifier) {
+            // A restored pending connection may complete before readiness is
+            // delivered. Replay will inspect its new state; do not cancel it
+            // merely because adoption has intentionally been deferred.
+            log("Deferring restored connection callback until Bluetooth is powered on")
+            return
+        }
         guard BLELocalForgetPolicy.acceptsCallback(
             peripheralIdentifier: peripheral.identifier,
             currentIdentifier: connectedPeripheral?.identifier,
