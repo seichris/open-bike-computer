@@ -650,7 +650,7 @@ class AppAttestStoreTests(unittest.TestCase):
 
     def test_additive_assertion_extensions_preserve_identity_and_signature_checks(self):
         cases = ["valid", "wrong-category", "wrong-build", "missing-category", "tampered",
-                 "prefixed", "prefixed-wrong-category", "prefixed-wrong-build",
+                 "prefixed", "prefixed-additive", "prefixed-wrong-category", "prefixed-wrong-build",
                  "prefixed-missing-category", "prefixed-missing-version",
                  "prefixed-tampered", "mixed", "conflicting"]
         for index, case in enumerate(cases):
@@ -708,7 +708,7 @@ class AppAttestStoreTests(unittest.TestCase):
                         assertion_object=assertion, request_body=body,
                         payload=payload, app_build=TEST_APP_BUILD,
                     )
-                if case in {"valid", "prefixed"}:
+                if case in {"valid", "prefixed", "prefixed-additive"}:
                     self.assertEqual(verify(), 1)
                 else:
                     with self.assertRaises(AppAttestError) as rejected:
@@ -920,11 +920,11 @@ class AppAttestStoreTests(unittest.TestCase):
             payload=payload,
             body=body,
             counter=1,
-            extensions={"unexpected": True},
+            extensions={"unexpected": "synthetic-private-extension-value"},
             extension_data_flag=False,
         )
 
-        with self.assertRaisesRegex(AppAttestError, "extensions"):
+        with self.assertLogs("map_platform.app_attest", level="WARNING") as logs, self.assertRaisesRegex(AppAttestError, "extensions"):
             self.store.verify_map_create_assertion(
                 installation_id=installation_id,
                 challenge_id=challenge.challenge_id,
@@ -934,6 +934,9 @@ class AppAttestStoreTests(unittest.TestCase):
                 payload=payload,
                 app_build=TEST_APP_BUILD,
             )
+
+        self.assertIn("unexpected:str", " ".join(logs.output))
+        self.assertNotIn("synthetic-private-extension-value", " ".join(logs.output))
 
     def test_assertion_is_bound_to_body_challenge_and_monotonic_counter(self):
         installation_id = "inst_v2_" + "a" * 32

@@ -5728,6 +5728,14 @@ extension NavigationProtocolTests {
     }
 
     static func testBrowserDebugExitReleasesLeaseAfterFreshConfirmation() async {
+        await assertBrowserDebugExitReleasesLease(readinessRecovery: false)
+        await assertBrowserDebugExitReleasesLease(readinessRecovery: true)
+        await assertBrowserDebugExitReleasesLease(readinessRecovery: true, newConnection: true)
+    }
+
+    private static func assertBrowserDebugExitReleasesLease(
+        readinessRecovery: Bool, newConnection: Bool = false
+    ) async {
         let suiteName = "browser-debug-exit.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -5765,9 +5773,41 @@ extension NavigationProtocolTests {
                "an active browser session retains its root")
         let stopped = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
             Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+        if readinessRecovery { bleManager.isNavigationReady = false }
+        if newConnection {
+            let previousEpoch = bleManager.transferConnectionEpoch
+            bleManager.clearConnectionStateForTesting()
+            bleManager.setConnectedDeviceIDForTesting("device-a")
+            bleManager.isConnected = true
+            bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 64, canSend: { true }, write: { packets.append($0) }
+            ))
+            assert(bleManager.transferConnectionEpoch != previousEpoch,
+                   "reconnect fixture advances the connection epoch")
+        }
         _ = bleManager.handleDeviceTransferStatusNotification(stopped)
-        let cleanup = Task { await manager.reconcileEndedRemoteDebug(bleManager: bleManager) }
-        for _ in 0..<100 where !packets.contains(Data("DSTS".utf8)) {
+        if readinessRecovery {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            assert(packets.isEmpty && coordinator.lease?.mode == "debug",
+                   "disconnected empty state cannot release a debug lease")
+            bleManager.isNavigationReady = true
+        }
+        // No Settings view or manual reconcile call: the model must react.
+        if newConnection {
+            for _ in 0..<1000 where coordinator.lease != nil {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+            assert(coordinator.lease == nil && coordinator.unresolved != nil,
+                   "a retired connection releases its local root but retains durable cleanup quarantine")
+            assert(!packets.contains(Data("DTRNexit".utf8)),
+                   "reconnect cleanup never sends an old session's exit on the new connection")
+            do {
+                _ = try coordinator.acquire(deviceID: "device-a", mode: "map", epoch: bleManager.transferConnectionEpoch)
+                assert(false, "a successor must confirm fresh idle status before admission")
+            } catch { assert(error as? DeviceOperationCoordinator.Failure == .cleanupUnresolved) }
+            return
+        }
+        for _ in 0..<1000 where !packets.contains(Data("DSTS".utf8)) {
             try? await Task.sleep(nanoseconds: 1_000_000)
         }
         assert(packets.contains(Data("DSTS".utf8)) && coordinator.lease != nil,
@@ -5775,8 +5815,10 @@ extension NavigationProtocolTests {
         assert(!packets.contains(Data("DTRNexit".utf8)),
                "external exit cleanup cannot send a stale exit command")
         _ = bleManager.handleDeviceTransferStatusNotification(stopped)
-        await cleanup.value
-        assert(coordinator.isCleanupComplete, "confirmed browser exit releases the debug root")
+        for _ in 0..<1000 where !coordinator.isCleanupComplete {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assert(coordinator.isCleanupComplete, "model-owned cleanup releases the root without a view")
         do {
             let map = try coordinator.acquire(deviceID: "device-a", mode: "map", epoch: 1)
             await manager.reconcileEndedRemoteDebug(bleManager: bleManager)
