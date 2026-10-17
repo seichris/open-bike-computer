@@ -495,10 +495,14 @@ def _assertion_extension_values(
     if extensions is None:
         return None, None
     allowed = {"validationCategory", "bundleVersion"}
-    if not set(extensions).issubset(allowed):
+    # Apple may add optional client properties. Accept additive metadata only
+    # alongside both known identity fields, which are validated below. The
+    # signature verifier still authenticates the complete bounded CBOR data,
+    # including every opaque extension; unknown fields cannot replace identity.
+    if set(extensions) - allowed and not allowed.issubset(extensions):
         raise AppAttestError(
             "app_attest_invalid_extensions",
-            "App Attest assertion extensions contain unsupported fields",
+            "App Attest assertion extensions lack required identity fields",
         )
     validation_category_value = extensions.get("validationCategory")
     bundle_version = extensions.get("bundleVersion")
