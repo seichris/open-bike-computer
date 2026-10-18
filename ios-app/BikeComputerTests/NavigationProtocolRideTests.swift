@@ -5687,6 +5687,11 @@ extension NavigationProtocolTests {
     }
 
     static func testDeviceTransferManagerConfirmsDebugExit() async {
+        await assertDeviceTransferManagerConfirmsDebugExit(statusDelay: 0)
+        await assertDeviceTransferManagerConfirmsDebugExit(statusDelay: 9_000_000_000)
+    }
+
+    private static func assertDeviceTransferManagerConfirmsDebugExit(statusDelay: UInt64) async {
         let suiteName = "transfer-fixture.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -5740,6 +5745,7 @@ extension NavigationProtocolTests {
         assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
                     "DTRNexit",
                     "debug exit starts with an authenticated exit command")
+        if statusDelay > 0 { try? await Task.sleep(nanoseconds: statusDelay) }
         let stoppedStatus = """
         {"configured":true,"enabled":false,"mode":"","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
         """
@@ -5751,6 +5757,10 @@ extension NavigationProtocolTests {
             try await task.value
             assert(bleManager.deviceTransferSessionToken == nil,
                    "confirmed debug exit clears the session token")
+            assert(defaults.data(forKey: "device-operation-cleanup-v1") == nil,
+                   "late exit confirmation must also clear durable cleanup ownership")
+            assert(sentPackets.filter { $0 == Data("DTRNexit".utf8) }.count == 1,
+                   "recovery confirms status without sending another exit")
         } catch {
             assert(false, "fresh empty status should confirm debug exit: \(error)")
         }

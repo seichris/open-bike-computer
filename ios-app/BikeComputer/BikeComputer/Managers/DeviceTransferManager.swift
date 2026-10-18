@@ -968,8 +968,45 @@ final class DeviceTransferManager {
             self.coordinator.finish(lease, remoteClear: clear)
             if self.operationLease == lease {
                 self.operationLease = nil
-                self.stopDebugStatusObservation()
             }
+            // A late/chunked empty status can arrive after the exit window.
+            // Reconfirm it instead of stranding the saved cleanup record. Never
+            // adopt another operation or carry this automatic retry across a link.
+            if !clear, lease.mode == DeviceTransferSession.Mode.debug.rawValue,
+               self.coordinator.lease == nil,
+               self.coordinator.unresolved == lease,
+               bleManager.isNavigationReady,
+               bleManager.connectedDeviceID == lease.deviceID,
+               bleManager.transferConnectionEpoch == lease.connectionEpoch {
+                do {
+                    let recovered = try await self.coordinator.recover(
+                        deviceID: lease.deviceID,
+                        connectionEpoch: lease.connectionEpoch,
+                        status: {
+                            .init(deviceID: bleManager.connectedDeviceID,
+                                  connectionEpoch: bleManager.transferConnectionEpoch,
+                                  ready: bleManager.isNavigationReady,
+                                  revision: bleManager.deviceTransferStatusRevision,
+                                  mode: bleManager.deviceTransferMode,
+                                  tokenDigest: bleManager.deviceTransferSessionToken.flatMap {
+                                      $0.isEmpty ? nil : Self.authorizationDigest($0)
+                                  },
+                                  transferGeneration: bleManager.deviceTransferGeneration)
+                        },
+                        requestStatus: { bleManager.requestDeviceTransferStatus() }
+                    )
+                    if let recovered {
+                        // An exact still-active owner remains retryable; the
+                        // model observer can also reconcile a subsequent exit.
+                        self.operationLease = recovered
+                        self.authorizationToken = bleManager.deviceTransferSessionToken
+                        self.authorizationGeneration = bleManager.deviceTransferGeneration
+                    } else {
+                        clear = true
+                    }
+                } catch { /* Keep unresolved ownership quarantined. */ }
+            }
+            if self.operationLease == nil { self.stopDebugStatusObservation() }
             return clear && self.coordinator.isCleanupComplete
         }
         cleanupTask = cleanup
