@@ -874,31 +874,29 @@ final class DeviceTransferManager {
         // Recovery never sends an unbound exit. Only a fresh authenticated empty
         // status from the recorded device can resolve an interrupted cleanup.
         if coordinator.unresolved != nil, coordinator.lease == nil {
-            let revision = bleManager.deviceTransferStatusRevision
-            _ = bleManager.requestDeviceTransferStatus()
-            for _ in 0..<8 {
-                try await Task.sleep(nanoseconds: 250_000_000)
-                guard bleManager.isNavigationReady, bleManager.connectedDeviceID == deviceID else {
-                    throw DeviceOperationCoordinator.Failure.staleOwner
-                }
-                if bleManager.deviceTransferStatusRevision != revision,
-                   bleManager.deviceTransferMode.isEmpty,
-                   bleManager.deviceTransferSessionToken?.isEmpty != false {
-                    coordinator.reconcileClear(deviceID: deviceID)
-                    break
-                }
-                if bleManager.deviceTransferStatusRevision != revision,
-                   let stored = coordinator.unresolved, stored.deviceID == deviceID,
-                   stored.mode == bleManager.deviceTransferMode,
-                   coordinator.transferGeneration == bleManager.deviceTransferGeneration,
-                   let token = bleManager.deviceTransferSessionToken,
-                   coordinator.tokenDigest == Self.authorizationDigest(token) {
-                    operationLease = try coordinator.adoptUnresolved(epoch: bleManager.transferConnectionEpoch)
-                    authorizationToken = token
-                    authorizationGeneration = bleManager.deviceTransferGeneration
-                    remoteAcceptancePossible = true
-                    _ = await cleanupOperation(bleManager: bleManager)
-                    break
+            let recovered = try await coordinator.recover(
+                deviceID: deviceID,
+                connectionEpoch: bleManager.transferConnectionEpoch,
+                status: {
+                    .init(deviceID: bleManager.connectedDeviceID,
+                          connectionEpoch: bleManager.transferConnectionEpoch,
+                          ready: bleManager.isNavigationReady,
+                          revision: bleManager.deviceTransferStatusRevision,
+                          mode: bleManager.deviceTransferMode,
+                          tokenDigest: bleManager.deviceTransferSessionToken.flatMap {
+                              $0.isEmpty ? nil : Self.authorizationDigest($0)
+                          },
+                          transferGeneration: bleManager.deviceTransferGeneration)
+                },
+                requestStatus: { bleManager.requestDeviceTransferStatus() }
+            )
+            if let recovered {
+                operationLease = recovered
+                authorizationToken = bleManager.deviceTransferSessionToken
+                authorizationGeneration = bleManager.deviceTransferGeneration
+                remoteAcceptancePossible = true
+                guard await cleanupOperation(bleManager: bleManager) else {
+                    throw DeviceOperationCoordinator.Failure.cleanupUnresolved
                 }
             }
         }
