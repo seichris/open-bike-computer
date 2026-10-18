@@ -14,12 +14,26 @@ class DeviceOperationLifecycleContractTests(unittest.TestCase):
     def test_reconnect_cleanup_requires_fresh_exact_authorization(self):
         begin = MANAGER[MANAGER.index("private func beginOperation"):MANAGER.index("private static func authorizationDigest")]
         self.assertIn("bleManager.isNavigationReady", begin)
-        self.assertIn("stored.deviceID == deviceID", begin)
-        self.assertIn("stored.mode == bleManager.deviceTransferMode", begin)
-        self.assertIn("coordinator.transferGeneration == bleManager.deviceTransferGeneration", begin)
-        self.assertIn("coordinator.tokenDigest == Self.authorizationDigest(token)", begin)
-        self.assertIn("deviceTransferStatusRevision != revision", begin)
-        self.assertLess(begin.index("coordinator.tokenDigest =="), begin.index("coordinator.adoptUnresolved("))
+        self.assertIn("try await coordinator.recover(", begin)
+        for field in ("deviceID: bleManager.connectedDeviceID",
+                      "connectionEpoch: bleManager.transferConnectionEpoch",
+                      "revision: bleManager.deviceTransferStatusRevision",
+                      "mode: bleManager.deviceTransferMode",
+                      "Self.authorizationDigest($0)",
+                      "transferGeneration: bleManager.deviceTransferGeneration",
+                      "requestStatus: { bleManager.requestDeviceTransferStatus() }"):
+            self.assertIn(field, begin)
+        self.assertLess(begin.index("coordinator.recover("), begin.index("coordinator.acquire("))
+        recovery = REGISTRY[REGISTRY.index("func recover("):REGISTRY.index("init(defaults:")]
+        for fence in ("stored.deviceID == deviceID", "current.deviceID == deviceID",
+                      "current.connectionEpoch == connectionEpoch", "current.ready",
+                      "current.revision != revision", "current.mode == stored.mode",
+                      "current.tokenDigest == tokenDigest",
+                      "current.transferGeneration == transferGeneration"):
+            self.assertIn(fence, recovery)
+        self.assertLess(recovery.index("current.tokenDigest == tokenDigest"),
+                        recovery.index("adoptUnresolved("))
+        self.assertNotIn("coordinator.adoptUnresolved(", begin)
         self.assertIn("SHA256.hash(data: Data(token.utf8))", MANAGER)
         record = REGISTRY[REGISTRY.index("private struct CleanupRecord"):REGISTRY.index("static let shared")]
         self.assertIn("tokenDigest", record)
