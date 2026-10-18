@@ -10,7 +10,6 @@ import ImageIO
 nonisolated enum TopographyMapKitTileWarp {
     typealias TileLoader = @Sendable (_ z: Int, _ x: Int, _ y: Int, _ scale: Int) async throws -> Data?
 
-    private struct TileKey: Hashable { let x: Int; let y: Int }
     private struct Point { let x: Double; let y: Double }
     private static let tileSide = 256
 
@@ -85,16 +84,40 @@ nonisolated enum TopographyMapKitTileWarp {
             throw WarpError.extent
         }
 
-        var tiles: [TileKey: [UInt8]] = [:]
+        // Stitch only the sampled source rectangle, with transparent pixels
+        // for missing tiles. Sampling a dictionary of entire RGBA arrays for
+        // every channel caused millions of hashes and retain/release pairs per
+        // tile, delaying MapKit's replies during a zoom gesture.
+        let sourceWidth = maxX - minX + 1
+        let sourceHeight = maxY - minY + 1
+        var sourcePixels = [UInt8](repeating: 0, count: sourceWidth * sourceHeight * 4)
+        var hasSource = false
         for tileY in firstTileY...lastTileY {
             for tileX in firstTileX...lastTileX {
                 try Task.checkCancellation()
                 if let data = try await loader(z, tileX, tileY, scale) {
-                    tiles[TileKey(x: tileX, y: tileY)] = try decode(data, side: side)
+                    let pixels = try decode(data, side: side)
+                    hasSource = true
+                    let left = max(minX, tileX * side)
+                    let right = min(maxX + 1, (tileX + 1) * side)
+                    let top = max(minY, tileY * side)
+                    let bottom = min(maxY + 1, (tileY + 1) * side)
+                    pixels.withUnsafeBufferPointer { input in
+                        sourcePixels.withUnsafeMutableBufferPointer { output in
+                            for row in top..<bottom {
+                                let src = ((row - tileY * side) * side + left - tileX * side) * 4
+                                let dst = ((row - minY) * sourceWidth + left - minX) * 4
+                                output.baseAddress!.advanced(by: dst).update(
+                                    from: input.baseAddress!.advanced(by: src),
+                                    count: (right - left) * 4
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
-        guard !tiles.isEmpty else { return nil }
+        guard hasSource else { return nil }
 
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue |
             CGBitmapInfo.byteOrder32Big.rawValue
@@ -105,39 +128,47 @@ nonisolated enum TopographyMapKitTileWarp {
         ), let output = context.data?.assumingMemoryBound(to: UInt8.self) else {
             throw WarpError.outputTile
         }
-        for pixelY in 0..<side {
-            try Task.checkCancellation()
-            let cellY = pixelY / step
-            let fractionalY = (Double(pixelY) + 0.5 - Double(cellY * step)) / Double(step)
-            for pixelX in 0..<side {
-                let cellX = pixelX / step
-                let fractionalX = (Double(pixelX) + 0.5 - Double(cellX * step)) / Double(step)
-                let upperLeft = grid[cellY * (count + 1) + cellX]
-                let upperRight = grid[cellY * (count + 1) + cellX + 1]
-                let lowerLeft = grid[(cellY + 1) * (count + 1) + cellX]
-                let lowerRight = grid[(cellY + 1) * (count + 1) + cellX + 1]
-                let sourceX = interpolate(
-                    upperLeft.x, upperRight.x, lowerLeft.x, lowerRight.x,
-                    fractionalX, fractionalY
-                ) - 0.5
-                let sourceY = interpolate(
-                    upperLeft.y, upperRight.y, lowerLeft.y, lowerRight.y,
-                    fractionalX, fractionalY
-                ) - 0.5
-                let left = Int(floor(sourceX))
-                let top = Int(floor(sourceY))
-                let fractionX = sourceX - Double(left)
-                let fractionY = sourceY - Double(top)
-                let outputIndex = (pixelY * side + pixelX) * 4
-                for channel in 0..<4 {
-                    let a = component(atX: left, y: top, channel: channel, side: side, tiles: tiles)
-                    let b = component(atX: left + 1, y: top, channel: channel, side: side, tiles: tiles)
-                    let c = component(atX: left, y: top + 1, channel: channel, side: side, tiles: tiles)
-                    let d = component(atX: left + 1, y: top + 1, channel: channel, side: side, tiles: tiles)
-                    output[outputIndex + channel] = UInt8(
-                        (interpolate(a, b, c, d, fractionX, fractionY))
-                            .rounded().clamped(to: 0...255)
-                    )
+        try sourcePixels.withUnsafeBufferPointer { pixels in
+            for pixelY in 0..<side {
+                try Task.checkCancellation()
+                let cellY = pixelY / step
+                let fractionalY = (Double(pixelY) + 0.5 - Double(cellY * step)) / Double(step)
+                for pixelX in 0..<side {
+                    let cellX = pixelX / step
+                    let fractionalX = (Double(pixelX) + 0.5 - Double(cellX * step)) / Double(step)
+                    let upperLeft = grid[cellY * (count + 1) + cellX]
+                    let upperRight = grid[cellY * (count + 1) + cellX + 1]
+                    let lowerLeft = grid[(cellY + 1) * (count + 1) + cellX]
+                    let lowerRight = grid[(cellY + 1) * (count + 1) + cellX + 1]
+                    let sourceX = interpolate(
+                        upperLeft.x, upperRight.x, lowerLeft.x, lowerRight.x,
+                        fractionalX, fractionalY
+                    ) - 0.5
+                    let sourceY = interpolate(
+                        upperLeft.y, upperRight.y, lowerLeft.y, lowerRight.y,
+                        fractionalX, fractionalY
+                    ) - 0.5
+                    let left = Int(floor(sourceX))
+                    let top = Int(floor(sourceY))
+                    let fractionX = sourceX - Double(left)
+                    let fractionY = sourceY - Double(top)
+                    let outputIndex = (pixelY * side + pixelX) * 4
+                    // The inverse grid's extrema include a one-pixel bilinear
+                    // border, so all four neighbours are inside this rectangle.
+                    let aIndex = ((top - minY) * sourceWidth + left - minX) * 4
+                    let bIndex = aIndex + 4
+                    let cIndex = aIndex + sourceWidth * 4
+                    let dIndex = cIndex + 4
+                    for channel in 0..<4 {
+                        let a = Double(pixels[aIndex + channel])
+                        let b = Double(pixels[bIndex + channel])
+                        let c = Double(pixels[cIndex + channel])
+                        let d = Double(pixels[dIndex + channel])
+                        output[outputIndex + channel] = UInt8(
+                            (interpolate(a, b, c, d, fractionX, fractionY))
+                                .rounded().clamped(to: 0...255)
+                        )
+                    }
                 }
             }
         }
@@ -174,17 +205,6 @@ nonisolated enum TopographyMapKitTileWarp {
         (a * (1 - x) + b * x) * (1 - y) + (c * (1 - x) + d * x) * y
     }
 
-    private static func component(
-        atX x: Int, y: Int, channel: Int, side: Int,
-        tiles: [TileKey: [UInt8]]
-    ) -> Double {
-        let tileX = Int(floor(Double(x) / Double(side)))
-        let tileY = Int(floor(Double(y) / Double(side)))
-        guard let tile = tiles[TileKey(x: tileX, y: tileY)] else { return 0 }
-        let localX = x - tileX * side
-        let localY = y - tileY * side
-        return Double(tile[(localY * side + localX) * 4 + channel])
-    }
 }
 
 private extension Double {

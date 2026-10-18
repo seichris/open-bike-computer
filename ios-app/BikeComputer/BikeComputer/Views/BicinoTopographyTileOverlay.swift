@@ -129,6 +129,7 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     let y = path.y
     let z = path.z
     let scale = path.contentScaleFactor > 1 ? 2 : 1
+    let started = ProcessInfo.processInfo.systemUptime
     noteTile(z: z, x: x, y: y, scale: scale, outcome: "requested")
     let alignsChina = alignsChina
     let taskID = UUID()
@@ -147,7 +148,8 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
           data = try await store.displayTile(z: z, x: x, y: y, scale: scale)
         }
         try Task.checkCancellation()
-        self?.noteTile(z: z, x: x, y: y, scale: scale, outcome: data == nil ? "empty" : "loaded")
+        self?.noteTile(z: z, x: x, y: y, scale: scale, outcome: data == nil ? "empty" : "loaded",
+                       elapsed: ProcessInfo.processInfo.systemUptime - started)
         reply.complete(data ?? Self.transparentPNG, nil)
       } catch {
         self?.noteTile(z: z, x: x, y: y, scale: scale, outcome: "failed-\(type(of: error))")
@@ -165,7 +167,7 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     tasks.forEach { $0.cancel() }
   }
 
-  private func noteTile(z: Int, x: Int, y: Int, scale: Int, outcome: String) {
+  private func noteTile(z: Int, x: Int, y: Int, scale: Int, outcome: String, elapsed: TimeInterval? = nil) {
 #if DEBUG
     guard ProcessInfo.processInfo.arguments.contains("--contour-tile-diagnostics") else { return }
     let count = pow(2.0, Double(z))
@@ -179,7 +181,10 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     taskLock.unlock()
     // Coalesce by zoom/outcome, keeping centre and edge separate so a sweep
     // cannot exhaust the cap on one detailed viewport. No absolute positions.
-    if shouldLog { print("ContourTile instance=\(diagnosticID) \(key) offset=\(dx),\(dy)") }
+    if shouldLog {
+      let timing = elapsed.map { " elapsedMs=\(Int($0 * 1000))" } ?? ""
+      print("ContourTile instance=\(diagnosticID) \(key) offset=\(dx),\(dy)\(timing)")
+    }
 #endif
   }
 
