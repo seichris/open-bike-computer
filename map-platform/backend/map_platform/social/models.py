@@ -111,14 +111,29 @@ class QuickMessage(Input):
     status: Literal["waiting", "mechanical", "turned_around", "regroup", "meet_at_stop"]
 
 
+# At least 256 random bits, base64url without padding. Only digests are stored.
+SECRET_PATTERN = r"^[A-Za-z0-9_-]{43,128}$"
+
+
 class DeviceBinding(Input):
     token: str = Field(pattern=r"^[0-9a-f]{64,200}$")
     environment: Literal["development", "production"]
+    secret: str = Field(pattern=SECRET_PATTERN)
+
+
+class DeviceRelease(Input):
+    secret: str = Field(pattern=SECRET_PATTERN)
+    owner: str = Field(min_length=36, max_length=36)
 
 
 class Deletion(Input):
     expectedProfileID: str
     appleAuthorizationCode: str | None = Field(default=None, max_length=4096)
+    receiptDigest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DeletionReceipt(Input):
+    receipt: str = Field(pattern=SECRET_PATTERN)
 
 
 class WebsiteDeletion(Input):

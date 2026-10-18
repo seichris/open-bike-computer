@@ -8,9 +8,13 @@ from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import OperationalError
 from ..user_auth import FirebaseIdentity
 from .features import SocialFeatures
-from .database import (Database, accounts, blocks, content, devices, friendships, invites,
-                       limits, links, media, members, messages, outbox, replays, rides)
+from .database import (Database, accounts, blocks, content, deletion_receipts, devices, exposures,
+                       friendships, invites, limits, links, media, members, messages, outbox,
+                       replays, rides)
 from .media import S3Media, reconcile_orphans
+
+# Long enough for an app to come back online and confirm an accepted deletion.
+DELETION_RECEIPT_RETENTION_SECONDS = 30 * 86400
 
 
 class APNs:
@@ -68,6 +72,11 @@ def cleanup_account(c, actor, identity, media_store):
     c.execute(delete(invites).where(or_(invites.c.sender == actor, invites.c.recipient == actor)))
     c.execute(delete(messages).where(messages.c.sender == actor))
     c.execute(delete(replays).where(replays.c.owner == actor))
+    # Routes this rider received are no longer relevant. Records of copies that
+    # others received from this rider keep restricting their republication.
+    # The deletion receipt deliberately survives cleanup for confirmation.
+    c.execute(delete(exposures).where(exposures.c.viewer == actor))
+    c.execute(delete(devices).where(devices.c.owner == actor))
     # Route snapshots in organized sessions are no longer authorized after deletion.
     c.execute(update(rides).where(rides.c.owner == actor).values(route={}, title="Deleted ride", status="ended"))
     from .service import digest
@@ -143,6 +152,7 @@ def run_once(database, identity, media_store, notifications, now=None, features=
         c.execute(delete(invites).where(invites.c.expires < now-30*86400))
         c.execute(delete(replays).where(replays.c.created < now-86400))
         c.execute(delete(limits).where(limits.c.expires < now))
+        c.execute(delete(deletion_receipts).where(deletion_receipts.c.created < now-DELETION_RECEIPT_RETENTION_SECONDS))
 
     database.run(maintain)
 

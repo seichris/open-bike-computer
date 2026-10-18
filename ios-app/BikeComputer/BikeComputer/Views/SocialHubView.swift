@@ -130,12 +130,16 @@ struct SocialHubView: View {
                     Button("Link another Apple sign-in") { perform { _ = try await store.session.signInWithApple(link: true) } }
                     Text("Link a provider only if it belongs to you. Accounts with existing separate identities are never merged automatically.").font(.caption)
                     Button("Enable request and invitation alerts") { perform { try await store.enableNotifications() } }
+                    if case .unavailable(let reason) = store.notificationStatus {
+                        Text(reason).font(.caption).foregroundStyle(.secondary)
+                    }
                     Button("Sign out") { perform { try await store.signOut() } }
                     Button("Delete Bicino account", role: .destructive) { deleting = true }
                 } footer: {
                     Text("Account deletion applies to bicino.com and social riding. It removes shared content and photos. Your private Health workouts and local routes are not deleted.")
                 }
             }
+            if let notice = store.notice { Section { Text(notice) } }
             if let error = store.error { Section { Text(error).foregroundStyle(.red) } }
         }
         .navigationTitle("Friends & Riding")
@@ -145,11 +149,6 @@ struct SocialHubView: View {
         .refreshable { do { try await store.refresh() } catch { store.error = error.localizedDescription } }
         .confirmationDialog("Delete your Bicino account and shared data?", isPresented: $deleting) {
             Button("Delete account", role: .destructive) { perform { try await store.deleteAccount() } }
-        }
-        .onChange(of: store.pendingLink) { url in
-            guard let url else { return }
-            let parts = url.pathComponents
-            if parts.count == 4 && parts[2] == "ride" { joinCode = parts[3] }
         }
     }
 
@@ -289,26 +288,44 @@ private struct SocialRoutePublisher: View {
     @State private var visibility = "private"
     @State private var consent = false
     @State private var selected: PlannedRouteSummaryV1?
+    /// Ownership is read from route provenance once per library change, not per redraw.
+    @State private var publications: [UUID: SocialRoutePublication] = [:]
+    private var candidates: [PlannedRouteSummaryV1] {
+        routeLibrary.offlineNavigationRoutes.filter { $0.providerID == RouteProviderPolicyV1.importedGPX.providerID }
+    }
     var body: some View {
         List {
             Section { SocialVisibilityPicker(selection: $visibility)
                 Toggle("I have permission to share this route", isOn: $consent)
-                Text("Planned routes are shared exactly as saved, including any private areas they cross. Review the whole route before sharing. Only eligible GPX routes can be published.").font(.caption)
+                Text("Planned routes are shared exactly as saved, including any private areas they cross. Review the whole route before sharing. Only GPX routes you own can be published; routes saved from other riders stay theirs to share.").font(.caption)
             }
-            ForEach(routeLibrary.offlineNavigationRoutes.filter { $0.providerID == "user.imported-gpx" }) { route in
-                Button(route.name) { selected = route }
+            ForEach(candidates) { route in
+                if publications[route.id]?.mayPublish == true {
+                    Button(route.name) { selected = route }
+                } else {
+                    VStack(alignment: .leading) {
+                        Text(route.name).foregroundStyle(.secondary)
+                        Text(publications[route.id] == nil ? "Checking ownership…" : "Saved from another rider. Only its owner can share it.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
-            if let selected, let archive = try? routeLibrary.offlineArchive(for: selected),
+            if let selected, publications[selected.id]?.mayPublish == true,
+               let archive = try? routeLibrary.offlineArchive(for: selected),
                let encoded = try? archive.encoded(purpose: .offlineNavigation),
                let body = try? JSONDecoder().decode(SocialContentBody.self, from: JSONSerialization.data(withJSONObject: ["archive": String(decoding: encoded, as: UTF8.self)])) {
                 SocialTrackPreview(content: body).frame(height: 230)
                 Button("Publish \(selected.name)") {
-                    Task { do { try await store.publish(archive, title: selected.name, visibility: visibility) }
+                    Task { do { try await store.publish(selected, from: routeLibrary, title: selected.name, visibility: visibility) }
                         catch { store.error = error.localizedDescription } }
                 }.disabled(!consent)
             }
             if let error = store.error { Text(error).foregroundStyle(.red) }
         }.navigationTitle("Share route")
+        .task(id: candidates.map(\.id.uuidString) + [store.profile?.id ?? ""]) {
+            publications = Dictionary(candidates.map { ($0.id, store.publication(for: $0, in: routeLibrary)) },
+                                      uniquingKeysWith: { first, _ in first })
+        }
     }
 }
 
@@ -416,14 +433,10 @@ private struct SocialLiveControls: View {
                 Button("Share my live location") { run { try await store.live.startSharing(stats: stats) } }
                 Text("Sharing stops after four hours or when the ride ends. You can stop it at any time.").font(.caption)
             }
-            Button("Save shared route") { run {
-                guard let raw = ride.route.archive else { throw SocialFailure.invalidResponse }
-                _ = try routeLibrary.importArchive(Data(raw.utf8))
-            } }
+            Button("Save shared route") { run { try store.saveRideRoute(ride, to: routeLibrary) } }
             if let mapAction {
                 Button("Open shared route on map") { run {
-                    guard let raw = ride.route.archive else { throw SocialFailure.invalidResponse }
-                    let summary = try routeLibrary.importArchive(Data(raw.utf8))
+                    let summary = try store.saveRideRoute(ride, to: routeLibrary)
                     try mapAction.perform { try routeLibrary.mapSelection(for: summary) }
                 } }
             }

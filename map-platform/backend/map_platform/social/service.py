@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import secrets
 import time
@@ -10,10 +11,12 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .database import (Database, accounts, blocks, content, devices, friendships, invites,
-                       limits, links, media, members, messages, outbox, rides)
+from .database import (Database, accounts, blocks, content, devices, exposures, friendships,
+                       insert_ignore, invites, limits, links, media, members, messages, outbox,
+                       deletion_receipts, rides)
 from .geometry import distance, route_progress, sanitize_track
 from .media import sanitize_avatar
+from .route_archive import archive_fingerprint, route_fingerprint
 
 
 class SocialError(Exception):
@@ -55,10 +58,29 @@ def row(c, table, condition):
     return dict(result)
 
 
+def public_content(item):
+    """Strip storage-only fields (activity source IDs and geometry digests)."""
+    return {k: v for k, v in item.items() if k not in {"source", "fingerprint"}}
+
+
 class SocialService:
     MAX_SHARING_SECONDS = 4 * 3600
+    # A recipient is alerted for a room at most once per day, however often the
+    # organizer re-issues a revoked invitation.
+    INVITE_ALERT_INTERVAL = 86400
     def __init__(self, database, media_store, clock=time.time):
         self.db, self.media, self.now = database, media_store, clock
+
+    def expose(self, c, viewer, fingerprint, owner):
+        """Record that Bicino gave this viewer another rider's route geometry."""
+        if viewer and fingerprint and viewer != owner:
+            insert_ignore(c, exposures, [{"viewer": viewer, "fingerprint": fingerprint,
+                                          "owner": owner, "created": self.now()}],
+                          ["viewer", "fingerprint", "owner"])
+
+    def expose_content(self, c, viewer, item):
+        if item["kind"] == "route":
+            self.expose(c, viewer, item.get("fingerprint"), item["owner"])
 
     def account(self, principal):
         def perform(c):
@@ -273,7 +295,7 @@ class SocialService:
                 value["invitationCodeNeedsRotation"] = True
             return value
         if kind == "content":
-            return {k:v for k,v in self.content_read(c, actor, result["id"]).items() if k != "source"}
+            return public_content(self.content_read(c, actor, result["id"]))
         if kind == "profile":
             return self.profile(c, actor, result["id"], result["id"] == actor)
         if kind == "friendship":
@@ -312,12 +334,19 @@ class SocialService:
             uuid.UUID(route["id"])
         except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
             raise SocialError("route_not_redistributable") from None
+        fingerprint = route_fingerprint(points)
+        if c.scalar(select(exposures.c.owner).where(and_(exposures.c.viewer == actor,
+                exposures.c.fingerprint == fingerprint, exposures.c.owner != actor)).limit(1)) is not None:
+            # Saved, duplicated, reversed or re-imported copies of a route that
+            # Bicino gave this rider remain the owner's to share. The client's
+            # sharing-rights confirmation is not authority over someone else's route.
+            raise SocialError("route_redistribution_not_permitted", 403)
         if c.scalar(select(func.count()).select_from(content).where(content.c.owner == actor)) >= 500:
             raise SocialError("content_quota", 429)
         item = {"id": identifier(), "owner": actor, "kind": "route", "title": data.title,
                 "visibility": data.visibility, "revision": 1,
                 "body": {"archive": data.archive, "sha256": digest(data.archive), "hashPayload": data.hashPayload, "distanceMeters": route["distanceMeters"]},
-                "source": None, "created": self.now()}
+                "source": None, "created": self.now(), "fingerprint": fingerprint}
         c.execute(content.insert().values(**item))
         return item
 
@@ -403,7 +432,8 @@ class SocialService:
             raise SocialError("invalid_start")
         c.execute(rides.insert().values(id=ride_id, owner=actor, title=data.title,
             route=source["body"], status="planned", starts=start, expires=start+86400,
-            code=digest(code), created=self.now()))
+            code=digest(code), created=self.now(),
+            fingerprint=source.get("fingerprint") or archive_fingerprint(source["body"])))
         c.execute(members.insert().values(ride=ride_id, account=actor, status="accepted", sharing=False,
                   stats=False, sequence=-1, live=None, epoch=identifier()))
         return dict(self.ride_read(c, actor, ride_id), joinCode=code)
@@ -450,11 +480,25 @@ class SocialService:
             raise SocialError("friend_invitation_required", 403)
         if not self.active(c, data.profileID)["privacy"].get("invitations", True):
             raise SocialError("invitations_disabled", 403)
+        where = and_(invites.c.ride == data.rideID, invites.c.recipient == data.profileID)
+        if c.scalar(select(members.c.status).where(and_(members.c.ride == data.rideID,
+                members.c.account == data.profileID))) == "accepted":
+            raise SocialError("already_member", 409)
+        existing = c.execute(select(invites).where(where)).mappings().first()
+        if existing and existing["status"] == "declined":
+            # The recipient's refusal stands. They can still join voluntarily by code.
+            raise SocialError("invitation_declined", 409)
+        if existing and existing["status"] == "pending":
+            return dict(existing)  # Idempotent repeat: no new invitation or alert.
+        notified = existing["notified"] if existing else None
+        alert = notified is None or self.now()-notified >= self.INVITE_ALERT_INTERVAL
         item = {"id": identifier(), "ride": data.rideID, "sender": actor, "recipient": data.profileID,
-                "status": "pending", "expires": ride["expires"]}
+                "status": "pending", "expires": ride["expires"],
+                "notified": self.now() if alert else notified}
         upsert(c, invites, item, ["ride", "recipient"], item)
-        self.emit(c, data.profileID, "ride_invite", {"rideID": data.rideID})
-        return dict(row(c, invites, and_(invites.c.ride == data.rideID, invites.c.recipient == data.profileID)))
+        if alert:
+            self.emit(c, data.profileID, "ride_invite", {"rideID": data.rideID})
+        return dict(row(c, invites, where))
 
     def join(self, c, actor, ride_id, *, invited=False):
         ride = row(c, rides, rides.c.id == ride_id)
@@ -477,6 +521,10 @@ class SocialService:
             values = {"ride": ride_id, "account": actor, "status": "accepted", "sharing": False,
                       "stats": False, "sequence": -1, "live": None, "received": None, "epoch": identifier()}
             upsert(c, members, values, ["ride", "account"], values)
+        # Membership hands over the organizer's route snapshot.
+        self.expose(c, actor, ride["fingerprint"], ride["owner"])
+        c.execute(update(invites).where(and_(invites.c.ride == ride_id, invites.c.recipient == actor,
+                                             invites.c.status == "pending")).values(status="accepted"))
         return self.ride_read(c, actor, ride_id)
 
     def consent(self, c, actor, ride_id, data):
@@ -535,8 +583,12 @@ class SocialService:
             c.execute(update(invites).where(invites.c.ride == ride_id).values(status="revoked"))
         return {"status": "ended" if end else "left"}
 
-    def begin_deletion(self, c, actor):
+    def begin_deletion(self, c, actor, receipt_digest=None):
         self.db.lock(c, actor)
+        if receipt_digest:
+            # Committed atomically with the deletion: only an accepted request has
+            # a receipt, and only the client holding its secret can resolve it.
+            c.execute(deletion_receipts.insert().values(digest=receipt_digest, account=actor, created=self.now()))
         c.execute(update(accounts).where(accounts.c.id == actor).values(state="deleting", avatar=None,
                   username=None, name="Deleted rider", privacy={}, version=accounts.c.version+1))
         c.execute(update(members).where(members.c.account == actor).values(status="left", live=None, sharing=False))
@@ -547,3 +599,52 @@ class SocialService:
         c.execute(delete(devices).where(devices.c.owner == actor))
         self.emit(c, actor, "delete_account", {})
         return {"status": "deleting"}
+
+    def deletion_receipt(self, c, receipt):
+        account = c.scalar(select(deletion_receipts.c.account).where(deletion_receipts.c.digest == digest(receipt)))
+        state = c.scalar(select(accounts.c.state).where(accounts.c.id == account)) if account else None
+        if state not in {"deleting", "deleted"}:
+            # Unknown receipts and missing accounts are never evidence of deletion.
+            raise SocialError("unknown_receipt", 404)
+        return {"status": state, "profileID": account}
+
+    def bind_device(self, c, actor, installation, data):
+        """Bind this app installation's push token to the actor.
+
+        The installation secret, not knowledge of an installation ID or token,
+        authorizes taking over a binding. A proven installation can move from a
+        signed-out or switched account to the current one; a token bound by a
+        different installation stays with its owner unless that owner is the actor.
+        """
+        current = c.execute(select(devices).where(devices.c.id == installation)).mappings().first()
+        self.db.lock(c, actor, *([current["owner"]] if current else []))
+        current = c.execute(select(devices).where(devices.c.id == installation)).mappings().first()
+        proof = digest(data.secret)
+        if current and not hmac.compare_digest(current["secret_digest"], proof):
+            raise SocialError("notification_binding_in_use", 409)
+        holder = c.execute(select(devices).where(and_(devices.c.token == data.token,
+                                                      devices.c.id != installation))).mappings().first()
+        if holder:
+            if holder["owner"] != actor:
+                raise SocialError("notification_binding_in_use", 409)
+            # The same account reinstalled this app under a new installation identity.
+            c.execute(delete(devices).where(devices.c.id == holder["id"]))
+        values = {"owner": actor, "token": data.token, "environment": data.environment, "secret_digest": proof}
+        if current:
+            c.execute(update(devices).where(devices.c.id == installation).values(**values))
+        else:
+            c.execute(devices.insert().values(id=installation, **values))
+        return {"registered": True, "id": installation, "owner": actor}
+
+    def release_device(self, c, installation, data):
+        """Remove a binding with the installation secret, even after forced sign-out.
+
+        The expected owner prevents a delayed release for a previous account from
+        removing a binding that was already handed to the next account. The same
+        response is returned whether or not anything matched.
+        """
+        current = c.execute(select(devices).where(devices.c.id == installation)).mappings().first()
+        if (current and current["owner"] == data.owner
+                and hmac.compare_digest(current["secret_digest"], digest(data.secret))):
+            c.execute(delete(devices).where(and_(devices.c.id == installation, devices.c.owner == data.owner)))
+        return {"released": True}

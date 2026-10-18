@@ -44,6 +44,16 @@ redraw cost, fragment links and deletion reauthentication. Regression checks and
 a fresh independent review must close each finding in the review ledger; a code
 edit or passing unrelated CI does not close it.
 
+The follow-up review of `2e936133` / `b2576622` found saved, duplicated or room
+copies could still be republished, an identity-cache lock serialized provider
+lookups, per-launch push bindings stranded after sign-out, any rider-set change
+re-sent every portrait, deletion retries re-authenticated before checking an
+accepted deletion, declined ride invitations could be re-alerted, and reconnect
+notices stuck for viewers, plus documentation, read-retry, image-bomb and
+event-loop nits. Schema 3 adds route exposures, installation-proven push
+bindings and deletion receipts with an explicit migration; each item has backend,
+native or host regression coverage in its own domain.
+
 Main now includes terrain PR #565 at `9df83499`. Preserve its first-word CAP2
 bit `31` and client version `29`. Group riders move to extended feature-word
 TLV type `3`, bit `0`, requiring client version `30`; both firmware and app must

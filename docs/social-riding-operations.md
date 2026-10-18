@@ -34,8 +34,23 @@ and recent-auth deletion before enabling either production surface.
 
 ## Upgrade and lifecycle contracts
 
-Schema **2** requires the explicit migration job before API/worker startup. Stop
-all old social replicas first. The V1 upgrade retires replay payloads and ends
+Schema **3** requires the explicit migration job before API/worker startup. Stop
+all old social replicas first; a V2 binary refuses a schema-3 database and a V3
+binary refuses an unmigrated one. The V2 upgrade, in one transaction under the
+migration advisory lock:
+
+- adds `secret_digest` to push bindings and **retires every V2 binding**. V2 rows
+  never proved possession of an installation secret, so they cannot be handed
+  off safely. The app binds its installation again with a proof at its next
+  launch or sign-in when alerts are authorized;
+- backfills a direction-insensitive geometry fingerprint for published routes
+  and room snapshots, and records route exposures conservatively for accepted
+  friends of friends-visible routes and for members and invitees of rooms that
+  still hold a snapshot;
+- creates the deletion-receipt table and marks existing pending invitations as
+  already alerted.
+
+Do not roll back to V2 binaries after this migration. The V1 upgrade retires replay payloads and ends
 legacy development rooms, clears their route snapshots/live consent, and revokes
 invitations: V1 route copies cannot prove their source owner's redistribution
 permission. Create a new room from an owned route afterward. New replay rows
@@ -47,7 +62,20 @@ HTTP client retries one ambiguous timeout/disconnect with the same operation key
 live state instead uses its publisher's monotonic sequence. Invite replacement
 hides the old code while pending and serializes native rotation requests.
 
-Group Ride creation requires ownership of the published route. Location consent
+Group Ride creation requires ownership of the published route. Route
+redistribution follows what Bicino actually handed to a rider: viewing a
+friends-visible route, resolving a link while signed in, previewing a room code,
+opening an invitation or joining a room records an exposure of that geometry.
+`POST /routes` then refuses identical, ID-changed or reversed geometry from that
+rider with `403 route_redistribution_not_permitted`, even after unfriending or
+the owner deleting the source. The sharing-rights confirmation is not authority
+over another rider's route. Riders who never received it may still publish an
+independently imported identical GPX file, and owners can always republish their
+own geometry. The app records owner provenance for every saved, duplicated or
+room-snapshot copy, reads it back after relaunch, matches re-imported copies by
+the same fingerprint and lists other riders' copies as not publishable.
+
+Location consent
 expires after **four hours** or the room expiry, whichever comes first, and
 publishing cannot extend it. Consent writes require the current member `epoch`;
 a stale start/stop returns `409 consent_changed` without changing the lease.
@@ -63,6 +91,16 @@ rotation; confirmed membership/account revocation clears them immediately.
 JWT signature/audience/issuer/expiry checks run on every request. Provider
 revocation state is cached for at most 30 seconds per API instance, bounded to
 512 UIDs; SQL account/membership/block/consent authorization is never cached.
+Provider lookups run outside the cache lock, one per UID at a time (concurrent
+requests for that UID wait up to eight seconds), with at most 64 lookups in
+flight and a five-second Firebase HTTP timeout. A slow or failing lookup never
+delays other users. Provider faults return `503 identity_unavailable`, never
+`401`; live sockets keep running on SQL authorization for 90 seconds of provider
+outage and then close with `1013` so the app reconnects. Only a provider answer
+that the user is disabled, deleted or revoked ends authentication. Read-only
+handlers retry serialization and deadlock aborts with the transaction helper and
+return `503 database_busy` when retries are exhausted; mutations keep their
+idempotency ledger and rate charges are taken once.
 The reconciliation worker only examines its configured Firebase project. A
 batch stops without changes if more than three accounts, or more than a quarter
 of a batch of at least four, appear deleted. Investigate configuration/provider
@@ -79,9 +117,36 @@ links, whose capability paths are no longer supported. Recent-auth deletion
 allows the same -60 to 300 second clock window on both surfaces; a bridge 401
 asks the user to sign in again and prevents Firebase deletion.
 
-Push tokens cannot move between accounts without the current owner unbinding.
+Push bindings belong to an app installation, identified by a UUID and proven by
+a 256-bit secret kept only in the app's existing explicit private, device-only
+Keychain group. The server stores the secret's SHA-256. Knowing an installation
+ID or a push token is never enough to move a binding: a different secret, or a
+token bound by another installation of a different account, returns
+`409 notification_binding_in_use`. A proven installation moves to the account
+now signed in, so switching accounts hands it over even if the previous sign-out
+never reached the server. Sign-out, forced sign-out, account switch and deletion
+persist a release obligation and complete it with
+`POST /notification-devices/{installation}/release` and the secret plus the
+expected owner, which needs no account token and cannot remove a binding already
+handed to the next account. Alert registration failures are reported separately
+and never make a successful refresh or social action look failed.
+
 A declined friend request cannot be reopened by its original sender; the
-recipient may initiate a new request. APNs keeps its HTTP/2 connection and caches
+recipient may initiate a new request. A declined ride invitation likewise stands
+for the room (`409 invitation_declined`), while the recipient can still join by
+code. Repeating a pending invitation returns it unchanged, members cannot be
+invited (`409 already_member`), and re-issuing a revoked invitation alerts the
+recipient at most once per day per room.
+
+Native deletion sends the digest of a fresh client-held receipt secret, which the
+server commits atomically with an accepted deletion. The app persists the receipt
+before sending and, after lost responses, an app restart, identity cleanup or an
+automatic sign-out, confirms it with `POST /deletion-receipts/resolve` before any
+provider re-authentication. That endpoint takes no bearer token, so recovery never
+signs in or recreates an identity. Unknown receipts and a missing provider
+identity are never treated as completion, and completion signs out only the
+deleted account, never one the rider switched to. Receipts survive identity
+cleanup and expire after 30 days. APNs keeps its HTTP/2 connection and caches
 provider tokens for 50 minutes, below Apple's one-hour limit.
 
 The signing entitlement path is selected by `BICINO_SOCIAL_ENABLED`: `NO` uses
@@ -162,14 +227,15 @@ Grant only avatar-prefix get/put/delete/list access. Never use a public avatar U
 
 Start PostgreSQL, run `docker compose -f map-platform/deploy/compose.social.yaml
 --profile migration run --rm social-migrate`, then start API and worker. Migration
-v2 runs under a PostgreSQL advisory lock and retires the unsafe V1 replay/room
-state as described above. API startup verifies the
+v3 runs under a PostgreSQL advisory lock, retires the unsafe V1 replay/room state
+and unproven V2 push bindings, and backfills route fingerprints and exposures as
+described above. API startup verifies the
 schema and fails closed rather than migrating during a request. Use a DML-only
 runtime role after the schema is installed, and a separate migration credential.
 The application uses serializable transactions and bounded conflict retries.
-For a V1 development upgrade, stop the old social API and worker writers before
-migration, then start the V2 API and worker together. Do not run V1 writers
-against schema2 or roll back to V1 binaries after the retirement migration.
+For a V1 or V2 development upgrade, stop the old social API and worker writers
+before migration, then start the V3 API and worker together. Do not run older
+writers against schema 3 or roll back to older binaries after the migration.
 
 Route `/v1/social/*` from the configured iPhone map-service origin to the social
 API, including WebSocket upgrades. Alternatively opt in to the mounted router in
@@ -197,6 +263,9 @@ rechecked every 30 seconds on sockets; membership and blocks on every snapshot.
 A bounded worker reconciliation also detects identities deleted or disabled
 outside Bicino (100 accounts per minute, advancing across the account set).
 
+Route exposures keep only viewer and owner account IDs with a geometry digest,
+never coordinates. Deleting an account removes the routes it received; records of
+copies other riders received from it keep restricting their republication.
 Only latest live state is retained; samples disappear at 60 seconds and live
 leases require fresh consent after expiry. Group sessions expire 24 hours after
 their scheduled start. Worker cleanup runs every 10 seconds, messages and replay

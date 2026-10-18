@@ -1,7 +1,9 @@
+import base64
 import hashlib
 import json
 import unittest
 import os
+import uuid
 from io import BytesIO
 from unittest.mock import patch
 from PIL import Image
@@ -10,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from map_platform.social.api import create_app
 from map_platform.social.features import SocialFeatures
-from map_platform.social.database import Database, accounts, content, media, members, outbox
+from map_platform.social.database import Database, accounts, content, devices, invites, media, members, outbox
 from map_platform.social.media import MemoryMedia, sanitize_avatar
 from map_platform.social.service import SocialService
 from map_platform.social.worker import cleanup_account, run_once
@@ -43,6 +45,7 @@ class SocialTest(unittest.TestCase):
         self.client=TestClient(create_app(service=self.service,identity=Identity(),features=SocialFeatures(True,True,True,True,True)))
         self.counter=0
         self.consentEpochs={}
+        self.deletionReceipts={}
         self.ids={u:self.call(u,'GET','/me').json()['id'] for u in ('alice','bob','carol')}
     def tearDown(self):
         self.client.close(); self.db.engine.dispose()
@@ -56,7 +59,22 @@ class SocialTest(unittest.TestCase):
                     self.consentEpochs[receipt]=c.scalar(select(members.c.epoch).where(
                         (members.c.ride==path.split('/')[2]) & (members.c.account==self.ids[who])))
             if self.consentEpochs[receipt]: body=dict(body,epoch=self.consentEpochs[receipt])
+        if method == 'POST' and path == '/me/deletion' and isinstance(body,dict) and 'receiptDigest' not in body:
+            # Mirrors the app: a fresh client-held receipt secret per deletion request.
+            secret=self.secret()
+            self.deletionReceipts[who]=secret
+            body=dict(body,receiptDigest=hashlib.sha256(secret.encode()).hexdigest())
         return self.client.request(method,path,json=body,headers=headers,**kwargs)
+    @staticmethod
+    def secret():
+        return base64.urlsafe_b64encode(os.urandom(32)).rstrip(b'=').decode()
+    def device(self, owner, token='a'*64, installation=None, secret=None):
+        """Insert a proven installation binding directly, as the worker would see it."""
+        installation = installation or str(uuid.uuid4())
+        with self.db.transaction() as c:
+            c.execute(devices.insert().values(id=installation, owner=owner, token=token, environment='development',
+                secret_digest=hashlib.sha256((secret or self.secret()).encode()).hexdigest()))
+        return installation
     def friend(self):
         r=self.call('alice','POST','/friend-requests',{'profileID':self.ids['bob']})
         self.assertEqual(r.status_code,200,r.text)
@@ -71,6 +89,23 @@ class SocialTest(unittest.TestCase):
             'destination':{'coordinate':{'latitude':0,'longitude':0.05},'label':'End'},
             'bounds':{'south':0,'west':0,'north':0,'east':0.05},'distanceMeters':5560,
             'points':[{'latitude':0,'longitude':0},{'latitude':0,'longitude':0.025},{'latitude':0,'longitude':0.05}],'steps':[{'id':1,'geometryStartIndex':0,'geometryEndIndex':2,'instruction':'Follow route','maneuver':'straight','distanceMeters':5560}]}}
+        payload=json.dumps(archive,separators=(',',':'),sort_keys=True)
+        archive['contentHash']=hashlib.sha256(payload.encode()).hexdigest()
+        return {'title':'Ride','visibility':visibility,'archive':json.dumps(archive),'hashPayload':payload,'sharingRightsConfirmed':True}
+    def route_body(self, points, route_id, visibility='friends'):
+        """A valid imported-GPX archive with chosen geometry and route identity."""
+        coordinates=[{'latitude':lat,'longitude':lon} for lat,lon in points]
+        archive={'schemaVersion':1,'createdAt':1000000000,'route':{
+            'id':route_id,'revision':1,
+            'provider':{'providerID':'user.imported-gpx','attribution':'User-provided GPX','storageScope':'durable'},
+            'localeIdentifier':'en_US','transportType':'cycling','normalizationVersion':1,
+            'source':{'coordinate':coordinates[0],'label':'Start'},
+            'destination':{'coordinate':coordinates[-1],'label':'End'},
+            'bounds':{'south':min(p[0] for p in points),'west':min(p[1] for p in points),
+                      'north':max(p[0] for p in points),'east':max(p[1] for p in points)},
+            'distanceMeters':2000,'points':coordinates,
+            'steps':[{'id':1,'geometryStartIndex':0,'geometryEndIndex':len(points)-1,'instruction':'Follow route',
+                      'maneuver':'straight','distanceMeters':2000}]}}
         payload=json.dumps(archive,separators=(',',':'),sort_keys=True)
         archive['contentHash']=hashlib.sha256(payload.encode()).hexdigest()
         return {'title':'Ride','visibility':visibility,'archive':json.dumps(archive),'hashPayload':payload,'sharingRightsConfirmed':True}
@@ -315,8 +350,10 @@ class SocialTest(unittest.TestCase):
         result = self.call('alice','POST',f"/group-rides/{room['id']}/leave")
         self.assertEqual(result.status_code,200,result.text)
         self.assertEqual(self.call('bob','GET',f"/group-rides/{room['id']}").status_code,410)
-        result = self.call('alice','PUT','/notification-devices/test',{'token':'a'*64,'environment':'production'})
+        result = self.call('alice','PUT','/notification-devices/'+str(uuid.uuid4()),
+                           {'token':'a'*64,'environment':'production','secret':self.secret()})
         self.assertEqual(result.status_code,400,result.text)
+        self.assertEqual(result.json()['code'],'notification_environment_mismatch')
 
     def test_lists_are_metadata_and_invitation_preview_is_recipient_only(self):
         self.friend()
@@ -335,8 +372,8 @@ class SocialTest(unittest.TestCase):
 
     def test_notification_category_mute_is_enforced_in_worker(self):
         from map_platform.social.database import devices
+        self.device(self.ids['bob'])
         with self.db.transaction() as c:
-            c.execute(devices.insert().values(id='phone', owner=self.ids['bob'], token='a'*64, environment='development'))
             privacy = dict(c.scalar(select(accounts.c.privacy).where(accounts.c.id == self.ids['bob'])))
             privacy['friendNotifications'] = False
             c.execute(accounts.update().where(accounts.c.id == self.ids['bob']).values(privacy=privacy))
@@ -351,10 +388,10 @@ class SocialTest(unittest.TestCase):
     def test_group_rollout_holds_invite_push_without_blocking_deletion(self):
         from map_platform.social.database import devices
         room = self.ride()
-        self.call('alice', 'POST', '/ride-invites', {'rideID': room['id'], 'profileID': self.ids['bob']})
+        self.call('bob', 'POST', f"/group-rides/{room['id']}/leave")
+        self.assertEqual(self.call('alice', 'POST', '/ride-invites', {'rideID': room['id'], 'profileID': self.ids['bob']}).status_code, 200)
         self.call('carol', 'POST', '/me/deletion', {'expectedProfileID': self.ids['carol']})
-        with self.db.transaction() as c:
-            c.execute(devices.insert().values(id='phone', owner=self.ids['bob'], token='a'*64, environment='development'))
+        self.device(self.ids['bob'])
         class RecordingNotifications:
             def __init__(self): self.sent = []
             def send(self, *args): self.sent.append(args); return True
@@ -466,7 +503,8 @@ class SocialTest(unittest.TestCase):
         from map_platform.social.worker import reconcile_accounts
         from sqlalchemy import update
         room = self.ride()
-        self.call('alice','POST','/ride-invites',{'rideID':room['id'],'profileID':self.ids['bob']})
+        self.call('bob','POST',f"/group-rides/{room['id']}/leave")
+        self.assertEqual(self.call('alice','POST','/ride-invites',{'rideID':room['id'],'profileID':self.ids['bob']}).status_code,200)
         with self.db.transaction() as c:
             c.execute(update(accounts).where(accounts.c.id==self.ids['alice']).values(state='disabled'))
         response = self.call('bob','GET','/ride-invites')
@@ -491,14 +529,6 @@ class SocialTest(unittest.TestCase):
             self.assertEqual(self.call('alice','POST','/friend-requests',{'profileID':self.ids['bob']}).json()['code'],'request_declined')
         # The recipient can still initiate a new relationship voluntarily.
         self.assertEqual(self.call('bob','POST','/friend-requests',{'profileID':self.ids['alice']}).status_code,200)
-
-    def test_token_binding_cannot_be_taken_by_another_account(self):
-        body = {'token':'a'*64,'environment':'development'}
-        self.assertEqual(self.call('alice','PUT','/notification-devices/phone-a',body).status_code,200)
-        self.assertEqual(self.call('bob','PUT','/notification-devices/phone-b',body).status_code,409)
-        self.assertEqual(self.call('bob','PUT','/notification-devices/phone-a',dict(body,token='b'*64)).status_code,409)
-        self.call('alice','DELETE','/notification-devices/phone-a')
-        self.assertEqual(self.call('bob','PUT','/notification-devices/phone-b',body).status_code,200)
 
     def test_malformed_consent_is_422_even_when_features_are_off(self):
         self.client.app.state.features = SocialFeatures()
@@ -575,8 +605,11 @@ class SocialTest(unittest.TestCase):
         self.assertEqual(self.call('bob','POST',path+'/state',state).status_code,403)
 
     def test_push_binding_length_matches_database_limit(self):
-        response=self.call('alice','PUT','/notification-devices/'+('a'*37),{'token':'a'*64,'environment':'development'})
-        self.assertEqual(response.status_code,400)
+        body={'token':'a'*64,'environment':'development','secret':self.secret()}
+        for installation in ['a'*37, 'b'*36, 'not-a-uuid']:
+            response=self.call('alice','PUT','/notification-devices/'+installation,body)
+            self.assertEqual(response.status_code,400,installation)
+            self.assertEqual(response.json()['code'],'invalid_binding')
 
     def test_cleanup_checks_project_before_any_firebase_mutation(self):
         class Wrong(Identity):
@@ -596,5 +629,312 @@ class SocialTest(unittest.TestCase):
                 response=self.client.post('/internal/account-deletion',content=raw,
                     headers={'Content-Type':'application/json','X-Bicino-Deletion-Signature':signature})
                 self.assertEqual(response.status_code,200 if -60<=age<=300 else 401)
+
+    # F1: route redistribution follows what Bicino actually handed to a rider.
+    def test_received_routes_cannot_be_republished_after_save_duplicate_or_reverse(self):
+        self.friend()
+        points=[(0,0),(0,0.01),(0.01,0.02),(0.02,0.02)]
+        original=self.call('alice','POST','/routes',self.route_body(points,'00000000-0000-4000-8000-000000000101')).json()
+        # Carol never received it: identical geometry from an independent GPX file is hers to publish.
+        self.assertEqual(self.call('carol','POST','/routes',self.route_body(points,'00000000-0000-4000-8000-000000000102','private')).status_code,200)
+        self.assertEqual(self.call('bob','GET','/routes/'+original['id']).status_code,200)
+        self.assertNotIn('fingerprint',self.call('bob','GET','/routes/'+original['id']).json())
+        copies=[self.route_body(points,'00000000-0000-4000-8000-000000000101','link'),            # exact saved copy
+                self.route_body(points,'00000000-0000-4000-8000-000000000103','friends'),         # duplicate with a new route ID
+                self.route_body(list(reversed(points)),'00000000-0000-4000-8000-000000000104','private')]  # reversed copy
+        for copy in copies:
+            response=self.call('bob','POST','/routes',copy)
+            self.assertEqual(response.status_code,403,response.text)
+            self.assertEqual(response.json()['code'],'route_redistribution_not_permitted')
+        # The restriction survives the friendship and the source route.
+        self.call('alice','DELETE','/friends/'+self.ids['bob'])
+        self.call('alice','DELETE','/routes/'+original['id'])
+        self.assertEqual(self.call('bob','POST','/routes',copies[1]).status_code,403)
+        # Bob's own different route and Alice's own geometry stay publishable.
+        self.assertEqual(self.call('bob','POST','/routes',self.route_body([(1,1),(1,1.01)],'00000000-0000-4000-8000-000000000105')).status_code,200)
+        self.assertEqual(self.call('alice','POST','/routes',self.route_body(points,'00000000-0000-4000-8000-000000000106','link')).status_code,200)
+
+    def test_group_snapshots_previews_and_links_restrict_republication(self):
+        points=[(0,1),(0.01,1),(0.02,1.01)]
+        source=self.call('alice','POST','/routes',self.route_body(points,'00000000-0000-4000-8000-000000000111','link')).json()
+        room=self.call('alice','POST','/group-rides',{'routeID':source['id'],'title':'Saturday'}).json()
+        self.assertEqual(self.call('carol','POST','/group-rides/preview',{'code':room['joinCode']}).status_code,200)
+        self.assertEqual(self.call('bob','POST','/group-rides/join',{'code':room['joinCode']}).status_code,200)
+        for who,route_id in [('carol','00000000-0000-4000-8000-000000000112'),('bob','00000000-0000-4000-8000-000000000113')]:
+            self.assertEqual(self.call(who,'POST','/routes',self.route_body(points,route_id,'private')).json()['code'],
+                             'route_redistribution_not_permitted')
+        # An authenticated link resolution records receipt too; the owner is never restricted.
+        link=self.call('alice','POST','/share-links',{'contentID':source['id']}).json()
+        other=[(2,2),(2.01,2)]
+        mine=self.call('alice','POST','/routes',self.route_body(other,'00000000-0000-4000-8000-000000000114','link')).json()
+        link=self.call('alice','POST','/share-links',{'contentID':mine['id']}).json()
+        self.assertEqual(self.client.post('/shared/resolve',json={'code':link['url'].split('#')[-1]},
+                                          headers={'Authorization':'Bearer bob'}).status_code,200)
+        self.assertEqual(self.call('bob','POST','/routes',self.route_body(other,'00000000-0000-4000-8000-000000000115')).status_code,403)
+        self.assertEqual(self.call('alice','POST','/routes',self.route_body(other,'00000000-0000-4000-8000-000000000116')).status_code,200)
+
+    # F3: an app installation proves itself with a secret only it holds.
+    def bind(self, who, installation, secret, token='a'*64):
+        return self.call(who,'PUT','/notification-devices/'+installation,
+                         {'token':token,'environment':'development','secret':secret})
+    def binding(self, installation):
+        with self.db.transaction() as c:
+            return c.execute(select(devices).where(devices.c.id==installation.lower())).mappings().first()
+    def release(self, installation, secret, owner):
+        return self.client.post(f'/notification-devices/{installation}/release',json={'secret':secret,'owner':owner})
+
+    def test_installation_proof_hands_off_accounts_and_rejects_takeover(self):
+        phone,secret=str(uuid.uuid4()).upper(),self.secret()
+        self.assertEqual(self.bind('alice',phone,secret).json()['owner'],self.ids['alice'])
+        # Relaunch re-binds idempotently; APNs token rotation updates the same installation.
+        self.assertEqual(self.bind('alice',phone,secret,token='c'*64).status_code,200)
+        self.assertEqual(self.binding(phone)['token'],'c'*64)
+        # Knowing the installation ID or the push token is not proof.
+        self.assertEqual(self.bind('carol',phone,self.secret(),token='c'*64).json()['code'],'notification_binding_in_use')
+        self.assertEqual(self.bind('carol',str(uuid.uuid4()),self.secret(),token='c'*64).json()['code'],'notification_binding_in_use')
+        for body in [(self.secret(),self.ids['alice']),(secret,self.ids['carol'])]:
+            response=self.release(phone,*body)
+            self.assertEqual((response.status_code,response.json()),(200,{'released':True}))
+        self.assertEqual(self.binding(phone)['owner'],self.ids['alice'])
+        # Alice signed out offline; Bob signs in on the same phone and the proven installation moves.
+        self.assertEqual(self.bind('bob',phone,secret,token='c'*64).json()['owner'],self.ids['bob'])
+        # Alice's delayed release or authenticated delete cannot remove Bob's binding.
+        self.release(phone,secret,self.ids['alice'])
+        self.call('alice','DELETE','/notification-devices/'+phone)
+        self.assertEqual(self.binding(phone)['owner'],self.ids['bob'])
+        # Pushes follow only the current owner.
+        self.call('alice','POST','/friend-requests',{'profileID':self.ids['bob']})
+        self.call('bob','POST','/friend-requests',{'profileID':self.ids['carol']})
+        self.call('carol','POST','/friend-requests',{'profileID':self.ids['alice']})
+        class Recording:
+            def __init__(self): self.sent=[]
+            def send(self, binding, kind, event): self.sent.append(binding['owner']); return True
+        notifier=Recording()
+        run_once(self.db,Identity(),self.media,notifier,now=self.clock)
+        self.assertEqual(notifier.sent,[self.ids['bob']])
+        # Bob's forced sign-out cleanup needs no bearer token, only the installation secret.
+        self.assertEqual(self.release(phone,secret,self.ids['bob']).status_code,200)
+        self.assertIsNone(self.binding(phone))
+        # The same account may move its own token to a reinstalled installation.
+        self.bind('bob',phone,secret,token='d'*64)
+        reinstall=str(uuid.uuid4())
+        self.assertEqual(self.bind('bob',reinstall,self.secret(),token='d'*64).status_code,200)
+        self.assertIsNone(self.binding(phone))
+        self.assertEqual(self.binding(reinstall)['owner'],self.ids['bob'])
+        # Malformed proofs are rejected before any lookup.
+        self.assertEqual(self.client.post(f'/notification-devices/{phone}/release',json={'secret':'short','owner':self.ids['bob']}).status_code,422)
+
+    # F5: an accepted deletion can be confirmed with its receipt secret alone.
+    def test_deletion_receipt_confirms_only_an_accepted_deletion(self):
+        resolve=lambda secret: self.client.post('/deletion-receipts/resolve',json={'receipt':secret})
+        self.assertEqual(resolve(self.secret()).json()['code'],'unknown_receipt')
+        rejected=self.secret()
+        response=self.call('bob','POST','/me/deletion',{'expectedProfileID':self.ids['alice'],
+                           'receiptDigest':hashlib.sha256(rejected.encode()).hexdigest()})
+        self.assertEqual(response.status_code,409)
+        self.assertEqual(resolve(rejected).status_code,404)
+        self.assertEqual(self.client.post('/me/deletion',json={'expectedProfileID':self.ids['bob']},
+            headers={'Authorization':'Bearer bob','Idempotency-Key':'missing-receipt'}).status_code,422)
+        self.assertEqual(self.call('alice','POST','/me/deletion',{'expectedProfileID':self.ids['alice']}).status_code,200)
+        receipt=self.deletionReceipts['alice']
+        self.assertEqual(resolve(receipt).json(),{'status':'deleting','profileID':self.ids['alice']})
+        run_once(self.db,Identity(),self.media,Notifications(),now=self.clock)
+        self.assertEqual(resolve(receipt).json(),{'status':'deleted','profileID':self.ids['alice']})
+        # Receipts outlive identity cleanup, then expire after their retention period.
+        run_once(self.db,Identity(),self.media,Notifications(),now=self.clock+31*86400)
+        self.assertEqual(resolve(receipt).status_code,404)
+
+    # F6: invitations cannot be used to re-alert a recipient.
+    def test_invitations_respect_decline_membership_and_alert_limits(self):
+        self.friend()
+        route=self.call('alice','POST','/routes',self.route()).json()
+        # Scheduled ahead so the one-day alert interval elapses within the room's lifetime.
+        room=self.call('alice','POST','/group-rides',{'routeID':route['id'],'title':'Saturday',
+                       'startsAt':self.clock+3*86400}).json()
+        invite=lambda: self.call('alice','POST','/ride-invites',{'rideID':room['id'],'profileID':self.ids['bob']})
+        def alerts():
+            with self.db.transaction() as c:
+                return len(c.execute(select(outbox).where(outbox.c.kind=='ride_invite')).all())
+        first=invite().json()
+        self.assertEqual((first['status'],alerts()),('pending',1))
+        self.assertEqual((invite().json()['id'],alerts()),(first['id'],1))
+        self.call('alice','DELETE','/ride-invites/'+first['id'])
+        reissued=invite().json()
+        self.assertNotEqual(reissued['id'],first['id'])
+        self.assertEqual((reissued['status'],alerts()),('pending',1))
+        self.clock+=86401
+        self.call('alice','DELETE','/ride-invites/'+reissued['id'])
+        reissued=invite().json()
+        self.assertEqual(alerts(),2)
+        self.assertEqual(self.call('bob','POST',f"/ride-invites/{reissued['id']}/decline").status_code,200)
+        for _ in range(3):
+            response=invite()
+            self.assertEqual((response.status_code,response.json()['code']),(409,'invitation_declined'))
+        self.assertEqual(alerts(),2)
+        with self.db.transaction() as c:
+            self.assertEqual(c.scalar(select(invites.c.status).where(invites.c.recipient==self.ids['bob'])),'declined')
+        # The recipient may still join voluntarily; members cannot be re-alerted.
+        self.assertEqual(self.call('bob','POST','/group-rides/join',{'code':room['joinCode']}).status_code,200)
+        response=invite()
+        self.assertEqual((response.status_code,response.json()['code'],alerts()),(409,'already_member',2))
+
+    def test_joining_by_code_settles_a_pending_invitation(self):
+        self.friend()
+        route=self.call('alice','POST','/routes',self.route()).json()
+        room=self.call('alice','POST','/group-rides',{'routeID':route['id'],'title':'Saturday'}).json()
+        self.call('alice','POST','/ride-invites',{'rideID':room['id'],'profileID':self.ids['bob']})
+        self.assertEqual(len(self.call('bob','GET','/ride-invites').json()['items']),1)
+        self.call('bob','POST','/group-rides/join',{'code':room['joinCode']})
+        self.assertEqual(self.call('bob','GET','/ride-invites').json()['items'],[])
+
+    # N2: read transactions retry conflicts without replaying mutations.
+    def test_read_handlers_retry_conflicts_report_exhaustion_and_keep_real_faults(self):
+        room=self.ride()
+        class Conflict(Exception): sqlstate='40001'
+        class Deadlock(Exception): sqlstate='40P01'
+        class Missing(Exception): sqlstate='42P01'
+        calls=[]
+        def flaky(original, failures, error):
+            def wrapper(*args, **kwargs):
+                calls.append(1)
+                if len(calls)<=failures:
+                    raise OperationalError('SELECT', {}, error())
+                return original(*args, **kwargs)
+            return wrapper
+        with patch.object(self.service,'ride_read',flaky(self.service.ride_read,2,Conflict)):
+            response=self.call('bob','GET','/group-rides/'+room['id'])
+        self.assertEqual((response.status_code,len(calls)),(200,3))
+        calls.clear()
+        with patch.object(self.service,'ride_read',flaky(self.service.ride_read,99,Deadlock)):
+            response=self.call('bob','GET','/group-rides/'+room['id'])
+        self.assertEqual((response.status_code,response.json()['code'],len(calls)),(503,'database_busy',5))
+        calls.clear()
+        with patch.object(self.service,'ride_read',flaky(self.service.ride_read,99,Missing)):
+            with self.assertRaises(OperationalError):
+                self.call('bob','GET','/group-rides/'+room['id'])
+        self.assertEqual(len(calls),1)
+        # A read-only POST preview retries its read, while its rate charge happens once.
+        from map_platform.social.database import limits
+        def charges():
+            with self.db.transaction() as c:
+                return c.scalar(select(limits.c.count).where(limits.c.key==self.ids['carol']+':join')) or 0
+        before=charges(); calls.clear()
+        with patch.object(self.service,'expose',flaky(self.service.expose,2,Conflict)):
+            response=self.call('carol','POST','/group-rides/preview',{'code':room['joinCode']})
+        self.assertEqual((response.status_code,len(calls),charges()-before),(200,3,1))
+
+    # N3: decompression-bomb dimensions are invalid input, rejected from the header.
+    def test_avatar_dimension_bombs_are_invalid_images_without_decoding(self):
+        import struct, tracemalloc, zlib
+        def png_header(width, height):
+            def chunk(kind, data):
+                return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data)&0xffffffff)
+            return (b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',width,height,8,2,0,0,0))
+                    +chunk(b'IDAT',zlib.compress(b''))+chunk(b'IEND',b''))
+        for width,height in [(10000,10000),(20000,20000)]:  # warning tier and error tier
+            data=png_header(width,height)
+            tracemalloc.start()
+            try:
+                with self.assertRaises(ValueError): sanitize_avatar(data)
+                _,peak=tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            self.assertLess(peak,2*1024*1024)
+            response=self.client.put('/me/avatar?version=1',content=data,
+                headers={'Authorization':'Bearer alice','Idempotency-Key':f'bomb-{width}'})
+            self.assertEqual((response.status_code,response.json()['code']),(400,'invalid_image'))
+
+    # N4: rate accounting is a database transaction and must never run on the event loop.
+    def test_rate_accounting_runs_off_the_event_loop(self):
+        import asyncio
+        room=self.ride()
+        observed=[]
+        original=self.service.rate
+        def rate(actor, category, *args):
+            try:
+                asyncio.get_running_loop(); on_loop=True
+            except RuntimeError:
+                on_loop=False
+            observed.append((category,on_loop))
+            return original(actor,category,*args)
+        with patch.object(self.service,'rate',rate):
+            with self.client.websocket_connect(f"/group-rides/{room['id']}/live",headers={'Authorization':'Bearer bob'}) as socket:
+                socket.receive_json()
+            self.call('alice','POST','/friend-requests',{'profileID':self.ids['carol']})
+            self.call('alice','POST','/routes',self.route())
+            self.call('bob','POST',f"/group-rides/{room['id']}/messages",{'status':'waiting'})
+            self.client.put('/me/avatar?version=1',content=b'not an image',headers={'Authorization':'Bearer alice','Idempotency-Key':'off-loop'})
+        categories={category for category,_ in observed}
+        self.assertTrue({'sockets','friend_requests','publication','messages','avatar','requests'}<=categories,categories)
+        self.assertEqual([entry for entry in observed if entry[1]],[])
+
+    # F2: a provider outage is reported as temporarily unavailable, never as revocation.
+    def test_identity_outage_is_503_and_socket_retry_later(self):
+        from map_platform.user_auth import IdentityUnavailable
+        class Outage(Identity):
+            def verify(self, token):
+                if token=='outage': raise IdentityUnavailable('provider')
+                return super().verify(token)
+        client=TestClient(create_app(service=self.service,identity=Outage(),features=SocialFeatures(True,True,True,True,True)))
+        try:
+            response=client.get('/me',headers={'Authorization':'Bearer outage'})
+            self.assertEqual((response.status_code,response.json()['code']),(503,'identity_unavailable'))
+            self.assertEqual(client.get('/me',headers={'Authorization':'Bearer nobody'}).status_code,401)
+            from starlette.websockets import WebSocketDisconnect
+            room=self.ride()
+            with client.websocket_connect(f"/group-rides/{room['id']}/live",headers={'Authorization':'Bearer outage'}) as socket:
+                with self.assertRaises(WebSocketDisconnect) as closed: socket.receive_json()
+            self.assertEqual(closed.exception.code,1013)
+        finally:
+            client.close()
+
+    # Schema 3: an explicit migration upgrades real V2 data.
+    def test_schema_v2_upgrade_retires_unproven_bindings_and_backfills_route_receipts(self):
+        from sqlalchemy import Column, MetaData, Table, UniqueConstraint, inspect, update as sql_update
+        from map_platform.social import database
+        removed={'social_notification_devices':{'secret_digest'},'social_content':{'fingerprint'},
+                 'social_rides':{'fingerprint'},'social_invites':{'notified'}}
+        legacy=MetaData()
+        for table in database.metadata.sorted_tables:
+            if table.name in {'social_route_exposures','social_deletion_receipts'}: continue
+            columns=[Column(c.name,c.type,primary_key=c.primary_key,nullable=c.nullable)
+                     for c in table.columns if c.name not in removed.get(table.name,set())]
+            unique=[UniqueConstraint(*[c.name for c in u.columns]) for u in table.constraints if isinstance(u,UniqueConstraint)]
+            Table(table.name,legacy,*columns,*unique)
+        database.metadata.drop_all(self.db.engine)
+        legacy.create_all(self.db.engine)
+        alice,bob,carol='a'*36,'b'*36,'c'*36
+        archive=json.loads(self.route_body([(0,0),(0,0.01)],'00000000-0000-4000-8000-000000000121')['archive'])
+        body={'archive':json.dumps(archive),'sha256':'0'*64,'hashPayload':'{}','distanceMeters':2000}
+        with self.db.transaction() as c:
+            c.execute(database.versions.insert().values(version=2))
+            for account in (alice,bob,carol):
+                c.execute(accounts.insert().values(id=account,project='test',uid=account,name='Rider',state='active',
+                          version=1,privacy={},created=self.clock))
+            c.execute(database.friendships.insert().values(id='f'*36,a=alice,b=bob,sender=alice,status='accepted',updated=self.clock))
+            c.execute(content.insert().values(id='r'*36,owner=alice,kind='route',title='Loop',visibility='friends',
+                      revision=1,body=body,source=None,created=self.clock))
+            c.execute(database.rides.insert().values(id='g'*36,owner=alice,title='Room',route=body,status='active',
+                      starts=self.clock,expires=self.clock+86400,code='d'*64,created=self.clock))
+            c.execute(members.insert().values(ride='g'*36,account=carol,status='accepted',sharing=False,stats=False,
+                      sequence=-1,live=None,epoch='e'*36))
+            c.execute(invites.insert().values(id='i'*36,ride='g'*36,sender=alice,recipient=bob,status='pending',expires=self.clock+86400))
+            c.execute(legacy.tables['social_notification_devices'].insert().values(id='p'*36,owner=bob,token='a'*64,environment='development'))
+        self.db.migrate(); self.db.check_schema()
+        from map_platform.social.route_archive import route_fingerprint
+        fingerprint=route_fingerprint(archive['route']['points'])
+        with self.db.transaction() as c:
+            self.assertIn('secret_digest',{col['name'] for col in inspect(c).get_columns('social_notification_devices')})
+            self.assertEqual(c.execute(select(devices)).all(),[])
+            self.assertEqual(c.scalar(select(content.c.fingerprint)),fingerprint)
+            self.assertEqual(c.scalar(select(database.rides.c.fingerprint)),fingerprint)
+            self.assertIsNotNone(c.scalar(select(invites.c.notified)))
+            self.assertEqual(set(c.execute(select(database.exposures.c.viewer,database.exposures.c.owner)).all()),
+                             {(bob,alice),(carol,alice)})
+            if c.dialect.name=='postgresql':
+                nullable={col['name']:col['nullable'] for col in inspect(c).get_columns('social_notification_devices')}
+                self.assertFalse(nullable['secret_digest'])
+        self.db.migrate()  # Idempotent at the current version.
+        self.db.check_schema()
 
 if __name__=='__main__':unittest.main()

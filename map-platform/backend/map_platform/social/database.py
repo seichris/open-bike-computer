@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 from sqlalchemy import (BigInteger, Boolean, Column, Float, ForeignKey, Integer,
-                        JSON, MetaData, String, Table, UniqueConstraint, create_engine,
-                        delete, null, select, text, update)
+                        JSON, MetaData, String, Table, UniqueConstraint, and_, create_engine,
+                        delete, inspect, null, or_, select, text, update)
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+SCHEMA_VERSION = 3
+RETRYABLE_SQLSTATES = frozenset({"40001", "40P01"})
 
 metadata = MetaData()
 
@@ -43,6 +49,8 @@ content = Table("social_content", metadata,
     Column("body", JSON, nullable=False),
     Column("source", String(128)),
     Column("created", Float, nullable=False),
+    # Direction-insensitive route geometry digest; activities have none.
+    Column("fingerprint", String(64), index=True),
     UniqueConstraint("owner", "kind", "source"))
 
 links = Table("social_links", metadata,
@@ -67,7 +75,8 @@ rides = Table("social_rides", metadata,
     Column("starts", Float),
     Column("expires", Float, nullable=False),
     Column("code", String(64), unique=True, nullable=False),
-    Column("created", Float, nullable=False))
+    Column("created", Float, nullable=False),
+    Column("fingerprint", String(64)))
 
 members = Table("social_members", metadata,
     Column("ride", String(36), ForeignKey(rides.c.id), primary_key=True),
@@ -88,6 +97,8 @@ invites = Table("social_invites", metadata,
     Column("recipient", String(36), ForeignKey(accounts.c.id), nullable=False),
     Column("status", String(16), nullable=False),
     Column("expires", Float, nullable=False),
+    # Last time this recipient was alerted for this room; bounds repeated pushes.
+    Column("notified", Float),
     UniqueConstraint("ride", "recipient"))
 
 messages = Table("social_messages", metadata,
@@ -106,11 +117,29 @@ outbox = Table("social_outbox", metadata,
     Column("attempts", Integer, nullable=False, default=0),
     Column("next_attempt", Float, nullable=False, default=0))
 
+# One row per app installation. The id is the installation identifier and
+# secret_digest is SHA-256 of an installation secret that only the app keeps.
 devices = Table("social_notification_devices", metadata,
     Column("id", String(36), primary_key=True),
     Column("owner", String(36), ForeignKey(accounts.c.id), nullable=False),
     Column("token", String(256), unique=True, nullable=False),
-    Column("environment", String(16), nullable=False))
+    Column("environment", String(16), nullable=False),
+    Column("secret_digest", String(64), nullable=False))
+
+# Route geometry another account received from Bicino (friend view, link,
+# preview or membership). It cannot be republished by that viewer.
+exposures = Table("social_route_exposures", metadata,
+    Column("viewer", String(36), ForeignKey(accounts.c.id), primary_key=True),
+    Column("fingerprint", String(64), primary_key=True),
+    Column("owner", String(36), ForeignKey(accounts.c.id), primary_key=True),
+    Column("created", Float, nullable=False))
+
+# Digest of a client-held deletion receipt. Lets the app confirm an accepted
+# deletion after lost responses, restart or identity cleanup without signing in.
+deletion_receipts = Table("social_deletion_receipts", metadata,
+    Column("digest", String(64), primary_key=True),
+    Column("account", String(36), ForeignKey(accounts.c.id), nullable=False),
+    Column("created", Float, nullable=False))
 
 limits = Table("social_limits", metadata,
     Column("key", String(180), primary_key=True),
@@ -148,24 +177,21 @@ class Database:
             metadata.create_all(connection)
             current = connection.scalar(select(versions.c.version))
             if current is None:
-                connection.execute(versions.insert().values(version=2))
-            elif current == 1:
-                # Old replay payloads contain capabilities and route snapshots.
-                # Retire those receipts before serving the upgraded API.
-                connection.execute(delete(replays))
-                # V1 snapshots lack source ownership provenance. Retire those
-                # development rooms instead of keeping potentially redistributed
-                # routes or resuming old consent under the new lease contract.
-                connection.execute(update(rides).values(status="ended", route={}))
-                connection.execute(update(members).values(live=null(), sharing=False, stats=False, status="left"))
-                connection.execute(update(invites).values(status="revoked"))
-                connection.execute(update(versions).values(version=2))
-            elif current != 2:
+                connection.execute(versions.insert().values(version=SCHEMA_VERSION))
+                return
+            if current == 1:
+                _retire_v1(connection)
+                current = 2
+            if current == 2:
+                _upgrade_v2(connection, time.time())
+                current = 3
+            if current != SCHEMA_VERSION:
                 raise ValueError("Unsupported social schema")
+            connection.execute(update(versions).values(version=SCHEMA_VERSION))
 
     def check_schema(self):
         with self.engine.connect() as c:
-            if c.scalar(select(versions.c.version)) != 2:
+            if c.scalar(select(versions.c.version)) != SCHEMA_VERSION:
                 raise ValueError("Run social migration before enabling the service")
 
     @contextmanager
@@ -173,15 +199,15 @@ class Database:
         with self.engine.begin() as c:
             yield c
 
-    def run(self, callback):
-        import time
+    def run(self, callback, *, attempts: int = 5):
+        """Run a complete transaction, retrying serialization and deadlock aborts."""
         from sqlalchemy.exc import OperationalError
-        for attempt in range(5):
+        for attempt in range(attempts):
             try:
                 with self.transaction() as c:
                     return callback(c)
             except OperationalError as error:
-                if getattr(error.orig, "sqlstate", None) not in {"40001", "40P01"} or attempt == 4:
+                if getattr(error.orig, "sqlstate", None) not in RETRYABLE_SQLSTATES or attempt == attempts-1:
                     raise
                 time.sleep(0.02 * (attempt + 1))
 
@@ -190,3 +216,76 @@ class Database:
         # Deterministic ordering prevents pair-operation deadlocks.
         list(c.execute(select(accounts.c.id).where(accounts.c.id.in_(sorted(set(ids))))
                        .order_by(accounts.c.id).with_for_update()))
+
+
+def insert_ignore(c, table, rows, keys):
+    """Insert rows whose primary key may already exist, without failing the transaction."""
+    if not rows:
+        return
+    statement = (pg_insert if c.dialect.name == "postgresql" else sqlite_insert)(table).values(rows)
+    c.execute(statement.on_conflict_do_nothing(index_elements=keys))
+
+
+def _retire_v1(connection):
+    # Old replay payloads contain capabilities and route snapshots.
+    # Retire those receipts before serving the upgraded API.
+    connection.execute(delete(replays))
+    # V1 snapshots lack source ownership provenance. Retire those
+    # development rooms instead of keeping potentially redistributed
+    # routes or resuming old consent under the new lease contract.
+    connection.execute(update(rides).values(status="ended", route={}))
+    connection.execute(update(members).values(live=null(), sharing=False, stats=False, status="left"))
+    connection.execute(update(invites).values(status="revoked"))
+
+
+def _add_column(connection, table, name, ddl):
+    if name not in {column["name"] for column in inspect(connection).get_columns(table)}:
+        connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+
+def _upgrade_v2(connection, now):
+    from .route_archive import archive_fingerprint
+    postgresql = connection.dialect.name == "postgresql"
+    _add_column(connection, "social_notification_devices", "secret_digest", "VARCHAR(64)")
+    _add_column(connection, "social_content", "fingerprint", "VARCHAR(64)")
+    _add_column(connection, "social_rides", "fingerprint", "VARCHAR(64)")
+    _add_column(connection, "social_invites", "notified", "DOUBLE PRECISION" if postgresql else "FLOAT")
+    # V2 bindings never proved possession of an installation secret, so a stale
+    # or squatted row cannot be safely handed off. Retire them; the app binds its
+    # installation again with a proof on its next launch or sign-in.
+    connection.execute(delete(devices).where(devices.c.secret_digest.is_(None)))
+    if postgresql:
+        connection.execute(text("ALTER TABLE social_notification_devices ALTER COLUMN secret_digest SET NOT NULL"))
+    connection.execute(text("CREATE INDEX IF NOT EXISTS ix_social_content_fingerprint ON social_content (fingerprint)"))
+    # Existing pending invitations were already alerted once.
+    connection.execute(update(invites).where(and_(invites.c.status == "pending", invites.c.notified.is_(None)))
+                       .values(notified=now))
+    for item in connection.execute(select(content.c.id, content.c.body).where(and_(
+            content.c.kind == "route", content.c.fingerprint.is_(None)))).mappings().all():
+        fingerprint = archive_fingerprint(item["body"])
+        if fingerprint:
+            connection.execute(update(content).where(content.c.id == item["id"]).values(fingerprint=fingerprint))
+    for ride in connection.execute(select(rides.c.id, rides.c.route).where(rides.c.fingerprint.is_(None))).mappings().all():
+        fingerprint = archive_fingerprint(ride["route"])
+        if fingerprint:
+            connection.execute(update(rides).where(rides.c.id == ride["id"]).values(fingerprint=fingerprint))
+    # Exposure tracking is new. Conservatively record every account that could
+    # already have received a route: accepted friends of friends-visible routes,
+    # and members or invitees of rooms that still hold a snapshot.
+    rows = {}
+    def exposed(viewer, fingerprint, owner):
+        if viewer != owner:
+            rows[(viewer, fingerprint, owner)] = {"viewer": viewer, "fingerprint": fingerprint,
+                                                  "owner": owner, "created": now}
+    for owner, fingerprint in connection.execute(select(content.c.owner, content.c.fingerprint).where(and_(
+            content.c.kind == "route", content.c.visibility == "friends", content.c.fingerprint.is_not(None)))).all():
+        for a, b in connection.execute(select(friendships.c.a, friendships.c.b).where(and_(
+                friendships.c.status == "accepted", or_(friendships.c.a == owner, friendships.c.b == owner)))).all():
+            exposed(b if a == owner else a, fingerprint, owner)
+    for ride_id, owner, fingerprint in connection.execute(select(rides.c.id, rides.c.owner, rides.c.fingerprint)
+                                                          .where(rides.c.fingerprint.is_not(None))).all():
+        for viewer in connection.scalars(select(members.c.account).where(members.c.ride == ride_id)).all():
+            exposed(viewer, fingerprint, owner)
+        for viewer in connection.scalars(select(invites.c.recipient).where(invites.c.ride == ride_id)).all():
+            exposed(viewer, fingerprint, owner)
+    insert_ignore(connection, exposures, list(rows.values()), ["viewer", "fingerprint", "owner"])

@@ -200,10 +200,16 @@ final class PhoneRouteLibrary: ObservableObject {
         return record.summary
     }
 
-    /// Social provenance is a phone-side sidecar; navigation hashes retain their original meaning.
+    private var socialProvenanceDirectory: URL {
+        store.rootDirectory.appendingPathComponent("social-provenance", isDirectory: true)
+    }
+
+    /// Saves a route received through Bicino social: a friend's or linked route,
+    /// its duplicate, or a Group Ride snapshot. Each copy records its owner in a
+    /// phone-side sidecar so it cannot later be published as the saver's own.
+    /// Navigation hashes retain their original meaning.
     @discardableResult
-    func importSocialArchive(_ data: Data, socialID: String, owner: String,
-                             revision: Int, duplicate: Bool) throws -> PlannedRouteSummaryV1 {
+    func importSocialArchive(_ data: Data, source: SocialRouteSource, duplicate: Bool) throws -> PlannedRouteSummaryV1 {
         let original = try NavigationRouteArchiveV1.decode(data, purpose: .offlineNavigation, now: now())
         guard original.route.provider == RouteProviderPolicyV1.importedGPX else {
             throw NavigationRouteArchiveError.durableStorageNotAllowed(providerID: original.providerID)
@@ -219,14 +225,58 @@ final class PhoneRouteLibrary: ObservableObject {
             archive = try NavigationRouteArchiveV1.create(route: route, createdAt: original.createdAt,
                 deleteAfter: original.deleteAfter, purpose: .offlineNavigation)
         } else { archive = original }
-        let directory = store.rootDirectory.appendingPathComponent("social-provenance", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let metadata: [String: Any] = ["schema": 1, "socialID": socialID, "owner": owner,
-            "socialRevision": revision, "sourceRouteID": original.routeID.uuidString,
-            "sourceRevision": original.revision, "sourceHash": original.contentHash]
-        let encoded = try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys])
-        try encoded.write(to: directory.appendingPathComponent(archive.routeID.uuidString + ".json"), options: .atomic)
+        let provenance = SocialRouteProvenance(source: source, sourceRouteID: original.routeID.uuidString,
+            sourceRevision: Int(original.revision), sourceHash: original.contentHash,
+            geometry: Self.socialGeometry(original.route))
+        try FileManager.default.createDirectory(at: socialProvenanceDirectory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        // Written before the copy becomes visible, so no saved copy lacks its owner.
+        try encoder.encode(provenance).write(
+            to: socialProvenanceDirectory.appendingPathComponent(archive.routeID.uuidString + ".json"), options: .atomic)
         return try importArchive(archive.encoded(purpose: .offlineNavigation, now: now()))
+    }
+
+    /// Owners of a saved route: its own sidecar, or for a copy that lost it (for
+    /// example an exported and re-imported file) every sidecar with the same geometry.
+    /// A sidecar that cannot be read fails closed as an unknown owner.
+    func socialProvenance(for summary: PlannedRouteSummaryV1) -> [SocialRouteProvenance] {
+        let direct = socialProvenanceDirectory.appendingPathComponent(summary.id.uuidString + ".json")
+        if FileManager.default.fileExists(atPath: direct.path) {
+            guard let data = try? Data(contentsOf: direct), data.count <= 16_384,
+                  let value = try? JSONDecoder().decode(SocialRouteProvenance.self, from: data) else {
+                return [SocialRouteProvenance(source: SocialRouteSource(kind: .content, socialID: "", owner: "", revision: nil),
+                                              sourceRouteID: summary.id.uuidString, sourceRevision: 0, sourceHash: "", geometry: "")]
+            }
+            return [value]
+        }
+        let records = allSocialProvenance()
+        guard !records.isEmpty, let archive = try? offlineArchive(for: summary) else { return [] }
+        let geometry = Self.socialGeometry(archive.route)
+        return records.filter { $0.geometry == geometry }
+    }
+
+    /// Whether the signed-in rider may publish this saved route. A sharing-rights
+    /// confirmation cannot override another rider's ownership.
+    func socialPublication(for summary: PlannedRouteSummaryV1, currentProfileID: String?) -> SocialRoutePublication {
+        let provenance = socialProvenance(for: summary)
+        if let foreign = provenance.first(where: { $0.owner != currentProfileID }) {
+            return .restricted(owner: foreign.owner)
+        }
+        return provenance.isEmpty ? .independent : .ownCopy
+    }
+
+    private func allSocialProvenance() -> [SocialRouteProvenance] {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: socialProvenanceDirectory, includingPropertiesForKeys: nil) else { return [] }
+        return files.filter { $0.pathExtension == "json" }.compactMap { file in
+            guard let data = try? Data(contentsOf: file), data.count <= 16_384 else { return nil }
+            return try? JSONDecoder().decode(SocialRouteProvenance.self, from: data)
+        }
+    }
+
+    static func socialGeometry(_ route: NavigationRouteV1) -> String {
+        SocialRouteGeometry.fingerprint(route.points.map { (latitude: $0.latitude, longitude: $0.longitude) })
     }
 
     @discardableResult

@@ -2645,7 +2645,16 @@ The UI compares each badge presentation before touching LVGL and copies portrait
 pixels only when its committed hash changes. Off-screen placement uses the ray
 from the viewport center to the camera-projected rider, including near-plane
 clipping; colliding badges retain the nearest rider. Up to eight stable local slots represent the nearest riders;
-no Firebase UID, public ID, URL, or account token reaches firmware.
+no Firebase UID, public ID, URL, or account token reaches firmware. Slot changes
+are incremental within a session: an unchanged rider keeps its slot and committed
+portrait, a rider who leaves or stops sharing before expiry is removed with
+operation `2` at once, and a slot is cleared before reuse only when a nearer
+rider replaces its occupant. A rider whose position expired stays parked in its
+slot (firmware already hides it after 60 seconds), so a return resumes with the
+same portrait hash and no transfer. The phone starts a new epoch (operation `0`)
+only for a new BLE session, account, room or hardware capability, or when the
+device answers a state or remove with result `1` because it no longer knows the
+session.
 
 | Operation | Bytes after header | Meaning |
 | --- | --- | --- |

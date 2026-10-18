@@ -8,16 +8,20 @@ private func require(_ value: @autoclosure () -> Bool, _ message: String) {
 
 @MainActor
 private final class SocketFixture: SocialSocket {
-    var first: URLSessionWebSocketTask.Message?
+    /// Messages the test pushes into this live socket.
+    var queue: [URLSessionWebSocketTask.Message]
     let drop: Bool
-    init(first: URLSessionWebSocketTask.Message? = nil, drop: Bool = false) { self.first=first;self.drop=drop }
+    private(set) var delivered = 0
+    init(first: URLSessionWebSocketTask.Message? = nil, drop: Bool = false) { queue=first.map { [$0] } ?? [];self.drop=drop }
     func resume() {}
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {}
     func receive() async throws -> URLSessionWebSocketTask.Message {
-        if let first { self.first=nil;return first }
-        if drop { throw URLError(.networkConnectionLost) }
-        try await Task.sleep(nanoseconds: 10_000_000_000)
-        throw URLError(.timedOut)
+        while queue.isEmpty {
+            if drop { throw URLError(.networkConnectionLost) }
+            try await Task.sleep(nanoseconds: 5_000_000)  // Ends when the live service resets.
+        }
+        delivered+=1
+        return queue.removeFirst()
     }
 }
 
@@ -31,6 +35,9 @@ private final class RideFixture: SocialRideNetworking {
     var serverSharing=false
     var holdStart=false,holdStop=false
     var held:CheckedContinuation<Void,Never>?
+    var stateFailures=0,socketDrops=0
+    private(set) var sockets:[SocketFixture]=[]
+    var snapshot:URLSessionWebSocketTask.Message { .data(try! JSONSerialization.data(withJSONObject:room)) }
     var room:[String:Any] {
         ["id":"ride-1","owner":"owner","title":"Test","status":"active","expiresAt":100000.0,
          "route":[:],"members":[],"riders":dropSocket ? [["profile":["id":"friend","displayName":"Friend"],
@@ -57,6 +64,7 @@ private final class RideFixture: SocialRideNetworking {
             sequences.append(payload["sequence"] as! Int)
             if terminal || !serverSharing || payload["epoch"] as? String != "consent-\(leaseEpoch)" { throw SocialFailure.server("sharing_disabled") }
             guard sequences.last! > acceptedSequence else { throw SocialFailure.server("stale_state") }
+            if stateFailures>0 { stateFailures-=1;throw SocialFailure.server("service_unavailable") }
             acceptedSequence=sequences.last!
             if lostFirst && sequences.count==1 { throw URLError(.timedOut) }
             result=["accepted":sequences.last!]
@@ -69,7 +77,11 @@ private final class RideFixture: SocialRideNetworking {
     }
     func socket(rideID:String) async throws -> any SocialSocket {
         let data=try JSONSerialization.data(withJSONObject:room)
-        return SocketFixture(first:dropSocket ? .data(data) : nil,drop:dropSocket)
+        let socket:SocketFixture
+        if socketDrops>0 { socketDrops-=1;socket=SocketFixture(drop:true) }
+        else { socket=SocketFixture(first:dropSocket ? .data(data) : nil,drop:dropSocket) }
+        sockets.append(socket)
+        return socket
     }
 }
 
@@ -177,6 +189,43 @@ struct SocialRuntimeTests {
             service.reset()
         }
 
+        // A viewer's reconnect notice clears on the next healthy snapshot.
+        let viewer=RideFixture();viewer.socketDrops=1
+        let watching=LiveRideService(client:viewer,pollNanoseconds:10_000_000,reconnectNanoseconds:10_000_000)
+        var notices:[LiveRideService.Notice?]=[]
+        let noticeObserver=watching.$error.sink { _ in notices.append(watching.notice) }
+        try await watching.select(viewer.selected())
+        try await wait { viewer.sockets.count>=2 }
+        viewer.sockets.last!.queue.append(viewer.snapshot)
+        try await wait { notices.contains(.reconnecting) && watching.error==nil }
+        require(!watching.isSharing && watching.notice==nil,"a healthy snapshot clears a viewer's reconnect notice")
+        noticeObserver.cancel()
+        watching.reset()
+
+        // Publishing and sharing-ended notices persist until resolved, but never into the next ride.
+        let rider=RideFixture();rider.stateFailures=1_000
+        let sharing=LiveRideService(client:rider,pollNanoseconds:10_000_000,reconnectNanoseconds:10_000_000)
+        sharing.prepareLocation={true}
+        try await sharing.select(rider.selected())
+        sharing.updateLocation(CLLocation(coordinate:.init(latitude:1,longitude:2),altitude:0,horizontalAccuracy:5,verticalAccuracy:5,timestamp:Date()))
+        try await sharing.startSharing(stats:false)
+        try await wait { sharing.notice == .publishFailed && !rider.sockets.isEmpty }
+        rider.sockets.last!.queue.append(rider.snapshot)
+        try await wait { rider.sockets.last!.delivered>=1 }
+        require(sharing.notice == .publishFailed,"a healthy snapshot does not hide a publishing failure")
+        rider.stateFailures=0
+        try await wait { sharing.notice==nil }
+        rider.terminal=true
+        // The publisher sends only newer fixes; a fresh fix reaches the terminal response.
+        sharing.updateLocation(CLLocation(coordinate:.init(latitude:1,longitude:2.001),altitude:0,horizontalAccuracy:5,verticalAccuracy:5,timestamp:Date().addingTimeInterval(1)))
+        try await wait { sharing.notice == .sharingEnded }
+        rider.sockets.last!.queue.append(rider.snapshot)
+        try await wait { rider.sockets.last!.delivered>=2 }
+        require(sharing.notice == .sharingEnded && !sharing.isSharing,"sharing-ended persists until the rider acts")
+        try await sharing.select(rider.selected())
+        require(sharing.notice==nil && sharing.error==nil,"notices never carry into the next ride")
+        sharing.reset()
+
         let auth=AuthFixture();let config=URLSessionConfiguration.ephemeral
         config.protocolClasses=[ProtocolFixture.self]
         let urlSession=URLSession(configuration:config)
@@ -197,17 +246,30 @@ struct SocialRuntimeTests {
             preconditionFailure("state transport failure must reach its publisher")
         } catch is URLError { }
         require(ProtocolFixture.state.requests.count==1,"state retransmission belongs to the monotonic publisher")
+        // A lost deletion response retries with its operation key; the account's own
+        // authenticated answer that deletion is under way completes it.
+        let orchestrator=SocialAccountDeletion(store:SocialTestStore(),client:client,anonymous:client)
         for code in ["account_deleting","account_deleted"] {
             ProtocolFixture.state.reset(failing:true,responseCode:code)
-            try await client.deleteAccount(body:["expectedProfileID":"owner"])
-            require(ProtocolFixture.state.requests.count==2,"lost deletion response retries and completes local sign-out path")
+            let completed=try await orchestrator.delete(profileID:"owner",accountUID:"uid-owner",reauthenticate:{ nil })
+            require(completed.profileID=="owner" && orchestrator.pending==nil,"accepted deletion completes after a lost response")
+            require(ProtocolFixture.state.requests.count==2,"the transport retry reuses the deletion operation")
         }
-        auth.failure = .server("account_deleted")
-        try await client.deleteAccount(body:["expectedProfileID":"owner"])
+        // A provider identity that disappeared is not proof: only the receipt can confirm it.
+        auth.failure = .identityMissing
+        ProtocolFixture.state.reset(failing:false)
+        do {
+            _ = try await orchestrator.delete(profileID:"owner",accountUID:"uid-owner",reauthenticate:{ nil })
+            preconditionFailure("a missing identity must not be treated as completed deletion")
+        } catch SocialFailure.identityMissing { }
+        let resolve=ProtocolFixture.state.requests.last!
+        require(resolve.url!.path=="/v1/social/deletion-receipts/resolve" && resolve.value(forHTTPHeaderField:"Authorization")==nil,
+                "receipt confirmation is anonymous and keeps its secret out of the URL")
+        require(orchestrator.pending != nil,"an unconfirmed receipt is retained for recovery")
         auth.failure = nil
         ProtocolFixture.state.reset(failing:false,responseCode:"account_unavailable")
         do {
-            try await client.deleteAccount(body:["expectedProfileID":"owner"])
+            _ = try await orchestrator.delete(profileID:"owner",accountUID:"uid-owner",reauthenticate:{ nil })
             preconditionFailure("unconfirmed deletion must not be treated as complete")
         } catch SocialFailure.server("account_unavailable") { }
         urlSession.invalidateAndCancel()
@@ -225,6 +287,7 @@ struct SocialRuntimeTests {
             require((edge.x-233)*dx>=0 && (edge.y-233)*dy>=0,"edge follows the projected point after panning or rotation")
         }
         require(abs(SocialMapGeometry.edgeCenter(projected:CGPoint(x:-100,y:100),bounds:bounds)!.x-42)<0.00001,"a panned rider stays on the projected side of the map")
-        print("Social publisher, expiry, reconnect/revocation, HTTP retry, link and projected-edge regressions passed")
+        try await SocialMaintenanceTests.run()
+        print("Social publisher, expiry, reconnect/revocation, notices, HTTP retry, deletion, link and projected-edge regressions passed")
     }
 }

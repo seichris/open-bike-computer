@@ -280,6 +280,7 @@
         "ios-app/BikeComputer/RideShared/NavigationRouteFileStore.swift",
         "ios-app/BikeComputer/BikeComputer/Models/SavedRouteMapSelection.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/PhoneRouteLibrary.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SocialRouteProvenance.swift",
         "ios-app/BikeComputerTests/OfflineRouteSaveTests.swift",
         "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
         "ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift",
@@ -391,6 +392,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/SavedRouteMapSelection.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/PhoneRouteLibrary.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SocialRouteProvenance.swift",
         "ios-app/BikeComputer/BikeComputer/Views/SavedRouteMapPreview.swift",
         "ios-app/BikeComputerTests/SavedRouteMapPreviewTests.swift"
       ],
@@ -689,6 +691,11 @@
         "ios-app/BikeComputer/BikeComputer/Models/SocialModels.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoSocialClient.swift",
         "ios-app/BikeComputer/BikeComputer/Services/LiveRideService.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/SocialSecureStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/SocialNotificationBinding.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/SocialAccountDeletion.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/SocialRiderRelayEngine.swift",
+        "ios-app/BikeComputerTests/SocialMaintenanceTests.swift",
         "ios-app/BikeComputerTests/SocialRuntimeTests.swift"
       ]
     }

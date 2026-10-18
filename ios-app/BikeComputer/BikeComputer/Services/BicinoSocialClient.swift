@@ -1,7 +1,10 @@
 import Foundation
 
-enum SocialFailure: LocalizedError {
+enum SocialFailure: LocalizedError, Equatable {
     case unavailable, signedOut, cancelled, accountChanged, invalidResponse
+    /// The identity provider no longer knows this account. This is not proof that
+    /// a Bicino deletion completed; only the server or a deletion receipt can say so.
+    case identityMissing
     case server(String)
 
     var errorDescription: String? {
@@ -11,6 +14,7 @@ enum SocialFailure: LocalizedError {
         case .cancelled: "Sign-in was cancelled."
         case .accountChanged: "Your account changed. Try again."
         case .invalidResponse: "Bicino returned an invalid response."
+        case .identityMissing: "This Bicino sign-in is no longer available."
         case .server(let code): code.replacingOccurrences(of: "_", with: " ").capitalized
         }
     }
@@ -36,6 +40,14 @@ protocol SocialRideNetworking {
     func socket(rideID: String) async throws -> any SocialSocket
 }
 
+/// Requests authorized by a secret in their body instead of an account token:
+/// releasing this installation's push binding and confirming a deletion receipt.
+/// They must work after sign-out, forced sign-out or account deletion.
+@MainActor
+protocol SocialAnonymousNetworking: AnyObject {
+    func anonymousRequest(_ path: String, body: Data) async throws -> Data
+}
+
 extension SocialRideNetworking {
     func json(_ path: String, method: String = "GET", body: [String: Any]? = nil) async throws -> [String: Any] {
         let encoded = try body.map { try JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys]) }
@@ -47,7 +59,7 @@ extension SocialRideNetworking {
 
 
 @MainActor
-final class BicinoSocialClient: SocialRideNetworking {
+final class BicinoSocialClient: SocialRideNetworking, SocialAnonymousNetworking {
     let session: any SocialAuthenticating
     let urlSession: URLSession
     let baseURL: URL?
@@ -96,18 +108,43 @@ final class BicinoSocialClient: SocialRideNetworking {
                 throw error
             }
             guard expected == session.generation else { throw SocialFailure.accountChanged }
-            guard let http = response as? HTTPURLResponse, data.count <= 16 * 1024 * 1024 else {
-                throw SocialFailure.invalidResponse
-            }
-            if http.statusCode == 401 && !refreshed {
+            if (response as? HTTPURLResponse)?.statusCode == 401 && !refreshed {
                 refreshed = true; forceRefresh = true; continue
             }
-            guard (200..<300).contains(http.statusCode) else {
-                let code = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["code"] as? String
-                throw SocialFailure.server(code ?? "service_unavailable")
-            }
-            return data
+            return try Self.payload(data, response)
         }
+    }
+
+    func anonymousRequest(_ path: String, body: Data) async throws -> Data {
+        guard let baseURL, baseURL.scheme == "https", !path.contains(".."), !path.contains(":") else {
+            throw SocialFailure.unavailable
+        }
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        request.httpMethod = "POST"
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // No Authorization header: the body secret is the only authority, and these
+        // idempotent requests may retry once after an ambiguous transport loss.
+        for attempt in 0...1 {
+            do {
+                let (data, response) = try await urlSession.data(for: request)
+                return try Self.payload(data, response)
+            } catch let error as URLError where attempt == 0 && [.timedOut, .networkConnectionLost].contains(error.code) {
+                continue
+            }
+        }
+        throw SocialFailure.invalidResponse
+    }
+
+    private static func payload(_ data: Data, _ response: URLResponse) throws -> Data {
+        guard let http = response as? HTTPURLResponse, data.count <= 16 * 1024 * 1024 else {
+            throw SocialFailure.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let code = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["code"] as? String
+            throw SocialFailure.server(code ?? "service_unavailable")
+        }
+        return data
     }
 
     func json(_ path: String, method: String = "GET", body: [String: Any]? = nil,
@@ -127,14 +164,6 @@ final class BicinoSocialClient: SocialRideNetworking {
         var request = URLRequest(url: components.url!)
         request.setValue("Bearer \(try await session.token(forceRefresh: false))", forHTTPHeaderField: "Authorization")
         return urlSession.webSocketTask(with: request)
-    }
-
-    func deleteAccount(body: [String: Any]) async throws {
-        do {
-            _ = try await json("me/deletion", method: "POST", body: body)
-        } catch SocialFailure.server(let code) where ["account_deleting", "account_deleted"].contains(code) {
-            // An accepted deletion can finish before its lost response is retried.
-        }
     }
 }
 

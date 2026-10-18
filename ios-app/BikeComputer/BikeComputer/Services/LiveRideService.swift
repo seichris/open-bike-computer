@@ -11,12 +11,19 @@ final class LiveRideService: ObservableObject {
     @Published private(set) var isSharing = false
     @Published private(set) var error: String?
     @Published private(set) var messages: [SocialQuickMessage] = []
+    /// What `error` describes, so each notice clears when its own condition resolves.
+    enum Notice: Int, Comparable {
+        case reconnecting, publishFailed, sharingEnded
+        static func < (a: Notice, b: Notice) -> Bool { a.rawValue < b.rawValue }
+    }
+    private(set) var notice: Notice?
     var prepareLocation: (() -> Bool)?
     var onRidersChanged: (([SocialRider]) -> Void)?
     var onCapabilitiesChanged: ((SocialCapabilities) -> Void)?
     private let client: any SocialRideNetworking
     private let uptime: () -> TimeInterval
     private let pollNanoseconds: UInt64
+    private let reconnectNanoseconds: UInt64
     private var sharingRevision = UUID()
     private var sharingDeadline = 0.0
     private var stream: Task<Void, Never>?
@@ -31,8 +38,28 @@ final class LiveRideService: ObservableObject {
     private var sequence = 0
     private var localEpoch = UUID()
 
-    init(client: any SocialRideNetworking, uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, pollNanoseconds: UInt64 = 3_000_000_000) {
-        self.client = client; self.uptime = uptime; self.pollNanoseconds = pollNanoseconds
+    init(client: any SocialRideNetworking, uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         pollNanoseconds: UInt64 = 3_000_000_000, reconnectNanoseconds: UInt64 = 3_000_000_000) {
+        self.client = client; self.uptime = uptime
+        self.pollNanoseconds = pollNanoseconds; self.reconnectNanoseconds = reconnectNanoseconds
+    }
+
+    /// A more important notice is never hidden by a lesser one.
+    private func show(_ kind: Notice, _ message: String) {
+        guard notice.map({ kind >= $0 }) ?? true else { return }
+        notice = kind
+        error = message
+    }
+
+    private func resolve(_ kind: Notice) {
+        guard notice == kind else { return }
+        notice = nil
+        error = nil
+    }
+
+    private func clearNotice() {
+        notice = nil
+        error = nil
     }
 
     func updateLocation(_ location: CLLocation?) {
@@ -96,7 +123,8 @@ final class LiveRideService: ObservableObject {
                         self.ride = next
                         self.riders = next.riders.filter { $0.age(at: Date()) < 60 }
                         if !next.sharing { self.isSharing = false }
-                        if self.isSharing { self.error = nil }
+                        // A healthy snapshot ends a reconnect, sharing or not.
+                        self.resolve(.reconnecting)
                         self.onRidersChanged?(self.riders)
                         try? await self.refreshMessages()
                     }
@@ -104,7 +132,7 @@ final class LiveRideService: ObservableObject {
                     guard !Task.isCancelled, epoch == self.localEpoch else { return }
                     self.riders.removeAll { $0.age(at: Date()) >= 60 }
                     self.onRidersChanged?(self.riders)
-                    self.error = "Reconnecting. Older rider positions expire automatically."
+                    self.show(.reconnecting, "Reconnecting. Older rider positions expire automatically.")
                     // Re-fetching checks membership; an explicit revoked/ended result
                     // clears the room, while transport loss can reconnect safely.
                     do {
@@ -115,7 +143,7 @@ final class LiveRideService: ObservableObject {
                             return
                         }
                     } catch { }
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    try? await Task.sleep(nanoseconds: self.reconnectNanoseconds)
                 }
             }
         }
@@ -157,7 +185,7 @@ final class LiveRideService: ObservableObject {
         sharedDistance = 0; sharedMovingSeconds = 0
         sharingStartedAt = uptime()
         sharingDeadline = requestedAt + min(4 * 3600, max(0, (updated.sharingExpiresAt ?? (updated.serverTime + 60)) - updated.serverTime))
-        error = nil
+        clearNotice()
         isSharing = true
         sequence = 0
         lastPublished = nil
@@ -168,7 +196,7 @@ final class LiveRideService: ObservableObject {
             while !Task.isCancelled && epoch == self.localEpoch && revision == self.sharingRevision && self.isSharing {
                 if self.uptime() >= self.sharingDeadline {
                     await self.stopSharing()
-                    self.error = "Location sharing ended. Start it again to continue."
+                    self.show(.sharingEnded, "Location sharing ended. Start it again to continue.")
                     return
                 }
                 if let location = self.latestLocation,
@@ -193,14 +221,15 @@ final class LiveRideService: ObservableObject {
                         _ = try await self.client.json("group-rides/\(ride.id)/state", method: "POST", body: state)
                         guard revision == self.sharingRevision, epoch == self.localEpoch else { return }
                         self.lastPublished = location.timestamp
+                        self.resolve(.publishFailed)
                     } catch {
                         guard revision == self.sharingRevision, epoch == self.localEpoch else { return }
                         if case SocialFailure.server(let code) = error, ["sharing_disabled", "ride_ended", "membership_required", "account_unavailable", "account_deleting"].contains(code) {
                             await self.stopSharing()
-                            self.error = "Location sharing ended. Start it again to continue."
+                            self.show(.sharingEnded, "Location sharing ended. Start it again to continue.")
                             return
                         }
-                        self.error = "Your last location update could not be shared."
+                        self.show(.publishFailed, "Your last location update could not be shared.")
                     }
                 }
                 try? await Task.sleep(nanoseconds: self.pollNanoseconds)
@@ -258,6 +287,7 @@ final class LiveRideService: ObservableObject {
         publisher?.cancel(); publisher = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         isSharing = false; ride = nil; riders = []; messages = []; invitationCode = nil; isRotatingInvitation = false
+        clearNotice()  // Notices describe the room being left, never the next one.
         onRidersChanged?([])
     }
 }

@@ -258,21 +258,75 @@ struct OfflineRouteSaveTests {
 
     static func socialCopyKeepsProviderAndProvenance() throws {
         let f = Fixture(); defer { f.cleanup() }
+        let before = checks
         let original = try draft(f).archive
         let data = try original.encoded(purpose: .offlineNavigation, now: f.now)
-        let saved = try f.library.importSocialArchive(data, socialID: "social-route", owner: "rider", revision: 3, duplicate: false)
-        let copy = try f.library.importSocialArchive(data, socialID: "social-route", owner: "rider", revision: 3, duplicate: true)
+        let friendRoute = SocialRouteSource(kind: .content, socialID: "social-route", owner: "rider", revision: 3)
+        let saved = try f.library.importSocialArchive(data, source: friendRoute, duplicate: false)
+        let copy = try f.library.importSocialArchive(data, source: friendRoute, duplicate: true)
         check(saved.id == original.routeID && copy.id != original.routeID, "Only Duplicate creates a new local identity")
         let restored = try f.library.offlineArchive(for: copy)
         check(restored.route.provider == original.route.provider && restored.createdAt == original.createdAt && restored.deleteAfter == original.deleteAfter,
               "Copy preserves provider and retention")
-        let sidecar = f.root.appendingPathComponent("social-provenance").appendingPathComponent(copy.id.uuidString + ".json")
+        let provenance = f.root.appendingPathComponent("social-provenance")
+        let sidecar = provenance.appendingPathComponent(copy.id.uuidString + ".json")
         let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: sidecar)) as! [String: Any]
         check(metadata["sourceHash"] as? String == original.contentHash, "Copy retains original hash provenance outside navigation archive")
         check(metadata["socialRevision"] as? Int == 3, "Social revision is retained")
+        check(metadata["owner"] as? String == "rider" && metadata["kind"] as? String == "content", "Copy records its owner and source kind")
+        check(metadata["geometry"] as? String == PhoneRouteLibrary.socialGeometry(original.route), "Copy records its route geometry")
+
+        // A friend's route, including an ID-changed duplicate, stays the owner's to share.
+        for summary in [saved, copy] {
+            check(f.library.socialPublication(for: summary, currentProfileID: "me") == .restricted(owner: "rider"),
+                  "A saved or duplicated friend route cannot be published as the saver's own")
+            check(f.library.socialPublication(for: summary, currentProfileID: nil) == .restricted(owner: "rider"),
+                  "An unknown signed-in rider fails closed")
+            check(f.library.socialPublication(for: summary, currentProfileID: "rider") == .ownCopy,
+                  "The owner may republish their own saved route")
+        }
+        // Restrictions are read back after a relaunch over the same storage.
+        let relaunched = f.makeLibrary()
+        check(relaunched.socialPublication(for: copy, currentProfileID: "me") == .restricted(owner: "rider"),
+              "Provenance survives reload")
+        // Group Ride snapshots saved or opened on the map belong to the organizer.
+        let snapshot = try draft(f, offset: 0.01).archive
+        let ride = try relaunched.importSocialArchive(snapshot.encoded(purpose: .offlineNavigation, now: f.now),
+            source: SocialRouteSource(kind: .ride, socialID: "ride-1", owner: "organizer", revision: nil), duplicate: false)
+        check(relaunched.socialPublication(for: ride, currentProfileID: "me") == .restricted(owner: "organizer"),
+              "Members cannot republish a Group Ride snapshot")
+        check(relaunched.socialPublication(for: ride, currentProfileID: "organizer") == .ownCopy,
+              "The organizer can still publish their own route")
+        // An exported copy re-imported without its sidecar, even reversed, is matched by geometry.
+        let reimported = try relaunched.importGPX(gpx(reversed: true), fileName: "Exported.gpx")
+        check(reimported.id != saved.id && reimported.id != copy.id, "Re-import creates a new local identity")
+        check(relaunched.socialPublication(for: reimported, currentProfileID: "me") == .restricted(owner: "rider"),
+              "Re-imported copies are recognized by route geometry")
+        // The rider's own unrelated GPX import remains publishable.
+        let own = try relaunched.importGPX(gpx(offset: 0.05), fileName: "Mine.gpx")
+        check(relaunched.socialPublication(for: own, currentProfileID: "me") == .independent, "Own GPX imports stay publishable")
+        // Unreadable provenance never grants publication.
+        try Data("{".utf8).write(to: sidecar)
+        check(relaunched.socialPublication(for: copy, currentProfileID: "rider") == .restricted(owner: ""),
+              "A corrupt sidecar fails closed")
+        // Schema-1 sidecars written before restrictions existed still restrict by owner.
+        let legacy = try JSONSerialization.data(withJSONObject: ["schema": 1, "socialID": "old", "owner": "rider",
+            "socialRevision": 1, "sourceRouteID": saved.id.uuidString, "sourceRevision": 1, "sourceHash": original.contentHash])
+        try legacy.write(to: provenance.appendingPathComponent(saved.id.uuidString + ".json"))
+        check(relaunched.socialPublication(for: saved, currentProfileID: "me") == .restricted(owner: "rider"),
+              "Legacy sidecars restrict by owner")
+        // Native fingerprints match the backend reference vectors byte for byte.
+        check(SocialRouteGeometry.fingerprint([(51.5, -0.1), (51.502, -0.1), (51.504, -0.1000004)])
+              == "57424a01bcdb7b9435cd88b98d443c20878d901434ddfdc93085886de4794bb7", "Fingerprint parity, forward")
+        check(SocialRouteGeometry.fingerprint([(51.504, -0.1000004), (51.502, -0.1), (51.5, -0.1)])
+              == "57424a01bcdb7b9435cd88b98d443c20878d901434ddfdc93085886de4794bb7", "Fingerprint parity, reversed")
+        check(SocialRouteGeometry.fingerprint([(-33.8688, 151.2093), (-33.86885, 151.20935)])
+              == "643bc165b37ae90cd785b174bcb26db6016f7c90cca19c8a5b41516bfc7ff8bf", "Fingerprint parity, southern/eastern")
         let strava = try NavigationRouteArchiveV1.create(route: changedProvider(original.route, RouteProviderPolicyV1.strava), createdAt: f.now,
             deleteAfter: f.now.addingTimeInterval(60), purpose: .offlineNavigation)
-        failure { _ = try f.library.importSocialArchive(strava.encoded(purpose: .offlineNavigation, now: f.now), socialID: "restricted", owner: "rider", revision: 1, duplicate: true) }
+        failure { _ = try f.library.importSocialArchive(strava.encoded(purpose: .offlineNavigation, now: f.now),
+            source: SocialRouteSource(kind: .content, socialID: "restricted", owner: "rider", revision: 1), duplicate: true) }
+        print("Social route provenance and publishing restrictions: \(checks - before) checks passed")
     }
 
     static func operationReceiptAndCrashRecovery() throws {

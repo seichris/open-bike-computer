@@ -1,7 +1,42 @@
 """Strict native route archive validation; imported GPX is the only social provider."""
+import hashlib
+import json
 import math
+import struct
 import uuid
 from .models import Point
+
+FINGERPRINT_DOMAIN = b"bicino-route-geometry-v1"
+
+
+def _scaled(value):
+    value *= 1_000_000
+    return math.floor(value + 0.5) if value >= 0 else math.ceil(value - 0.5)
+
+
+def route_fingerprint(points):
+    """Identify route geometry independently of route ID, revision, title or direction.
+
+    Coordinates use the same E6 rounding as archive validation. The native app
+    computes the identical value, so ID-changed duplicates and reversed copies of
+    a received route still match.
+    """
+    scaled = [(_scaled(p["latitude"]), _scaled(p["longitude"])) for p in points]
+    def digest(sequence):
+        value = hashlib.sha256(FINGERPRINT_DOMAIN)
+        for latitude, longitude in sequence:
+            value.update(struct.pack("<ii", latitude, longitude))
+        return value.hexdigest()
+    return min(digest(scaled), digest(reversed(scaled)))
+
+
+def archive_fingerprint(body):
+    """Fingerprint a stored route body or ride snapshot; None when it holds no route."""
+    try:
+        archive = json.loads(body["archive"])
+        return route_fingerprint(archive["route"]["points"])
+    except (KeyError, TypeError, ValueError, struct.error):
+        return None
 
 
 def validate_archive(archive):

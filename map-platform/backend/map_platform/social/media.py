@@ -10,24 +10,30 @@ from PIL import Image, ImageOps
 def sanitize_avatar(data: bytes) -> dict[str, bytes]:
     if not data or len(data) > 5 * 1024 * 1024:
         raise ValueError("avatar_size")
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", Image.DecompressionBombWarning)
-        with Image.open(BytesIO(data)) as source:
-            if (source.format not in {"JPEG", "PNG", "WEBP"}
-                    or getattr(source, "n_frames", 1) != 1
-                    or source.width * source.height > 16_000_000):
-                raise ValueError("avatar_format")
-            source.load()
-            image = ImageOps.exif_transpose(source).convert("RGB")
-            output = {}
-            for name, size in (("profile", 256), ("marker", 96), ("hardware", 40)):
-                # Copy pixels into a new image; no source metadata survives.
-                cropped = ImageOps.fit(image, (size, size), method=Image.Resampling.LANCZOS)
-                clean = Image.frombytes("RGB", cropped.size, cropped.tobytes())
-                encoded = BytesIO()
-                clean.save(encoded, format="PNG", optimize=True)
-                output[name] = encoded.getvalue()
-            return output
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            # Image.open reads only the header; Pillow's bomb check rejects huge
+            # declared dimensions before any pixel buffer is allocated.
+            with Image.open(BytesIO(data)) as source:
+                if (source.format not in {"JPEG", "PNG", "WEBP"}
+                        or getattr(source, "n_frames", 1) != 1
+                        or source.width * source.height > 16_000_000):
+                    raise ValueError("avatar_format")
+                source.load()
+                image = ImageOps.exif_transpose(source).convert("RGB")
+                output = {}
+                for name, size in (("profile", 256), ("marker", 96), ("hardware", 40)):
+                    # Copy pixels into a new image; no source metadata survives.
+                    cropped = ImageOps.fit(image, (size, size), method=Image.Resampling.LANCZOS)
+                    clean = Image.frombytes("RGB", cropped.size, cropped.tobytes())
+                    encoded = BytesIO()
+                    clean.save(encoded, format="PNG", optimize=True)
+                    output[name] = encoded.getvalue()
+                return output
+    except (Image.DecompressionBombWarning, Image.DecompressionBombError):
+        # Oversized declared dimensions are invalid input, not a server fault.
+        raise ValueError("avatar_dimensions") from None
 
 
 class S3Media:

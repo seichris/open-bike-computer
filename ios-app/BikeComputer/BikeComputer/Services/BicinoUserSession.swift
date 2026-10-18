@@ -16,6 +16,9 @@ final class BicinoUserSession: NSObject, ObservableObject, SocialAuthenticating 
     private var appleFlow: AppleSignInFlow?
     private var observedUID: String?
     private var refresh: Task<String, Error>?
+    /// The app-private Keychain group Firebase uses; social installation proofs share it.
+    private(set) var keychainGroup: String?
+    var currentUID: String? { observedUID }
 
     override init() {
         super.init()
@@ -40,6 +43,7 @@ final class BicinoUserSession: NSObject, ObservableObject, SocialAuthenticating 
         auth = Auth.auth()
         do { try auth?.useUserAccessGroup(keychainGroup) }
         catch { auth = nil; return }
+        self.keychainGroup = keychainGroup
         state = .restoring
         listener = auth?.addStateDidChangeListener { [weak self] _, user in
             Task { @MainActor [weak self] in
@@ -78,7 +82,8 @@ final class BicinoUserSession: NSObject, ObservableObject, SocialAuthenticating 
             guard expected == generation else { throw SocialFailure.accountChanged }
             let failure = error as NSError
             if failure.domain == AuthErrorDomain, failure.code == AuthErrorCode.userNotFound.rawValue {
-                throw SocialFailure.server("account_deleted")
+                // Only the server or a deletion receipt can confirm a Bicino deletion.
+                throw SocialFailure.identityMissing
             }
             throw error
         }

@@ -21,9 +21,15 @@ final class SocialCoordinator: ObservableObject {
     @Published private(set) var activities: [SocialContent] = []
     @Published private(set) var photos: [String: UIImage] = [:]
     @Published var error: String?
+    /// Informational outcome, such as an earlier deletion confirmed after relaunch.
+    @Published var notice: String?
     @Published var pendingLink: URL?
+    /// Alert registration is reported separately: it never makes a refresh or a
+    /// successful friend, route or ride action look failed.
+    @Published private(set) var notificationStatus: SocialNotificationBinding.Status = .inactive
+    let notifications: SocialNotificationBinding
+    let deletion: SocialAccountDeletion
     private var pushToken: String?
-    private let pushBinding = UUID().uuidString
     func enableNotifications() async throws {
         if try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) {
             UIApplication.shared.registerForRemoteNotifications()
@@ -31,16 +37,19 @@ final class SocialCoordinator: ObservableObject {
     }
     func didRegisterNotifications(_ data: Data) {
         pushToken = data.map { String(format: "%02x", $0) }.joined()
-        Task { try? await bindNotifications() }
+        Task { await bindNotifications() }
     }
-    private func bindNotifications() async throws {
+    private func bindNotifications() async {
         guard session.state == .signedIn, let pushToken else { return }
-        #if DEBUG
-        let environment = "development"
-        #else
-        let environment = "production"
-        #endif
-        _ = try await client.json("notification-devices/\(pushBinding)", method: "PUT", body: ["token": pushToken, "environment": environment])
+        await notifications.bind(token: pushToken)
+    }
+    /// Re-register on sign-in and launch so a migrated or rotated installation
+    /// binding is restored without the rider re-enabling alerts.
+    private func registerForAlertsIfAuthorized() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        guard session.state == .signedIn,
+              [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus) else { return }
+        UIApplication.shared.registerForRemoteNotifications()
     }
     private var relay: SocialBLERelay?
     func bindBLE(_ ble: BLEManager) { relay = SocialBLERelay(ble: ble, social: self) }
@@ -52,6 +61,16 @@ final class SocialCoordinator: ObservableObject {
         let client = BicinoSocialClient(session: session, baseURL: URL(string: OfflineMapServiceConfig.defaultServerURLString)?.appendingPathComponent("v1/social"))
         self.client = client
         live = LiveRideService(client: client)
+        // The existing explicit app-private group; no shared group is introduced.
+        let store: any SocialSecureStore = session.keychainGroup.map { SocialKeychainStore(accessGroup: $0) } ?? SocialMemoryStore()
+        #if DEBUG
+        let environment = "development"
+        #else
+        let environment = "production"
+        #endif
+        notifications = SocialNotificationBinding(store: store, client: client, anonymous: client, environment: environment)
+        deletion = SocialAccountDeletion(store: store, client: client, anonymous: client)
+        notifications.onStatusChange = { [weak self] in self?.notificationStatus = $0 }
         session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observers)
         live.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observers)
         session.$generation.dropFirst().sink { [weak self] _ in self?.clear() }.store(in: &observers)
@@ -61,6 +80,28 @@ final class SocialCoordinator: ObservableObject {
         live.onCapabilitiesChanged = { [weak self] capabilities in
             self?.capabilities = capabilities
             if !capabilities.media { self?.photos = [:] }
+        }
+        session.$state.removeDuplicates().dropFirst().sink { [weak self] state in
+            Task { @MainActor [weak self] in await self?.sessionChanged(state) }
+        }.store(in: &observers)
+        Task { [weak self] in
+            // Finish work left by an offline sign-out or an interrupted deletion.
+            await self?.notifications.releaseIfPending()
+            await self?.recoverDeletion()
+        }
+    }
+
+    private func sessionChanged(_ state: BicinoUserSession.State) async {
+        switch state {
+        case .signedOut:
+            // Explicit, forced (revoked, disabled, deleted) and switching sign-outs
+            // all end the bound account on this installation.
+            await notifications.accountEnded()
+            await recoverDeletion()
+        case .signedIn:
+            await registerForAlertsIfAuthorized()
+        default:
+            break
         }
     }
 
@@ -91,7 +132,7 @@ final class SocialCoordinator: ObservableObject {
         self.profile = me; self.friends = friends; self.requests = requests
         invitations = invites; sentInvitations = sent; rides = rooms; self.blocked = blocked; self.routes = routes; self.activities = activities
         await loadPhotos(friends + [me])
-        try await bindNotifications()
+        await bindNotifications()
     }
 
     private func pages<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> [T] {
@@ -178,7 +219,19 @@ final class SocialCoordinator: ObservableObject {
         try await refresh()
     }
 
-    func publish(_ archive: NavigationRouteArchiveV1, title: String, visibility: String) async throws {
+    /// Publishing is limited to routes this rider owns. A sharing-rights confirmation
+    /// cannot override another rider's ownership; the server enforces the same rule.
+    func publication(for summary: PlannedRouteSummaryV1, in library: PhoneRouteLibrary) -> SocialRoutePublication {
+        library.socialPublication(for: summary, currentProfileID: profile?.id)
+    }
+
+    func publish(_ summary: PlannedRouteSummaryV1, from library: PhoneRouteLibrary,
+                 title: String, visibility: String) async throws {
+        guard profile != nil else { throw SocialFailure.signedOut }
+        guard publication(for: summary, in: library).mayPublish else {
+            throw SocialFailure.server("only_the_route_owner_can_share_it")
+        }
+        let archive = try library.offlineArchive(for: summary)
         guard archive.route.provider == RouteProviderPolicyV1.importedGPX else {
             throw SocialFailure.server("this_route_provider_does_not_allow_social_sharing")
         }
@@ -191,13 +244,24 @@ final class SocialCoordinator: ObservableObject {
     }
 
     func save(_ item: SocialContent, to library: PhoneRouteLibrary, duplicate: Bool = false) throws {
-        guard let raw = item.body.archive, let expected = item.body.sha256 else { throw SocialFailure.invalidResponse }
+        _ = try library.importSocialArchive(verified(item.body), source: SocialRouteSource(
+            kind: .content, socialID: item.id, owner: item.owner, revision: item.revision), duplicate: duplicate)
+    }
+
+    /// Saves (or opens) a Group Ride's route snapshot as the organizer's route.
+    @discardableResult
+    func saveRideRoute(_ ride: SocialGroupRide, to library: PhoneRouteLibrary) throws -> PlannedRouteSummaryV1 {
+        try library.importSocialArchive(verified(ride.route), source: SocialRouteSource(
+            kind: .ride, socialID: ride.id, owner: ride.owner, revision: nil), duplicate: false)
+    }
+
+    private func verified(_ body: SocialContentBody) throws -> Data {
+        guard let raw = body.archive, let expected = body.sha256 else { throw SocialFailure.invalidResponse }
         let data = Data(raw.utf8)
         guard SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == expected else {
             throw SocialFailure.invalidResponse
         }
-        _ = try library.importSocialArchive(data, socialID: item.id, owner: item.owner,
-            revision: item.revision, duplicate: duplicate)
+        return data
     }
 
     func createRide(route: SocialContent, title: String, startsAt: Date? = nil) async throws {
@@ -220,26 +284,47 @@ final class SocialCoordinator: ObservableObject {
     }
 
     func signOut() async throws {
-        _ = try? await client.json("notification-devices/\(pushBinding)", method: "DELETE")
-        UIApplication.shared.unregisterForRemoteNotifications()
-        pushToken = nil
         await live.stopSharing()
         live.reset()
+        UIApplication.shared.unregisterForRemoteNotifications()
+        pushToken = nil
+        // Proof-based release needs no account token, so it completes later if offline.
+        await notifications.accountEnded()
         try session.signOut()
         clear()
     }
 
     func deleteAccount() async throws {
         guard let profile else { throw SocialFailure.signedOut }
-        var body: [String: Any] = ["expectedProfileID": profile.id]
-        if session.usesApple {
-            body["appleAuthorizationCode"] = try await session.signInWithApple(reauthenticate: true)
-        } else {
-            try await session.signInWithGoogle(reauthenticate: true)
-        }
-        await live.stopSharing()
-        try await client.deleteAccount(body: body)
-        try await signOut()
+        let session = session, live = live
+        let completed = try await deletion.delete(profileID: profile.id, accountUID: session.currentUID,
+            reauthenticate: {
+                if session.usesApple { return try await session.signInWithApple(reauthenticate: true) }
+                try await session.signInWithGoogle(reauthenticate: true)
+                return nil
+            },
+            beforeSending: { await live.stopSharing() })
+        await finishDeletion(completed)
+    }
+
+    /// Confirms an earlier accepted deletion after relaunch or automatic sign-out,
+    /// using only its receipt. Never signs in to do so.
+    private func recoverDeletion() async {
+        guard let completed = await deletion.recoverPending() else { return }
+        await finishDeletion(completed)
+        notice = "Your Bicino account deletion was completed."
+    }
+
+    private func finishDeletion(_ completed: SocialPendingDeletion) async {
+        // The server removed the deleted account's push bindings when deletion began.
+        await notifications.forget(owner: completed.profileID)
+        // Never sign out an account the rider switched to after the deletion.
+        guard SocialAccountDeletion.shouldSignOut(completed, currentUID: session.currentUID) else { return }
+        live.reset()
+        UIApplication.shared.unregisterForRemoteNotifications()
+        pushToken = nil
+        try? session.signOut()
+        clear()
     }
 
     func handleLink(_ url: URL) -> Bool {
