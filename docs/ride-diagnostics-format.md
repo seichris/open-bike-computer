@@ -1,7 +1,9 @@
 # Ride diagnostics format
 
-Ride diagnostics are local-only, structured evidence. They are not an
-analytics stream and are never uploaded automatically.
+Ride diagnostics are local-first, structured evidence, not an analytics stream.
+They are not uploaded to a service. An explicitly paired, expiring Mac broker
+can receive verified bundles over a private LAN; see [Diagnostics v2](diagnostics-v2.md).
+Local recording and manual export do not require pairing.
 
 ## Event record
 

@@ -119,7 +119,7 @@ def recovery_payload(descriptor: dict, images: dict[str, bytes]) -> tuple[dict, 
                        "sha256": digest(data), "role": "application" if name == "firmware.bin" else "ota-selection"})
     value = {
         "schemaVersion": 1, "artifactType": "bicino-web-recovery", "operation": "recover",
-        "minFlasherVersion": 1, "target": target, "environment": descriptor["environment"],
+        "minFlasherVersion": 2, "target": target, "environment": descriptor["environment"],
         "chip": "ESP32-S3", "flashBytes": FLASH_BYTES,
         "version": descriptor["firmwareVersion"]["version"], "build": descriptor["firmwareVersion"]["build"],
         "gitSha": descriptor["sourceIdentity"], "layoutId": LAYOUT_ID,
@@ -127,7 +127,7 @@ def recovery_payload(descriptor: dict, images: dict[str, bytes]) -> tuple[dict, 
         "bootloaderSha256": digest(by_name["bootloader.bin"][1]),
         "bootloaderLength": len(by_name["bootloader.bin"][1]),
         "regions": regions, "writes": writes, "allowSameBuild": True,
-        "unknownBuildPolicy": "deny", "qualificationRequired": True,
+        "unknownBuildPolicy": "rescue", "qualificationRequired": False,
         "dataImpact": "Preserves ownership, TLS identity, calibration, maps, app1 and diagnostics. Replaces app0 and resets OTA selection to app0.",
         "factoryDescriptorSha256": digest(canonical(descriptor)),
     }

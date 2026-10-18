@@ -1486,6 +1486,54 @@ build_src_filter =
         with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
             record_generated_sdkconfig_defaults(self.project_dir, production)
 
+    def test_attestation_rejects_qualification_without_same_size_reserve(self):
+        production = f"{self.environment}_LIFECYCLE_QUALIFICATION"
+        with (self.project_dir / "platformio.ini").open(
+            "a", encoding="utf-8"
+        ) as config:
+            config.write(f"[env:{production}]\nplatform = test\n")
+        self.initialize_git_repo()
+        core = self.write_core_attestation(production)
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware(production)
+        firmware = (
+            self.project_dir / ".pio" / "build" / production / "firmware.bin"
+        )
+        firmware.write_bytes(
+            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES + 1)
+        )
+
+        with patch.dict(
+            os.environ, {"PLATFORMIO_CORE_DIR": str(core)}
+        ), self.assertRaisesRegex(
+            GeneratedSdkconfigError,
+            f"required {PRODUCTION_APPLICATION_RESERVE_BYTES}-byte "
+            "application reserve",
+        ):
+            record_generated_sdkconfig_defaults(self.project_dir, production)
+
+    def test_attestation_accepts_exact_qualification_size_reserve(self):
+        production = f"{self.environment}_LIFECYCLE_QUALIFICATION"
+        with (self.project_dir / "platformio.ini").open(
+            "a", encoding="utf-8"
+        ) as config:
+            config.write(f"[env:{production}]\nplatform = test\n")
+        self.initialize_git_repo()
+        core = self.write_core_attestation(production)
+        defaults = self.project_dir / "sdkconfig.defaults"
+        defaults.write_text(GENERATED_CONFIG, encoding="utf-8")
+        self.write_firmware(production)
+        firmware = (
+            self.project_dir / ".pio" / "build" / production / "firmware.bin"
+        )
+        firmware.write_bytes(
+            b"x" * (0x300000 - PRODUCTION_APPLICATION_RESERVE_BYTES)
+        )
+
+        with patch.dict(os.environ, {"PLATFORMIO_CORE_DIR": str(core)}):
+            record_generated_sdkconfig_defaults(self.project_dir, production)
+
     def test_upload_replays_and_attests_additional_platformio_images(self):
         core = self.write_core_attestation().resolve()
         defaults = self.project_dir / "sdkconfig.defaults"
@@ -1895,6 +1943,15 @@ build_src_filter =
             pio_command="unit-test-pio",
             factory_output_dir=output_dir,
         )
+
+    def test_qualification_cannot_be_factory_packaged(self):
+        qualification = f"{self.environment}_LIFECYCLE_QUALIFICATION"
+        with (self.project_dir / "platformio.ini").open("a", encoding="utf-8") as config:
+            config.write(f"[env:{qualification}]\nplatform = test\n")
+        self.initialize_git_repo()
+        with self.assertRaisesRegex(BuildError, "factory output requires"):
+            build_firmware(self.project_dir, qualification,
+                           factory_output_dir=self.project_dir / "factory-output")
 
     def test_cli_rejects_factory_output_with_upload(self):
         errors = StringIO()

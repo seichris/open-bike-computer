@@ -37,11 +37,11 @@ CRC, size, order, range or reserved-field mismatch rejects the whole block.
 
 | Category | Code | Visibility bit |
 | --- | ---: | ---: |
-| Shops | 1 | 14 |
-| Restaurants & Cafes | 2 | 15 |
-| Public Toilets | 3 | 16 |
-| Gas Stations | 4 | 17 |
-| Bicycle Shops & Repair | 5 | 18 |
+| Shops | 1 | 18 |
+| Restaurants & Cafes | 2 | 19 |
+| Public Toilets | 3 | 20 |
+| Gas Stations | 4 | 21 |
+| Bicycle Shops & Repair | 5 | 22 |
 
 Specialized bicycle POIs take precedence over generic `shop=*`, and each OSM
 object belongs to at most one category. Area-derived POIs use a deterministic

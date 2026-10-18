@@ -107,7 +107,8 @@ def extract_contours(mosaic, grid, minor: int, index: int, cancel=lambda: None):
 
 
 def contour_sample(policy: TopographySourcePolicy, cache: ElevationCache,
-                   bounds: list[float], *, maximum_tiles: int = 8) -> dict[str, Any]:
+                   bounds: list[float], *, maximum_tiles: int = 8, terrain: bool = False,
+                   terrain_selection: dict | None = None, corridor_width_m: float = 0) -> dict[str, Any]:
     # Import optional native libraries only for this explicit operator command.
     import contourpy
     import numpy as np
@@ -116,7 +117,11 @@ def contour_sample(policy: TopographySourcePolicy, cache: ElevationCache,
     region = processing_region(bounds)
     indexes = {source.id: cache.index(source) for source in policy.sources}
     resolution = region_resolution(policy, indexes, region)
-    grid = contour_grid(bounds, resolution, MAX_GRID_PIXELS)
+    sample_bounds = bounds
+    if terrain:
+        from .terrain import sampling_bounds
+        sample_bounds = sampling_bounds(bounds)
+    grid = contour_grid(sample_bounds, resolution, MAX_GRID_PIXELS)
     plan = plan_elevation(policy, indexes, list(grid.acquisition_bounds))
     if not plan["coverageComplete"]:
         raise ValueError("sample or halo has uncovered geocells; missing tiles are not zero elevation")
@@ -146,7 +151,20 @@ def contour_sample(policy: TopographySourcePolicy, cache: ElevationCache,
                 source_pixels[receipt["sourceId"]] = source_pixels.get(receipt["sourceId"], 0) + int(np.count_nonzero(valid))
     minor, index = (50, 250) if resolution == 90 else (20, 100)
     records, missing = extract_contours(mosaic, grid, minor, index, cache.cancel)
+    terrain_fields = {}
+    if terrain:
+        from .terrain import ALGORITHM, grids_from_mosaic
+        selection = None
+        if terrain_selection is not None:
+            from .topography_geometry import project_selection
+            from shapely.ops import transform
+            from rasterio.warp import transform as warp
+            selected = project_selection(terrain_selection, bounds, crs, corridor_width_m)
+            selection = transform(lambda x, y, z=None: warp(crs, "EPSG:3857", x, y), selected).__geo_interface__
+        terrain_fields = {"terrainAlgorithm": ALGORITHM, "terrainGrids": grids_from_mosaic(
+            mosaic, grid, bounds, cache.cancel, selection=selection)}
     return {
+        **terrain_fields,
         "schemaVersion": 1, "kind": "bicino-contour-evidence-v1", "access": "free",
         "productionEligible": False, "sourcePolicySha256": policy.sha256,
         "boundsE7": enclosing_bounds_e7(bounds), "workingCrs": crs,

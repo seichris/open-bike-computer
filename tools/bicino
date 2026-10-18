@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+"""Repository-owned entry point; no installation or third-party runtime needed."""
+from bicino_diagnostics.cli import main
+raise SystemExit(main())

@@ -1,4 +1,5 @@
 #include "../../lib/map_transfer/map_stream_format.hpp"
+#include "../../lib/maps/src/mapRendererFileValidator.hpp"
 #include "../../lib/map_transfer/map_stream_crypto.hpp"
 #include "../../lib/map_transfer/map_stream_parser.hpp"
 #include "../../lib/map_transfer/map_stream_sha.hpp"
@@ -678,6 +679,42 @@ int main() {
     assert(!parser.feed(&trailing, 1));
     assert(parser.error() == MapStreamParserError::TrailingData);
     assert(consumer.completeCalls == 0);
+  }
+
+  {
+    // These paths must remain installable after a diagnostics -> production
+    // change. Production still validates the signed bytes and ignores relief.
+    const std::string terrainManifest = R"MANIFEST({"buildings":{"classDefaultHeightCount":0,"explicitHeightCount":0,"inheritedHeightCount":0,"levelsHeightCount":0,"localMedianHeightCount":0,"recordCount":0},"files":[{"bytes":4372,"path":"VECTMAP/map/+0000+0000/0.fme","sha256":"0000000000000000000000000000000000000000000000000000000000000000"},{"bytes":1,"path":"VECTMAP/map/assets/street-labels.fma","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}],"mapId":"map","schemaVersion":1,"target":{"buildingProfileVersion":1,"formatVersion":4,"internationalFallback":"en","labelLanguages":["en"],"labelProfileVersion":1,"minFirmwareVersion":"0.0.0","renderer":"esp32-fmb","topographyProfileVersion":1},"topography":{"attributionSha256":"0000000000000000000000000000000000000000000000000000000000000000","indexIntervalM":100,"intermediateSha256":"0000000000000000000000000000000000000000000000000000000000000000","minorIntervalM":20,"noDataMillionths":0,"pointCount":0,"profileVersion":1,"qualityMode":"standard-20m-v1","recordCount":0,"sourcePolicySha256":"0000000000000000000000000000000000000000000000000000000000000000","sources":[{}]}})MANIFEST";
+    MapStreamHeader terrainHeader;
+    terrainHeader.fileCount = 2;
+    terrainHeader.payloadBytes = 4373;
+    ParsedMapStreamManifest parsedTerrain;
+    assert(parseMapStreamManifest(terrainManifest, terrainHeader, parsedTerrain));
+    map_transfer::MapTransferInstaller installer("/tmp/unused-terrain-validation");
+    map_transfer::MapManifest installedTerrain;
+    assert(installer.validateManifestText(terrainManifest, installedTerrain).ok);
+    auto truncated = terrainManifest;
+    truncated.replace(truncated.find("4372"), 4, "4371");
+    terrainHeader.payloadBytes--;
+    assert(!parseMapStreamManifest(truncated, terrainHeader, parsedTerrain));
+    assert(!installer.validateManifestText(truncated, installedTerrain).ok);
+    std::vector<uint8_t> terrain(map_terrain::BYTES, 0);
+    std::copy_n(reinterpret_cast<const uint8_t *>("FME1"), 4, terrain.begin());
+    for (size_t p = 16; p < terrain.size(); p += 4) {
+      terrain[p] = 100; terrain[p + 2] = 180;
+    }
+    uint32_t crc = 0xffffffffu;
+    for (size_t p = 16; p < terrain.size(); ++p) {
+      crc ^= terrain[p];
+      for (int bit = 0; bit < 8; ++bit)
+        crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    writeLe32(terrain, 12, crc ^ 0xffffffffu);
+    map_renderer_format::StreamValidator validator("VECTMAP/map/+0000+0000/0.fme");
+    assert(validator.feed(terrain.data(), terrain.size()) && validator.finish());
+    terrain.back() ^= 1;
+    map_renderer_format::StreamValidator corrupt("VECTMAP/map/+0000+0000/0.fme");
+    assert(!corrupt.feed(terrain.data(), terrain.size()) || !corrupt.finish());
   }
 
   {

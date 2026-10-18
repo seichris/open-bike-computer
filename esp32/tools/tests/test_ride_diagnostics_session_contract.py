@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 
@@ -13,6 +15,153 @@ MAIN = (ROOT / "src/main.cpp").read_text(encoding="utf-8")
 
 
 class RideDiagnosticsSessionContractTests(unittest.TestCase):
+    def test_actual_loss_summary_is_bounded_and_preserves_failed_receipts(self):
+        start = RECORDER.index("  // Report cumulative per-reason counts")
+        stop = RECORDER.index("  if (static_cast<uint32_t>(nowMs - lastMemorySampleMs)", start)
+        summary = RECORDER[start:stop]
+        harness = r'''#include "ride_diagnostics_queue_policy.hpp"
+#include "ride_diagnostics_format.hpp"
+#include <atomic>
+#include <cassert>
+#include <string>
+namespace queue_policy = ride_diagnostics::queue_policy;
+using queue_policy::DropReason;
+constexpr unsigned kDropReasonCount = static_cast<unsigned>(DropReason::Count);
+std::atomic<unsigned> dropped{1}, dropsByReason[kDropReasonCount]{};
+unsigned lastReportedDrops[kDropReasonCount]{}, lastLossSummaryMs=0;
+unsigned depth=0, calls=0;
+bool accept=false;
+enum class Level { Info };
+unsigned queuedDepth() { return depth; }
+bool record(Level, const char *category, const char *event, const char *fields) {
+  assert(std::string(category)=="logger" && std::string(event)=="loss");
+  assert(ride_diagnostics::detail::validateFieldsJson(fields, std::strlen(fields)));
+  ++calls; return accept;
+}
+void process(unsigned nowMs) {
+// SUMMARY
+}
+int main() {
+  const unsigned reason=static_cast<unsigned>(DropReason::QueueBusy);
+  dropsByReason[reason]=1;
+  process(29999); assert(calls==0);
+  depth=1; process(30000); assert(calls==0 && lastLossSummaryMs==0);
+  depth=0; process(30001); assert(calls==1 && lastReportedDrops[reason]==0);
+  accept=true; process(60000); assert(calls==1);
+  process(60001); assert(calls==2 && lastReportedDrops[reason]==1);
+  assert(dropped==1 && dropsByReason[reason]==1);
+  process(90001); assert(calls==2);
+  dropsByReason[reason]=2; dropped=2;
+  process(120001); assert(calls==3 && lastReportedDrops[reason]==2);
+  assert(dropped==2 && dropsByReason[reason]==2);
+}
+'''.replace("// SUMMARY", summary)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "loss.cpp"
+            source.write_text(harness)
+            executable = Path(directory) / "loss"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "lib/ride_diagnostics"), str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
+    def test_actual_enqueue_accounts_for_each_admission_failure(self):
+        note = RECORDER[RECORDER.index("void noteDrop(DropReason reason) {"):
+                        RECORDER.index("std::atomic<uint32_t> storageErrors")]
+        enqueue = RECORDER[RECORDER.index("bool enqueue(QueuedEvent &event) {"):
+                           RECORDER.index("bool enqueueFormattedEvent")]
+        peek = RECORDER[RECORDER.index("bool peekNextEvent("):
+                        RECORDER.index("bool completeSealIfReady()")]
+        harness = (ROOT / "tools/tests/ride_diagnostics_queue_harness.cpp").read_text()
+        harness = harness.replace("// PRODUCTION_FUNCTIONS", note + peek + enqueue)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "queue.cpp"
+            source.write_text(harness)
+            executable = Path(directory) / "queue"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "tools/tests"), str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+
+    def test_fault_capsule_write_failure_retries_and_preserves_rtc(self):
+        update = RECORDER[RECORDER.index("void updateFaultCapsule("):RECORDER.index("bool utcNow(")]
+        flush = RECORDER[RECORDER.index("bool flushFaultCapsulesIfPossible() {"):RECORDER.index("uint16_t queuedDepth()")]
+        receipt = RECORDER[RECORDER.index("struct FaultCapsuleWriteReceipt {"):RECORDER.index("bool writeQueuedEvent(")]
+        self.run_production_harness("ride_diagnostics_fault_retry_harness.cpp", update + receipt + flush)
+
+    def test_oversized_index_cannot_claim_complete_inventory(self):
+        http = (ROOT / "lib/ride_diagnostics/ride_diagnostics_http.cpp").read_text()
+        types = http[http.index("struct Chunk {"):http.index("std::string jsonEscape")]
+        listing = http[http.index("ChunkIndex listChunks("):http.index("bool writeBodySegment")]
+        self.run_production_harness("ride_diagnostics_index_harness.cpp", types + listing, filesystem=True)
+
+    def test_checked_checkpoints_precede_fault_acknowledgement(self):
+        writer = RECORDER[RECORDER.index("struct FaultCapsuleWriteReceipt {"):RECORDER.index("bool flushFaultCapsulesIfPossible() {")]
+        self.run_production_harness("ride_diagnostics_checkpoint_harness.cpp", writer)
+
+    def test_backend_transition_allocates_new_namespace(self):
+        parse = RECORDER[RECORDER.index("bool parseUnsigned(const char *value, uint32_t &out) {"):RECORDER.index("void copyCapture")]
+        identity = RECORDER[RECORDER.index("uint32_t persistentBootSequence("):RECORDER.index("enum class ActiveFileCloseResult")]
+        paths = RECORDER[RECORDER.index("bool ensurePaths()"):RECORDER.index("void abandonActiveChunkAfterUncertainWrite()")]
+        start = RECORDER.index("bool isClosedChunk(")
+        closed = RECORDER[start:RECORDER.index("\n}", start) + 2]
+        end = RECORDER[RECORDER.index("bool beginStorageTransition("):RECORDER.index("bool prepareForShutdown(")]
+        start = RECORDER.index("    if (storageTransitionRequested.load(std::memory_order_acquire) &&\n        !sealRequested.load(std::memory_order_acquire)) {")
+        pause = RECORDER[start:RECORDER.index("    const uint32_t nowMs = millis();", start)]
+        pause = "void writerPauseIteration() { for (int pass=0; pass<1; ++pass) {" + pause + "}}"
+        self.run_production_harness("ride_diagnostics_backend_transition_harness.cpp", parse + identity + paths + closed + end + pause, filesystem=True)
+
+    def run_production_harness(self, name, functions, filesystem=False):
+        harness = (ROOT / "tools/tests" / name).read_text().replace("// PRODUCTION_FUNCTIONS", functions)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "recovery.cpp"
+            source.write_text(harness)
+            executable = Path(directory) / "recovery"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                "-I", str(ROOT / "lib/ride_diagnostics"), str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)] + ([str(Path(directory) / "data")] if filesystem else []), check=True)
+
+    def test_actual_maintenance_yields_at_every_filesystem_boundary(self):
+        # Use the production loops, not a second implementation of retention.
+        helpers = RECORDER[RECORDER.index("struct ChunkFileScan"):
+                           RECORDER.index("const char *levelName")]
+        parse = RECORDER[RECORDER.index("bool parseUnsigned(const char *value, uint32_t &out) {"):
+                         RECORDER.index("void copyCapture")]
+        collect = RECORDER[RECORDER.index("ChunkFileScan collectChunkFiles"):
+                           RECORDER.index("bool hasChunkWriteReserve()")]
+        harness = (ROOT / "tools/tests/ride_diagnostics_retention_harness.cpp").read_text()
+        harness = harness.replace("// PRODUCTION_FUNCTIONS", parse + helpers + collect)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "retention.cpp"
+            source.write_text(harness)
+            executable = Path(directory) / "retention"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "tools/tests"), str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable), str(Path(directory) / "sdcard")], check=True)
+
+    def test_admitted_retry_clears_old_error_before_worker_can_fail(self):
+        start = BLE[BLE.index("static bool startDiagnosticsSessionAsync"):
+                    BLE.index("static uint64_t currentAuthenticatedTransferSessionId")]
+        admission = start.index("diagnosticsSessionActiveGeneration.store(generation")
+        clear = start.index('deviceTransferHttp.setLastError("", "")')
+        worker = start.index("xTaskCreatePinnedToCore")
+        self.assertLess(admission, clear)
+        self.assertLess(clear, worker)
+        self.assertGreater(clear, start.index("diagnosticsSessionStartInProgress.exchange"))
+
+    def test_in_flight_maintenance_yields_without_deleting_from_partial_scan(self):
+        collect_start = RECORDER.index("ChunkFileScan collectChunkFiles")
+        prune_start = RECORDER.index("void pruneRetention()", collect_start)
+        collect = RECORDER[collect_start:prune_start]
+        prune = RECORDER[prune_start:
+                         RECORDER.index("bool hasChunkWriteReserve()")]
+        cleanup = RECORDER[RECORDER.index("void removeEmptyBootDirectories()"):
+                           RECORDER.index("const char *levelName")]
+        self.assertGreaterEqual(collect.count("shouldStop()"), 6)
+        self.assertIn("closedir(bootDirectory)", collect)
+        self.assertIn("closedir(boots)", collect)
+        self.assertLess(prune.index("scan.interrupted"), prune.index("removeChunkFile"))
+        self.assertIn("empty && !retentionScanInterrupted()", cleanup)
+        self.assertNotIn("retentionLeaseDeadlineMs.store(0", prune)
+
     def test_snapshot_lease_precedes_storage_probe_and_seal(self):
         start = BLE[
             BLE.index("static void diagnosticsSessionStartTask") :
@@ -51,6 +200,25 @@ class RideDiagnosticsSessionContractTests(unittest.TestCase):
         self.assertLess(enabled, failure)
         self.assertLess(failure, fallback)
         self.assertLess(fallback, record)
+
+    def test_completed_preparation_reclaims_stack_before_network_admission(self):
+        begin = BLE.index("static void processCompletedDiagnosticsSessionStart()")
+        end = BLE.index("static bool startDiagnosticsSessionAsync()", begin)
+        function = BLE[begin:end]
+        shutdown = BLE[BLE.index("bool BLENavigationServer::pollShutdownQuiescence()"):
+                       BLE.index("void BLENavigationServer::process()")]
+        shutdown = shutdown.replace("BLENavigationServer::", "")
+        harness = (ROOT / "tools/tests/diagnostics_preparation_handoff_harness.cpp").read_text()
+        harness = harness.replace("// PRODUCTION_SHUTDOWN", shutdown)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "handoff.cpp"
+            source.write_text(harness.replace("// PRODUCTION_FUNCTION", function))
+            executable = Path(directory) / "handoff"
+            subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                            "-I", str(ROOT / "lib/ride_diagnostics"),
+                            "-I", str(ROOT / "lib/device_transfer"),
+                            str(source), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
 
     def test_preseal_lease_publication_never_waits_behind_pruning(self):
         arm = RECORDER[

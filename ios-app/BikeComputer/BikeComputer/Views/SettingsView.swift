@@ -54,6 +54,7 @@ private func copernicusTopographyNotice(
 }
 
 struct SettingsView: View {
+    @EnvironmentObject private var social: SocialCoordinator
     @EnvironmentObject var bleManager: BLEManager
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -150,6 +151,13 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
+                if social.session.state != .unavailable {
+                    Section {
+                    NavigationLink("Friends & Riding") {
+                        SocialHubView(store: social, routeLibrary: routeLibrary)
+                    }
+                }
+                }
                 if shouldPromoteBikeComputerSettings {
                     Section {
                         bikeComputerSettingsLink
@@ -827,6 +835,18 @@ private struct DownloadingMapsSettingsSection: View {
                 )
             } else if manager.hasPendingDeviceActivation {
                 StatusValueRow(status: "Checking device activation", isBusy: false)
+            }
+
+            if manager.canCancelCurrentMapOperation {
+                Button("Cancel map installation", role: .destructive) {
+                    Task { await manager.cancelCurrentMapOperation(bleManager: bleManager) }
+                }
+                .disabled(!bleManager.isNavigationReady)
+                .accessibilityHint("Requests cancellation before the device accepts installation")
+            } else if manager.isCurrentMapOperationAccepted {
+                Text("Device accepted this map. Waiting for installation to finish.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             if let downloadProgress = manager.downloadByteProgress {
@@ -3300,6 +3320,9 @@ private struct RemoteDeviceDebugConsoleView: View {
 
 @MainActor
 private struct RemoteDeviceDebugSettingsSection: View {
+    // Session ownership outlives SwiftUI section recreation/dismissal.
+    @MainActor private static let sharedTransferManager = DeviceTransferManager()
+    private var remoteDebugTransferManager: DeviceTransferManager { Self.sharedTransferManager }
     @EnvironmentObject private var bleManager: BLEManager
     @AppStorage("remoteDebug.preferLAN.v1") private var preferLAN = true
     @State private var isWorking = false
@@ -3458,20 +3481,6 @@ private struct RemoteDeviceDebugSettingsSection: View {
                 }
             }
         }
-        .task(id: bleManager.deviceTransferMode) {
-            guard bleManager.deviceTransferMode ==
-                    DeviceTransferSession.Mode.debug.rawValue else { return }
-            while !Task.isCancelled,
-                  bleManager.deviceTransferMode ==
-                    DeviceTransferSession.Mode.debug.rawValue {
-                do {
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
-                } catch {
-                    return
-                }
-                _ = bleManager.requestDeviceTransferStatus()
-            }
-        }
     }
 
     private var activeSession: DeviceTransferSession? {
@@ -3564,7 +3573,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
                     }
                     credentials = nil
                 }
-                _ = try await DeviceTransferManager().enterRemoteDebug(
+                _ = try await remoteDebugTransferManager.enterRemoteDebug(
                     bleManager: bleManager,
                     lanCredentials: credentials,
                     status: { statusMessage = $0 }
@@ -3643,7 +3652,7 @@ private struct RemoteDeviceDebugSettingsSection: View {
         Task {
             defer { isWorking = false }
             do {
-                try await DeviceTransferManager().exitRemoteDebug(
+                try await remoteDebugTransferManager.exitRemoteDebug(
                     bleManager: bleManager
                 )
                 clearCopiedHotspotPassphraseIfOwned()

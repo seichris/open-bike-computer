@@ -10,15 +10,26 @@ MapStreamReceiver::MapStreamReceiver(
     size_t maximumWorkingBytes,
     MapStreamCheckpointPolicy checkpointPolicy, MapStreamNowCallback now,
     std::shared_ptr<MapStreamStorage> storage,
-    MapStreamStatusCallback onStatus)
+    MapStreamStatusCallback onStatus, std::string operationID)
     : installer_(std::move(storageRoot), std::move(sessionId), checkpointPolicy,
-                 std::move(now), std::move(storage), std::move(onStatus)),
+                 std::move(now), std::move(storage), std::move(onStatus), std::move(operationID)),
       parser_(trustStore, hasher_, installer_,
               {contentLength, std::move(firmwareVersion),
                maximumWorkingBytes}) {}
 
 bool MapStreamReceiver::feed(const uint8_t *data, size_t size) {
   return parser_.feed(data, size);
+}
+
+bool MapStreamReceiver::readyToFinish() const {
+  const auto &state = installer_.snapshot();
+  return parser_.readyToFinish() && state.completedFiles == state.totalFiles &&
+         state.completedPayloadBytes == state.totalPayloadBytes;
+}
+
+MapStreamReceiveResult MapStreamReceiver::abort() {
+  parser_.abort();
+  return result();
 }
 
 MapStreamReceiveResult MapStreamReceiver::finish() {
@@ -39,7 +50,8 @@ bool MapStreamReceiver::failed() const { return parser_.failed(); }
 
 MapStreamReceiveResult MapStreamReceiver::result() const {
   if (parser_.complete())
-    return {true, 200, "stream_ready", ""};
+    return {true, 200, installer_.snapshot().state == MapStreamInstallState::Prepared
+                           ? "stream_prepared" : "stream_ready", ""};
 
   const MapStreamInstallSnapshot &state = installer_.snapshot();
   if (state.state == MapStreamInstallState::Paused) {

@@ -109,6 +109,26 @@ exiting, the ordinary five-minute transfer inactivity boundary revokes the
 credential, stops the active Wi-Fi transport, releases synthetic input, and
 frees the snapshot.
 
+After an interrupted app/session, starting another operation first requests a
+fresh authenticated status from the recorded board. Recovery retries for up to
+sixteen seconds to allow chunked BLE notifications to arrive. It clears a stopped
+session only after an empty response on the same connection, or adopts and ends
+the exact recorded token/generation. A different board, reconnect, missing status,
+or mismatched authorization leaves cleanup unresolved; it never discards the
+saved ownership record to force admission.
+
+For map-based display tests, choose fixed coordinates inside the installed
+pack's actual `boundsE7` (west, south, east, north, scaled by ten million).
+A display name such as “China” does not imply country-wide coverage. Verify the
+active pack identity and bounds through owner-authenticated map status or its
+matching signed manifest before launching the Debug coordinate override. Keep
+the launch console open and verify the printed override; a normal relaunch
+removes it. Confirm map pixels in a fresh device frame before testing rider
+overlays, which are hidden when the current map projection has no map data.
+Preserve existing maps and routes; an out-of-coverage fixture does not require
+erasing or reinstalling them. Do not open USB serial during the test: even a
+nominally passive reader can reset the board and invalidate the debug session.
+
 ## HTTPS contract
 
 The token-free `GET /device-debug/` response is a secret-free, offline,

@@ -126,9 +126,10 @@ struct DeviceScreenConfigurationCapabilities: Equatable, Sendable {
 struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
     static let defaultVisibilityMask: UInt32 = 0x0fff
     static let contoursVisibilityMask: UInt32 = 1 << 13
-    static let poiVisibilityMask: UInt32 = 0x1f << 14
+    static let poiVisibilityMask: UInt32 = 0x1f << 18
+    static let terrainVisibilityMask: UInt32 = 0x3c000
     static let allowedVisibilityMask: UInt32 =
-        defaultVisibilityMask | contoursVisibilityMask | poiVisibilityMask
+        defaultVisibilityMask | contoursVisibilityMask | terrainVisibilityMask | poiVisibilityMask
 
     var minimumPolygonSize: UInt8 = 0
     var detailLevel: UInt8 = 2
@@ -164,6 +165,10 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
         return profile
     }
 
+    mutating func setTerrainVisibility(_ value: UInt32) {
+        visibilityMask = (visibilityMask & ~Self.terrainVisibilityMask) | (value & Self.terrainVisibilityMask)
+    }
+
     func isValid(for type: ConfiguredDeviceScreenType) -> Bool {
         guard minimumPolygonSize <= 50,
               detailLevel <= 2,
@@ -177,8 +182,12 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
               labelTextSize <= 2,
               labelOrientation <= 1 else { return false }
         switch type {
-        case .map, .nearby: return rotationMode <= 1
-        case .mapPlusNavigation: return birdsEyePerspective <= 4 && rotationMode <= 1
+        case .map: return rotationMode <= 1
+        case .nearby:
+            return visibilityMask & Self.terrainVisibilityMask == 0 && rotationMode <= 1
+        case .mapPlusNavigation:
+            return visibilityMask & Self.terrainVisibilityMask == 0 &&
+                birdsEyePerspective <= 4 && rotationMode <= 1
         default: return false
         }
     }

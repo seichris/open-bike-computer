@@ -31,6 +31,7 @@ constexpr std::size_t kReplayWindow = 4;
 
 struct SlotRecord {
   bool valid = false;
+  bool normalized = false;
   char slot = 'A';
   uint32_t revision = 0;
   uint32_t legacyDigest = 0;
@@ -307,7 +308,8 @@ bool decodeSlot(const char *key, char slot, SlotRecord &record) {
       storedCRC)
     return false;
   const auto result = screen_configuration_protocol::decodeDocument(
-      slotBuffer.data() + kSlotHeaderBytes, documentLength, record.document);
+      slotBuffer.data() + kSlotHeaderBytes, documentLength, record.document,
+      true, &record.normalized);
   if (result != screen_configuration_protocol::DecodeResult::Complete)
     return false;
   record.valid = true;
@@ -583,6 +585,22 @@ bool initialize(const MapRenderSettings &legacy) {
     Serial.printf("BLE screens: migrated legacy settings revision=1 count=%u\n",
                   migrated.instanceCount);
     return true;
+  }
+
+  if (selected->normalized) {
+    // Migrate through the other slot before changing the head. Preserve the
+    // revision and every supported setting, even after a diagnostics downgrade.
+    MapRenderSettings projected = legacy;
+    projectDocument(selected->document, projected);
+    const auto length = screen_configuration_protocol::encodeDocument(
+        selected->document, documentBuffer.data(), documentBuffer.size());
+    SlotRecord *normalizedSlot = selected->slot == 'A' ? &slotB : &slotA;
+    const char destination = normalizedSlot->slot;
+    if (!length || !writeSlot(destination, selected->revision, legacyDigest(projected),
+                              documentBuffer.data(), length, *normalizedSlot) ||
+        !writeMirrorTransaction(true))
+      return false;
+    selected = normalizedSlot;
   }
 
   active = {selected->revision, selected->document};

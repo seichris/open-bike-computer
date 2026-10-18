@@ -104,8 +104,9 @@ class WebManifestTests(unittest.TestCase):
             self.assertEqual([v["offset"] for v in value["writes"]], [0x10000, 0xE000])
             self.assertEqual(len(assets), 2)
             self.assertEqual({r["name"] for r in value["regions"] if not r["preserve"]}, {"app0", "otadata"})
-            self.assertEqual(value["unknownBuildPolicy"], "deny")
-            self.assertTrue(value["qualificationRequired"])
+            self.assertEqual(value["unknownBuildPolicy"], "rescue")
+            self.assertEqual(value["minFlasherVersion"], 2)
+            self.assertFalse(value["qualificationRequired"])
 
     def test_layout_and_checksum_rejected(self):
         _, images = inputs()
@@ -145,7 +146,7 @@ class WebManifestTests(unittest.TestCase):
             key.public_key().verify(der, web.canonical(payload), ec.ECDSA(hashes.SHA256()))
 
     def test_golden_vector(self):
-        path = Path(__file__).parents[1] / "web-flasher" / "test-vector.json"
+        path = Path(__file__).parents[1] / "web-flasher" / "rescue-test-vector.json"
         if not path.exists():
             self.fail("cross-language vector missing")
         vector = json.loads(path.read_text())

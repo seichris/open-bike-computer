@@ -5,6 +5,7 @@
 #include "ride_diagnostics.hpp"
 #include "ride_diagnostics_http_policy.hpp"
 #include "ride_diagnostics_index_policy.hpp"
+#include "catalog_v2.hpp"
 
 #include <Arduino.h>
 #include <dirent.h>
@@ -34,6 +35,7 @@ struct Chunk {
   uint32_t number = 0;
   uint32_t bytes = 0;
   std::string path;
+  std::string cachedDigest{};
 };
 
 struct ChunkIndex {
@@ -174,9 +176,13 @@ ChunkIndex listChunks(
   std::vector<Chunk> &chunks = index.chunks;
   chunks.reserve(kMaximumChunks);
   char bootsRoot[192] = {};
-  snprintf(bootsRoot, sizeof(bootsRoot),
+  const int rootLength = snprintf(bootsRoot, sizeof(bootsRoot),
            "%s/BICINO/DIAGNOSTICS/v1/boots",
            storage.diagnosticsRootPath());
+  if (rootLength < 0 || static_cast<std::size_t>(rootLength) >= sizeof(bootsRoot)) {
+    index.readable = false;
+    return index;
+  }
   DIR *boots = opendir(bootsRoot);
   if (boots == nullptr) {
     index.readable = false;
@@ -192,8 +198,12 @@ ChunkIndex listChunks(
     if (!parseUnsigned(bootEntry->d_name, boot))
       continue;
     char directory[192] = {};
-    snprintf(directory, sizeof(directory), "%s/%s", bootsRoot,
+    const int directoryLength = snprintf(directory, sizeof(directory), "%s/%s", bootsRoot,
              bootEntry->d_name);
+    if (directoryLength < 0 || static_cast<std::size_t>(directoryLength) >= sizeof(directory)) {
+      index.readable = false;
+      continue;
+    }
     DIR *dir = opendir(directory);
     if (dir == nullptr) {
       index.readable = false;
@@ -216,7 +226,11 @@ ChunkIndex listChunks(
           !isClosedChunk(boot, chunkNumber))
         continue;
       char path[220] = {};
-      snprintf(path, sizeof(path), "%s/%s", directory, name.c_str());
+      const int pathLength = snprintf(path, sizeof(path), "%s/%s", directory, name.c_str());
+      if (pathLength < 0 || static_cast<std::size_t>(pathLength) >= sizeof(path)) {
+        index.readable = false;
+        continue;
+      }
       struct stat metadata = {};
       if (::stat(path, &metadata) != 0 || !S_ISREG(metadata.st_mode)) {
         index.readable = false;
@@ -236,12 +250,16 @@ ChunkIndex listChunks(
       }
       Chunk candidate = {boot, chunkNumber,
                          static_cast<uint32_t>(metadata.st_size), path};
+      catalog_v2::Descriptor descriptor;
+      if (catalog_v2::read(storage, path, boot, chunkNumber, candidate.bytes, descriptor))
+        candidate.cachedDigest = catalog_v2::hex(descriptor);
+
       if (chunks.size() < kMaximumChunks) {
         chunks.push_back(std::move(candidate));
       } else {
-        auto oldest = std::min_element(chunks.begin(), chunks.end(), chunkOlder);
-        if (oldest != chunks.end() && chunkOlder(*oldest, candidate))
-          *oldest = std::move(candidate);
+        // The bounded response must never masquerade as the full inventory.
+        // Pruning may be deferred by a snapshot lease; retry after it expires.
+        index.readable = false;
       }
     }
     closedir(dir);
@@ -322,7 +340,7 @@ bool sendIndex(device_transfer::TransferClient &client,
   std::size_t contentLength = prefix.size() + suffix.size();
   for (std::size_t chunkIndex = 0; chunkIndex < chunks.size(); ++chunkIndex) {
     contentLength += (chunkIndex == 0 ? 0 : 1) +
-                     indexHashProgressCharacters(chunks[chunkIndex].bytes) +
+                     (chunks[chunkIndex].cachedDigest.empty() ? indexHashProgressCharacters(chunks[chunkIndex].bytes) : 0) +
                      indexEntryPrefix(chunks[chunkIndex]).size() +
                      kDigestCharacters + kEntrySuffixCharacters;
     if (contentLength > kMaximumIndexBytes) {
@@ -354,10 +372,10 @@ bool sendIndex(device_transfer::TransferClient &client,
       return false;
     }
     const Chunk &chunk = chunks[chunkIndex];
-    uint32_t bytes = 0;
-    std::string digest;
-    if (!sha256File(chunk.path.c_str(), digest, bytes, chunk.bytes, client,
-                    server, request) ||
+    uint32_t bytes = chunk.bytes;
+    std::string digest = chunk.cachedDigest;
+    if ((digest.empty() && !sha256File(chunk.path.c_str(), digest, bytes, chunk.bytes, client,
+                    server, request)) ||
         bytes == 0 || bytes != chunk.bytes || bytes > kChunkBytes ||
         digest.size() != kDigestCharacters) {
       endTransferSnapshotLease();
@@ -496,6 +514,9 @@ bool RideDiagnosticsHttp::handleRequest(
     return device_transfer::sendHttpError(client, 404, "not_found",
                                           "diagnostic endpoint not found");
   }
+  if (route.kind == http_policy::RouteKind::Policy) {
+    return sendBody(client, capturePolicyJson(), "application/json", server_, request);
+  }
   if (route.kind == http_policy::RouteKind::Status) {
     const Stats snapshot = stats();
     const std::string body =
@@ -519,7 +540,7 @@ bool RideDiagnosticsHttp::handleRequest(
       endTransferSnapshotLease();
       return device_transfer::sendHttpError(
           client, 500, "diagnostics_index_unreadable",
-          "one or more non-empty diagnostic chunks could not be read safely");
+          "diagnostic inventory is oversized or contains unreadable non-empty chunks");
     }
     const Stats snapshot = stats();
     return sendIndex(client, index, snapshot, server_, request);
@@ -537,8 +558,11 @@ bool RideDiagnosticsHttp::handleRequest(
   }
 
   if (route.kind == http_policy::RouteKind::ActiveTail) {
-    return device_transfer::sendHttpError(client, 404, "active_tail_disabled",
-                                          "active diagnostic tail is not exposed");
+    std::string tail;
+    if (!liveTailJson(route.boot, route.chunk, tail))
+      return device_transfer::sendHttpError(client, 503, "live_tail_unavailable",
+                                            "bounded observation cache is busy or unavailable");
+    return sendBody(client, tail, "application/json", server_, request);
   }
 
   if (route.kind == http_policy::RouteKind::Exit) {

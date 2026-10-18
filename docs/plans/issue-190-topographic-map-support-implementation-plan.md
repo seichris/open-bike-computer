@@ -217,7 +217,7 @@ Topographic Contours                            On
 
 ### Device controls
 
-`MAP_VISIBILITY_CONTOURS` uses map-visibility bit 13 for both Map and Map + Navigation profiles. At the original planning baseline, bits 13-14 were unallocated; the issue #338 combined-map/POI contract now allocates bits 14-18 to five POI groups. Reserve the next available visibility bit, 19, for a later hillshade contract, subject to a fresh allocation check when that feature is implemented. This is a different namespace from CAP2 capability bits: CAP2 bit 13 is already GPS-heading support.
+`MAP_VISIBILITY_CONTOURS` uses map-visibility bit 13 for both Map and Map + Navigation profiles. Current diagnostic terrain uses bits 14-17; issue #338 allocates bits 18-22 to the five POI groups. Preserve both allocations. This is a different namespace from CAP2 capability bits: CAP2 bit 13 is already GPS-heading support.
 
 Extend `normalizedFeatureVisibilityMask`, effective feature masks, render-job identity, persistence/migration, and iOS mask serialization together so bit 13 is not silently stripped. Preserve the bit-12 extended-visibility marker and current service-road/track compatibility behavior. Recheck allocations before implementing against a later main.
 
@@ -578,7 +578,7 @@ A later proposal must choose and version:
 - MapKit appearance parity; and
 - independent visibility/capability/status contracts.
 
-Issue #338 allocates renderer format 5 / FMB v6 section 6 to POIs and the Nearby index. If hillshade changes device bytes, use the next format, target 6 / FMB v7, with a seventh required section and feature `hillshade`, subject to a fresh allocation check. Do not reinterpret target 5 or make format-4 file composition optional after release.
+The diagnostic terrain contract in the issue #527 plan uses FME sidecars with renderer target 4. Issue #338 allocates renderer target 5 / FMB v6 section 6 to POIs. Future embedded terrain sections require a fresh format-allocation check; do not reinterpret target 5 or make the released format-4 block composition ambiguous.
 
 ## Implementation phases
 

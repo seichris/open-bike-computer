@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "../../ble_navigation/firmware_diagnostics_config.hpp"
+
 // #include "../../compass/compass.hpp" // Circular dependency if not careful,
 // but likely needed for getHeading
 #include "../../ble_navigation/ble_navigation.hpp"
@@ -17,28 +19,30 @@
 #include "../../renderer_tuning/renderer_tuning.hpp"
 // #include "../../tft/tft.hpp" // Removed or minimal include if possible?
 #include "../../utils/src/gpsMath.hpp"
-#include "mapTransform.hpp"
-#include "map_projection.hpp"
-#include "mapPresentation.hpp"
-#include "mapCamera.hpp"
-#include "mapPoseInputPolicy.hpp"
-#include "mapProbeDiagnostics.hpp"
-#include "mapRenderJob.hpp"
-#include "mapSurface.hpp"
 #include "../../utils/src/mapDragPreview.hpp"
 #include "../../utils/src/mapRasterWindow.hpp"
 #include "lvgl.h"
-#include "mapFontAsset.hpp"
-#include "mapBuildingRenderer.hpp"
-#include "mapLabelBlock.hpp"
 #include "mapBuildingBlock.hpp"
 #include "mapPoiBlock.hpp"
 #include "mapPoiLayout.hpp"
 #include "mapNearbyStorage.hpp"
 #include "mapNearbyLayout.hpp"
+#include "mapBuildingRenderer.hpp"
+#include "mapCamera.hpp"
 #include "mapContourBlock.hpp"
+#include "mapContourLabels.hpp"
+#include "mapFontAsset.hpp"
+#include "mapLabelBlock.hpp"
 #include "mapLabelLayout.hpp"
+#include "mapPoseInputPolicy.hpp"
+#include "mapPresentation.hpp"
+#include "mapProbeDiagnostics.hpp"
+#include "mapRenderJob.hpp"
+#include "mapSurface.hpp"
+#include "mapTerrain.hpp"
+#include "mapTransform.hpp"
 #include "mapVars.h"
+#include "map_projection.hpp"
 #include <Arduino.h>
 
 // Forward declarations
@@ -118,6 +122,9 @@ private:
     map_building_block::Block buildingData;
     map_poi_block::Block poiData;
     map_contour_block::Block contourData;
+#if FIRMWARE_DIAGNOSTICS
+    std::vector<map_terrain::Grid, PsramAllocator<map_terrain::Grid>> terrain;
+#endif
 
     // Spatial grid for polygon culling: grid[cellIndex] = list of polygon
     // indices
@@ -395,6 +402,20 @@ private:
   bool shouldUseRollingRasterWindow(uint8_t zoom) const;
   uint64_t rollingRasterSignature() const;
   double visibleMapRotation() const;
+  struct ContourCandidate {
+    MapBlock *block = nullptr;
+    uint16_t record = 0;
+    bool index = false;
+    double distance = 0;
+  };
+  bool admitContours(ViewPort &viewPort, MemCache &memCache, uint8_t zoom,
+                     std::array<ContourCandidate, 128> &admitted,
+                     size_t &admittedCount, uint32_t &candidates);
+  bool drawContourLabels(
+      ViewPort &viewPort, MemCache &memCache, map_surface::LabelSurface surface,
+      uint8_t zoom, double rotation, const RenderContext &context,
+      const map_projection::Projection *projection,
+      const MapLabelLayoutVector<map_label_layout::Placement> &streets = {});
   bool drawStreetLabels(ViewPort &viewPort, MemCache &memCache,
                         map_surface::LabelSurface surface, uint8_t zoom,
                         double rotation, const RenderContext &context,
@@ -430,6 +451,7 @@ private:
   void finalizeVectorMapFolderSwitchOnUi();
   bool startRenderWorker();
   bool stopRenderWorker();
+  bool reclaimRenderWorker();
   bool recoverRenderWorkerIfNeeded();
   bool buildRenderRequest(uint8_t zoom, uint32_t nowMs,
                           RenderRequest &request);
@@ -522,6 +544,7 @@ private:
   map_camera::Lag cameraLag;
   uint32_t lastCameraRequestMs = 0;
   renderer_diagnostics::CameraSample cameraEvidence{};
+  std::atomic<bool> shutdownAdmissionClosed_{false};
   std::atomic<bool> renderWorkerShutdown{false};
   std::atomic<bool> renderWorkerExited{true};
   std::atomic<bool> renderWorkerRestartAfterExit{false};
@@ -696,6 +719,7 @@ public:
     return nearbyPoiIndexHealthy.load(std::memory_order_acquire);
   }
   uint32_t currentMapEpoch() const { return mapEpoch; }
+  bool pollShutdownQuiescence();
   bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);
   void deleteMapScrSprites();
   void createMapScrSprites();
@@ -712,6 +736,7 @@ public:
   bool hasMapCanvas() const { return canvasMap != nullptr; }
   void displayMap();
   void updatePositionOverlay();
+  void updateSocialOverlay();
   void setWaypoint(double wptLat, double wptLon);
   void updateMap();
   void panMap(int8_t dx, int8_t dy);

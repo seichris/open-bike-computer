@@ -37,7 +37,7 @@ constexpr uint8_t DETAILED_RIDE_DIAGNOSTICS_CLIENT_VERSION =
 constexpr uint8_t RIDE_DELIVERY_ACK_CLIENT_VERSION =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t MAP_POIS_CLIENT_VERSION =
-    ride_ble_protocol_generated::MAP_POIS_MINIMUM_CLIENT_VERSION;
+    ride_ble_protocol_generated::EXTENDED_MAP_POIS_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t WORLD_RADIO_CLIENT_VERSION =
     ride_ble_protocol_generated::WORLD_RADIO_MINIMUM_CLIENT_VERSION;
 constexpr uint8_t SCREEN_CONFIGURATION_CLIENT_VERSION =
@@ -89,7 +89,7 @@ constexpr uint32_t DETAILED_RIDE_DIAGNOSTICS_FEATURE =
 constexpr uint32_t RIDE_DELIVERY_ACK_FEATURE =
     ride_ble_protocol_generated::RIDE_DELIVERY_ACK_FEATURE;
 constexpr uint32_t MAP_POIS_FEATURE =
-    ride_ble_protocol_generated::MAP_POIS_FEATURE;
+    ride_ble_protocol_generated::EXTENDED_MAP_POIS_FEATURE;
 constexpr uint32_t WORLD_RADIO_FEATURE =
     ride_ble_protocol_generated::WORLD_RADIO_FEATURE;
 constexpr uint32_t SCREEN_CONFIGURATION_FEATURE =
@@ -118,18 +118,21 @@ constexpr uint8_t POWER_BUTTON_CONFIG_TLV = 1;
 constexpr size_t POWER_BUTTON_CONFIG_BYTES = 3;
 constexpr size_t CAP2_BASE_BYTES = 9;
 constexpr size_t SCREEN_CONFIGURATION_TLV_BYTES = 16;
+constexpr size_t EXTENDED_FEATURE_TLV_BYTES = 6;
 constexpr size_t CAP2_MAX_BYTES =
     CAP2_BASE_BYTES + 2 + POWER_BUTTON_CONFIG_BYTES +
-    SCREEN_CONFIGURATION_TLV_BYTES;
+    SCREEN_CONFIGURATION_TLV_BYTES + EXTENDED_FEATURE_TLV_BYTES;
 
 inline size_t encodeCap2(uint32_t featureFlags, const uint8_t *powerConfig,
                          bool includePowerConfig, uint8_t *output,
                          size_t capacity, const uint8_t *additionalTLV = nullptr,
-                         size_t additionalTLVLength = 0) {
+                         size_t additionalTLVLength = 0,
+                         uint32_t extendedFeatureFlags = 0) {
   const size_t required = CAP2_BASE_BYTES +
                           (includePowerConfig ? 2 + POWER_BUTTON_CONFIG_BYTES
                                               : 0) +
-                          additionalTLVLength;
+                          additionalTLVLength +
+                          (extendedFeatureFlags != 0 ? EXTENDED_FEATURE_TLV_BYTES : 0);
   if (output == nullptr || capacity < required ||
       (includePowerConfig && powerConfig == nullptr) ||
       (additionalTLVLength != 0 && additionalTLV == nullptr))
@@ -154,6 +157,14 @@ inline size_t encodeCap2(uint32_t featureFlags, const uint8_t *powerConfig,
                                : 0);
     for (size_t index = 0; index < additionalTLVLength; ++index)
       output[offset + index] = additionalTLV[index];
+  }
+  if (extendedFeatureFlags != 0) {
+    const size_t offset = required - EXTENDED_FEATURE_TLV_BYTES;
+    output[offset] = ride_ble_protocol_generated::EXTENDED_FEATURE_TLV_TYPE;
+    output[offset + 1] = 4;
+    for (uint8_t index = 0; index < 4; ++index)
+      output[offset + 2 + index] =
+          static_cast<uint8_t>(extendedFeatureFlags >> (index * 8U));
   }
   return required;
 }

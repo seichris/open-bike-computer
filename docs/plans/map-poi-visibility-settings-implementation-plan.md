@@ -39,6 +39,27 @@ or enabled merely because it exists in the branch.
 
 ## Baseline
 
+### October 18 integration
+
+PR #378 is updated against freshly fetched GitHub `main` at
+`5c7081aa1a7600a1bd6ba3234224b5e2d6da77bc`, 141 main commits after the
+October 3 checkpoint below. Keep the current durable transfer operations,
+selection journals and power-loss recovery, diagnostics acquisition, shutdown
+ownership, social-riding capabilities, contour labels, and experimental FME
+terrain sidecars when resolving overlap with the POI implementation.
+
+Main now owns primary CAP2 bit 31/client 29 for terrain and extended bit
+0/client 30 for group riders. POI/Nearby uses **extended CAP2 bit 1/client
+31** instead. Main's terrain visibility bits 14-17 remain intact; POI groups
+use **bits 18-22**. Target 5/FMB v6 section 6, FPI1, and Nearby screen type 6
+remain unambiguous. Regenerate the C++/Swift contract and preview source
+metadata, and preserve POI regression coverage in the split protocol suites.
+
+The October 3 production size result below qualifies its recorded commit,
+not this integration. Rerun the 1.75-inch firmware matrix and the current PR
+checks before claiming a new production reserve result. Keep POI runtime
+disabled in ordinary/production profiles pending independent board acceptance.
+
 This plan was refreshed against freshly fetched GitHub `main` at
 `f935ede97cd4232357c5b8aafa704c58bffe6ab3` (2026-10-03,
 Asia/Singapore), 85 commits after the September 26 baseline. The original
@@ -122,18 +143,16 @@ reaches undownloaded geography rather than reporting a false empty search.
 The feature remains **off by default** with
 `MAP_POIS_RUNTIME_ENABLED=0` in ordinary and production profiles. Both
 `*_REMOTE_DEBUG` development profiles opt in for hardware qualification and
-advertise CAP2 bit 31 only when the configurable-screen subsystem is ready
-for client version 29 or newer. Prior exact-head iOS qualification and 1.75-inch
+advertise CAP2 extended bit 1 only when the configurable-screen subsystem is ready
+for client version 31 or newer. Prior exact-head iOS qualification and 1.75-inch
 CI builds passed; the coverage change requires new exact-head checks, and
 physical acceptance on both board families is still required. The connected
 ESP32's board family has not been identified, so no board-specific local build
 or flash is evidence for this checkpoint.
 
-The September allocation remains available in code: target 5/FMB v6,
-visibility bits 14-18, and CAP2 bit 31/client 29. The topography plan's
-unimplemented hillshade reservations have been moved to the next prospective
-format/section and visibility bit in this PR; recheck all allocations before
-implementing hillshade.
+The integrated allocation is target 5/FMB v6, visibility bits 18-22,
+and CAP2 extended bit 1/client 31. Current main's terrain sidecar and
+visibility assignments remain intact; they are not POI format reservations.
 
 At the recorded `main` baseline, the missing pieces were point extraction,
 exact category and block ownership, a noncolliding POI section and renderer
@@ -150,7 +169,7 @@ visibility bit 13, and CAP2 bit 26 to POIs. Current main assigns those
 identifiers to topographic contours and configurable screens. The integrated
 branch has migrated the golden vectors, generated BLE files, manifests,
 readers, policies, and tests to target 5 / FMB v6 section 6, visibility bits
-14-18, and CAP2 bit 31. Never accept both meanings behind the same version:
+18-22, and CAP2 extended bit 1. Never accept both meanings behind the same version:
 already-created target-4 artifacts and old clients would become ambiguous.
 
 ### 3 MiB production application budget
@@ -189,11 +208,11 @@ tags such as `disused:shop` or `abandoned:amenity`.
 
 | Category | Matching tags | Visibility bit |
 | --- | --- | ---: |
-| Shops | `shop=*`, excluding inactive placeholder values and `shop=bicycle` | 14 |
-| Restaurants & Cafes | `amenity=restaurant`, `amenity=cafe`, `amenity=fast_food` | 15 |
-| Public Toilets | `amenity=toilets` | 16 |
-| Gas Stations | `amenity=fuel` | 17 |
-| Bicycle Shops & Repair | `shop=bicycle`, `amenity=bicycle_repair_station` | 18 |
+| Shops | `shop=*`, excluding inactive placeholder values and `shop=bicycle` | 18 |
+| Restaurants & Cafes | `amenity=restaurant`, `amenity=cafe`, `amenity=fast_food` | 19 |
+| Public Toilets | `amenity=toilets` | 20 |
+| Gas Stations | `amenity=fuel` | 21 |
+| Bicycle Shops & Repair | `shop=bicycle`, `amenity=bicycle_repair_station` | 22 |
 
 Specialized bicycle matches take precedence over the general Shops category.
 The remaining amenity categories take precedence over a simultaneous generic
@@ -369,7 +388,7 @@ must never silently discard source POIs to make a pack fit.
 
 - FMB v1-v5 and renderer targets 1-4 continue to install and render unchanged.
 - POI controls are capability-gated. Firmware without the new capability does
-  not receive bits 14-18.
+  not receive bits 18-22.
 - On capable firmware with an active target-1 through target-4 map, show the
   controls disabled with **Download Active Map Again** and explain that the
   installed map has no POI data. A target-4 map can be regenerated as a combined
@@ -414,13 +433,13 @@ business details without requiring them for offline category discovery.
    and canonical empty section 5; it is not a second active map or a silent
    fallback. Target-4's existing strict contract remains unchanged.
 4. Keep the outer BIKEMAP1 stream format and install protocol unchanged.
-5. Use 32-bit visibility bits 14-18 in each configurable screen's map profile.
+5. Use 32-bit visibility bits 18-22 in each configurable screen's map profile.
    Reuse setting IDs `8` and `20` for the legacy profile path. Do not allocate
    five new setting IDs or maintain a second authoritative per-instance store.
-6. Reserve CAP2 bit 31 / minimum client version 29 for the complete target-5
+6. Reserve CAP2 extended bit 1 / minimum client version 31 for the complete target-5
    reader/render/settings/Nearby contract. Capability presence means the firmware
    can validate and render both defined target-5 variants, query its POI index,
-   and understands visibility bits 14-18. Nearby screen type 6 is additionally
+   and understands visibility bits 18-22. Nearby screen type 6 is additionally
    advertised through the existing configurable-screen type mask. Do not alter
    the meanings of CAP2 bits 26 or 30.
 7. Classify POIs during map generation. Firmware never parses raw OSM tags.
@@ -445,13 +464,11 @@ business details without requiring them for offline category discovery.
     cancellable bounded I/O, and immutable result publication. Never SD-scan all
     map geometry on the LVGL/UI thread or search only currently loaded blocks.
 
-The [topography plan at this baseline](https://github.com/seichris/open-bike-computer/blob/0f6fc8c6f0238d5508df199f2a50b1482b62ca1d/docs/plans/issue-190-topographic-map-support-implementation-plan.md)
-proposes target 5/FMB v6/section 6 and visibility bit 14 for future hillshade.
-No implementation of that contract exists in the inspected main, but both
-reservations conflict with this POI proposal. This PR updates the prospective
-hillshade format and visibility reservations to target 6/FMB v7/section 7 and
-bit 19. Recheck main before landing either feature. Do not ship two different
-target-5 or visibility-bit meanings.
+Current main implements diagnostic terrain in FME sidecars with visibility
+bits 14-17. Preserve that contract and its renderer-target-4 restrictions.
+POIs use their own FMB v6 section and visibility bits 18-22; no terrain bit or
+sidecar is reinterpreted as POI data. Future format work must recheck the live
+allocations before selecting new identifiers.
 
 ## Versioning and compatibility model
 
@@ -1053,13 +1070,13 @@ or every source POI.
 
 ### Capability
 
-Add `map_pois` at CAP2 bit 31 with minimum client version 29 in
+Add `map_pois` at CAP2 extended bit 1 with minimum client version 31 in
 `protocol/ride-ble-contract-v1.json`, then regenerate the Swift and C++ protocol
 files. Update capability golden vectors and Watch/iPhone compatibility tests.
-Bit 31 must be encoded/decoded as an unsigned 32-bit mask, with an explicit
-high-bit golden vector; avoid signed-shift overflow in Swift and C++. This uses
-the final CAP2 feature bit. Any later feature needs a versioned extension,
-not a recycled CAP2 bit.
+Encode this bit only in the extended feature TLV (type 3), alongside but
+independently of group-rider bit 0. Primary bit 31 remains terrain experiments
+and must never enable POI controls. Golden vectors cover the extended word,
+missing prerequisites, and the terrain/POI distinction.
 
 Firmware advertises the bit only when the complete target-5 reader, installer,
 renderer, visibility, persistence, index lookup, and Nearby path is present.
@@ -1069,7 +1086,7 @@ map-data signal.
 
 ### Visibility masks
 
-Extend `map_profile_protocol.hpp` with named bits 14-18 and a combined POI
+Extend `map_profile_protocol.hpp` with named bits 18-22 and a combined POI
 mask. Preserve contour bit 13 and the existing extended-marker bit 12. The
 marker remains required when a current app sends extended masks.
 
@@ -1128,7 +1145,7 @@ screen instances during capability negotiation.
 
 When constructing setting 8 or 20:
 
-- include bits 14-18 only after authenticated capability negotiation reports
+- include bits 18-22 only after authenticated capability negotiation reports
   `map_pois`;
 - retain the user's Boolean choices when an old device is connected;
 - set the existing extended marker for every current extended mask; and
@@ -1227,16 +1244,15 @@ plan. It is not completed by this documentation refresh.
    golden artifacts. Keep current main's FMB v5 contour contract, schema-v2
    generation policy, generated BLE mappings, and target-4 companion path.
 3. Migrate the existing POI extractor, writer, backend, firmware, iPhone, and
-   tests to target 5/FMB v6/section 6, bits 14-18, CAP2 bit 31/client 29.
+   tests to target 5/FMB v6/section 6, bits 18-22, CAP2 extended bit 1/client 31.
    Audit every numeric `>= 4` or `== 4` format check for feature meaning,
    every configurable-screen allowed/render mask, and all early reuse paths.
    Implement the combined/no-elevation discriminated contract, FPI1 index,
    requested-feature policy, and Nearby screen type 6 as new work: these are
    not supplied by renumbering the original visibility-only implementation.
-4. Keep the coordinated prospective hillshade reservation update in the
-   topography plan: target 6/FMB v7/section 7 and visibility bit 19. Preserve
-   target-4 topography and recheck for any newer deployed contract before
-   resolving conflicts.
+4. Preserve target-4 topography, FME terrain sidecars, and visibility bits
+   14-17. Keep POI format/capability assignments separate from the terrain
+   implementation and recheck for newer deployed contracts before landing.
 5. Register POI tests and Swift dependencies in `tools/development/`; preserve
    main's shared runner, CI routing, report isolation, and evidence workflow.
 6. Run the implementation tests below, inspect the fresh PR CI Gate, and keep
@@ -1281,7 +1297,7 @@ limit fixtures fail with typed errors.
 1. Add signed target-5/FMB v6 install validation and runtime decode.
 2. Add bounded POI selection, collision, icons, street-label reservations, and
    diagnostics.
-3. Add visibility bits, NVS defaults, render invalidation, and CAP2 bit 31
+3. Add visibility bits, NVS defaults, render invalidation, and CAP2 extended bit 1
    without changing contour bit 13 or configurable-screen bit 26.
    Include the screen-document allowed mask and runtime render mask.
 4. Add Nearby picker/result state, worker-owned nearest search, edge indicators,
@@ -1479,7 +1495,7 @@ profiles. A build is source evidence, not physical device evidence.
 - Fresh defaults, existing UserDefaults migration, save/relaunch, and
   capability downgrade/upgrade.
 - Exact setting-8 and setting-20 masks for each toggle and both profiles;
-  contour bit 13 remains independent of POI bits 14-18.
+  contour bit 13 remains independent of POI bits 18-22.
 - No POI bits sent to old firmware; one negotiated resend to new firmware.
 - Active target-3/4 versus target-5 settings availability; upgrading a contour
   map retains contour inclusion and enables independent contour/POI switches.
@@ -1615,7 +1631,7 @@ The feature is complete only when all of the following are true:
 5. Map and Map + Navigation persist independent choices for all five groups,
    including multiple configurable instances of each type and the legacy
    profile path. Existing stored masks remain intact.
-6. Old firmware never receives visibility bits 14-18, while capable firmware
+6. Old firmware never receives visibility bits 18-22, while capable firmware
    receives one convergent full profile after negotiation/reconnect.
 7. The renderer uses the shared projection, bounded placement, deterministic
    collision rules, and complete-frame publication.

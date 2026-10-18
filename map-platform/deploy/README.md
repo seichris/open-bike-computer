@@ -277,6 +277,18 @@ workflow never offers an unsafe "new API with old worker" override after worker
 inputs have changed. Resolve the pending candidate or build a dedicated,
 reviewed compatibility release instead.
 
+The dedicated `production-map-client-compatibility` release profile supports an
+approved App Store build upgrade without replacing the qualified worker. It
+starts from the exact healthy production controller and overlays only the
+rollout policy and public approval registry. Its validation checks the complete
+runtime file inventory against that base, and its entrypoint rejects generation
+commands. Publish this candidate manually on `main`, then review a controller-only
+Compose-lock PR with attestation verification and CI Gate. Keep the worker and
+promotion scheduler pins unchanged. See
+[client-compatibility/README.md](client-compatibility/README.md) for its immutable
+base and publishing command. This profile does not open an automatic production
+proposal or move `latest`.
+
 The shared `map-platform-data` volume is also the restart-safe source for
 `jobs/*.json`, `map-monitoring.sqlite3`, `app-attest.sqlite3`, source-cache
 state, and filesystem artifacts. Coolify/container stdout remains a live

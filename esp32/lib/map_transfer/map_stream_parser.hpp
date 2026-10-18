@@ -149,6 +149,9 @@ public:
   operator=(const MapStreamIncrementalParser &) = delete;
 
   bool feed(const uint8_t *data, size_t size);
+  // Does not invoke onComplete or write boot-eligible metadata.
+  bool readyToFinish() const;
+  void abort(MapStreamParserError error = MapStreamParserError::Truncated);
   bool finish();
   bool complete() const;
   bool failed() const;

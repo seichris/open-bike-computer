@@ -76,6 +76,33 @@ struct WorkoutRecordingOwnershipTests {
         let terminal = try require(decoded.finished(.save))
         check(terminal.finishing(.save) == nil, "Tombstone cannot re-enter finalization")
         let discard = try require(record.finishing(.discard))
+        let pauseIntent = WorkoutNativeTransitionIntent(id: UUID(), paused: true,
+            capturedAt: date.addingTimeInterval(10))
+        let pending = try require(record.addingNativeTransition(pauseIntent))
+        check(pending.isValid && pending.pendingNativeTransitions == [pauseIntent],
+              "Native event intent is durable ownership bookkeeping")
+        check(try JSONDecoder().decode(WorkoutRecordingRecord.self,
+            from: JSONEncoder().encode(pending)) == pending,
+              "A pending native event survives process loss")
+        check(pending.addingNativeTransition(pauseIntent) == pending,
+              "A repeated native callback cannot duplicate its pending event")
+        check(pending.finishing(.save) == nil,
+              "Saving waits for acknowledged native event writes")
+        check(pending.finishing(.discard)?.pendingNativeTransitions == nil,
+              "An explicit discard can retire unfinished native event writes")
+        var fullJournal = record
+        for index in 0..<32 {
+            fullJournal = try require(fullJournal.addingNativeTransition(.init(id: UUID(),
+                paused: index % 2 == 0, capturedAt: date.addingTimeInterval(Double(index)))))
+        }
+        check(fullJournal.addingNativeTransition(.init(id: UUID(), paused: true,
+            capturedAt: date.addingTimeInterval(40))) == nil,
+              "Native transition journal admission is bounded")
+        var legacyObject = try require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacyObject.removeValue(forKey: "pendingNativeTransitions")
+        check(try JSONDecoder().decode(WorkoutRecordingRecord.self,
+            from: JSONSerialization.data(withJSONObject: legacyObject)).pendingNativeTransitions == nil,
+              "Earlier ownership records retain backwards-compatible recovery")
         check(discard.finishing(.save) == nil, "Discard cannot become save")
         var invalid = discard
         invalid.saveAttempted = true
@@ -104,6 +131,15 @@ struct WorkoutRecordingOwnershipTests {
         try store.save(terminal)
         try store.clear(sessionID: terminal.sessionID)
         check(try store.load() == nil, "Only matching acknowledged ride is cleared")
+        let metadata = try WorkoutRecordingMetadataCodec.encode(attempted)
+        check(WorkoutRecordingMetadataCodec.decode(WorkoutRecordingRecord.self, from: metadata) == attempted,
+              "HealthKit-compatible string metadata preserves the original typed recording data")
+        check(WorkoutRecordingMetadataCodec.decode(WorkoutRecordingRecord.self,
+              from: try JSONEncoder().encode(attempted)) == attempted,
+              "Legacy in-memory binary metadata remains readable")
+        check(WorkoutRecordingMetadataCodec.decode(WorkoutRecordingRecord.self, from: "invalid") == nil
+                  && WorkoutRecordingMetadataCodec.decode(WorkoutRecordingRecord.self, from: 7) == nil,
+              "Malformed or unsupported metadata cannot manufacture recording data")
         print("Workout recording ownership: \(assertions) assertions passed")
     }
 

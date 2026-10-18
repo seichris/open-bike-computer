@@ -28,7 +28,10 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     private var hasActivated = false
     private var intentionallyCancelledRouteTransferIDs =
         Set<ObjectIdentifier>()
-    private var pendingControllerRevocations: [WatchControllerRequestV1] = []
+    private var controllerRevocations = WatchControllerRevocationOutboxV1()
+    private var controllerRevocationRetryTask: Task<Void, Never>?
+    private var controllerRevocationRetryAttempt = 0
+    private var controllerRevocationNextAttempt: [UUID: Date] = [:]
     private var pendingDirectRideReconciliations:
         [WatchDirectRideReconciliationRequestV1] = []
     private var directRideReconciliationRetryTask: Task<Void, Never>?
@@ -296,12 +299,22 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             where receivedSet.insert(eventID).inserted {
             received.append(eventID)
         }
+        if let count = batch.droppedEventCount, count > 0 {
+            var fields = ["origin": "watch", "reason": "producer_overflow", "droppedCount": String(count),
+                "originCaptureAssociation": "unknown", "timeBasis": "phone_receipt"]
+            if let producerID = batch.producerID { fields["attemptId"] = producerID.uuidString }
+            diagnosticsRecorder?.record(level: .warning, category: .ble,
+                event: "watch_ble_diagnostics_loss", fields: fields, captureId: diagnosticsRecorder?.processId)
+        }
         for event in batch.events {
             let eventID = "\(event.attemptID.uuidString):\(event.sequence)"
             guard receivedSet.insert(eventID).inserted else { continue }
             received.append(eventID)
             var fields: [String: String] = [
                 "origin": "watch",
+                "timeBasis": "phone_receipt",
+                "originCaptureAssociation": "unknown",
+                "originClockUncertainty": "unknown",
                 "controllerRole": "scoped_watch",
                 "attemptId": event.attemptID.uuidString,
                 "watchSequence": String(event.sequence),
@@ -314,6 +327,12 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
                 "replacedCount": String(event.replacedGroups),
                 "rejectedCount": String(event.rejectedGroups),
             ]
+            if let wallTime = event.originUnixTimeMs {
+                fields["originUnixTimeMs"] = String(wallTime)
+            }
+            if let processID = event.originProcessID {
+                fields["originProcessId"] = processID.uuidString.lowercased()
+            }
             if let queueBytes = event.queueBytes {
                 fields["queueBytes"] = String(queueBytes)
             }
@@ -332,7 +351,10 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
                     ? .warning : .info,
                 category: .ble,
                 event: "watch_ble_\(event.kind.rawValue)",
-                fields: fields
+                fields: fields,
+                // Queued Watch events have no trustworthy phone ride binding.
+                // Keep receipt time on the envelope and origin time separately.
+                captureId: diagnosticsRecorder?.processId
             )
         }
         received = Array(received.suffix(512))
@@ -372,11 +394,10 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
                   (try? request.validated()) != nil else {
                 return
             }
-            self.pendingControllerRevocations.removeAll {
-                $0.deviceID == request.deviceID &&
-                    $0.controllerID == request.controllerID
+            guard self.controllerRevocations.enqueue(request) else {
+                self.flushPendingControllerRevocations()
+                return
             }
-            self.pendingControllerRevocations.append(request)
             self.persistPendingControllerRevocations()
             self.flushPendingControllerRevocations()
         }
@@ -411,20 +432,20 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         ) else {
             return
         }
-        pendingControllerRevocations = requests.filter {
-            $0.operation == .revoke && (try? $0.validated()) != nil
-        }
+        controllerRevocations = WatchControllerRevocationOutboxV1(requests: requests)
+        state.pendingControllerCleanupDeviceIDs = Set(controllerRevocations.requests.map(\.deviceID))
     }
 
     private func persistPendingControllerRevocations() {
-        if pendingControllerRevocations.isEmpty {
+        state.pendingControllerCleanupDeviceIDs = Set(controllerRevocations.requests.map(\.deviceID))
+        if controllerRevocations.requests.isEmpty {
             defaults.removeObject(
                 forKey: Self.pendingControllerRevocationsDefaultsKey
             )
             return
         }
         guard let data = try? PropertyListEncoder().encode(
-            pendingControllerRevocations
+            controllerRevocations.requests
         ) else { return }
         defaults.set(
             data,
@@ -465,18 +486,78 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
               session.activationState == .activated,
               session.isPaired,
               session.isWatchAppInstalled else { return }
-        var queuedRequestIDs = Set<UUID>()
-        for request in pendingControllerRevocations {
-            guard let payload = try? request.encoded() else { continue }
-            session.transferUserInfo([
-                WatchControllerTransportV1.userInfoPayloadKey: payload,
-            ])
-            queuedRequestIDs.insert(request.requestID)
+        let outstanding = Set(session.outstandingUserInfoTransfers.compactMap { transfer -> UUID? in
+            guard let data = transfer.userInfo[WatchControllerTransportV1.userInfoPayloadKey] as? Data,
+                  let request = try? WatchControllerRequestV1.decode(data),
+                  request.operation == .revoke else { return nil }
+            return request.requestID
+        })
+        let timestamp = Date()
+        for request in controllerRevocations.requests {
+            guard !outstanding.contains(request.requestID),
+                  controllerRevocationNextAttempt[request.requestID, default: .distantPast] <= timestamp,
+                  let payload = try? request.encoded() else { continue }
+            session.transferUserInfo([WatchControllerTransportV1.userInfoPayloadKey: payload])
+            controllerRevocationNextAttempt[request.requestID] = timestamp.addingTimeInterval(30)
         }
-        pendingControllerRevocations.removeAll {
-            queuedRequestIDs.contains($0.requestID)
+        // OS queue admission and didFinish are transport observations. Only an
+        // exact receiver-applied receipt removes the persisted deletion intent.
+        scheduleControllerRevocationRetry()
+    }
+
+    private func scheduleControllerRevocationRetry() {
+        guard !controllerRevocations.requests.isEmpty,
+              controllerRevocationRetryTask == nil else { return }
+        let delay = min(30 * pow(2, Double(controllerRevocationRetryAttempt)), 300)
+        controllerRevocationRetryAttempt = min(controllerRevocationRetryAttempt + 1, 4)
+        controllerRevocationRetryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard let self else { return }
+            controllerRevocationRetryTask = nil
+            flushPendingControllerRevocations()
         }
+    }
+
+    /// Watch builds that predate applied receipts never send one. For them,
+    /// WatchConnectivity delivery is the strongest available confirmation, so
+    /// settle the exact delivered request instead of retrying forever.
+    private func controllerRevocationTransferDidFinish(
+        _ payload: Data,
+        delivered: Bool
+    ) {
+        if delivered, !watchSendsControllerRevocationReceipts,
+           let request = try? WatchControllerRequestV1.decode(payload),
+           controllerRevocations.settleDelivered(request) {
+            controllerRevocationNextAttempt.removeValue(forKey: request.requestID)
+            persistPendingControllerRevocations()
+            if controllerRevocations.requests.isEmpty {
+                controllerRevocationRetryAttempt = 0
+                controllerRevocationRetryTask?.cancel()
+                controllerRevocationRetryTask = nil
+            }
+            return
+        }
+        scheduleControllerRevocationRetry()
+    }
+
+    private var watchSendsControllerRevocationReceipts: Bool {
+        (session?.receivedApplicationContext[
+            WatchControllerRevocationReceiptV1.supportedContextKey
+        ] as? Int ?? 0) >= 1
+    }
+
+    @discardableResult
+    func receiveControllerRevocationReceipt(_ data: Data) -> Bool {
+        guard let receipt = try? WatchControllerRevocationReceiptV1.decode(data),
+              controllerRevocations.apply(receipt) else { return false }
+        controllerRevocationNextAttempt.removeValue(forKey: receipt.request.requestID)
         persistPendingControllerRevocations()
+        controllerRevocationRetryAttempt = 0
+        if controllerRevocations.requests.isEmpty {
+            controllerRevocationRetryTask?.cancel()
+            controllerRevocationRetryTask = nil
+        }
+        return true
     }
 
     private func flushPendingDirectRideReconciliations() {
@@ -655,7 +736,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
 
     @discardableResult
     func transferRoute(
-        _ record: InstalledNavigationRouteV1
+        _ record: InstalledNavigationRouteV1,
+        deliveryOperation: WatchRouteOperationV2? = nil
     ) -> WCSessionFileTransfer? {
         guard (try? record.archive.validate(purpose: .watchTransfer)) != nil,
               let session,
@@ -668,7 +750,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             operation: .install,
             identity: WatchRouteIdentityV1(archive: record.archive),
             encodedByteCount: record.encodedSize,
-            deleteAfter: record.archive.deleteAfter
+            deleteAfter: record.archive.deleteAfter,
+            deliveryOperation: deliveryOperation
         )
         return session.transferFile(
             record.fileURL,
@@ -701,7 +784,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     /// still has a durable background fallback.
     @discardableResult
     func sendRouteImmediately(
-        _ record: InstalledNavigationRouteV1
+        _ record: InstalledNavigationRouteV1,
+        deliveryOperation: WatchRouteOperationV2? = nil
     ) -> Bool {
         guard (try? record.archive.validate(purpose: .watchTransfer)) != nil,
               let session,
@@ -718,7 +802,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             operation: .install,
             identity: WatchRouteIdentityV1(archive: record.archive),
             encodedByteCount: record.encodedSize,
-            deleteAfter: record.archive.deleteAfter
+            deleteAfter: record.archive.deleteAfter,
+            deliveryOperation: deliveryOperation
         )
         guard let message = WatchRouteImmediateTransferV1.message(
             install: install,
@@ -726,6 +811,19 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         ) else { return false }
         session.sendMessage(message) { [weak self] response in
             Task { @MainActor [weak self] in
+                // An empty or undecodable reply proves nothing about the
+                // queued file transfer, which stays the durable fallback.
+                guard let receipt = WatchRouteSyncMessageV1(propertyList: response) else { return }
+                guard receipt.deliveryOperation == install.deliveryOperation else {
+                    // Only a token-less receipt identifies a pre-schema-2 Watch;
+                    // a different token is a stale reply for another attempt.
+                    if receipt.deliveryOperation == nil {
+                        self?.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+                            operation: .acknowledge, identity: install.identity, status: .rejected,
+                            errorCode: "watch_update_required", deliveryOperation: install.deliveryOperation))
+                    }
+                    return
+                }
                 self?.receiveAcknowledgement(response)
             }
         } errorHandler: { _ in
@@ -736,7 +834,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
 
     @discardableResult
     func requestRouteDeletion(
-        _ identity: WatchRouteIdentityV1
+        _ identity: WatchRouteIdentityV1,
+        deliveryOperation: WatchRouteOperationV2? = nil
     ) -> WCSessionUserInfoTransfer? {
         guard let session,
               session.activationState == .activated,
@@ -744,10 +843,16 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
               session.isWatchAppInstalled else {
             return nil
         }
+        if let existing = session.outstandingUserInfoTransfers.first(where: {
+            guard let message = WatchRouteSyncMessageV1(propertyList: $0.userInfo) else { return false }
+            return message.operation == .delete && message.identity == identity &&
+                message.deliveryOperation == deliveryOperation
+        }) { return existing }
         return session.transferUserInfo(
             WatchRouteSyncMessageV1(
                 operation: .delete,
-                identity: identity
+                identity: identity,
+                deliveryOperation: deliveryOperation
             ).propertyList
         )
     }
@@ -756,7 +861,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
         guard let session else {
             workoutHealthSetupSnapshot = nil
             cyclingSensorObservation = nil
-            state = PhoneWatchConnectivityStateV1()
+            state = PhoneWatchConnectivityStateV1(
+                pendingControllerCleanupDeviceIDs: Set(controllerRevocations.requests.map(\.deviceID)))
             return
         }
         let activated = session.activationState == .activated
@@ -798,7 +904,10 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
             isPaired: paired,
             isWatchAppInstalled: watchAppInstalled,
             isReachable: activated && session.isReachable,
-            watchMetadata: watchMetadata
+            watchMetadata: watchMetadata,
+            routeSyncSchemaVersion: session.receivedApplicationContext[
+                WatchRouteSyncMessageV1.supportedSchemaContextKey] as? Int ?? 1,
+            pendingControllerCleanupDeviceIDs: Set(controllerRevocations.requests.map(\.deviceID))
         )
         if activated {
             flushPendingControllerRevocations()
@@ -818,6 +927,10 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
     }
 
     fileprivate func receiveAcknowledgement(_ userInfo: [String: Any]) {
+        if let data = userInfo[WatchControllerRevocationReceiptV1.userInfoPayloadKey] as? Data {
+            _ = receiveControllerRevocationReceipt(data)
+            return
+        }
         if let payload = userInfo[
             WatchDirectRidePreparationRequestV1.userInfoPayloadKey
         ] as? Data {
@@ -881,7 +994,8 @@ final class PhoneWatchConnectivityCoordinator: NSObject, ObservableObject,
                 operation: .acknowledge,
                 identity: install.identity,
                 status: .rejected,
-                errorCode: "transfer_failed_\((error as NSError).code)"
+                errorCode: "transfer_failed_\((error as NSError).code)",
+                deliveryOperation: install.deliveryOperation
             )
         )
     }
@@ -969,6 +1083,18 @@ extension PhoneWatchConnectivityCoordinator: WCSessionDelegate {
         didFinish userInfoTransfer: WCSessionUserInfoTransfer,
         error: Error?
     ) {
+        if let payload = userInfoTransfer.userInfo[
+            WatchControllerTransportV1.userInfoPayloadKey
+        ] as? Data {
+            let delivered = error == nil
+            Task { @MainActor [weak self] in
+                self?.controllerRevocationTransferDidFinish(
+                    payload,
+                    delivered: delivered
+                )
+            }
+            return
+        }
         guard let data = userInfoTransfer.userInfo[
             "watchDirectRideReconciliationRequestV1"
         ] as? Data else { return }

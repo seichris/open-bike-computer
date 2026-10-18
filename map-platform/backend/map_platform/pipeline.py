@@ -5114,7 +5114,7 @@ class MapBuildPipeline:
 
         cache = ElevationCache(self.paths.work_root.parent / "topography-cache", cancellation_check=cancel,
                                remote=self.preparation_store)
-        identity = topography_input_identity(policy, cache, job.geometry.bounds.to_list())
+        identity = topography_input_identity(policy, cache, job.geometry.bounds.to_list(), terrain=job.request.get("target", {}).get("terrainProfileVersion") == 1)
         job._topography_reuse_identity = identity
         return identity
 
@@ -5854,6 +5854,9 @@ class MapBuildPipeline:
             cache,
             job.geometry.bounds.to_list(),
             maximum_tiles=256,
+            terrain=job.request.get("target", {}).get("terrainProfileVersion") == 1,
+            terrain_selection=self._topography_selection(job),
+            corridor_width_m=job.geometry.corridor_width_m or 0,
         )
         reserved_inputs = getattr(job, "_topography_reuse_identity", None)
         if reserved_inputs is not None and not sample_matches_input_identity(sample, reserved_inputs):

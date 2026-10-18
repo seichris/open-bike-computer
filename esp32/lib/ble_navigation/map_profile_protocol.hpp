@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "firmware_diagnostics_config.hpp"
 
 // Development qualification only. Production profiles deliberately omit this.
 #ifndef MAP_STABLE_CAMERA
@@ -75,11 +76,17 @@ constexpr uint32_t VISIBILITY_SERVICE_ROADS = 1u << 10;
 constexpr uint32_t VISIBILITY_TRACKS = 1u << 11;
 constexpr uint32_t VISIBILITY_EXTENDED_MARKER = 1u << 12;
 constexpr uint32_t VISIBILITY_CONTOURS = 1u << 13;
-constexpr uint32_t VISIBILITY_POI_SHOPS = 1u << 14;
-constexpr uint32_t VISIBILITY_POI_RESTAURANTS_AND_CAFES = 1u << 15;
-constexpr uint32_t VISIBILITY_POI_PUBLIC_TOILETS = 1u << 16;
-constexpr uint32_t VISIBILITY_POI_GAS_STATIONS = 1u << 17;
-constexpr uint32_t VISIBILITY_POI_BICYCLE_SERVICES = 1u << 18;
+constexpr uint32_t TERRAIN_EXPERIMENT_MASK = 0x3c000;
+#if FIRMWARE_DIAGNOSTICS
+constexpr uint32_t VISIBILITY_TERRAIN = TERRAIN_EXPERIMENT_MASK;
+#else
+constexpr uint32_t VISIBILITY_TERRAIN = 0;
+#endif
+constexpr uint32_t VISIBILITY_POI_SHOPS = 1u << 18;
+constexpr uint32_t VISIBILITY_POI_RESTAURANTS_AND_CAFES = 1u << 19;
+constexpr uint32_t VISIBILITY_POI_PUBLIC_TOILETS = 1u << 20;
+constexpr uint32_t VISIBILITY_POI_GAS_STATIONS = 1u << 21;
+constexpr uint32_t VISIBILITY_POI_BICYCLE_SERVICES = 1u << 22;
 constexpr uint32_t VISIBILITY_POI_MASK =
     VISIBILITY_POI_SHOPS | VISIBILITY_POI_RESTAURANTS_AND_CAFES |
     VISIBILITY_POI_PUBLIC_TOILETS | VISIBILITY_POI_GAS_STATIONS |
@@ -90,7 +97,7 @@ constexpr uint32_t VISIBILITY_EXTENDED_FEATURE_MASK =
     VISIBILITY_TRACKS | VISIBILITY_POI_MASK;
 constexpr uint32_t VISIBILITY_RENDER_FEATURE_MASK =
     (VISIBILITY_EXTENDED_FEATURE_MASK & ~VISIBILITY_POI_MASK) |
-    VISIBILITY_CONTOURS |
+    VISIBILITY_CONTOURS | VISIBILITY_TERRAIN |
     (POIS_RUNTIME_ENABLED ? VISIBILITY_POI_MASK : 0U);
 constexpr uint32_t MAP_DEFAULT_VISIBILITY_MASK = VISIBILITY_EXTENDED_FEATURE_MASK;
 constexpr uint32_t MAP_DEFAULT_PERSISTED_VISIBILITY_MASK =
@@ -134,7 +141,7 @@ inline uint8_t extendedCapabilityFlagsForClient(uint8_t clientVersion) {
 }
 
 inline uint32_t normalizedFeatureVisibilityMask(uint32_t mask) {
-  uint32_t normalized = mask & (VISIBILITY_LEGACY_FEATURE_MASK | VISIBILITY_CONTOURS);
+  uint32_t normalized = mask & (VISIBILITY_LEGACY_FEATURE_MASK | VISIBILITY_CONTOURS | VISIBILITY_TERRAIN);
   if ((mask & VISIBILITY_EXTENDED_MARKER) != 0) {
     normalized |= mask &
                   (VISIBILITY_SERVICE_ROADS | VISIBILITY_TRACKS |

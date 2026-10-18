@@ -10,21 +10,29 @@ final class PhoneWatchConnectivityCoordinator: ObservableObject {
         var isPaired = false
         var isWatchAppInstalled = false
         var isReachable = false
+        var routeSyncSchemaVersion = 2
     }
     @Published var state = State()
     var onRouteAcknowledgement: ((WatchRouteSyncMessageV1) -> Void)?
+    var operations: [WatchRouteIdentityV1: WatchRouteOperationV2] = [:]
     var acceptsDeletion = true
     var cancelledTransferCount = 1
     private(set) var sideEffects = 0
     private(set) var transferredRouteIDs: [UUID] = []
     private(set) var immediateRouteIDs: [UUID] = []
     private(set) var cancelledRouteIdentities: [WatchRouteIdentityV1] = []
-    func transferRoute(_ record: InstalledNavigationRouteV1) -> UUID? {
+    func acknowledgeCurrent(_ message: WatchRouteSyncMessageV1) {
+        onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: message.operation, identity: message.identity, status: message.status,
+            errorCode: message.errorCode, deliveryOperation: operations[message.identity]))
+    }
+    func transferRoute(_ record: InstalledNavigationRouteV1, deliveryOperation: WatchRouteOperationV2? = nil) -> UUID? {
+        operations[WatchRouteIdentityV1(archive: record.archive)] = deliveryOperation
         sideEffects += 1
         transferredRouteIDs.append(record.archive.routeID)
         return UUID()
     }
-    func sendRouteImmediately(_ record: InstalledNavigationRouteV1) {
+    func sendRouteImmediately(_ record: InstalledNavigationRouteV1, deliveryOperation: WatchRouteOperationV2? = nil) {
         sideEffects += 1
         immediateRouteIDs.append(record.archive.routeID)
     }
@@ -33,7 +41,8 @@ final class PhoneWatchConnectivityCoordinator: ObservableObject {
         cancelledRouteIdentities.append(identity)
         return cancelledTransferCount
     }
-    func requestRouteDeletion(_ identity: WatchRouteIdentityV1) -> UUID? {
+    func requestRouteDeletion(_ identity: WatchRouteIdentityV1, deliveryOperation: WatchRouteOperationV2? = nil) -> UUID? {
+        operations[identity] = deliveryOperation
         sideEffects += 1
         return acceptsDeletion ? UUID() : nil
     }
@@ -227,7 +236,10 @@ struct OfflineRouteSaveTests {
     }
 
     static func main() throws {
+        try operationReceiptAndCrashRecovery()
+        try unavailableWatchDeletionAndFenceRenewal()
         try sourceAndValidation()
+        try socialCopyKeepsProviderAndProvenance()
         try saveIdentityRestartAndDuplicates()
         try interactionCancellationAndStorageFailure()
         try corruptionDeletionAndReplacement()
@@ -242,6 +254,151 @@ struct OfflineRouteSaveTests {
         try selectedMapKitSaving()
         try uiWiring()
         print("Offline route save/navigation: \(checks) checks passed")
+    }
+
+    static func socialCopyKeepsProviderAndProvenance() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let before = checks
+        let original = try draft(f).archive
+        let data = try original.encoded(purpose: .offlineNavigation, now: f.now)
+        let friendRoute = SocialRouteSource(kind: .content, socialID: "social-route", owner: "rider", revision: 3)
+        let saved = try f.library.importSocialArchive(data, source: friendRoute, duplicate: false)
+        let copy = try f.library.importSocialArchive(data, source: friendRoute, duplicate: true)
+        check(saved.id == original.routeID && copy.id != original.routeID, "Only Duplicate creates a new local identity")
+        let restored = try f.library.offlineArchive(for: copy)
+        check(restored.route.provider == original.route.provider && restored.createdAt == original.createdAt && restored.deleteAfter == original.deleteAfter,
+              "Copy preserves provider and retention")
+        let provenance = f.root.appendingPathComponent("social-provenance")
+        let sidecar = provenance.appendingPathComponent(copy.id.uuidString + ".json")
+        let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: sidecar)) as! [String: Any]
+        check(metadata["sourceHash"] as? String == original.contentHash, "Copy retains original hash provenance outside navigation archive")
+        check(metadata["socialRevision"] as? Int == 3, "Social revision is retained")
+        check(metadata["owner"] as? String == "rider" && metadata["kind"] as? String == "content", "Copy records its owner and source kind")
+        check(metadata["geometry"] as? String == PhoneRouteLibrary.socialGeometry(original.route), "Copy records its route geometry")
+
+        // A friend's route, including an ID-changed duplicate, stays the owner's to share.
+        for summary in [saved, copy] {
+            check(f.library.socialPublication(for: summary, currentProfileID: "me") == .restricted(owner: "rider"),
+                  "A saved or duplicated friend route cannot be published as the saver's own")
+            check(f.library.socialPublication(for: summary, currentProfileID: nil) == .restricted(owner: "rider"),
+                  "An unknown signed-in rider fails closed")
+            check(f.library.socialPublication(for: summary, currentProfileID: "rider") == .ownCopy,
+                  "The owner may republish their own saved route")
+        }
+        // Restrictions are read back after a relaunch over the same storage.
+        let relaunched = f.makeLibrary()
+        check(relaunched.socialPublication(for: copy, currentProfileID: "me") == .restricted(owner: "rider"),
+              "Provenance survives reload")
+        // Group Ride snapshots saved or opened on the map belong to the organizer.
+        let snapshot = try draft(f, offset: 0.01).archive
+        let ride = try relaunched.importSocialArchive(snapshot.encoded(purpose: .offlineNavigation, now: f.now),
+            source: SocialRouteSource(kind: .ride, socialID: "ride-1", owner: "organizer", revision: nil), duplicate: false)
+        check(relaunched.socialPublication(for: ride, currentProfileID: "me") == .restricted(owner: "organizer"),
+              "Members cannot republish a Group Ride snapshot")
+        check(relaunched.socialPublication(for: ride, currentProfileID: "organizer") == .ownCopy,
+              "The organizer can still publish their own route")
+        // An exported copy re-imported without its sidecar, even reversed, is matched by geometry.
+        let reimported = try relaunched.importGPX(gpx(reversed: true), fileName: "Exported.gpx")
+        check(reimported.id != saved.id && reimported.id != copy.id, "Re-import creates a new local identity")
+        check(relaunched.socialPublication(for: reimported, currentProfileID: "me") == .restricted(owner: "rider"),
+              "Re-imported copies are recognized by route geometry")
+        // The rider's own unrelated GPX import remains publishable.
+        let own = try relaunched.importGPX(gpx(offset: 0.05), fileName: "Mine.gpx")
+        check(relaunched.socialPublication(for: own, currentProfileID: "me") == .independent, "Own GPX imports stay publishable")
+        // Unreadable provenance never grants publication.
+        try Data("{".utf8).write(to: sidecar)
+        check(relaunched.socialPublication(for: copy, currentProfileID: "rider") == .restricted(owner: ""),
+              "A corrupt sidecar fails closed")
+        // Schema-1 sidecars written before restrictions existed still restrict by owner.
+        let legacy = try JSONSerialization.data(withJSONObject: ["schema": 1, "socialID": "old", "owner": "rider",
+            "socialRevision": 1, "sourceRouteID": saved.id.uuidString, "sourceRevision": 1, "sourceHash": original.contentHash])
+        try legacy.write(to: provenance.appendingPathComponent(saved.id.uuidString + ".json"))
+        check(relaunched.socialPublication(for: saved, currentProfileID: "me") == .restricted(owner: "rider"),
+              "Legacy sidecars restrict by owner")
+        // Native fingerprints match the backend reference vectors byte for byte.
+        check(SocialRouteGeometry.fingerprint([(51.5, -0.1), (51.502, -0.1), (51.504, -0.1000004)])
+              == "57424a01bcdb7b9435cd88b98d443c20878d901434ddfdc93085886de4794bb7", "Fingerprint parity, forward")
+        check(SocialRouteGeometry.fingerprint([(51.504, -0.1000004), (51.502, -0.1), (51.5, -0.1)])
+              == "57424a01bcdb7b9435cd88b98d443c20878d901434ddfdc93085886de4794bb7", "Fingerprint parity, reversed")
+        check(SocialRouteGeometry.fingerprint([(-33.8688, 151.2093), (-33.86885, 151.20935)])
+              == "643bc165b37ae90cd785b174bcb26db6016f7c90cca19c8a5b41516bfc7ff8bf", "Fingerprint parity, southern/eastern")
+        let strava = try NavigationRouteArchiveV1.create(route: changedProvider(original.route, RouteProviderPolicyV1.strava), createdAt: f.now,
+            deleteAfter: f.now.addingTimeInterval(60), purpose: .offlineNavigation)
+        failure { _ = try f.library.importSocialArchive(strava.encoded(purpose: .offlineNavigation, now: f.now),
+            source: SocialRouteSource(kind: .content, socialID: "restricted", owner: "rider", revision: 1), duplicate: true) }
+        print("Social route provenance and publishing restrictions: \(checks - before) checks passed")
+    }
+
+    static func operationReceiptAndCrashRecovery() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let summary = try f.library.importGPX(gpx(), fileName: "Crash.gpx")
+        let archive = try f.library.offlineArchive(for: summary)
+        let identity = WatchRouteIdentityV1(archive: archive)
+        let bytes = try archive.encoded(purpose: .offlineNavigation, now: f.now)
+        try f.library.sendToWatch(summary)
+        let oldInstall = f.watch.operations[identity]!
+        let journal = WatchRouteOperationJournalV2(rootDirectory: f.root)
+        let deletion = try journal.issue(.delete, identity: identity)
+        let restarted = f.makeLibrary()
+        check(restarted.offlineNavigationRoutes.isEmpty, "journaled delete excludes navigation after crash")
+        check(f.watch.operations[identity] == deletion, "restart queues the exact persisted deletion")
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(operation: .acknowledge,
+            identity: identity, status: .ready, deliveryOperation: oldInstall))
+        check(restarted.offlineNavigationRoutes.isEmpty, "old install receipt cannot overwrite deletion intent")
+        try journal.complete(.delete, identity: identity, token: deletion)
+        let afterReceiptCrash = f.makeLibrary()
+        check(afterReceiptCrash.routes.isEmpty && f.store.records(now: f.now).isEmpty,
+              "crash after receipt but before unlink completes local deletion on restart")
+        let imported = try afterReceiptCrash.importArchive(bytes)
+        try afterReceiptCrash.sendToWatch(imported)
+        let newer = f.watch.operations[identity]!
+        check(newer.generation > deletion.generation, "explicit reimport can reinstall identical bytes")
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(operation: .acknowledge,
+            identity: identity, status: .deleted, deliveryOperation: deletion))
+        check(afterReceiptCrash.routes.count == 1, "old deletion receipt cannot delete explicit reinstall")
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(operation: .acknowledge,
+            identity: identity, status: .ready))
+        check(afterReceiptCrash.watchSyncState[identity] == .ready, "only exact successor receipt marks ready")
+        f.watch.state.routeSyncSchemaVersion = 1
+        try afterReceiptCrash.sendToWatch(imported)
+        check(afterReceiptCrash.watchSyncState[identity] == .rejected("watch_update_required"),
+              "older Watch requires update instead of an unacknowledgeable transfer")
+    }
+
+    static func unavailableWatchDeletionAndFenceRenewal() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let summary = try f.library.importGPX(gpx(), fileName: "Away.gpx")
+        let identity = WatchRouteIdentityV1(archive: try f.library.offlineArchive(for: summary))
+        try f.library.sendToWatch(summary)
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
+            operation: .acknowledge, identity: identity, status: .ready))
+        f.watch.acceptsDeletion = false
+        try f.library.delete(summary)
+        check(f.library.routes.isEmpty && f.store.records(now: f.now).isEmpty,
+              "An unavailable Watch does not keep a deleted route on iPhone")
+        let journal = WatchRouteOperationJournalV2(rootDirectory: f.root)
+        let fence = try journal.entry(identity)
+        check(fence?.operation == .delete && fence?.applied == false,
+              "The journaled deletion waits for the Watch")
+        f.watch.acceptsDeletion = true
+        f.watch.operations[identity] = nil
+        f.watch.state = .init(isActivated: true, isPaired: true, isWatchAppInstalled: true)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        check(fence?.token != nil && f.watch.operations[identity] == fence?.token,
+              "A returning Watch receives the exact persisted deletion without reachability")
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
+            operation: .acknowledge, identity: identity, status: .rejected,
+            errorCode: "stale_operation"))
+        let renewed = try journal.entry(identity)
+        check(renewed?.operation == .delete && renewed?.applied == false &&
+              (renewed?.token?.generation ?? 0) > (fence?.token?.generation ?? 0),
+              "A superseded fence advances its generation instead of resending forever")
+        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            operation: .acknowledge, identity: identity, status: .deleted,
+            deliveryOperation: renewed?.token))
+        let settled = try journal.entry(identity)
+        check(settled?.applied == true && settled?.token == renewed?.token,
+              "Only the renewed operation's receipt settles the deletion")
     }
 
     static func sourceAndValidation() throws {
@@ -682,7 +839,7 @@ struct OfflineRouteSaveTests {
             f.watch.immediateRouteIDs == [first.id, first.id],
             "Repeated reachable-state refreshes do not duplicate live sends"
         )
-        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
             operation: .acknowledge,
             identity: firstIdentity,
             status: .ready,
@@ -702,7 +859,7 @@ struct OfflineRouteSaveTests {
         let secondIdentity = WatchRouteIdentityV1(
             archive: try f.library.offlineArchive(for: second)
         )
-        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
             operation: .acknowledge,
             identity: secondIdentity,
             status: .rejected,
@@ -752,7 +909,7 @@ struct OfflineRouteSaveTests {
         let identity = WatchRouteIdentityV1(archive: archive)
         let selected = try f.library.offlineDraft(for: saved.summary)
         try f.library.sendToWatch(saved.summary)
-        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
             operation: .acknowledge, identity: identity, status: .ready, errorCode: nil))
         let factory = TestNavigationDirectionsFactory()
         let coordinator = BikeComputerCoordinator(destinationStore: SavedDestinationStore(defaults: f.defaults),
@@ -773,11 +930,11 @@ struct OfflineRouteSaveTests {
         let restarted = f.makeLibrary()
         check(!restarted.isAvailableOffline(saved.summary), "Pending deletion survives restart")
         failure { _ = try restarted.offlineArchive(for: saved.summary) }
-        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
             operation: .acknowledge, identity: identity, status: .rejected, errorCode: "in_use"))
-        check(restarted.isAvailableOffline(saved.summary), "An explicitly rejected Watch deletion keeps the original route")
+        check(!restarted.isAvailableOffline(saved.summary), "A rejected receipt keeps the durable deletion intent for retry")
         try restarted.delete(saved.summary)
-        f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+        f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
             operation: .acknowledge, identity: identity, status: .deleted, errorCode: nil))
         check(restarted.routes.isEmpty && f.makeLibrary().routes.isEmpty, "Acknowledged deletion is durable")
     }
@@ -845,7 +1002,7 @@ struct OfflineRouteSaveTests {
                 let summary = try f.library.importArchive(archive.encoded(purpose: .offlineNavigation, now: f.now))
                 let identity = WatchRouteIdentityV1(archive: archive)
                 try f.library.sendToWatch(summary)
-                f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+                f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
                     operation: .acknowledge, identity: identity, status: .ready, errorCode: nil))
                 f.fileManager.failsRouteDeletion = true
                 if provider == RouteProviderPolicyV1.strava {
@@ -854,8 +1011,11 @@ struct OfflineRouteSaveTests {
                 } else {
                     try f.library.delete(summary)
                 }
-                f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+                f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
                     operation: .acknowledge, identity: identity, status: status, errorCode: nil))
+                let deletion = try WatchRouteOperationJournalV2(rootDirectory: f.root).entry(identity)
+                check(deletion?.operation == .delete && deletion?.applied == true,
+                      "Exact deleted or evicted receipt settles the durable deletion before unlink")
                 check(!f.store.records(now: f.now).isEmpty, "Injected local unlink failure really leaves archive bytes")
                 check(f.library.offlineNavigationRoutes.isEmpty, "Watch acknowledgement cannot clear failed local cleanup")
                 failure { _ = try f.library.offlineArchive(for: summary) }
@@ -873,7 +1033,7 @@ struct OfflineRouteSaveTests {
         let summary = try f.library.importGPX(gpx(), fileName: "Keep.gpx")
         let identity = WatchRouteIdentityV1(archive: try f.library.offlineArchive(for: summary))
         for status in [WatchRouteSyncStatusV1.evicted, .deleted] {
-            f.watch.onRouteAcknowledgement?(WatchRouteSyncMessageV1(
+            f.watch.acknowledgeCurrent(WatchRouteSyncMessageV1(
                 operation: .acknowledge, identity: identity, status: status, errorCode: nil))
             check(f.library.isAvailableOffline(summary), "Unrequested Watch removal does not delete the iPhone copy")
         }

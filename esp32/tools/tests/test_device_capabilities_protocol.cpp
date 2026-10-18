@@ -74,13 +74,13 @@ int main() {
                 28);
   static_assert(device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE ==
                 (1UL << 30));
-  static_assert(device_capabilities_protocol::MAP_POIS_CLIENT_VERSION == 29);
+  static_assert(device_capabilities_protocol::MAP_POIS_CLIENT_VERSION == 31);
   static_assert(device_capabilities_protocol::MAP_POIS_FEATURE ==
-                (1UL << 31));
-  assert(!device_capabilities_protocol::supportsMapPois(28, true, true));
-  assert(!device_capabilities_protocol::supportsMapPois(29, false, true));
-  assert(!device_capabilities_protocol::supportsMapPois(29, true, false));
-  assert(device_capabilities_protocol::supportsMapPois(29, true, true));
+                (1UL << 1));
+  assert(!device_capabilities_protocol::supportsMapPois(30, true, true));
+  assert(!device_capabilities_protocol::supportsMapPois(31, false, true));
+  assert(!device_capabilities_protocol::supportsMapPois(31, true, false));
+  assert(device_capabilities_protocol::supportsMapPois(31, true, true));
   static_assert((device_capabilities_protocol::WORLD_RADIO_FEATURE &
                  (device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE |
                   device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
@@ -112,6 +112,23 @@ int main() {
   static_assert((device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE &
                  device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE) == 0);
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
+  static_assert(ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE == (1UL << 31));
+  static_assert(ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE == 1);
+  static_assert(ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_MINIMUM_CLIENT_VERSION == 30);
+  const uint8_t screens[16] = {2, 14};
+  const uint8_t extendedPower[] = {1, 4, 80};
+  const size_t extendedSize = device_capabilities_protocol::encodeCap2(
+      ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE,
+      extendedPower, true, output, sizeof(output), screens, sizeof(screens),
+      ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE);
+  assert(extendedSize == 36 && extendedSize == sizeof(output));
+  assert(output[8] == 0x80); // Terrain keeps its shipped first-word allocation.
+  assert(output[9] == 1 && output[14] == 2); // Power and screen TLVs survive.
+  const uint8_t extendedGolden[] = {3, 4, 1, 0, 0, 0};
+  for (size_t index = 0; index < sizeof(extendedGolden); ++index)
+    assert(output[30 + index] == extendedGolden[index]);
+  assert(device_capabilities_protocol::encodeCap2(
+      0, extendedPower, true, output, extendedSize - 1, screens, sizeof(screens), 1) == 0);
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
       0x00003fff, power, true, output, sizeof(output));
@@ -196,10 +213,11 @@ int main() {
   for (size_t index = 0; index < topographicContoursSize; ++index)
     assert(output[index] == expectedTopographicContours[index]);
   const size_t mapPoisSize = device_capabilities_protocol::encodeCap2(
-      device_capabilities_protocol::MAP_POIS_FEATURE, nullptr, false,
-      output, sizeof(output));
+      0, nullptr, false, output, sizeof(output), nullptr, 0,
+      device_capabilities_protocol::MAP_POIS_FEATURE);
   const uint8_t expectedMapPois[] = {
-      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x80};
+      'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x00,
+      3, 4, 0x02, 0x00, 0x00, 0x00};
   assert(mapPoisSize == sizeof(expectedMapPois));
   for (size_t index = 0; index < mapPoisSize; ++index)
     assert(output[index] == expectedMapPois[index]);

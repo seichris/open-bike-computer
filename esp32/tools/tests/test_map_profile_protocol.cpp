@@ -9,6 +9,10 @@ struct TestProfile {
 int main() {
   using namespace map_profile_protocol;
 
+  static_assert((VISIBILITY_POI_MASK & TERRAIN_EXPERIMENT_MASK) == 0);
+  static_assert(VISIBILITY_POI_SHOPS == (1u << 18));
+  static_assert(VISIBILITY_POI_BICYCLE_SERVICES == (1u << 22));
+
   assert(CAPABILITY_MASK == (1 << 3));
   assert(EXTENDED_VISIBILITY_CAPABILITY_MASK == (1 << 4));
   assert(!clientSupportsIndependentProfiles(0));

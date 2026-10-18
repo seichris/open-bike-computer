@@ -7,6 +7,8 @@ RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/bicino-swift-check.XXXXXX")"
 trap 'rm -rf "$RUN_TMP"' EXIT
 export TMPDIR="${RUN_TMP}/"
 
+"$(dirname "${BASH_SOURCE[0]}")/run-device-map-operation-tests.sh"
+
 "$(dirname "${BASH_SOURCE[0]}")/run-native-workout-zone-tests.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +19,7 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 cd "${REPO_DIR}"
 
 python3 "${SCRIPT_DIR}/run-durable-map-attempt-tests.py"
+python3 "${SCRIPT_DIR}/run-map-upload-binding-tests.py"
 
 TOPOGRAPHY_ALIGNMENT_OUT="${TMPDIR:-/tmp}/open-bike-topography-alignment-tests"
 python3 "${DEV_SWIFT_COMPILER}" navigation-1 -- \
@@ -24,6 +27,7 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-1 -- \
   -o "${TOPOGRAPHY_ALIGNMENT_OUT}"
 "${TOPOGRAPHY_ALIGNMENT_OUT}"
 
+"${SCRIPT_DIR}/run-device-operation-tests.sh"
 "${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
 bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
 bash "${SCRIPT_DIR}/run-offline-route-tests.sh"
@@ -51,6 +55,8 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-5 -- \
   -o "${OUT}"
 
 "${OUT}"
+
+bash "${SCRIPT_DIR}/run-bluetooth-restoration-tests.sh"
 
 bash "${SCRIPT_DIR}/run-world-radio-tests.sh"
 
@@ -109,3 +115,14 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-9 -- \
   -o "${PREVIEW_CATALYST_OUT}"
 
 "${PREVIEW_CATALYST_OUT}"
+
+CONTOUR_LABEL_OUT="${TMPDIR:-/tmp}/open-bike-contour-label-tests"
+python3 "${DEV_SWIFT_COMPILER}" navigation-10 -- \
+  -parse-as-library \
+  -target "$(uname -m)-apple-ios16.4-macabi" \
+  -sdk "${MACOS_SDK}" \
+  -F "${IOS_SUPPORT}/System/Library/Frameworks" \
+  -I "${IOS_SUPPORT}/usr/lib/swift" \
+  -L "${IOS_SUPPORT}/usr/lib/swift" \
+  -o "${CONTOUR_LABEL_OUT}"
+"${CONTOUR_LABEL_OUT}"

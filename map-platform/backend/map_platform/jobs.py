@@ -2209,7 +2209,7 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
         if not isinstance(target, dict):
             raise ValueError("target must be an object")
         unexpected_target = sorted(
-            set(target) - {"renderer", "rendererFormatVersion", "firmwareVersion", "requestedFeatures"}
+            set(target) - {"renderer", "rendererFormatVersion", "firmwareVersion", "requestedFeatures", "terrainProfileVersion"}
         )
         if unexpected_target:
             raise ValueError(
@@ -2234,6 +2234,10 @@ def _validate_map_job_fields(request: dict[str, Any]) -> None:
             ):
                 raise ValueError("target rendererFormatVersion must be 1, 2, 3, 4, or 5")
             normalized_target["rendererFormatVersion"] = renderer_format_version
+        if "terrainProfileVersion" in target:
+            if target.get("rendererFormatVersion") != 4 or type(target["terrainProfileVersion"]) is not int or target["terrainProfileVersion"] != 1:
+                raise ValueError("terrain requires target 4 and profile 1")
+            normalized_target["terrainProfileVersion"] = 1
         if "firmwareVersion" in target:
             firmware_version = target["firmwareVersion"]
             if not isinstance(firmware_version, str):

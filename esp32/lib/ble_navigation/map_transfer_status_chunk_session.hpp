@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 namespace map_transfer_status_protocol {
 
@@ -94,6 +95,13 @@ constexpr size_t chunkPayloadBytes(uint16_t peerMtu) {
              : kMaximumChunkPayloadBytes;
 }
 
+constexpr bool fitsAuthenticatedNotification(size_t bytes, uint16_t peerMtu,
+                                              size_t frameCapacity) {
+  const size_t mtuFrameBytes = peerMtu >= 3 ? peerMtu - 3U : 0;
+  const size_t wireBytes = frameCapacity < mtuFrameBytes ? frameCapacity : mtuFrameBytes;
+  return wireBytes >= 22U && bytes <= wireBytes - 22U;
+}
+
 // Repeated status requests must retransmit the same logical chunk stream.
 // Keeping the transfer ID stable while the body is unchanged lets a central
 // fill gaps from later retransmissions instead of discarding every partial
@@ -122,6 +130,47 @@ private:
 // bounded batch before the owner task pumps the next one.
 class ChunkTransmission {
 public:
+  // Generic status needs stable retransmission IDs, but retaining a second
+  // complete body in ChunkSession costs scarce internal RAM. Own the producer's
+  // allocation directly and compare exact bytes against that one retained body.
+  bool beginStable(std::string &&body, size_t chunkPayloadBytes) {
+    if (active_ || body.empty() || chunkPayloadBytes == 0)
+      return false;
+    const size_t count = body.size() / chunkPayloadBytes +
+                         (body.size() % chunkPayloadBytes != 0);
+    if (count > 255)
+      return false;
+    if (body_ != body)
+      ++transferId_;
+    body_ = std::move(body);
+    // libstdc++ may leave the old destination allocation in the moved-from
+    // producer. Release it here, before pumping frames or starting Wi-Fi.
+    std::string{}.swap(body);
+    chunkPayloadBytes_ = chunkPayloadBytes;
+    chunkCount_ = count;
+    nextIndex_ = 0;
+    active_ = true;
+    return true;
+  }
+
+  void finishStable() {
+    chunkPayloadBytes_ = 0;
+    chunkCount_ = 0;
+    nextIndex_ = 0;
+    active_ = false;
+  }
+
+  void discardStable() {
+    // Status can contain a session token/hotspot secret. Release its plaintext
+    // at a mode or authorization boundary, retaining only the sequence counter
+    // so a new status cannot reuse the preceding partial stream's ID.
+    volatile char *bytes = body_.empty() ? nullptr : &body_[0];
+    for (size_t index = 0; index < body_.size(); ++index)
+      bytes[index] = 0;
+    std::string{}.swap(body_);
+    finishStable();
+  }
+
   bool begin(const std::string &body, uint8_t transferId,
              size_t chunkPayloadBytes) {
     reset();

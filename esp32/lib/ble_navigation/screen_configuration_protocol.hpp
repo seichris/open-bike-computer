@@ -33,7 +33,8 @@ constexpr uint32_t APP_INSTANCE_ID_MASK = 1UL << 31;
 constexpr uint32_t ALLOWED_VISIBILITY_MASK =
     map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
     map_profile_protocol::VISIBILITY_OVERLAY_MASK |
-    map_profile_protocol::VISIBILITY_CONTOURS;
+    map_profile_protocol::VISIBILITY_CONTOURS |
+    map_profile_protocol::VISIBILITY_TERRAIN;
 constexpr uint32_t DEFAULT_VISIBILITY_MASK =
     map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
     map_profile_protocol::VISIBILITY_OVERLAY_MASK;
@@ -242,7 +243,8 @@ inline bool isValidMapProfile(const MapProfile &profile, ScreenType type) {
   if (type == ScreenType::Map || type == ScreenType::Nearby)
     return profile.rotationMode <= 1;
   if (type == ScreenType::MapNavigation)
-    return profile.birdsEyePerspective <= 4 && profile.rotationMode <= 1;
+    return (profile.visibilityMask & map_profile_protocol::TERRAIN_EXPERIMENT_MASK) == 0 &&
+           profile.birdsEyePerspective <= 4 && profile.rotationMode <= 1;
   return false;
 }
 
@@ -524,7 +526,9 @@ inline bool decodeMapProfile(Reader &reader, std::size_t payloadLength,
 }
 
 inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
-                                   Document &document) {
+                                   Document &document, bool stored = false,
+                                   bool *normalized = nullptr) {
+  if (normalized) *normalized = false;
   if (input == nullptr || length < DOCUMENT_HEADER_BYTES + DOCUMENT_CRC_BYTES ||
       length > MAX_DOCUMENT_BYTES)
     return DecodeResult::Malformed;
@@ -575,6 +579,14 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
       if (!decodeMapProfile(reader, payloadLength, instance.type,
                             instance.mapProfile))
         return DecodeResult::Malformed;
+      if (stored) {
+        // Only local, CRC-checked persistence may shed unsupported experiments.
+        // Wire documents still fail validation instead of silently changing.
+        const uint32_t remove = map_profile_protocol::TERRAIN_EXPERIMENT_MASK &
+            ~(instance.type == ScreenType::Map ? map_profile_protocol::VISIBILITY_TERRAIN : 0);
+        if (normalized && (instance.mapProfile.visibilityMask & remove)) *normalized = true;
+        instance.mapProfile.visibilityMask &= ~remove;
+      }
       break;
     case ScreenType::RideStats: {
       if (payloadLength != RIDE_STATS_PAYLOAD_BYTES)

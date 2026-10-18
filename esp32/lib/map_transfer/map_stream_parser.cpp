@@ -10,6 +10,10 @@
 #include <new>
 #include <utility>
 
+#ifndef FIRMWARE_DIAGNOSTICS
+#define FIRMWARE_DIAGNOSTICS 1
+#endif
+
 #if defined(ARDUINO) && defined(BOARD_HAS_PSRAM)
 #include <esp_heap_caps.h>
 #endif
@@ -924,10 +928,13 @@ bool safeMapPath(std::string_view path, const std::string &mapId,
   }
   const bool fontAsset = tile == "assets" && filename == "street-labels.fma";
   const bool poiIndexAsset = tile == "assets" && filename == "nearby-pois.fpi";
+  const auto extension = filename.size() >= 4
+                             ? filename.substr(filename.size() - 4)
+                             : std::string_view{};
+  const bool block = extension == ".fme" || extension == ".fmb" ||
+                     extension == ".fmp";
   if (!fontAsset && !poiIndexAsset &&
-      (filename.size() < 5 ||
-       !(filename.substr(filename.size() - 4) == ".fmb" ||
-         filename.substr(filename.size() - 4) == ".fmp"))) {
+      (filename.size() < 5 || !block)) {
     return false;
   }
   tileOffset = secondSlash + 1;
@@ -1202,6 +1209,8 @@ bool parseMapStreamManifest(std::string_view manifestText,
     size_t filenameBytes = 0;
     if (!safeMapPath(path, parsed.metadata.mapId, tileOffset, tileBytes,
                      filenameOffset, filenameBytes) ||
+        (endsWith(path, ".fme") &&
+         (parsed.metadata.formatVersion != 4 || file.bytes != 4372)) ||
         file.bytes == 0 ||
         file.bytes >
             (endsWith(path, "/assets/street-labels.fma")
@@ -1319,8 +1328,21 @@ bool MapStreamIncrementalParser::feed(const uint8_t *data, size_t size) {
   return stage_ != Stage::Failed;
 }
 
+bool MapStreamIncrementalParser::readyToFinish() const {
+  return stage_ == Stage::AwaitingFinish && verifiedReady_ &&
+         fileIndex_ == verified_.manifest.files.size() && !fileStarted_ &&
+         receivedBytes_ == header_.totalBytes() &&
+         (options_.expectedContentBytes == std::numeric_limits<uint64_t>::max() ||
+          receivedBytes_ == options_.expectedContentBytes);
+}
+
+void MapStreamIncrementalParser::abort(MapStreamParserError error) {
+  if (stage_ != Stage::Complete && stage_ != Stage::Failed)
+    fail(error);
+}
+
 bool MapStreamIncrementalParser::finish() {
-  if (stage_ == Stage::AwaitingFinish) {
+  if (readyToFinish()) {
     if (!consumer_.onComplete(verified_))
       return fail(MapStreamParserError::ConsumerRejected);
     stage_ = Stage::Complete;
