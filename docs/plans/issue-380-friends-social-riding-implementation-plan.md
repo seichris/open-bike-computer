@@ -2,8 +2,8 @@
 
 - Issue: [#380 — Friends and social riding](https://github.com/seichris/open-bike-computer/issues/380)
 - Dependency: [#376 — Temporary Group Rides](https://github.com/seichris/open-bike-computer/issues/376)
-- Status: implemented in the accompanying application, backend, firmware, and website changes; production activation and physical acceptance remain rollout gates.
-- Updated: 2026-10-03.
+- Status: source implementation covers phases A–G; review corrections, current-head end-to-end testing, production activation, and physical acceptance remain incomplete.
+- Updated: 2026-10-18.
 - Source baseline: `open-bike-computer` main at `0f6fc8c6f0238d5508df199f2a50b1482b62ca1d`; `bicino` main at `502705be626b5e4c82d9e38df9d99b5e49282a47`.
 - Additional requirement from Chris: users choose a profile picture; friends appear with that picture on the map, or at the round display's edge in their direction with a distance below when outside the visible map.
 
@@ -19,14 +19,36 @@ available from another branch. Large route bodies are fetched on demand instead
 of loaded with every list. PostgreSQL is the shared authority; notification,
 deletion, orphan-media, and external-identity cleanup run in a durable worker.
 
-The companion bicino change adds safe Universal Link landing pages and a signed
-server-to-server deletion handoff. Both pull requests target main. Nothing in
-this delivery configures provider consoles, deploys services, or flashes hardware.
+The companion bicino change adds Universal Link landing pages and a signed
+server-to-server deletion handoff. Both pull requests target main. A separate
+isolated development rollout on October 3 passed 19 live API checks using
+disposable test identities. That evidence belongs to its older source revision;
+it does not qualify the current app, provider flows, or hardware. No physical
+portrait acceptance is recorded.
 See [rollout and acceptance instructions](../social-riding-operations.md). Native
 social configuration defaults off, and hardware capability advertisement remains
 limited to diagnostic firmware until the physical acceptance matrix is recorded.
 The baseline inventory below describes the original inspected code, not the
 post-implementation source tree.
+
+### Review and integration checkpoint (October 18)
+
+The independent Claude Mac app review of PR #569 at `39134751` and website
+PR #90 at `76c726f4` reported two high-priority defects: a lost successful
+position response can stall later publishing, and creating a Group Ride from
+another rider's friends-only route can redistribute a route without its owner's
+permission. Both require regression coverage and correction before #569 merges.
+The remaining review findings also need triage, including replay retention,
+maintenance/reconciliation scope, sharing leases, keychain upgrades, display
+redraw cost, and website deletion/link handling. Passing CI does not close these
+review findings.
+
+Main now includes terrain PR #565 at `9df83499`. Preserve its first-word CAP2
+bit `31` and client version `29`. Group riders move to extended feature-word
+TLV type `3`, bit `0`, requiring client version `30`; both firmware and app must
+be rebuilt together for the updated development protocol. This replaces the
+unmerged social branch's conflicting bit allocation. Production activation
+remains off and the physical acceptance matrix below remains required.
 
 ## 1. Outcome and decisions
 

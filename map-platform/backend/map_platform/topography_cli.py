@@ -68,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
         if command in ("stage", "sample"):
             child.add_argument("--max-tiles", type=int, default=8)
         if command == "sample":
+            child.add_argument("--terrain", action="store_true", help="include experimental DEM-derived terrain grids")
             child.add_argument("--output", type=Path, required=True, help="new evidence JSON file; never overwritten")
     args = parser.parse_args(argv)
     if args.command == "sources":
@@ -151,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         receipts = [cache.stage(sources[tile["sourceId"]], tuple(tile["cell"])) for tile in plan["tiles"]]
         print(json.dumps({"plan": plan, "receipts": receipts}, indent=2, sort_keys=True))
         return 0
-    _write_evidence(args.output, contour_sample(policy, cache, args.bounds, maximum_tiles=args.max_tiles))
+    _write_evidence(args.output, contour_sample(policy, cache, args.bounds, maximum_tiles=args.max_tiles, terrain=args.terrain))
     return 0
 
 

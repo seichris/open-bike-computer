@@ -1069,6 +1069,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsMapNavigationOrientation = false
     @Published private(set) var supportsGroupRiders = false
     var onSocialAcknowledgement: ((Data) -> Void)?
+    @Published private(set) var supportsTerrainExperiments = false
     @Published private(set) var supportsTopographicContours = false
     @Published private(set) var supportsExplicitInvalidGPSHeading: Bool = false
     @Published private(set) var supportsScopedWatchController: Bool = false
@@ -1347,6 +1348,9 @@ class BLEManager: NSObject, ObservableObject {
     
     // MARK: - Private Properties
     private var centralManager: CBCentralManager!
+    private var pendingBluetoothRestoration: (() -> Void)?
+    private var pendingRestoredPeripheralIdentifiers: Set<UUID> = []
+    private var restoredSessionAwaitingAdvertisement: UUID?
     private var connectedPeripheral: CBPeripheral?
     private var navigationCharacteristic: CBCharacteristic?
     private var authCharacteristic: CBCharacteristic?
@@ -1578,7 +1582,8 @@ class BLEManager: NSObject, ObservableObject {
     private var lastSentPhoneBatteryCharging: Bool?
     private var suppressNextReconnect: Bool = false
     private var hasActiveBLESession: Bool {
-        isConnected || isConnecting || connectedPeripheral != nil
+        pendingBluetoothRestoration != nil ||
+            isConnected || isConnecting || connectedPeripheral != nil
     }
 
     var hasActiveTransportSession: Bool { hasActiveBLESession }
@@ -2240,7 +2245,7 @@ class BLEManager: NSObject, ObservableObject {
     // MARK: - Public Methods
 
     private var hasScanDriver: Bool {
-#if HOST_TESTING
+#if HOST_TESTING && !BLUETOOTH_RESTORATION_ADAPTER_TESTING
         scanDriverForTesting != nil
 #else
         centralManager != nil
@@ -2248,7 +2253,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private var isScanDriverPoweredOn: Bool {
-#if HOST_TESTING
+#if HOST_TESTING && !BLUETOOTH_RESTORATION_ADAPTER_TESTING
         scanDriverForTesting?.isPoweredOn == true
 #else
         centralManager != nil && centralManager.state == .poweredOn
@@ -2256,7 +2261,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private var isScanDriverScanning: Bool {
-#if HOST_TESTING
+#if HOST_TESTING && !BLUETOOTH_RESTORATION_ADAPTER_TESTING
         scanDriverForTesting?.isScanning == true
 #else
         centralManager != nil && centralManager.isScanning
@@ -2267,7 +2272,7 @@ class BLEManager: NSObject, ObservableObject {
         serviceUUIDs: [CBUUID],
         allowsDuplicates: Bool
     ) {
-#if HOST_TESTING
+#if HOST_TESTING && !BLUETOOTH_RESTORATION_ADAPTER_TESTING
         scanDriverForTesting?.start(
             serviceUUIDs: serviceUUIDs,
             allowsDuplicates: allowsDuplicates
@@ -2284,10 +2289,12 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func stopScanDriver() {
-#if HOST_TESTING
+#if HOST_TESTING && !BLUETOOTH_RESTORATION_ADAPTER_TESTING
         scanDriverForTesting?.stop()
 #else
-        centralManager?.stopScan()
+        if centralManager?.state == .poweredOn {
+            centralManager.stopScan()
+        }
 #endif
     }
 
@@ -2331,6 +2338,10 @@ class BLEManager: NSObject, ObservableObject {
         guard let scanDriverForTesting else { return }
         scanDriverForTesting.isPoweredOn = isPoweredOn
         handleCentralStateChange(isPoweredOn ? .poweredOn : .poweredOff)
+    }
+
+    func installCentralManagerForTesting(_ central: CBCentralManager) {
+        centralManager = central
     }
 
     func setFirmwareBootCheckpointForTesting(
@@ -5616,6 +5627,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsStreetLabels = false
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
+        supportsTerrainExperiments = false
         supportsTopographicContours = false
         supportsGroupRiders = false
         supportsRideAutomation = false
@@ -6709,6 +6721,13 @@ class BLEManager: NSObject, ObservableObject {
             log("Skipping reconnect: connection already active")
             return
         }
+        if let identifier = restoredSessionAwaitingAdvertisement {
+            if identifier == lastConnectedPeripheralIdentifier {
+                reconcileScanning(reason: "waiting for restored session teardown advertisement")
+                return
+            }
+            restoredSessionAwaitingAdvertisement = nil
+        }
 
         guard let uuid = lastConnectedPeripheralIdentifier else {
             log("No last connected device")
@@ -6744,6 +6763,10 @@ class BLEManager: NSObject, ObservableObject {
             log("Skipping connect: connection already active")
             return
         }
+        guard restoredSessionAwaitingAdvertisement != peripheral.identifier else {
+            reconcileScanning(reason: "cached link cannot prove restored session teardown")
+            return
+        }
 
         guard adoptConnectionContext(peripheral) else { return }
         centralManager.connect(peripheral, options: nil)
@@ -6765,6 +6788,7 @@ class BLEManager: NSObject, ObservableObject {
     /// authentication reset and delegate ownership before accepting callbacks.
     private func adoptConnectionContext(_ peripheral: CBPeripheral?) -> Bool {
         guard reduceRideTransport(.beginConnection) == .applied else { return false }
+        restoredSessionAwaitingAdvertisement = nil
         stopPhysicalScan(reason: "connection attempt starting")
         connectedPeripheral = peripheral
         isConnected = false
@@ -6810,6 +6834,7 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func retireRestoredConnection(_ peripheral: CBPeripheral) {
+        restoredSessionAwaitingAdvertisement = peripheral.identifier
         pendingConnectionAfterDisconnect = peripheral.identifier
         _ = reduceRideTransport(.failed(generation: rideTransportStateMachine.generation,
                                         reason: .connectionFailed))
@@ -6839,7 +6864,11 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    private func clearConnectionState() {
+    private func clearConnectionState(preservingPendingRestoration: Bool = false) {
+        if !preservingPendingRestoration {
+            pendingBluetoothRestoration = nil
+            pendingRestoredPeripheralIdentifiers.removeAll()
+        }
         deviceScreenConfigurationController.disconnect(
             deviceID: connectedDeviceID,
             generation: rideDeliveryConnectionGeneration
@@ -7016,6 +7045,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsStreetLabels = false
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
+        supportsTerrainExperiments = false
         supportsTopographicContours = false
         supportsGroupRiders = false
         supportsRideAutomation = false
@@ -9545,6 +9575,46 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         _ central: CBCentralManager,
         willRestoreState dict: [String: Any]
     ) {
+        let restored = dict[CBCentralManagerRestoredStatePeripheralsKey]
+            as? [CBPeripheral] ?? []
+        restoreBluetoothWhenReady(
+            isPoweredOn: central.state == .poweredOn,
+            peripheralIdentifiers: Set(restored.map(\.identifier))
+        ) {
+            [weak self, weak central] in
+            guard let self, let central else { return }
+            self.restoreBluetoothState(central, dict: dict)
+        }
+    }
+
+    private func restoreBluetoothWhenReady(
+        isPoweredOn: Bool,
+        peripheralIdentifiers: Set<UUID>,
+        resume: @escaping () -> Void
+    ) {
+        // willRestoreState can precede the first powered-on callback. Issuing
+        // GATT discovery at that point can silently lose the request and leave
+        // authentication waiting for its timeout instead of making progress.
+        pendingBluetoothRestoration = resume
+        pendingRestoredPeripheralIdentifiers = peripheralIdentifiers
+        if isPoweredOn {
+            resumePendingBluetoothRestoration()
+        } else {
+            log("Deferring CoreBluetooth restoration until Bluetooth is powered on")
+        }
+    }
+
+    private func resumePendingBluetoothRestoration() {
+        let resume = pendingBluetoothRestoration
+        pendingBluetoothRestoration = nil
+        pendingRestoredPeripheralIdentifiers.removeAll()
+        resume?()
+    }
+
+    private func restoreBluetoothState(
+        _ central: CBCentralManager,
+        dict: [String: Any]
+    ) {
         // Core Bluetooth may restore a system-owned scan before this
         // instance's shadow state has observed it. Stop unconditionally at
         // the restoration boundary before accepting any connection.
@@ -9557,6 +9627,18 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
                 as? [CBPeripheral],
               !peripherals.isEmpty else {
             log("CoreBluetooth restored without a Bike Computer peripheral")
+            return
+        }
+        if watchDirectRidePreparedDeviceID == nil,
+           hasActiveBLESession,
+           let currentIdentifier = connectedPeripheral?.identifier {
+            // A repeated restoration delivery must not replace the active
+            // generation or restart its authentication deadline.
+            for peripheral in peripherals
+            where peripheral.identifier != currentIdentifier {
+                central.cancelPeripheralConnection(peripheral)
+            }
+            log("Keeping the active Bike Computer connection during restoration")
             return
         }
         guard let selectedIdentifier = BLERestorationPolicy.selectedIdentifier(
@@ -9584,13 +9666,19 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         log("Restored Bike Computer connection state: \(restored.state.rawValue)")
         switch restored.state {
         case .connected:
-            centralManager(central, didConnect: restored)
+            // CoreBluetooth preserves the physical link across process loss,
+            // but this process has none of its ephemeral session keys/counters.
+            // Firmware must keep rejecting plaintext on that authenticated
+            // link. Confirm its teardown before creating a fresh secure session.
+            log("Retiring restored link before establishing a fresh secure session")
+            retireRestoredConnection(restored)
         case .connecting:
             // The pending OS attempt now belongs to the adopted generation and
             // keeps the same persistence policy as a fresh trusted connect.
             startConnectionTimeoutIfBounded(for: restored)
         case .disconnected:
-            connectToPeripheral(restored)
+            restoredSessionAwaitingAdvertisement = restored.identifier
+            reconcileScanning(reason: "restored disconnected link needs fresh advertisement")
         case .disconnecting:
             retireRestoredConnection(restored)
         @unknown default:
@@ -9636,6 +9724,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         case .poweredOn:
             centralStateDescription = "powered on"
             log("Bluetooth powered on")
+            resumePendingBluetoothRestoration()
             // Attempt to reconnect to last device, or start scanning
             if watchDirectRidePreparedDeviceID != nil {
                 stopPhysicalScan(
@@ -9687,7 +9776,10 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             centralStateDescription = "unknown"
             log("Bluetooth unknown state")
             stopPhysicalScan(reason: "Bluetooth state unknown")
-            clearConnectionState()
+            // The initial unknown state is part of restoration startup, not a
+            // radio-loss boundary. Retire any old transport, but keep the
+            // snapshot until the first usable state arrives.
+            clearConnectionState(preservingPendingRestoration: true)
             
         @unknown default:
             centralStateDescription = "unknown"
@@ -9731,6 +9823,10 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             "\(purpose.logDescription) " +
             "(RSSI: \(RSSI))"
         )
+        if purpose != .none,
+           restoredSessionAwaitingAdvertisement == peripheral.identifier {
+            restoredSessionAwaitingAdvertisement = nil
+        }
 
         switch purpose {
         case .selectedPeripheral(let pendingIdentifier):
@@ -9793,6 +9889,14 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
     }
     
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        if pendingBluetoothRestoration != nil,
+           pendingRestoredPeripheralIdentifiers.contains(peripheral.identifier) {
+            // A restored pending connection may complete before readiness is
+            // delivered. Replay will inspect its new state; do not cancel it
+            // merely because adoption has intentionally been deferred.
+            log("Deferring restored connection callback until Bluetooth is powered on")
+            return
+        }
         guard BLELocalForgetPolicy.acceptsCallback(
             peripheralIdentifier: peripheral.identifier,
             currentIdentifier: connectedPeripheral?.identifier,
@@ -9929,6 +10033,13 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         if let nextIdentifier = BLEPendingHandoffPolicy.consume(
             &pendingConnectionAfterDisconnect
         ) {
+            if restoredSessionAwaitingAdvertisement == nextIdentifier {
+                // CoreBluetooth confirms only this app's local cancellation.
+                // This single-link firmware advertises after resetting its
+                // secure session, so wait for that evidence before connecting.
+                reconcileScanning(reason: "restored local disconnect awaits bike advertisement")
+                return
+            }
             connectDiscoveredPeripheral(identifier: nextIdentifier)
             return
         }
@@ -10416,6 +10527,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsStreetLabels = false
         supports3DBuildings = false
         supportsMapNavigationOrientation = false
+        supportsTerrainExperiments = false
         supportsTopographicContours = false
         supportsGroupRiders = false
         supportsRideAutomation = false
@@ -10472,6 +10584,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let powerButtonConfig: Data?
         var screenConfigurationCapabilities:
             DeviceScreenConfigurationCapabilities? = nil
+        var extendedFeatureFlags: UInt32 = 0
         if prefix == DeviceBLEProtocol.deviceCapabilitiesPrefix {
             guard data.count == 5 || data.count == 6 ||
                     data.count == 8 || data.count == 9 else {
@@ -10517,6 +10630,15 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         break
                     }
                     parsedPowerConfig = data.subdata(in: offset..<(offset + length))
+                } else if type == RideBLEGeneratedProtocolV1.extendedFeatureTLVType {
+                    guard length == 4 else {
+                        valid = false
+                        break
+                    }
+                    extendedFeatureFlags = UInt32(data[offset]) |
+                        (UInt32(data[offset + 1]) << 8) |
+                        (UInt32(data[offset + 2]) << 16) |
+                        (UInt32(data[offset + 3]) << 24)
                 } else if type == RideBLEGeneratedProtocolV1
                     .screenConfigurationCapabilityTLVType {
                     guard let parsed = DeviceScreenConfigurationCapabilities(
@@ -10577,7 +10699,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.rideAutomationCapabilityMask != 0
         let hasExplicitInvalidGPSHeading =
             flags & DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask != 0
-        supportsGroupRiders = flags & RideBLEGeneratedProtocolV1.groupRidersV1Feature != 0
+        supportsGroupRiders = extendedFeatureFlags & RideBLEGeneratedProtocolV1.groupRidersV1Feature != 0
         let hasScopedWatchController =
             flags & DeviceBLEProtocol.scopedWatchControllerCapabilityMask != 0
         let hasRemoteDeviceDebug =
@@ -10712,6 +10834,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supports3DBuildings = has3DBuildings
         supportsMapNavigationOrientation = flags &
             RideBLEGeneratedProtocolV1.mapNavigationOrientationFeature != 0
+        supportsTerrainExperiments = flags & RideBLEGeneratedProtocolV1.terrainExperimentsFeature != 0
         supportsTopographicContours = hasTopographicContours
         supportsRideAutomation = hasRideAutomation
         supportsExplicitInvalidGPSHeading = hasExplicitInvalidGPSHeading

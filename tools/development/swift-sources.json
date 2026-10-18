@@ -1,6 +1,13 @@
 {
   "schema": 1,
   "groups": {
+    "topography-native-reader": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "map-platform/backend/tests/companion_validator_cli.swift"
+      ]
+    },
     "native-workout-zone-1": {
       "sources": [
         "ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift",
@@ -11,8 +18,10 @@
     "navigation-1": {
       "sources": [
         "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
-        "ios-app/BikeComputerTests/TopographyMapKitTileWarpTests.swift"
+        "ios-app/BikeComputerTests/TopographyMapKitTileWarpTests.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/ContourLabelLayout.swift"
       ]
     },
     "navigation-2": {
@@ -72,6 +81,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
         "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineRouteSave.swift",
@@ -114,7 +124,8 @@
         "ios-app/BikeComputer/WorkoutShared/WorkoutMirrorRuntimeLogic.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutRuntimeLogic.swift",
         "ios-app/BikeComputerTests/NavigationProtocolMapTests.swift",
-        "ios-app/BikeComputerTests/NavigationProtocolRideTests.swift"
+        "ios-app/BikeComputerTests/NavigationProtocolRideTests.swift",
+        "ios-app/BikeComputerTests/BLERestorationAdapterTests.swift"
       ],
       "groups": [
         "common-1",
@@ -159,12 +170,14 @@
         "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
         "ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift",
         "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
-        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift"
+        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/ContourLabelLayout.swift"
       ],
       "groups": [
         "common-3"
@@ -176,12 +189,14 @@
         "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
         "ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/SavedRouteMapPolicy.swift",
         "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
-        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift"
+        "ios-app/BikeComputer/BikeComputer/Views/MapView.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/ContourLabelLayout.swift"
       ],
       "groups": [
         "common-3"
@@ -190,6 +205,7 @@
     "navigation-9": {
       "sources": [
         "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
         "ios-app/BikeComputerTests/SavedMapPreviewCatalystTests.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift",
@@ -249,7 +265,8 @@
         "ios-app/BikeComputer/RideShared/WireBytes.swift",
         "ios-app/BikeComputer/RideShared/RideBLETransportStateMachine.swift",
         "ios-app/BikeComputer/RideShared/RideGPSPacket.swift",
-        "ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift"
+        "ios-app/BikeComputer/RideShared/WatchDirectBLEContract.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/ContourLabelLayout.swift"
       ],
       "groups": [
         "common-1"
@@ -295,6 +312,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
         "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Models/SavedRouteNaming.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
@@ -474,6 +492,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapCatalog.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapPlatform.swift",
         "ios-app/BikeComputer/BikeComputer/Models/OfflineMapServiceConfig.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
         "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoServiceSession.swift",
@@ -512,7 +531,8 @@
         "ios-app/BikeComputer/WorkoutShared/WorkoutZoneDeviceProtocol.swift",
         "ios-app/BikeComputer/WorkoutShared/WorkoutZoneWire.generated.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DurableMapDownloadCoordinator.swift",
-        "ios-app/BikeComputer/RideShared/RideBLEZoneDispatch.swift"
+        "ios-app/BikeComputer/RideShared/RideBLEZoneDispatch.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TerrainMapStyle.swift"
       ]
     },
     "common-2": {
@@ -530,6 +550,7 @@
       "sources": [
         "ios-app/BikeComputer/BikeComputer/Models/AppModels.swift",
         "ios-app/BikeComputer/BikeComputer/Models/IPhoneMapAppearance.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
         "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/MapTrackingPolicy.swift",
@@ -538,7 +559,9 @@
         "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
         "ios-app/BikeComputer/BikeComputer/Views/MapView.swift",
         "ios-app/BikeComputer/BikeComputer/Views/SocialMapLayer.swift",
-        "ios-app/BikeComputer/BikeComputer/Models/SocialModels.swift"
+        "ios-app/BikeComputer/BikeComputer/Models/SocialModels.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TerrainMapStyle.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/ContourLabelLayout.swift"
       ]
     },
     "common-4": {
@@ -642,6 +665,23 @@
       ],
       "sources": [
         "ios-app/BikeComputerTests/DiagnosticsBrokerContractTests.swift"
+      ]
+    },
+    "navigation-10": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Utilities/CoordinateConverter.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyMapKitTileWarp.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
+        "ios-app/BikeComputer/BikeComputer/Utilities/ContourLabelLayout.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TerrainMapStyle.swift",
+        "ios-app/BikeComputerTests/ContourLabelLifecycleTests.swift"
+      ]
+    },
+    "bluetooth-restoration-corebluetooth-double": {
+      "sources": [
+        "ios-app/tests/ble-restoration-host/CoreBluetooth.swift"
       ]
     }
   }

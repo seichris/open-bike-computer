@@ -131,6 +131,19 @@ a captured handshake unusable on a later connection. No navigation, map,
 settings, workout, rename, or deregistration command is accepted before this
 completes.
 
+CoreBluetooth can restore a connected physical link after the iPhone app process
+exits. The new process does not retain the prior session's ephemeral keys or
+counters. After Bluetooth becomes powered on, iOS retires that restored link,
+waits for local disconnection through the bounded recovery lifecycle, then scans
+for a fresh bike advertisement before connecting and authenticating a new session.
+CoreBluetooth's local disconnect callback alone does not prove physical teardown;
+this firmware stops advertising while connected and restarts only after resetting
+the secure session. A cached or manual reconnect cannot bypass that advertisement
+barrier. The trusted scan stays active in the background without a pairing timeout.
+The app does not send a plaintext
+handshake on the retained authenticated link or weaken firmware frame checks.
+Restored pending connections remain owned by CoreBluetooth until they connect.
+
 1. iOS writes `OWNER|<OwnerID>|<ClientNonce>`.
 2. ESP32 notifies
    `SERVER2|<DeviceID>|<ClientNonce>|<ServerNonce>|<HMAC-SHA256(OwnerKey, "server2|<DeviceID>|<OwnerID>|<ClientNonce>|<ServerNonce>")>`.
@@ -1320,7 +1333,9 @@ Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
 Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
 configurable display inactivity timeouts. Version `27` requests bit `29`,
 versioned workout zones. Version `28` requests bit `30`, topographic contours.
-The current iPhone client negotiates version `28`; older direct Watch clients
+Version `29` requests bit `31`, diagnostic terrain experiments. Version `30`
+requests the extended feature word (TLV type `3`), with bit `0` for group riders.
+The current iPhone client negotiates version `30`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
@@ -1353,7 +1368,13 @@ therefore unavailable in production.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
-carries the 14-byte screen-configuration limits and support masks. Types are unique;
+carries the 14-byte screen-configuration limits and support masks. TLV type `3`
+carries exactly four bytes of little-endian extended feature flags, independently
+numbered from the first word. Its bit `0` is `group_riders_v1`; absent means zero.
+Firmware includes this extension only when at least one extended feature is
+available to the negotiated client. Bit `31` of the first word remains terrain;
+it never enables social packets. Older clients skip the new TLV, and version-29
+firmware remains usable without group riders. Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
 well-formed types are skipped. Firmware sends legacy `CAPS` to clients below
 version `10`, preserving the version `7...9` extended-byte contract, and current
@@ -2308,6 +2329,32 @@ contract generates Swift/C++ constants and append-only widget IDs. Golden
 packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
 by both languages.
 
+### Experimental terrain map presets (client 29)
+
+CAP2 bit 31 (`terrain_experiments`) is advertised only by diagnostics firmware.
+It enables presets of existing configurable `Map` screen instances: Hillshade,
+Tint & Slope, and 3D Terrain. There are no new screen IDs or larger legacy masks.
+The instance's UInt32 visibility field uses bits 14 hillshade, 15 elevation tint,
+16 slope shading, and 17 terrain height exploration. Tint combines bits 14+15;
+slope uses bit 16 independently. Ordinary Map and Map+Navigation defaults do not
+change. Terrain bits are valid only on Map instances; incoming production
+commands reject them. Loading a local diagnostics-era layout on production
+masks these bits while preserving the revision, instances, and other settings.
+Signed FME1 sidecars remain accepted and fully validated on production so
+saved maps and activation recovery work across a firmware change. Production
+does not load or render the terrain grids. The phone still requires the
+terrain capability before transferring a terrain-bearing saved artifact, since
+older contour-capable firmware cannot accept FME1. This check uses the verified
+signed manifest, including for saved maps without terrain metadata. Custom
+cutouts require an explicit terrain opt-in instead of assuming a diagnostics peer.
+
+Contour numbers follow bit 13 in both existing map screens, independently of
+street-label density. Firmware-owned numeric glyphs support existing font packs.
+3D Terrain is an isolated height-surface experiment; route/position overlays
+are suppressed because navigation has not been qualified on a draped surface.
+These screens must pass separate physical performance/readability gates before
+any production enablement. Old maps without FME1 sidecars remain readable.
+
 ### Device operation lifecycle clarification
 
 Signed-stream HTTP `ready` acknowledges validated/finalized staging, not an
@@ -2582,7 +2629,8 @@ Bike settings expose pending cleanup until it settles.
 
 ## Group rider portraits (GRUP v1, diagnostic rollout)
 
-CAP2 bit 31 (`group_riders_v1`) requires client version 29, owner-authenticated
+CAP2 extended feature word (TLV type `3`) bit `0` (`group_riders_v1`) requires
+client version `30`, owner-authenticated
 navigation writes, at least ATT MTU 150, PSRAM allocation, and diagnostic firmware.
 Scoped Watch sessions cannot send these packets. Production does not advertise
 the feature until physical display/transport qualification is recorded.

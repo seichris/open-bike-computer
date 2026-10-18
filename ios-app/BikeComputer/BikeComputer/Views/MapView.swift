@@ -449,6 +449,7 @@ struct MapViewContainer: UIViewRepresentable {
                 uiView.removeAnnotations(existingSimAnnotations)
             }
         }
+        context.coordinator.refreshContourLabels(on: uiView)
     }
     
     func makeCoordinator() -> Coordinator {
@@ -467,7 +468,11 @@ struct MapViewContainer: UIViewRepresentable {
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         let socialLayer = SocialMapLayer()
 
+        private let contourLabels = BicinoContourLabels()
         private var displayedTopographyOverlay: MKTileOverlay?
+#if DEBUG
+        private var contourDiagnosticCount = 0
+#endif
 
         func updateTopographyOverlay(_ overlay: MKTileOverlay?, on mapView: MKMapView) {
             guard displayedTopographyOverlay !== overlay else { return }
@@ -476,11 +481,22 @@ struct MapViewContainer: UIViewRepresentable {
                     .cancelPendingLoads()
                 mapView.removeOverlay(displayedTopographyOverlay)
             }
+            contourLabels.clear(on: mapView)
             displayedTopographyOverlay = overlay
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--contour-tile-diagnostics") {
+                print("ContourOverlay instance=\((overlay as? BicinoTopographyTileOverlay)?.diagnosticID ?? "none")")
+            }
+#endif
+            contourLabels.update(on: mapView, overlay: overlay as? BicinoTopographyTileOverlay)
             if let overlay { mapView.insertOverlay(overlay, at: 0, level: .aboveRoads) }
             // Navigation and saved-route overlays retain their own ownership.
             // No camera, tracking, selection or route state changes here.
         }
+        func refreshContourLabels(on mapView: MKMapView) {
+            contourLabels.update(on: mapView, overlay: displayedTopographyOverlay as? BicinoTopographyTileOverlay)
+        }
+
         typealias AddressResolver = @MainActor (CLLocation) async -> String?
 
         var lastRoute: MKRoute?
@@ -633,6 +649,24 @@ struct MapViewContainer: UIViewRepresentable {
                CoordinateConverter.isInChina(lat: center.latitude, lon: center.longitude) {
                 center = CoordinateConverter.wgs84ToGCJ02(coordinate: center)
             }
+
+#if DEBUG
+            // Lab-only camera presets exercise the real MapKit renderer on a
+            // physical phone without synthesizing unsupported pinch gestures.
+            let prefix = "--contour-test-zoom="
+            if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }),
+               let zoom = Double(argument.dropFirst(prefix.count)), zoom.isFinite,
+               (7...22).contains(zoom), mapView.bounds.width > 0, mapView.bounds.height > 0 {
+                let point = MKMapPoint(center)
+                let width = MKMapSize.world.width * mapView.bounds.width / (256 * pow(2, zoom))
+                let height = width * mapView.bounds.height / mapView.bounds.width
+                mapView.setVisibleMapRect(MKMapRect(
+                    x: point.x - width / 2, y: point.y - height / 2,
+                    width: width, height: height), animated: false)
+                hasSetInitialRegion = true
+                return
+            }
+#endif
 
             let region = MKCoordinateRegion(
                 center: center,
@@ -1089,6 +1123,16 @@ struct MapViewContainer: UIViewRepresentable {
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
             socialLayer.layout()
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--contour-tile-diagnostics"),
+               contourDiagnosticCount < 32, mapView.visibleMapRect.width > 0 {
+                contourDiagnosticCount += 1
+                let zoom = log2(MKMapSize.world.width * mapView.bounds.width /
+                                mapView.visibleMapRect.width / 256)
+                print("ContourCamera zoomEstimate=\(zoom) pitch=\(mapView.camera.pitch) heading=\(mapView.camera.heading) min=\(displayedTopographyOverlay?.minimumZ ?? -1) max=\(displayedTopographyOverlay?.maximumZ ?? -1)")
+            }
+#endif
+            contourLabels.update(on: mapView, overlay: displayedTopographyOverlay as? BicinoTopographyTileOverlay)
             controlState?.updatePitch(from: mapView)
             updateOfflineMapSelectionBounds()
         }
@@ -1348,6 +1392,7 @@ struct MapViewContainer: UIViewRepresentable {
             if let rider = annotation as? SocialRiderAnnotation {
                 return socialLayer.annotationView(rider, map: mapView)
             }
+            if let label = annotation as? BicinoContourLabelAnnotation { return BicinoContourLabelAnnotation.view(on: mapView, annotation: label) }
             // Use default view for user location
             if annotation is MKUserLocation {
                 return nil

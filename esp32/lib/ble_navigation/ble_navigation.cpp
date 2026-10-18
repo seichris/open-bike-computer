@@ -4314,16 +4314,21 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE;
     }
-    const bool supportsGroup = activePeerMtu.load(std::memory_order_acquire) >= 150 && clientVersion >= ride_ble_protocol_generated::GROUP_RIDERS_V1_MINIMUM_CLIENT_VERSION && social_riders::ready();
+    const bool supportsGroup =
+        activePeerMtu.load(std::memory_order_acquire) >= 150 &&
+        clientVersion >= ride_ble_protocol_generated::GROUP_RIDERS_V1_MINIMUM_CLIENT_VERSION &&
+        social_riders::ready();
     bleSessionSupportsGroupRiders.store(supportsGroup, std::memory_order_release);
-    if (supportsGroup) {
-      featureFlags |= ride_ble_protocol_generated::GROUP_RIDERS_V1_FEATURE;
-    }
+    const uint32_t extendedFeatureFlags = supportsGroup
+        ? ride_ble_protocol_generated::GROUP_RIDERS_V1_FEATURE : 0;
+    if (map_profile_protocol::VISIBILITY_TERRAIN != 0 && clientVersion >=
+        ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_MINIMUM_CLIENT_VERSION)
+      featureFlags |= ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE;
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
         sizeof(response), screenConfigurationTLV,
-        screenConfigurationTLVLength);
+        screenConfigurationTLVLength, extendedFeatureFlags);
     if (responseSize == 0) {
       Serial.println("BLE Capabilities: CAP2 encoding failed");
       return;
@@ -5467,7 +5472,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
         normalizedMapFeatureVisibilityMask(mask);
     if (mirrorLegacyMapProfile) {
       mapRenderSettings.mapNavigationStyle.visibilityMask =
-          mapRenderSettings.mapStyle.visibilityMask;
+          mapRenderSettings.mapStyle.visibilityMask & ~map_profile_protocol::TERRAIN_EXPERIMENT_MASK;
     }
     mapRenderSettings.navigationOverlayVisibilityMask =
         mask & MAP_VISIBILITY_OVERLAY_MASK;
@@ -5502,7 +5507,8 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   case 20:
     mapRenderSettings.mapNavigationStyle.visibilityMask =
-        normalizedMapFeatureVisibilityMask((uint32_t)settingValue);
+        normalizedMapFeatureVisibilityMask((uint32_t)settingValue) &
+        ~map_profile_protocol::TERRAIN_EXPERIMENT_MASK;
     persistMapProfileSetting();
     break;
   case 21:

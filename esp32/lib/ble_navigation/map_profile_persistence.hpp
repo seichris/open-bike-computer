@@ -138,7 +138,7 @@ inline void load(Store &store, Profile &mapStyle,
           (hasStoredMapStyle
                ? mapStyle.visibilityMask
                : map_profile_protocol::MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK) |
-              map_profile_protocol::VISIBILITY_EXTENDED_MARKER));
+              map_profile_protocol::VISIBILITY_EXTENDED_MARKER)) & ~map_profile_protocol::TERRAIN_EXPERIMENT_MASK;
   mapNavigationStyle.labelDensity = static_cast<uint8_t>(
       map_profile_protocol::clampValue(
           map_profile_protocol::MAP_NAVIGATION_LABEL_DENSITY_SETTING_ID,
