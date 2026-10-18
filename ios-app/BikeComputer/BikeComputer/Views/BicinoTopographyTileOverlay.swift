@@ -16,6 +16,7 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
   private var tileTasks: [UUID: Task<Void, Never>] = [:]
 #if DEBUG
   private var tileDiagnosticKeys: Set<String> = []
+  let diagnosticID = String(UUID().uuidString.prefix(8))
 #endif
   private var memoryWarningObserver: NSObjectProtocol?
 
@@ -170,12 +171,15 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     let count = pow(2.0, Double(z))
     let centreX = Int(mapBounds.midX / MKMapSize.world.width * count)
     let centreY = Int(mapBounds.midY / MKMapSize.world.height * count)
-    let key = "z=\(z) scale=\(scale) offset=\(x-centreX),\(y-centreY) \(outcome)"
+    let dx = x - centreX, dy = y - centreY
+    let scope = dx == 0 && dy == 0 ? "centre" : "edge"
+    let key = "z=\(z) scale=\(scale) \(scope) \(outcome)"
     taskLock.lock()
     let shouldLog = tileDiagnosticKeys.count < 128 && tileDiagnosticKeys.insert(key).inserted
     taskLock.unlock()
-    // Opt-in and bounded; never include tile coordinates or map identities.
-    if shouldLog { print("ContourTile \(key)") }
+    // Coalesce by zoom/outcome, keeping centre and edge separate so a sweep
+    // cannot exhaust the cap on one detailed viewport. No absolute positions.
+    if shouldLog { print("ContourTile instance=\(diagnosticID) \(key) offset=\(dx),\(dy)") }
 #endif
   }
 
