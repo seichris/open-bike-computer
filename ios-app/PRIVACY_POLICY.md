@@ -232,6 +232,11 @@ yours. To manage alerts safely, the app keeps a random installation identifier a
 secret on this device only, and the server keeps the identifier and a one-way
 digest of the secret with your push token.
 
+Requests that need no sign-in, such as opening a share link or confirming a
+deletion, are rate limited using a one-way digest of the requesting network
+address. These hourly counters expire within two hours and are removed by
+scheduled maintenance.
+
 Account deletion disables social access immediately and queues retryable cleanup
 of publications and photos, including Firebase account deletion. A one-way digest
 of a deletion receipt held by your app is kept for 30 days so the app can confirm

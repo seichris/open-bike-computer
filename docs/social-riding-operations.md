@@ -81,7 +81,11 @@ publishing cannot extend it. Consent writes require the current member `epoch`;
 a stale start/stop returns `409 consent_changed` without changing the lease.
 `GET /group-rides/{id}/consent` returns only the authenticated member's epoch,
 even during feature rollback, so a new explicit stop can retry safely. The phone
-tracks the latest consent intent and ignores superseded responses.
+tracks the latest consent intent and ignores superseded responses. Live snapshots
+are ordered by consent generation, not by server clocks: once the server accepts
+one of the phone's consent changes, any snapshot still carrying a replaced epoch
+was read before it and is skipped. Snapshots with the current epoch (including a
+server-side expiry, which keeps the epoch) or another device's newer epoch apply.
 A coverage gap hides live state after 60 seconds;
 it can resume within the existing consent deadline. The phone uses a monotonic
 clock to stop its GPS demand at that deadline. Selecting/reopening a room never
@@ -103,10 +107,33 @@ return `503 database_busy` when retries are exhausted; mutations keep their
 idempotency ledger and rate charges are taken once.
 The reconciliation worker only examines its configured Firebase project. A
 batch stops without changes if more than three accounts, or more than a quarter
-of a batch of at least four, appear deleted. Investigate configuration/provider
-state before retrying; never interpret a provider outage as deletion. Cleanup
-also verifies the stored project before contacting Firebase. Deleted UID hashes
-prevent a still-valid cached token from recreating the account during this bound.
+of a batch of at least four, appear deleted, and the worker retries that same
+batch every minute until it is resolved. Never interpret a provider outage as
+deletion. Cleanup also verifies the stored project before contacting Firebase.
+Deleted UID hashes prevent a still-valid cached token from recreating the account
+during this bound.
+
+When the circuit-breaker error is logged, recover in this order, using the
+worker's own image and runtime environment:
+
+1. Investigate first: confirm `BICINO_FIREBASE_PROJECT_ID`, the service account
+   and the Firebase project are the intended ones, and find out why accounts were
+   deleted outside Bicino (console clean-up, other tooling).
+2. `bicino-social reconcile-review` walks batches read-only (default at most 50)
+   and prints the held batch's `cursor` and the internal account IDs that Firebase
+   currently reports deleted. It changes nothing and prints no provider UIDs.
+3. Only when every listed deletion is confirmed legitimate, run
+   `bicino-social reconcile-resolve --cursor <cursor> --account <id> ...` without
+   `--confirm` to validate, then again with `--confirm`. It refuses unless every
+   deletion in that exact batch is listed, each listed account belongs to it, and
+   Firebase reports each one deleted again at that moment. An unavailable provider
+   status anywhere in the batch refuses resolution without changes. The command
+   applies that validated snapshot directly, so a second provider read cannot add
+   unreviewed deletions. The per-account project checks still apply, and later
+   batches keep the normal breaker.
+4. The running worker resumes on its next pass, because the resolved accounts
+   leave the active set. If configuration was wrong, fix it and restart instead;
+   never resolve a batch to work around a misconfiguration.
 
 Share and invitation links use `/social/shared#<secret>` and
 `/social/ride#<code>`; the website never receives the fragment. The page can open
@@ -114,8 +141,29 @@ Bicino or Bicino Dev. API resolution uses `POST /shared/resolve` or
 `POST /group-rides/preview` with `{"code":"..."}` in the body; never log request
 bodies. Public profile IDs can remain in paths. Regenerate older development
 links, whose capability paths are no longer supported. Recent-auth deletion
-allows the same -60 to 300 second clock window on both surfaces; a bridge 401
-asks the user to sign in again and prevents Firebase deletion.
+allows the same -60 to 300 second clock window on both surfaces.
+
+The website deletion bridge validates in a fixed order and returns typed codes:
+`503 deletion_bridge_unconfigured` (social secret missing or short),
+`401 deletion_proof_invalid` (signature; checked before any other field and before
+any database work), `403 deletion_project_mismatch`, `401 deletion_proof_expired`
+(`issuedAt` outside ±60 seconds), then `401 reauthentication_required` (the
+person's sign-in is outside the window). Only the last asks the person to sign in
+again. The website logs the others by status and code only (never the proof,
+signature, account or body), shows a retryable "temporarily unavailable" error,
+and never deletes the Firebase user after any refusal.
+
+Requests without an account token are limited per client network in hourly
+windows held in the shared limits table, so every replica enforces one bound and
+one network cannot spend another's allowance: anonymous share-link resolution
+60, deletion-receipt resolution 30 and push-binding release 30 per network.
+Signed-in link resolution is charged to the account (120 per hour) on top of the
+general quotas. Each limit is charged before the endpoint's own lookup. The
+signed website bridge does no database work before its proof verifies; verified
+proofs are limited to 10 per hour per account subject, not per network, because
+serverless egress addresses are shared. IPv6 clients share one bucket per /64.
+Limiter keys hold a digest of the network, never the address, and expire with
+their window.
 
 Push bindings belong to an app installation, identified by a UUID and proven by
 a 256-bit secret kept only in the app's existing explicit private, device-only
@@ -219,6 +267,9 @@ Supply the required Compose secret file paths and a mode-0600 runtime env file:
 - `BICINO_APPLE_NATIVE_CLIENT_ID`, `BICINO_APPLE_TEAM_ID`,
   `BICINO_APPLE_KEY_ID`, `BICINO_APPLE_PRIVATE_KEY` for Apple code revocation.
 - `BICINO_APNS_TEAM_ID`, `BICINO_APNS_KEY_ID`, `BICINO_APNS_PRIVATE_KEY` for APNs.
+- `BICINO_SOCIAL_TRUSTED_PROXIES`: comma-separated CIDRs of the reverse proxies
+  that connect to the API (for example the proxy's Docker network). Empty by
+  default, which trusts only the TCP peer. Invalid values fail startup.
 
 The Firebase service account is a read-only container secret. Use only Auth
 verification/deletion permissions needed by this service. Use a separate private
@@ -243,6 +294,17 @@ the existing API using `BICINO_SOCIAL_ENABLED=true` and the same settings. Do no
 put bearer tokens or capability secrets in URL paths/queries. Redact Authorization, Apple grants, coordinates,
 push tokens, and request bodies in all proxy/APM/error collection. Set a 5 MiB
 request cap and bounded connection/time limits. API responses are `no-store`.
+
+Client networks for anonymous limits come from the TCP peer. `X-Forwarded-For` is
+read only when that peer is in `BICINO_SOCIAL_TRUSTED_PROXIES`, and then from the
+right: the nearest address that is not a trusted proxy is the client, so entries
+a client writes itself are never used. Every trusted proxy must append the address
+it received the connection from (for example nginx
+`proxy_add_x_forwarded_for`); otherwise all its clients share the proxy's bucket.
+The Compose API runs uvicorn with `--no-proxy-headers` so only this policy reads
+the header. For the mounted router, keep the map API's uvicorn
+`--forwarded-allow-ips` at its loopback default or consistent with this list. A
+proxy-level per-client rate limit is still recommended as defense in depth.
 
 Set website `BICINO_SOCIAL_ENABLED=true`, `BICINO_SOCIAL_ORIGIN` to the API's HTTPS
 origin, and the same deletion secret. Deploy the companion website change before

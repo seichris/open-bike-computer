@@ -48,6 +48,11 @@ private final class RideFixture: SocialRideNetworking {
     func selected() throws -> SocialGroupRide {
         try JSONDecoder().decode(SocialGroupRide.self,from:JSONSerialization.data(withJSONObject:room))
     }
+    /// A live snapshot as some server replica read it, possibly before a consent change.
+    func snapshot(epoch:Int,sharing:Bool,serverTime:Double) -> URLSessionWebSocketTask.Message {
+        var value=room;value["epoch"]="consent-\(epoch)";value["sharing"]=sharing;value["serverTime"]=serverTime
+        return .data(try! JSONSerialization.data(withJSONObject:value))
+    }
     func request(_ path:String,method:String,body:Data?,contentType:String,query:[URLQueryItem]) async throws -> Data {
         var result:[String:Any]=room
         if path.hasSuffix("/consent") && method=="POST" {
@@ -186,8 +191,42 @@ struct SocialRuntimeTests {
             do { try await old.value } catch SocialFailure.cancelled { }
             require(service.isSharing == !delayedStart && network.serverSharing == !delayedStart,
                     "a delayed consent request cannot overtake the latest start/stop choice")
+            // Snapshots read before any of those accepted changes cannot undo the latest choice,
+            // even when another replica's clock stamps them later.
+            try await wait { !network.sockets.isEmpty }
+            let socket=network.sockets.last!
+            for retired in 0..<network.leaseEpoch {
+                socket.queue.append(network.snapshot(epoch:retired,sharing:delayedStart,serverTime:9_999_999))
+            }
+            try await wait { socket.delivered>=network.leaseEpoch }
+            require(service.isSharing == !delayedStart && service.ride?.epoch == "consent-\(network.leaseEpoch)",
+                    "reordered start/stop leaves only the latest consent generation in effect")
             service.reset()
         }
+
+        // Consent generation, not server time, orders live snapshots against this phone's choices.
+        let ordered=RideFixture()
+        let orderedLive=LiveRideService(client:ordered,pollNanoseconds:10_000_000)
+        orderedLive.prepareLocation={true}
+        try await orderedLive.select(ordered.selected())
+        try await wait { !ordered.sockets.isEmpty }
+        let stream=ordered.sockets.last!
+        try await orderedLive.startSharing(stats:false)
+        require(orderedLive.isSharing && ordered.leaseEpoch==1,"sharing was accepted")
+        // Read before the accepted consent, but stamped later by a replica with a fast clock.
+        stream.queue.append(ordered.snapshot(epoch:0,sharing:false,serverTime:9_999_999))
+        try await wait { stream.delivered>=1 }
+        require(orderedLive.isSharing && ordered.serverSharing,"a stale sharing:false snapshot cannot cancel accepted sharing")
+        // A current-generation snapshot from a replica with a slow clock still applies.
+        stream.queue.append(ordered.snapshot(epoch:1,sharing:true,serverTime:1))
+        try await wait { stream.delivered>=2 }
+        require(orderedLive.isSharing && orderedLive.ride?.serverTime==1,"current consent snapshots apply regardless of server clock")
+        // The server ending this same consent (expiry keeps the epoch) is honored.
+        ordered.serverSharing=false
+        stream.queue.append(ordered.snapshot(epoch:1,sharing:false,serverTime:1))
+        try await wait { !orderedLive.isSharing }
+        require(orderedLive.ride?.sharing==false,"a matching current revocation stops local sharing")
+        orderedLive.reset()
 
         // A viewer's reconnect notice clears on the next healthy snapshot.
         let viewer=RideFixture();viewer.socketDrops=1

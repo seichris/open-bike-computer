@@ -1371,6 +1371,10 @@ exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
 carries the 14-byte screen-configuration limits and support masks. TLV type `3`
 carries exactly four bytes of little-endian extended feature flags, independently
 numbered from the first word. Its bit `0` is `group_riders_v1`; absent means zero.
+Because extended bits restart at zero, generated constants for this word carry
+their own prefix (`EXTENDED_GROUP_RIDERS_V1_FEATURE` in C++,
+`extendedGroupRidersV1Feature` in Swift) so they cannot be mistaken for the
+first word's same-valued bit.
 Firmware includes this extension only when at least one extended feature is
 available to the negotiated client. Bit `31` of the first word remains terrain;
 it never enables social packets. Older clients skip the new TLV, and version-29

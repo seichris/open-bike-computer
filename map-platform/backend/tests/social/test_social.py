@@ -498,6 +498,124 @@ class SocialTest(unittest.TestCase):
             self.assertEqual(set(c.scalars(select(accounts.c.state))), {'active'})
             self.assertEqual(list(c.scalars(select(outbox.c.kind))), [])
 
+    def test_held_reconciliation_batch_has_a_reviewed_operator_recovery_and_then_resumes(self):
+        from map_platform.social.worker import (ReconciliationRefused, reconcile_accounts,
+                                                resolve_reconciliation, review_reconciliation, _parser)
+        for index in range(9):
+            self.service.account(AccountPrincipal('test', f'extra{index}', int(self.clock)))
+        other = self.service.account(AccountPrincipal('other-project', 'outsider', int(self.clock)))
+        with self.db.transaction() as c:
+            uids = dict(c.execute(select(accounts.c.id, accounts.c.uid).where(accounts.c.project == 'test')).all())
+        ordered = sorted(uids)
+        self.assertEqual(len(ordered), 12)
+        deleted, disabled_late = set(ordered[:4]), ordered[11]
+        class External(Identity):
+            calls = []
+            def status(self, uid):
+                self.calls.append(uid)
+                if uid == 'outsider': raise AssertionError('must not query another project')
+                account = next(key for key, value in uids.items() if value == uid)
+                if account in deleted: return 'deleted'
+                return 'disabled' if account == disabled_late else 'active'
+        identity = External()
+        def states():
+            with self.db.transaction() as c:
+                return dict(c.execute(select(accounts.c.id, accounts.c.state)).all())
+        before = states()
+        # Four external deletions in one batch trip the breaker on every pass.
+        for _ in range(2):
+            with self.assertLogs(level='ERROR'):
+                self.assertEqual(reconcile_accounts(self.db, identity, self.media, '', batch_size=6), '')
+        self.assertEqual(states(), before)
+        # Review is read-only and names internal account IDs of the held batch.
+        report = review_reconciliation(self.db, identity, '', batch_size=6)
+        self.assertEqual(report, {'held': True, 'cursor': '', 'deleted': sorted(deleted), 'checked': 6, 'batch': 6})
+        self.assertEqual(states(), before)
+        for refused in ([ordered[0], ordered[0]],            # duplicates
+                        sorted(deleted)[:3],                  # an unreviewed deletion remains
+                        sorted(deleted) + [ordered[4]],       # not deleted at the provider
+                        sorted(deleted) + [ordered[8]],       # outside the held batch
+                        sorted(deleted) + [other]):           # another project
+            with self.assertRaises(ReconciliationRefused):
+                resolve_reconciliation(self.db, identity, self.media, '', refused, confirm=True, batch_size=6)
+        self.assertEqual(states(), before)
+        dry = resolve_reconciliation(self.db, identity, self.media, '', sorted(deleted), batch_size=6)
+        self.assertEqual(dry, {'applied': False, 'cursor': '', 'reviewed': 4})
+        self.assertEqual(states(), before)
+        # Operator confirmation applies exactly the reviewed batch.
+        applied = resolve_reconciliation(self.db, identity, self.media, '', sorted(deleted), confirm=True, batch_size=6)
+        self.assertTrue(applied['applied'])
+        after = states()
+        self.assertEqual({key for key, value in after.items() if value == 'deleting'}, deleted)
+        self.assertEqual(after[other], 'active')
+        with self.db.transaction() as c:
+            self.assertEqual(sorted(c.scalars(select(outbox.c.owner).where(outbox.c.kind == 'delete_account'))), sorted(deleted))
+        # The worker's next passes make progress through later batches again.
+        cursor = applied['cursor']
+        for _ in range(3):
+            cursor = reconcile_accounts(self.db, identity, self.media, cursor, batch_size=6)
+            if not cursor: break
+        self.assertEqual(states()[disabled_late], 'disabled')
+        self.assertEqual(review_reconciliation(self.db, identity, '', batch_size=6), {'held': False, 'complete': True})
+        self.assertNotIn('outsider', identity.calls)
+        # The CLI requires an explicit cursor and reviewed accounts; confirmation is opt-in.
+        parsed = _parser().parse_args(['reconcile-resolve', '--cursor', '', '--account', ordered[0]])
+        self.assertFalse(parsed.confirm)
+        import contextlib, io
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            _parser().parse_args(['reconcile-resolve', '--account', ordered[0]])
+        self.assertEqual(_parser().parse_args(['worker']).command, 'worker')
+
+    def test_reconciliation_resolution_cannot_add_an_unreviewed_provider_deletion(self):
+        from collections import Counter
+        from map_platform.social.worker import resolve_reconciliation
+        for index in range(3):
+            self.service.account(AccountPrincipal('test', f'snapshot{index}', int(self.clock)))
+        with self.db.transaction() as c:
+            batch = list(c.execute(select(accounts).order_by(accounts.c.id)).mappings())
+        reviewed = {account['id'] for account in batch[:4]}
+        deleted_uids = {account['uid'] for account in batch[:4]}
+        unreviewed = batch[4]
+        calls = Counter()
+        class Changing(Identity):
+            def status(self, uid):
+                calls[uid] += 1
+                if uid in deleted_uids:
+                    return 'deleted'
+                # A second lookup sees a deletion the operator never reviewed.
+                if uid == unreviewed['uid'] and calls[uid] > 1:
+                    return 'deleted'
+                return 'active'
+        result = resolve_reconciliation(self.db, Changing(), self.media, '', sorted(reviewed),
+                                        confirm=True, batch_size=6)
+        self.assertTrue(result['applied'])
+        with self.db.transaction() as c:
+            states = dict(c.execute(select(accounts.c.id, accounts.c.state)).all())
+            self.assertEqual({key for key, state in states.items() if state == 'deleting'}, reviewed)
+            self.assertEqual(states[unreviewed['id']], 'active')
+            self.assertEqual(set(c.scalars(select(outbox.c.owner).where(outbox.c.kind == 'delete_account'))), reviewed)
+        self.assertEqual(set(calls.values()), {1})
+
+    def test_reconciliation_resolution_refuses_an_incomplete_provider_snapshot(self):
+        from map_platform.social.worker import ReconciliationRefused, resolve_reconciliation
+        with self.db.transaction() as c:
+            batch = list(c.execute(select(accounts).order_by(accounts.c.id)).mappings())
+        reviewed, unavailable = batch[0], batch[1]
+        class Outage(Identity):
+            def status(self, uid):
+                if uid == reviewed['uid']:
+                    return 'deleted'
+                if uid == unavailable['uid']:
+                    raise RuntimeError('provider unavailable')
+                return 'active'
+        for confirm in (False, True):
+            with self.assertRaises(ReconciliationRefused):
+                resolve_reconciliation(self.db, Outage(), self.media, '', [reviewed['id']],
+                                       confirm=confirm, batch_size=3)
+            with self.db.transaction() as c:
+                self.assertEqual(set(c.scalars(select(accounts.c.state))), {'active'})
+                self.assertEqual(list(c.scalars(select(outbox.c.kind))), [])
+
     def test_disabled_sender_is_skipped_and_invitations_are_revoked(self):
         from map_platform.social.database import invites
         from map_platform.social.worker import reconcile_accounts
@@ -629,6 +747,58 @@ class SocialTest(unittest.TestCase):
                 response=self.client.post('/internal/account-deletion',content=raw,
                     headers={'Content-Type':'application/json','X-Bicino-Deletion-Signature':signature})
                 self.assertEqual(response.status_code,200 if -60<=age<=300 else 401)
+                if not -60<=age<=300:
+                    self.assertEqual(response.json(),{'code':'reauthentication_required'})
+
+    def website_proof(self, secret, uid='alice', project='test', auth_age=0, issued_age=0, signature=None):
+        import hmac
+        proof={'uid':uid,'project':project,'authTime':int(self.clock-auth_age),
+               'issuedAt':int(self.clock-issued_age),'nonce':str(uuid.uuid4())}
+        raw=json.dumps(proof).encode()
+        signed=signature if signature is not None else hmac.new(secret.encode(),raw,'sha256').hexdigest()
+        return self.client.post('/internal/account-deletion',content=raw,
+            headers={'Content-Type':'application/json','X-Bicino-Deletion-Signature':signed})
+
+    def limiter_rows(self):
+        from map_platform.social.database import limits
+        with self.db.transaction() as c:
+            return sorted(c.scalars(select(limits.c.key)))
+
+    def test_website_deletion_errors_are_typed_in_validation_order(self):
+        secret='w'*40
+        with patch.dict(os.environ,{'BICINO_SOCIAL_DELETION_SECRET':'short','BICINO_FIREBASE_PROJECT_ID':'test'}):
+            response=self.website_proof('short')
+            self.assertEqual((response.status_code,response.json()),(503,{'code':'deletion_bridge_unconfigured'}))
+        with patch.dict(os.environ,{'BICINO_SOCIAL_DELETION_SECRET':secret,'BICINO_FIREBASE_PROJECT_ID':'test'}):
+            rows=self.limiter_rows()
+            # The signature is checked first, even when every other field is also wrong,
+            # and an unsigned request touches no database state.
+            for response in (self.website_proof(secret,signature='0'*64),
+                             self.website_proof(secret,project='other',auth_age=900,issued_age=900,signature='0'*64)):
+                self.assertEqual((response.status_code,response.json()),(401,{'code':'deletion_proof_invalid'}))
+            self.assertEqual(self.limiter_rows(),rows)
+            response=self.website_proof(secret,project='other',auth_age=900,issued_age=900)
+            self.assertEqual((response.status_code,response.json()),(403,{'code':'deletion_project_mismatch'}))
+            response=self.website_proof(secret,auth_age=900,issued_age=61)
+            self.assertEqual((response.status_code,response.json()),(401,{'code':'deletion_proof_expired'}))
+            response=self.website_proof(secret,auth_age=301)
+            self.assertEqual((response.status_code,response.json()),(401,{'code':'reauthentication_required'}))
+            self.assertEqual(self.limiter_rows(),rows)
+            self.assertEqual(self.call('alice','GET','/me').status_code,200)
+            response=self.website_proof(secret)
+            self.assertEqual((response.status_code,response.json()),(200,{'status':'deleting'}))
+            self.assertEqual(self.call('alice','GET','/me').status_code,403)
+
+    def test_verified_website_proofs_are_bounded_per_account_subject(self):
+        import map_platform.social.api as social_api
+        secret='v'*40
+        with patch.dict(os.environ,{'BICINO_SOCIAL_DELETION_SECRET':secret,'BICINO_FIREBASE_PROJECT_ID':'test'}), \
+             patch.dict(social_api.ANONYMOUS_LIMITS,{'website_deletion':2}):
+            statuses=[self.website_proof(secret,uid='absent-subject').status_code for _ in range(3)]
+            self.assertEqual(statuses,[200,200,429])
+            self.assertEqual(self.website_proof(secret,uid='bob').status_code,200)  # another subject
+            self.clock+=3600
+            self.assertEqual(self.website_proof(secret,uid='absent-subject').status_code,200)
 
     # F1: route redistribution follows what Bicino actually handed to a rider.
     def test_received_routes_cannot_be_republished_after_save_duplicate_or_reverse(self):
@@ -936,5 +1106,129 @@ class SocialTest(unittest.TestCase):
                 self.assertFalse(nullable['secret_digest'])
         self.db.migrate()  # Idempotent at the current version.
         self.db.check_schema()
+
+    # Unauthenticated endpoints: durable per-network limits charged before any lookup.
+    def anonymous_client(self, address, trusted=''):
+        from map_platform.social.client_address import ClientAddressPolicy
+        app=create_app(service=self.service,identity=Identity(),features=SocialFeatures(True,True,True,True,True),
+                       client_addresses=ClientAddressPolicy(trusted))
+        return TestClient(app,client=(address,50000))
+
+    def shared_code(self):
+        item=self.call('alice','POST','/routes',self.route('link')).json()
+        return self.call('alice','POST','/share-links',{'contentID':item['id']}).json()['url'].split('#')[1]
+
+    def test_anonymous_endpoints_are_bounded_per_network_and_recover(self):
+        import map_platform.social.api as social_api
+        code=self.shared_code()
+        endpoints={
+            'link_resolve': lambda client: client.post('/shared/resolve',json={'code':code}),
+            'deletion_receipt': lambda client: client.post('/deletion-receipts/resolve',json={'receipt':self.secret()}),
+            'push_release': lambda client: client.post(f'/notification-devices/{uuid.uuid4()}/release',
+                                                       json={'secret':self.secret(),'owner':str(uuid.uuid4())}),
+        }
+        lookups=[]
+        original_receipt,original_release=self.service.deletion_receipt,self.service.release_device
+        def receipt(*args): lookups.append('receipt'); return original_receipt(*args)
+        def release(*args): lookups.append('release'); return original_release(*args)
+        with patch.dict(social_api.ANONYMOUS_LIMITS,{name:3 for name in endpoints}), \
+             patch.object(self.service,'deletion_receipt',receipt), patch.object(self.service,'release_device',release):
+            first,second=self.anonymous_client('203.0.113.10'),self.anonymous_client('203.0.113.11')
+            for name,call in endpoints.items():
+                statuses=[call(first).status_code for _ in range(4)]
+                self.assertNotIn(429,statuses[:3],name)
+                self.assertEqual(statuses[3],429,name)
+                # The limit is charged before the endpoint's own lookup.
+                before=len(lookups)
+                self.assertEqual(call(first).status_code,429,name)
+                self.assertEqual(len(lookups),before,name)
+                # A forged forwarding header from an untrusted peer selects nothing.
+                forged=first.post('/deletion-receipts/resolve',json={'receipt':self.secret()},
+                                  headers={'X-Forwarded-For':'198.51.100.77'}) if name=='deletion_receipt' else None
+                if forged is not None: self.assertEqual(forged.status_code,429)
+                # One network cannot spend another network's allowance.
+                self.assertNotEqual(call(second).status_code,429,name)
+            self.assertEqual(first.post('/shared/resolve',json={'code':code}).status_code,429)
+            # Signed-in resolution is charged to the account, not the exhausted network.
+            signed=first.post('/shared/resolve',json={'code':code},headers={'Authorization':'Bearer bob'})
+            self.assertEqual(signed.status_code,200,signed.text)
+            self.clock+=3600
+            for name,call in endpoints.items():
+                self.assertNotEqual(call(first).status_code,429,name)
+            first.close(); second.close()
+
+    def test_signed_in_link_resolution_has_its_own_account_quota(self):
+        import map_platform.social.api as social_api
+        code=self.shared_code()
+        with patch.object(social_api,'ACCOUNT_LINK_RESOLVE_LIMIT',2):
+            client=self.anonymous_client('203.0.113.20')
+            statuses=[client.post('/shared/resolve',json={'code':code},headers={'Authorization':'Bearer bob'}).status_code
+                      for _ in range(3)]
+            self.assertEqual(statuses,[200,200,429])
+            # Another account from the same network keeps its own allowance.
+            self.assertEqual(client.post('/shared/resolve',json={'code':code},headers={'Authorization':'Bearer carol'}).status_code,200)
+            self.assertEqual(client.post('/shared/resolve',json={'code':code}).status_code,200)
+            client.close()
+
+    def test_forwarded_addresses_are_trusted_only_from_configured_proxies(self):
+        import map_platform.social.api as social_api
+        from map_platform.social.client_address import ClientAddressPolicy
+        policy=ClientAddressPolicy('10.0.0.0/8, 2001:db8:ffff::/48')
+        def bucket(peer, forwarded=None):
+            headers=[(b'x-forwarded-for',forwarded.encode())] if forwarded is not None else []
+            return policy.bucket({'client':(peer,1),'headers':headers})
+        client=bucket('198.51.100.5')
+        # Untrusted peers: any forwarding header is ignored.
+        self.assertEqual(bucket('198.51.100.5','203.0.113.1'),client)
+        # Trusted proxy: the nearest untrusted hop is the client; forged entries to its left do nothing.
+        self.assertEqual(bucket('10.1.2.3','203.0.113.9, 198.51.100.5'),client)
+        self.assertEqual(bucket('10.1.2.3','1.2.3.4, 198.51.100.5, 10.9.9.9'),client)
+        self.assertEqual(bucket('10.1.2.3','not-an-ip, 198.51.100.5'),client)
+        self.assertNotEqual(bucket('10.1.2.3','198.51.100.5, 198.51.100.6'),client)
+        # A malformed nearest hop falls back to the proxy, never to a client-chosen value.
+        self.assertEqual(bucket('10.1.2.3','198.51.100.5, garbage'),bucket('10.1.2.3'))
+        # IPv6 clients share one bucket per /64; IPv4-mapped addresses are IPv4.
+        self.assertEqual(bucket('2001:db8:1:2::1'),bucket('2001:db8:1:2:ffff::9'))
+        self.assertNotEqual(bucket('2001:db8:1:2::1'),bucket('2001:db8:1:3::1'))
+        self.assertEqual(bucket('::ffff:198.51.100.5'),client)
+        self.assertEqual(bucket('2001:db8:ffff::1','2001:db8:1:2::7'),bucket('2001:db8:1:2::1'))
+        self.assertEqual(bucket('testclient'),bucket('unix-socket'))
+        with self.assertRaises(ValueError):
+            ClientAddressPolicy('not-a-network')
+        # End to end through a trusted proxy: clients behind it get separate buckets.
+        with patch.dict(social_api.ANONYMOUS_LIMITS,{'deletion_receipt':1}):
+            proxy=self.anonymous_client('10.1.2.3',trusted='10.0.0.0/8')
+            def post(forwarded):
+                return proxy.post('/deletion-receipts/resolve',json={'receipt':self.secret()},
+                                  headers={'X-Forwarded-For':forwarded}).status_code
+            self.assertEqual(post('198.51.100.5'),404)
+            self.assertEqual(post('203.0.113.200, 198.51.100.5'),429)
+            self.assertEqual(post('198.51.100.6'),404)
+            proxy.close()
+
+    def test_anonymous_limits_run_off_the_event_loop(self):
+        import asyncio
+        observed=[]
+        original=self.service.anonymous_rate
+        def anonymous_rate(category,*args):
+            try:
+                asyncio.get_running_loop(); on_loop=True
+            except RuntimeError:
+                on_loop=False
+            observed.append((category,on_loop))
+            return original(category,*args)
+        code=self.shared_code()
+        secret='o'*40
+        with patch.object(self.service,'anonymous_rate',anonymous_rate), \
+             patch.dict(os.environ,{'BICINO_SOCIAL_DELETION_SECRET':secret,'BICINO_FIREBASE_PROJECT_ID':'test'}):
+            client=self.anonymous_client('203.0.113.30')
+            client.post('/shared/resolve',json={'code':code})
+            client.post('/deletion-receipts/resolve',json={'receipt':self.secret()})
+            client.post(f'/notification-devices/{uuid.uuid4()}/release',json={'secret':self.secret(),'owner':str(uuid.uuid4())})
+            client.close()
+            self.website_proof(secret,uid='absent-subject')
+        self.assertEqual({category for category,_ in observed},
+                         {'link_resolve','deletion_receipt','push_release','website_deletion'})
+        self.assertEqual([entry for entry in observed if entry[1]],[])
 
 if __name__=='__main__':unittest.main()

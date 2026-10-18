@@ -17,6 +17,7 @@ from ..request_limits import RequestBodyLimitMiddleware
 from ..user_auth import FirebaseIdentity, IdentityUnavailable
 from .database import (RETRYABLE_SQLSTATES, Database, accounts, blocks, content, devices, friendships,
                        invites, links, media, members, messages, replays, rides)
+from .client_address import ClientAddressPolicy
 from .media import S3Media
 from .features import SocialFeatures
 from .models import (ActivityUpload, Consent, ContentEdit, Deletion, DeletionReceipt, DeviceBinding,
@@ -29,15 +30,31 @@ INSTALLATION_ID = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-
 IDENTITY_OUTAGE_GRACE_SECONDS = 90
 # Close codes the native client treats as "retry later" rather than revocation.
 TRANSIENT_CODES = frozenset({"identity_unavailable", "database_busy"})
+# Requests without an account token, bounded per client network (or, for the
+# signed website bridge, per verified account subject) in fixed hourly windows.
+# Each key is independent, so one network cannot spend another's allowance.
+ANONYMOUS_LIMITS = {
+    "link_resolve": 60,            # anonymous share-link resolution, per network
+    "deletion_receipt": 30,        # receipt confirmation, per network
+    "push_release": 30,            # installation binding release, per network
+    "website_deletion": 10,        # verified proofs, per account subject
+}
+# Signed-in share-link resolution, per account, in addition to general quotas.
+ACCOUNT_LINK_RESOLVE_LIMIT = 120
 
 
-def create_app(*, service=None, identity=None, features=None):
+def create_app(*, service=None, identity=None, features=None, client_addresses=None):
     if service is None:
         db = Database(os.environ["BICINO_SOCIAL_DATABASE_URL"])
         db.check_schema()
         service = SocialService(db, S3Media())
     if identity is None:
         identity = FirebaseIdentity(os.environ["BICINO_FIREBASE_PROJECT_ID"])
+    addresses = client_addresses if client_addresses is not None else ClientAddressPolicy.from_environment()
+
+    def anonymous_limit(category, request):
+        """Charge the caller's network bucket before any other database work."""
+        service.anonymous_rate(category, addresses.bucket(request.scope), ANONYMOUS_LIMITS[category])
     async def rollout(request: HTTPConnection):
         if request.scope["type"] != "http":
             return  # The socket handler checks the flag before every snapshot.
@@ -165,15 +182,26 @@ def create_app(*, service=None, identity=None, features=None):
 
     @app.post("/internal/account-deletion")
     async def website_deletion(data: WebsiteDeletion, request: Request):
+        # Typed outcomes, checked in this order with no database work before the
+        # signature is valid. Only a stale recent sign-in asks the person to sign in
+        # again; the others are website/service configuration or protocol faults.
         secret = os.environ.get("BICINO_SOCIAL_DELETION_SECRET", "")
         signature = request.headers.get("X-Bicino-Deletion-Signature", "")
         raw = await request.body()
-        if len(secret) < 32 or not hmac.compare_digest(signature, hmac.new(secret.encode(), raw, "sha256").hexdigest()):
-            raise SocialError("authentication_required", 401)
-        if (data.project != os.environ.get("BICINO_FIREBASE_PROJECT_ID")
-                or abs(service.now()-data.issuedAt) > 60
-                or not -60 <= service.now()-data.authTime <= 300):
-            raise SocialError("authentication_required", 401)
+        if len(secret) < 32:
+            raise SocialError("deletion_bridge_unconfigured", 503)
+        if not hmac.compare_digest(signature, hmac.new(secret.encode(), raw, "sha256").hexdigest()):
+            raise SocialError("deletion_proof_invalid", 401)
+        if data.project != os.environ.get("BICINO_FIREBASE_PROJECT_ID"):
+            raise SocialError("deletion_project_mismatch", 403)
+        if abs(service.now()-data.issuedAt) > 60:
+            raise SocialError("deletion_proof_expired", 401)
+        if not -60 <= service.now()-data.authTime <= 300:
+            raise SocialError("reauthentication_required", 401)
+        # Only the website holds the secret, so verified proofs are bounded per
+        # account subject rather than per (shared, serverless) network address.
+        await run_in_threadpool(service.anonymous_rate, "website_deletion",
+                                digest(f"{data.project}:{data.uid}")[:32], ANONYMOUS_LIMITS["website_deletion"])
         def perform(c):
             account = c.execute(select(accounts).where(and_(accounts.c.uid == data.uid,
                 accounts.c.project == data.project))).mappings().first()
@@ -392,8 +420,15 @@ def create_app(*, service=None, identity=None, features=None):
         return await operation(request, auth, perform)
 
     @app.post("/shared/resolve")
-    def shared(data: Join, authorization: str | None = Header(default=None)):
-        actor = authenticate(authorization)[0] if authorization else None
+    def shared(data: Join, request: Request, authorization: str | None = Header(default=None)):
+        # Signed-in resolution is charged to the account; anonymous resolution to
+        # the client network. Either is charged before the link lookup.
+        if authorization:
+            actor = authenticate(authorization)[0]
+            service.rate(actor, "link_resolve", ACCOUNT_LINK_RESOLVE_LIMIT)
+        else:
+            actor = None
+            anonymous_limit("link_resolve", request)
         def perform(c):
             link = row(c, links, and_(links.c.digest == digest(data.code), links.c.expires > service.now()))
             item = service.content_read(c, actor, link["content"], capability=True)
@@ -589,10 +624,11 @@ def create_app(*, service=None, identity=None, features=None):
         return await operation(request, auth, lambda c, a: service.bind_device(c, a, binding, data))
 
     @app.post("/notification-devices/{installation_id}/release")
-    def release(installation_id: str, data: DeviceRelease):
+    def release(installation_id: str, data: DeviceRelease, request: Request):
         # No bearer token: after forced sign-out or deletion none may exist. The
         # installation secret and the expected owner authorize this idempotent cleanup.
         binding = installation(installation_id)
+        anonymous_limit("push_release", request)
         return service.db.run(lambda c: service.release_device(c, binding, data))
 
     @app.delete("/notification-devices/{installation_id}")
@@ -616,10 +652,11 @@ def create_app(*, service=None, identity=None, features=None):
         return await operation(request, auth, lambda c, a: service.begin_deletion(c, a, data.receiptDigest))
 
     @app.post("/deletion-receipts/resolve")
-    def deletion_receipt(data: DeletionReceipt):
+    def deletion_receipt(data: DeletionReceipt, request: Request):
         # Unauthenticated by design: after cleanup no identity remains, and recovery
         # must not recreate one by signing in. Only the receipt secret, whose digest
         # was committed with the accepted deletion, proves the earlier request.
+        anonymous_limit("deletion_receipt", request)
         return read(lambda c: service.deletion_receipt(c, data.receipt))
 
     @app.websocket("/group-rides/{ride_id}/live")

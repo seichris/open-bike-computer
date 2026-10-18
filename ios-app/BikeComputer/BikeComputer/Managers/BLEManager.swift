@@ -10699,7 +10699,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.rideAutomationCapabilityMask != 0
         let hasExplicitInvalidGPSHeading =
             flags & DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask != 0
-        supportsGroupRiders = extendedFeatureFlags & RideBLEGeneratedProtocolV1.groupRidersV1Feature != 0
+        supportsGroupRiders = extendedFeatureFlags & RideBLEGeneratedProtocolV1.extendedGroupRidersV1Feature != 0
         let hasScopedWatchController =
             flags & DeviceBLEProtocol.scopedWatchControllerCapabilityMask != 0
         let hasRemoteDeviceDebug =

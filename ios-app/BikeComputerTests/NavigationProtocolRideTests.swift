@@ -3864,6 +3864,10 @@ extension NavigationProtocolTests {
             "CAP2 terrain capability is accepted")
         assert(manager.supportsTerrainExperiments, "CAP2 bit 31 unlocks experimental Map presets")
         assert(!manager.supportsGroupRiders, "terrain bit 31 must never unlock social packets")
+        assert(RideBLEGeneratedProtocolV1.extendedGroupRidersV1Feature == 1 << 0 &&
+               RideBLEGeneratedProtocolV1.extendedGroupRidersV1MinimumClientVersion == 30 &&
+               RideBLEGeneratedProtocolV1.terrainExperimentsFeature == 1 << 31,
+               "extended-word constants carry their own prefix and keep the shipped wire values")
         let groupTLV = Data([RideBLEGeneratedProtocolV1.extendedFeatureTLVType, 4, 1, 0, 0, 0])
         let groupCapabilities = Data("CAP2".utf8) + Data([1, 0, 0, 0, 0]) + groupTLV
         assert(manager.handleDeviceCapabilitiesNotification(groupCapabilities),

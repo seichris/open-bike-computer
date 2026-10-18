@@ -61,6 +61,8 @@ def load_contract() -> dict:
             raise SystemExit("capabilities cannot require a future client version")
     if set(caps["features"]) & set(caps["extended_features"]):
         raise SystemExit("capability names must be unique across words")
+    if set(caps["features"]) & {"extended_" + name for name in caps["extended_features"]}:
+        raise SystemExit("main-word names must not collide with generated extended-word names")
     if caps["extended_feature_tlv_type"] in (1, contract["screen_configuration"]["capability_tlv_type"]):
         raise SystemExit("extended features must have a distinct TLV type")
     requests = contract["device_requests"]
@@ -154,12 +156,22 @@ def render_swift(contract: dict) -> str:
         ]
     )
     lines.append(f"    static let extendedFeatureTLVType: UInt8 = {caps['extended_feature_tlv_type']}")
-    for name, entry in {**caps["features"], **caps["extended_features"]}.items():
+    for name, entry in caps["features"].items():
         lines.append(
             f"    static let {camel(name)}Feature: UInt32 = 1 << {entry['bit']}"
         )
         lines.append(
             f"    static let {camel(name)}MinimumClientVersion: UInt8 = "
+            f"{entry['minimum_client_version']}"
+        )
+    # Extended-word bits restart at zero, so their names carry a distinct prefix:
+    # an extended flag can never be mistaken for the main word's same-valued bit.
+    for name, entry in caps["extended_features"].items():
+        lines.append(
+            f"    static let {camel('extended_' + name)}Feature: UInt32 = 1 << {entry['bit']}"
+        )
+        lines.append(
+            f"    static let {camel('extended_' + name)}MinimumClientVersion: UInt8 = "
             f"{entry['minimum_client_version']}"
         )
     lines.extend(
@@ -265,12 +277,22 @@ def render_cpp(contract: dict) -> str:
         ]
     )
     lines.append(f"inline constexpr uint8_t EXTENDED_FEATURE_TLV_TYPE = {caps['extended_feature_tlv_type']};")
-    for name, entry in {**caps["features"], **caps["extended_features"]}.items():
+    for name, entry in caps["features"].items():
         lines.append(
             f"inline constexpr uint32_t {upper(name)}_FEATURE = 1UL << {entry['bit']};"
         )
         lines.append(
             f"inline constexpr uint8_t {upper(name)}_MINIMUM_CLIENT_VERSION = "
+            f"{entry['minimum_client_version']};"
+        )
+    # Extended-word bits restart at zero; the EXTENDED_ prefix keeps them from
+    # being OR'd into the main CAP2 word, where the same value means another feature.
+    for name, entry in caps["extended_features"].items():
+        lines.append(
+            f"inline constexpr uint32_t EXTENDED_{upper(name)}_FEATURE = 1UL << {entry['bit']};"
+        )
+        lines.append(
+            f"inline constexpr uint8_t EXTENDED_{upper(name)}_MINIMUM_CLIENT_VERSION = "
             f"{entry['minimum_client_version']};"
         )
     requests = contract["device_requests"]

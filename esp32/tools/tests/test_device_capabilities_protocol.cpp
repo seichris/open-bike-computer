@@ -106,14 +106,14 @@ int main() {
                  device_capabilities_protocol::WATCH_GPS_MOTION_EVIDENCE_V1_FEATURE) == 0);
   uint8_t output[device_capabilities_protocol::CAP2_MAX_BYTES]{};
   static_assert(ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE == (1UL << 31));
-  static_assert(ride_ble_protocol_generated::GROUP_RIDERS_V1_FEATURE == 1);
-  static_assert(ride_ble_protocol_generated::GROUP_RIDERS_V1_MINIMUM_CLIENT_VERSION == 30);
+  static_assert(ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE == 1);
+  static_assert(ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_MINIMUM_CLIENT_VERSION == 30);
   const uint8_t screens[16] = {2, 14};
   const uint8_t extendedPower[] = {1, 4, 80};
   const size_t extendedSize = device_capabilities_protocol::encodeCap2(
       ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE,
       extendedPower, true, output, sizeof(output), screens, sizeof(screens),
-      ride_ble_protocol_generated::GROUP_RIDERS_V1_FEATURE);
+      ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE);
   assert(extendedSize == 36 && extendedSize == sizeof(output));
   assert(output[8] == 0x80); // Terrain keeps its shipped first-word allocation.
   assert(output[9] == 1 && output[14] == 2); // Power and screen TLVs survive.

@@ -4316,11 +4316,11 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
     }
     const bool supportsGroup =
         activePeerMtu.load(std::memory_order_acquire) >= 150 &&
-        clientVersion >= ride_ble_protocol_generated::GROUP_RIDERS_V1_MINIMUM_CLIENT_VERSION &&
+        clientVersion >= ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_MINIMUM_CLIENT_VERSION &&
         social_riders::ready();
     bleSessionSupportsGroupRiders.store(supportsGroup, std::memory_order_release);
     const uint32_t extendedFeatureFlags = supportsGroup
-        ? ride_ble_protocol_generated::GROUP_RIDERS_V1_FEATURE : 0;
+        ? ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE : 0;
     if (map_profile_protocol::VISIBILITY_TERRAIN != 0 && clientVersion >=
         ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_MINIMUM_CLIENT_VERSION)
       featureFlags |= ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE;

@@ -81,8 +81,8 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let topographicContoursMinimumClientVersion: UInt8 = 28
     static let terrainExperimentsFeature: UInt32 = 1 << 31
     static let terrainExperimentsMinimumClientVersion: UInt8 = 29
-    static let groupRidersV1Feature: UInt32 = 1 << 0
-    static let groupRidersV1MinimumClientVersion: UInt8 = 30
+    static let extendedGroupRidersV1Feature: UInt32 = 1 << 0
+    static let extendedGroupRidersV1MinimumClientVersion: UInt8 = 30
     static let screenConfigurationSchemaVersion: UInt8 = 1
     static let screenConfigurationCapabilityTLVType: UInt8 = 2
     static let maximumScreenConfigurationInstances = 16

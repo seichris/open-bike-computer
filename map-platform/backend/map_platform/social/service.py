@@ -119,6 +119,21 @@ class SocialService:
         if self.db.run(perform) > maximum:
             raise SocialError("rate_limited", 429)
 
+    def anonymous_rate(self, category, bucket, maximum, seconds=3600):
+        """Durable fixed-window limit keyed by something other than an account.
+
+        `bucket` is a client-network or verified-subject digest, never raw input.
+        Counters live in the shared limits table, so every API replica enforces
+        the same bound, and expire with their window.
+        """
+        def perform(c):
+            key, window = f"anon:{category}:{bucket}", int(self.now()//seconds)
+            upsert(c, limits, {"key": key, "window": window, "count": 1, "expires": (window+2)*seconds}, ["key", "window"],
+                   {"count": limits.c.count+1})
+            return c.scalar(select(limits.c.count).where(and_(limits.c.key == key, limits.c.window == window)))
+        if self.db.run(perform) > maximum:
+            raise SocialError("rate_limited", 429)
+
     def blocked(self, c, a, b):
         return c.scalar(select(blocks.c.owner).where(or_(
             and_(blocks.c.owner == a, blocks.c.target == b),

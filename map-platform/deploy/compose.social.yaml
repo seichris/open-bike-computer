@@ -39,7 +39,9 @@ services:
       social-postgres: {condition: service_healthy}
   social-api:
     <<: *social
-    command: [uvicorn, --factory, map_platform.social.server:app, --host, 0.0.0.0, --port, "8080", --no-access-log]
+    # The application alone interprets X-Forwarded-For, and only from the proxies
+    # in BICINO_SOCIAL_TRUSTED_PROXIES; uvicorn must not rewrite the peer address.
+    command: [uvicorn, --factory, map_platform.social.server:app, --host, 0.0.0.0, --port, "8080", --no-access-log, --no-proxy-headers]
     expose: ["8080"]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8080/v1/social/healthz', timeout=3)"]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 
@@ -90,6 +91,87 @@ class RequestBodyLimitMiddlewareTests(unittest.IsolatedAsyncioTestCase):
                 if ('PUT',path) in overrides:self.assertEqual(responses,[])
                 else:self.assertEqual(responses[0]['status'],413)
         self.assertEqual(calls,['/v1/social/me/avatar'])
+
+    async def test_replays_body_once_then_passes_original_events_through(self):
+        upstream = asyncio.Queue()
+        body_messages = [
+            {"type": "http.request", "body": b"ab", "more_body": True},
+            {"type": "http.request", "body": b"cd", "more_body": False},
+        ]
+        for message in body_messages:
+            upstream.put_nowait(message)
+        pulled = []
+
+        async def receive():
+            message = await upstream.get()
+            pulled.append(message)
+            return message
+
+        seen = []
+        response_messages = []
+
+        async def app(scope, receive, send):
+            while True:
+                message = await receive()
+                seen.append(message)
+                if not message.get("more_body", False):
+                    break
+            # After the replayed body nothing is pending upstream: receive() must wait
+            # for a real event instead of inventing an empty request.
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(receive(), timeout=0.05)
+            upstream.put_nowait({"type": "http.disconnect"})
+            seen.append(await asyncio.wait_for(receive(), timeout=1))
+            # Later events are not swallowed either.
+            upstream.put_nowait({"type": "http.disconnect", "later": True})
+            seen.append(await asyncio.wait_for(receive(), timeout=1))
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+        async def send(message):
+            response_messages.append(message)
+
+        middleware = RequestBodyLimitMiddleware(app, max_body_bytes=10)
+        await asyncio.wait_for(
+            middleware({"type": "http", "method": "POST", "path": "/v1/jobs", "headers": []}, receive, send),
+            timeout=2,
+        )
+        self.assertEqual(seen[:2], body_messages)  # Exact body, delivered once.
+        self.assertEqual(b"".join(message["body"] for message in seen[:2]), b"abcd")
+        self.assertEqual(seen[2:], [{"type": "http.disconnect"}, {"type": "http.disconnect", "later": True}])
+        self.assertEqual(len(pulled), 4)  # Each upstream event was read exactly once.
+        self.assertEqual(response_messages[0]["status"], 204)
+
+    async def test_disconnect_during_body_is_replayed_then_live_events_follow(self):
+        upstream = asyncio.Queue()
+        for message in (
+            {"type": "http.request", "body": b"ab", "more_body": True},
+            {"type": "http.disconnect"},
+        ):
+            upstream.put_nowait(message)
+        seen = []
+
+        async def app(scope, receive, send):
+            seen.append(await receive())
+            seen.append(await receive())
+            upstream.put_nowait({"type": "http.disconnect", "later": True})
+            seen.append(await asyncio.wait_for(receive(), timeout=1))
+
+        async def send(message):
+            raise AssertionError("a disconnected request is not answered here")
+
+        middleware = RequestBodyLimitMiddleware(
+            app, max_body_bytes=1, body_limits={("PUT", "/v1/social/me/avatar"): 10})
+        await asyncio.wait_for(
+            middleware({"type": "http", "method": "PUT", "path": "/v1/social/me/avatar", "headers": []},
+                       upstream.get, send),
+            timeout=2,
+        )
+        self.assertEqual(seen, [
+            {"type": "http.request", "body": b"ab", "more_body": True},
+            {"type": "http.disconnect"},
+            {"type": "http.disconnect", "later": True},
+        ])
 
 
 if __name__ == "__main__":

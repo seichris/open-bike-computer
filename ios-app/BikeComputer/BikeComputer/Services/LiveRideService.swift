@@ -25,6 +25,10 @@ final class LiveRideService: ObservableObject {
     private let pollNanoseconds: UInt64
     private let reconnectNanoseconds: UInt64
     private var sharingRevision = UUID()
+    /// Consent epochs the server has replaced in response to this phone's own
+    /// consent changes. A live snapshot still carrying one was read before that
+    /// change, whatever its server clock says, so it cannot describe sharing now.
+    private var retiredEpochs: Set<String> = []
     private var sharingDeadline = 0.0
     private var stream: Task<Void, Never>?
     private var publisher: Task<Void, Never>?
@@ -115,7 +119,11 @@ final class LiveRideService: ObservableObject {
                         }
                         let next = try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: document))
                         guard epoch == self.localEpoch, next.id == ride.id else { break }
-                        if let current = self.ride, next.serverTime < current.serverTime { continue }
+                        // Ordered by consent generation, not by server clocks: a snapshot
+                        // from before an accepted change of ours is skipped; the next one
+                        // follows within seconds. The current epoch (including a server-side
+                        // expiry, which keeps it) and other devices' newer epochs apply.
+                        if self.retiredEpochs.contains(next.epoch) { continue }
                         if let capabilities = document["capabilities"] {
                             self.onCapabilitiesChanged?(try JSONDecoder().decode(SocialCapabilities.self,
                                 from: JSONSerialization.data(withJSONObject: capabilities)))
@@ -151,11 +159,15 @@ final class LiveRideService: ObservableObject {
 
     private func changeConsent(ride: SocialGroupRide, location: Bool, stats: Bool, revision: UUID) async throws -> SocialGroupRide {
         var expected = ride.epoch
+        let selection = localEpoch
         for attempt in 0...1 {
             guard revision == sharingRevision else { throw SocialFailure.cancelled }
             do {
                 let value = try await client.json("group-rides/\(ride.id)/consent", method: "POST",
                     body: ["epoch": expected, "location": location, "stats": stats])
+                // Accepted: the server replaced `expected` with a new epoch, even if a
+                // newer local choice now discards this response.
+                if selection == localEpoch { retiredEpochs.formUnion([ride.epoch, expected]) }
                 guard revision == sharingRevision else { throw SocialFailure.cancelled }
                 return try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value))
             } catch SocialFailure.server("consent_changed") {
@@ -283,6 +295,7 @@ final class LiveRideService: ObservableObject {
     func reset() {
         sharingRevision = UUID()
         localEpoch = UUID()
+        retiredEpochs = []
         stream?.cancel(); stream = nil
         publisher?.cancel(); publisher = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
