@@ -134,6 +134,10 @@ LoadResult loadGrid(uint8_t *bytes, Grid &grid, Read read, Cancel cancelled) {
 inline uint16_t color(Node n, uint32_t mode, uint16_t base) {
   int r = (base >> 11) * 255 / 31, g = ((base >> 5) & 63) * 255 / 63,
       b = (base & 31) * 255 / 31;
+  // Unfilled map areas use black. Multiplication cannot reveal relief there,
+  // so the standalone hillshade experiment supplies a neutral ground color.
+  if (base == 0 && (mode & HILLSHADE) && !(mode & (TINT | SLOPE | HEIGHT)))
+    r = g = b = 192;
   if (mode & (TINT | SLOPE | HEIGHT)) {
     float t = mode & SLOPE ? std::min(1.f, n.slope / 45.f)
                            : std::clamp((n.height + 200.f) / 3200.f, 0.f, 1.f);

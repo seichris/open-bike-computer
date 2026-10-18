@@ -427,7 +427,13 @@ private final class TerrainReliefRenderer: MKOverlayRenderer {
   }
   override func draw(_ mapRect: MKMapRect, zoomScale: MKZoomScale, in context: CGContext) {
     guard let terrain = overlay as? TerrainReliefOverlay else { return }
+    context.saveGState()
+    context.clip(to: rect(for: mapRect))
     context.setAllowsAntialiasing(false)
+    // Adjacent translucent polygons can cover the same rounded edge pixel.
+    // Replace those pixels within one isolated layer, then composite it once.
+    context.beginTransparencyLayer(auxiliaryInfo: nil)
+    context.setBlendMode(.copy)
     for cell in terrain.cells {
       let path = CGMutablePath()
       path.addLines(between: cell.points.map { point(for: $0) })
@@ -449,6 +455,8 @@ private final class TerrainReliefRenderer: MKOverlayRenderer {
       context.setFillColor(color.cgColor)
       context.fillPath()
     }
+    context.endTransparencyLayer()
+    context.restoreGState()
   }
 }
 

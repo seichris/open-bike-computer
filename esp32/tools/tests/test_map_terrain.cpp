@@ -4,6 +4,12 @@
 #include <vector>
 int main() {
   using namespace map_terrain;
+  // Relief must remain visible over the normal black, unfilled map background.
+  const auto shadow = color({100, 0, 0}, HILLSHADE, 0);
+  const auto light = color({100, 255, 0}, HILLSHADE, 0);
+  assert(shadow != 0 && light != shadow);
+  assert(color({100, 0, 0}, 0, 0) == 0);
+  assert(color({100, 255, 0}, HILLSHADE, 0xffff) == 0xffff);
   std::vector<uint8_t> data(BYTES, 0);
   memcpy(data.data(), "FME1", 4);
   for (size_t p = 16; p < BYTES; p += 4) {
