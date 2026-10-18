@@ -261,6 +261,8 @@ struct MapViewContainer: UIViewRepresentable {
     var isRouteCalculationActive = false
     var topographyOverlay: MKTileOverlay? = nil
     var offlineNavigationPolyline: MKPolyline? = nil
+    var socialRiders: [SocialRider] = []
+    var socialPhotos: [String: UIImage] = [:]
 
     private var visibleSavedRoutePreview: MapSavedRouteOverlay? {
         let content = SavedRouteMapPolicy.content(
@@ -331,6 +333,7 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
+        context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos, location: location)
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: uiView)
         context.coordinator.applyAppearanceIfNeeded(
             appearance,
@@ -463,6 +466,8 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
+        let socialLayer = SocialMapLayer()
+
         private let contourLabels = BicinoContourLabels()
         private var displayedTopographyOverlay: MKTileOverlay?
 #if DEBUG
@@ -1117,6 +1122,7 @@ struct MapViewContainer: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            socialLayer.layout()
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--contour-tile-diagnostics"),
                contourDiagnosticCount < 32, mapView.visibleMapRect.width > 0 {
@@ -1383,6 +1389,9 @@ struct MapViewContainer: UIViewRepresentable {
 
         
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            if let rider = annotation as? SocialRiderAnnotation {
+                return socialLayer.annotationView(rider, map: mapView)
+            }
             if let label = annotation as? BicinoContourLabelAnnotation { return BicinoContourLabelAnnotation.view(on: mapView, annotation: label) }
             // Use default view for user location
             if annotation is MKUserLocation {

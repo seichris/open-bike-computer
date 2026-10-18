@@ -674,6 +674,17 @@
       ]
     },
     {
+      "id": "social-riders-host-tests",
+      "name": "Social rider image transport and safe-boundary host tests",
+      "component": "firmware_host",
+      "cwd": ".",
+      "command": "python3 esp32/tools/run_social_riders_tests.py",
+      "tools": [
+        "python3",
+        "c++"
+      ]
+    },
+    {
       "id": "ios-build-containers",
       "name": "Build and validate Debug/Release iOS containers",
       "component": "ios_native",
@@ -773,6 +784,20 @@
       "tools": [
         "python3",
         "g++"
+      ]
+    },
+    {
+      "id": "social-runtime-tests",
+      "name": "Social publishing, retry, reconnect and link contracts",
+      "component": "ios",
+      "cwd": ".",
+      "command": "python3 tools/development/swift_compile.py social-runtime -- -swift-version 6 -parse-as-library -o \"${TMPDIR}/social-runtime-tests\"\n\"${TMPDIR}/social-runtime-tests\"",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
       ]
     }
   ]

@@ -1333,7 +1333,9 @@ Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
 Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
 configurable display inactivity timeouts. Version `27` requests bit `29`,
 versioned workout zones. Version `28` requests bit `30`, topographic contours.
-The current iPhone client negotiates version `28`; older direct Watch clients
+Version `29` requests bit `31`, diagnostic terrain experiments. Version `30`
+requests the extended feature word (TLV type `3`), with bit `0` for group riders.
+The current iPhone client negotiates version `30`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
@@ -1366,7 +1368,17 @@ therefore unavailable in production.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
-carries the 14-byte screen-configuration limits and support masks. Types are unique;
+carries the 14-byte screen-configuration limits and support masks. TLV type `3`
+carries exactly four bytes of little-endian extended feature flags, independently
+numbered from the first word. Its bit `0` is `group_riders_v1`; absent means zero.
+Because extended bits restart at zero, generated constants for this word carry
+their own prefix (`EXTENDED_GROUP_RIDERS_V1_FEATURE` in C++,
+`extendedGroupRidersV1Feature` in Swift) so they cannot be mistaken for the
+first word's same-valued bit.
+Firmware includes this extension only when at least one extended feature is
+available to the negotiated client. Bit `31` of the first word remains terrain;
+it never enables social packets. Older clients skip the new TLV, and version-29
+firmware remains usable without group riders. Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
 well-formed types are skipped. Firmware sends legacy `CAPS` to clients below
 version `10`, preserving the version `7...9` extended-byte contract, and current
@@ -2618,3 +2630,59 @@ transfers are deduplicated, and absent/rejected receipts retry with 30–300 sec
 backoff when activated. Repeated keychain deletion is idempotent and scoped to the
 same DeviceID and ControllerID; an old receipt cannot revoke a successor key.
 Bike settings expose pending cleanup until it settles.
+
+## Group rider portraits (GRUP v1, diagnostic rollout)
+
+CAP2 extended feature word (TLV type `3`) bit `0` (`group_riders_v1`) requires
+client version `30`, owner-authenticated
+navigation writes, at least ATT MTU 150, PSRAM allocation, and diagnostic firmware.
+Scoped Watch sessions cannot send these packets. Production does not advertise
+the feature until physical display/transport qualification is recorded.
+
+All fields are little endian. Packets use the existing protected navigation
+characteristic, not a new characteristic. The 10-byte header is `GRUP`, version
+`1` (u8), operation (u8), and a nonzero per-session epoch (u32). Phone resets the
+epoch on connection, account, or ride change; disconnect/auth reset erases state
+and pixel caches. An identical state retransmission is acknowledged as applied,
+but never renews its position age; a reused sequence with different fields is stale.
+The UI compares each badge presentation before touching LVGL and copies portrait
+pixels only when its committed hash changes. Off-screen placement uses the ray
+from the viewport center to the camera-projected rider, including near-plane
+clipping; colliding badges retain the nearest rider. Up to eight stable local slots represent the nearest riders;
+no Firebase UID, public ID, URL, or account token reaches firmware. Slot changes
+are incremental within a session: an unchanged rider keeps its slot and committed
+portrait, a rider who leaves or stops sharing before expiry is removed with
+operation `2` at once, and a slot is cleared before reuse only when a nearer
+rider replaces its occupant. A rider whose position expired stays parked in its
+slot (firmware already hides it after 60 seconds), so a return resumes with the
+same portrait hash and no transfer. The phone starts a new epoch (operation `0`)
+only for a new BLE session, account, room or hardware capability, or when the
+device answers a state or remove with result `1` because it no longer knows the
+session.
+
+| Operation | Bytes after header | Meaning |
+| --- | --- | --- |
+| 0 reset | none | Start epoch; repeated same-epoch reset is idempotent |
+| 1 state | slot:u8, sequence:u32, lat:i32 E6, lon:i32 E6, age:u16 seconds, accuracy:u16 meters, course:u16 degrees or 65535, ASCII initials:4, pixel SHA256:32 | Exactly 65 bytes; WGS-84; reject invalid coordinates, age >=60, accuracy >100, or old sequence |
+| 2 remove | slot:u8 | Immediately clear this slot and matching staging transfer |
+| 3 image begin | slot:u8, SHA256:32 | One shared staging image; hash must match the current rider reference |
+| 4 image chunk | slot:u8, offset:u16, 1–112 pixel bytes | Contiguous byte offsets; identical repeated chunks are safe |
+| 5 image commit | slot:u8 | Exactly 3200 bytes of 40×40 RGB565 little endian; SHA256 verified before atomic publication |
+
+Each accepted protocol attempt returns protected `GACK` (17 bytes): magic:4,
+epoch:u32, slot:u8 (255 for reset), next image offset:u16, result:u8,
+operation:u8, current rider sequence:u32. Result 0=applied, 1=stale/session or
+offset mismatch, 2=malformed, 3=image hash mismatch. The phone permits only one
+outstanding operation, checks epoch/slot/operation/sequence/offset, and retries at
+most three times with a two-second ACK timeout. Navigation retains queue priority.
+Image errors leave an initials fallback and never publish partial pixels.
+
+Age includes server-reported capture age plus monotonic elapsed time; retries
+cannot refresh an old fix. Rider markers fade at 15 seconds and expire at 60.
+The complete portrait/distance footprint is constrained to the round screen (or
+a rectangular safe boundary for 2.06-inch). Offscreen bearing is derived from
+fresh own GPS through the same visible map projection; its distance is straight
+line distance, distinct from the phone's confident same-route progress gap.
+Overlapping footprints show a count badge. Pan/zoom gestures hide the layer until
+the published projection is stable. The existing full-buffer/full-refresh display
+strategy is unchanged.

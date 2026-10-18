@@ -3863,8 +3863,37 @@ extension NavigationProtocolTests {
             Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 0, 0xc0])),
             "CAP2 terrain capability is accepted")
         assert(manager.supportsTerrainExperiments, "CAP2 bit 31 unlocks experimental Map presets")
+        assert(!manager.supportsGroupRiders, "terrain bit 31 must never unlock social packets")
+        assert(RideBLEGeneratedProtocolV1.extendedGroupRidersV1Feature == 1 << 0 &&
+               RideBLEGeneratedProtocolV1.extendedGroupRidersV1MinimumClientVersion == 30 &&
+               RideBLEGeneratedProtocolV1.terrainExperimentsFeature == 1 << 31,
+               "extended-word constants carry their own prefix and keep the shipped wire values")
+        let groupTLV = Data([RideBLEGeneratedProtocolV1.extendedFeatureTLVType, 4, 1, 0, 0, 0])
+        let groupCapabilities = Data("CAP2".utf8) + Data([1, 0, 0, 0, 0]) + groupTLV
+        assert(manager.handleDeviceCapabilitiesNotification(groupCapabilities),
+               "extended feature word is accepted independently")
+        assert(manager.supportsGroupRiders && !manager.supportsTerrainExperiments,
+               "extended bit 0 advertises group riders without terrain")
+        let bothCapabilities = Data("CAP2".utf8) + Data([1, 0, 0, 0, 0xc0]) + groupTLV
+        assert(manager.handleDeviceCapabilitiesNotification(bothCapabilities),
+               "terrain and group riders coexist")
+        assert(manager.supportsGroupRiders && manager.supportsTerrainExperiments,
+               "both words are interpreted independently")
+        assert(manager.handleDeviceCapabilitiesNotification(bothCapabilities + groupTLV),
+               "duplicate extended words are consumed for retry")
+        assert(!manager.supportsGroupRiders && !manager.supportsTerrainExperiments,
+               "duplicate TLVs reject the complete response")
+        for invalid in [Data([3, 3, 1, 0, 0]), Data([3, 4, 1, 0])] {
+            assert(manager.handleDeviceCapabilitiesNotification(capabilities + invalid),
+                   "invalid extended words are consumed for retry")
+            assert(!manager.supportsGroupRiders, "malformed extensions cannot enable social")
+        }
+        assert(manager.handleDeviceCapabilitiesNotification(
+            groupCapabilities + Data([254, 1, 42])), "unknown well-formed TLVs remain compatible")
+        assert(manager.supportsGroupRiders, "unknown TLV does not hide known extended flags")
         assert(manager.handleDeviceCapabilitiesNotification(capabilities), "legacy capabilities remain accepted")
         assert(!manager.supportsTerrainExperiments, "renegotiation clears terrain capability")
+        assert(!manager.supportsGroupRiders, "missing extended word clears social on renegotiation")
         let status = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
             """
             {"enabled":true,"activeMapId":"topo-map","activeRendererFormat":4,"topographyProfileVersion":1,"topographyQualityMode":"standard-20m-v1","contourMinorIntervalM":20,"contourIndexIntervalM":100,"contourNoDataMillionths":0,"containsContours":true,"topographySourcePolicyReceiptPrefix":"abcdef012345","topographySectionHealthy":true}

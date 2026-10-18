@@ -1067,6 +1067,8 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsStreetLabels: Bool = false
     @Published private(set) var supports3DBuildings: Bool = false
     @Published private(set) var supportsMapNavigationOrientation = false
+    @Published private(set) var supportsGroupRiders = false
+    var onSocialAcknowledgement: ((Data) -> Void)?
     @Published private(set) var supportsTerrainExperiments = false
     @Published private(set) var supportsTopographicContours = false
     @Published private(set) var supportsExplicitInvalidGPSHeading: Bool = false
@@ -5627,6 +5629,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsMapNavigationOrientation = false
         supportsTerrainExperiments = false
         supportsTopographicContours = false
+        supportsGroupRiders = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -7044,6 +7047,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsMapNavigationOrientation = false
         supportsTerrainExperiments = false
         supportsTopographicContours = false
+        supportsGroupRiders = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -10525,6 +10529,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsMapNavigationOrientation = false
         supportsTerrainExperiments = false
         supportsTopographicContours = false
+        supportsGroupRiders = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -10579,6 +10584,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let powerButtonConfig: Data?
         var screenConfigurationCapabilities:
             DeviceScreenConfigurationCapabilities? = nil
+        var extendedFeatureFlags: UInt32 = 0
         if prefix == DeviceBLEProtocol.deviceCapabilitiesPrefix {
             guard data.count == 5 || data.count == 6 ||
                     data.count == 8 || data.count == 9 else {
@@ -10624,6 +10630,15 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         break
                     }
                     parsedPowerConfig = data.subdata(in: offset..<(offset + length))
+                } else if type == RideBLEGeneratedProtocolV1.extendedFeatureTLVType {
+                    guard length == 4 else {
+                        valid = false
+                        break
+                    }
+                    extendedFeatureFlags = UInt32(data[offset]) |
+                        (UInt32(data[offset + 1]) << 8) |
+                        (UInt32(data[offset + 2]) << 16) |
+                        (UInt32(data[offset + 3]) << 24)
                 } else if type == RideBLEGeneratedProtocolV1
                     .screenConfigurationCapabilityTLVType {
                     guard let parsed = DeviceScreenConfigurationCapabilities(
@@ -10684,6 +10699,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             flags & DeviceBLEProtocol.rideAutomationCapabilityMask != 0
         let hasExplicitInvalidGPSHeading =
             flags & DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask != 0
+        supportsGroupRiders = extendedFeatureFlags & RideBLEGeneratedProtocolV1.extendedGroupRidersV1Feature != 0
         let hasScopedWatchController =
             flags & DeviceBLEProtocol.scopedWatchControllerCapabilityMask != 0
         let hasRemoteDeviceDebug =
@@ -10918,6 +10934,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     }
 
     @discardableResult
+    func sendSocialPacket(_ data: Data) -> Bool {
+        guard supportsGroupRiders, isNavigationReady else { return false }
+        return sendFallbackMapPacket(data, label: "group rider", writeClass: .settingsControl, atomically: true)
+    }
+
+    @discardableResult
     func sendWorldRadioStatus(_ status: WorldRadioStatus) -> Bool {
         guard supportsWorldRadio, isNavigationReady,
               let payload = status.encoded() else {
@@ -10935,6 +10957,10 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
 
     @discardableResult
     func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
+        if data.starts(with: Data("GACK".utf8)) {
+            if isNavigationReady && supportsGroupRiders && data.count == 17 { onSocialAcknowledgement?(data) }
+            return true
+        }
         if data.starts(with: RideBLEApplicationAcknowledgementV1.prefix) {
             guard supportsRideDeliveryAcknowledgement,
                   let acknowledgement =
