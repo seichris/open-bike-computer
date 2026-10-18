@@ -2190,7 +2190,7 @@ bool Maps::drawContourLabels(
   using namespace map_contour_labels;
   if (!(context.style.visibilityMask &
         map_profile_protocol::VISIBILITY_CONTOURS) ||
-      zoom > 4 || !surface.valid())
+      zoom > map_transform::kMaximumRuntimeZoom || !surface.valid())
     return true;
   const int width = surface.color.width, height = surface.color.height;
   // Conservative occupancy includes navigation, road strokes and street labels.
@@ -2284,57 +2284,68 @@ bool Maps::drawContourLabels(
                      candidates))
     return false;
   size_t considered = 0, placed = 0, segmentsVisited = 0;
-  const double spacing = 256.0 * std::max(1, int(zoom));
-  for (size_t candidate = 0; candidate < admittedCount; ++candidate) {
-    const auto *block = admitted[candidate].block;
-    const auto &record = block->contourData.records[admitted[candidate].record];
-    if (!(record.flags & 1))
-      continue;
-    for (size_t i = 1; i < record.pointCount; ++i) {
-      if (shouldCancelMapRenderWork())
-        return false;
-      if (++segmentsVisited > 8192)
-        return true;
-      auto a = block->contourData.points[record.pointOffset + i - 1],
-           b = block->contourData.points[record.pointOffset + i];
-      double ax = double(block->offset.x) + a.x,
-             ay = double(block->offset.y) + a.y,
-             bx = double(block->offset.x) + b.x,
-             by = double(block->offset.y) + b.y;
-      bool horizontal = std::abs(bx - ax) >= std::abs(by - ay);
-      double start = horizontal ? ax : ay, end = horizontal ? bx : by;
-      if (start == end)
+  std::array<int, 16> elevations{};
+  // Give each visible elevation a chance before repeating a nearby contour.
+  // Both passes share the existing candidate, segment and placement budgets.
+  for (int pass = 0; pass < 2; ++pass) {
+    for (size_t candidate = 0; candidate < admittedCount; ++candidate) {
+      const auto *block = admitted[candidate].block;
+      const auto &record = block->contourData.records[admitted[candidate].record];
+      if (!(record.flags & 1))
         continue;
-      double gridLine = std::ceil(std::min(start, end) / spacing) * spacing;
-      for (; gridLine < std::max(start, end); gridLine += spacing) {
-        double t = (gridLine - start) / (end - start);
-        auto p = project(ax + (bx - ax) * t, ay + (by - ay) * t);
-        if (!p.valid)
-          continue;
-        Box box{float(p.x), float(p.y),
-                float(characterCount(record.elevationM) * 12 + 8), 22};
-        if (box.x - box.w / 2 < 6 || box.y - 11 < 6 ||
-            box.x + box.w / 2 > width - 6 || box.y + 11 > height - 6)
-          continue;
-        if (++considered > 256 || placed == 16)
+      if (pass == 0 && std::find(elevations.begin(), elevations.begin() + placed,
+                                record.elevationM) != elevations.begin() + placed)
+        continue;
+      bool placedFirst = false;
+      for (size_t i = 1; i < record.pointCount; ++i) {
+        if (shouldCancelMapRenderWork())
+          return false;
+        if (++segmentsVisited > 8192)
           return true;
-        if (MAP_RENDER_ROUND_VIEWPORT) {
-          const float farX = std::abs(box.x - width / 2.f) + box.w / 2;
-          const float farY = std::abs(box.y - height / 2.f) + 11;
-          const float radius = std::min(width, height) / 2.f - 6;
-          if (farX * farX + farY * farY > radius * radius)
-            continue;
-        }
-        bool hit = false;
-        for (int y = int((box.y - 11) / ch); y <= int((box.y + 11) / ch); ++y)
-          for (int x = int((box.x - box.w / 2) / cw);
-               x <= int((box.x + box.w / 2) / cw); ++x)
-            hit |= occupied[y * 32 + x] != 0;
-        if (hit)
-          continue;
-        draw(surface, int(p.x), int(p.y), record.elevationM);
-        reserve({box.x, box.y, box.w + 52, box.h + 42});
-        ++placed;
+        auto a = block->contourData.points[record.pointOffset + i - 1],
+             b = block->contourData.points[record.pointOffset + i];
+        double ax = double(block->offset.x) + a.x,
+               ay = double(block->offset.y) + a.y,
+               bx = double(block->offset.x) + b.x,
+               by = double(block->offset.y) + b.y;
+        bool exhausted = false;
+        visitAnchors(ax, ay, bx, by, zoom, [&](double x, double y) {
+          auto p = project(x, y);
+          if (!p.valid)
+            return true;
+          Box box{float(p.x), float(p.y),
+                  float(characterCount(record.elevationM) * 12 + 8), 22};
+          if (box.x - box.w / 2 < 6 || box.y - 11 < 6 ||
+              box.x + box.w / 2 > width - 6 || box.y + 11 > height - 6)
+            return true;
+          if (++considered > 256 || placed == elevations.size()) {
+            exhausted = true;
+            return false;
+          }
+          if (MAP_RENDER_ROUND_VIEWPORT) {
+            const float farX = std::abs(box.x - width / 2.f) + box.w / 2;
+            const float farY = std::abs(box.y - height / 2.f) + 11;
+            const float radius = std::min(width, height) / 2.f - 6;
+            if (farX * farX + farY * farY > radius * radius)
+              return true;
+          }
+          bool hit = false;
+          for (int y = int((box.y - 11) / ch); y <= int((box.y + 11) / ch); ++y)
+            for (int x = int((box.x - box.w / 2) / cw);
+                 x <= int((box.x + box.w / 2) / cw); ++x)
+              hit |= occupied[y * 32 + x] != 0;
+          if (hit)
+            return true;
+          draw(surface, int(p.x), int(p.y), record.elevationM);
+          reserve({box.x, box.y, box.w + 52, box.h + 42});
+          elevations[placed++] = record.elevationM;
+          placedFirst = pass == 0;
+          return !placedFirst;
+        });
+        if (exhausted)
+          return true;
+        if (placedFirst)
+          break;
       }
     }
   }

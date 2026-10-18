@@ -58,6 +58,37 @@ int main() {
   data.back() = 91;
   assert(!grid.decode(data.data(), data.size()));
   using namespace map_contour_labels;
+  // A short visible contour between the old 256 m grid lines got no label
+  // candidate. The screen-scaled lattice supplies opportunities at close zoom.
+  std::vector<double> anchors;
+  visitAnchors(100, 50, 200, 50, 1, [&](double x, double y) {
+    assert(y == 50);
+    anchors.push_back(x);
+    return true;
+  });
+  assert((anchors == std::vector<double>{128, 192}));
+  for (uint8_t zoom = 1; zoom <= map_transform::kMaximumRuntimeZoom; ++zoom)
+    assert(std::abs(anchorSpacing(zoom) *
+                    map_transform::worldToScreenScale(zoom) - 96) < 0.001);
+  // Splitting at a block boundary must not duplicate or shift world anchors,
+  // including negative coordinates and reversed contour records.
+  std::vector<double> whole, split;
+  auto collect = [&](std::vector<double> &out, double ax, double bx) {
+    visitAnchors(ax, 50, bx, 50, 1, [&](double x, double) {
+      out.push_back(x);
+      return true;
+    });
+  };
+  collect(whole, -200, 200);
+  collect(split, 0, -200);
+  collect(split, 200, 0);
+  assert(whole == split);
+  size_t visits = 0;
+  visitAnchors(0, -200, 0, 200, 1, [&](double, double) {
+    ++visits;
+    return false; // Placement/candidate budgets stop enumeration immediately.
+  });
+  assert(visits == 1);
   assert(segmentHits({50, 50, 20, 10}, 0, 50, 100, 50, 2));
   assert(!segmentHits({50, 50, 20, 10}, 0, 10, 100, 10, 2));
   assert(segmentHits({50, 50, 20, 10}, 50, 50, 50, 50, 2));

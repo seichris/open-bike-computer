@@ -87,7 +87,13 @@ import UIKit
                      "reservation refresh must apply a delta when the selected anchors are unchanged")
         marker.coordinate = initial[0].coordinate
         labels.update(on: map, overlay: overlay)
-        try await Task.sleep(for: .milliseconds(200))
+        // Layout debounces for 100 ms, then resumes on the main actor. A fixed
+        // 200 ms delay raced that continuation on a busy CI runner.
+        let deadline = ContinuousClock.now + .seconds(5)
+        while contourAnnotations(map).contains(where: { $0 === initial[0] }),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
         let movedIDs = Set(contourAnnotations(map).map(ObjectIdentifier.init))
         precondition(!movedIDs.contains(ObjectIdentifier(initial[0])))
         precondition(!movedIDs.intersection(initialIDs).isEmpty,

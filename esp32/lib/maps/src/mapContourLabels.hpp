@@ -1,11 +1,34 @@
 #pragma once
 #include "mapSurface.hpp"
+#include "mapTransform.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 namespace map_contour_labels {
+// Keep candidate opportunities roughly 96 screen pixels apart at every zoom.
+// A world-fixed lattice keeps anchors stable through panning and block splits.
+inline double anchorSpacing(uint8_t zoom) {
+  return 96.0 / map_transform::worldToScreenScale(zoom);
+}
+template <typename Visitor>
+inline void visitAnchors(double ax, double ay, double bx, double by,
+                         uint8_t zoom, Visitor visit) {
+  const bool horizontal = std::abs(bx - ax) >= std::abs(by - ay);
+  const double start = horizontal ? ax : ay, end = horizontal ? bx : by;
+  if (start == end)
+    return;
+  const double spacing = anchorSpacing(zoom);
+  for (double grid = std::ceil(std::min(start, end) / spacing) * spacing;
+       grid < std::max(start, end); grid += spacing) {
+    const double t = (grid - start) / (end - start);
+    // Preserve the exact lattice coordinate when record direction changes.
+    if (!visit(horizontal ? grid : ax + (bx - ax) * t,
+               horizontal ? ay + (by - ay) * t : grid))
+      break;
+  }
+}
 struct Box {
   float x = 0, y = 0, w = 0, h = 0;
 };
