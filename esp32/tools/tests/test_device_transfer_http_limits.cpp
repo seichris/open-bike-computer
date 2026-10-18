@@ -35,6 +35,7 @@ int main() {
   for (const auto &line : {"", "GET", "GET /path", "GET /path HTTP/1.1 extra"}) {
     std::string method, path;
     assert(!device_transfer::parseHttpRequestLine(line, method, path));
+  }
   {
     device_transfer::HttpSecurityHeaders headers;
     headers.accept("x-map-operation-id",std::string(32,'a'));
