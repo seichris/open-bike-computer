@@ -81,7 +81,8 @@ class RideDiagnosticsIOSContractTests(unittest.TestCase):
             TRANSFER_MANAGER.index("private func ownsConnection")
         ]
         self.assertIn("operationLease == nil, cleanupTask == nil", begin)
-        self.assertIn("coordinator.reconcileClear(deviceID: deviceID)", begin)
+        self.assertIn("try await coordinator.recover(", begin)
+        self.assertIn("requestStatus: { bleManager.requestDeviceTransferStatus() }", begin)
         cleanup = TRANSFER_MANAGER[
             TRANSFER_MANAGER.index("private func cleanupOperation") :
             TRANSFER_MANAGER.index("func releaseFirmwareAfterReboot")

@@ -14,12 +14,22 @@ class DeviceOperationLifecycleContractTests(unittest.TestCase):
     def test_reconnect_cleanup_requires_fresh_exact_authorization(self):
         begin = MANAGER[MANAGER.index("private func beginOperation"):MANAGER.index("private static func authorizationDigest")]
         self.assertIn("bleManager.isNavigationReady", begin)
-        self.assertIn("stored.deviceID == deviceID", begin)
-        self.assertIn("stored.mode == bleManager.deviceTransferMode", begin)
-        self.assertIn("coordinator.transferGeneration == bleManager.deviceTransferGeneration", begin)
-        self.assertIn("coordinator.tokenDigest == Self.authorizationDigest(token)", begin)
-        self.assertIn("deviceTransferStatusRevision != revision", begin)
-        self.assertLess(begin.index("coordinator.tokenDigest =="), begin.index("coordinator.adoptUnresolved("))
+        self.assertIn("try await coordinator.recover(", begin)
+        self.assertIn("deviceID: bleManager.connectedDeviceID", begin)
+        self.assertIn("connectionEpoch: bleManager.transferConnectionEpoch", begin)
+        self.assertIn("revision: bleManager.deviceTransferStatusRevision", begin)
+        self.assertIn("mode: bleManager.deviceTransferMode", begin)
+        self.assertIn("Self.authorizationDigest($0)", begin)
+        self.assertIn("transferGeneration: bleManager.deviceTransferGeneration", begin)
+        recovery = REGISTRY[REGISTRY.index("func recover("):REGISTRY.index("init(defaults:")]
+        self.assertIn("stored.deviceID == deviceID", recovery)
+        self.assertIn("current.connectionEpoch == connectionEpoch", recovery)
+        self.assertIn("current.mode == stored.mode", recovery)
+        self.assertIn("current.transferGeneration == transferGeneration", recovery)
+        self.assertIn("current.tokenDigest == tokenDigest", recovery)
+        self.assertIn("current.revision != revision", recovery)
+        self.assertLess(recovery.index("current.tokenDigest == tokenDigest"),
+                        recovery.index("adoptUnresolved(epoch:"))
         self.assertIn("SHA256.hash(data: Data(token.utf8))", MANAGER)
         record = REGISTRY[REGISTRY.index("private struct CleanupRecord"):REGISTRY.index("static let shared")]
         self.assertIn("tokenDigest", record)
