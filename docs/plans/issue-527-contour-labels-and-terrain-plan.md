@@ -146,6 +146,15 @@ surface on phone and device. Tint incorporates hillshade; slope is an alternativ
 color meaning. Existing maps and companion v1 remain readable. New phone labels
 and terrain require regeneration of an experimental map pair.
 
+iPhone contour presentation extends through zoom 7, two levels beyond the
+signed companion's native zoom 9 minimum. These display-only overview tiles
+combine at most 16 verified native tiles, decoding one child at a time.
+Composition is serialized by the companion actor, allocates its canvas only
+for a populated tile, and caches only the finished output in the existing
+4 MiB/128-entry cache. Native zoom 9–16 bytes and companion
+validation remain unchanged; existing downloads gain the wider view without
+regeneration. China coordinate alignment also applies to the overview levels.
+
 Source/build tests do not establish daylight readability, optical seams,
 motion stability, measured on-device frame time or battery impact. These remain
 required before promotion. Apple base-map labels are owned by MapKit; numeric

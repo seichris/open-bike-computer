@@ -42,7 +42,7 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     super.init(urlTemplate: nil)
     canReplaceMapContent = false
     tileSize = CGSize(width: 256, height: 256)
-    minimumZ = metadata.minimumZoom
+    minimumZ = TopographyContourOverview.minimumZoom
     maximumZ = metadata.maximumZoom
     isGeometryFlipped = false
     memoryWarningObserver = NotificationCenter.default.addObserver(
@@ -136,10 +136,10 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
           data = try await TopographyMapKitTileWarp.tile(
             z: z, x: x, y: y, scale: scale
           ) { z, x, y, scale in
-            try await store.tile(z: z, x: x, y: y, scale: scale)
+            try await store.displayTile(z: z, x: x, y: y, scale: scale)
           }
         } else {
-          data = try await store.tile(z: z, x: x, y: y, scale: scale)
+          data = try await store.displayTile(z: z, x: x, y: y, scale: scale)
         }
         try Task.checkCancellation()
         reply.complete(data ?? Self.transparentPNG, nil)

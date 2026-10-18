@@ -40,7 +40,7 @@ nonisolated enum TopographyMapKitTileWarp {
         scale: Int,
         loader: TileLoader
     ) async throws -> Data? {
-        guard (9...16).contains(z), scale == 1 || scale == 2,
+        guard (TopographyContourOverview.minimumZoom...16).contains(z), scale == 1 || scale == 2,
               x >= 0, y >= 0, x < (1 << z), y < (1 << z) else { return nil }
 
         let side = tileSide * scale

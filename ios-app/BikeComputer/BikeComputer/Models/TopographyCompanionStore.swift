@@ -508,7 +508,31 @@ actor TopographyCompanionStore {
         return output
     }
 
+    // Composition stays synchronous on this actor: only one overview buffer
+    // exists per companion, and cancellation is checked between child reads.
+    func displayTile(z: Int, x: Int, y: Int, scale: Int) throws -> Data? {
+        if z >= TopographyContourOverview.nativeMinimumZoom {
+            return try tile(z: z, x: x, y: y, scale: scale)
+        }
+        try Task.checkCancellation()
+        guard database != nil, metadata != nil else { throw TopographyCompanionError.closed }
+        let key = TileKey(z: z, x: x, y: y, scale: scale)
+        if let data = tileCache[key] { return data }
+        let data = try TopographyContourOverview.tile(z: z, x: x, y: y, scale: scale) {
+            [self] z, x, y, scale in
+            try self.readTile(z: z, x: x, y: y, scale: scale, cacheResult: false)
+        }
+        try Task.checkCancellation()
+        guard database != nil else { throw TopographyCompanionError.closed }
+        if let data { cache(data, for: key) }
+        return data
+    }
+
     func tile(z: Int, x: Int, y: Int, scale: Int) throws -> Data? {
+        try readTile(z: z, x: x, y: y, scale: scale, cacheResult: true)
+    }
+
+    private func readTile(z: Int, x: Int, y: Int, scale: Int, cacheResult: Bool) throws -> Data? {
         try Task.checkCancellation()
         guard let database, metadata != nil else { throw TopographyCompanionError.closed }
         let key = TileKey(z: z, x: x, y: y, scale: scale)
@@ -521,12 +545,20 @@ actor TopographyCompanionStore {
         if status == SQLITE_DONE { return nil }
         guard status == SQLITE_ROW else { throw TopographyCompanionError.database }
         let data = try Self.tileData(statement, pngColumn: 0, shaColumn: 1, scale: scale)
+        if cacheResult { cache(data, for: key) }
+        return data
+    }
+
+    private func cache(_ data: Data, for key: TileKey) {
+        if let previous = tileCache.removeValue(forKey: key) {
+            cacheBytes -= previous.count
+            cacheOrder.removeAll { $0 == key }
+        }
         while cacheBytes + data.count > Self.cacheLimit || cacheOrder.count >= 128 {
             let oldest = cacheOrder.removeFirst()
             cacheBytes -= tileCache.removeValue(forKey: oldest)?.count ?? 0
         }
         tileCache[key] = data; cacheOrder.append(key); cacheBytes += data.count
-        return data
     }
 
     func close() {
