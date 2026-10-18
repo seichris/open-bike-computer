@@ -158,6 +158,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
     let fileCount: Int
     let payloadBytes: Int64
     let rendererFormatVersion: Int
+    let containsTerrain: Bool
     let topography: VerifiedBikeMapTopography?
 
     fileprivate init(
@@ -182,6 +183,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         fileCount: Int,
         payloadBytes: Int64,
         rendererFormatVersion: Int,
+        containsTerrain: Bool,
         topography: VerifiedBikeMapTopography?
     ) {
         self.url = url
@@ -205,6 +207,7 @@ nonisolated struct VerifiedBikeMapArtifact: Equatable {
         self.fileCount = fileCount
         self.payloadBytes = payloadBytes
         self.rendererFormatVersion = rendererFormatVersion
+        self.containsTerrain = containsTerrain
         self.topography = topography
     }
 }
@@ -403,7 +406,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
     private static let lowercaseSHA256Pattern = "^[0-9a-f]{64}$"
     private static let safeMapIDPattern = "^[A-Za-z0-9._-]+$"
     private static let mapPathPattern =
-        "^VECTMAP/[A-Za-z0-9._-]+/(?:[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\\.fm[bp]|assets/street-labels\\.fma)$"
+        "^VECTMAP/[A-Za-z0-9._-]+/(?:[A-Za-z0-9+._-]+/[A-Za-z0-9+._-]+\\.fm[bpe]|assets/street-labels\\.fma)$"
 
     struct Manifest: Decodable {
         struct Producer: Decodable {
@@ -759,6 +762,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
             fileCount: manifest.files.count,
             payloadBytes: Int64(header.payloadBytes),
             rendererFormatVersion: manifest.target.formatVersion,
+            containsTerrain: manifest.files.contains { $0.path.hasSuffix(".fme") },
             topography: manifest.topography.map { topography in
                 VerifiedBikeMapTopography(
                     profileVersion: topography.profileVersion,
@@ -1000,7 +1004,11 @@ nonisolated enum BikeMapStreamArtifactValidator {
         path: String,
         rendererFormatVersion: Int
     ) throws {
-        if path.hasSuffix(".fmb") {
+        if path.hasSuffix(".fme") {
+            guard rendererFormatVersion == 4, prefix == Data("FME1".utf8) else {
+                throw BikeMapStreamFormatError.invalidManifest("terrain header does not match its target")
+            }
+        } else if path.hasSuffix(".fmb") {
             guard prefix.count == 4,
                   prefix.prefix(3) == Data("FMB".utf8) else {
                 throw BikeMapStreamFormatError.invalidManifest(

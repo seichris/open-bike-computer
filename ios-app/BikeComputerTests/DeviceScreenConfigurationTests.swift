@@ -144,6 +144,16 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         ) == nil,
         "screen capability TLV rejects the wrong length"
     )
+    var profile = DeviceScreenMapProfile.mapDefault
+    profile.visibilityMask |= DeviceScreenMapProfile.contoursVisibilityMask
+    profile.labelDensity = 3
+    profile.visibilityMask &= ~UInt32(1 << 8)
+    let originalProfile = profile
+    profile.setTerrainVisibility(1 << 17)
+    assert(profile.isValid(for: .map))
+    assert(!profile.isValid(for: .mapPlusNavigation), "terrain must not hide navigation overlays")
+    profile.setTerrainVisibility(0)
+    assertEqual(profile, originalProfile, "3D round trip preserves layers and labels")
     let document = DeviceScreenConfigurationDocument.legacyDefault
     guard let encoded = try? DeviceScreenConfigurationCodec.encode(document),
           let decoded = try? DeviceScreenConfigurationCodec.decode(encoded) else {

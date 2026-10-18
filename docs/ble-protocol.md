@@ -2321,6 +2321,32 @@ contract generates Swift/C++ constants and append-only widget IDs. Golden
 packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
 by both languages.
 
+### Experimental terrain map presets (client 29)
+
+CAP2 bit 31 (`terrain_experiments`) is advertised only by diagnostics firmware.
+It enables presets of existing configurable `Map` screen instances: Hillshade,
+Tint & Slope, and 3D Terrain. There are no new screen IDs or larger legacy masks.
+The instance's UInt32 visibility field uses bits 14 hillshade, 15 elevation tint,
+16 slope shading, and 17 terrain height exploration. Tint combines bits 14+15;
+slope uses bit 16 independently. Ordinary Map and Map+Navigation defaults do not
+change. Terrain bits are valid only on Map instances; incoming production
+commands reject them. Loading a local diagnostics-era layout on production
+masks these bits while preserving the revision, instances, and other settings.
+Signed FME1 sidecars remain accepted and fully validated on production so
+saved maps and activation recovery work across a firmware change. Production
+does not load or render the terrain grids. The phone still requires the
+terrain capability before transferring a terrain-bearing saved artifact, since
+older contour-capable firmware cannot accept FME1. This check uses the verified
+signed manifest, including for saved maps without terrain metadata. Custom
+cutouts require an explicit terrain opt-in instead of assuming a diagnostics peer.
+
+Contour numbers follow bit 13 in both existing map screens, independently of
+street-label density. Firmware-owned numeric glyphs support existing font packs.
+3D Terrain is an isolated height-surface experiment; route/position overlays
+are suppressed because navigation has not been qualified on a draped surface.
+These screens must pass separate physical performance/readability gates before
+any production enablement. Old maps without FME1 sidecars remain readable.
+
 ### Device operation lifecycle clarification
 
 Signed-stream HTTP `ready` acknowledges validated/finalized staging, not an

@@ -4302,6 +4302,9 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE;
     }
+    if (map_profile_protocol::VISIBILITY_TERRAIN != 0 && clientVersion >=
+        ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_MINIMUM_CLIENT_VERSION)
+      featureFlags |= ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE;
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
@@ -5450,7 +5453,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
         normalizedMapFeatureVisibilityMask(mask);
     if (mirrorLegacyMapProfile) {
       mapRenderSettings.mapNavigationStyle.visibilityMask =
-          mapRenderSettings.mapStyle.visibilityMask;
+          mapRenderSettings.mapStyle.visibilityMask & ~map_profile_protocol::TERRAIN_EXPERIMENT_MASK;
     }
     mapRenderSettings.navigationOverlayVisibilityMask =
         mask & MAP_VISIBILITY_OVERLAY_MASK;
@@ -5485,7 +5488,8 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   case 20:
     mapRenderSettings.mapNavigationStyle.visibilityMask =
-        normalizedMapFeatureVisibilityMask((uint32_t)settingValue);
+        normalizedMapFeatureVisibilityMask((uint32_t)settingValue) &
+        ~map_profile_protocol::TERRAIN_EXPERIMENT_MASK;
     persistMapProfileSetting();
     break;
   case 21:
