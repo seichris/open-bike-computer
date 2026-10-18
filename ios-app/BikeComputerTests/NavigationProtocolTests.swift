@@ -822,6 +822,13 @@ struct NavigationProtocolTests {
             print("Map operation recovery regression passed")
             return
         }
+        if CommandLine.arguments.contains("--debug-cleanup-only") {
+            await testDeviceTransferManagerConfirmsDebugExit()
+            await testBrowserDebugExitReleasesLeaseAfterFreshConfirmation()
+            await testDeviceTransferManagerCompensatesCancelledDebugEntry()
+            print("Debug shutdown and delayed confirmation regressions passed")
+            return
+        }
         testIconMapping()
         testRouteEndpointExtraction()
         testRouteRemainingDistance()

@@ -1001,6 +1001,7 @@ final class DeviceTransferManager {
                         self.operationLease = recovered
                         self.authorizationToken = bleManager.deviceTransferSessionToken
                         self.authorizationGeneration = bleManager.deviceTransferGeneration
+                        self.observeDebugStatus(bleManager: bleManager)
                     } else {
                         clear = true
                     }
