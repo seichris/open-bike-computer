@@ -77,6 +77,20 @@ class RequestBodyLimitMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(received_by_app, original_messages)
         self.assertEqual(response_messages[0]["status"], 204)
 
+    async def test_map_api_has_no_implicit_social_body_limit_bypass(self):
+        calls=[]
+        async def app(scope,receive,send): calls.append(scope['path'])
+        for overrides,expected in [({},413),({('PUT','/v1/social/me/avatar'):10},None)]:
+            for path in ['/v1/jobs','/v1/social/me/avatar']:
+                responses=[]
+                async def receive(): return {'type':'http.request','body':b'123456','more_body':False}
+                async def send(message): responses.append(message)
+                middleware=RequestBodyLimitMiddleware(app,max_body_bytes=5,body_limits=overrides)
+                await middleware({'type':'http','method':'PUT','path':path,'headers':[]},receive,send)
+                if ('PUT',path) in overrides:self.assertEqual(responses,[])
+                else:self.assertEqual(responses[0]['status'],413)
+        self.assertEqual(calls,['/v1/social/me/avatar'])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -683,6 +683,14 @@
       "sources": [
         "ios-app/tests/ble-restoration-host/CoreBluetooth.swift"
       ]
+    },
+    "social-runtime": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Models/SocialModels.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/BicinoSocialClient.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/LiveRideService.swift",
+        "ios-app/BikeComputerTests/SocialRuntimeTests.swift"
+      ]
     }
   }
 }

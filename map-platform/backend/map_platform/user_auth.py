@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections import OrderedDict
+from threading import Lock
 import time
 
 
@@ -13,16 +15,19 @@ class AccountPrincipal:
 
     def require_recent(self, now: float | None = None) -> None:
         age = (time.time() if now is None else now) - self.authenticated_at
-        if not 0 <= age <= 300:
+        if not -60 <= age <= 300:
             raise ValueError("reauthentication_required")
 
 
 class FirebaseIdentity:
-    def __init__(self, project: str):
+    def __init__(self, project: str, *, clock=time.monotonic):
         if not project:
             raise ValueError("BICINO_FIREBASE_PROJECT_ID is required")
         import firebase_admin
         self.project = project
+        self.clock = clock
+        self._revocation = OrderedDict()
+        self._revocation_lock = Lock()
         # Application Default Credentials; never accept credentials from a caller.
         try:
             self.app = firebase_admin.get_app("bicino-social")
@@ -37,7 +42,22 @@ class FirebaseIdentity:
         from firebase_admin import auth
         if not 100 <= len(token) <= 10000:
             raise ValueError("invalid_token")
-        claims = auth.verify_id_token(token, app=self.app, check_revoked=True)
+        # Signature, issuer, audience and expiry are verified on every request.
+        # Cache only provider revocation state for at most 30 seconds; SQL account
+        # deletion/block/consent authorization is still checked on every request.
+        claims = auth.verify_id_token(token, app=self.app, check_revoked=False)
+        uid = claims["uid"]
+        with self._revocation_lock:
+            cached = self._revocation.get(uid)
+            if cached is None or not 0 <= self.clock()-cached[0] < 30:
+                user = auth.get_user(uid, app=self.app)
+                cached = (self.clock(), user.disabled, user.tokens_valid_after_timestamp / 1000)
+                self._revocation[uid] = cached
+            self._revocation.move_to_end(uid)
+            while len(self._revocation) > 512:
+                self._revocation.popitem(last=False)
+        if cached[1] or claims["auth_time"] < cached[2]:
+            raise ValueError("revoked_token")
         return AccountPrincipal(self.project, claims["uid"], int(claims["auth_time"]))
 
     def status(self, uid: str) -> str:

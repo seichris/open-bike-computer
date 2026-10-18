@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from sqlalchemy import (BigInteger, Boolean, Column, Float, ForeignKey, Integer,
                         JSON, MetaData, String, Table, UniqueConstraint, create_engine,
-                        select, text)
+                        delete, null, select, text, update)
 
 metadata = MetaData()
 
@@ -76,7 +76,7 @@ members = Table("social_members", metadata,
     Column("sharing", Boolean, nullable=False, default=False),
     Column("stats", Boolean, nullable=False, default=False),
     Column("sequence", BigInteger, nullable=False, default=-1),
-    Column("live", JSON),
+    Column("live", JSON(none_as_null=True)),
     Column("received", Float),
     Column("lease", Float),
     Column("epoch", String(36), nullable=False))
@@ -148,13 +148,24 @@ class Database:
             metadata.create_all(connection)
             current = connection.scalar(select(versions.c.version))
             if current is None:
-                connection.execute(versions.insert().values(version=1))
-            elif current != 1:
+                connection.execute(versions.insert().values(version=2))
+            elif current == 1:
+                # Old replay payloads contain capabilities and route snapshots.
+                # Retire those receipts before serving the upgraded API.
+                connection.execute(delete(replays))
+                # V1 snapshots lack source ownership provenance. Retire those
+                # development rooms instead of keeping potentially redistributed
+                # routes or resuming old consent under the new lease contract.
+                connection.execute(update(rides).values(status="ended", route={}))
+                connection.execute(update(members).values(live=null(), sharing=False, stats=False, status="left"))
+                connection.execute(update(invites).values(status="revoked"))
+                connection.execute(update(versions).values(version=2))
+            elif current != 2:
                 raise ValueError("Unsupported social schema")
 
     def check_schema(self):
         with self.engine.connect() as c:
-            if c.scalar(select(versions.c.version)) != 1:
+            if c.scalar(select(versions.c.version)) != 2:
                 raise ValueError("Run social migration before enabling the service")
 
     @contextmanager

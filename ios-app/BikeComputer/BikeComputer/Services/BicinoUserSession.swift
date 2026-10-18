@@ -6,24 +6,8 @@ import FirebaseCore
 import GoogleSignIn
 import UIKit
 
-enum SocialFailure: LocalizedError {
-    case unavailable, signedOut, cancelled, accountChanged, invalidResponse
-    case server(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .unavailable: "Social riding is not configured for this build."
-        case .signedOut: "Sign in to use social riding."
-        case .cancelled: "Sign-in was cancelled."
-        case .accountChanged: "Your account changed. Try again."
-        case .invalidResponse: "Bicino returned an invalid response."
-        case .server(let code): code.replacingOccurrences(of: "_", with: " ").capitalized
-        }
-    }
-}
-
 @MainActor
-final class BicinoUserSession: NSObject, ObservableObject {
+final class BicinoUserSession: NSObject, ObservableObject, SocialAuthenticating {
     enum State: Equatable { case unavailable, restoring, signedOut, signedIn }
     @Published private(set) var state: State = .unavailable
     @Published private(set) var generation = UUID()
@@ -37,6 +21,10 @@ final class BicinoUserSession: NSObject, ObservableObject {
         super.init()
         let info = Bundle.main.infoDictionary ?? [:]
         guard (info["BicinoSocialEnabled"] as? String) == "YES",
+              let keychainGroup = info["BicinoSocialKeychainGroup"] as? String,
+              !keychainGroup.contains("$("), keychainGroup.hasSuffix("." + (Bundle.main.bundleIdentifier ?? "")),
+              let reversedID = info["BicinoGoogleReversedClientID"] as? String,
+              reversedID.hasPrefix("com.googleusercontent.apps."),
               let appID = info["BicinoFirebaseAppID"] as? String, !appID.isEmpty,
               let senderID = info["BicinoFirebaseSenderID"] as? String, !senderID.isEmpty,
               let apiKey = info["BicinoFirebaseAPIKey"] as? String, !apiKey.isEmpty,
@@ -50,6 +38,8 @@ final class BicinoUserSession: NSObject, ObservableObject {
         options.bundleID = Bundle.main.bundleIdentifier ?? ""
         if FirebaseApp.app() == nil { FirebaseApp.configure(options: options) }
         auth = Auth.auth()
+        do { try auth?.useUserAccessGroup(keychainGroup) }
+        catch { auth = nil; return }
         state = .restoring
         listener = auth?.addStateDidChangeListener { [weak self] _, user in
             Task { @MainActor [weak self] in
@@ -72,17 +62,26 @@ final class BicinoUserSession: NSObject, ObservableObject {
     func token(forceRefresh: Bool = false) async throws -> String {
         guard state == .signedIn, let user = auth?.currentUser else { throw SocialFailure.signedOut }
         let expected = generation
-        if forceRefresh, let refresh {
-            let value = try await refresh.value
+        do {
+            if forceRefresh, let refresh {
+                let value = try await refresh.value
+                guard expected == generation else { throw SocialFailure.accountChanged }
+                return value
+            }
+            let task = Task { try await user.getIDToken(forcingRefresh: forceRefresh) }
+            if forceRefresh { refresh = task }
+            defer { if forceRefresh { refresh = nil } }
+            let token = try await task.value
             guard expected == generation else { throw SocialFailure.accountChanged }
-            return value
+            return token
+        } catch {
+            guard expected == generation else { throw SocialFailure.accountChanged }
+            let failure = error as NSError
+            if failure.domain == AuthErrorDomain, failure.code == AuthErrorCode.userNotFound.rawValue {
+                throw SocialFailure.server("account_deleted")
+            }
+            throw error
         }
-        let task = Task { try await user.getIDToken(forcingRefresh: forceRefresh) }
-        if forceRefresh { refresh = task }
-        defer { if forceRefresh { refresh = nil } }
-        let token = try await task.value
-        guard expected == generation else { throw SocialFailure.accountChanged }
-        return token
     }
 
     func signInWithGoogle(reauthenticate: Bool = false, link: Bool = false) async throws {

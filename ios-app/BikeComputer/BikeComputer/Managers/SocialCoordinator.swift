@@ -49,7 +49,7 @@ final class SocialCoordinator: ObservableObject {
     init() {
         let session = BicinoUserSession()
         self.session = session
-        let client = BicinoSocialClient(session: session)
+        let client = BicinoSocialClient(session: session, baseURL: URL(string: OfflineMapServiceConfig.defaultServerURLString)?.appendingPathComponent("v1/social"))
         self.client = client
         live = LiveRideService(client: client)
         session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observers)
@@ -238,18 +238,13 @@ final class SocialCoordinator: ObservableObject {
             try await session.signInWithGoogle(reauthenticate: true)
         }
         await live.stopSharing()
-        _ = try await client.json("me/deletion", method: "POST", body: body)
+        try await client.deleteAccount(body: body)
         try await signOut()
     }
 
     func handleLink(_ url: URL) -> Bool {
-        let canonical: URL
-        if url.scheme == "https", url.host == "bicino.com" { canonical = url }
-        else if ["bikecomputer", "bikecomputer-dev"].contains(url.scheme ?? ""), url.host == "social",
-                let value = URL(string: "https://bicino.com/social" + url.path) { canonical = value }
-        else { return false }
-        guard canonical.path.hasPrefix("/social/") else { return false }
-        pendingLink = canonical
+        guard let target = SocialLinkTarget(url: url) else { return false }
+        pendingLink = target.canonicalURL
         return true
     }
 }

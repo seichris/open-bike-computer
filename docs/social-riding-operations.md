@@ -18,12 +18,81 @@ copy server credentials into Xcode or the application bundle.
 Set build settings `BICINO_FIREBASE_APP_ID`, `BICINO_FIREBASE_SENDER_ID`,
 `BICINO_FIREBASE_API_KEY`, `BICINO_FIREBASE_PROJECT_ID`, `BICINO_GOOGLE_CLIENT_ID`,
 and `BICINO_GOOGLE_REVERSED_CLIENT_ID`, then `BICINO_SOCIAL_ENABLED = YES`.
-Their committed defaults are empty / NO. Firebase uses the app's own default
-Keychain access group, preceding the existing explicitly selected map-library
-group; Firebase is not linked into Watch or widgets. A website cookie does not
+Their committed defaults are empty / NO, except for a valid inactive Google
+callback scheme. The disabled build hides Friends & Riding. Social startup
+requires a configured Google reversed client ID. Firebase explicitly selects the
+app-private `BicinoSocialKeychainGroup`; the existing map-library group remains
+first in the enabled entitlement array, preserving all pre-existing unscoped credential
+stores. No BLE owner, transfer, diagnostics or App Attest credential migration is
+introduced. This is the Keychain security review: Firebase does not use the shared
+map-library group, production and Dev Firebase sessions are separate, and the
+pre-existing stores retain main's read/write/delete group behavior. Firebase is
+not linked into Watch or widgets. A website cookie does not
 sign the native app in. Test separate web/native Apple and Google sessions for
 matching UID, conflict handling, explicit linking, cancellation, expiry, logout,
 and recent-auth deletion before enabling either production surface.
+
+## Upgrade and lifecycle contracts
+
+Schema **2** requires the explicit migration job before API/worker startup. Stop
+all old social replicas first. The V1 upgrade retires replay payloads and ends
+legacy development rooms, clears their route snapshots/live consent, and revokes
+invitations: V1 route copies cannot prove their source owner's redistribution
+permission. Create a new room from an owned route afterward. New replay rows
+contain references, not route bodies or capability secrets. Retried room creation
+returns the existing room with `invitationCodeNeedsRotation`; the organizer can
+mint a fresh invitation in the app. Retried link/code minting asks for a new
+operation, rather than returning a retained or superseded secret. The native
+HTTP client retries one ambiguous timeout/disconnect with the same operation key;
+live state instead uses its publisher's monotonic sequence. Invite replacement
+hides the old code while pending and serializes native rotation requests.
+
+Group Ride creation requires ownership of the published route. Location consent
+expires after **four hours** or the room expiry, whichever comes first, and
+publishing cannot extend it. Consent writes require the current member `epoch`;
+a stale start/stop returns `409 consent_changed` without changing the lease.
+`GET /group-rides/{id}/consent` returns only the authenticated member's epoch,
+even during feature rollback, so a new explicit stop can retry safely. The phone
+tracks the latest consent intent and ignores superseded responses.
+A coverage gap hides live state after 60 seconds;
+it can resume within the existing consent deadline. The phone uses a monotonic
+clock to stop its GPS demand at that deadline. Selecting/reopening a room never
+silently restarts local publication. Fresh positions survive routine socket
+rotation; confirmed membership/account revocation clears them immediately.
+
+JWT signature/audience/issuer/expiry checks run on every request. Provider
+revocation state is cached for at most 30 seconds per API instance, bounded to
+512 UIDs; SQL account/membership/block/consent authorization is never cached.
+The reconciliation worker only examines its configured Firebase project. A
+batch stops without changes if more than three accounts, or more than a quarter
+of a batch of at least four, appear deleted. Investigate configuration/provider
+state before retrying; never interpret a provider outage as deletion. Cleanup
+also verifies the stored project before contacting Firebase. Deleted UID hashes
+prevent a still-valid cached token from recreating the account during this bound.
+
+Share and invitation links use `/social/shared#<secret>` and
+`/social/ride#<code>`; the website never receives the fragment. The page can open
+Bicino or Bicino Dev. API resolution uses `POST /shared/resolve` or
+`POST /group-rides/preview` with `{"code":"..."}` in the body; never log request
+bodies. Public profile IDs can remain in paths. Regenerate older development
+links, whose capability paths are no longer supported. Recent-auth deletion
+allows the same -60 to 300 second clock window on both surfaces; a bridge 401
+asks the user to sign in again and prevents Firebase deletion.
+
+Push tokens cannot move between accounts without the current owner unbinding.
+A declined friend request cannot be reopened by its original sender; the
+recipient may initiate a new request. APNs keeps its HTTP/2 connection and caches
+provider tokens for 50 minutes, below Apple's one-hour limit.
+
+The signing entitlement path is selected by `BICINO_SOCIAL_ENABLED`: `NO` uses
+the baseline file without Apple/Push or the Firebase group; `YES` selects
+`BikeComputerSocial.entitlements`. Xcode build-setting resolution verifies both
+paths. Release readiness remains separate from source tests: validate production App ID
+Sign in with Apple/Push capabilities, provisioning, callback configuration and
+APNs topic before the next signed TestFlight archive. The shared image includes
+social dependencies; its promotion still moves the signed map worker and must
+pass the existing worker/hardware promotion gates. Feature-off is not a waiver
+for signing, packaging or deployment gates.
 
 ## Runtime
 
@@ -93,16 +162,19 @@ Grant only avatar-prefix get/put/delete/list access. Never use a public avatar U
 
 Start PostgreSQL, run `docker compose -f map-platform/deploy/compose.social.yaml
 --profile migration run --rm social-migrate`, then start API and worker. Migration
-v1 is additive and runs under a PostgreSQL advisory lock. API startup verifies the
+v2 runs under a PostgreSQL advisory lock and retires the unsafe V1 replay/room
+state as described above. API startup verifies the
 schema and fails closed rather than migrating during a request. Use a DML-only
 runtime role after the schema is installed, and a separate migration credential.
 The application uses serializable transactions and bounded conflict retries.
+For a V1 development upgrade, stop the old social API and worker writers before
+migration, then start the V2 API and worker together. Do not run V1 writers
+against schema2 or roll back to V1 binaries after the retirement migration.
 
 Route `/v1/social/*` from the configured iPhone map-service origin to the social
 API, including WebSocket upgrades. Alternatively opt in to the mounted router in
 the existing API using `BICINO_SOCIAL_ENABLED=true` and the same settings. Do not
-put bearer tokens in URLs. Disable access-log query/path capture for `/social/shared/*`
-and `/group-rides/preview/*` and redact Authorization, Apple grants, coordinates,
+put bearer tokens or capability secrets in URL paths/queries. Redact Authorization, Apple grants, coordinates,
 push tokens, and request bodies in all proxy/APM/error collection. Set a 5 MiB
 request cap and bounded connection/time limits. API responses are `no-store`.
 

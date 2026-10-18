@@ -18,6 +18,7 @@ from map_platform.social.geometry import distance, sanitize_track, route_progres
 from map_platform.user_auth import AccountPrincipal
 
 class Identity:
+    project = "test"
     def verify(self, token):
         if token not in {'alice','bob','carol'}: raise ValueError()
         return AccountPrincipal('test',token,1000000)
@@ -41,12 +42,20 @@ class SocialTest(unittest.TestCase):
         self.media=MemoryMedia();self.service=SocialService(self.db,self.media,lambda:self.clock)
         self.client=TestClient(create_app(service=self.service,identity=Identity(),features=SocialFeatures(True,True,True,True,True)))
         self.counter=0
+        self.consentEpochs={}
         self.ids={u:self.call(u,'GET','/me').json()['id'] for u in ('alice','bob','carol')}
     def tearDown(self):
         self.client.close(); self.db.engine.dispose()
     def call(self, who, method, path, body=None, key=None, **kwargs):
         self.counter+=1
         headers={'Authorization':'Bearer '+who,'Idempotency-Key':key or 'request-'+str(self.counter)}
+        if method == 'POST' and path.endswith('/consent') and isinstance(body,dict) and 'epoch' not in body:
+            receipt=(who,path,headers['Idempotency-Key'])
+            if receipt not in self.consentEpochs:
+                with self.db.transaction() as c:
+                    self.consentEpochs[receipt]=c.scalar(select(members.c.epoch).where(
+                        (members.c.ride==path.split('/')[2]) & (members.c.account==self.ids[who])))
+            if self.consentEpochs[receipt]: body=dict(body,epoch=self.consentEpochs[receipt])
         return self.client.request(method,path,json=body,headers=headers,**kwargs)
     def friend(self):
         r=self.call('alice','POST','/friend-requests',{'profileID':self.ids['bob']})
@@ -105,8 +114,8 @@ class SocialTest(unittest.TestCase):
         self.client.app.state.features = SocialFeatures(activities=True, groups=True, hardware=True)
         caps = self.call('alice', 'GET', '/capabilities').json()
         self.assertFalse(caps['groups']); self.assertFalse(caps['hardware'])
-        for path in ['/routes/' + item['id'], '/activities/' + item['id'], '/shared/' + link['url'].split('/')[-1]]:
-            self.assertEqual(self.call('alice', 'GET', path).status_code, 503, path)
+        for path in ['/routes/' + item['id'], '/activities/' + item['id'], '/shared/resolve']:
+            self.assertEqual((self.client.post(path, json={'code':link['url'].split('#')[-1]}) if path == '/shared/resolve' else self.call('alice', 'GET', path)).status_code, 503, path)
         self.assertEqual(self.call('alice', 'POST', '/share-links', {'contentID': item['id']}, key='rollout-link').status_code, 503)
         self.assertEqual(self.call('alice', 'POST', '/share-links', {'contentID': item['id']}).status_code, 503)
         self.assertEqual(self.call('alice', 'DELETE', '/share-links/' + link['id']).status_code, 200)
@@ -153,10 +162,10 @@ class SocialTest(unittest.TestCase):
     def test_links_revoke_and_replays_do_not_resurrect(self):
         item=self.call('alice','POST','/routes',self.route('link')).json()
         link=self.call('alice','POST','/share-links',{'contentID':item['id']},key='share-create').json()
-        path='/shared/'+link['url'].split('/')[-1]
-        self.assertEqual(self.client.get(path).status_code,200)
+        path='/shared/'+link['url'].split('#')[-1]
+        self.assertEqual(self.client.post('/shared/resolve', json={'code':link['url'].split('#')[-1]}).status_code,200)
         self.call('alice','PATCH','/routes/'+item['id'],{'revision':1,'title':'Ride','visibility':'private'})
-        self.assertEqual(self.client.get(path).status_code,404)
+        self.assertEqual(self.client.post('/shared/resolve', json={'code':link['url'].split('#')[-1]}).status_code,404)
         self.assertEqual(self.call('alice','POST','/share-links',{'contentID':item['id']},key='share-create').status_code,404)
     def test_live_consent_epoch_replay_age_and_block(self):
         room=self.ride();rid=room['id']
@@ -262,6 +271,9 @@ class SocialTest(unittest.TestCase):
                 self.assertEqual(result.get('riders',[]),[])
         self.clock+=61
         state={'epoch':epoch,'sequence':2,'capturedAt':self.clock,'latitude':0,'longitude':0,'horizontalAccuracy':5}
+        self.assertEqual(self.call('bob','POST',f'/group-rides/{rid}/state',state).status_code,200)
+        self.clock += 4*3600
+        state['sequence'] = 3; state['capturedAt'] = self.clock
         self.assertEqual(self.call('bob','POST',f'/group-rides/{rid}/state',state).status_code,403)
 
     @unittest.skipUnless(os.environ.get('BICINO_SOCIAL_TEST_DATABASE_URL'), 'requires PostgreSQL isolation')
@@ -358,7 +370,7 @@ class SocialTest(unittest.TestCase):
     def test_removed_member_cannot_preview_old_code_and_invites_can_be_cancelled(self):
         room = self.ride(); rid = room['id']
         self.call('alice','DELETE',f"/group-rides/{rid}/members/{self.ids['bob']}")
-        self.assertEqual(self.call('bob','GET','/group-rides/preview/'+room['joinCode']).status_code,403)
+        self.assertEqual(self.call('bob','POST','/group-rides/preview',{'code':room['joinCode']}).status_code,403)
         invitation = self.call('alice','POST','/ride-invites',{'rideID':rid,'profileID':self.ids['bob']}).json()
         self.assertEqual(len(self.call('alice','GET','/ride-invites?sent=true').json()['items']),1)
         self.assertEqual(self.call('carol','DELETE','/ride-invites/'+invitation['id']).status_code,404)
@@ -370,5 +382,219 @@ class SocialTest(unittest.TestCase):
         self.assertEqual(self.call('alice','POST','/routes',body).status_code,422)
         self.assertEqual(self.call('alice','POST','/group-rides/join',{'code':'a'}).status_code,422)
         with self.assertRaises((ValueError, OSError)):sanitize_avatar(b'not an image')
+
+    def test_friends_route_cannot_be_redistributed_by_group_creator(self):
+        self.friend()
+        item = self.call('alice', 'POST', '/routes', self.route()).json()
+        self.assertEqual(self.call('bob', 'GET', '/routes/'+item['id']).status_code, 200)
+        result = self.call('bob', 'POST', '/group-rides', {'routeID':item['id'], 'title':'Copy'})
+        self.assertEqual(result.status_code, 403)
+        self.assertEqual(result.json()['code'], 'route_owner_required')
+
+    def test_replay_receipts_have_no_routes_secrets_or_profile_copies(self):
+        from map_platform.social.database import replays
+        item = self.call('alice', 'POST', '/routes', self.route('link')).json()
+        link = self.call('alice', 'POST', '/share-links', {'contentID':item['id']}, key='link-retry').json()
+        room = self.call('alice', 'POST', '/group-rides', {'routeID':item['id'], 'title':'Ride'}, key='room-retry').json()
+        self.call('bob', 'POST', '/group-rides/join', {'code':room['joinCode']})
+        with self.db.transaction() as c:
+            retained = json.dumps(list(c.scalars(select(replays.c.response))))
+            self.assertNotIn(room['joinCode'], retained)
+            self.assertNotIn(link['url'].split('#')[-1], retained)
+            self.assertNotIn('archive', retained)
+            self.assertNotIn('hashPayload', retained)
+        retry = self.call('alice', 'POST', '/group-rides', {'routeID':item['id'], 'title':'Ride'}, key='room-retry')
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.json()['id'], room['id'])
+        self.assertTrue(retry.json()['invitationCodeNeedsRotation'])
+        self.assertNotIn('joinCode', retry.json())
+        self.assertEqual(self.call('alice', 'POST', '/share-links', {'contentID':item['id']}, key='link-retry').json()['code'], 'fresh_link_required')
+        path = '/group-rides/'+room['id']+'/rotate-code'
+        first = self.call('alice', 'POST', path, key='rotate-retry').json()['joinCode']
+        second = self.call('alice', 'POST', path).json()['joinCode']
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.call('alice', 'POST', path, key='rotate-retry').json()['code'], 'fresh_invitation_required')
+        self.assertEqual(self.call('bob', 'POST', '/group-rides/preview', {'code':first}).status_code, 404)
+
+    def test_gap_hides_live_state_but_allows_resume_until_consent_deadline(self):
+        room = self.ride(); path = '/group-rides/'+room['id']
+        consent = self.call('bob', 'POST', path+'/consent', {'location':True,'stats':False}).json()
+        state = {'epoch':consent['epoch'],'sequence':1,'capturedAt':self.clock,'latitude':0,'longitude':0,'horizontalAccuracy':5}
+        self.assertEqual(self.call('bob', 'POST', path+'/state', state).status_code, 200)
+        self.assertNotIn('epoch', self.call('alice','GET',path).json()['riders'][0])
+        self.clock += 61
+        run_once(self.db, Identity(), self.media, Notifications(), now=self.clock)
+        snapshot = self.call('bob','GET',path).json()
+        self.assertTrue(snapshot['sharing']); self.assertEqual(snapshot['riders'], [])
+        state.update(sequence=2,capturedAt=self.clock)
+        self.assertEqual(self.call('bob','POST',path+'/state',state).status_code,200)
+        self.clock = consent['sharingExpiresAt']+1
+        state.update(sequence=3,capturedAt=self.clock)
+        self.assertEqual(self.call('bob','POST',path+'/state',state).status_code,403)
+
+    def test_worker_does_not_rewrite_cleared_history(self):
+        from sqlalchemy import event
+        room = self.ride()
+        self.clock += 86401
+        run_once(self.db, Identity(), self.media, Notifications(), now=self.clock)
+        writes = []
+        def record(c, cursor, statement, parameters, context, many):
+            if statement.startswith('UPDATE social_'): writes.append(cursor.rowcount)
+        event.listen(self.db.engine, 'after_cursor_execute', record)
+        try: run_once(self.db, Identity(), self.media, Notifications(), now=self.clock+10)
+        finally: event.remove(self.db.engine, 'after_cursor_execute', record)
+        self.assertEqual(sum(writes), 0)
+
+    def test_identity_reconciliation_is_project_scoped_and_mass_delete_stops(self):
+        from map_platform.social.worker import reconcile_accounts
+        from sqlalchemy import update
+        class Wrong(Identity):
+            project = 'wrong-project'
+            def status(self, uid): raise AssertionError('must not query another project')
+        reconcile_accounts(self.db, Wrong(), self.media)
+        self.service.account(AccountPrincipal('test','fourth',int(self.clock)))
+        class Missing(Identity):
+            def status(self, uid): return 'deleted'
+        with self.assertLogs(level='ERROR'):
+            reconcile_accounts(self.db, Missing(), self.media)
+        with self.db.transaction() as c:
+            self.assertEqual(set(c.scalars(select(accounts.c.state))), {'active'})
+            self.assertEqual(list(c.scalars(select(outbox.c.kind))), [])
+
+    def test_disabled_sender_is_skipped_and_invitations_are_revoked(self):
+        from map_platform.social.database import invites
+        from map_platform.social.worker import reconcile_accounts
+        from sqlalchemy import update
+        room = self.ride()
+        self.call('alice','POST','/ride-invites',{'rideID':room['id'],'profileID':self.ids['bob']})
+        with self.db.transaction() as c:
+            c.execute(update(accounts).where(accounts.c.id==self.ids['alice']).values(state='disabled'))
+        response = self.call('bob','GET','/ride-invites')
+        self.assertEqual(response.status_code,200); self.assertEqual(response.json()['items'],[])
+        class Disabled(Identity):
+            def status(self, uid): return 'disabled' if uid=='alice' else 'active'
+        reconcile_accounts(self.db,Disabled(),self.media)
+        with self.db.transaction() as c:
+            self.assertEqual(set(c.scalars(select(invites.c.status))),{'revoked'})
+
+    def test_declined_request_cannot_be_resent_by_original_sender(self):
+        request = self.call('alice','POST','/friend-requests',{'profileID':self.ids['bob']}).json()
+        self.call('bob','POST','/friend-requests/'+request['id']+'/decline')
+        self.assertEqual(self.call('alice','POST','/friend-requests',{'profileID':self.ids['bob']}).json()['code'],'request_declined')
+        for mode in ('remove', 'block-unblock'):
+            if mode == 'remove':
+                self.call('alice','DELETE','/friends/'+self.ids['bob'])
+            else:
+                self.call('alice','PUT','/blocks/'+self.ids['bob'])
+                self.call('alice','DELETE','/blocks/'+self.ids['bob'])
+            self.clock += 86401
+            self.assertEqual(self.call('alice','POST','/friend-requests',{'profileID':self.ids['bob']}).json()['code'],'request_declined')
+        # The recipient can still initiate a new relationship voluntarily.
+        self.assertEqual(self.call('bob','POST','/friend-requests',{'profileID':self.ids['alice']}).status_code,200)
+
+    def test_token_binding_cannot_be_taken_by_another_account(self):
+        body = {'token':'a'*64,'environment':'development'}
+        self.assertEqual(self.call('alice','PUT','/notification-devices/phone-a',body).status_code,200)
+        self.assertEqual(self.call('bob','PUT','/notification-devices/phone-b',body).status_code,409)
+        self.assertEqual(self.call('bob','PUT','/notification-devices/phone-a',dict(body,token='b'*64)).status_code,409)
+        self.call('alice','DELETE','/notification-devices/phone-a')
+        self.assertEqual(self.call('bob','PUT','/notification-devices/phone-b',body).status_code,200)
+
+    def test_malformed_consent_is_422_even_when_features_are_off(self):
+        self.client.app.state.features = SocialFeatures()
+        response = self.client.post('/group-rides/anything/consent',content=b'{bad',headers={'Authorization':'Bearer alice','Content-Type':'application/json'})
+        self.assertEqual(response.status_code,422)
+
+    def test_deletion_retry_and_deleted_identity_cannot_recreate_account(self):
+        self.assertEqual(self.call('alice','POST','/me/deletion',{'expectedProfileID':self.ids['alice']}).status_code,200)
+        self.assertEqual(self.call('alice','POST','/me/deletion',{'expectedProfileID':self.ids['alice']}).json()['code'],'account_deleting')
+        run_once(self.db,Identity(),self.media,Notifications(),now=self.clock)
+        self.assertEqual(self.call('alice','GET','/me').status_code,403)
+        self.assertEqual(self.call('alice','POST','/me/deletion',{'expectedProfileID':self.ids['alice']}).json()['code'],'account_deleted')
+        with self.db.transaction() as c:
+            self.assertEqual(len(list(c.scalars(select(accounts.c.id)))),3)
+
+    def test_media_io_is_outside_database_transaction_and_revalidates(self):
+        from sqlalchemy import event, update
+        active = set()
+        event.listen(self.db.engine,'begin',lambda c:active.add(id(c)))
+        event.listen(self.db.engine,'commit',lambda c:active.discard(id(c)))
+        event.listen(self.db.engine,'rollback',lambda c:active.discard(id(c)))
+        original_put,original_get = self.media.put,self.media.get
+        def put(key, value):
+            self.assertFalse(active); original_put(key,value)
+        def get(key):
+            self.assertFalse(active)
+            with self.db.transaction() as c:
+                c.execute(update(accounts).where(accounts.c.id==self.ids['alice']).values(avatar=None))
+            return original_get(key)
+        self.media.put=put; self.media.get=get
+        image=BytesIO(); Image.new('RGB',(80,80)).save(image,format='PNG')
+        response=self.client.put('/me/avatar?version=1',content=image.getvalue(),headers={'Authorization':'Bearer alice','Idempotency-Key':'photo-io'})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(self.call('alice','GET','/media/'+response.json()['avatarID']+'/marker').status_code,404)
+
+    def test_activity_private_reupload_revokes_prior_links(self):
+        data={'uploadConsent':True,'sourceID':'track-1','title':'Track','visibility':'link','elapsedSeconds':100,'movingSeconds':80,
+              'points':[{'latitude':10,'longitude':20},{'latitude':10.01,'longitude':20.01}]}
+        item=self.call('alice','POST','/activities',data)
+        self.assertEqual(item.status_code,200,item.text)
+        link=self.call('alice','POST','/share-links',{'contentID':item.json()['id']}).json()
+        self.assertEqual(self.client.post('/shared/resolve',json={'code':link['url'].split('#')[-1]}).status_code,200)
+        data['visibility']='private';self.call('alice','POST','/activities',data)
+        data['visibility']='link';self.call('alice','POST','/activities',data)
+        self.assertEqual(self.client.post('/shared/resolve',json={'code':link['url'].split('#')[-1]}).status_code,404)
+
+    def test_schema_upgrade_retires_unsafe_replays_and_json_null_live(self):
+        from sqlalchemy import JSON, update
+        from map_platform.social.database import replays, versions
+        self.ride()
+        with self.db.transaction() as c:
+            c.execute(update(versions).values(version=1))
+            c.execute(update(members).values(live=JSON.NULL))
+            c.execute(replays.insert().values(owner=self.ids['alice'],key='legacy-secret',digest='0'*64,response={'joinCode':'legacy-secret','route':{'archive':'private'}},created=self.clock))
+        self.db.migrate();self.db.check_schema()
+        with self.db.transaction() as c:
+            self.assertEqual(list(c.scalars(select(replays.c.response))),[])
+            self.assertEqual(len(list(c.scalars(select(members.c.account).where(members.c.live.is_not(None))))),0)
+
+    def test_consent_epoch_rejects_delayed_start_and_stop_and_supports_rollback(self):
+        room=self.ride();path='/group-rides/'+room['id']
+        old=self.call('bob','GET',path+'/consent').json()['epoch']
+        active=self.call('bob','POST',path+'/consent',{'epoch':old,'location':True,'stats':False}).json()
+        self.assertEqual(self.call('bob','POST',path+'/consent',{'epoch':old,'location':False,'stats':False}).json()['code'],'consent_changed')
+        self.client.app.state.features=SocialFeatures(routes=True)
+        current=self.call('bob','GET',path+'/consent')
+        self.assertEqual(current.status_code,200)
+        self.assertNotIn('route',current.json())
+        stopped=self.call('bob','POST',path+'/consent',{'epoch':current.json()['epoch'],'location':False,'stats':False})
+        self.assertEqual(stopped.status_code,200,stopped.text);self.assertFalse(stopped.json()['sharing'])
+        self.client.app.state.features=SocialFeatures(True,True,True,True,True)
+        self.assertEqual(self.call('bob','POST',path+'/consent',{'epoch':old,'location':True,'stats':False}).status_code,409)
+        state={'epoch':active['epoch'],'sequence':1,'capturedAt':self.clock,'latitude':0,'longitude':0,'horizontalAccuracy':5}
+        self.assertEqual(self.call('bob','POST',path+'/state',state).status_code,403)
+
+    def test_push_binding_length_matches_database_limit(self):
+        response=self.call('alice','PUT','/notification-devices/'+('a'*37),{'token':'a'*64,'environment':'development'})
+        self.assertEqual(response.status_code,400)
+
+    def test_cleanup_checks_project_before_any_firebase_mutation(self):
+        class Wrong(Identity):
+            project='other-project'
+            def delete(self,uid):raise AssertionError('must not contact another project')
+        with self.assertRaisesRegex(ValueError,'Firebase project mismatch'):
+            self.db.run(lambda c:cleanup_account(c,self.ids['alice'],Wrong(),self.media))
+
+    def test_website_deletion_clock_window_matches_native_and_web(self):
+        import hmac,uuid
+        secret='s'*40
+        with patch.dict(os.environ,{'BICINO_SOCIAL_DELETION_SECRET':secret,'BICINO_FIREBASE_PROJECT_ID':'test'}):
+            for age in [-61,-60,0,300,301]:
+                proof={'uid':'absent-account','project':'test','authTime':int(self.clock-age),
+                       'issuedAt':int(self.clock),'nonce':str(uuid.uuid4())}
+                raw=json.dumps(proof).encode();signature=hmac.new(secret.encode(),raw,'sha256').hexdigest()
+                response=self.client.post('/internal/account-deletion',content=raw,
+                    headers={'Content-Type':'application/json','X-Bicino-Deletion-Signature':signature})
+                self.assertEqual(response.status_code,200 if -60<=age<=300 else 401)
 
 if __name__=='__main__':unittest.main()

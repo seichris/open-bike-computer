@@ -1,4 +1,5 @@
 import CoreLocation
+import CoreGraphics
 import Foundation
 
 struct SocialCapabilities: Codable, Equatable {
@@ -124,6 +125,8 @@ struct SocialGroupRide: Decodable, Identifiable {
     let epoch: String
     let serverTime: Double
     let joinCode: String?
+    let sharingExpiresAt: Double?
+    let invitationCodeNeedsRotation: Bool?
 }
 
 struct SocialQuickMessage: Decodable, Identifiable {
@@ -131,4 +134,44 @@ struct SocialQuickMessage: Decodable, Identifiable {
     let sender: String
     let status: String
     let created: Double
+}
+
+/// Capability secrets stay in URL fragments, which are never sent to the website.
+struct SocialLinkTarget {
+    let kind: String
+    let id: String
+    let canonicalURL: URL
+    init?(url: URL) {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        if ["bikecomputer", "bikecomputer-dev"].contains(url.scheme ?? ""), url.host == "social" {
+            components?.scheme = "https"; components?.host = "bicino.com"
+            components?.path = "/social" + url.path
+        }
+        guard let parts = components, parts.scheme == "https", parts.host == "bicino.com",
+              parts.user == nil, parts.password == nil, parts.port == nil, parts.query == nil,
+              let canonical = parts.url else { return nil }
+        let path = canonical.pathComponents
+        guard path.count >= 3, path[1] == "social" else { return nil }
+        kind = path[2]
+        if kind == "profile", path.count == 4, parts.fragment == nil { id = path[3] }
+        else if ["ride", "shared"].contains(kind), path.count == 3, let secret = parts.fragment { id = secret }
+        else { return nil }
+        guard id.range(of: "^[A-Za-z0-9_-]{20,100}$", options: .regularExpression) != nil else { return nil }
+        canonicalURL = canonical
+    }
+}
+
+/// Projected coordinates already include camera rotation, panning and perspective.
+enum SocialMapGeometry {
+    static func edgeCenter(projected: CGPoint, bounds: CGRect) -> CGPoint? {
+        let safe = bounds.insetBy(dx: 42, dy: 70)
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let dx = projected.x-center.x, dy = projected.y-center.y
+        guard dx.isFinite, dy.isFinite, safe.width > 0, safe.height > 0,
+              abs(dx)+abs(dy) > 0.0001 else { return nil }
+        let tx = abs(dx) > 0.0001 ? safe.width/2/abs(dx) : CGFloat.greatestFiniteMagnitude
+        let ty = abs(dy) > 0.0001 ? safe.height/2/abs(dy) : CGFloat.greatestFiniteMagnitude
+        let scale = min(tx, ty)
+        return CGPoint(x: center.x+scale*dx, y: center.y+scale*dy)
+    }
 }

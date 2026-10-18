@@ -30,7 +30,7 @@ bool ingest(const uint8_t *p,size_t n,uint8_t (&ack)[17]) {
 bool snapshot(size_t slot,Rider &out) {
   xSemaphoreTake(mutex,portMAX_DELAY);
   bool valid=state && slot<CAPACITY && state->riders[slot].present && state->riders[slot].ageMs(millis())<EXPIRE_MS;
-  if(valid)out=state->riders[slot];
+  if(valid)copySnapshot(state->riders[slot],out);
   xSemaphoreGive(mutex);return valid;
 }
 }

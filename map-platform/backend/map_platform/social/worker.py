@@ -14,13 +14,23 @@ from .media import S3Media, reconcile_orphans
 
 
 class APNs:
+    def __init__(self, *, clock=time.time, client=None):
+        self.clock, self.client = clock, client
+        self.token, self.issued = None, 0
+
+    def close(self):
+        if self.client is not None:
+            self.client.close()
+
     def send(self, binding, kind, event_id):
         import httpx
         import jwt
         # Missing config leaves the event pending instead of claiming delivery.
-        token = jwt.encode({"iss": os.environ["BICINO_APNS_TEAM_ID"], "iat": int(time.time())},
-            os.environ["BICINO_APNS_PRIVATE_KEY"].replace("\\n", "\n"), algorithm="ES256",
-            headers={"kid": os.environ["BICINO_APNS_KEY_ID"]})
+        if self.token is None or not 0 <= self.clock()-self.issued < 3000:
+            self.issued = self.clock()
+            self.token = jwt.encode({"iss": os.environ["BICINO_APNS_TEAM_ID"], "iat": int(self.issued)},
+                os.environ["BICINO_APNS_PRIVATE_KEY"].replace("\\n", "\n"), algorithm="ES256",
+                headers={"kid": os.environ["BICINO_APNS_KEY_ID"]})
         environment = binding["environment"]
         expected = os.environ.get("BICINO_SOCIAL_ENVIRONMENT", "development")
         if environment != expected:
@@ -28,9 +38,10 @@ class APNs:
         host = "api.push.apple.com" if environment == "production" else "api.sandbox.push.apple.com"
         topic = "LetItRide.BikeComputer" if environment == "production" else "LetItRide.BikeComputer.dev"
         copy = "You have a new friend request." if kind == "friend_request" else "You have a ride invitation."
-        with httpx.Client(http2=True, timeout=10) as client:
-            response = client.post(f"https://{host}/3/device/{binding['token']}",
-                headers={"authorization": f"bearer {token}", "apns-topic": topic,
+        if self.client is None:
+            self.client = httpx.Client(http2=True, timeout=10)
+        response = self.client.post(f"https://{host}/3/device/{binding['token']}",
+                headers={"authorization": f"bearer {self.token}", "apns-topic": topic,
                          "apns-push-type": "alert", "apns-collapse-id": event_id},
                 json={"aps": {"alert": {"title": "Bicino", "body": copy}}, "category": kind})
         if response.status_code == 410:
@@ -41,6 +52,10 @@ class APNs:
 
 def cleanup_account(c, actor, identity, media_store):
     account = c.execute(select(accounts).where(accounts.c.id == actor)).mappings().one()
+    if account["state"] == "deleted":
+        return
+    if account["project"] != identity.project:
+        raise ValueError("Firebase project mismatch")
     identity.delete(account["uid"])
     for item in c.execute(select(media).where(media.c.owner == actor)).mappings():
         for variant in item["variants"].values():
@@ -55,8 +70,9 @@ def cleanup_account(c, actor, identity, media_store):
     c.execute(delete(replays).where(replays.c.owner == actor))
     # Route snapshots in organized sessions are no longer authorized after deletion.
     c.execute(update(rides).where(rides.c.owner == actor).values(route={}, title="Deleted ride", status="ended"))
-    c.execute(update(accounts).where(accounts.c.id == actor).values(uid="deleted:"+actor,
-              project="deleted", state="deleted", username=None, name="Deleted rider", privacy={}, avatar=None))
+    from .service import digest
+    c.execute(update(accounts).where(accounts.c.id == actor).values(uid="deleted:"+digest(account["uid"]),
+              state="deleted", username=None, name="Deleted rider", privacy={}, avatar=None))
 
 
 def run_once(database, identity, media_store, notifications, now=None, features=None):
@@ -111,10 +127,17 @@ def run_once(database, identity, media_store, notifications, now=None, features=
         if not database.run(process_event):
             break
     def maintain(c):
-        c.execute(update(members).where(or_(members.c.received < now-60, members.c.lease <= now)).values(live=None, sharing=False, stats=False))
-        expired = select(rides.c.id).where(rides.c.expires <= now)
-        c.execute(update(members).where(members.c.ride.in_(expired)).values(live=None, sharing=False, stats=False))
-        c.execute(update(rides).where(rides.c.expires <= now).values(status="expired", route={}))
+        # Coverage gaps hide positions, without silently revoking bounded consent.
+        c.execute(update(members).where(and_(members.c.live.is_not(None),
+            members.c.received < now-60)).values(live=None))
+        active = or_(members.c.sharing.is_(True), members.c.stats.is_(True), members.c.live.is_not(None))
+        c.execute(update(members).where(and_(active, members.c.lease <= now))
+                  .values(live=None, sharing=False, stats=False))
+        expired = select(rides.c.id).where(and_(rides.c.expires <= now, rides.c.status != "expired"))
+        c.execute(update(members).where(and_(active, members.c.ride.in_(expired)))
+                  .values(live=None, sharing=False, stats=False))
+        c.execute(update(rides).where(and_(rides.c.expires <= now, rides.c.status != "expired"))
+                  .values(status="expired", route={}))
         c.execute(delete(messages).where(messages.c.created < now-86400))
         c.execute(delete(links).where(links.c.expires <= now))
         c.execute(delete(invites).where(invites.c.expires < now-30*86400))
@@ -129,22 +152,32 @@ def reconcile_accounts(database, identity, media_store, cursor=""):
     service = SocialService(database, media_store)
     with database.transaction() as c:
         batch = list(c.execute(select(accounts).where(and_(accounts.c.id > cursor,
+            accounts.c.project == identity.project,
             accounts.c.state.in_(["active", "disabled"]))).order_by(accounts.c.id).limit(100)).mappings())
+    checked = []
     for account in batch:
         try:
             status = identity.status(account["uid"])
         except Exception:
             continue  # Provider outage is not evidence of account deletion.
+        checked.append((account, status))
+    missing = sum(status == "deleted" for _, status in checked)
+    if missing > 3 or (len(checked) >= 4 and missing > len(checked)/4):
+        __import__("logging").error("Social identity reconciliation circuit breaker; no accounts changed")
+        return cursor
+    for account, status in checked:
         def apply(c):
             database.lock(c, account["id"])
             current = c.execute(select(accounts).where(accounts.c.id == account["id"])).mappings().one()
-            if current["state"] not in {"active", "disabled"}:
+            if current["state"] not in {"active", "disabled"} or current["project"] != identity.project:
                 return
             if status == "deleted":
                 service.begin_deletion(c, account["id"])
             elif status == "disabled":
                 c.execute(update(accounts).where(accounts.c.id == account["id"]).values(state="disabled"))
                 c.execute(update(members).where(members.c.account == account["id"]).values(live=None, sharing=False, stats=False))
+                c.execute(update(invites).where(and_(invites.c.status == "pending", or_(
+                    invites.c.sender == account["id"], invites.c.recipient == account["id"]))).values(status="revoked"))
             elif status == "active" and current["state"] == "disabled":
                 c.execute(update(accounts).where(accounts.c.id == account["id"]).values(state="active"))
         database.run(apply)

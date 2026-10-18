@@ -8,21 +8,19 @@ from typing import Any
 class RequestBodyLimitMiddleware:
     """Bound request bodies before framework JSON parsing allocates them."""
 
-    def __init__(self, app: Callable[..., Awaitable[None]], max_body_bytes: int):
+    def __init__(self, app: Callable[..., Awaitable[None]], max_body_bytes: int, body_limits: dict[tuple[str, str], int] | None = None):
         if max_body_bytes < 1:
             raise ValueError("maximum request body size must be positive")
         self.app = app
         self.max_body_bytes = max_body_bytes
+        self.body_limits = body_limits or {}
 
     async def __call__(self, scope: dict[str, Any], receive, send) -> None:
         if scope.get("type") != "http" or scope.get("method") in {"GET", "HEAD"}:
             await self.app(scope, receive, send)
             return
 
-        # The opt-in social avatar endpoint accepts a single bounded raster.
-        # Keep the existing map/API body limit unchanged everywhere else.
-        limit = (5 * 1024 * 1024 if scope.get("path") in {"/v1/social/me/avatar", "/v1/social/routes", "/v1/social/activities"}
-                 and scope.get("method") in {"PUT", "POST"} else self.max_body_bytes)
+        limit = self.body_limits.get((scope.get("method"), scope.get("path")), self.max_body_bytes)
         content_length = self._content_length(scope)
         if content_length is not None and content_length > limit:
             await self._reject(send)

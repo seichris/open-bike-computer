@@ -343,6 +343,8 @@ jobs:
       - name: Run Swift helper tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-swift-helper-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-swift-helper-tests/results.json"
         working-directory: ios-app
+      - name: Run social publisher, reconnect and link contracts
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check social-runtime-tests --report "$RUNNER_TEMP/dev-checks/social-runtime-tests/results.json"
       - name: Run ride diagnostics recorder tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-ride-diagnostics-recorder-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-ride-diagnostics-recorder-tests/results.json"
         working-directory: ios-app

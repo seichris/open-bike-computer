@@ -56,6 +56,7 @@ def row(c, table, condition):
 
 
 class SocialService:
+    MAX_SHARING_SECONDS = 4 * 3600
     def __init__(self, database, media_store, clock=time.time):
         self.db, self.media, self.now = database, media_store, clock
 
@@ -64,11 +65,16 @@ class SocialService:
             condition = and_(accounts.c.project == principal.project, accounts.c.uid == principal.uid)
             account = c.execute(select(accounts).where(condition)).mappings().first()
             if account is None:
+                if c.scalar(select(accounts.c.id).where(and_(accounts.c.project == principal.project,
+                        accounts.c.uid == "deleted:"+digest(principal.uid)))):
+                    raise SocialError("account_deleted", 403)
                 upsert(c, accounts, {"id": identifier(), "project": principal.project,
                        "uid": principal.uid, "name": "Rider", "state": "active", "version": 1,
                        "privacy": {"zones": [], "requests": True, "invitations": True, "notifications": True},
                        "created": self.now()}, ["project", "uid"])
                 account = row(c, accounts, condition)
+            if account["state"] == "deleting":
+                raise SocialError("account_deleting", 403)
             if account["state"] != "active":
                 raise SocialError("account_unavailable", 403)
             return account["id"]
@@ -150,7 +156,10 @@ class SocialService:
         existing = c.execute(select(friendships).where(and_(friendships.c.a == a, friendships.c.b == b))).mappings().first()
         if existing and (existing["status"] == "accepted" or (existing["status"] == "pending" and self.now()-existing["updated"] <= 30*86400)):
             return dict(existing)
-        if existing and self.now()-existing["updated"] < 86400:
+        if existing and existing["status"] == "declined" and existing["sender"] == actor:
+            raise SocialError("request_declined", 409)
+        recipient_reopening = existing and existing["status"] == "declined" and existing["sender"] != actor
+        if existing and not recipient_reopening and self.now()-existing["updated"] < 86400:
             raise SocialError("request_cooldown", 429)
         values = {"id": existing["id"] if existing else identifier(), "a": a, "b": b,
                   "sender": actor, "status": "pending", "updated": self.now()}
@@ -178,7 +187,9 @@ class SocialService:
         self.active(c, actor)
         self.active(c, target)
         a, b = sorted((actor, target))
-        c.execute(update(friendships).where(and_(friendships.c.a == a, friendships.c.b == b))
+        # Neither removing nor blocking can erase the recipient's refusal.
+        c.execute(update(friendships).where(and_(friendships.c.a == a, friendships.c.b == b,
+                                                 friendships.c.status != "declined"))
                   .values(status="removed", updated=self.now()))
         c.execute(update(invites).where(and_(or_(
             and_(invites.c.sender == actor, invites.c.recipient == target),
@@ -198,18 +209,21 @@ class SocialService:
                               .values(status="removed", sharing=False, stats=False, live=None))
         return {"status": "blocked" if block else "removed"}
 
-    def set_avatar(self, c, actor, raw, version):
+    def prepare_avatar(self, actor, raw):
         variants = sanitize_avatar(raw)
+        asset, receipts = identifier(), {}
+        for name, value in variants.items():
+            key = f"avatars/{actor}/{asset}/{name}.png"
+            self.media.put(key, value)
+            receipts[name] = {"key": key, "sha256": hashlib.sha256(value).hexdigest()}
+        return asset, receipts
+
+    def set_avatar(self, c, actor, prepared, version):
         self.db.lock(c, actor)
         account = self.active(c, actor)
         if version != account["version"]:
             raise SocialError("version_conflict", 409)
-        asset, receipts = identifier(), {}
-        for name, value in variants.items():
-            key = f"avatars/{actor}/{asset}/{name}.png"
-            # Record cleanup before external writes; callers reconcile object orphans.
-            self.media.put(key, value)
-            receipts[name] = {"key": key, "sha256": hashlib.sha256(value).hexdigest()}
+        asset, receipts = prepared
         c.execute(media.insert().values(id=asset, owner=actor, variants=receipts, created=self.now()))
         if account["avatar"]:
             self.emit(c, actor, "delete_media", {"assetID": account["avatar"]})
@@ -235,18 +249,43 @@ class SocialService:
                 raise SocialError("not_found", 404)
         return item
 
-    def replay(self, c, actor, result):
+    def replay_receipt(self, result):
+        # Store references, never route bodies, capability secrets or profiles.
         if "members" in result and "riders" in result:
-            return self.ride_read(c, actor, result["id"])
+            return {"receipt": "ride", "id": result["id"], "minted": "joinCode" in result}
         if "kind" in result and "body" in result:
-            return {k:v for k,v in self.content_read(c, actor, result["id"]).items() if k != "source"}
+            return {"receipt": "content", "id": result["id"]}
         if "displayName" in result:
-            return self.profile(c, actor, result["id"], result["id"] == actor)
+            return {"receipt": "profile", "id": result["id"]}
         if "a" in result and "b" in result:
-            self.pair_allowed(c, result["a"], result["b"])
-            return row(c, friendships, friendships.c.id == result["id"])
+            return {"receipt": "friendship", "id": result["id"]}
         if "url" in result:
-            row(c, links, and_(links.c.id == result["id"], links.c.owner == actor, links.c.expires > self.now()))
+            return {"receipt": "link", "id": result["id"]}
+        if "joinCode" in result:
+            return {"receipt": "mint"}
+        return result
+
+    def replay(self, c, actor, result):
+        kind = result.get("receipt")
+        if kind == "ride":
+            value = self.ride_read(c, actor, result["id"])
+            if result.get("minted"):
+                value["invitationCodeNeedsRotation"] = True
+            return value
+        if kind == "content":
+            return {k:v for k,v in self.content_read(c, actor, result["id"]).items() if k != "source"}
+        if kind == "profile":
+            return self.profile(c, actor, result["id"], result["id"] == actor)
+        if kind == "friendship":
+            item = row(c, friendships, friendships.c.id == result["id"])
+            self.pair_allowed(c, item["a"], item["b"])
+            return row(c, friendships, friendships.c.id == result["id"])
+        if kind == "link":
+            link = row(c, links, and_(links.c.id == result["id"], links.c.owner == actor, links.c.expires > self.now()))
+            self.content_read(c, actor, link["content"])
+            raise SocialError("fresh_link_required", 409)
+        if kind == "mint":
+            raise SocialError("fresh_invitation_required", 409)
         return result
 
     def upload_route(self, c, actor, data):
@@ -304,6 +343,8 @@ class SocialService:
                 "revision": existing["revision"]+1 if existing else 1, "body": result,
                 "source": data.sourceID, "created": self.now()}
         upsert(c, content, item, ["owner", "kind", "source"], item)
+        if data.visibility != "link":
+            c.execute(delete(links).where(links.c.content == item["id"]))
         return item
 
     def edit_content(self, c, actor, content_id, data):
@@ -338,7 +379,7 @@ class SocialService:
         secret, link_id = secrets.token_urlsafe(32), identifier()
         c.execute(links.insert().values(id=link_id, owner=actor, content=item["id"], digest=digest(secret),
                                        expires=self.now()+data.expiresIn))
-        return {"id": link_id, "url": f"https://bicino.com/social/shared/{secret}",
+        return {"id": link_id, "url": f"https://bicino.com/social/shared#{secret}",
                 "expiresAt": self.now()+data.expiresIn}
 
     def require_room_capacity(self, c, actor):
@@ -352,6 +393,8 @@ class SocialService:
         self.db.lock(c, actor)
         self.require_room_capacity(c, actor)
         source = self.content_read(c, actor, data.routeID)
+        if source["owner"] != actor:
+            raise SocialError("route_owner_required", 403)
         if source["kind"] != "route":
             raise SocialError("route_required")
         code, ride_id = secrets.token_urlsafe(24), identifier()
@@ -390,13 +433,14 @@ class SocialService:
             roster.append(profile)
             if m["sharing"] and m["lease"] and m["lease"] > self.now() and m["live"] and m["received"] is not None and self.now()-m["received"] < 60:
                 state = dict(m["live"])
+                state.pop("epoch", None)
                 state.update(profile=profile, receivedAt=m["received"], age=max(0, self.now()-state["capturedAt"]))
                 if state["age"] < 60:
                     live.append(state)
         return {"id": ride_id, "title": ride["title"], "owner": ride["owner"],
                 "status": ride["status"], "expiresAt": ride["expires"], "route": ride["route"],
                 "members": roster, "riders": live, "sharing": bool(me["sharing"] and me["lease"] and me["lease"] > self.now()), "stats": me["stats"],
-                "epoch": me["epoch"], "serverTime": self.now()}
+                "epoch": me["epoch"], "sharingExpiresAt": me["lease"], "serverTime": self.now()}
 
     def invite(self, c, actor, data):
         self.db.lock(c, actor, data.profileID)
@@ -437,12 +481,15 @@ class SocialService:
 
     def consent(self, c, actor, ride_id, data):
         self.db.lock(c, actor)
-        ride, _ = self.require_member(c, actor, ride_id)
+        ride, member = self.require_member(c, actor, ride_id)
+        if data.epoch != member["epoch"]:
+            raise SocialError("consent_changed", 409)
         if data.location and ride["starts"] > self.now()+3600:
             raise SocialError("ride_not_started", 409)
         c.execute(update(members).where(and_(members.c.ride == ride_id, members.c.account == actor))
                   .values(sharing=data.location, stats=data.location and data.stats, live=None,
-                          sequence=-1, epoch=identifier(), received=None, lease=self.now()+60 if data.location else None))
+                          sequence=-1, epoch=identifier(), received=None,
+                          lease=min(ride["expires"], self.now()+self.MAX_SHARING_SECONDS) if data.location else None))
         if data.location:
             c.execute(update(rides).where(rides.c.id == ride_id).values(status="active"))
         return self.ride_read(c, actor, ride_id)
@@ -469,7 +516,7 @@ class SocialService:
             for key in ("speed", "distanceMeters", "movingSeconds", "elapsedSeconds", "elevationGainMeters"):
                 payload.pop(key, None)
         c.execute(update(members).where(and_(members.c.ride == ride_id, members.c.account == actor))
-                  .values(sequence=data.sequence, live=payload, received=self.now(), lease=self.now()+60))
+                  .values(sequence=data.sequence, live=payload, received=self.now()))
         return {"accepted": data.sequence}
 
     def leave(self, c, actor, ride_id, end=False):

@@ -104,7 +104,12 @@ final class SocialMapLayer {
         }
         var occupied: [(CGRect, String)] = []
         for badge in edges.values { badge.cluster.isHidden = true; badge.cluster.text = nil }
-        for (id, rider) in visible.sorted(by: { $0.key < $1.key }) {
+        for (id, rider) in visible.sorted(by: {
+            guard let ownLocation else { return $0.key < $1.key }
+            let a = ownLocation.distance(from: CLLocation(latitude: $0.value.latitude, longitude: $0.value.longitude))
+            let b = ownLocation.distance(from: CLLocation(latitude: $1.value.latitude, longitude: $1.value.longitude))
+            return a == b ? $0.key < $1.key : a < b
+        }) {
             let annotation: SocialRiderAnnotation
             if let old = annotations[id] { annotation = old; old.rider = rider; old.coordinate = CoordinateConverter.wgs84ToGCJ02(coordinate: rider.coordinate) }
             else { annotation = SocialRiderAnnotation(rider); annotations[id] = annotation; map.addAnnotation(annotation) }
@@ -125,15 +130,8 @@ final class SocialMapLayer {
             let target = CLLocation(latitude: rider.latitude, longitude: rider.longitude)
             let meters = ownLocation.distance(from: target)
             guard meters >= 3 else { edges.removeValue(forKey: id)?.removeFromSuperview(); continue }
-            let bearing = Self.bearing(from: ownLocation.coordinate, to: rider.coordinate)
-            let angle = (bearing-map.camera.heading) * .pi/180
-            let dx = sin(angle), dy = -cos(angle)
-            let safe = map.bounds.insetBy(dx: 42, dy: 70)
-            let center = CGPoint(x: map.bounds.midX, y: map.bounds.midY)
-            let tx = abs(dx) > 0.0001 ? Double(safe.width/2)/abs(dx) : Double.greatestFiniteMagnitude
-            let ty = abs(dy) > 0.0001 ? Double(safe.height/2)/abs(dy) : Double.greatestFiniteMagnitude
-            let radius = max(0, min(tx, ty))
-            var origin = CGPoint(x: center.x+radius*dx-24, y: center.y+radius*dy-30)
+            guard let center = SocialMapGeometry.edgeCenter(projected: point, bounds: map.bounds) else { continue }
+            var origin = CGPoint(x: center.x-24, y: center.y-30)
             // Preserve bearing within a small arc; overlapping extras remain
             // available through the rider list instead of inventing a direction.
             let rect = CGRect(origin: origin, size: CGSize(width: 48, height: 60))

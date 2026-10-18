@@ -44,7 +44,8 @@ struct SocialLinkView: View {
                         SocialTrackPreview(content: preview.route).frame(height: 250)
                         Text("Joining does not start location sharing.")
                         Button("Join ride") { run {
-                            guard let code = store.pendingLink?.lastPathComponent else { return }
+                            guard let url = store.pendingLink, let target = SocialLinkTarget(url: url), target.kind == "ride" else { return }
+                            let code = target.id
                             try await store.join(code); completed = true
                         } }.disabled(completed)
                     }
@@ -55,14 +56,12 @@ struct SocialLinkView: View {
         }.task(id: store.session.state) {
             guard store.session.state == .signedIn, let url = store.pendingLink else { return }
             run {
-                let parts = url.pathComponents
-                guard parts.count == 4 else { throw SocialFailure.invalidResponse }
-                let id = parts[3]
-                guard id.range(of: "^[A-Za-z0-9_-]{20,100}$", options: .regularExpression) != nil else { throw SocialFailure.invalidResponse }
-                switch parts[2] {
+                guard let target = SocialLinkTarget(url: url) else { throw SocialFailure.invalidResponse }
+                let id = target.id
+                switch target.kind {
                 case "profile": profile = try JSONDecoder().decode(SocialProfile.self, from: await store.client.request("profiles/\(id)"))
-                case "shared": content = try JSONDecoder().decode(SocialContent.self, from: await store.client.request("shared/\(id)"))
-                case "ride": preview = try JSONDecoder().decode(SocialRidePreview.self, from: await store.client.request("group-rides/preview/\(id)"))
+                case "shared": content = try JSONDecoder().decode(SocialContent.self, from: await store.client.request("shared/resolve", method: "POST", body: JSONSerialization.data(withJSONObject: ["code": id])))
+                case "ride": preview = try JSONDecoder().decode(SocialRidePreview.self, from: await store.client.request("group-rides/preview", method: "POST", body: JSONSerialization.data(withJSONObject: ["code": id])))
                 default: throw SocialFailure.invalidResponse
                 }
             }

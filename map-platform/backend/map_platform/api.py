@@ -406,6 +406,8 @@ def create_app(
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=max_request_body_bytes,
+        body_limits={(method, path): 5*1024*1024 for method, path in (("PUT", "/v1/social/me/avatar"), ("POST", "/v1/social/routes"), ("POST", "/v1/social/activities"))}
+            if os.environ.get("BICINO_SOCIAL_ENABLED", "false").lower() == "true" else {},
     )
     app.state.artifact_store = artifact_store
     app.state.installation_store = installation_store

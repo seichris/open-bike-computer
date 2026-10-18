@@ -2639,7 +2639,12 @@ All fields are little endian. Packets use the existing protected navigation
 characteristic, not a new characteristic. The 10-byte header is `GRUP`, version
 `1` (u8), operation (u8), and a nonzero per-session epoch (u32). Phone resets the
 epoch on connection, account, or ride change; disconnect/auth reset erases state
-and pixel caches. Up to eight stable local slots represent the nearest riders;
+and pixel caches. An identical state retransmission is acknowledged as applied,
+but never renews its position age; a reused sequence with different fields is stale.
+The UI compares each badge presentation before touching LVGL and copies portrait
+pixels only when its committed hash changes. Off-screen placement uses the ray
+from the viewport center to the camera-projected rider, including near-plane
+clipping; colliding badges retain the nearest rider. Up to eight stable local slots represent the nearest riders;
 no Firebase UID, public ID, URL, or account token reaches firmware.
 
 | Operation | Bytes after header | Meaning |

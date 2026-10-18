@@ -38,10 +38,11 @@ PR #90 at `76c726f4` reported two high-priority defects: a lost successful
 position response can stall later publishing, and creating a Group Ride from
 another rider's friends-only route can redistribute a route without its owner's
 permission. Both require regression coverage and correction before #569 merges.
-The remaining review findings also need triage, including replay retention,
-maintenance/reconciliation scope, sharing leases, keychain upgrades, display
-redraw cost, and website deletion/link handling. Passing CI does not close these
-review findings.
+Corrections now cover these defects, replay redaction and schema upgrade,
+maintenance/reconciliation scope, bounded sharing, Keychain compatibility, badge
+redraw cost, fragment links and deletion reauthentication. Regression checks and
+a fresh independent review must close each finding in the review ledger; a code
+edit or passing unrelated CI does not close it.
 
 Main now includes terrain PR #565 at `9df83499`. Preserve its first-word CAP2
 bit `31` and client version `29`. Group riders move to extended feature-word
@@ -198,8 +199,11 @@ GET/POST  /v1/social/activities
 GET/PATCH/DELETE /v1/social/activities/{activityID}
 POST      /v1/social/share-links
 DELETE    /v1/social/share-links/{linkID}
-GET       /v1/social/shared/{secret}
+POST      /v1/social/shared/resolve  (capability in request body)
 GET/POST  /v1/social/ride-invites
+GET       /v1/social/group-rides/{rideID}/consent  (own current epoch)
+POST      /v1/social/group-rides/{rideID}/consent  (compare-and-set epoch)
+POST      /v1/social/group-rides/preview  (code in request body)
 POST      /v1/social/ride-invites/{inviteID}/accept
 POST      /v1/social/ride-invites/{inviteID}/decline
 DELETE    /v1/social/ride-invites/{inviteID}

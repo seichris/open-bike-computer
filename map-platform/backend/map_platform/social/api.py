@@ -44,10 +44,15 @@ def create_app(*, service=None, identity=None, features=None):
         if request.method == "DELETE":
             return
         if parts[0] in {"group-rides", "ride-invites"}:
+            if request.method == "GET" and parts[-1] == "consent":
+                return  # An explicit stop can refresh its epoch during rollback.
             if request.method == "POST" and parts[-1] in {"leave", "end", "decline"}:
                 return
             if request.method == "POST" and parts[-1] == "consent":
-                body = await request.json()
+                try:
+                    body = await request.json()
+                except (ValueError, UnicodeError):
+                    raise SocialError("invalid_json", 422) from None
                 if isinstance(body, dict) and body.get("location") is False and body.get("stats", False) is False:
                     return
             app.state.features.require("groups")
@@ -107,6 +112,9 @@ def create_app(*, service=None, identity=None, features=None):
                 if old:
                     if old["digest"] != fingerprint:
                         raise SocialError("idempotency_conflict", 409)
+                    if old["response"].get("receipt") == "link":
+                        link = row(c, links, links.c.id == old["response"]["id"])
+                        app.state.features.require_content(service.content_read(c, actor, link["content"])["kind"])
                     result = service.replay(c, actor, old["response"])
                     if result.get("kind") in {"route", "activity"}:
                         app.state.features.require_content(result["kind"])
@@ -115,9 +123,7 @@ def create_app(*, service=None, identity=None, features=None):
                         app.state.features.require_content(service.content_read(c, actor, link["content"])["kind"])
                     return result
                 result = callback(c, actor)
-                retained = dict(result)
-                if "riders" in retained:
-                    retained["riders"] = []  # Live locations must never enter the replay ledger.
+                retained = service.replay_receipt(result)
                 c.execute(replays.insert().values(owner=actor, key=key, digest=fingerprint,
                                                  response=retained, created=service.now()))
                 return result
@@ -140,7 +146,7 @@ def create_app(*, service=None, identity=None, features=None):
             raise SocialError("authentication_required", 401)
         if (data.project != os.environ.get("BICINO_FIREBASE_PROJECT_ID")
                 or abs(service.now()-data.issuedAt) > 60
-                or not 0 <= service.now()-data.authTime <= 300):
+                or not -60 <= service.now()-data.authTime <= 300):
             raise SocialError("authentication_required", 401)
         def perform():
             with service.db.transaction() as c:
@@ -175,7 +181,13 @@ def create_app(*, service=None, identity=None, features=None):
         service.rate(auth[0], "avatar", 10)
         raw = await request.body()
         try:
-            return await operation(request, auth, lambda c, a: service.set_avatar(c, a, raw, version))
+            def preflight(c):
+                service.active(c, auth[0])
+            await run_in_threadpool(service.db.run, preflight)
+            prepared = await run_in_threadpool(service.prepare_avatar, auth[0], raw)
+            # Object writes occur before the transaction/replay retry boundary.
+            # Unreferenced prepared uploads are swept after the orphan grace period.
+            return await operation(request, auth, lambda c, a: service.set_avatar(c, a, prepared, version))
         except (ValueError, OSError):
             raise SocialError("invalid_image") from None
 
@@ -191,10 +203,15 @@ def create_app(*, service=None, identity=None, features=None):
             if service.active(c, asset["owner"])["avatar"] != asset_id or variant not in asset["variants"]:
                 raise SocialError("not_found", 404)
             receipt = asset["variants"][variant]
-            data = service.media.get(receipt["key"])
-            if hashlib.sha256(data).hexdigest() != receipt["sha256"]:
-                raise SocialError("media_unavailable", 503)
-            return Response(data, media_type="image/png")
+        data = service.media.get(receipt["key"])
+        if hashlib.sha256(data).hexdigest() != receipt["sha256"]:
+            raise SocialError("media_unavailable", 503)
+        # Revalidate after I/O so revocation during a slow read still wins.
+        with service.db.transaction() as c:
+            service.pair_allowed(c, auth[0], asset["owner"])
+            if service.active(c, asset["owner"])["avatar"] != asset_id:
+                raise SocialError("not_found", 404)
+        return Response(data, media_type="image/png")
 
     @app.get("/profiles/by-username/{username}")
     def lookup(username: str, auth=Depends(authenticate)):
@@ -341,11 +358,11 @@ def create_app(*, service=None, identity=None, features=None):
             return {"revoked": True}
         return await operation(request, auth, perform)
 
-    @app.get("/shared/{secret}")
-    def shared(secret: str, authorization: str | None = Header(default=None)):
+    @app.post("/shared/resolve")
+    def shared(data: Join, authorization: str | None = Header(default=None)):
         actor = authenticate(authorization)[0] if authorization else None
         with service.db.transaction() as c:
-            link = row(c, links, and_(links.c.digest == digest(secret), links.c.expires > service.now()))
+            link = row(c, links, and_(links.c.digest == digest(data.code), links.c.expires > service.now()))
             item = service.content_read(c, actor, link["content"], capability=True)
             app.state.features.require_content(item["kind"])
             return public_content(item)
@@ -377,11 +394,11 @@ def create_app(*, service=None, identity=None, features=None):
             return service.join(c, actor, ride_id)
         return await operation(request, auth, perform)
 
-    @app.get("/group-rides/preview/{code}")
-    def preview_ride(code: str, auth=Depends(authenticate)):
+    @app.post("/group-rides/preview")
+    def preview_ride(data: Join, auth=Depends(authenticate)):
         service.rate(auth[0], "join", 20)
         with service.db.transaction() as c:
-            ride = row(c, rides, and_(rides.c.code == digest(code), rides.c.expires > service.now(),
+            ride = row(c, rides, and_(rides.c.code == digest(data.code), rides.c.expires > service.now(),
                                       rides.c.status.in_(["planned", "active"])))
             service.pair_allowed(c, auth[0], ride["owner"])
             prior = c.execute(select(members.c.status).where(and_(members.c.ride == ride["id"], members.c.account == auth[0]))).scalar()
@@ -407,6 +424,13 @@ def create_app(*, service=None, identity=None, features=None):
     def get_ride(ride_id: str, auth=Depends(authenticate)):
         with service.db.transaction() as c:
             return service.ride_read(c, auth[0], ride_id)
+
+    @app.get("/group-rides/{ride_id}/consent")
+    def consent_status(ride_id: str, auth=Depends(authenticate)):
+        def read(c):
+            _, member = service.require_member(c, auth[0], ride_id)
+            return {"epoch": member["epoch"]}
+        return service.db.run(read)
 
     @app.post("/group-rides/{ride_id}/consent")
     async def consent(ride_id: str, data: Consent, request: Request, auth=Depends(authenticate)):
@@ -444,7 +468,11 @@ def create_app(*, service=None, identity=None, features=None):
                 invites.c.status == "pending", invites.c.expires > service.now())).limit(50)).mappings()
             items = []
             for v in values:
-                service.pair_allowed(c, auth[0], v["sender"])
+                try:
+                    service.pair_allowed(c, auth[0], v["sender"])
+                    service.pair_allowed(c, auth[0], v["recipient"])
+                except SocialError:
+                    continue
                 ride = row(c, rides, rides.c.id == v["ride"])
                 items.append(dict(v, title=ride["title"], startsAt=ride["starts"]))
             return {"items": items}
@@ -511,13 +539,16 @@ def create_app(*, service=None, identity=None, features=None):
     async def bind(binding_id: str, data: DeviceBinding, request: Request, auth=Depends(authenticate)):
         if data.environment != os.environ.get("BICINO_SOCIAL_ENVIRONMENT", "development"):
             raise SocialError("notification_environment_mismatch", 400)
-        if len(binding_id) > 64:
+        if not 1 <= len(binding_id) <= 36:
             raise SocialError("invalid_binding")
         def perform(c, actor):
             service.db.lock(c, actor)
             c.execute(delete(devices).where(and_(devices.c.owner == actor, devices.c.id == binding_id)))
-            # Rebinding a token replaces its old account association on this app install.
-            c.execute(delete(devices).where(devices.c.token == data.token))
+            existing = c.execute(select(devices).where(or_(devices.c.token == data.token,
+                devices.c.id == binding_id))).mappings().first()
+            if existing and existing["owner"] != actor:
+                raise SocialError("notification_binding_in_use", 409)
+            c.execute(delete(devices).where(and_(devices.c.owner == actor, devices.c.token == data.token)))
             c.execute(devices.insert().values(id=binding_id, owner=actor, token=data.token, environment=data.environment))
             return {"registered": True, "id": binding_id}
         return await operation(request, auth, perform)
@@ -566,12 +597,19 @@ def create_app(*, service=None, identity=None, features=None):
                         raise SocialError("authentication_required", 401) from None
                     last_identity_check = loop_start
                 def snapshot():
-                    with service.db.transaction() as c:
+                    def read(c):
                         value = service.ride_read(c, actor, ride_id)
                         value.pop("route", None)
                         value["capabilities"] = app.state.features.document()
                         return value
-                value = await run_in_threadpool(snapshot)
+                    return service.db.run(read)
+                try:
+                    value = await run_in_threadpool(snapshot)
+                except OperationalError as error:
+                    if getattr(error.orig, "sqlstate", None) not in {"40001", "40P01"}:
+                        raise
+                    await asyncio.sleep(0.2)
+                    continue
                 await asyncio.wait_for(websocket.send_json(value), timeout=10)
                 try:
                     message = await asyncio.wait_for(websocket.receive_text(), timeout=2)

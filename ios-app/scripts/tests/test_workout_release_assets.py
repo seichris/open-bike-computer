@@ -186,12 +186,14 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         )
         expected_social_defaults = {
             "BICINO_SOCIAL_ENABLED": "NO",
+            "BICINO_SIGNING_ENTITLEMENTS_NO": "BikeComputer/BikeComputer.entitlements",
+            "BICINO_SIGNING_ENTITLEMENTS_YES": "BikeComputer/BikeComputerSocial.entitlements",
             "BICINO_FIREBASE_APP_ID": "",
             "BICINO_FIREBASE_SENDER_ID": "",
             "BICINO_FIREBASE_API_KEY": "",
             "BICINO_FIREBASE_PROJECT_ID": "",
             "BICINO_GOOGLE_CLIENT_ID": "",
-            "BICINO_GOOGLE_REVERSED_CLIENT_ID": "",
+            "BICINO_GOOGLE_REVERSED_CLIENT_ID": "$(BICINO_URL_SCHEME)-google-disabled",
         }
         self.assertEqual(development, {
             **expected_zone_flags, **expected_development,
@@ -389,11 +391,15 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             ios_info["LSApplicationQueriesSchemes"],
             ["strava"],
         )
-        self.assertEqual(ios_entitlements["aps-environment"], "$(BICINO_APNS_ENVIRONMENT)")
-        self.assertEqual(ios_entitlements["com.apple.developer.applesignin"], ["Default"])
-        self.assertEqual(ios_entitlements["keychain-access-groups"], [
-            "$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)",
+        self.assertNotIn("aps-environment", ios_entitlements)
+        self.assertNotIn("com.apple.developer.applesignin", ios_entitlements)
+        self.assertEqual(ios_entitlements["keychain-access-groups"], ["$(AppIdentifierPrefix)LetItRide.BikeComputer.map-library"])
+        social_entitlements = load_plist(IOS_PROJECT / "BikeComputer" / "BikeComputerSocial.entitlements")
+        self.assertEqual(social_entitlements["aps-environment"], "$(BICINO_APNS_ENVIRONMENT)")
+        self.assertEqual(social_entitlements["com.apple.developer.applesignin"], ["Default"])
+        self.assertEqual(social_entitlements["keychain-access-groups"], [
             "$(AppIdentifierPrefix)LetItRide.BikeComputer.map-library",
+            "$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)",
         ])
         self.assertTrue(ios_entitlements["com.apple.developer.healthkit"])
         self.assertTrue(watch_entitlements["com.apple.developer.healthkit"])
@@ -553,10 +559,10 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(
             project.count(
                 "CODE_SIGN_ENTITLEMENTS = "
-                "BikeComputer/BikeComputer.entitlements;"
+                '\"$(BICINO_SIGNING_ENTITLEMENTS_$(BICINO_SOCIAL_ENABLED))\";'
             ),
             2,
-            "iPhone Debug and Release must both reference HealthKit entitlements",
+            "iPhone Debug and Release must select the configured entitlement set",
         )
         self.assertEqual(
             project.count(

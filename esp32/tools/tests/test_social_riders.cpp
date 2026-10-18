@@ -1,4 +1,5 @@
 #include "../../lib/social_riders/social_riders_protocol.hpp"
+#include "../../lib/social_riders/social_riders_projection.hpp"
 #include <cassert>
 #include <iostream>
 #include <vector>
@@ -14,8 +15,9 @@ int main() {
   std::array<uint8_t,IMAGE_BYTES> image{};image[0]=1;std::array<uint8_t,32> expected{};hash(image.data(),image.size(),expected.data());memcpy(state.data()+33,expected.data(),32);
   assert(s.ingest(state.data(),state.size(),100,hash)==0);
   assert(s.riders[0].ageMs(60100)==60000);
-  assert(s.ingest(state.data(),state.size(),200,hash)==1); // duplicate cannot freshen age
+  assert(s.ingest(state.data(),state.size(),200,hash)==0); // lost ACK retries succeed without freshening age
   assert(s.riders[0].received==100);
+  auto conflicting=state;conflicting[29]='B';assert(s.ingest(conflicting.data(),conflicting.size(),200,hash)==1);
   auto begin=packet(3,43);memcpy(begin.data()+11,expected.data(),32);
   assert(s.ingest(begin.data(),begin.size(),100,hash)==0);
   auto invalid=packet(4,14);invalid[11]=1;assert(s.ingest(invalid.data(),invalid.size(),100,hash)==1);
@@ -28,6 +30,32 @@ int main() {
   auto commit=packet(5);assert(s.ingest(commit.data(),commit.size(),100,hash)==0);
   assert(s.riders[0].imageReady&&s.riders[0].image==image);
   assert(s.ingest(commit.data(),commit.size(),100,hash)==0);
+  Rider copied;
+  assert(copySnapshot(s.riders[0],copied));
+  copied.image[0]=99; // Unchanged hash must not recopy 3200 bytes on each display tick.
+  s.riders[0].sequence=2;assert(!copySnapshot(s.riders[0],copied));
+  assert(copied.sequence==2&&copied.image[0]==99);
+  s.riders[0].imageHash[1]=4;assert(copySnapshot(s.riders[0],copied));assert(copied.image[0]==1);
+  PresentationCache cache;BadgePresentation visible;visible.x=50;visible.y=60;
+  assert(cache.apply(visible));
+  for(int tick=0;tick<600;++tick)assert(!cache.apply(visible));
+  visible.x=51;assert(cache.apply(visible));
+  visible.stale=true;assert(cache.apply(visible));
+  assert(cache.hide());assert(!cache.hide());assert(cache.apply(visible));
+  map_projection::Config config;config.viewportWidth=466;config.viewportHeight=466;
+  config.anchorX=233;config.anchorY=330;config.zoom=2;
+  for(auto mode:{map_projection::Mode::Flat,map_projection::Mode::BirdsEye}) {
+    config.mode=mode;map_projection::Projection projection(config);
+    for(int direction=0;direction<360;direction+=45) {
+      const double angle=direction*M_PI/180;
+      auto world=projection.worldForGround({10000*sin(angle),10000*cos(angle)});
+      auto point=projectRider(projection,world,233,233);
+      assert(point.valid&&std::isfinite(point.x)&&std::isfinite(point.y));
+      auto boundary=edge(point.x-233,point.y-233,466,466,true);
+      assert((point.x-233)*(boundary.x-233)>=0);
+      assert((point.y-233)*(boundary.y-233)>=0);
+    }
+  }
   reset=packet(0,10,8);s.ingest(reset.data(),reset.size(),200,hash);
   assert(!s.riders[0].present&&!s.riders[0].imageReady);
   assert(s.ingest(state.data(),state.size(),200,hash)==1); // old session rejected

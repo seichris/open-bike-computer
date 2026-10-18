@@ -29,6 +29,10 @@ BICINO_FIREBASE_SENDER_ID =
 BICINO_FIREBASE_API_KEY =
 BICINO_FIREBASE_PROJECT_ID =
 BICINO_GOOGLE_CLIENT_ID =
-BICINO_GOOGLE_REVERSED_CLIENT_ID =
+BICINO_GOOGLE_REVERSED_CLIENT_ID = $(BICINO_URL_SCHEME)-google-disabled
 
 BICINO_APNS_ENVIRONMENT = development
+
+// Only enabled social builds request Apple/Push and the private Firebase group.
+BICINO_SIGNING_ENTITLEMENTS_NO = BikeComputer/BikeComputer.entitlements
+BICINO_SIGNING_ENTITLEMENTS_YES = BikeComputer/BikeComputerSocial.entitlements

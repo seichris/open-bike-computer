@@ -12,6 +12,10 @@
 	<string>$(BICINO_FIREBASE_API_KEY)</string>
 	<key>BicinoFirebaseProjectID</key>
 	<string>$(BICINO_FIREBASE_PROJECT_ID)</string>
+	<key>BicinoSocialKeychainGroup</key>
+	<string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>BicinoGoogleReversedClientID</key>
+	<string>$(BICINO_GOOGLE_REVERSED_CLIENT_ID)</string>
 	<key>BicinoGoogleClientID</key>
 	<string>$(BICINO_GOOGLE_CLIENT_ID)</string>
 

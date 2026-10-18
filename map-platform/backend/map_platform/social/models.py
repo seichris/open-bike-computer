@@ -89,6 +89,7 @@ class Join(Input):
 
 
 class Consent(Input):
+    epoch: str = Field(min_length=36, max_length=36)
     location: bool
     stats: bool
 

@@ -151,10 +151,12 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section {
+                if social.session.state != .unavailable {
+                    Section {
                     NavigationLink("Friends & Riding") {
                         SocialHubView(store: social, routeLibrary: routeLibrary)
                     }
+                }
                 }
                 if shouldPromoteBikeComputerSettings {
                     Section {

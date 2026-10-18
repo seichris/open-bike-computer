@@ -346,7 +346,7 @@ struct SocialContentDetail: View {
                     do { try store.save(item, to: routeLibrary, duplicate: true); saved = true }
                     catch { store.error = error.localizedDescription }
                 }
-                if store.capabilities.groups {
+                if store.capabilities.groups && item.owner == store.profile?.id {
                     Toggle("Schedule for later", isOn: $schedule)
                     if schedule { DatePicker("Starts", selection: $startsAt, in: Date()...Date().addingTimeInterval(29 * 86400)) }
                     Button("Ride together") {
@@ -414,6 +414,7 @@ private struct SocialLiveControls: View {
             } else {
                 Toggle("Share GPS speed, distance and times", isOn: $stats)
                 Button("Share my live location") { run { try await store.live.startSharing(stats: stats) } }
+                Text("Sharing stops after four hours or when the ride ends. You can stop it at any time.").font(.caption)
             }
             Button("Save shared route") { run {
                 guard let raw = ride.route.archive else { throw SocialFailure.invalidResponse }
@@ -443,8 +444,9 @@ private struct SocialLiveControls: View {
                     } else { Text("Route gap unavailable").font(.caption).foregroundStyle(.secondary) }
                 }
             }
-            if let code = store.live.invitationCode, let url = URL(string: "https://bicino.com/social/ride/\(code)") { ShareLink("Invite with link", item: url) }
+            if let code = store.live.invitationCode, let url = URL(string: "https://bicino.com/social/ride#\(code)") { ShareLink("Invite with link", item: url) }
             if ride.owner == store.profile?.id {
+                Button(store.live.invitationCode == nil ? "Create invite link" : "Replace invite link") { run { try await store.live.rotateInvitation() } }.disabled(store.live.isRotatingInvitation)
                 ForEach(store.friends) { friend in
                     if let invite = store.sentInvitations.first(where: { $0.ride == ride.id && $0.recipient == friend.id }) {
                         Button("Cancel invitation to \(friend.displayName)") { run { try await store.mutate("ride-invites/\(invite.id)", method: "DELETE") } }

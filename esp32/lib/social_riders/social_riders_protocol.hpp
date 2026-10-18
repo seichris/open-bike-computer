@@ -10,15 +10,38 @@
 namespace social_riders {
 constexpr size_t CAPACITY = 8, IMAGE_BYTES = 40 * 40 * 2;
 constexpr uint32_t EXPIRE_MS = 60000, STALE_MS = 15000;
-struct Rider {
+struct RiderMetadata {
   bool present = false, imageReady = false;
   uint32_t sequence = 0, received = 0;
   uint16_t age = 0, accuracy = 0, course = 65535;
   int32_t latitude = 0, longitude = 0;
   char initials[5] = {};
   std::array<uint8_t, 32> hash{}, imageHash{};
-  std::array<uint8_t, IMAGE_BYTES> image{};
   uint32_t ageMs(uint32_t now) const { return uint32_t(age) * 1000 + uint32_t(now - received); }
+};
+struct Rider : RiderMetadata { std::array<uint8_t, IMAGE_BYTES> image{}; };
+inline bool copySnapshot(const Rider &source, Rider &destination) {
+  const bool copy = source.imageReady && source.imageHash != destination.imageHash;
+  static_cast<RiderMetadata &>(destination) = static_cast<const RiderMetadata &>(source);
+  if (copy) destination.image = source.image;
+  return copy;
+}
+struct BadgePresentation {
+  int x=0,y=0; bool stale=false,portrait=false;
+  std::array<char,24> label{}; std::array<char,5> initials{};
+  std::array<uint8_t,32> hash{};
+  bool operator==(const BadgePresentation &b) const {
+    return x==b.x && y==b.y && stale==b.stale && portrait==b.portrait &&
+           label==b.label && initials==b.initials && hash==b.hash;
+  }
+};
+class PresentationCache {
+  bool visible=false; BadgePresentation previous{};
+public:
+  bool apply(const BadgePresentation &next) {
+    const bool changed=!visible || !(previous==next); previous=next;visible=true;return changed;
+  }
+  bool hide() { const bool changed=visible;visible=false;return changed; }
 };
 inline uint16_t u16(const uint8_t *p) { return p[0] | (uint16_t(p[1]) << 8); }
 inline uint32_t u32(const uint8_t *p) { return u16(p) | (uint32_t(u16(p+2)) << 16); }
@@ -56,7 +79,13 @@ public:
       const int32_t lat = int32_t(u32(p+15)), lon = int32_t(u32(p+19));
       if (std::abs(int64_t(lat)) > 90000000 || std::abs(int64_t(lon)) > 180000000 ||
           u16(p+23) >= 60 || u16(p+25) > 100 || (u16(p+27) != 65535 && u16(p+27) >= 360)) return 2;
-      if (r.present && seq <= r.sequence) return 1;
+      if (r.present && seq < r.sequence) return 1;
+      if (r.present && seq == r.sequence) {
+        // A lost ACK must permit the next portrait operation, without renewing age.
+        return r.latitude==lat && r.longitude==lon && r.age==u16(p+23) &&
+            r.accuracy==u16(p+25) && r.course==u16(p+27) &&
+            !memcmp(r.initials,p+29,4) && !memcmp(r.hash.data(),p+33,32) ? 0 : 1;
+      }
       for (int i=0;i<4;++i) if (p[29+i] && (p[29+i] < 32 || p[29+i] > 126)) return 2;
       r.present=true; r.sequence=seq; r.latitude=lat; r.longitude=lon;
       r.received=now; r.age=u16(p+23); r.accuracy=u16(p+25); r.course=u16(p+27);

@@ -785,6 +785,20 @@
         "python3",
         "g++"
       ]
+    },
+    {
+      "id": "social-runtime-tests",
+      "name": "Social publishing, retry, reconnect and link contracts",
+      "component": "ios",
+      "cwd": ".",
+      "command": "python3 tools/development/swift_compile.py social-runtime -- -swift-version 6 -parse-as-library -o \"${TMPDIR}/social-runtime-tests\"\n\"${TMPDIR}/social-runtime-tests\"",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ]
     }
   ]
 }

@@ -4284,7 +4284,10 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         let controlEnvelope = try WorkoutContractCodec.decode(
             XCTUnwrap(transport.sentData.first)
         )
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil {
+            manager.store.presentation.pendingControl == nil &&
+                manager.store.presentation.errorCode == .terminalChoiceUnconfirmed
+        }
         XCTAssertNil(manager.store.presentation.pendingControl)
         XCTAssertEqual(
             manager.store.presentation.errorCode,
