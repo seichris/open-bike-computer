@@ -1,6 +1,13 @@
 {
   "schema": 1,
   "groups": {
+    "topography-native-reader": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift",
+        "map-platform/backend/tests/companion_validator_cli.swift"
+      ]
+    },
     "native-workout-zone-1": {
       "sources": [
         "ios-app/BikeComputer/WorkoutShared/RideAutomationContract.swift",

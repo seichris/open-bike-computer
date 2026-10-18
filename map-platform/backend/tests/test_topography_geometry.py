@@ -317,9 +317,9 @@ class TopographyGeometryTests(unittest.TestCase):
     def test_iphone_companion_reader_accepts_python_artifact_and_rejects_mutations(self):
         root = Path(__file__).resolve().parents[3]
         executable = self.root / "companion-validator"
-        subprocess.run(["swiftc", "-parse-as-library",
-                        str(root / "ios-app/BikeComputer/BikeComputer/Models/TopographyCompanionStore.swift"),
-                        str(Path(__file__).with_name("companion_validator_cli.swift")), "-o", str(executable)], check=True)
+        subprocess.run([sys.executable, str(root / "tools/development/swift_compile.py"),
+                        "topography-native-reader", "--", "-parse-as-library",
+                        "-o", str(executable)], check=True)
         original = self.root / "original.btopo"
         compiled, metadata = self.companion(original)
         receipt = {"mapEntryID": "entry-123", "mapContentReceipt": "c" * 64, "mapID": "test-map",
