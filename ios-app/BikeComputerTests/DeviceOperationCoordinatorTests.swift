@@ -116,6 +116,7 @@ struct DeviceOperationCoordinatorTests {
         cancelledParent.cancel()
         let independentCleanup = await cancelledParent.value
         precondition(independentCleanup, "cancelled acquisition cancelled cleanup")
+        try await verifyInterruptedRecovery()
         defaults.set(Data("corrupt cleanup".utf8), forKey: "device-operation-cleanup-v1")
         let corrupt = DeviceOperationCoordinator(defaults: defaults)
         do {
@@ -123,5 +124,88 @@ struct DeviceOperationCoordinatorTests {
             fatalError("corrupt persisted ownership failed open")
         } catch DeviceOperationCoordinator.Failure.cleanupUnresolved { }
         print("Device operation lease tests passed")
+    }
+
+    @MainActor static func verifyInterruptedRecovery() async throws {
+        let name = "DeviceRecoveryTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let owner = DeviceOperationCoordinator(defaults: defaults)
+        func interrupted() throws -> DeviceOperationCoordinator.Lease {
+            let lease = try owner.acquire(deviceID: "board-A", mode: "debug", epoch: 1)
+            owner.recordAuthorization(lease, digest: "expected-digest", generation: 7)
+            owner.finish(lease, remoteClear: false)
+            return lease
+        }
+        var ticks = 0, requests = 0
+        var revision: UInt64 = 10, epoch: UInt64 = 2
+        var mode = "", digest: String? = nil
+        var generation: UInt32 = 0
+        let status = {
+            DeviceOperationCoordinator.RecoveryStatus(
+                deviceID: "board-A", connectionEpoch: epoch, ready: true,
+                revision: revision, mode: mode, tokenDigest: digest,
+                transferGeneration: generation)
+        }
+        let request = { requests += 1; return true }
+
+        _ = try interrupted()
+        let cleared = try await owner.recover(deviceID: "board-A", connectionEpoch: 2,
+            status: status, requestStatus: request, pause: {
+                ticks += 1
+                // Three seconds of lost/incomplete notifications exceed the
+                // former two-second admission window. A retry completes them.
+                if ticks == 12 { revision += 1 }
+            })
+        precondition(cleared == nil && owner.isCleanupComplete && requests >= 3,
+                     "a delayed fresh empty status must recover interrupted cleanup")
+
+        _ = try interrupted()
+        ticks = 0
+        do {
+            _ = try await owner.recover(deviceID: "board-A", connectionEpoch: 2,
+                status: status, requestStatus: request, pause: { ticks += 1 })
+            fatalError("cached empty status retired persisted ownership")
+        } catch DeviceOperationCoordinator.Failure.cleanupUnresolved { }
+        precondition(ticks == 64 && owner.unresolved != nil && owner.lease == nil)
+
+        let retained = owner.unresolved!
+        mode = "debug"; digest = "wrong-digest"; generation = 7; revision += 1
+        ticks = 0
+        let adopted = try await owner.recover(deviceID: "board-A", connectionEpoch: 2,
+            status: status, requestStatus: request, pause: {
+                ticks += 1; revision += 1
+                if ticks == 2 { digest = "expected-digest"; generation = 8 }
+                if ticks == 3 { generation = 7 }
+            })
+        precondition(ticks == 3 && adopted?.id == retained.id && adopted?.connectionEpoch == 2,
+                     "adoption needs both the recorded token digest and generation")
+        owner.finish(adopted!, remoteClear: true)
+
+        _ = try interrupted()
+        do {
+            _ = try await owner.recover(deviceID: "board-A", connectionEpoch: 2,
+                status: status, requestStatus: request, pause: {
+                    epoch = 3; revision += 1; mode = ""; digest = nil
+                })
+            fatalError("a successor connection cleared predecessor cleanup")
+        } catch DeviceOperationCoordinator.Failure.staleOwner { }
+        precondition(owner.unresolved != nil && owner.lease == nil)
+
+        let previousRequests = requests
+        do {
+            _ = try await owner.recover(deviceID: "board-B", connectionEpoch: 3,
+                status: status, requestStatus: request, pause: {})
+            fatalError("another device recovered the recorded owner")
+        } catch DeviceOperationCoordinator.Failure.cleanupUnresolved { }
+        precondition(requests == previousRequests, "wrong-device recovery must not send commands")
+
+        do {
+            _ = try await owner.recover(deviceID: "board-A", connectionEpoch: 3,
+                status: status, requestStatus: request, pause: { throw CancellationError() })
+            fatalError("cancelled recovery completed")
+        } catch is CancellationError { }
+        precondition(owner.unresolved != nil && owner.lease == nil)
+        owner.reconcileClear(deviceID: "board-A")
     }
 }
