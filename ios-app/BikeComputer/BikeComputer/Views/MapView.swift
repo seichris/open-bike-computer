@@ -465,6 +465,9 @@ struct MapViewContainer: UIViewRepresentable {
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         private let contourLabels = BicinoContourLabels()
         private var displayedTopographyOverlay: MKTileOverlay?
+#if DEBUG
+        private var contourDiagnosticCount = 0
+#endif
 
         func updateTopographyOverlay(_ overlay: MKTileOverlay?, on mapView: MKMapView) {
             guard displayedTopographyOverlay !== overlay else { return }
@@ -1091,6 +1094,15 @@ struct MapViewContainer: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--contour-tile-diagnostics"),
+               contourDiagnosticCount < 32, mapView.visibleMapRect.width > 0 {
+                contourDiagnosticCount += 1
+                let zoom = log2(MKMapSize.world.width * mapView.bounds.width /
+                                mapView.visibleMapRect.width / 256)
+                print("ContourCamera zoomEstimate=\(zoom) min=\(displayedTopographyOverlay?.minimumZ ?? -1) max=\(displayedTopographyOverlay?.maximumZ ?? -1)")
+            }
+#endif
             contourLabels.update(on: mapView, overlay: displayedTopographyOverlay as? BicinoTopographyTileOverlay)
             controlState?.updatePitch(from: mapView)
             updateOfflineMapSelectionBounds()
