@@ -511,7 +511,7 @@ actor TopographyCompanionStore {
     // Composition stays synchronous on this actor: only one overview buffer
     // exists per companion, and cancellation is checked between child reads.
     func displayTile(z: Int, x: Int, y: Int, scale: Int) throws -> Data? {
-        if z >= TopographyContourOverview.nativeMinimumZoom {
+        if (TopographyContourOverview.nativeMinimumZoom...TopographyContourOverview.nativeMaximumZoom).contains(z) {
             return try tile(z: z, x: x, y: y, scale: scale)
         }
         try Task.checkCancellation()

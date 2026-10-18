@@ -46,7 +46,7 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     canReplaceMapContent = false
     tileSize = CGSize(width: 256, height: 256)
     minimumZ = TopographyContourOverview.minimumZoom
-    maximumZ = metadata.maximumZoom
+    maximumZ = TopographyContourOverview.maximumZoom
     isGeometryFlipped = false
     memoryWarningObserver = NotificationCenter.default.addObserver(
       forName: UIApplication.didReceiveMemoryWarningNotification,
@@ -128,7 +128,7 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     let y = path.y
     let z = path.z
     let scale = path.contentScaleFactor > 1 ? 2 : 1
-    noteTile(z: z, scale: scale, outcome: "requested")
+    noteTile(z: z, x: x, y: y, scale: scale, outcome: "requested")
     let alignsChina = alignsChina
     let taskID = UUID()
     taskLock.lock()
@@ -146,10 +146,10 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
           data = try await store.displayTile(z: z, x: x, y: y, scale: scale)
         }
         try Task.checkCancellation()
-        self?.noteTile(z: z, scale: scale, outcome: data == nil ? "empty" : "loaded")
+        self?.noteTile(z: z, x: x, y: y, scale: scale, outcome: data == nil ? "empty" : "loaded")
         reply.complete(data ?? Self.transparentPNG, nil)
       } catch {
-        self?.noteTile(z: z, scale: scale, outcome: "failed-\(type(of: error))")
+        self?.noteTile(z: z, x: x, y: y, scale: scale, outcome: "failed-\(type(of: error))")
         reply.complete(nil, error)
       }
     }
@@ -164,12 +164,15 @@ nonisolated final class BicinoTopographyTileOverlay: MKTileOverlay, @unchecked S
     tasks.forEach { $0.cancel() }
   }
 
-  private func noteTile(z: Int, scale: Int, outcome: String) {
+  private func noteTile(z: Int, x: Int, y: Int, scale: Int, outcome: String) {
 #if DEBUG
     guard ProcessInfo.processInfo.arguments.contains("--contour-tile-diagnostics") else { return }
-    let key = "z=\(z) scale=\(scale) \(outcome)"
+    let count = pow(2.0, Double(z))
+    let centreX = Int(mapBounds.midX / MKMapSize.world.width * count)
+    let centreY = Int(mapBounds.midY / MKMapSize.world.height * count)
+    let key = "z=\(z) scale=\(scale) offset=\(x-centreX),\(y-centreY) \(outcome)"
     taskLock.lock()
-    let shouldLog = tileDiagnosticKeys.count < 64 && tileDiagnosticKeys.insert(key).inserted
+    let shouldLog = tileDiagnosticKeys.count < 128 && tileDiagnosticKeys.insert(key).inserted
     taskLock.unlock()
     // Opt-in and bounded; never include tile coordinates or map identities.
     if shouldLog { print("ContourTile \(key)") }

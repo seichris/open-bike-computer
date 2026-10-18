@@ -25,6 +25,8 @@ struct TopographyMapKitTileWarpTests {
         for scale in [1, 2] {
             try await chinaControlPoint(scale: scale)
             try await overviewPlacement(scale: scale)
+            try overzoomPlacement(scale: scale)
+            try await chinaControlPoint(scale: scale, zoom: 22)
         }
         try await overviewLimits()
         let unchanged = Data([1, 2, 3])
@@ -95,8 +97,35 @@ struct TopographyMapKitTileWarpTests {
         precondition(native == png, "native signed tile bytes must remain unchanged")
     }
 
+    private static func overzoomPlacement(scale: Int) throws {
+        let side = 256 * scale
+        for zoom in [17, 18, 22] {
+            let factor = 1 << (zoom - 16), childSide = side / factor
+            for row in [0, factor - 1] {
+                for column in [0, factor - 1] {
+                    let png = try markedTile(side: side,
+                        x: column * childSide + childSide / 2,
+                        y: row * childSide + childSide / 2,
+                        radius: max(0, childSide / 2 - 1))
+                    let reads = Reads()
+                    let output = try TopographyContourOverview.tile(
+                        z: zoom, x: 5 * factor + column, y: 6 * factor + row, scale: scale
+                    ) { z, x, y, s in
+                        reads.record(z, x, y, s)
+                        precondition(z == 16 && x == 5 && y == 6 && s == scale)
+                        return png
+                    }
+                    guard let output else { preconditionFailure("missing enlarged tile") }
+                    let value = try alpha(output, side: side, x: side / 2, y: side / 2)
+                    precondition(value > 128, "close zoom must crop the correct XYZ child")
+                    precondition(reads.values.count == 1, "close zoom reads just one verified parent")
+                }
+            }
+        }
+    }
+
     private static func overviewLimits() async throws {
-        for path in [[6, 0, 0, 1], [17, 0, 0, 1], [7, -1, 0, 1],
+        for path in [[6, 0, 0, 1], [23, 0, 0, 1], [7, -1, 0, 1],
                      [7, 128, 0, 1], [7, 0, 128, 1], [7, 0, 0, 3],
                      [Int.max, 0, 0, 1]] {
             let output = try TopographyContourOverview.tile(
@@ -126,8 +155,7 @@ struct TopographyMapKitTileWarpTests {
         catch is CancellationError { }
     }
 
-    private static func chinaControlPoint(scale: Int) async throws {
-        let zoom = 16
+    private static func chinaControlPoint(scale: Int, zoom: Int = 16) async throws {
         let side = 256 * scale
         let wgs = (lat: 31.04, lon: 103.5)
         let gcj = CoordinateConverter.wgs84ToGCJ02(lat: wgs.lat, lon: wgs.lon)
@@ -144,18 +172,22 @@ struct TopographyMapKitTileWarpTests {
         let targetTileY = Int(floor(target.y / Double(side)))
         precondition(sourceTileX != targetTileX || sourceTileY != targetTileY,
                      "control fixture must exercise a neighbouring source tile")
-        let sourceX = Int(source.x) - sourceTileX * side
-        let sourceY = Int(source.y) - sourceTileY * side
         let targetX = Int(target.x) - targetTileX * side
         let targetY = Int(target.y) - targetTileY * side
-        let sourcePNG = try markedTile(side: side, x: sourceX, y: sourceY)
-        let sourceAlpha = try alpha(sourcePNG, side: side, x: sourceX, y: sourceY)
+        let nativeZoom = min(zoom, 16)
+        let native = pixel(lat: wgs.lat, lon: wgs.lon, zoom: nativeZoom, side: side)
+        let nativeX = Int(native.x) / side, nativeY = Int(native.y) / side
+        let sourcePNG = try markedTile(side: side, x: Int(native.x) % side, y: Int(native.y) % side)
+        let sourceAlpha = try alpha(sourcePNG, side: side, x: Int(native.x) % side, y: Int(native.y) % side)
         precondition(sourceAlpha > 200,
                      "source image orientation is incorrect")
         let output = try await TopographyMapKitTileWarp.tile(
             z: zoom, x: targetTileX, y: targetTileY, scale: scale
         ) { _, x, y, _ in
-            x == sourceTileX && y == sourceTileY ? sourcePNG : nil
+            try TopographyContourOverview.tile(z: zoom, x: x, y: y, scale: scale) { z, x, y, _ in
+                precondition(z == nativeZoom)
+                return x == nativeX && y == nativeY ? sourcePNG : nil
+            }
         }
         guard let output else { preconditionFailure("warped tile is missing") }
         let targetAlpha = try alpha(output, side: side, x: targetX, y: targetY)
@@ -171,7 +203,7 @@ struct TopographyMapKitTileWarpTests {
                 (1 - asinh(tan(lat * .pi / 180)) / .pi) / 2 * world)
     }
 
-    private static func markedTile(side: Int, x: Int, y: Int) throws -> Data {
+    private static func markedTile(side: Int, x: Int, y: Int, radius: Int = 4) throws -> Data {
         guard let context = CGContext(
             data: nil, width: side, height: side, bitsPerComponent: 8,
             bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
@@ -180,8 +212,8 @@ struct TopographyMapKitTileWarpTests {
         ), let bytes = context.data?.assumingMemoryBound(to: UInt8.self) else {
             throw TestError.image
         }
-        for row in max(0, y - 4)...min(side - 1, y + 4) {
-            for column in max(0, x - 4)...min(side - 1, x + 4) {
+        for row in max(0, y - radius)...min(side - 1, y + radius) {
+            for column in max(0, x - radius)...min(side - 1, x + radius) {
                 let index = (row * side + column) * 4
                 bytes[index] = 255
                 bytes[index + 3] = 255

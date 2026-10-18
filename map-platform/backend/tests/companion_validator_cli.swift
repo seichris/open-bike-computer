@@ -8,9 +8,12 @@ enum CompanionValidatorCLI {
             let store = TopographyCompanionStore(url: URL(fileURLWithPath: CommandLine.arguments[1]), receipt: receipt)
             let metadata = try await store.validate()
             guard try await store.tile(z: 0, x: 0, y: 0, scale: 1) == nil else { fatalError("out-of-domain tile") }
-            for z in [7, 8] {
+            for z in [7, 8, 17, 22] {
                 for scale in [1, 2] {
-                    let x = 1 << (z - 1), y = x - 1
+                    // The fixture has a contour through world (2000, 2000).
+                    let count = Double(1 << z)
+                    let x = Int((0.5 + 2000 / 40_075_016.68557849) * count)
+                    let y = Int((0.5 - 2000 / 40_075_016.68557849) * count)
                     guard let first = try await store.displayTile(z: z, x: x, y: y, scale: scale),
                           let cached = try await store.displayTile(z: z, x: x, y: y, scale: scale),
                           first == cached else { fatalError("overview missing or cache mismatch") }

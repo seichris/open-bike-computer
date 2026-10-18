@@ -154,6 +154,10 @@ for a populated tile, and caches only the finished output in the existing
 4 MiB/128-entry cache. Native zoom 9–16 bytes and companion
 validation remain unchanged; existing downloads gain the wider view without
 regeneration. China coordinate alignment also applies to the overview levels.
+Close views through zoom 22 enlarge the corresponding crop of a verified zoom
+16 parent. This keeps strokes available alongside the independently placed
+numbers through MapKit's close zooms without changing signed native coverage.
+The same serialized composition and cache bounds apply in both directions.
 
 Source/build tests do not establish daylight readability, optical seams,
 motion stability, measured on-device frame time or battery impact. These remain
