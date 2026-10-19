@@ -3942,6 +3942,10 @@ extension NavigationProtocolTests {
             4,
             "topographic map detail requests format 4 independently of iPhone visibility"
         )
+        assertEqual(try? manager.makeCustomBBoxRequest().target?.terrainProfileVersion,
+                    nil, "custom cutouts must not assume a diagnostics peer")
+        assertEqual(try? manager.makeCustomBBoxRequest(supportsTerrainExperiments: true).target?.terrainProfileVersion,
+                    1, "terrain requires an explicit compatible-peer choice")
         let restored = OfflineMapManager(defaults: defaults)
         assert(restored.includeTopographyInNewMaps,
                "topographic map detail remains selected on the supported production server")
@@ -8968,7 +8972,7 @@ extension NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 28, "capability version negotiates signed topographic contours alongside existing capabilities")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 30, "capability version negotiates extended group riders alongside terrain")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1Feature, 1 << 29, "CAP2 bit 29 advertises versioned workout zones without reusing the display inactivity capability")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1MinimumClientVersion, 27, "zone negotiation requires protocol 27, independent of the iOS version")
         assertEqual(DeviceBLEProtocol.topographicContoursCapabilityMask, 1 << 30, "CAP2 bit 30 advertises signed topographic contour support")

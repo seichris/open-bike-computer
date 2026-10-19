@@ -11,6 +11,7 @@ import UIKit
 
 private enum ContentSheetDestination: Identifiable, Equatable {
     case settings
+    case socialLink
     case offlineRoutes
     case savePlannedRoute(OfflineRouteSaveDraft)
     case bikeComputerSetup
@@ -22,6 +23,7 @@ private enum ContentSheetDestination: Identifiable, Equatable {
 
     var id: String {
         switch self {
+        case .socialLink: return "social-link"
         case .settings: return "settings"
         case .offlineRoutes: return "offline-routes"
         case .savePlannedRoute(let draft): return "save-route:\(draft.id.uuidString)"
@@ -60,6 +62,8 @@ private extension PresentationDetent {
 }
 
 struct ContentView: View {
+    @EnvironmentObject private var social: SocialCoordinator
+    @State private var terrainExperiment: TerrainMapStyle?
     
     // MARK: - State
     
@@ -485,6 +489,8 @@ struct ContentView: View {
             }
         }
         .onOpenURL { url in
+            if social.session.handleURL(url) { return }
+            if social.handleLink(url) { presentedSheet = .socialLink; return }
             if BicinoAppLinkPolicy.isDeviceConnectionLink(url) {
                 hasPendingBicinoSetupAppLink = true
                 presentPendingBicinoSetupAppLinkIfEligible()
@@ -851,6 +857,12 @@ struct ContentView: View {
         for destination: ContentSheetDestination
     ) -> some View {
         switch destination {
+        case .socialLink:
+            NavigationStack { SocialLinkView(store: social, routeLibrary: routeLibrary) }
+                .environment(\.savedRouteMapAction, SavedRouteMapAction(
+                    isNavigationActive: coordinator.isNavigating,
+                    show: { selection in try showOfflineRouteFromLibrary(selection) }
+                ))
         case .savePlannedRoute(let draft):
             RouteSaveSheet(library: routeLibrary, draft: draft) { result in
                 plannedRouteSaveFeedback = result.message
@@ -1738,6 +1750,13 @@ struct ContentView: View {
 
     private var mapLayersMenu: some View {
         Menu {
+            if let overlay = offlineMapManager.topographyOverlay as? BicinoTopographyTileOverlay, overlay.hasTerrainFeatures {
+                Section("Offline Terrain Experiments") {
+                    ForEach([TerrainMapStyle.hillshade, .elevationTint, .terrain3D]) { style in
+                        Button(style == .elevationTint ? "Tint & Slope" : style.title) { terrainExperiment = style }
+                    }
+                }
+            }
             Section("Base Map") {
                 Picker("Base Map", selection: mapBaseStyleBinding) {
                     ForEach(IPhoneMapBaseStyle.allCases) { style in
@@ -1766,6 +1785,11 @@ struct ContentView: View {
             mapControlIcon("map.fill")
         }
         .buttonStyle(.plain)
+        .sheet(item: $terrainExperiment) { style in
+            if let overlay = offlineMapManager.topographyOverlay as? BicinoTopographyTileOverlay {
+                BicinoTerrainExperimentView(overlay: overlay, style: style)
+            }
+        }
         .accessibilityLabel("Layers")
         .accessibilityValue(
             "\(mapAppearance.baseStyle.title), " +
@@ -2223,7 +2247,9 @@ struct ContentView: View {
             savedRoutePreviewBottomPadding: savedRoutePreviewBottomPadding,
             isRouteCalculationActive: coordinator.routeCalculation.isCalculating,
             topographyOverlay: offlineMapManager.topographyOverlay,
-            offlineNavigationPolyline: coordinator.offlineRoutePolyline
+            offlineNavigationPolyline: coordinator.offlineRoutePolyline,
+            socialRiders: social.live.riders.filter { $0.id != social.profile?.id },
+            socialPhotos: social.photos
         )
     }
 

@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -494,23 +495,49 @@ def _assertion_extension_values(
 ) -> tuple[int | None, str | None]:
     if extensions is None:
         return None, None
-    allowed = {"validationCategory", "bundleVersion"}
-    if not set(extensions).issubset(allowed):
-        raise AppAttestError(
-            "app_attest_invalid_extensions", "App Attest extensions are invalid"
+    category_field, version_field = "validationCategory", "bundleVersion"
+    prefixed_fields = {"apple_validation_category_01", "apple_bundle_version_01"}
+    if set(extensions) & prefixed_fields:
+        # The connected iPhone also uses Apple's attestation-style names in
+        # signed assertions. Require one complete naming family, never combine
+        # partial families or silently prefer one identity over another.
+        if set(extensions) & {category_field, version_field}:
+            raise AppAttestError(
+                "app_attest_invalid_extensions",
+                "App Attest assertion extensions mix identity field formats",
+            )
+        category_field, version_field = (
+            "apple_validation_category_01", "apple_bundle_version_01"
         )
-    validation_category_value = extensions.get("validationCategory")
-    bundle_version = extensions.get("bundleVersion")
+    allowed = {category_field, version_field}
+    # Apple may add optional client properties. Accept additive metadata only
+    # alongside both known identity fields, which are validated below. The
+    # signature verifier still authenticates the complete bounded CBOR data,
+    # including every opaque extension; unknown fields cannot replace identity.
+    if set(extensions) - allowed and not allowed.issubset(extensions):
+        raise AppAttestError(
+            "app_attest_invalid_extensions",
+            "App Attest assertion extensions lack required identity fields",
+        )
+    validation_category_value = extensions.get(category_field)
+    bundle_version = extensions.get(version_field)
     if validation_category_value is None and bundle_version is None:
         return None, None
     validation_category = _validation_category(validation_category_value)
-    if (
-        validation_category is None
-        or not isinstance(bundle_version, str)
-        or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", bundle_version)
-    ):
+    if validation_category is None:
         raise AppAttestError(
-            "app_attest_invalid_extensions", "App Attest extensions are invalid"
+            "app_attest_invalid_extensions",
+            "App Attest assertion extensions have a missing or invalid category",
+        )
+    if not isinstance(bundle_version, str):
+        raise AppAttestError(
+            "app_attest_invalid_extensions",
+            "App Attest assertion extensions require a bundle-version string",
+        )
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", bundle_version):
+        raise AppAttestError(
+            "app_attest_invalid_extensions",
+            "App Attest assertion extensions have an invalid bundle-version format",
         )
     return validation_category, bundle_version
 
@@ -1266,6 +1293,21 @@ class AppAttestStore:
             raise AppAttestError(
                 "app_attest_invalid_assertion", "App Attest assertion is invalid"
             )
+        client_data_hash = hashlib.sha256(client_data).digest()
+        nonce = hashlib.sha256(auth_data + client_data_hash).digest()
+        try:
+            public_key = ec.EllipticCurvePublicKey.from_encoded_point(
+                ec.SECP256R1(), public_key_x963
+            )
+            public_key.verify(
+                signature,
+                nonce,
+                ec.ECDSA(hashes.SHA256()),
+            )
+        except (ValueError, InvalidSignature) as exc:
+            raise AppAttestError(
+                "app_attest_invalid_signature", "App Attest signature is invalid"
+            ) from exc
         parsed = parse_authenticator_data(auth_data, attestation=False)
         expected_rp_id = hashlib.sha256(app_id.encode("utf-8")).digest()
         if not secrets.compare_digest(parsed.rp_id_hash, expected_rp_id):
@@ -1276,9 +1318,24 @@ class AppAttestStore:
             raise AppAttestError(
                 "app_attest_counter_replay", "App Attest assertion was replayed"
             )
-        validation_category, bundle_version = _assertion_extension_values(
-            parsed.extensions
-        )
+        try:
+            validation_category, bundle_version = _assertion_extension_values(
+                parsed.extensions
+            )
+        except AppAttestError:
+            # Signed schema metadata only: never emit extension values, credentials,
+            # challenges, signatures, or the authenticator payload itself.
+            fields = []
+            for name, value in (parsed.extensions or {}).items():
+                label = name if isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "nonstandard-field"
+                kind = type(value).__name__
+                size = f"[{len(value)}]" if isinstance(value, (bytes, str, list, dict)) else ""
+                fields.append(f"{label}:{kind}{size}")
+            logging.getLogger(__name__).warning(
+                "App Attest signed assertion extension schema rejected fields=%s",
+                ",".join(sorted(fields)[:8]),
+            )
+            raise
         if (
             parsed.assertion_at_flag
             and parsed.extensions is not None
@@ -1300,21 +1357,6 @@ class AppAttestStore:
                     "app_attest_invalid_extensions",
                     "App Attest assertion identity is invalid",
                 )
-        client_data_hash = hashlib.sha256(client_data).digest()
-        nonce = hashlib.sha256(auth_data + client_data_hash).digest()
-        try:
-            public_key = ec.EllipticCurvePublicKey.from_encoded_point(
-                ec.SECP256R1(), public_key_x963
-            )
-            public_key.verify(
-                signature,
-                nonce,
-                ec.ECDSA(hashes.SHA256()),
-            )
-        except (ValueError, InvalidSignature) as exc:
-            raise AppAttestError(
-                "app_attest_invalid_signature", "App Attest signature is invalid"
-            ) from exc
         return parsed.counter
 
     @staticmethod

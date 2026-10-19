@@ -54,6 +54,7 @@ private func copernicusTopographyNotice(
 }
 
 struct SettingsView: View {
+    @EnvironmentObject private var social: SocialCoordinator
     @EnvironmentObject var bleManager: BLEManager
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -150,6 +151,13 @@ struct SettingsView: View {
     var body: some View {
         NavigationView {
             Form {
+                if social.session.state != .unavailable {
+                    Section {
+                    NavigationLink("Friends & Riding") {
+                        SocialHubView(store: social, routeLibrary: routeLibrary)
+                    }
+                }
+                }
                 if shouldPromoteBikeComputerSettings {
                     Section {
                         bikeComputerSettingsLink
@@ -3394,20 +3402,6 @@ private struct RemoteDeviceDebugSettingsSection: View {
                     statusMessage = "Idle"
                     errorMessage = nil
                 }
-            }
-        }
-        .task(id: bleManager.deviceTransferMode) {
-            guard bleManager.deviceTransferMode ==
-                    DeviceTransferSession.Mode.debug.rawValue else { return }
-            while !Task.isCancelled,
-                  bleManager.deviceTransferMode ==
-                    DeviceTransferSession.Mode.debug.rawValue {
-                do {
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
-                } catch {
-                    return
-                }
-                _ = bleManager.requestDeviceTransferStatus()
             }
         }
     }

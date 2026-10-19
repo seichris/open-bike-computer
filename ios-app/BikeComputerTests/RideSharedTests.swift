@@ -1507,6 +1507,42 @@ enum RideSharedTests {
                 response,
             "Watch controller response round-trips"
         )
+        let revoke = WatchControllerRequestV1(operation: .revoke, deviceID: deviceID,
+                                               controllerID: controllerID)
+        let applied = WatchControllerRevocationReceiptV1(
+            request: revoke, response: .init(requestID: revoke.requestID, accepted: true))
+        try expect(try WatchControllerRevocationReceiptV1.decode(applied.encoded()) == applied,
+                   "receiver applied cleanup receipt round trips exact identifiers")
+        var outbox = WatchControllerRevocationOutboxV1()
+        try expect(outbox.enqueue(revoke), "cleanup intent is admitted")
+        let duplicate = WatchControllerRequestV1(operation: .revoke, deviceID: deviceID, controllerID: controllerID)
+        try expect(!outbox.enqueue(duplicate), "repeated cleanup retains its original receipt identity")
+        let persisted = try PropertyListEncoder().encode(outbox.requests)
+        var restarted = WatchControllerRevocationOutboxV1(requests:
+            try PropertyListDecoder().decode([WatchControllerRequestV1].self, from: persisted))
+        try expect(!restarted.apply(.init(request: revoke,
+            response: .init(requestID: revoke.requestID, accepted: false, errorCode: "keychain_locked"))),
+            "receiver keychain failure cannot settle cleanup")
+        try expect(!restarted.apply(.init(request: duplicate,
+            response: .init(requestID: duplicate.requestID, accepted: true))),
+            "late receipt for another request cannot settle the durable operation")
+        try expect(restarted.requests == [revoke], "restart and failed receipts preserve exact intent")
+        try expect(restarted.apply(applied) && restarted.requests.isEmpty,
+                   "only the exact receiver applied receipt removes cleanup")
+        var legacy = WatchControllerRevocationOutboxV1(requests: [revoke])
+        try expect(!legacy.settleDelivered(duplicate),
+                   "delivery of another request cannot settle a pre-receipt Watch's cleanup")
+        try expect(legacy.settleDelivered(revoke) && legacy.requests.isEmpty,
+                   "a pre-receipt Watch settles its exact delivered request")
+        expectThrows(WatchControllerContractError.invalidEnvelope,
+                     "receipt cannot acknowledge a different request") {
+            _ = try WatchControllerRevocationReceiptV1(request: revoke,
+                response: .init(requestID: UUID(), accepted: true)).encoded()
+        }
+        expectThrows(WatchControllerContractError.invalidEnvelope,
+                     "enrollment material cannot enter cleanup receipts") {
+            _ = try WatchControllerRevocationReceiptV1(request: request, response: response).encoded()
+        }
         expectThrows(
             WatchControllerContractError.invalidControllerID,
             "all-zero controller IDs are rejected"

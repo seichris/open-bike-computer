@@ -3251,6 +3251,32 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         XCTAssertEqual(manager.store.presentation.sessionState, .running)
     }
 
+    func testLostSendCompletionCannotBlockTerminalChoiceAfterPauseConfirmation() async throws {
+        for discard in [false, true] {
+            let now = Date(timeIntervalSinceReferenceDate: 800_400_545)
+            let manager = WorkoutMirrorManager(now: { now }, remoteSendTimeout: 0.02)
+            let transport = FakeMirroredSessionTransport()
+            manager.acceptMirroredTransport(transport)
+            manager.applyRemoteEnvelopes(
+                [makeSnapshotEnvelope(sequence: 60, capturedAt: now, state: .running)],
+                receivedAt: now, from: transport)
+            manager.pause()
+            manager.applyNativeSessionState(.paused, at: now, from: transport)
+            if discard { manager.discard() } else { manager.endAndSave() }
+            XCTAssertEqual(transport.sentData.count, 1)
+            try await waitUntil { transport.sentData.count == 2 }
+            let terminal = try WorkoutContractCodec.decode(transport.sentData[1])
+            XCTAssertEqual(terminal.control, discard ? .discard : .endAndSave)
+            let pause = try WorkoutContractCodec.decode(transport.sentData[0])
+            XCTAssertGreaterThan(terminal.sequence, pause.sequence)
+            // The old completion must not clear the successor's semantic state.
+            transport.completeNext(succeeded: true)
+            await Task.yield()
+            XCTAssertEqual(manager.store.presentation.pendingControl,
+                           discard ? .discard : .endAndSave)
+        }
+    }
+
     func testPauseResumeTimeoutsRemainWatchUnavailable() async throws {
         for (index, scenario) in [
             (state: WorkoutSessionStateV1.running, control: WorkoutControlV1.pause),
@@ -4258,7 +4284,10 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         let controlEnvelope = try WorkoutContractCodec.decode(
             XCTUnwrap(transport.sentData.first)
         )
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil {
+            manager.store.presentation.pendingControl == nil &&
+                manager.store.presentation.errorCode == .terminalChoiceUnconfirmed
+        }
         XCTAssertNil(manager.store.presentation.pendingControl)
         XCTAssertEqual(
             manager.store.presentation.errorCode,

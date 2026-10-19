@@ -17,6 +17,14 @@ SPEC.loader.exec_module(changed_components)
 
 
 class ChangedComponentsTests(unittest.TestCase):
+    def test_pinned_social_renderer_inputs_select_its_build_job(self):
+        for path in changed_components.FIRMWARE_RENDER_TEST_PATHS:
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["firmware_build"])
+                self.assertTrue(selected["firmware_host"])
+                self.assertFalse(selected["ios"])
+
     def test_diagnostics_registry_selects_all_producers_and_consumers(self) -> None:
         for path in ("protocol/diagnostics/registry-v2.json",
                      "tools/generate_diagnostics_contract.py"):

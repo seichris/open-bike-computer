@@ -490,7 +490,7 @@ struct SavedRoutesSettingsSection: View {
             finishRenaming()
             focusedRouteID = nil
             do {
-                try routeLibrary.sendToWatch(route)
+                try routeLibrary.retryWatchSync(route)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -511,8 +511,9 @@ struct SavedRoutesSettingsSection: View {
             ("Queued", "clock", .secondary)
         case .deleting:
             ("Deleting", "clock", .secondary)
-        case .rejected:
-            ("Sync failed", "exclamationmark.triangle.fill", .red)
+        case .rejected(let reason):
+            (reason == "watch_update_required" ? "Update Watch app" : "Sync failed",
+             "exclamationmark.triangle.fill", .red)
         case .localOnly, .ready:
             nil
         }

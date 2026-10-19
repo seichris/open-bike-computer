@@ -219,6 +219,9 @@
       "tools": [
         "python3",
         "g++"
+      ],
+      "pythonImports": [
+        "SCons"
       ]
     },
     {
@@ -260,7 +263,7 @@
       "name": "Map projection host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_projection.cpp \\\n  -o ${TMPDIR}/test_map_projection\n${TMPDIR}/test_map_projection",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_map_projection.cpp \\\n  -o ${TMPDIR}/test_map_projection\n${TMPDIR}/test_map_projection\ng++ -std=c++17 -Wall -Wextra -Werror tools/tests/test_map_terrain.cpp -o ${TMPDIR}/test_map_terrain\n${TMPDIR}/test_map_terrain\nfor mode in default 0 1; do\n  profile_flags=\"\"\n  if [ \"$mode\" != default ]; then profile_flags=\"-DFIRMWARE_DIAGNOSTICS=$mode\"; fi\n  g++ -std=c++17 -Wall -Wextra -Werror $profile_flags \\\n    tools/tests/test_map_diagnostics_defaults.cpp tools/tests/test_map_diagnostics_defaults_peer.cpp \\\n    -o ${TMPDIR}/test_map_diagnostics_defaults\n  ${TMPDIR}/test_map_diagnostics_defaults\ndone",
       "tools": [
         "python3",
         "g++"
@@ -315,7 +318,7 @@
       "name": "Screen configuration protocol and Ride Stats widget host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_screen_configuration_protocol.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_protocol\n${TMPDIR}/test_screen_configuration_protocol\ng++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 \\\n  tools/tests/test_screen_configuration_protocol.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_protocol_development\n${TMPDIR}/test_screen_configuration_protocol_development\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_screen_configuration_policy.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_policy\n${TMPDIR}/test_screen_configuration_policy\ng++ -std=c++17 -Wall -Wextra -Werror -Itools/tests/host_stubs \\\n  tools/tests/test_screen_configuration_store.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_store\n${TMPDIR}/test_screen_configuration_store\n${TMPDIR}/test_screen_configuration_store legacy\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ride_stats_widget.cpp \\\n  -o ${TMPDIR}/test_ride_stats_widget\n${TMPDIR}/test_ride_stats_widget",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=0 \\\n  tools/tests/test_screen_configuration_protocol.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_protocol\n${TMPDIR}/test_screen_configuration_protocol\ng++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 \\\n  tools/tests/test_screen_configuration_protocol.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_protocol_development\n${TMPDIR}/test_screen_configuration_protocol_development\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_screen_configuration_policy.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_policy\n${TMPDIR}/test_screen_configuration_policy\ng++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=0 -Itools/tests/host_stubs \\\n  tools/tests/test_screen_configuration_store.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_store\n${TMPDIR}/test_screen_configuration_store\n${TMPDIR}/test_screen_configuration_store legacy\n${TMPDIR}/test_screen_configuration_store downgrade\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ride_stats_widget.cpp \\\n  -o ${TMPDIR}/test_ride_stats_widget\n${TMPDIR}/test_ride_stats_widget",
       "tools": [
         "python3",
         "g++"
@@ -326,7 +329,7 @@
       "name": "Ride controller lease host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ride_controller_lease.cpp \\\n  -o ${TMPDIR}/test_ride_controller_lease\n${TMPDIR}/test_ride_controller_lease\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_scoped_watch_payload_policy.cpp \\\n  -o ${TMPDIR}/test_scoped_watch_payload_policy\n${TMPDIR}/test_scoped_watch_payload_policy\ng++ -std=c++17 -Wall -Wextra -Werror -DVERSION=\\\"ci-host\\\" \\\n  tools/tests/test_ride_delivery_protocol.cpp \\\n  -o ${TMPDIR}/test_ride_delivery_protocol\n${TMPDIR}/test_ride_delivery_protocol",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_ride_controller_lease.cpp \\\n  -o ${TMPDIR}/test_ride_controller_lease\n${TMPDIR}/test_ride_controller_lease\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_scoped_watch_payload_policy.cpp \\\n  -o ${TMPDIR}/test_scoped_watch_payload_policy\n${TMPDIR}/test_scoped_watch_payload_policy\ng++ -std=c++17 -Wall -Wextra -Werror -DVERSION=\\\"ci-host\\\" \\\n  tools/tests/test_ride_delivery_protocol.cpp \\\n  -o ${TMPDIR}/test_ride_delivery_protocol\n${TMPDIR}/test_ride_delivery_protocol\ng++ -std=c++17 -Wall -Wextra -Werror tools/tests/test_ride_command_admission.cpp -o ${TMPDIR}/test_ride_command_admission\n${TMPDIR}/test_ride_command_admission",
       "tools": [
         "python3",
         "g++"
@@ -500,7 +503,7 @@
       "name": "Map stream format host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_parser.cpp \\\n  tools/tests/test_map_stream_format.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_format\n${TMPDIR}/test_map_stream_format\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  tools/tests/test_map_stream_compiled_trust.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_compiled_trust_production\n${TMPDIR}/test_map_stream_compiled_trust_production\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DMAP_STREAM_DEVELOPMENT_TRUST=1 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  tools/tests/test_map_stream_compiled_trust.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_compiled_trust_development\n${TMPDIR}/test_map_stream_compiled_trust_development\nfor test in test_map_stream_install test_map_selection_anchors test_map_metadata_power_loss; do\n  test_flags=\"\"\n  if [ \"$test\" = test_map_selection_anchors ]; then\n    test_flags=\"-finstrument-functions -DMAP_RECOVERY_INSTRUMENT_FUNCTIONS=1\"\n  fi\n  g++ -std=c++17 -Wall -Wextra -Werror $test_flags \\\n    lib/map_transfer/map_transfer.cpp \\\n    lib/map_transfer/map_operation_journal.cpp \\\n    lib/device_transfer/durable_operation.cpp \\\n    lib/map_transfer/map_stream_format.cpp \\\n    lib/map_transfer/map_stream_crypto.cpp \\\n    lib/map_transfer/map_stream_sha.cpp \\\n    lib/map_transfer/map_stream_trust.cpp \\\n    lib/map_transfer/map_stream_parser.cpp \\\n    lib/map_transfer/map_stream_install.cpp \\\n    lib/map_transfer/map_stream_receiver.cpp \\\n    lib/map_transfer/map_stream_compiled_trust.cpp \\\n    lib/maps/src/mapBlockFormat.cpp \\\n    lib/maps/src/mapLabelBlock.cpp \\\n    lib/maps/src/mapFontAsset.cpp \\\n    lib/maps/src/mapFontAssetFormat.cpp \\\n    tools/tests/${test}.cpp \\\n    $(pkg-config --cflags --libs mbedcrypto) \\\n    -o ${TMPDIR}/${test}\n  ${TMPDIR}/${test}\ndone",
+      "command": "g++ -std=c++17 -DFIRMWARE_DIAGNOSTICS=1 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_parser.cpp \\\n  tools/tests/test_map_stream_format.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_format\n${TMPDIR}/test_map_stream_format\ng++ -std=c++17 -DFIRMWARE_DIAGNOSTICS=0 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_parser.cpp \\\n  tools/tests/test_map_stream_format.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_format_production\n${TMPDIR}/test_map_stream_format_production\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  tools/tests/test_map_stream_compiled_trust.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_compiled_trust_production\n${TMPDIR}/test_map_stream_compiled_trust_production\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  -DMAP_STREAM_DEVELOPMENT_TRUST=1 \\\n  lib/map_transfer/map_transfer.cpp \\\n  lib/map_transfer/map_operation_journal.cpp \\\n  lib/device_transfer/durable_operation.cpp \\\n  lib/maps/src/mapBlockFormat.cpp \\\n  lib/maps/src/mapLabelBlock.cpp \\\n  lib/maps/src/mapFontAsset.cpp \\\n  lib/maps/src/mapFontAssetFormat.cpp \\\n  lib/map_transfer/map_stream_format.cpp \\\n  lib/map_transfer/map_stream_crypto.cpp \\\n  lib/map_transfer/map_stream_sha.cpp \\\n  lib/map_transfer/map_stream_trust.cpp \\\n  lib/map_transfer/map_stream_compiled_trust.cpp \\\n  tools/tests/test_map_stream_compiled_trust.cpp \\\n  $(pkg-config --cflags --libs mbedcrypto) \\\n  -o ${TMPDIR}/test_map_stream_compiled_trust_development\n${TMPDIR}/test_map_stream_compiled_trust_development\nfor test in test_map_stream_install test_map_selection_anchors test_map_metadata_power_loss; do\n  test_flags=\"\"\n  if [ \"$test\" = test_map_selection_anchors ]; then\n    test_flags=\"-finstrument-functions -DMAP_RECOVERY_INSTRUMENT_FUNCTIONS=1\"\n  fi\n  g++ -std=c++17 -Wall -Wextra -Werror $test_flags \\\n    lib/map_transfer/map_transfer.cpp \\\n    lib/map_transfer/map_operation_journal.cpp \\\n    lib/device_transfer/durable_operation.cpp \\\n    lib/map_transfer/map_stream_format.cpp \\\n    lib/map_transfer/map_stream_crypto.cpp \\\n    lib/map_transfer/map_stream_sha.cpp \\\n    lib/map_transfer/map_stream_trust.cpp \\\n    lib/map_transfer/map_stream_parser.cpp \\\n    lib/map_transfer/map_stream_install.cpp \\\n    lib/map_transfer/map_stream_receiver.cpp \\\n    lib/map_transfer/map_stream_compiled_trust.cpp \\\n    lib/maps/src/mapBlockFormat.cpp \\\n    lib/maps/src/mapLabelBlock.cpp \\\n    lib/maps/src/mapFontAsset.cpp \\\n    lib/maps/src/mapFontAssetFormat.cpp \\\n    tools/tests/${test}.cpp \\\n    $(pkg-config --cflags --libs mbedcrypto) \\\n    -o ${TMPDIR}/${test}\n  ${TMPDIR}/${test}\ndone",
       "tools": [
         "python3",
         "g++",
@@ -675,6 +678,17 @@
       ]
     },
     {
+      "id": "social-riders-host-tests",
+      "name": "Social rider image transport and safe-boundary host tests",
+      "component": "firmware_host",
+      "cwd": ".",
+      "command": "python3 esp32/tools/run_social_riders_tests.py",
+      "tools": [
+        "python3",
+        "c++"
+      ]
+    },
+    {
       "id": "ios-build-containers",
       "name": "Build and validate Debug/Release iOS containers",
       "component": "ios_native",
@@ -774,6 +788,20 @@
       "tools": [
         "python3",
         "g++"
+      ]
+    },
+    {
+      "id": "social-runtime-tests",
+      "name": "Social publishing, retry, reconnect and link contracts",
+      "component": "ios",
+      "cwd": ".",
+      "command": "python3 tools/development/swift_compile.py social-runtime -- -swift-version 6 -parse-as-library -o \"${TMPDIR}/social-runtime-tests\"\n\"${TMPDIR}/social-runtime-tests\"",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
       ]
     }
   ]

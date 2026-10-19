@@ -1,3 +1,4 @@
 -r ../../esp32/tools/preconnection-assets-requirements.txt
 cryptography==50.0.0
 PyYAML==6.0.3
+SCons==4.8.1

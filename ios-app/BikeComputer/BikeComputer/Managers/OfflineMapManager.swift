@@ -1599,8 +1599,11 @@ nonisolated enum SavedMapRendererCompatibilityPolicy {
         rendererFormatVersion: Int?,
         supportsStreetLabels: Bool,
         supports3DBuildings: Bool,
-        supportsTopographicContours: Bool
+        supportsTopographicContours: Bool,
+        containsTerrain: Bool = false,
+        supportsTerrainExperiments: Bool = false
     ) -> Bool {
+        guard !containsTerrain || supportsTerrainExperiments else { return false }
         switch rendererFormatVersion {
         case nil, 1:
             return true
@@ -2368,7 +2371,7 @@ final class OfflineMapManager: ObservableObject {
         createJobAndDownload(
             request: OfflineMapJobRequest
                 .customBBox(selectedMapBounds)
-                .withTopography(includeTopographyInNewMaps)
+                .withTopography(includeTopographyInNewMaps, terrain: bleManager.supportsTerrainExperiments)
         )
     }
 
@@ -2438,7 +2441,7 @@ final class OfflineMapManager: ObservableObject {
             }
             let request = OfflineMapJobRequest
                 .customBBox(bounds)
-                .withTopography(manager.includeTopographyInNewMaps)
+                .withTopography(manager.includeTopographyInNewMaps, terrain: bleManager.supportsTerrainExperiments)
                 .forDevice(
                     firmwareVersion: bleManager.firmwareVersion
                 )
@@ -4410,7 +4413,7 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
-    func makeCustomBBoxRequest() throws -> OfflineMapJobRequest {
+    func makeCustomBBoxRequest(supportsTerrainExperiments: Bool = false) throws -> OfflineMapJobRequest {
         guard let latitude = Double(centerLatitude),
               let longitude = Double(centerLongitude),
               let sizeKm = Double(sideLengthKm) else {
@@ -4422,7 +4425,7 @@ final class OfflineMapManager: ObservableObject {
         )
         return OfflineMapJobRequest
             .customBBox(bounds)
-            .withTopography(includeTopographyInNewMaps)
+            .withTopography(includeTopographyInNewMaps, terrain: supportsTerrainExperiments)
     }
 
     private func createJobAndDownload(request: OfflineMapJobRequest) {
@@ -5949,7 +5952,9 @@ final class OfflineMapManager: ObservableObject {
                supportsStreetLabels: bleManager.supportsStreetLabels,
                supports3DBuildings: bleManager.supports3DBuildings,
                supportsTopographicContours:
-                   bleManager.supportsTopographicContours
+                   bleManager.supportsTopographicContours,
+               containsTerrain: prepared.artifact.containsTerrain,
+               supportsTerrainExperiments: bleManager.supportsTerrainExperiments
            ) {
             throw OfflineMapPlatformError.invalidPack(
                 "This saved map is not compatible with the connected device. Regenerate it for this firmware."

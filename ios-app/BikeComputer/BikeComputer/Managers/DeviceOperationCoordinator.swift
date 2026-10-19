@@ -41,6 +41,61 @@ final class DeviceOperationCoordinator {
     private(set) var transferGeneration: UInt32?
     var removeConfiguration: (String) -> Void = { _ in }
 
+    struct RecoveryStatus {
+        let deviceID: String?
+        let connectionEpoch: UInt64
+        let ready: Bool
+        let revision: UInt64
+        let mode: String
+        let tokenDigest: String?
+        let transferGeneration: UInt32
+    }
+
+    /// Recover only from a fresh authenticated response on this exact link.
+    /// Chunked status can outlive the old two-second, single-request window.
+    /// Retry for a bounded sixteen seconds, without retiring unknown ownership.
+    func recover(
+        deviceID: String,
+        connectionEpoch: UInt64,
+        status: () -> RecoveryStatus,
+        requestStatus: () -> Bool,
+        pause: () async throws -> Void = {
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+    ) async throws -> Lease? {
+        guard lease == nil, let stored = unresolved,
+              stored.deviceID == deviceID else { throw Failure.cleanupUnresolved }
+        let initial = status()
+        guard initial.ready, initial.deviceID == deviceID,
+              initial.connectionEpoch == connectionEpoch else { throw Failure.staleOwner }
+        let revision = initial.revision
+        guard requestStatus() else { throw Failure.cleanupUnresolved }
+        for attempt in 0..<64 {
+            try Task.checkCancellation()
+            guard lease == nil, unresolved == stored else { throw Failure.busy }
+            let current = status()
+            guard current.ready, current.deviceID == deviceID,
+                  current.connectionEpoch == connectionEpoch else {
+                throw Failure.staleOwner
+            }
+            if current.revision != revision {
+                if current.mode.isEmpty, current.tokenDigest == nil {
+                    reconcileClear(deviceID: deviceID)
+                    return nil
+                }
+                if current.mode == stored.mode, let tokenDigest,
+                   current.tokenDigest == tokenDigest,
+                   let transferGeneration,
+                   current.transferGeneration == transferGeneration {
+                    return try adoptUnresolved(epoch: connectionEpoch)
+                }
+            }
+            if attempt > 0, attempt % 4 == 0 { _ = requestStatus() }
+            try await pause()
+        }
+        throw Failure.cleanupUnresolved
+    }
+
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         if let data = defaults.data(forKey: key) {

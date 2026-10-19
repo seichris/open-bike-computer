@@ -49,6 +49,13 @@ Changing a commit therefore recompiles metadata and changed sources while
 allowing unchanged libraries to be restored. Raw unverified builds retain
 their previous global identity flags. Version, board/profile, and configuration
 changes still affect normal compiler input identities.
+LVGL's macro-expanded `LV_CONF_PATH` include is an explicit dependency of
+application/library objects: relying on include scanning alone can restore an
+allocator built with an older pool size. A real SCons host regression alternates
+configuration sizes with the same object cache and checks the executable result.
+Every existing file named by `-include`/`-imacros` in the compiler flags (such
+as `include/nimble_connection_config.h`) is declared the same way, because the
+scanner never reads compiler flags; a second SCons regression alternates one.
 Verified compiles explicitly define `__DATE__`, `__TIME__`, and `__TIMESTAMP__`
 as the Unix epoch through a generated header with a compiler dependency.
 Arduino's chip report uses these macros; their fixed values prevent the source
