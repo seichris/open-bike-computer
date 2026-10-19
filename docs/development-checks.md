@@ -52,20 +52,10 @@ unsupported hosts, Python modules, native headers, and simulator runtimes are
 **failed**. `--plan` inspects selection/prerequisites without running tests.
 Neither a blocked prerequisite nor an omitted full check is proof of validation.
 
-On macOS, use a healthy Python and an isolated environment for host dependencies:
-
-```sh
-python3 -m venv /absolute/path/to/development-venv
-/absolute/path/to/development-venv/bin/python -m pip install \
-  -r tools/development/requirements.txt
-/absolute/path/to/development-venv/bin/python tools/dev_check.py --plan
-```
-
-This environment is for host tests. Firmware continues to hand off to its exact
-repository-locked runtime. Map checks use the dependencies documented by the
-backend and extractor; native crypto checks also need compatible MbedTLS headers
-and libraries. The plan reports missing prerequisites without installing into an
-ambient interpreter or modifying the firmware runtime.
+Host dependencies come from the per-worktree environment that `tools/dev-setup`
+creates; run checks with `tools/dev-env tools/dev-check` (see Worktree
+environment below). Firmware continues to hand off to its exact
+repository-locked runtime.
 
 Host checks receive their own temporary directories and compiler module caches.
 Local app-container checks keep Debug/Release DerivedData under this worktree's
@@ -96,3 +86,48 @@ between declarations. The durable test invocation uses whole-module compilation
 and host-only access-control inspection for existing private-state assertions;
 app builds retain ordinary Swift access control. These tests do not establish
 physical radio, filesystem power-loss or device delivery acceptance.
+
+## Worktree environment
+
+Prepare each worktree with `tools/dev-setup` and run Python-dependent commands
+through `tools/dev-env`:
+
+```sh
+tools/dev-setup
+tools/dev-env tools/dev-check --plan
+tools/dev-env tools/dev-check
+tools/dev-setup --map-backend
+tools/dev-env --map-backend tools/dev-check --suite map
+```
+
+The Codex app runs `tools/dev-setup` when it creates a worktree
+(`.codex/environments/environment.toml`, which also defines check and build-only
+actions); Claude Code runs `tools/dev-setup --quiet` from the SessionStart hook
+in `.claude/settings.json`. `CLAUDE.md` only imports `AGENTS.md`, and
+`.claude/skills` links to `.agents/skills`, so both apps read the same rules and
+skills. Keep logic in `tools/development/environment.py`, not in the adapters.
+
+Setup picks the first healthy Python 3.10-3.14 (3.13 preferred; override with
+`OPEN_BIKE_PYTHON`), creates the ignored `.venv/` from
+`tools/development/requirements.txt` and records an input fingerprint, so an
+unchanged rerun only verifies. Input changes update the environment in place;
+an environment that is broken or uses a Python outside its range is reported
+and moved aside (never deleted) only with `--recreate`. The map backend pins an
+incompatible `cryptography`, so `--map-backend` creates the separate
+`map-platform/backend/.venv/` with the map-platform CI extras plus `api`
+(`.[api,test,object-storage,topography,social]`) on Python 3.10-3.12, because
+the topography pins have no wheels for newer Pythons. Runs in the
+same worktree serialize on a lock in that worktree's Git directory; separate
+worktrees never share or modify each other's environments. Only pip's user
+download cache is shared.
+
+Setup then runs `tools/dev_check.py --plan` and prints each blocked
+prerequisite, for example missing Xcode command-line tools or MbedTLS. It never
+installs global packages, changes `xcode-select`, accepts licenses, builds or
+flashes firmware, opens serial ports, installs apps, deploys or reads signing
+keys. Firmware still bootstraps lazily through its repository-locked runtime:
+verified downloads and core transport use
+`~/Library/Caches/OpenBikeComputer/`, while mutable PlatformIO and build state
+stays below each worktree's `esp32/.pio/open-bike-build/`; never share or link
+those directories, DerivedData, manifests or upload plans between worktrees.
+`tools/dev-env` refuses to run when its environment is missing, broken or stale.
