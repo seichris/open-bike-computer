@@ -77,6 +77,7 @@ struct SettingsView: View {
     @FocusState private var focusedSavedMapFilename: String?
     @State private var presentedSheet: SettingsSheetDestination?
     @State private var routeImportFeedback: String?
+    @State private var showsAccount = false
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
@@ -149,9 +150,30 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Form {
+                if social.session.state != .unavailable {
+                    Section {
+                        Button { showsAccount = true } label: {
+                            SettingsProfileHeader(
+                                profile: social.profile,
+                                image: social.profile?.avatarID.flatMap { social.photos[$0] },
+                                isSignedIn: social.session.state == .signedIn,
+                                isRestoring: social.session.state == .restoring
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Opens your account and friends")
+                        .accessibilityIdentifier("settings.profile")
+                        .listRowBackground(Color.clear)
+                    }
+                }
+
                 if shouldPromoteBikeComputerSettings {
+                    Section {
+                        BicinoOneStoreHero()
+                            .listRowInsets(EdgeInsets())
+                    }
                     Section {
                         bikeComputerSettingsLink
                     }
@@ -271,13 +293,16 @@ struct SettingsView: View {
                     .listRowBackground(Color.clear)
                 }
             }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if shouldPromoteBikeComputerSettings {
-                    BicinoOneStoreHero()
-                }
-            }
-            .navigationTitle("Settings")
+            .navigationTitle(social.session.state == .unavailable ? "Settings" : "")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: $showsAccount) {
+                SocialHubView(store: social, routeLibrary: routeLibrary, destination: .account)
+            }
+            .task(id: social.session.generation) {
+                guard social.session.state == .signedIn else { return }
+                do { try await social.refresh() }
+                catch { social.error = error.localizedDescription }
+            }
         }
         .sheet(
             item: settingsSheetPresentation,

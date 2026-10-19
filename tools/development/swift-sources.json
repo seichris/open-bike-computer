@@ -689,6 +689,7 @@
     "social-runtime": {
       "sources": [
         "ios-app/BikeComputer/BikeComputer/Models/SocialModels.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/SocialProfilePresentation.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoSocialClient.swift",
         "ios-app/BikeComputer/BikeComputer/Services/LiveRideService.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialSecureStore.swift",

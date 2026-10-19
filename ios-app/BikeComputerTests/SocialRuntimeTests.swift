@@ -137,6 +137,7 @@ struct SocialRuntimeTests {
         require(condition(),"asynchronous social condition reached its deadline")
     }
     static func main() async throws {
+        profileSetupPresentation()
         let fixture=RideFixture();fixture.lostFirst=true
         let live=LiveRideService(client:fixture,uptime:{fixture.seconds},pollNanoseconds:10_000_000)
         live.prepareLocation={true}
@@ -328,5 +329,41 @@ struct SocialRuntimeTests {
         require(abs(SocialMapGeometry.edgeCenter(projected:CGPoint(x:-100,y:100),bounds:bounds)!.x-42)<0.00001,"a panned rider stays on the projected side of the map")
         try await SocialMaintenanceTests.run()
         print("Social publisher, expiry, reconnect/revocation, notices, HTTP retry, deletion, link and projected-edge regressions passed")
+    }
+
+    private static func profileSetupPresentation() {
+        let suite = "SocialProfileSetupTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let history = SocialProfileSetupHistory(defaults: defaults)
+        let empty = SocialProfile(id: "first", username: nil, displayName: "Rider",
+            avatarID: nil, version: 1, privacy: nil)
+        require(history.shouldOffer(for: empty), "a new profile is offered setup")
+        history.recordOffer(for: empty)
+        let relaunched = SocialProfileSetupHistory(defaults: UserDefaults(suiteName: suite)!)
+        require(!relaunched.shouldOffer(for: empty), "skipping setup survives a relaunch and later sign-in")
+        require(empty.needsProfileSetup, "skipping keeps the completion reminder available")
+        let other = SocialProfile(id: "second", username: nil, displayName: "Rider",
+            avatarID: nil, version: 1, privacy: nil)
+        require(relaunched.shouldOffer(for: other), "one account's skip does not suppress another account's setup")
+        let complete = SocialProfile(id: "complete", username: "chris", displayName: "Chris",
+            avatarID: nil, version: 2, privacy: nil)
+        require(!history.shouldOffer(for: complete), "a completed profile without an optional photo needs no prompt")
+        var draft = SocialProfileDraft(profile: empty)
+        require(draft.name.isEmpty && !draft.isValid, "new users choose their public name rather than accepting a placeholder")
+        draft.name = "  Chris  "
+        draft.username = "  CHRIS_1  "
+        require(draft.isValid && draft.normalizedName == "Chris" && draft.normalizedUsername == "chris_1",
+            "saved names are trimmed and usernames normalized")
+        for username in ["ab", "1rider", "has space", String(repeating: "a", count: 31)] {
+            draft.username = username
+            require(!draft.isValid, "invalid usernames cannot be submitted")
+        }
+        draft.username = "chris"
+        draft.name = "   "
+        require(!draft.isValid, "a blank public name cannot be submitted")
+        require(!SocialHubDestination.account.showsSharedContentAndJoin
+            && SocialHubDestination.friendsAndRides.showsSharedContentAndJoin,
+            "the account screen omits shared content and code entry while the full social destination retains them")
     }
 }

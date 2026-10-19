@@ -5,6 +5,8 @@ import MapKit
 struct SocialHubView: View {
     @ObservedObject var store: SocialCoordinator
     @ObservedObject var routeLibrary: PhoneRouteLibrary
+    var destination: SocialHubDestination = .friendsAndRides
+    var offersProfileSetup = true
     @State private var username = ""
     @State private var found: SocialProfile?
     @State private var joinCode = ""
@@ -15,23 +17,34 @@ struct SocialHubView: View {
         List {
             if store.session.state == .unavailable {
                 Section { Text("Social riding is not available in this build. Navigation and private workouts are still available.") }
+            } else if store.session.state == .restoring {
+                Section { ProgressView("Restoring your account…") }
             } else if store.session.state != .signedIn {
-                Section("Your Bicino account") {
+                Section {
                     Text("Use the same Apple or Google account as bicino.com.")
-                    Button("Continue with Apple") { perform { _ = try await store.session.signInWithApple(); try await store.refresh() } }
-                    Button("Continue with Google") { perform { try await store.session.signInWithGoogle(); try await store.refresh() } }
+                    Button("Continue with Apple") { perform { _ = try await store.session.signInWithApple() } }
+                    Button("Continue with Google") { perform { try await store.session.signInWithGoogle() } }
+                } header: {
+                    Text("Your Bicino account")
+                } footer: {
+                    Text("Sign-in is optional. Navigation and private rides work without an account.")
                 }
             } else {
                 if let profile = store.profile {
                     Section {
                         NavigationLink {
-                            SocialProfileEditor(store: store, profile: profile)
+                            if profile.needsProfileSetup {
+                                SocialProfileSetupView(store: store, profile: profile,
+                                    generation: store.session.generation)
+                            } else {
+                                SocialProfileEditor(store: store, profile: profile)
+                            }
                         } label: {
                             HStack {
                                 SocialAvatar(profile: profile, image: profile.avatarID.flatMap { store.photos[$0] })
                                 VStack(alignment: .leading) {
                                     Text(profile.displayName)
-                                    Text(profile.username.map { "@\($0)" } ?? "Set your username and photo").font(.caption)
+                                    Text(profile.username.map { "@\($0)" } ?? "Complete your profile").font(.caption)
                                 }
                             }
                         }
@@ -96,7 +109,7 @@ struct SocialHubView: View {
                         }
                     }
                 }
-                if store.capabilities.routes {
+                if destination.showsSharedContentAndJoin && store.capabilities.routes {
                     Section("Shared routes") {
                         NavigationLink("Publish a saved route") { SocialRoutePublisher(store: store, routeLibrary: routeLibrary) }
                         ForEach(store.routes) { route in
@@ -104,7 +117,7 @@ struct SocialHubView: View {
                         }
                     }
                 }
-                if store.capabilities.activities {
+                if destination.showsSharedContentAndJoin && store.capabilities.activities {
                     Section("Completed rides") {
                         NavigationLink("Share a completed ride") { SocialActivityPublisher(store: store) }
                         ForEach(store.activities) { activity in
@@ -119,7 +132,7 @@ struct SocialHubView: View {
                         }
                     }
                 }
-                if store.capabilities.groups {
+                if destination.showsSharedContentAndJoin && store.capabilities.groups {
                     Section("Join a Group Ride") {
                         TextField("Ride code", text: $joinCode).textInputAutocapitalization(.never).autocorrectionDisabled()
                         Button("Join") { perform { try await store.join(joinCode.trimmingCharacters(in: .whitespacesAndNewlines)) } }
@@ -142,10 +155,16 @@ struct SocialHubView: View {
             if let notice = store.notice { Section { Text(notice) } }
             if let error = store.error { Section { Text(error).foregroundStyle(.red) } }
         }
-        .navigationTitle("Friends & Group Rides")
+        .navigationTitle(destination.title)
+        .navigationBarTitleDisplayMode(.inline)
         .disabled(busy)
         .overlay { if busy { ProgressView() } }
-        .task { if store.session.state == .signedIn { perform { try await store.refresh() } } }
+        .task(id: store.session.generation) {
+            guard store.session.state == .signedIn else { return }
+            do { try await store.refresh() }
+            catch { store.error = error.localizedDescription }
+        }
+        .modifier(SocialProfileSetupPresentation(store: store, enabled: offersProfileSetup))
         .refreshable { do { try await store.refresh() } catch { store.error = error.localizedDescription } }
         .confirmationDialog("Delete your Bicino account and shared data?", isPresented: $deleting) {
             Button("Delete account", role: .destructive) { perform { try await store.deleteAccount() } }

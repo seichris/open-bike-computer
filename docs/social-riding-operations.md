@@ -32,6 +32,23 @@ sign the native app in. Test separate web/native Apple and Google sessions for
 matching UID, conflict handling, explicit linking, cancellation, expiry, logout,
 and recent-auth deletion before enabling either production surface.
 
+## Settings and profile setup
+
+When social riding is configured, Settings opens with a centered account header.
+The header opens Account & Friends, which retains profile editing, friends,
+requests, invitations, existing group rides and account controls, but omits
+Shared routes, Completed rides and Join a Group Ride. The bottom Friends & Group
+Rides row continues to open the full social screen.
+
+Sign-in is optional. After sign-in, an incomplete profile is offered a short
+name/username/photo setup, including sign-ins opened from a shared link. The
+offer is recorded per profile on this installation, so Not now or dismissing it
+does not cause repeated prompts after relaunch or later sign-ins. The header
+and account row keep a Complete your profile reminder. Photos are optional;
+a name and username complete setup. Existing complete profiles are not prompted.
+The same public profile is used on bicino.com; setup does not change privacy
+preferences or begin live-location sharing.
+
 ## Upgrade and lifecycle contracts
 
 Schema **3** requires the explicit migration job before API/worker startup. Stop

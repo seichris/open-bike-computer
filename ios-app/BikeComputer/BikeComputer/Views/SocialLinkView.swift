@@ -29,7 +29,7 @@ struct SocialLinkView: View {
     var body: some View {
         Group {
             if store.session.state != .signedIn {
-                SocialHubView(store: store, routeLibrary: routeLibrary)
+                SocialHubView(store: store, routeLibrary: routeLibrary, offersProfileSetup: false)
             } else if let content {
                 SocialContentDetail(store: store, item: content, routeLibrary: routeLibrary)
             } else {
@@ -53,9 +53,12 @@ struct SocialLinkView: View {
                     if let error { Text(error).foregroundStyle(.red) }
                 }.navigationTitle("Bicino link")
             }
-        }.task(id: store.session.state) {
+        }
+        .modifier(SocialProfileSetupPresentation(store: store))
+        .task(id: store.session.state) {
             guard store.session.state == .signedIn, let url = store.pendingLink else { return }
             run {
+                try await store.refresh()
                 guard let target = SocialLinkTarget(url: url) else { throw SocialFailure.invalidResponse }
                 let id = target.id
                 switch target.kind {
