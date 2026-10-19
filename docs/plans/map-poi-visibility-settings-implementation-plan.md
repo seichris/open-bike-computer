@@ -174,9 +174,10 @@ The feature remains **off by default** with
 advertise CAP2 extended bit 1 only when the configurable-screen subsystem is ready
 for client version 31 or newer. Prior exact-head iOS qualification and 1.75-inch
 CI builds passed; the coverage change requires new exact-head checks, and
-physical acceptance on both board families is still required. The connected
-ESP32's board family has not been identified, so no board-specific local build
-or flash is evidence for this checkpoint.
+physical acceptance on both board families is still required. The user
+identified the connected board as Waveshare 1.75-inch for build-only validation.
+This does not authorize a flash or qualify a physical device, and no 2.06-inch
+build is authorized for this review run.
 
 The integrated allocation is target 5/FMB v6, visibility bits 18-22,
 and CAP2 extended bit 1/client 31. Current main's terrain sidecar and
@@ -806,9 +807,14 @@ nor a missing index becomes an empty-result fallback.
 
 The manifest's signed selection geometry/coverage remains authoritative for
 search coverage; index entries alone do not establish geographic coverage.
-Preserve polygon holes and corridor selections. Where current device metadata
-only retains a bounding box, carry the bounded signed selection geometry into
-target-5 active-map metadata rather than claiming the whole box was downloaded.
+Preserve polygon holes and corridor selections at the signed block-grid
+resolution, not as an enclosing bounding box. Every selected block contains
+complete POI and base-vector content, including portions that cross the exact
+selection edge; unselected blocks remain excluded. Optional contours retain
+their independent generation and coverage contract. Canonical target-5 extraction uses these
+same complete-block semantics in legacy, shadow and selected scope modes, so
+an omitted POI inside a signed block is never mistaken for searched empty
+space. Exact sub-block geofencing is not represented by this coverage profile.
 
 ## Backend, signed artifacts, and catalog
 

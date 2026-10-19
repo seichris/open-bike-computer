@@ -371,6 +371,11 @@ if args.selection_geometry:
 apply_selection_mask = (
     selection_geometry is not None
     and selection_policy != "complete_blocks_no_selection_edge_clipping"
+    # Canonical target-5 coverage signs whole blocks, including their empty
+    # areas. Edge-clipping POIs or other features within those blocks would
+    # falsely describe omitted data as searched empty space. Scope-planned
+    # builds already use the same complete-block semantics.
+    and args.output_blocks is None
 )
 
 

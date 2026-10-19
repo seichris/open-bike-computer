@@ -103,6 +103,17 @@ class PoiCLITests(unittest.TestCase):
                     "type": "Feature",
                     "geometry": {"type": "Point", "coordinates": [500, 500]},
                     "properties": {"osm_id": "1", "shop": "books"},
+                }, {
+                    # Outside the triangle but inside selected block (1, 1).
+                    # Signed whole-block coverage must include this cafe too.
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [8000, 8000]},
+                    "properties": {"osm_id": "2", "amenity": "cafe"},
+                }, {
+                    # Still exclude a POI in unselected block (2, 2).
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [10000, 10000]},
+                    "properties": {"osm_id": "3", "amenity": "toilets"},
                 }],
             }
             for layer, features in layers.items():
@@ -141,7 +152,18 @@ class PoiCLITests(unittest.TestCase):
             self.assertEqual(fmb_blocks(root / "bounded"), {(0, 0), (1, 1)})
             stats = json.loads(next(line.removeprefix("POI_STATS:")
                 for line in bounded.stdout.splitlines() if line.startswith("POI_STATS:")))
-            self.assertEqual(stats["recordCount"], 1)
+            self.assertEqual(stats["recordCount"], 2)
+            self.assertEqual(stats["restaurantsAndCafesCount"], 1)
+            self.assertEqual(stats["publicToiletsCount"], 0)
+            encoded_count = 0
+            for path in (root / "bounded").rglob("*.fmb"):
+                data = path.read_bytes()
+                directory = data.index(b"EXT6")
+                offset, length = struct.unpack_from("<II", data, directory + 8 + 5 * 16 + 4)
+                count = struct.unpack_from("<H", data, offset)[0]
+                self.assertEqual(length, 8 + count * 8)
+                encoded_count += count
+            self.assertEqual(encoded_count, stats["recordCount"])
 
             for name, document in (
                 ("unsorted", {**valid, "blocks": [[0, 1], [0, 0]]}),

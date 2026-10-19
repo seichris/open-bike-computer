@@ -37,6 +37,7 @@ validation on 2026-10-19.
 | R22 | P2 | The 1,024-block Nearby coverage cap ran only at manifest time, after admission and extraction | fixed+verified |
 | R23 | P2 | Review hypothesis: old canary artifacts could be reused after the corrected worker is promoted | invalidated |
 | R24 | P1 | Linux GCC/glibc rejects the fclose function-pointer deleter type under the Nearby host test's warnings-as-errors | fixed+verified |
+| R25 | P2 | Canonical whole-block target-5 coverage still used exact selection-edge filtering in legacy/shadow extraction, omitting data inside signed blocks | fixed+verified |
 
 Non-blocking observation: ambient limits 48/32 and 14 px icons differ from the
 plan's qualification targets. These are not demonstrated correctness defects;
@@ -311,6 +312,49 @@ no additional code defect within P0/P1/P2. Publish the verified repair, then
 revalidate its exact remote head; earlier CI results do not attest that head.
 Ledger: 21 fixed+verified, two active (R10/R18 build/reserve), one invalidated,
 zero user-deferred. No device, deployment, reserve or production gate changed.
+
+## Whole-block completeness correction, iteration 10
+
+A final contract review found R25 in the R20 boundary fix. The signed target-5
+coverage names complete selected blocks, but legacy/shadow extraction still
+filtered POIs and features to the exact polygon/corridor edge. Reproduced with
+a cafe at projected (8,000, 8,000), outside the triangle but inside signed
+block (1, 1): expected two POIs, emitted/reported only one. The unselected
+corner block remains outside coverage.
+
+Canonical `--output-blocks` now uses the existing complete-block selection
+semantics for POI/base-vector features, matching selected/chunked mode. Other renderer
+formats and unscoped CLI behavior retain their selection rules. Source closure,
+calibration rules and rollout policy are not changed. Polygon holes and
+corridors are represented at signed block-grid resolution; this profile does
+not claim sub-block geofencing. The plan now says so explicitly.
+
+The real extractor CLI regression passes: both the inside-polygon shop and
+the cafe in signed block (1, 1) are retained, while a toilet in unselected
+block (2, 2) is excluded. Full map verification passed with stable source,
+report `bcde9101-ab6b-4cee-89f7-922faf22c06c`: backend 988 (four skips),
+deployment 58, and all 181 extractor tests. The regression also compares the
+record counts encoded in the actual FMB v6 sections against POI_STATS.
+The strengthened encoded-record regression and all 181 OSM tests then passed
+with stable source, report `6dde4810-618d-4375-9927-6ef945a0d555`.
+
+The clean `7ca655d6` local Debug **and** Release app builds passed with Xcode
+26.6, including iPhone, Watch, complication and Live Activity validation and
+exact-source symbols: report `6e20e8fb-d8f1-4d24-a8c6-90080860afde`,
+`sourceUnchanged=true`. All 40 firmware host checks also passed from that
+clean head (report `4a15de93-2248-400c-95ad-ff5f1d8b66e9`). These are baseline
+results for the unchanged app/firmware source, not attestations of a future
+commit containing R25. CI app builds failed before compilation on GitHub
+dependency transport; GitHub refused a job rerun while its workflow was active.
+The ten-poll CI observation ended at 2026-10-19 05:13:24 UTC with firmware
+profiles and iOS tests pending. No pending or network-failed result was waived.
+
+Iteration 11: reviewed the final coverage correction, its source/selection
+callers, signed-reader contract, cache identities and regression tests. No
+additional in-gate code defect was found. Exact final remote-head verification
+follows publication. Ledger: 22 fixed+verified, two active (R10/R18 clean enabled
+firmware/reserve), one invalidated, zero user-deferred. Earlier canary packs are
+not rewritten; qualification must regenerate packs with the corrected worker.
 
 ## Earlier diagnostic batch
 
