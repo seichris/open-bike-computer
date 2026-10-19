@@ -209,6 +209,22 @@ for signing, packaging or deployment gates.
 
 ## Runtime
 
+### Map-independent friend indicators
+
+Social locations are global. Offline map packs supply the background, not a
+geographic limit on friends. With a usable published map, portraits use its
+projection as before. Without a map or microSD card, fresh friend positions use
+great-circle GPS bearing and distance and remain on the screen rim; a coincident
+friend appears in the center. The existing missing-map message remains visible.
+Distances are straight-line distances, not road or route distances.
+
+The fallback follows course-up when a resolved heading is available, otherwise
+north-up, with an explicit orientation label. It requires a valid own coordinate
+and source measurement younger than 15 seconds. BLE source revocation takes effect
+immediately. Existing friend staleness (15 seconds), expiry (60 seconds), clustering,
+portraits, privacy revocation and production capability gates remain in force.
+An exactly antipodal friend has no unique bearing and is omitted.
+
 ### Staged feature activation
 
 The global `BICINO_SOCIAL_ENABLED` switch mounts social in the existing map API;
@@ -358,6 +374,8 @@ validated image and record device ID, image hash, portrait screenshots and logs:
 
 - Friends inside/outside the map in eight directions, north/course-up, pan/zoom,
   bird's-eye, screen changes, map tiles missing, and stale/absent own GPS.
+- No-map and no-card GPS fallback, covered-to-uncovered map transitions,
+  antimeridian/polar positions and explicit fallback orientation.
 - Real 40×40 RGB565 photos, initials fallback, overlap count, 15-second stale fade,
   60-second expiry, image truncation/hash failure, interruption and reconnect.
 - Stop sharing, leave, removal, block, end, logout, owner change, and account deletion.

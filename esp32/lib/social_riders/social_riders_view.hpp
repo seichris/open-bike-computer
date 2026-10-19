@@ -7,6 +7,7 @@ void hideView();
 void beginFrame();
 void endFrame();
 void addClusterMember(size_t slot);
+void showFallbackOrientation(lv_obj_t *parent, bool courseUp);
 void draw(size_t slot, lv_obj_t *parent, double x, double y, const Rider &rider,
           bool edge, double meters, uint32_t now);
 }
