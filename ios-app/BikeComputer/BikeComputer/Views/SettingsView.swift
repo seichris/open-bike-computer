@@ -2163,10 +2163,7 @@ private struct DeviceScreensSettingsSection: View {
     let offlineMapManager: OfflineMapManager
 
     var body: some View {
-        Section(
-            header: Text("Bicino Screens"),
-            footer: Text(mapStyleFooter)
-        ) {
+        Section {
             ForEach(bleManager.availableDeviceScreens) { screen in
                 HStack(spacing: 4) {
                     Text(screen.title)
@@ -2225,15 +2222,18 @@ private struct DeviceScreensSettingsSection: View {
                     Text(screen.title).tag(screen)
                 }
             }
+        } header: {
+            Text("Bicino Screens")
+        } footer: {
+            if bleManager.hasReceivedDeviceCapabilities {
+                Text(mapStyleFooter)
+            }
         }
         .disabled(!bleManager.supportsDeviceSettings ||
                   !bleManager.hasReceivedDeviceCapabilities)
     }
 
     private var mapStyleFooter: String {
-        if !bleManager.hasReceivedDeviceCapabilities {
-            return "Checking whether the connected firmware supports independent map styles."
-        }
         if bleManager.supportsIndependentMapProfiles {
             return "Use the gear buttons to configure Map and Map + Navigation independently."
         }
