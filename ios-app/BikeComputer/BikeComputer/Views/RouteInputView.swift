@@ -99,6 +99,7 @@ struct RouteSearchPanel: View {
                     selectInitialDestination(initialDestination)
                 } else {
                     DispatchQueue.main.async {
+                        guard isExpanded, !hasSelectedDestination else { return }
                         focusedField = .destination
                     }
                 }
@@ -503,6 +504,7 @@ struct RouteSearchPanel: View {
     }
 
     private func selectInitialDestination(_ destination: SavedDestination) {
+        focusedField = nil
         guard !hasSelectedDestination || selectedDestination != destination else { return }
         selectDestination(destination)
     }
