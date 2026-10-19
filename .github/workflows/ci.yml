@@ -187,6 +187,13 @@ jobs:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
           BICINO_BUILD_EVIDENCE_DIR: ${{ runner.temp }}/bicino-build-symbols
         run: python3 ../tools/build_evidence.py firmware --environment "$BUILD_ENVIRONMENT"
+      - name: Stress eight rider badges with the pinned LVGL renderer
+        if: contains(matrix.target, '_REMOTE_DEBUG')
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          python3 tools/run_social_riders_render_test.py --lvgl-source \
+            ".pio/open-bike-build/platformio/${BUILD_ENVIRONMENT}/libdeps/${BUILD_ENVIRONMENT}/lvgl"
       - name: Verify remote-debug excludes locale startup allocations
         if: contains(matrix.target, '_REMOTE_DEBUG')
         env:

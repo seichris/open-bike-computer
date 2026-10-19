@@ -178,7 +178,7 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
         )
         for config in (LVGL_CONFIG_SOURCE, LVGL_CONFIG_TEMPLATE_SOURCE):
             self.assertIn(gate, config)
-            self.assertIn("#define LV_MEM_SIZE (96 * 1024U)", config)
+            self.assertIn("#define LV_MEM_SIZE (192 * 1024U)", config)
             self.assertIn(
                 "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config
             )

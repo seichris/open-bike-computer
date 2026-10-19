@@ -53,11 +53,11 @@
 
 #if LV_USE_STDLIB_MALLOC == LV_STDLIB_BUILTIN
     /*Size of the memory available for `lv_malloc()` in bytes (>= 2kB)*/
-    // The full-screen map object tree plus LVGL's four-line software image
-    // blend buffer exceeds 64 KiB on the 466x466 displays. Keep enough margin
-    // for the Map + Navigation overlay without exhausting the built-in TLSF
-    // pool during display refresh.
-    #define LV_MEM_SIZE (96 * 1024U)          /*[bytes]*/
+    // All resident screens, eight social badges and temporary glyph/image
+    // buffers share this pool. The 96 KiB pool exhausted during a map drag
+    // while drawing rider initials, trapping the UI in LV_ASSERT_MALLOC.
+    // Reserve bounded PSRAM headroom for refresh and TLSF fragmentation.
+    #define LV_MEM_SIZE (192 * 1024U)          /*[bytes]*/
 
     /*Size of the memory expand for `lv_malloc()` in bytes*/
     #define LV_MEM_POOL_EXPAND_SIZE 0
@@ -68,7 +68,7 @@
     #if LV_MEM_ADR == 0
         // Map and firmware transfers start a Wi-Fi AP after the complete UI
         // and BLE stack are live. Keep LVGL's fixed TLSF semantics, but put
-        // its 96 KiB backing pool in the PSRAM available on both AMOLED boards
+        // its 192 KiB backing pool in the PSRAM available on both AMOLED boards
         // so the Wi-Fi driver retains enough contiguous internal memory.
         #if defined(BOARD_HAS_PSRAM) && (defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206))
             #define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>
