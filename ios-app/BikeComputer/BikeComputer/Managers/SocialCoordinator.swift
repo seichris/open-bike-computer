@@ -29,11 +29,23 @@ final class SocialCoordinator: ObservableObject {
     @Published private(set) var notificationStatus: SocialNotificationBinding.Status = .inactive
     let notifications: SocialNotificationBinding
     let deletion: SocialAccountDeletion
+    private let profileEdits = SocialProfileMutationQueue()
+    @Published private(set) var alertsAuthorized = false
+    @Published private(set) var alertsDenied = false
     private var pushToken: String?
-    func enableNotifications() async throws {
-        if try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) {
+    @discardableResult
+    func enableNotifications() async throws -> Bool {
+        let allowed = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
+        await refreshNotificationAuthorization()
+        if allowed {
             UIApplication.shared.registerForRemoteNotifications()
         }
+        return allowed
+    }
+    func refreshNotificationAuthorization() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        alertsAuthorized = [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus)
+        alertsDenied = settings.authorizationStatus == .denied
     }
     func didRegisterNotifications(_ data: Data) {
         pushToken = data.map { String(format: "%02x", $0) }.joined()
@@ -46,9 +58,8 @@ final class SocialCoordinator: ObservableObject {
     /// Re-register on sign-in and launch so a migrated or rotated installation
     /// binding is restored without the rider re-enabling alerts.
     private func registerForAlertsIfAuthorized() async {
-        let settings = await UNUserNotificationCenter.current().notificationSettings()
-        guard session.state == .signedIn,
-              [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus) else { return }
+        await refreshNotificationAuthorization()
+        guard session.state == .signedIn, alertsAuthorized else { return }
         UIApplication.shared.registerForRemoteNotifications()
     }
     private var relay: SocialBLERelay?
@@ -129,7 +140,9 @@ final class SocialCoordinator: ObservableObject {
         let routes = try await content(kind: "routes")
         let activities = try await content(kind: "activities")
         guard expected == session.generation else { return }
-        self.profile = me; self.friends = friends; self.requests = requests
+        // A background refresh must not replace a newer autosave response.
+        if profile?.id != me.id || (profile?.version ?? 0) <= (me.version ?? 0) { profile = me }
+        self.friends = friends; self.requests = requests
         invitations = invites; sentInvitations = sent; rides = rooms; self.blocked = blocked; self.routes = routes; self.activities = activities
         await loadPhotos(friends + [me])
         await bindNotifications()
@@ -168,15 +181,50 @@ final class SocialCoordinator: ObservableObject {
     }
 
     func saveProfile(username: String, name: String, privacy: SocialPrivacy) async throws {
-        guard let profile else { return }
-        let privacyJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(privacy))
-        _ = try await client.json("me", method: "PATCH", body: ["version": profile.version ?? 1,
-            "username": username.lowercased(), "displayName": name, "privacy": privacyJSON])
-        try await refresh()
+        try await editProfile { draft, settings in
+            draft.username = username
+            draft.name = name
+            settings = privacy
+        }
+    }
+
+    func saveProfileName(_ name: String) async throws {
+        try await editProfile { draft, _ in draft.name = name }
+    }
+
+    func saveProfileUsername(_ username: String) async throws {
+        try await editProfile { draft, _ in draft.username = SocialUsername.normalized(username) }
+    }
+
+    func savePrivacy(_ flag: SocialPrivacyFlag, value: Bool) async throws {
+        try await editProfile { _, settings in settings[keyPath: flag.keyPath] = value }
+    }
+
+    func savePrivateAreas(_ zones: [SocialZone]) async throws {
+        try await editProfile { _, settings in settings.zones = zones }
+    }
+
+    private func editProfile(
+        _ change: @escaping @MainActor @Sendable (inout SocialProfileDraft, inout SocialPrivacy) -> Void
+    ) async throws {
+        let expected = session.generation
+        try await profileEdits.perform(generation: expected, currentGeneration: { self.session.generation }) {
+            guard let profile = self.profile else { throw SocialFailure.signedOut }
+            var draft = SocialProfileDraft(profile: profile)
+            var privacy = profile.privacy ?? SocialPrivacy()
+            change(&draft, &privacy)
+            guard draft.isValid else { throw SocialFailure.server("enter_a_valid_name_and_username") }
+            let privacyJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(privacy))
+            let data = try await self.client.request("me", method: "PATCH", body: JSONSerialization.data(withJSONObject: [
+                "version": profile.version ?? 1, "username": draft.normalizedUsername,
+                "displayName": draft.normalizedName, "privacy": privacyJSON
+            ]))
+            _ = try self.acceptProfileResponse(data, generation: expected)
+        }
     }
 
     func setPhoto(_ data: Data) async throws {
-        guard let profile, let image = UIImage(data: data), image.size.width > 0, image.size.height > 0 else {
+        guard let image = UIImage(data: data), image.size.width > 0, image.size.height > 0 else {
             throw SocialFailure.invalidResponse
         }
         // Server repeats crop/validation and removes all metadata.
@@ -188,19 +236,37 @@ final class SocialCoordinator: ObservableObject {
             image.draw(in: CGRect(x: (256-size.width)/2, y: (256-size.height)/2, width: size.width, height: size.height))
         }
         guard let png = thumbnail.pngData() else { throw SocialFailure.invalidResponse }
-        _ = try await client.request("me/avatar", method: "PUT", body: png, contentType: "image/png",
-            query: [URLQueryItem(name: "version", value: String(profile.version ?? 1))])
-        photos = [:]
-        try await refresh()
+        let expected = session.generation
+        try await profileEdits.perform(generation: expected, currentGeneration: { self.session.generation }) {
+            guard let profile = self.profile else { throw SocialFailure.signedOut }
+            let data = try await self.client.request("me/avatar", method: "PUT", body: png, contentType: "image/png",
+                query: [URLQueryItem(name: "version", value: String(profile.version ?? 1))])
+            let updated = try self.acceptProfileResponse(data, generation: expected)
+            self.photos = [:]
+            await self.loadPhotos([updated])
+        }
     }
 
     func removePhoto() async throws {
-        _ = try await client.json("me/avatar", method: "DELETE")
-        photos = [:]
-        try await refresh()
+        let expected = session.generation
+        try await profileEdits.perform(generation: expected, currentGeneration: { self.session.generation }) {
+            let data = try await self.client.request("me/avatar", method: "DELETE")
+            let updated = try self.acceptProfileResponse(data, generation: expected)
+            self.photos = [:]
+            await self.loadPhotos([updated])
+        }
+    }
+
+    private func acceptProfileResponse(_ data: Data, generation: UUID) throws -> SocialProfile {
+        guard generation == session.generation else { throw SocialFailure.accountChanged }
+        let profile = try JSONDecoder().decode(SocialProfile.self, from: data)
+        guard self.profile?.id == profile.id else { throw SocialFailure.accountChanged }
+        self.profile = profile
+        return profile
     }
 
     func lookup(_ username: String) async throws -> SocialProfile {
+        let username = SocialUsername.normalized(username)
         guard username.range(of: "^[a-z][a-z0-9_]{2,29}$", options: .regularExpression) != nil else {
             throw SocialFailure.server("enter_an_exact_username")
         }

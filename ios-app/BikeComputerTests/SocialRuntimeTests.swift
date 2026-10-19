@@ -26,6 +26,17 @@ private final class SocketFixture: SocialSocket {
 }
 
 @MainActor
+private final class ProfileEditFixture {
+    var generation = UUID()
+    var version = 1
+    var seenVersions: [Int] = []
+    var name = "Chris"
+    var notifications = true
+    var held: CheckedContinuation<Void, Never>?
+    var retiredEditRan = false
+}
+
+@MainActor
 private final class RideFixture: SocialRideNetworking {
     var seconds=0.0
     var sequences:[Int]=[]
@@ -138,6 +149,7 @@ struct SocialRuntimeTests {
     }
     static func main() async throws {
         profileSetupPresentation()
+        try await profileMutationSerialization()
         let fixture=RideFixture();fixture.lostFirst=true
         let live=LiveRideService(client:fixture,uptime:{fixture.seconds},pollNanoseconds:10_000_000)
         live.prepareLocation={true}
@@ -331,7 +343,73 @@ struct SocialRuntimeTests {
         print("Social publisher, expiry, reconnect/revocation, notices, HTTP retry, deletion, link and projected-edge regressions passed")
     }
 
+    private static func profileMutationSerialization() async throws {
+        let queue = SocialProfileMutationQueue()
+        let fixture = ProfileEditFixture()
+        let generation = fixture.generation
+        let name = Task { @MainActor in
+            try await queue.perform(generation: generation, currentGeneration: { fixture.generation }) {
+                fixture.seenVersions.append(fixture.version)
+                await withCheckedContinuation { fixture.held = $0 }
+                fixture.name = "New name"
+                fixture.version += 1
+            }
+        }
+        try await wait { fixture.held != nil }
+        let privacy = Task { @MainActor in
+            try await queue.perform(generation: generation, currentGeneration: { fixture.generation }) {
+                fixture.seenVersions.append(fixture.version)
+                fixture.notifications = false
+                fixture.version += 1
+            }
+        }
+        await Task.yield()
+        require(fixture.seenVersions == [1], "a preference edit waits for the preceding profile field response")
+        fixture.held?.resume(); fixture.held = nil
+        try await name.value
+        try await privacy.value
+        require(fixture.seenVersions == [1, 2] && fixture.name == "New name" && !fixture.notifications,
+            "successive autosaves use the latest version and preserve each other's settings")
+
+        do {
+            try await queue.perform(generation: generation, currentGeneration: { fixture.generation }) {
+                throw SocialFailure.unavailable
+            }
+            preconditionFailure("a failed save must be reported")
+        } catch SocialFailure.unavailable { }
+        try await queue.perform(generation: generation, currentGeneration: { fixture.generation }) {
+            fixture.version += 1
+        }
+        require(fixture.version == 4, "a failed save does not block later changes")
+
+        let held = Task { @MainActor in
+            try await queue.perform(generation: generation, currentGeneration: { fixture.generation }) {
+                await withCheckedContinuation { fixture.held = $0 }
+            }
+        }
+        try await wait { fixture.held != nil }
+        let retired = Task { @MainActor in
+            try await queue.perform(generation: generation, currentGeneration: { fixture.generation }) {
+                fixture.retiredEditRan = true
+            }
+        }
+        await Task.yield()
+        fixture.generation = UUID()
+        fixture.held?.resume(); fixture.held = nil
+        do { try await held.value; preconditionFailure("an old account's response must be rejected") }
+        catch SocialFailure.accountChanged { }
+        do { try await retired.value; preconditionFailure("a queued edit must not cross an account change") }
+        catch SocialFailure.accountChanged { }
+        require(!fixture.retiredEditRan, "an old account's pending settings never run against a new account")
+    }
+
     private static func profileSetupPresentation() {
+        require(SocialUsername.normalized("  @Chris_1 \n") == "chris_1",
+            "rider lookup accepts a pasted handle with an at-sign, case and whitespace")
+        require(SocialUsername.normalized("Chris_1") == "chris_1",
+            "rider lookup also accepts a username without an at-sign")
+        require(SocialUsername.normalized("@@chris") == "@chris",
+            "lookup does not silently repair malformed handles")
         let suite = "SocialProfileSetupTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }

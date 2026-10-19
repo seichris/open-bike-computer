@@ -1,5 +1,26 @@
 import Foundation
 
+enum SocialPrivacyFlag: Sendable {
+    case requests, invitations, notifications, friendNotifications, rideNotifications
+
+    var keyPath: WritableKeyPath<SocialPrivacy, Bool> {
+        switch self {
+        case .requests: \.requests
+        case .invitations: \.invitations
+        case .notifications: \.notifications
+        case .friendNotifications: \.friendNotifications
+        case .rideNotifications: \.rideNotifications
+        }
+    }
+}
+
+enum SocialUsername {
+    static func normalized(_ input: String) -> String {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return trimmed.hasPrefix("@") ? String(trimmed.dropFirst()) : trimmed
+    }
+}
+
 enum SocialHubDestination: Equatable {
     case friendsAndRides
     case account

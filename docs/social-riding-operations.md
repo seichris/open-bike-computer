@@ -49,6 +49,24 @@ a name and username complete setup. Existing complete profiles are not prompted.
 The same public profile is used on bicino.com; setup does not change privacy
 preferences or begin live-location sharing.
 
+Profile sharing and the QR-code action share one row. Rider lookup accepts an
+exact username with or without a leading @. Native completed-ride publishing
+has been removed; previously published entries remain available for management.
+Private Health workout recording and group rides do not depend on publishing.
+
+Privacy and notifications and Private areas appear at the bottom of Account &
+Friends. Profile fields save when focus leaves a field or the editor closes;
+choosing/removing a photo, toggles and private-area additions/removals save
+immediately. Profile and avatar writes are serialized against the server's
+profile version. Failed changes are reported; preferences roll back to the
+confirmed server state. An account switch rejects queued edits from the old
+account. The deployed profile-write contract requires a completed name and
+username before account preferences can be changed.
+
+The request/invitation alerts toggle includes the iPhone notification permission
+step. Denied system permission keeps alerts off and offers an iPhone Settings
+link. The account's notification preference still controls server delivery.
+
 ## Upgrade and lifecycle contracts
 
 Schema **3** requires the explicit migration job before API/worker startup. Stop

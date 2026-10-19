@@ -12,6 +12,7 @@ struct SocialHubView: View {
     @State private var joinCode = ""
     @State private var busy = false
     @State private var deleting = false
+    @State private var showsQRCode = false
 
     var body: some View {
         List {
@@ -48,10 +49,10 @@ struct SocialHubView: View {
                                 }
                             }
                         }
-                        NavigationLink("Show my QR code") { SocialQRCode(url: URL(string: "https://bicino.com/social/profile/\(profile.id)")!) }
-                        ShareLink(item: URL(string: "https://bicino.com/social/profile/\(profile.id)")!) {
-                            Label("Share my profile", systemImage: "qrcode")
-                        }
+                        SocialProfileActionsRow(
+                            profileURL: URL(string: "https://bicino.com/social/profile/\(profile.id)")!,
+                            showQRCode: { showsQRCode = true }
+                        )
                     }
                 }
                 if store.live.ride != nil {
@@ -75,8 +76,7 @@ struct SocialHubView: View {
                             }
                         }
                     }
-                    TextField("Exact username", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    Button("Find rider") { perform { found = try await store.lookup(username.lowercased()) } }
+                    SocialRiderSearchRow(username: $username, search: searchForRider)
                     if let found {
                         Text(found.displayName)
                         Button("Send friend request") { perform { try await store.mutate("friend-requests", body: ["profileID": found.id]); self.found = nil } }
@@ -117,9 +117,8 @@ struct SocialHubView: View {
                         }
                     }
                 }
-                if destination.showsSharedContentAndJoin && store.capabilities.activities {
+                if destination.showsSharedContentAndJoin && store.capabilities.activities && !store.activities.isEmpty {
                     Section("Completed rides") {
-                        NavigationLink("Share a completed ride") { SocialActivityPublisher(store: store) }
                         ForEach(store.activities) { activity in
                             NavigationLink(activity.title) { SocialContentDetail(store: store, item: activity, routeLibrary: routeLibrary) }
                         }
@@ -142,14 +141,14 @@ struct SocialHubView: View {
                     Button("Link another Google sign-in") { perform { try await store.session.signInWithGoogle(link: true) } }
                     Button("Link another Apple sign-in") { perform { _ = try await store.session.signInWithApple(link: true) } }
                     Text("Link a provider only if it belongs to you. Accounts with existing separate identities are never merged automatically.").font(.caption)
-                    Button("Enable request and invitation alerts") { perform { try await store.enableNotifications() } }
-                    if case .unavailable(let reason) = store.notificationStatus {
-                        Text(reason).font(.caption).foregroundStyle(.secondary)
-                    }
                     Button("Sign out") { perform { try await store.signOut() } }
                     Button("Delete Bicino account", role: .destructive) { deleting = true }
                 } footer: {
                     Text("Account deletion applies to bicino.com and social riding. It removes shared content and photos. Your private Health workouts and local routes are not deleted.")
+                }
+                if destination == .account, let profile = store.profile {
+                    SocialPrivacySettingsSections(store: store, profile: profile)
+                        .id(profile.id)
                 }
             }
             if let notice = store.notice { Section { Text(notice) } }
@@ -157,6 +156,12 @@ struct SocialHubView: View {
         }
         .navigationTitle(destination.title)
         .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(isPresented: $showsQRCode) {
+            if let profile = store.profile {
+                SocialQRCode(url: URL(string: "https://bicino.com/social/profile/\(profile.id)")!)
+            }
+        }
+        .onChange(of: store.session.generation) { _ in showsQRCode = false }
         .disabled(busy)
         .overlay { if busy { ProgressView() } }
         .task(id: store.session.generation) {
@@ -177,6 +182,12 @@ struct SocialHubView: View {
             defer { busy = false }
             do { try await work() } catch { store.error = error.localizedDescription }
         }
+    }
+
+    private func searchForRider() {
+        let query = username
+        guard !busy, !SocialUsername.normalized(query).isEmpty else { return }
+        perform { found = try await store.lookup(query) }
     }
 }
 
@@ -201,71 +212,6 @@ private struct SocialRequestIdentity: View {
             if let data = try? await store.client.request("profiles/\(id)"),
                let profile = try? JSONDecoder().decode(SocialProfile.self, from: data) { name = profile.displayName }
         }
-    }
-}
-
-private struct SocialProfileEditor: View {
-    @ObservedObject var store: SocialCoordinator
-    let profile: SocialProfile
-    @State private var username = ""
-    @State private var name = ""
-    @State private var privacy = SocialPrivacy()
-    @State private var selected: PhotosPickerItem?
-    @State private var photo: Data?
-    @State private var latitude = ""
-    @State private var longitude = ""
-    @State private var radius = "500"
-    var body: some View {
-        Form {
-            Section {
-                TextField("Display name", text: $name)
-                TextField("Username", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
-                if store.capabilities.media {
-                    PhotosPicker("Choose photo", selection: $selected, matching: .images)
-                    if let photo, let image = UIImage(data: photo) {
-                        Image(uiImage: image).resizable().scaledToFill().frame(width: 160, height: 160).clipShape(Circle())
-                        Button("Use this photo") { run { try await store.setPhoto(photo); self.photo = nil } }
-                    }
-                }
-                Button("Remove photo", role: .destructive) { run { try await store.removePhoto() } }
-            } header: { Text("Profile") } footer: {
-                Text("Your name and photo are visible to riders who look up your exact profile, friends, and accepted ride members. Your location stays private until you share it in a ride.")
-            }
-            Section("Privacy and notifications") {
-                Toggle("Allow friend requests", isOn: $privacy.requests)
-                Toggle("Allow ride invitations from friends", isOn: $privacy.invitations)
-                Toggle("Notifications", isOn: $privacy.notifications)
-                Toggle("Friend request notifications", isOn: $privacy.friendNotifications)
-                Toggle("Ride invitation notifications", isOn: $privacy.rideNotifications)
-                Text("Routes and completed rides start as Only me. Sharing a route never shares your live location.")
-            }
-            Section("Private areas") {
-                ForEach(Array(privacy.zones.enumerated()), id: \.offset) { index, zone in
-                    HStack { Text("Private area \(index+1) · \(Int(zone.radius)) m"); Spacer()
-                        Button("Remove", role: .destructive) { privacy.zones.remove(at: index) }
-                    }
-                }
-                TextField("Latitude", text: $latitude).keyboardType(.numbersAndPunctuation)
-                TextField("Longitude", text: $longitude).keyboardType(.numbersAndPunctuation)
-                TextField("Radius in metres (200–20000)", text: $radius).keyboardType(.numberPad)
-                Button("Add private area") {
-                    guard privacy.zones.count < 10, let lat = Double(latitude), let lon = Double(longitude),
-                          let radius = Double(radius), (-90...90).contains(lat), (-180...180).contains(lon),
-                          (200...20000).contains(radius) else { store.error = "Enter valid coordinates and radius."; return }
-                    privacy.zones.append(.init(latitude: lat, longitude: lon, radius: radius))
-                }
-                Text("Changing private areas hides previously published rides until you share them again. Start and finish areas are trimmed automatically.").font(.caption)
-            }
-            Button("Save profile and privacy") { run { try await store.saveProfile(username: username, name: name, privacy: privacy) } }
-            if let error = store.error { Text(error).foregroundStyle(.red) }
-        }.navigationTitle("Your profile")
-        .task { username = profile.username ?? ""; name = profile.displayName; privacy = profile.privacy ?? SocialPrivacy() }
-        .onChange(of: selected) { item in
-            Task { photo = try? await item?.loadTransferable(type: Data.self) }
-        }
-    }
-    private func run(_ work: @escaping @MainActor () async throws -> Void) {
-        Task { do { try await work() } catch { store.error = error.localizedDescription } }
     }
 }
 
