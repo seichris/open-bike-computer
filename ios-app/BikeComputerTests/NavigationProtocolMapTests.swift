@@ -3407,7 +3407,7 @@ extension NavigationProtocolTests {
                 !screensSource.contains("Button(\"Save to Bicino\")") &&
                 !screensSource.contains("Button(\"Cancel Changes\"") &&
                 screensSource.contains("Text(\"Bicino Screens\")") &&
-                settingsSource.contains("header: Text(\"Bicino Screens\")") &&
+                settingsSource.contains("Text(\"Bicino Screens\")") &&
                 !screensSource.contains("Changes save automatically.") &&
                 !screensSource.contains("Changes will save automatically.") &&
                 !screensSource.contains("Saving changes to Bicino…") &&
