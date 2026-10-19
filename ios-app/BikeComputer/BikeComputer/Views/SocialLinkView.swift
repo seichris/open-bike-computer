@@ -49,7 +49,7 @@ struct SocialLinkView: View {
                             try await store.join(code); completed = true
                         } }.disabled(completed)
                     }
-                    if completed { Text("Done. Open Friends & Group Rides to continue.") }
+                    if completed { Text("Done. Open your profile to continue.") }
                     if let error { Text(error).foregroundStyle(.red) }
                 }.navigationTitle("Bicino link")
             }

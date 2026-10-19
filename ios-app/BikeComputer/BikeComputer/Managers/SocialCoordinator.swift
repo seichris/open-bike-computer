@@ -9,6 +9,7 @@ final class SocialCoordinator: ObservableObject {
     let session: BicinoUserSession
     let client: BicinoSocialClient
     let live: LiveRideService
+    let savedRouteSharing: SocialSavedRouteSharing
     @Published private(set) var profile: SocialProfile?
     @Published private(set) var capabilities = SocialCapabilities()
     @Published private(set) var friends: [SocialProfile] = []
@@ -72,6 +73,7 @@ final class SocialCoordinator: ObservableObject {
         let client = BicinoSocialClient(session: session, baseURL: URL(string: OfflineMapServiceConfig.defaultServerURLString)?.appendingPathComponent("v1/social"))
         self.client = client
         live = LiveRideService(client: client)
+        savedRouteSharing = SocialSavedRouteSharing(client: client, currentGeneration: { session.generation })
         // The existing explicit app-private group; no shared group is introduced.
         let store: any SocialSecureStore = session.keychainGroup.map { SocialKeychainStore(accessGroup: $0) } ?? SocialMemoryStore()
         #if DEBUG
@@ -291,22 +293,29 @@ final class SocialCoordinator: ObservableObject {
         library.socialPublication(for: summary, currentProfileID: profile?.id)
     }
 
-    func publish(_ summary: PlannedRouteSummaryV1, from library: PhoneRouteLibrary,
-                 title: String, visibility: String) async throws {
-        guard profile != nil else { throw SocialFailure.signedOut }
-        guard publication(for: summary, in: library).mayPublish else {
-            throw SocialFailure.server("only_the_route_owner_can_share_it")
+    func sharingUnavailableReason(for summary: PlannedRouteSummaryV1, in library: PhoneRouteLibrary) -> String? {
+        guard session.state == .signedIn else { return "Sign in from your profile to start a group ride or share this route." }
+        guard capabilities.routes, capabilities.groups else { return "Group rides and route sharing are unavailable right now." }
+        guard summary.providerID == RouteProviderPolicyV1.importedGPX.providerID else {
+            return "This provider’s routes can be navigated privately. Group rides and sharing are available for your own GPX routes."
         }
+        guard publication(for: summary, in: library).mayPublish else { return "Only this route’s owner can share it or start a group ride with it." }
+        return nil
+    }
+
+    func shareSavedRoute(_ summary: PlannedRouteSummaryV1, from library: PhoneRouteLibrary,
+                        visibility: String) async throws -> SocialContent {
+        if let reason = sharingUnavailableReason(for: summary, in: library) { throw SocialFailure.server(reason) }
+        guard let owner = profile?.id else { throw SocialFailure.signedOut }
         let archive = try library.offlineArchive(for: summary)
         guard archive.route.provider == RouteProviderPolicyV1.importedGPX else {
             throw SocialFailure.server("this_route_provider_does_not_allow_social_sharing")
         }
-        let data = try archive.encoded(purpose: .offlineNavigation)
-        guard let encoded = String(data: data, encoding: .utf8) else { throw SocialFailure.invalidResponse }
-        let payload = String(decoding: try archive.socialHashPayload(), as: UTF8.self)
-        _ = try await client.json("routes", method: "POST", body: ["archive": encoded, "hashPayload": payload, "title": title,
-            "visibility": visibility, "sharingRightsConfirmed": true])
-        try await refresh()
+        let encoded = try archive.encoded(purpose: .offlineNavigation)
+        return try await savedRouteSharing.save(owner: owner, hash: archive.contentHash,
+            archive: String(decoding: encoded, as: UTF8.self),
+            hashPayload: String(decoding: try archive.socialHashPayload(), as: UTF8.self),
+            title: library.displayName(for: summary), visibility: visibility, generation: session.generation)
     }
 
     func save(_ item: SocialContent, to library: PhoneRouteLibrary, duplicate: Bool = false) throws {
@@ -331,9 +340,11 @@ final class SocialCoordinator: ObservableObject {
     }
 
     func createRide(route: SocialContent, title: String, startsAt: Date? = nil) async throws {
+        let generation = session.generation
         var body: [String: Any] = ["routeID": route.id, "title": title]
         if let startsAt { body["startsAt"] = startsAt.timeIntervalSince1970 }
         let value = try await client.json("group-rides", method: "POST", body: body)
+        guard session.generation == generation else { throw SocialFailure.accountChanged }
         let ride = try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value))
         try await live.select(ride)
     }

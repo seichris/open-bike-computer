@@ -143,11 +143,12 @@ nonisolated struct SavedRoutePreviewLayoutKey: PreferenceKey {
     }
 }
 
-struct SavedRouteMapPreviewCard: View {
+struct SavedRouteMapPreviewCard<Actions: View>: View {
     let preview: SavedRouteMapPreview
     let maximumHeight: CGFloat
     let onHide: () -> Void
     var onStart: (() -> Void)? = nil
+    @ViewBuilder var actions: Actions
 
     var body: some View {
         ViewThatFits(in: .vertical) {
@@ -185,20 +186,17 @@ struct SavedRouteMapPreviewCard: View {
             }
             Text(distance)
                 .font(.subheadline)
-            Text(preview.attribution)
-                .font(.caption).foregroundStyle(.secondary)
-            Text(preview.attribution)
-                .font(.caption).foregroundStyle(.secondary)
+            if preview.providerID != RouteProviderPolicyV1.importedGPX.providerID {
+                Text(preview.attribution).font(.caption).foregroundStyle(.secondary)
+            }
             if let onStart {
                 Button(action: onStart) {
-                    Label("Start Offline Navigation", systemImage: "location.fill")
-                        .frame(minHeight: 44)
+                    SavedRouteActionLabel(title: "Start Offline Navigation", icon: "location.fill")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
                 .accessibilityIdentifier("startSavedRoutePreviewOffline")
-                Text("Follows the saved route; no online rerouting or offline map tiles are downloaded.")
-                    .font(.caption2).foregroundStyle(.secondary)
             }
+            actions
             if preview.providerID == RouteProviderPolicyV1.strava.providerID,
                let url = preview.sourceURL {
                 Link("View on Strava", destination: url)
@@ -216,5 +214,21 @@ struct SavedRouteMapPreviewCard: View {
     private var distance: String {
         let formatter = MKDistanceFormatter()
         return formatter.string(fromDistance: preview.distanceMeters)
+    }
+}
+
+struct SavedRouteActionLabel: View {
+    let title: String
+    let icon: String
+
+    var body: some View {
+        Label(title, systemImage: icon)
+            .font(.subheadline.weight(.semibold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.72)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 15)
+            .foregroundStyle(.white)
+            .background(Color.blue, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }

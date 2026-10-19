@@ -21,17 +21,6 @@ enum SocialUsername {
     }
 }
 
-enum SocialHubDestination: Equatable {
-    case friendsAndRides
-    case account
-
-    var title: String {
-        self == .account ? "Account & Friends" : "Friends & Group Rides"
-    }
-
-    var showsSharedContentAndJoin: Bool { self == .friendsAndRides }
-}
-
 extension SocialProfile {
     /// A photo is optional. A chosen name and username complete the profile.
     var needsProfileSetup: Bool {

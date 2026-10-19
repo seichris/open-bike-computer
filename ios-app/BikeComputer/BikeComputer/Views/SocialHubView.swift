@@ -5,7 +5,6 @@ import MapKit
 struct SocialHubView: View {
     @ObservedObject var store: SocialCoordinator
     @ObservedObject var routeLibrary: PhoneRouteLibrary
-    var destination: SocialHubDestination = .friendsAndRides
     var offersProfileSetup = true
     @State private var username = ""
     @State private var found: SocialProfile?
@@ -84,7 +83,7 @@ struct SocialHubView: View {
                 }
                 if !store.requests.isEmpty {
                     Section("Friend requests") {
-                        ForEach(store.requests) { request in
+                        ForEach(store.requests.filter { $0.status == "pending" }) { request in
                             if request.sender == store.profile?.id {
                                 Text("Friend request sent").foregroundStyle(.secondary)
                                 Button("Cancel request") { perform { try await store.mutate("friend-requests/\(request.id)", method: "DELETE") } }
@@ -109,21 +108,6 @@ struct SocialHubView: View {
                         }
                     }
                 }
-                if destination.showsSharedContentAndJoin && store.capabilities.routes {
-                    Section("Shared routes") {
-                        NavigationLink("Publish a saved route") { SocialRoutePublisher(store: store, routeLibrary: routeLibrary) }
-                        ForEach(store.routes) { route in
-                            NavigationLink(route.title) { SocialContentDetail(store: store, item: route, routeLibrary: routeLibrary) }
-                        }
-                    }
-                }
-                if destination.showsSharedContentAndJoin && store.capabilities.activities && !store.activities.isEmpty {
-                    Section("Completed rides") {
-                        ForEach(store.activities) { activity in
-                            NavigationLink(activity.title) { SocialContentDetail(store: store, item: activity, routeLibrary: routeLibrary) }
-                        }
-                    }
-                }
                 if !store.blocked.isEmpty {
                     Section("Blocked riders") {
                         ForEach(store.blocked) { profile in
@@ -131,22 +115,19 @@ struct SocialHubView: View {
                         }
                     }
                 }
-                if destination.showsSharedContentAndJoin && store.capabilities.groups {
+                if store.capabilities.groups {
                     Section("Join a Group Ride") {
                         TextField("Ride code", text: $joinCode).textInputAutocapitalization(.never).autocorrectionDisabled()
                         Button("Join") { perform { try await store.join(joinCode.trimmingCharacters(in: .whitespacesAndNewlines)) } }
                     }
                 }
                 Section {
-                    Button("Link another Google sign-in") { perform { try await store.session.signInWithGoogle(link: true) } }
-                    Button("Link another Apple sign-in") { perform { _ = try await store.session.signInWithApple(link: true) } }
-                    Text("Link a provider only if it belongs to you. Accounts with existing separate identities are never merged automatically.").font(.caption)
                     Button("Sign out") { perform { try await store.signOut() } }
                     Button("Delete Bicino account", role: .destructive) { deleting = true }
                 } footer: {
                     Text("Account deletion applies to bicino.com and social riding. It removes shared content and photos. Your private Health workouts and local routes are not deleted.")
                 }
-                if destination == .account, let profile = store.profile {
+                if let profile = store.profile {
                     SocialPrivacySettingsSections(store: store, profile: profile)
                         .id(profile.id)
                 }
@@ -154,7 +135,7 @@ struct SocialHubView: View {
             if let notice = store.notice { Section { Text(notice) } }
             if let error = store.error { Section { Text(error).foregroundStyle(.red) } }
         }
-        .navigationTitle(destination.title)
+        .navigationTitle("Profile, Friends & Group Rides")
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(isPresented: $showsQRCode) {
             if let profile = store.profile {
@@ -180,7 +161,7 @@ struct SocialHubView: View {
         busy = true; store.error = nil
         Task { @MainActor in
             defer { busy = false }
-            do { try await work() } catch { store.error = error.localizedDescription }
+            do { try await work() } catch SocialFailure.cancelled { } catch { store.error = error.localizedDescription }
         }
     }
 
@@ -244,53 +225,6 @@ private struct SocialFriendView: View {
     }
     private func remove(block: Bool) {
         Task { do { try await store.removeFriend(friend.id, block: block); dismiss() } catch { store.error = error.localizedDescription } }
-    }
-}
-
-private struct SocialRoutePublisher: View {
-    @ObservedObject var store: SocialCoordinator
-    @ObservedObject var routeLibrary: PhoneRouteLibrary
-    @State private var visibility = "private"
-    @State private var consent = false
-    @State private var selected: PlannedRouteSummaryV1?
-    /// Ownership is read from route provenance once per library change, not per redraw.
-    @State private var publications: [UUID: SocialRoutePublication] = [:]
-    private var candidates: [PlannedRouteSummaryV1] {
-        routeLibrary.offlineNavigationRoutes.filter { $0.providerID == RouteProviderPolicyV1.importedGPX.providerID }
-    }
-    var body: some View {
-        List {
-            Section { SocialVisibilityPicker(selection: $visibility)
-                Toggle("I have permission to share this route", isOn: $consent)
-                Text("Planned routes are shared exactly as saved, including any private areas they cross. Review the whole route before sharing. Only GPX routes you own can be published; routes saved from other riders stay theirs to share.").font(.caption)
-            }
-            ForEach(candidates) { route in
-                if publications[route.id]?.mayPublish == true {
-                    Button(route.name) { selected = route }
-                } else {
-                    VStack(alignment: .leading) {
-                        Text(route.name).foregroundStyle(.secondary)
-                        Text(publications[route.id] == nil ? "Checking ownership…" : "Saved from another rider. Only its owner can share it.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if let selected, publications[selected.id]?.mayPublish == true,
-               let archive = try? routeLibrary.offlineArchive(for: selected),
-               let encoded = try? archive.encoded(purpose: .offlineNavigation),
-               let body = try? JSONDecoder().decode(SocialContentBody.self, from: JSONSerialization.data(withJSONObject: ["archive": String(decoding: encoded, as: UTF8.self)])) {
-                SocialTrackPreview(content: body).frame(height: 230)
-                Button("Publish \(selected.name)") {
-                    Task { do { try await store.publish(selected, from: routeLibrary, title: selected.name, visibility: visibility) }
-                        catch { store.error = error.localizedDescription } }
-                }.disabled(!consent)
-            }
-            if let error = store.error { Text(error).foregroundStyle(.red) }
-        }.navigationTitle("Share route")
-        .task(id: candidates.map(\.id.uuidString) + [store.profile?.id ?? ""]) {
-            publications = Dictionary(candidates.map { ($0.id, store.publication(for: $0, in: routeLibrary)) },
-                                      uniquingKeysWith: { first, _ in first })
-        }
     }
 }
 

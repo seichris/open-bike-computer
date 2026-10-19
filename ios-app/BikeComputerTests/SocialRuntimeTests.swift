@@ -149,6 +149,7 @@ struct SocialRuntimeTests {
     }
     static func main() async throws {
         profileSetupPresentation()
+        try await SocialSavedRouteSharingTests.run()
         try await profileMutationSerialization()
         let fixture=RideFixture();fixture.lostFirst=true
         let live=LiveRideService(client:fixture,uptime:{fixture.seconds},pollNanoseconds:10_000_000)
@@ -440,8 +441,6 @@ struct SocialRuntimeTests {
         draft.username = "chris"
         draft.name = "   "
         require(!draft.isValid, "a blank public name cannot be submitted")
-        require(!SocialHubDestination.account.showsSharedContentAndJoin
-            && SocialHubDestination.friendsAndRides.showsSharedContentAndJoin,
-            "the account screen omits shared content and code entry while the full social destination retains them")
+
     }
 }

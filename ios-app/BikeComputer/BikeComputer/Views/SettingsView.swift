@@ -159,13 +159,15 @@ struct SettingsView: View {
                                 profile: social.profile,
                                 image: social.profile?.avatarID.flatMap { social.photos[$0] },
                                 isSignedIn: social.session.state == .signedIn,
-                                isRestoring: social.session.state == .restoring
+                                isRestoring: social.session.state == .restoring,
+                                friends: social.friends, photos: social.photos
                             )
                         }
                         .buttonStyle(.plain)
-                        .accessibilityHint("Opens your account and friends")
+                        .accessibilityHint("Opens your profile, friends and group rides")
                         .accessibilityIdentifier("settings.profile")
                         .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                     }
                 }
 
@@ -235,12 +237,6 @@ struct SettingsView: View {
                 )
 
                 Section {
-                    if social.session.state != .unavailable {
-                        NavigationLink("Friends & Group Rides") {
-                            SocialHubView(store: social, routeLibrary: routeLibrary)
-                        }
-                    }
-
                     if !shouldPromoteBikeComputerSettings {
                         bikeComputerSettingsLink
                     }
@@ -296,7 +292,7 @@ struct SettingsView: View {
             .navigationTitle(social.session.state == .unavailable ? "Settings" : "")
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(isPresented: $showsAccount) {
-                SocialHubView(store: social, routeLibrary: routeLibrary, destination: .account)
+                SocialHubView(store: social, routeLibrary: routeLibrary)
             }
             .task(id: social.session.generation) {
                 guard social.session.state == .signedIn else { return }

@@ -35,10 +35,13 @@ and recent-auth deletion before enabling either production surface.
 ## Settings and profile setup
 
 When social riding is configured, Settings opens with a centered account header.
-The header opens Account & Friends, which retains profile editing, friends,
-requests, invitations, existing group rides and account controls, but omits
-Shared routes, Completed rides and Join a Group Ride. The bottom Friends & Group
-Rides row continues to open the full social screen.
+The header opens the unified Profile, Friends & Group Rides screen with profile
+editing, friends, requests, invitations, existing rides, join-by-code and account
+controls. There is no duplicate social entry at the bottom of Settings. The
+header shows up to five overlapping friend portraits beside the rider's portrait,
+with a count for additional friends. Native provider-linking controls are removed;
+account deletion still supports recent-authentication with the original provider.
+Dismissing Apple or Google sign-in is treated as cancellation, not a profile error.
 
 Sign-in is optional. After sign-in, an incomplete profile is offered a short
 name/username/photo setup, including sign-ins opened from a shared link. The
@@ -51,13 +54,13 @@ preferences or begin live-location sharing.
 
 Profile sharing and the QR-code action share one row. Rider lookup accepts an
 exact username with or without a leading @. Native completed-ride publishing
-has been removed; previously published entries remain available for management.
+has been removed. Shared-route publishing is no longer a separate native screen.
 Private Health workout recording and group rides do not depend on publishing.
 
-Privacy and notifications and Private areas appear at the bottom of Account &
-Friends. Profile fields save when focus leaves a field or the editor closes;
-choosing/removing a photo, toggles and private-area additions/removals save
-immediately. Profile and avatar writes are serialized against the server's
+Privacy and notifications appears at the bottom of the unified profile screen.
+Private-area editing is removed from the native UI; existing server settings are
+preserved. Profile fields save when focus leaves a field or the editor closes;
+choosing/removing a photo and preference toggles save immediately. Profile and avatar writes are serialized against the server's
 profile version. Failed changes are reported; preferences roll back to the
 confirmed server state. An account switch rejects queued edits from the old
 account. The deployed profile-write contract requires a completed name and
@@ -66,6 +69,29 @@ username before account preferences can be changed.
 The request/invitation alerts toggle includes the iPhone notification permission
 step. Denied system permission keeps alerts off and offers an iPhone Settings
 link. The account's notification preference still controls server delivery.
+
+## Saved routes and group creation
+
+Saved Routes uses Create a Route for online planning. A favorite destination's
+map icon opens the selected-destination controls (From/To, transport, favorite
+state and Go), preserving its saved coordinate rather than performing a new
+address search. An archived route's map icon continues to preview that archive.
+The passive Watch-ready checkmark is hidden; transfer failures retain retry.
+
+The saved-route preview offers Start Offline Navigation and Start Group Ride,
+followed by a Share with picker (Friends, Only Me, Anyone with the link). A local
+route starts as Only Me and opening it never uploads it. Selecting a nonprivate
+visibility or starting a group prepares a server snapshot automatically; no
+separate Publish step is required. Account plus exact archive content hash map
+to a server content ID, so later starts and visibility edits reuse the snapshot.
+Changing back to Only Me uses the server's existing share-link revocation.
+Link visibility offers a Share route link action. Live location remains opt-in.
+
+The deployed server accepts only owned, redistributable imported GPX archives.
+MapKit remains phone-only; Strava and another rider's saved route cannot be
+republished. Those previews retain private navigation and explain why sharing
+and group creation are disabled. This UI change does not change provider policy,
+route archive hashes, backend schemas, or the deployment contract.
 
 ## Upgrade and lifecycle contracts
 
@@ -97,7 +123,7 @@ HTTP client retries one ambiguous timeout/disconnect with the same operation key
 live state instead uses its publisher's monotonic sequence. Invite replacement
 hides the old code while pending and serializes native rotation requests.
 
-Group Ride creation requires ownership of the published route. Route
+The group-ride API requires ownership of its stored route snapshot. Route
 redistribution follows what Bicino actually handed to a rider: viewing a
 friends-visible route, resolving a link while signed in, previewing a room code,
 opening an invitation or joining a room records an exposure of that geometry.

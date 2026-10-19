@@ -692,13 +692,15 @@
         "ios-app/BikeComputer/BikeComputer/Models/SocialProfilePresentation.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialProfileMutationQueue.swift",
         "ios-app/BikeComputer/BikeComputer/Services/BicinoSocialClient.swift",
+        "ios-app/BikeComputer/BikeComputer/Services/SocialSavedRouteSharing.swift",
         "ios-app/BikeComputer/BikeComputer/Services/LiveRideService.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialSecureStore.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialNotificationBinding.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialAccountDeletion.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialRiderRelayEngine.swift",
         "ios-app/BikeComputerTests/SocialMaintenanceTests.swift",
-        "ios-app/BikeComputerTests/SocialRuntimeTests.swift"
+        "ios-app/BikeComputerTests/SocialRuntimeTests.swift",
+        "ios-app/BikeComputerTests/SocialSavedRouteSharingTests.swift"
       ]
     }
   }

@@ -6,9 +6,6 @@ struct SocialPrivacySettingsSections: View {
     @ObservedObject var store: SocialCoordinator
     let profile: SocialProfile
     @State private var privacy: SocialPrivacy
-    @State private var latitude = ""
-    @State private var longitude = ""
-    @State private var radius = "500"
     @State private var isSaving = false
     @State private var error: String?
 
@@ -32,7 +29,7 @@ struct SocialPrivacySettingsSections: View {
                 Text("Privacy and notifications")
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Shared routes start as Only me. Sharing a route never shares your live location.")
+                    Text("Your live location stays private until you choose to share it in a group ride.")
                     Text(isSaving ? "Saving…" : "Changes save automatically.")
                     if profile.needsProfileSetup { Text("Complete your profile to change account preferences.") }
                     if store.alertsDenied {
@@ -45,25 +42,6 @@ struct SocialPrivacySettingsSections: View {
                 }
             }
 
-            Section {
-                ForEach(Array(privacy.zones.enumerated()), id: \.offset) { index, zone in
-                    HStack {
-                        Text("Private area \(index + 1) · \(Int(zone.radius)) m")
-                        Spacer()
-                        Button("Remove", role: .destructive) { removeArea(at: index) }
-                            .buttonStyle(.borderless)
-                    }
-                }
-                TextField("Latitude", text: $latitude).keyboardType(.numbersAndPunctuation)
-                TextField("Longitude", text: $longitude).keyboardType(.numbersAndPunctuation)
-                TextField("Radius in metres (200–20000)", text: $radius).keyboardType(.numberPad)
-                Button("Add private area", action: addArea)
-                    .disabled(privacy.zones.count >= 10)
-            } header: {
-                Text("Private areas")
-            } footer: {
-                Text("Changing private areas hides previously published rides until you share them again. Start and finish areas are trimmed automatically.")
-            }
         }
         .disabled(isSaving || profile.needsProfileSetup)
         .task { await store.refreshNotificationAuthorization() }
@@ -93,34 +71,6 @@ struct SocialPrivacySettingsSections: View {
             }
             guard store.session.generation == generation, store.profile?.id == profile.id else { throw SocialFailure.accountChanged }
             try await store.savePrivacy(flag, value: value)
-        }
-    }
-
-    private func addArea() {
-        guard let lat = Double(latitude), let lon = Double(longitude), let metres = Double(radius),
-              (-90...90).contains(lat), (-180...180).contains(lon), (200...20000).contains(metres) else {
-            error = "Enter valid coordinates and a radius between 200 and 20000 metres."
-            return
-        }
-        var zones = privacy.zones
-        zones.append(SocialZone(latitude: lat, longitude: lon, radius: metres))
-        saveAreas(zones, clearsDraft: true)
-    }
-
-    private func removeArea(at index: Int) {
-        guard !isSaving, privacy.zones.indices.contains(index) else { return }
-        var zones = privacy.zones
-        zones.remove(at: index)
-        saveAreas(zones, clearsDraft: false)
-    }
-
-    private func saveAreas(_ zones: [SocialZone], clearsDraft: Bool) {
-        guard !isSaving, store.profile?.id == profile.id else { return }
-        privacy.zones = zones
-        persist { generation in
-            guard store.session.generation == generation, store.profile?.id == profile.id else { throw SocialFailure.accountChanged }
-            try await store.savePrivateAreas(zones)
-            if clearsDraft { latitude = ""; longitude = "" }
         }
     }
 

@@ -59,6 +59,7 @@ struct RouteSearchPanel: View {
     let currentAddress: String
     let currentLocation: CLLocation?
     let maxExpandedHeight: CGFloat
+    var initialDestination: SavedDestination? = nil
     var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType) -> Void
     var onSaveToFavorites:
         ((SavedDestination, RouteEndpoint, MKDirectionsTransportType) -> Void)? = nil
@@ -87,19 +88,27 @@ struct RouteSearchPanel: View {
         .frame(maxHeight: isExpanded ? maxExpandedHeight : nil, alignment: .bottom)
         .onAppear {
             updateSearchRegions()
+            if isExpanded, let initialDestination { selectInitialDestination(initialDestination) }
         }
         .onChange(of: currentLocation) { _ in
             updateSearchRegions()
         }
         .onChange(of: isExpanded) { expanded in
             if expanded {
-                DispatchQueue.main.async {
-                    focusedField = .destination
+                if let initialDestination {
+                    selectInitialDestination(initialDestination)
+                } else {
+                    DispatchQueue.main.async {
+                        focusedField = .destination
+                    }
                 }
             } else {
                 focusedField = nil
                 resetTransientState()
             }
+        }
+        .onChange(of: initialDestination) { destination in
+            if isExpanded, let destination { selectInitialDestination(destination) }
         }
     }
 
@@ -485,12 +494,17 @@ struct RouteSearchPanel: View {
     }
 
     private func selectDestination(_ destination: SavedDestination) {
-        isSelectingFromSuggestion = true
+        isSelectingFromSuggestion = destinationAddress != destination.name
         selectedDestination = destination
         destinationAddress = destination.name
         hasSelectedDestination = true
         focusedField = nil
         destinationStore.addRecent(destination)
+    }
+
+    private func selectInitialDestination(_ destination: SavedDestination) {
+        guard !hasSelectedDestination || selectedDestination != destination else { return }
+        selectDestination(destination)
     }
 
     private func toggleSelectedDestinationFavorite() {

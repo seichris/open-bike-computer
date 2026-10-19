@@ -5,10 +5,12 @@ struct SettingsProfileHeader: View {
     let image: UIImage?
     let isSignedIn: Bool
     let isRestoring: Bool
+    var friends: [SocialProfile] = []
+    var photos: [String: UIImage] = [:]
 
     var body: some View {
-        VStack(spacing: 8) {
-            SocialProfilePortrait(profile: profile, image: image, size: 80)
+        VStack(spacing: 4) {
+            portraits
             if let profile, isSignedIn {
                 Text(profile.displayName).font(.title2.weight(.semibold))
                 if let username = profile.username, !username.isEmpty {
@@ -28,9 +30,35 @@ struct SettingsProfileHeader: View {
         }
         .multilineTextAlignment(.center)
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 16)
+        .padding(.vertical, 6)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+    }
+
+    private var portraits: some View {
+        let shown = Array(friends.prefix(5))
+        let overflow = max(0, friends.count - shown.count)
+        let count = shown.count + (overflow > 0 ? 1 : 0)
+        return ZStack(alignment: .leading) {
+            SocialProfilePortrait(profile: profile, image: image, size: 80)
+                .zIndex(10)
+            ForEach(Array(shown.enumerated()), id: \.element.id) { index, friend in
+                SocialProfilePortrait(profile: friend,
+                    image: friend.avatarID.flatMap { photos[$0] }, size: 40)
+                    .overlay(Circle().stroke(Color(uiColor: .systemGroupedBackground), lineWidth: 2))
+                    .offset(x: 68 + CGFloat(index) * 27)
+                    .zIndex(Double(9 - index))
+            }
+            if overflow > 0 {
+                Text("+\(overflow)").font(.caption.weight(.semibold))
+                    .frame(width: 40, height: 40)
+                    .background(Color(uiColor: .secondarySystemGroupedBackground), in: Circle())
+                    .overlay(Circle().stroke(Color(uiColor: .systemGroupedBackground), lineWidth: 2))
+                    .offset(x: 68 + CGFloat(shown.count) * 27)
+            }
+        }
+        .frame(width: count == 0 ? 80 : 108 + CGFloat(count - 1) * 27, height: 80, alignment: .leading)
+        .accessibilityHidden(true)
     }
 }
 
@@ -53,6 +81,7 @@ struct SocialProfilePortrait: View {
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
+        .background(Color(uiColor: .systemGroupedBackground), in: Circle())
         .accessibilityHidden(true)
     }
 }
