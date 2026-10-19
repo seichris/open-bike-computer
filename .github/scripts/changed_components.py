@@ -33,6 +33,13 @@ FULL_CI_PATHS = {
     ".github/workflows/ci.yml",
 }
 FIRMWARE_HOST_ONLY_PATH_PREFIXES = ("esp32/tools/tests/",)
+# This host renderer runs after a firmware build supplies pinned LVGL sources.
+FIRMWARE_RENDER_TEST_PATHS = {
+    "esp32/tools/tests/test_social_riders_render.cpp",
+    "esp32/tools/run_social_riders_render_test.py",
+    "tools/generate_ride_stats_preview.py",
+    "tools/ride_stats_preview/lvgl-source.lock.json",
+}
 FIRMWARE_HOST_PATH_PREFIXES = (
     ".github/actions/firmware-build-cache/",
     ".github/actions/require-immutable-releases/",
@@ -182,6 +189,10 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
                 and not path.endswith(".md")
             ):
                 selected["firmware_build"] = True
+
+        if path in FIRMWARE_RENDER_TEST_PATHS:
+            selected["firmware_build"] = True
+            selected["firmware_host"] = True
 
         if (
             path.startswith("tools/tests/")

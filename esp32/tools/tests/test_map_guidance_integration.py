@@ -190,14 +190,27 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)"
         )
         for config in (LVGL_CONFIG_SOURCE, LVGL_CONFIG_TEMPLATE_SOURCE):
-            self.assertIn(gate, config)
-            self.assertIn("#define LV_MEM_SIZE (96 * 1024U)", config)
+            # The enlarged pool is PSRAM-only; boards whose pool is a static
+            # internal-RAM array keep the previous size.
+            size_gate = config.index(gate)
+            size_fallback = config.index("#else", size_gate)
+            size_end = config.index("#endif", size_fallback)
+            self.assertIn("#define LV_MEM_SIZE (192 * 1024U)", config[size_gate:size_fallback])
+            self.assertIn("#define LV_MEM_SIZE (96 * 1024U)", config[size_fallback:size_end])
+            self.assertEqual(config.count("#define LV_MEM_SIZE"), 2)
+            pool_gate = config.index(gate, size_end)
             self.assertIn(
-                "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config
+                "#define LV_MEM_POOL_INCLUDE <esp_heap_caps.h>", config[pool_gate:]
             )
-            self.assertIn(allocator, config)
-            fallback = config.index("#else", config.index(gate))
+            self.assertIn(allocator, config[pool_gate:])
+            fallback = config.index("#else", pool_gate)
             self.assertIn("#undef LV_MEM_POOL_ALLOC", config[fallback:])
+
+    def test_lvgl_assertions_reset_through_the_panic_handler(self):
+        for config in (LVGL_CONFIG_SOURCE, LVGL_CONFIG_TEMPLATE_SOURCE):
+            self.assertIn("#define LV_ASSERT_HANDLER_INCLUDE <stdlib.h>", config)
+            self.assertIn("#define LV_ASSERT_HANDLER abort();", config)
+            self.assertNotIn("#define LV_ASSERT_HANDLER while(1);", config)
 
     def test_publication_rejects_stale_frame_then_swaps_complete_buffers(self):
         publish = function_body(MAP_RENDERER_SOURCE, "bool Maps::publishReadyFrame")
