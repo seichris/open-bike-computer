@@ -160,7 +160,8 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
         if not path:
             continue
 
-        if path in FULL_CI_PATHS or path in {"tools/dev-check", "tools/dev_check.py"}:
+        # Runner/environment entry points route like their tools/development/ code.
+        if path in FULL_CI_PATHS or path in {"tools/dev-check", "tools/dev_check.py", "tools/dev-setup", "tools/dev-env"}:
             return {component: True for component in COMPONENTS}
 
         if path == CHECK_REGISTRY:
