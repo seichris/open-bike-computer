@@ -29,11 +29,48 @@ int main() {
     candidate.riderDistanceSquared = static_cast<double>(index);
     candidate.category = Category::Shops;
     candidate.recordOrder = static_cast<uint16_t>(index);
-    retainBounded(bounded, candidate, false, &boundedDiagnostics);
+    retainBounded(bounded, candidate, {1000, 1000}, false, {}, &boundedDiagnostics);
   }
   assert(bounded.size() == kMaximumCandidates);
   assert(boundedDiagnostics.gathered == kMaximumCandidates + 20);
   assert(boundedDiagnostics.capacityDeferred == 20);
+  MapPoiLayoutVector<Candidate> viewportCandidates;
+  for (size_t index = 0; index < kMaximumCandidates + 1; ++index)
+    retainBounded(viewportCandidates, {-50, 100, 0, Category::BicycleServices,
+                  0, static_cast<uint16_t>(index), 0}, {200, 200}, false);
+  retainBounded(viewportCandidates, shop, {200, 200}, false);
+  assert(viewportCandidates.size() == 1);
+  assert(place(std::move(viewportCandidates), {200, 200}, false, {}).size() == 1);
+  viewportCandidates.clear();
+  const Viewport roundCrop{466, 366, 233};
+  assert(!fitsViewport(20, 20, roundCrop));
+  assert(fitsViewport(233, 15, roundCrop));
+  for (size_t index = 0; index < kMaximumCandidates + 1; ++index)
+    retainBounded(viewportCandidates, {20, 20, 0, Category::BicycleServices,
+                  0, static_cast<uint16_t>(index), 0}, roundCrop, false);
+  retainBounded(viewportCandidates, {233, 180, 1, Category::Shops, 0, 0, 0},
+                roundCrop, false);
+  assert(viewportCandidates.size() == 1);
+
+  // The guidance banner (or a rider overlay) can cover hundreds of otherwise
+  // valid projected points. Reject these before the bounded priority list.
+  viewportCandidates.clear();
+  const MapLabelLayoutVector<map_label_layout::ReservedRegion> banner{
+      {150, 34, 300, 68}};
+  Diagnostics bannerDiagnostics;
+  for (size_t index = 0; index < kMaximumCandidates + 1; ++index)
+    retainBounded(viewportCandidates, {150, 34, 0, Category::BicycleServices,
+                  0, static_cast<uint16_t>(index), 0}, {300, 200}, true,
+                  banner, &bannerDiagnostics);
+  retainBounded(viewportCandidates, {50, 150, 1, Category::Shops, 0, 0, 0},
+                {300, 200}, true, banner, &bannerDiagnostics);
+  const auto outsideBanner = place(std::move(viewportCandidates), {300, 200},
+                                   true, banner, &bannerDiagnostics);
+  assert(outsideBanner.size() == 1);
+  assert(outsideBanner[0].candidate.category == Category::Shops);
+  assert(bannerDiagnostics.gathered == kMaximumCandidates + 2);
+  assert(bannerDiagnostics.collisionRejected == kMaximumCandidates + 1);
+  assert(bannerDiagnostics.capacityDeferred == 0);
 
   MapPoiLayoutVector<Candidate> candidates;
   candidates.push_back(shop);

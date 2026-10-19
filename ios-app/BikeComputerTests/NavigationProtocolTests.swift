@@ -822,6 +822,13 @@ struct NavigationProtocolTests {
             print("Map operation recovery regression passed")
             return
         }
+        if CommandLine.arguments.contains("--debug-cleanup-only") {
+            await testDeviceTransferManagerConfirmsDebugExit()
+            await testBrowserDebugExitReleasesLeaseAfterFreshConfirmation()
+            await testDeviceTransferManagerCompensatesCancelledDebugEntry()
+            print("Debug shutdown and delayed confirmation regressions passed")
+            return
+        }
         testIconMapping()
         testRouteEndpointExtraction()
         testRouteRemainingDistance()
@@ -7142,6 +7149,17 @@ struct NavigationProtocolTests {
             sideLengthKm: 22.264
         )
         let request = OfflineMapJobRequest.customBBox(bounds)
+        let pois = request.withMapPois(true).forDevice(firmwareVersion: "1.0.0")
+            .identified(clientInstallationId: "test", clientRequestId: "request", installOnDevice: true)
+        assertEqual(pois.target?.rendererFormatVersion, 5, "POI-enabled peer requests target 5")
+        assertEqual(pois.target?.requestedFeatures, ["3d-buildings", "map-pois", "street-labels"],
+                    "no-elevation POI requests explicitly omit contours")
+        assertEqual(request.withTopography(true).withMapPois(true).target?.requestedFeatures,
+                    ["3d-buildings", "contours", "map-pois", "street-labels"],
+                    "adding POIs preserves contours")
+        assertEqual(request.withTopography(true, terrain: true).withMapPois(true)
+            .target?.terrainProfileVersion, nil,
+            "target 5 never sends the unsupported target-4-only FME discriminator")
         let terrainRequest = request.withTopography(true, terrain: true).forDevice(firmwareVersion: "1.0.0")
         assertEqual(terrainRequest.target?.rendererFormatVersion, 4, "terrain needs renderer 4")
         assertEqual(terrainRequest.target?.terrainProfileVersion, 1, "device request retains terrain opt-in")
@@ -9212,6 +9230,18 @@ struct NavigationProtocolTests {
     }
 
     static func testSavedMapRendererCompatibilityPolicy() {
+        for pois in [false, true] {
+            for contours in [false, true] {
+                for supportsContours in [false, true] {
+                    assertEqual(SavedMapRendererCompatibilityPolicy.isCompatible(
+                        rendererFormatVersion: 5, supportsStreetLabels: true,
+                        supports3DBuildings: true, supportsTopographicContours: supportsContours,
+                        supportsMapPois: pois, includesContours: contours),
+                        pois && (!contours || supportsContours),
+                        "target-5 transfer gates POIs and only included contour layers")
+                }
+            }
+        }
         assert(!SavedMapRendererCompatibilityPolicy.isCompatible(
             rendererFormatVersion: 4, supportsStreetLabels: true,
             supports3DBuildings: true, supportsTopographicContours: true,
@@ -9353,30 +9383,30 @@ struct NavigationProtocolTests {
             assert(false, "valid target-3 manifest is accepted: \(error)")
         }
 
-        let poiManifest = Data((
-            "{\"buildings\":{" +
-            "\"classDefaultHeightCount\":0,\"explicitHeightCount\":1," +
-            "\"inheritedHeightCount\":0,\"levelsHeightCount\":0," +
-            "\"localMedianHeightCount\":0,\"recordCount\":1}," +
-            "\"files\":[" +
-            "{\"bytes\":4,\"path\":\"VECTMAP/poi-map/+000+000/0_0.fmb\",\"sha256\":\"\(sha)\"}," +
-            "{\"bytes\":4,\"path\":\"VECTMAP/poi-map/assets/nearby-pois.fpi\",\"sha256\":\"\(sha)\"}," +
-            "{\"bytes\":4,\"path\":\"VECTMAP/poi-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}]," +
-            "\"layers\":{\"contours\":\"not-included\"}," +
-            "\"mapId\":\"poi-map\"," +
-            "\"nearbyCoverage\":{\"blockSizeMeters\":4096,\"blocks\":[[0,0]]," +
-            "\"profileVersion\":1}," +
-            "\"pois\":{\"bicycleServicesCount\":1,\"gasStationsCount\":1," +
-            "\"publicToiletsCount\":1,\"recordCount\":5," +
-            "\"restaurantsAndCafesCount\":1,\"shopsCount\":1}," +
-            "\"producer\":{\"buildSha256\":\"\(sha)\",\"imageDigest\":\"sha256:\(sha)\"}," +
-            "\"schemaVersion\":1," +
-            "\"target\":{\"buildingProfileVersion\":1,\"formatVersion\":5," +
-            "\"internationalFallback\":\"en\",\"labelLanguages\":[\"en\"]," +
-            "\"labelProfileVersion\":1,\"poiIndexProfileVersion\":1,\"poiProfileVersion\":1," +
-            "\"renderer\":\"esp32-fmb\"," +
+        let poiManifest = Data([
+            "{\"buildings\":{",
+            "\"classDefaultHeightCount\":0,\"explicitHeightCount\":1,",
+            "\"inheritedHeightCount\":0,\"levelsHeightCount\":0,",
+            "\"localMedianHeightCount\":0,\"recordCount\":1},",
+            "\"files\":[",
+            "{\"bytes\":4,\"path\":\"VECTMAP/poi-map/+000+000/0_0.fmb\",\"sha256\":\"\(sha)\"},",
+            "{\"bytes\":4,\"path\":\"VECTMAP/poi-map/assets/nearby-pois.fpi\",\"sha256\":\"\(sha)\"},",
+            "{\"bytes\":4,\"path\":\"VECTMAP/poi-map/assets/street-labels.fma\",\"sha256\":\"\(sha)\"}],",
+            "\"layers\":{\"contours\":\"not-included\"},",
+            "\"mapId\":\"poi-map\",",
+            "\"nearbyCoverage\":{\"blockSizeMeters\":4096,\"blocks\":[[0,0]],",
+            "\"profileVersion\":1},",
+            "\"pois\":{\"bicycleServicesCount\":1,\"gasStationsCount\":1,",
+            "\"publicToiletsCount\":1,\"recordCount\":5,",
+            "\"restaurantsAndCafesCount\":1,\"shopsCount\":1},",
+            "\"producer\":{\"buildSha256\":\"\(sha)\",\"imageDigest\":\"sha256:\(sha)\"},",
+            "\"schemaVersion\":1,",
+            "\"target\":{\"buildingProfileVersion\":1,\"formatVersion\":5,",
+            "\"internationalFallback\":\"en\",\"labelLanguages\":[\"en\"],",
+            "\"labelProfileVersion\":1,\"poiIndexProfileVersion\":1,\"poiProfileVersion\":1,",
+            "\"renderer\":\"esp32-fmb\",",
             "\"requestedFeatures\":[\"3d-buildings\",\"map-pois\",\"street-labels\"]}}"
-        ).utf8)
+        ].joined().utf8)
         do {
             let decoded = try BikeMapStreamArtifactValidator.decodeAndValidateManifest(
                 poiManifest,
@@ -9449,7 +9479,7 @@ struct NavigationProtocolTests {
             }
         }
 
-        for (prefix, target, accepted, message) in [
+        let fileHeaderCases: [(Data, Int, Bool, String)] = [
             (Data([0x46, 0x4d, 0x42, 5]), 4, true, "target 4 accepts FMB v5"),
             (Data([0x46, 0x4d, 0x42, 4]), 4, false, "target 4 rejects FMB v4"),
             (Data([0x46, 0x4d, 0x42, 4]), 3, true, "target 3 accepts FMB v4"),
@@ -9458,7 +9488,8 @@ struct NavigationProtocolTests {
             (Data([0x46, 0x4d, 0x42, 2]), 2, false, "target 2 rejects FMB v2"),
             (Data([0x46, 0x4d, 0x42, 3]), 1, false, "target 1 rejects FMB v3"),
             (Data([0x46, 0x4d, 0x42, 2]), 1, true, "target 1 accepts FMB v2"),
-        ] {
+        ]
+        for (prefix, target, accepted, message) in fileHeaderCases {
             do {
                 try BikeMapStreamArtifactValidator.validateFileHeader(
                     prefix,

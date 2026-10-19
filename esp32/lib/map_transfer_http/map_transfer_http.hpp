@@ -41,6 +41,10 @@ public:
   void setStreamTrustStore(MapStreamTrustStore trustStore);
   void setStreamStorageAvailable(bool available);
   void setStreamStorageProbe(std::function<bool()> probe);
+  void setRendererHealthProbes(bool (*font)(), bool (*pois)()) {
+    fontHealthy_ = font;
+    poisHealthy_ = pois;
+  }
   bool refreshStreamStorageCapability(bool requireWritable = true);
   bool streamInstallSupported() const;
   bool setEnabled(bool enabled);
@@ -75,6 +79,8 @@ public:
   bool takeRuntimeRollback(ActiveMapSelection &restored, bool &succeeded);
 
 private:
+  bool (*fontHealthy_)() = nullptr;
+  bool (*poisHealthy_)() = nullptr;
   class OperationStoreGuard {
   public:
     explicit OperationStoreGuard(const MapTransferHttpServer &owner) : owner_(owner) {

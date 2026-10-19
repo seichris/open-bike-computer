@@ -8,6 +8,7 @@
 #include "map_activation_workspace.hpp"
 #include "../ride_diagnostics/ride_diagnostics.hpp"
 #include "../ui_scheduler/ui_scheduler.hpp"
+#include "../map_transfer/map_renderer_status.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -1233,8 +1234,10 @@ void MapTransferHttpServer::handleStatus(device_transfer::TransferClient &client
         body +=
             "\"" + jsonEscape(activeMap.target.labelLanguages[index]) + "\"";
       }
-      body += "],\"fontAssetHealthy\":";
-      body += activeMap.target.formatVersion >= 2 ? "true" : "false";
+      body += "]";
+      appendRendererLayerStatus(body, activeMap.target,
+          fontHealthy_ != nullptr && fontHealthy_(),
+          poisHealthy_ != nullptr && poisHealthy_());
     }
   } else {
     body += ",\"activeError\":{\"code\":\"" + jsonEscape(active.code) +

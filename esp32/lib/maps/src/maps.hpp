@@ -27,6 +27,7 @@
 #include "mapPoiLayout.hpp"
 #include "mapNearbyStorage.hpp"
 #include "mapNearbyLayout.hpp"
+#include "mapNearbyViewport.hpp"
 #include "mapBuildingRenderer.hpp"
 #include "mapCamera.hpp"
 #include "mapContourBlock.hpp"
@@ -443,6 +444,9 @@ private:
   bool processPendingVectorMapActivation();
   bool processPendingStorageControl();
   bool processPendingNearbySearch();
+#if MAP_POIS_RUNTIME_ENABLED
+  void pauseNearbySearchOnStorageOwner();
+#endif
   void (*pendingStorageControl_)(void *) = nullptr;
   void *pendingStorageControlContext_ = nullptr;
   map_probe_diagnostics::Result
@@ -512,6 +516,11 @@ private:
   std::atomic<uint32_t> nearbySearchGeneration{0};
   bool pendingNearbySearchValid = false;
   bool readyNearbySearchValid = false;
+#if MAP_POIS_RUNTIME_ENABLED
+  NearbySearchRequest activeNearbyRequest{};
+  std::unique_ptr<map_nearby_storage::SearchCursor> activeNearbyCursor;
+  map_nearby_viewport::Bookmark nearbyViewport;
+#endif
   uint32_t vectorMapActivationSequence = 0;
   bool publishedMapFrame = false;
   bool publishedMapFound = false;
@@ -718,6 +727,15 @@ public:
   bool nearbyIndexHealthy() const {
     return nearbyPoiIndexHealthy.load(std::memory_order_acquire);
   }
+#if MAP_POIS_RUNTIME_ENABLED
+  void beginNearbyViewport() { nearbyViewport.capture(followGps, point); }
+  void endNearbyViewport() {
+    if (nearbyViewport.restore(followGps, point)) {
+      isPosMoved = true;
+      redrawMap = true;
+    }
+  }
+#endif
   uint32_t currentMapEpoch() const { return mapEpoch; }
   bool pollShutdownQuiescence();
   bool takeVectorMapFolderActivationResult(VectorMapActivationResult &result);

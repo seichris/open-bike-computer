@@ -102,6 +102,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         let rendererFormatVersion: Int
         let firmwareVersion: String?
         var terrainProfileVersion: Int? = nil
+        var requestedFeatures: [String]? = nil
     }
 
     struct LabelProfile: Encodable, Equatable {
@@ -184,6 +185,25 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         )
     }
 
+    func withMapPois(_ enabled: Bool) -> OfflineMapJobRequest {
+        guard enabled else { return self }
+        return OfflineMapJobRequest(
+            mode: mode, bbox: bbox, geometry: geometry, route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId, installOnDevice: installOnDevice,
+            target: RendererTarget(
+                renderer: "esp32-fmb", rendererFormatVersion: 5,
+                firmwareVersion: target?.firmwareVersion,
+                // Terrain experiments have a separate target-4 contract.
+                // Target 5 supports the independent contour layer, not FME.
+                terrainProfileVersion: nil,
+                requestedFeatures: (["3d-buildings", "map-pois", "street-labels"] +
+                    (target?.rendererFormatVersion == 4 ? ["contours"] : [])).sorted()
+            ), labels: labels ?? Self.defaultLabelProfile
+        )
+    }
+
     static func customBBox(_ bounds: OfflineMapBounds) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
             mode: "custom_bbox",
@@ -262,7 +282,8 @@ struct OfflineMapJobRequest: Encodable, Equatable {
                 renderer: "esp32-fmb",
                 rendererFormatVersion: target?.rendererFormatVersion ?? 3,
                 firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion,
-                terrainProfileVersion: target?.terrainProfileVersion
+                terrainProfileVersion: target?.terrainProfileVersion,
+                requestedFeatures: target?.requestedFeatures
             ),
             labels: labels ?? Self.defaultLabelProfile
         )
@@ -1489,6 +1510,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     struct Target: Decodable, Equatable {
         let renderer: String?
         let formatVersion: Int?
+        var requestedFeatures: [String]? = nil
     }
 
     let mapId: String?

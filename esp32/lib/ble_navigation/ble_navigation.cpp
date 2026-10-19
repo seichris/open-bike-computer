@@ -31,6 +31,7 @@ extern Power power;
 #include "deferred_notification_dispatch_policy.hpp"
 #include "scoped_watch_payload_policy.hpp"
 #include "map_transfer_status_chunk_session.hpp"
+#include "../map_transfer/map_renderer_status.hpp"
 #include "renderer_diagnostics_ble_protocol.hpp"
 #include "transfer_control_dispatch.hpp"
 #include "workout_telemetry_protocol.hpp"
@@ -2802,29 +2803,11 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
         body +=
             "\"" + status_json::escape(activeMap.target.labelLanguages[index]) + "\"";
       }
-      body += "],\"fontAssetHealthy\":";
-      body += activeMap.target.formatVersion >= 2 &&
-                      mapView.debugStreetLabelFontHealthy()
-                  ? "true"
-                  : "false";
+      body += "]";
+      map_transfer::appendRendererLayerStatus(body, activeMap.target,
+          mapView.debugStreetLabelFontHealthy(), mapView.nearbyIndexHealthy());
       body += ",\"topographyProfileVersion\":" +
               std::to_string(activeMap.target.topographyProfileVersion) +
-              ",\"poiProfileVersion\":" +
-              std::to_string(activeMap.target.poiProfileVersion) +
-              ",\"poiIndexProfileVersion\":" +
-              std::to_string(activeMap.target.poiIndexProfileVersion) +
-              ",\"poiIndexHealthy\":" +
-              (activeMap.target.formatVersion == 5 &&
-                       activeMap.target.poiProfileVersion == 1 &&
-                       activeMap.target.poiIndexProfileVersion == 1 &&
-                       mapView.nearbyIndexHealthy() ? "true" : "false") +
-              ",\"poiDataHealthy\":" +
-              (activeMap.target.formatVersion == 5 &&
-                       activeMap.target.poiProfileVersion == 1 &&
-                       activeMap.target.poiIndexProfileVersion == 1 &&
-                       mapView.nearbyIndexHealthy() ? "true" : "false") +
-              ",\"contourLayerIncluded\":" +
-              (activeMap.target.contoursIncluded ? "true" : "false") +
               ",\"topographyQualityMode\":\"" +
               status_json::escape(activeMap.target.topographyQualityMode) +
               "\",\"contourMinorIntervalM\":" +

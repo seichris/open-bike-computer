@@ -1601,7 +1601,9 @@ nonisolated enum SavedMapRendererCompatibilityPolicy {
         supports3DBuildings: Bool,
         supportsTopographicContours: Bool,
         containsTerrain: Bool = false,
-        supportsTerrainExperiments: Bool = false
+        supportsTerrainExperiments: Bool = false,
+        supportsMapPois: Bool = false,
+        includesContours: Bool = false
     ) -> Bool {
         guard !containsTerrain || supportsTerrainExperiments else { return false }
         switch rendererFormatVersion {
@@ -1614,6 +1616,9 @@ nonisolated enum SavedMapRendererCompatibilityPolicy {
         case 4:
             return supportsStreetLabels && supports3DBuildings &&
                 supportsTopographicContours
+        case 5:
+            return supportsStreetLabels && supports3DBuildings && supportsMapPois &&
+                (!includesContours || supportsTopographicContours)
         default:
             return false
         }
@@ -2372,6 +2377,7 @@ final class OfflineMapManager: ObservableObject {
             request: OfflineMapJobRequest
                 .customBBox(selectedMapBounds)
                 .withTopography(includeTopographyInNewMaps, terrain: bleManager.supportsTerrainExperiments)
+                .withMapPois(bleManager.supportsMapPois)
         )
     }
 
@@ -2395,8 +2401,7 @@ final class OfflineMapManager: ObservableObject {
               let packURL = cachedPackURLs.first(where: {
                   savedMapID(for: $0) == bleManager.mapTransferActiveMapId
               }),
-              let archive = try? OfflineMapPackArchive(url: packURL),
-              let manifest = try? archive.manifest(),
+              let manifest = OfflineMapPackPreviewReader.manifest(for: packURL),
               let coordinates = manifest.bounds,
               coordinates.count == 4 else {
             errorMessage = "The active map area is unavailable. Choose the area again in Saved Maps."
@@ -2409,20 +2414,25 @@ final class OfflineMapManager: ObservableObject {
                 maxLon: coordinates[2],
                 maxLat: coordinates[3]
             ),
-            bleManager: bleManager
+            bleManager: bleManager,
+            preserveContours: manifest.target?.formatVersion == 4 ||
+                manifest.target?.requestedFeatures?.contains("contours") == true ||
+                bleManager.activeMapContourLayerIncluded
         )
     }
 
     private func installBoundsMap(
         _ bounds: OfflineMapBounds,
-        bleManager: BLEManager
+        bleManager: BLEManager,
+        preserveContours: Bool = false
     ) {
+        let includeContours = includeTopographyInNewMaps || preserveContours
         guard canStartNewMapJob() else { return }
-        guard !includeTopographyInNewMaps || canRequestTopographicMap else {
+        guard !includeContours || canRequestTopographicMap else {
             errorMessage = "This map server does not support topographic map creation."
             return
         }
-        guard !includeTopographyInNewMaps ||
+        guard !includeContours ||
                 bleManager.supportsTopographicContours else {
             errorMessage = bleManager.hasReceivedDeviceCapabilities
                 ? "Update the Bike Computer firmware to install topographic maps."
@@ -2441,7 +2451,8 @@ final class OfflineMapManager: ObservableObject {
             }
             let request = OfflineMapJobRequest
                 .customBBox(bounds)
-                .withTopography(manager.includeTopographyInNewMaps, terrain: bleManager.supportsTerrainExperiments)
+                .withTopography(includeContours, terrain: bleManager.supportsTerrainExperiments)
+                .withMapPois(bleManager.supportsMapPois)
                 .forDevice(
                     firmwareVersion: bleManager.firmwareVersion
                 )
@@ -5888,7 +5899,9 @@ final class OfflineMapManager: ObservableObject {
                supportsStreetLabels: bleManager.supportsStreetLabels,
                supports3DBuildings: bleManager.supports3DBuildings,
                supportsTopographicContours:
-                   bleManager.supportsTopographicContours
+                   bleManager.supportsTopographicContours,
+               supportsMapPois: bleManager.supportsMapPois,
+               includesContours: metadata.topography != nil
            ) {
             throw OfflineMapPlatformError.invalidPack(
                 "This saved map is not compatible with the connected device. Regenerate it for this firmware."
@@ -5954,7 +5967,9 @@ final class OfflineMapManager: ObservableObject {
                supportsTopographicContours:
                    bleManager.supportsTopographicContours,
                containsTerrain: prepared.artifact.containsTerrain,
-               supportsTerrainExperiments: bleManager.supportsTerrainExperiments
+               supportsTerrainExperiments: bleManager.supportsTerrainExperiments,
+               supportsMapPois: bleManager.supportsMapPois,
+               includesContours: prepared.artifact.topography != nil
            ) {
             throw OfflineMapPlatformError.invalidPack(
                 "This saved map is not compatible with the connected device. Regenerate it for this firmware."

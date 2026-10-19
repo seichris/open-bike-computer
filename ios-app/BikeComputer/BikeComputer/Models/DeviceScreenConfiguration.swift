@@ -155,6 +155,14 @@ struct DeviceScreenMapProfile: Equatable, Codable, Sendable {
 
     static var nearbyDefault: DeviceScreenMapProfile { .init() }
 
+    func supported(by capabilities: DeviceScreenConfigurationCapabilities) -> Self {
+        var profile = self
+        if !capabilities.supports(.nearby) {
+            profile.visibilityMask &= ~Self.poiVisibilityMask
+        }
+        return profile
+    }
+
     static var mapPlusNavigationDefault: DeviceScreenMapProfile {
         var profile = DeviceScreenMapProfile()
         profile.detailLevel = 0

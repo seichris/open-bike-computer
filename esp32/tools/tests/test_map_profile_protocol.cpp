@@ -80,7 +80,7 @@ int main() {
          0);
   assert((MAP_NAVIGATION_DEFAULT_VISIBILITY_MASK & VISIBILITY_POI_MASK) == 0);
   assert((MAP_DEFAULT_VISIBILITY_MASK & VISIBILITY_POI_MASK) ==
-         VISIBILITY_POI_MASK);
+         (POIS_RUNTIME_ENABLED ? VISIBILITY_POI_MASK : 0U));
 
   const uint32_t allLegacyFeatures = VISIBILITY_LEGACY_FEATURE_MASK;
   assert(VISIBILITY_CONTOURS == (1U << 13));
@@ -113,7 +113,8 @@ int main() {
       VISIBILITY_EXTENDED_MARKER | VISIBILITY_POI_SHOPS |
       VISIBILITY_POI_BICYCLE_SERVICES | (1u << 31);
   assert(normalizedFeatureVisibilityMask(extendedPois) ==
-         (VISIBILITY_POI_SHOPS | VISIBILITY_POI_BICYCLE_SERVICES));
+         (POIS_RUNTIME_ENABLED ?
+          (VISIBILITY_POI_SHOPS | VISIBILITY_POI_BICYCLE_SERVICES) : 0U));
   assert((normalizedFeatureVisibilityMask(VISIBILITY_POI_MASK) &
           VISIBILITY_POI_MASK) == 0);
   assert(visibilityMaskForMapVersion(VISIBILITY_SERVICE_ROADS, 1) ==

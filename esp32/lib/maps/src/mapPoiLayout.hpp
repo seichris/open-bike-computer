@@ -46,14 +46,26 @@ struct Diagnostics {
   std::array<size_t, 5> acceptedCategories = {};
 };
 
+struct Viewport {
+  float width = 0;
+  float height = 0;
+  // The visible crop is centered on the panel. A non-fullscreen crop keeps
+  // the physical panel radius, not half of its smaller cropped height.
+  float clipRadius = 0; // zero for rectangular panels
+};
+
 uint32_t visibilityBit(map_poi_block::Category category);
 bool better(const Candidate &left, const Candidate &right, bool guidance);
+bool fitsViewport(float x, float y, Viewport screen);
 void retainBounded(MapPoiLayoutVector<Candidate> &candidates,
-                   const Candidate &candidate, bool guidance,
+                   const Candidate &candidate, Viewport screen,
+                   bool guidance,
+                   const MapLabelLayoutVector<map_label_layout::ReservedRegion>
+                       &reserved = {},
                    Diagnostics *diagnostics = nullptr);
 MapPoiLayoutVector<Placement>
 place(MapPoiLayoutVector<Candidate> candidates,
-      map_label_layout::Bounds screen, bool guidance,
+      Viewport screen, bool guidance,
       const MapLabelLayoutVector<map_label_layout::ReservedRegion> &reserved,
       Diagnostics *diagnostics = nullptr);
 

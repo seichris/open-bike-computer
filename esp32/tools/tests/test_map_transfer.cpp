@@ -1,4 +1,5 @@
 #include "../../lib/map_transfer/map_transfer.hpp"
+#include "../../lib/map_transfer/map_renderer_status.hpp"
 #include "../../lib/maps/src/mapBlockFormat.hpp"
 #include "../../lib/maps/src/mapNearbyStorage.hpp"
 
@@ -117,7 +118,7 @@ static uint32_t crc32(const std::vector<uint8_t> &data) {
 }
 
 static std::string emptyLabelFmb(uint32_t fingerprint, uint8_t version = 3,
-                                 bool withPoi = false) {
+                                 bool withPoi = false, uint16_t poiCount = 1) {
   std::vector<uint8_t> data = {
       'F', 'M', 'B', version, 0, 0, 0, 0, 'E', 'X', 'T',
       static_cast<uint8_t>('0' + version), version, 0, 0, 0};
@@ -130,11 +131,12 @@ static std::string emptyLabelFmb(uint32_t fingerprint, uint8_t version = 3,
   if (version >= 5)
     sections.push_back({1, 0, 20, 0, 100, 0, 0, 0, 0, 0, 0, 0});
   if (version >= 6) {
-    std::vector<uint8_t> pois = {static_cast<uint8_t>(withPoi ? 1 : 0),
-                                 0, 8, 0};
+    std::vector<uint8_t> pois;
+    appendLe16(pois, withPoi ? poiCount : 0);
+    appendLe16(pois, 8);
     appendLe32(pois, withPoi ? 1 : 0);
-    if (withPoi) {
-      appendLe16(pois, 120);
+    for (uint16_t index = 0; withPoi && index < poiCount; ++index) {
+      appendLe16(pois, 120 + index);
       appendLe16(pois, 80);
       pois.insert(pois.end(), {1, 2, 0, 0});
     }
@@ -176,12 +178,12 @@ static std::string emptyFontAsset(uint32_t fingerprint) {
 
 static std::string poiIndexOneBlock(int32_t x, int32_t y,
                                     uint32_t sectionOffset,
-                                    uint32_t sectionBytes) {
+                                    uint32_t sectionBytes, uint16_t count = 1) {
   std::vector<uint8_t> body;
   appendLe32(body, static_cast<uint32_t>(x));
   appendLe32(body, static_cast<uint32_t>(y));
   appendLe32(body, 1);
-  appendLe16(body, 1);
+  appendLe16(body, count);
   for (int category = 1; category < 5; ++category)
     appendLe16(body, 0);
   appendLe32(body, sectionOffset);
@@ -195,6 +197,34 @@ static std::string poiIndexOneBlock(int32_t x, int32_t y,
   appendLe32(data, crc32(body));
   data.insert(data.end(), body.begin(), body.end());
   return std::string(reinterpret_cast<const char *>(data.data()), data.size());
+}
+
+static void testNearbyIndexReadsYieldBetweenBatches() {
+  const std::string root = tempRoot();
+  assert(::system((std::string("mkdir -p ") + root + "/assets").c_str()) == 0);
+  std::vector<uint8_t> table;
+  for (int x = 0; x < 1000; ++x) {
+    const auto row = poiIndexOneBlock(x, 0, 142, 16);
+    table.insert(table.end(), row.begin() + 16, row.end());
+  }
+  std::vector<uint8_t> bytes{'F', 'P', 'I', '1'};
+  appendLe16(bytes, 32);
+  appendLe16(bytes, 0);
+  appendLe32(bytes, 1000);
+  appendLe32(bytes, crc32(table));
+  bytes.insert(bytes.end(), table.begin(), table.end());
+  writeFile(root + "/assets/nearby-pois.fpi", std::string(bytes.begin(), bytes.end()));
+  // No restaurants: the query must not try to open any block, but it must
+  // still resume between bounded reads while validating the full index CRC.
+  map_nearby_storage::SearchCursor query(root, {0, 0}, 2, 10000);
+  size_t slices = 0;
+  while (!query.step()) {
+    assert(query.result().count == 0);
+    assert(++slices < 20);
+  }
+  assert(slices >= 9);
+  assert(query.result().status == map_nearby_storage::Status::Ok);
+  assert(query.result().count == 0 && query.result().searchedBlocks == 0);
 }
 
 static void testTargetFiveIndexMatchesSignedBlocks() {
@@ -260,6 +290,21 @@ static void testTargetFiveIndexMatchesSignedBlocks() {
   assert(active.target.poiIndexSha256 == sha(index));
 
   const std::string installedRoot = root + active.root;
+  std::string status;
+  map_transfer::appendRendererLayerStatus(status, active.target, false, true);
+  assert(status.find("\"poiIndexHealthy\":true") != std::string::npos);
+  assert(status.find("\"fontAssetHealthy\":false") != std::string::npos);
+  assert(status.find("\"contourLayerIncluded\":false") != std::string::npos);
+  assert(!map_nearby_storage::invalidatesHealth(map_nearby_storage::Status::ReadFailed));
+  assert(!map_nearby_storage::invalidatesHealth(map_nearby_storage::Status::ResourceRejected));
+  assert(map_nearby_storage::invalidatesHealth(map_nearby_storage::Status::Corrupt));
+  map_nearby_storage::SearchCursor cursor(installedRoot, {0, 0}, 1, 10000);
+  size_t slices = 0;
+  while (!cursor.step()) {
+    ++slices; // a pending render may run here without resetting query progress
+    assert(cursor.result().count == 0);
+  }
+  assert(slices >= 6 && cursor.result().count == 1);
   const auto nearby = map_nearby_storage::search(
       installedRoot, {0.0, 0.0}, 1U, 10000.0);
   assert(nearby.status == map_nearby_storage::Status::Ok);
@@ -283,6 +328,28 @@ static void testTargetFiveIndexMatchesSignedBlocks() {
       installedRoot, {0.0, 0.0}, 1U, 10000.0);
   assert(damaged.status == map_nearby_storage::Status::Corrupt &&
          damaged.count == 0);
+
+  // Three record batches are required. Simulate returning to the render loop
+  // between batches, and prove no incomplete top-ten set leaks to the UI.
+  constexpr uint16_t denseCount = 513;
+  writeFile(installedRoot + "/+000+000/0_0.fmb",
+            emptyLabelFmb(0x12345678, 6, true, denseCount));
+  writeFile(installedRoot + "/assets/nearby-pois.fpi",
+            poiIndexOneBlock(0, 0, 142, 8 + denseCount * 8, denseCount));
+  map_nearby_storage::SearchCursor dense(installedRoot, {0, 0}, 1, 10000);
+  size_t denseSlices = 0;
+  while (!dense.step()) {
+    assert(dense.result().count == 0);
+    assert(++denseSlices < 30);
+  }
+  assert(denseSlices >= 8 && dense.result().count == 10);
+  assert(dense.result().places[0].recordOrdinal == 0);
+  assert(dense.result().places[9].recordOrdinal == 9);
+  map_nearby_storage::SearchCursor interrupted(installedRoot, {0, 0}, 1, 10000);
+  assert(!interrupted.step());
+  assert(interrupted.step(cancel));
+  assert(interrupted.result().status == map_nearby_storage::Status::Cancelled);
+  assert(interrupted.result().count == 0);
 
   const std::string mismatched = poiIndexOneBlock(1, 0, 142, 16);
   stage("session-pois-mismatch", mismatched);
@@ -1686,6 +1753,7 @@ static void testPendingArchiveActivationSurvivesRestart() {
 }
 
 int main() {
+  testNearbyIndexReadsYieldBetweenBatches();
   testSha256KnownVector();
   testTargetTwoLabelContractValidation();
   testTargetThreeBuildingContractValidation();

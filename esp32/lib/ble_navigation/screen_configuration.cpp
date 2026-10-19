@@ -73,7 +73,8 @@ MapProfile captureProfile(const ScreenMapRenderSettings &source,
   profile.positionMarkerScale = source.positionMarkerScale;
   profile.zoomLevel = source.zoomLevel;
   profile.visibilityMask =
-      source.visibilityMask | legacy.navigationOverlayVisibilityMask;
+      (source.visibilityMask | legacy.navigationOverlayVisibilityMask) &
+      screen_configuration_protocol::ALLOWED_VISIBILITY_MASK;
   profile.labelDensity = source.labelDensity;
   profile.labelLanguageMode = source.labelLanguageMode;
   profile.labelTextSize = source.labelTextSize;

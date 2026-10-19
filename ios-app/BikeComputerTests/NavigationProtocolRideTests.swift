@@ -5749,10 +5749,19 @@ extension NavigationProtocolTests {
     }
 
     static func testDeviceTransferManagerConfirmsDebugExit() async {
+        await assertDeviceTransferManagerConfirmsDebugExit(delayed: false)
+        await assertDeviceTransferManagerConfirmsDebugExit(delayed: true)
+        await assertDeviceTransferManagerConfirmsDebugExit(delayed: true, recoverActive: true)
+    }
+
+    private static func assertDeviceTransferManagerConfirmsDebugExit(
+        delayed: Bool, recoverActive: Bool = false
+    ) async {
         let suiteName = "transfer-fixture.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
+        let coordinator = DeviceOperationCoordinator(defaults: defaults)
+        let manager = DeviceTransferManager(coordinator: coordinator)
         let bleManager = BLEManager()
         bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
@@ -5765,10 +5774,28 @@ extension NavigationProtocolTests {
             Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
         )
         var sentPackets: [Data] = []
+        var statusReply: Data?
+        var replyOnlyWithoutOwner = true
+        var activeRecoveryRequested = false
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 64,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { [weak bleManager] packet in
+                sentPackets.append(packet)
+                guard packet == Data("DSTS".utf8), let reply = statusReply,
+                      !replyOnlyWithoutOwner || coordinator.lease == nil else { return }
+                if replyOnlyWithoutOwner {
+                    guard !activeRecoveryRequested else { return }
+                    activeRecoveryRequested = true
+                }
+                // Leave enough time for the old two-second polling task to
+                // observe the released lease and stop before active recovery.
+                let delay: UInt64 = replyOnlyWithoutOwner ? 2_500_000_000 : 1_000_000
+                Task { @MainActor [weak bleManager] in
+                    try? await Task.sleep(nanoseconds: delay)
+                    _ = bleManager?.handleDeviceTransferStatusNotification(reply)
+                }
+            }
         ))
         let entry = Task {
             try await manager.enterRemoteDebug(bleManager: bleManager, status: { _ in })
@@ -5790,6 +5817,9 @@ extension NavigationProtocolTests {
         do { _ = try await entry.value }
         catch { assert(false, "debug exit fixture acquires ownership first: \(error)") }
         sentPackets.removeAll()
+        if recoverActive {
+            statusReply = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(activeStatus.utf8)
+        }
 
         let task = Task {
             try await manager.exitRemoteDebug(
@@ -5802,17 +5832,47 @@ extension NavigationProtocolTests {
         assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
                     "DTRNexit",
                     "debug exit starts with an authenticated exit command")
+        if delayed {
+            for _ in 0..<4000 {
+                if recoverActive ? activeRecoveryRequested : coordinator.lease == nil { break }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            assert(recoverActive ? activeRecoveryRequested : coordinator.lease == nil,
+                   "fixture must reach the failed first confirmation window")
+        }
         let stoppedStatus = """
         {"configured":true,"enabled":false,"mode":"","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
         """
-        _ = bleManager.handleDeviceTransferStatusNotification(
-            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
-                Data(stoppedStatus.utf8)
-        )
+        if recoverActive {
+            do {
+                try await task.value
+                assert(false, "an active recovery cannot claim that debug has stopped")
+            } catch {
+                assert(error as? DeviceOperationCoordinator.Failure == .cleanupUnresolved,
+                       "a matching active recovery stays owned and retryable")
+            }
+            assert(coordinator.lease != nil && coordinator.unresolved != nil,
+                   "fresh matching active status must retain ownership")
+        }
+        statusReply = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(stoppedStatus.utf8)
+        replyOnlyWithoutOwner = false
+        if !recoverActive {
+            _ = bleManager.handleDeviceTransferStatusNotification(statusReply!)
+        }
         do {
-            try await task.value
+            if !recoverActive { try await task.value }
+            // No unsolicited idle notification in the recovered-active case:
+            // the restarted model poll must discover shutdown by itself.
+            for _ in 0..<2000 where !coordinator.isCleanupComplete {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            assert(coordinator.isCleanupComplete, "debug shutdown must release local ownership")
             assert(bleManager.deviceTransferSessionToken == nil,
                    "confirmed debug exit clears the session token")
+            assert(defaults.data(forKey: "device-operation-cleanup-v1") == nil,
+                   "late exit confirmation must also clear durable cleanup ownership")
+            assert(sentPackets.filter { $0 == Data("DTRNexit".utf8) }.count == 1,
+                   "recovery confirms status without sending another exit")
         } catch {
             assert(false, "fresh empty status should confirm debug exit: \(error)")
         }

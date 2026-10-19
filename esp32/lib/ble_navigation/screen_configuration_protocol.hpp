@@ -31,12 +31,12 @@ constexpr uint32_t REASSEMBLY_TIMEOUT_MS = 5000;
 constexpr uint8_t INSTANCE_ENABLED_FLAG = 1U << 0;
 constexpr uint32_t APP_INSTANCE_ID_MASK = 1UL << 31;
 constexpr uint32_t ALLOWED_VISIBILITY_MASK =
-    map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
+    map_profile_protocol::MAP_DEFAULT_VISIBILITY_MASK |
     map_profile_protocol::VISIBILITY_OVERLAY_MASK |
     map_profile_protocol::VISIBILITY_CONTOURS |
     map_profile_protocol::VISIBILITY_TERRAIN;
 constexpr uint32_t DEFAULT_VISIBILITY_MASK =
-    map_profile_protocol::VISIBILITY_EXTENDED_FEATURE_MASK |
+    map_profile_protocol::MAP_DEFAULT_VISIBILITY_MASK |
     map_profile_protocol::VISIBILITY_OVERLAY_MASK;
 
 using ScreenType = ride_ble_protocol_generated::ScreenType;
@@ -582,8 +582,11 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
       if (stored) {
         // Only local, CRC-checked persistence may shed unsupported experiments.
         // Wire documents still fail validation instead of silently changing.
-        const uint32_t remove = map_profile_protocol::TERRAIN_EXPERIMENT_MASK &
-            ~(instance.type == ScreenType::Map ? map_profile_protocol::VISIBILITY_TERRAIN : 0);
+        const uint32_t remove =
+            (map_profile_protocol::TERRAIN_EXPERIMENT_MASK &
+             ~(instance.type == ScreenType::Map ? map_profile_protocol::VISIBILITY_TERRAIN : 0)) |
+            (map_profile_protocol::POIS_RUNTIME_ENABLED ? 0U :
+             map_profile_protocol::VISIBILITY_POI_MASK);
         if (normalized && (instance.mapProfile.visibilityMask & remove)) *normalized = true;
         instance.mapProfile.visibilityMask &= ~remove;
       }

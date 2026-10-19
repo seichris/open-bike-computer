@@ -2127,6 +2127,10 @@ static void nearbyStartSearch(uint32_t nowMs) {
 static void nearbyShowMapTap(lv_event_t *event) {
   if (lv_event_get_code(event) != LV_EVENT_CLICKED ||
       nearby.selectedMask == 0) return;
+  mapView.beginNearbyViewport();
+  map_nearby_query::Position position;
+  if (nearbyFreshPosition(millis(), position))
+    mapView.centerOnGps(position.latitude, position.longitude);
   nearby.showingMap = true;
   nearby.radiusM = 10000.0;
   nearby.mapEpoch = mapView.currentMapEpoch();
@@ -2405,6 +2409,7 @@ static void createNearbyScreen() {
 }
 
 static void showNearbyPicker() {
+  mapView.endNearbyViewport();
   mapView.cancelNearbySearch();
   nearby.querying = false;
   nearby.showingMap = false;
@@ -2422,6 +2427,7 @@ static void showNearbyPicker() {
 }
 
 static void hideNearbyScreen() {
+  mapView.endNearbyViewport();
   mapView.cancelNearbySearch();
   nearby.querying = false;
   nearby.showingMap = false;
@@ -2507,11 +2513,8 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
           distance, sizeof(distance));
       lv_label_set_text(marker.distance, distance);
       lv_obj_clear_flag(marker.distance, LV_OBJ_FLAG_HIDDEN);
-      const double dx = placed.x - TFT_WIDTH / 2.0;
-      const double dy = placed.y - TFT_HEIGHT / 2.0;
-      const double length = std::max(1.0, std::hypot(dx, dy));
-      const double ux = dx / length;
-      const double uy = dy / length;
+      const double ux = placed.directionX;
+      const double uy = placed.directionY;
       const double px = -uy;
       const double py = ux;
       const auto arrowPoint = [](double x, double y) {

@@ -244,12 +244,9 @@ def _polygon_components(geometry: BaseGeometry) -> tuple[Polygon, ...]:
         return (geometry,)
     if not isinstance(geometry, MultiPolygon):
         return ()
-    return tuple(
-        sorted(
-            geometry.geoms,
-            key=lambda item: (item.bounds, item.area, item.wkb),
-        )
-    )
+    # One OSM object owns one icon, independent of source ring ordering or
+    # extraction bounds. Prefer the largest outer ring, with a stable tie break.
+    return (min(geometry.geoms, key=lambda item: (-item.area, item.bounds, item.wkb)),)
 
 
 def _quantize_anchor(
@@ -274,10 +271,12 @@ def prepare_pois(
     config: PoiConfig,
     *,
     selection_geometry: BaseGeometry | None = None,
+    emitted_blocks: Iterable[tuple[int, int]] | None = None,
 ) -> tuple[tuple[PoiRecord, ...], dict[str, Any]]:
     records: list[PoiRecord] = []
     diagnostics: Counter[str] = Counter()
     seen: set[tuple[str, int]] = set()
+    block_scope = set(emitted_blocks) if emitted_blocks is not None else None
 
     for source_kind, features in (("point", point_features), ("area", area_features)):
         for feature in features:
@@ -333,6 +332,9 @@ def prepare_pois(
                     diagnostics["invalidCoordinate"] += 1
                     continue
                 block_x, block_y, local_x, local_y = quantized
+                if block_scope is not None and (block_x, block_y) not in block_scope:
+                    diagnostics["outsideEmittedBlocks"] += 1
+                    continue
                 records.append(
                     PoiRecord(
                         block_x=block_x,

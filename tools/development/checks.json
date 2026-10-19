@@ -813,7 +813,7 @@
       "name": "Firmware text size helper equivalence",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "python -m unittest tools.tests.test_firmware_text_size",
+      "command": "python3 -m unittest tools.tests.test_firmware_text_size",
       "tools": [
         "python3",
         "g++"

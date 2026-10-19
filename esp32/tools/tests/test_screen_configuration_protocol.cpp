@@ -31,6 +31,33 @@ static Document makeDocument() {
 }
 
 int main() {
+  assert((defaultMapProfile(ScreenType::Map).visibilityMask &
+          map_profile_protocol::VISIBILITY_POI_MASK) ==
+         (map_profile_protocol::POIS_RUNTIME_ENABLED ?
+          map_profile_protocol::VISIBILITY_POI_MASK : 0U));
+#if !MAP_POIS_RUNTIME_ENABLED
+  // A CRC-checked document left by POI-enabled firmware can shed only its
+  // unsupported bits on load. The same wire upload must still be rejected.
+  Document stored = makeDocument();
+  std::array<uint8_t, MAX_DOCUMENT_BYTES> storedBytes{};
+  const size_t storedSize = encodeDocument(stored, storedBytes.data(), storedBytes.size());
+  assert(storedSize > 0);
+  const size_t maskOffset = DOCUMENT_HEADER_BYTES + INSTANCE_HEADER_BYTES +
+      stored.instances[0].nameLength + 7;
+  const uint32_t mask = stored.instances[0].mapProfile.visibilityMask |
+      map_profile_protocol::VISIBILITY_POI_MASK;
+  wire_bytes::writeU32(storedBytes.data() + maskOffset, mask);
+  wire_bytes::writeU32(storedBytes.data() + storedSize - 4,
+                       crc32(storedBytes.data(), storedSize - 4));
+  Document normalizedDocument{};
+  bool normalized = false;
+  assert(decodeDocument(storedBytes.data(), storedSize, normalizedDocument) != DecodeResult::Complete);
+  assert(decodeDocument(storedBytes.data(), storedSize, normalizedDocument, true,
+                        &normalized) == DecodeResult::Complete);
+  assert(normalized);
+  assert((normalizedDocument.instances[0].mapProfile.visibilityMask &
+          map_profile_protocol::VISIBILITY_POI_MASK) == 0);
+#endif
   Document nearbyOnly{};
   nearbyOnly.instanceCount = 1;
   nearbyOnly.defaultInstanceID = 7;

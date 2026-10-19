@@ -1,6 +1,5 @@
 #pragma once
 
-#include "mapBlockFormat.hpp"
 #include "mapNearbyQuery.hpp"
 #include "mapNearbyCoverage.hpp"
 
@@ -146,182 +145,217 @@ inline bool readIndex(const std::string &root,
   return true;
 }
 
-// A full streaming FMB check detects SD corruption without allocating the
-// entire (up to 2 MiB) block or decoding irrelevant roads and polygons.
-inline Status validateBlock(std::FILE *file, const std::string &path,
-                            uint32_t size, Cancel cancel, void *context) {
-  map_block_format::StreamValidator validator(path);
-  std::array<uint8_t, 4096> buffer{};
-  uint32_t remaining = size;
-  while (remaining != 0) {
-    if (cancelled(cancel, context)) return Status::Cancelled;
-    const size_t count = std::min<size_t>(remaining, buffer.size());
-    if (!readExact(file, buffer.data(), count)) return Status::ReadFailed;
-    if (!validator.feed(buffer.data(), count)) return Status::Corrupt;
-    remaining -= count;
-  }
-  return validator.finish() ? Status::Ok : Status::Corrupt;
-}
+// Only demonstrable on-disk format/checksum failures invalidate runtime health.
+// Allocation pressure, cancellation and transient SD reads remain retryable.
+inline bool invalidatesHealth(Status status) { return status == Status::Corrupt; }
 
-inline bool skip(std::FILE *file, uint32_t amount, uint32_t limit,
-                 uint32_t &position) {
-  const long signedAmount = static_cast<long>(amount);
-  if (position > limit || amount > limit - position || signedAmount < 0 ||
-      static_cast<uint32_t>(signedAmount) != amount ||
-      std::fseek(file, signedAmount, SEEK_CUR) != 0) return false;
-  position += amount;
-  return true;
-}
-
-// Return section 6's directory identity, independently of FPI1. The full
-// streaming validation above has already established the geometry records.
-inline bool poiSection(std::FILE *file, uint32_t size, uint32_t &offset,
-                       uint32_t &length, uint32_t &crc) {
-  if (!seek(file, 0) || size < 4) return false;
-  uint8_t header[4]{};
-  if (!readExact(file, header, sizeof(header)) || header[0] != 'F' ||
-      header[1] != 'M' || header[2] != 'B' || header[3] != 6) return false;
-  uint32_t position = 4;
-  uint8_t small[2]{};
-  if (!readExact(file, small, 2)) return false;
-  position += 2;
-  const uint16_t polygonCount = map_poi_index::u16(small);
-  for (uint16_t index = 0; index < polygonCount; ++index) {
-    uint8_t fixed[14]{};
-    if (!readExact(file, fixed, sizeof(fixed))) return false;
-    position += sizeof(fixed);
-    if (!skip(file, uint32_t(map_poi_index::u16(fixed + 12)) * 4U,
-              size, position)) return false;
+// A cursor is owned exclusively by the map worker. Each step scans at most
+// 128 geometry headers (seeking over coordinates), or 256 POI records. Installed
+// blocks were already fully authenticated and validated; a query checks their
+// header, section directory, signed FPI1 identity, POI records, counts and CRC
+// without reading unrelated geometry payloads again.
+class SearchCursor {
+ public:
+  SearchCursor(std::string root, map_nearby_query::Position rider,
+               uint32_t selectedMask, double radiusM,
+               const std::vector<map_nearby_coverage::Block> *coverage = nullptr)
+      : root_(std::move(root)), rider_(rider), selectedMask_(selectedMask),
+        radiusM_(radiusM), coverage_(coverage),
+        nearest_(rider, selectedMask, radiusM) {
+    while (!root_.empty() && root_.back() == '/') root_.pop_back();
+    if (!map_nearby_query::valid(rider) || selectedMask == 0 ||
+        (selectedMask & ~0x1fU) != 0 || !std::isfinite(radiusM) ||
+        radiusM <= 0 || radiusM > 25000) finish(Status::Corrupt);
+    else if (root_.empty()) finish(Status::Unavailable);
   }
-  if (!readExact(file, small, 2)) return false;
-  position += 2;
-  const uint16_t lineCount = map_poi_index::u16(small);
-  for (uint16_t index = 0; index < lineCount; ++index) {
-    uint8_t fixed[15]{};
-    if (!readExact(file, fixed, sizeof(fixed))) return false;
-    position += sizeof(fixed);
-    if (!skip(file, uint32_t(map_poi_index::u16(fixed + 13)) * 4U,
-              size, position)) return false;
-  }
-  if (position > size || size - position < 104U) return false;
-  uint8_t directory[104]{};
-  if (!readExact(file, directory, sizeof(directory)) ||
-      directory[0] != 'E' || directory[1] != 'X' ||
-      directory[2] != 'T' || directory[3] != '6' ||
-      directory[4] != 6 || directory[5] != 0 ||
-      directory[6] != 0 || directory[7] != 0) return false;
-  const uint8_t *entry = directory + 8 + 5 * 16;
-  if (entry[0] != 6 || entry[1] != 1 || entry[2] != 0 || entry[3] != 0)
-    return false;
-  offset = map_poi_index::u32(entry + 4);
-  length = map_poi_index::u32(entry + 8);
-  crc = map_poi_index::u32(entry + 12);
-  return offset >= position + sizeof(directory) && offset <= size &&
-         length <= size - offset;
-}
 
-inline Status consumeBlock(const std::string &root,
-                           const map_poi_index::Entry &entry,
-                           map_nearby_query::NearestTen &nearest,
-                           Cancel cancel, void *context) {
-  const std::string relative = map_poi_index::relativeBlockPath(
-      entry.blockX, entry.blockY);
-  if (relative.empty()) return Status::Corrupt;
-  const std::string path = root + "/" + relative;
-  File file = open(path);
-  if (!file) return Status::ReadFailed;
-  uint32_t size = 0;
-  if (!fileSize(file.get(), size)) return Status::ReadFailed;
-  if (size < 112 || size > map_poi_index::kMaximumBlockBytes)
-    return Status::Corrupt;
-  const Status validated = validateBlock(file.get(), path, size, cancel, context);
-  if (validated != Status::Ok) return validated;
-  uint32_t offset = 0, length = 0, expectedCrc = 0;
-  if (!poiSection(file.get(), size, offset, length, expectedCrc) ||
-      offset != entry.sectionOffset || length != entry.sectionBytes ||
-      length != 8U + entry.recordCount() * 8U || !seek(file.get(), offset))
-    return Status::Corrupt;
-  uint8_t sectionHeader[8]{};
-  if (!readExact(file.get(), sectionHeader, sizeof(sectionHeader)))
-    return Status::ReadFailed;
-  if (map_poi_index::u16(sectionHeader) != entry.recordCount() ||
-      map_poi_index::u16(sectionHeader + 2) != 8 ||
-      map_poi_index::u32(sectionHeader + 4) != entry.categoryMask)
-    return Status::Corrupt;
-  uint32_t crc = crcUpdate(0xffffffffU, sectionHeader, sizeof(sectionHeader));
-  std::array<uint8_t, map_nearby_query::kMaximumBatchRecords * 8U> records{};
-  std::array<uint16_t, 5> counts{};
-  uint16_t ordinal = 0;
-  while (ordinal < entry.recordCount()) {
-    if (cancelled(cancel, context)) return Status::Cancelled;
-    const size_t count = std::min<size_t>(
-        records.size() / 8U, entry.recordCount() - ordinal);
-    const size_t bytes = count * 8U;
-    if (!readExact(file.get(), records.data(), bytes)) return Status::ReadFailed;
-    crc = crcUpdate(crc, records.data(), bytes);
+  const SearchResult &result() const { return result_; }
+  bool done() const { return phase_ == Phase::Done; }
+
+  bool step(Cancel cancel = nullptr, void *context = nullptr) {
+    if (done()) return true;
+    if (cancelled(cancel, context)) return finish(Status::Cancelled);
+    if (phase_ == Phase::Index) {
+      file_ = open(root_ + "/assets/nearby-pois.fpi");
+      if (!file_) return finish(Status::Unavailable);
+      if (!fileSize(file_.get(), indexRemaining_)) return finish(Status::ReadFailed);
+      // Signed Nearby coverage caps installed maps below the generic FPI1
+      // codec limit. Fail closed before allocating/scanning an oversized index.
+      if (indexRemaining_ < map_poi_index::kHeaderBytes ||
+          indexRemaining_ > map_poi_index::kHeaderBytes +
+              map_poi_index::kEntryBytes * map_nearby_coverage::kMaximumBlocks)
+        return finish(Status::Corrupt);
+      auto append = [](const map_poi_index::Entry &entry, void *destination) {
+        static_cast<MapNearbyVector<map_poi_index::Entry> *>(destination)->push_back(entry);
+        return true;
+      };
+      indexValidator_ = std::make_unique<map_poi_index::StreamValidator>(append, &entries_);
+      phase_ = Phase::IndexRead;
+      return false;
+    }
+    if (phase_ == Phase::IndexRead) {
+      std::array<uint8_t, 4096> buffer{};
+      const size_t count = std::min<size_t>(indexRemaining_, buffer.size());
+      if (!readExact(file_.get(), buffer.data(), count)) return finish(Status::ReadFailed);
+      if (!indexValidator_->feed(buffer.data(), count)) return finish(Status::Corrupt);
+      indexRemaining_ -= static_cast<uint32_t>(count);
+      if (indexRemaining_ != 0) return false;
+      if (!indexValidator_->finish() || entries_.size() != indexValidator_->entryCount())
+        return finish(Status::Corrupt);
+      file_.reset();
+      indexValidator_.reset();
+      if (!map_nearby_query::prepareFrontier(entries_.data(), entries_.size(),
+              rider_, selectedMask_, radiusM_, frontier_))
+        return finish(Status::Corrupt);
+      result_.candidateBlocks = static_cast<uint32_t>(frontier_.size());
+      phase_ = Phase::Block;
+      return false;
+    }
+    if (phase_ == Phase::Block) {
+      if (nextBlock_ == frontier_.size() ||
+          nearest_.canFinishBefore(frontier_[nextBlock_].lowerBoundM()))
+        return finish(Status::Ok);
+      entry_ = entries_[frontier_[nextBlock_].index];
+      const auto relative = map_poi_index::relativeBlockPath(entry_.blockX, entry_.blockY);
+      if (relative.empty()) return finish(Status::Corrupt);
+      file_ = open(root_ + "/" + relative);
+      if (!file_ || !fileSize(file_.get(), size_)) return finish(Status::ReadFailed);
+      if (size_ < 112 || size_ > map_poi_index::kMaximumBlockBytes)
+        return finish(Status::Corrupt);
+      uint8_t header[6]{};
+      if (!readExact(file_.get(), header, sizeof(header))) return finish(Status::ReadFailed);
+      if (header[0] != 'F' || header[1] != 'M' ||
+          header[2] != 'B' || header[3] != 6) return finish(Status::Corrupt);
+      position_ = sizeof(header);
+      shapes_ = map_poi_index::u16(header + 4);
+      phase_ = Phase::Polygons;
+      return false;
+    }
+    if (phase_ == Phase::Polygons || phase_ == Phase::Lines) {
+      const bool polygons = phase_ == Phase::Polygons;
+      const size_t headerSize = polygons ? 14U : 15U;
+      for (size_t batch = 0; shapes_ != 0 && batch < 128; ++batch, --shapes_) {
+        if (cancelled(cancel, context)) return finish(Status::Cancelled);
+        if (position_ > size_ || headerSize > size_ - position_)
+          return finish(Status::Corrupt);
+        uint8_t header[15]{};
+        if (!readExact(file_.get(), header, headerSize)) return finish(Status::ReadFailed);
+        position_ += static_cast<uint32_t>(headerSize);
+        const uint32_t coordinates = map_poi_index::u16(header + headerSize - 2) * 4U;
+        if (coordinates > size_ - position_) return finish(Status::Corrupt);
+        position_ += coordinates;
+        if (!seek(file_.get(), position_)) return finish(Status::ReadFailed);
+      }
+      if (shapes_ != 0) return false;
+      if (polygons) {
+        if (size_ - position_ < 2) return finish(Status::Corrupt);
+        uint8_t count[2]{};
+        if (!readExact(file_.get(), count, 2)) return finish(Status::ReadFailed);
+        position_ += 2;
+        shapes_ = map_poi_index::u16(count);
+        phase_ = Phase::Lines;
+      } else phase_ = Phase::Directory;
+      return false;
+    }
+    if (phase_ == Phase::Directory) {
+      std::array<uint8_t, 104> directory{};
+      if (position_ > size_ || size_ - position_ < directory.size())
+        return finish(Status::Corrupt);
+      if (!readExact(file_.get(), directory.data(), directory.size()))
+        return finish(Status::ReadFailed);
+      if (directory[0] != 'E' || directory[1] != 'X' ||
+          directory[2] != 'T' || directory[3] != '6' ||
+          directory[4] != 6 || directory[5] || directory[6] || directory[7])
+        return finish(Status::Corrupt);
+      const uint8_t *section = directory.data() + 8 + 5 * 16;
+      const uint32_t offset = map_poi_index::u32(section + 4);
+      const uint32_t length = map_poi_index::u32(section + 8);
+      expectedCrc_ = map_poi_index::u32(section + 12);
+      if (section[0] != 6 || section[1] != 1 || section[2] || section[3] ||
+          offset != entry_.sectionOffset || length != entry_.sectionBytes ||
+          length != 8U + entry_.recordCount() * 8U ||
+          offset < position_ + directory.size() || offset > size_ ||
+          length > size_ - offset) return finish(Status::Corrupt);
+      if (!seek(file_.get(), offset)) return finish(Status::ReadFailed);
+      uint8_t header[8]{};
+      if (!readExact(file_.get(), header, sizeof(header))) return finish(Status::ReadFailed);
+      if (map_poi_index::u16(header) != entry_.recordCount() ||
+          map_poi_index::u16(header + 2) != 8 ||
+          map_poi_index::u32(header + 4) != entry_.categoryMask)
+        return finish(Status::Corrupt);
+      crc_ = crcUpdate(0xffffffffU, header, sizeof(header));
+      ordinal_ = 0;
+      counts_ = {};
+      phase_ = Phase::Records;
+      return false;
+    }
+    std::array<uint8_t, map_nearby_query::kMaximumBatchRecords * 8U> records{};
+    const size_t count = std::min<size_t>(records.size() / 8U,
+                                        entry_.recordCount() - ordinal_);
+    if (!readExact(file_.get(), records.data(), count * 8U)) return finish(Status::ReadFailed);
+    crc_ = crcUpdate(crc_, records.data(), count * 8U);
     for (size_t index = 0; index < count; ++index) {
       const uint8_t category = records[index * 8U + 4U];
-      if (category < 1 || category > 5) return Status::Corrupt;
-      ++counts[category - 1U];
+      if (category < 1 || category > 5) return finish(Status::Corrupt);
+      ++counts_[category - 1U];
     }
-    if (!nearest.consume(entry, ordinal, records.data(), count))
-      return Status::Corrupt;
-    ordinal += static_cast<uint16_t>(count);
+    if (!nearest_.consume(entry_, ordinal_, records.data(), count))
+      return finish(Status::Corrupt);
+    ordinal_ += static_cast<uint16_t>(count);
+    if (ordinal_ == entry_.recordCount()) {
+      if (counts_ != entry_.categoryCounts || (crc_ ^ 0xffffffffU) != expectedCrc_)
+        return finish(Status::Corrupt);
+      file_.reset();
+      ++nextBlock_;
+      ++result_.searchedBlocks;
+      phase_ = Phase::Block;
+    }
+    return false;
   }
-  return counts == entry.categoryCounts && (crc ^ 0xffffffffU) == expectedCrc
-             ? Status::Ok : Status::Corrupt;
-}
+
+ private:
+  enum class Phase { Index, IndexRead, Block, Polygons, Lines, Directory, Records, Done };
+  bool finish(Status status) {
+    result_.status = status;
+    if (status == Status::Ok) {
+      result_.count = static_cast<uint8_t>(nearest_.size());
+      for (size_t index = 0; index < nearest_.size(); ++index)
+        result_.places[index] = nearest_[index];
+      result_.coverageComplete = coverage_ != nullptr &&
+          map_nearby_coverage::completeWithinRadius(*coverage_, rider_, radiusM_);
+    } else result_.count = 0; // never expose a partially searched set
+    file_.reset();
+    indexValidator_.reset();
+    phase_ = Phase::Done;
+    return true;
+  }
+  std::string root_;
+  map_nearby_query::Position rider_;
+  uint32_t selectedMask_;
+  double radiusM_;
+  const std::vector<map_nearby_coverage::Block> *coverage_;
+  map_nearby_query::NearestTen nearest_;
+  SearchResult result_{};
+  MapNearbyVector<map_poi_index::Entry> entries_;
+  MapNearbyVector<map_nearby_query::FrontierItem> frontier_;
+  File file_{nullptr, &std::fclose};
+  std::unique_ptr<map_poi_index::StreamValidator> indexValidator_;
+  uint32_t indexRemaining_ = 0;
+  map_poi_index::Entry entry_{};
+  Phase phase_ = Phase::Index;
+  size_t nextBlock_ = 0;
+  uint32_t size_ = 0, position_ = 0, expectedCrc_ = 0, crc_ = 0;
+  uint16_t shapes_ = 0, ordinal_ = 0;
+  std::array<uint16_t, 5> counts_{};
+};
 
 inline SearchResult search(const std::string &root,
                            map_nearby_query::Position rider,
                            uint32_t selectedMask, double radiusM,
                            Cancel cancel = nullptr, void *context = nullptr,
                            const std::vector<map_nearby_coverage::Block> *coverage = nullptr) {
-  SearchResult result;
-  if (!map_nearby_query::valid(rider) || selectedMask == 0 ||
-      (selectedMask & ~0x1fU) != 0 || !std::isfinite(radiusM) ||
-      radiusM <= 0 || radiusM > 25000) {
-    result.status = Status::Corrupt;
-    return result;
-  }
-  std::string normalized = root;
-  while (!normalized.empty() && normalized.back() == '/')
-    normalized.pop_back();
-  if (normalized.empty()) {
-    result.status = Status::Unavailable;
-    return result;
-  }
-  MapNearbyVector<map_poi_index::Entry> entries;
-  if (!readIndex(normalized, entries, cancel, context, result.status))
-    return result;
-  MapNearbyVector<map_nearby_query::FrontierItem> frontier;
-  if (!map_nearby_query::prepareFrontier(entries.data(), entries.size(), rider,
-                                          selectedMask, radiusM, frontier)) {
-    result.status = Status::Corrupt;
-    return result;
-  }
-  result.candidateBlocks = static_cast<uint32_t>(frontier.size());
-  map_nearby_query::NearestTen nearest(rider, selectedMask, radiusM);
-  for (const auto &item : frontier) {
-    if (cancelled(cancel, context)) {
-      result.status = Status::Cancelled;
-      return result;
-    }
-    if (nearest.canFinishBefore(item.lowerBoundM())) break;
-    const Status status = consumeBlock(normalized, entries[item.index],
-                                       nearest, cancel, context);
-    if (status != Status::Ok) {
-      result.status = status;
-      return result;
-    }
-    ++result.searchedBlocks;
-  }
-  result.count = static_cast<uint8_t>(nearest.size());
-  for (size_t index = 0; index < nearest.size(); ++index)
-    result.places[index] = nearest[index];
-  result.status = Status::Ok;
-  result.coverageComplete = coverage != nullptr &&
-      map_nearby_coverage::completeWithinRadius(*coverage, rider, radiusM);
-  return result;
+  SearchCursor cursor(root, rider, selectedMask, radiusM, coverage);
+  while (!cursor.step(cancel, context)) {}
+  return cursor.result();
 }
 } // namespace map_nearby_storage

@@ -300,14 +300,14 @@ private struct DeviceScreenInstanceEditorView: View {
                     supportsNavigationOrientation: bleManager.supportsMapNavigationOrientation,
                     topographicContoursAvailable:
                         bleManager.topographicContoursAvailable,
+                    supportsTerrainExperiments: bleManager.supportsTerrainExperiments,
                     supportsMapPois: bleManager.supportsMapPois,
                     poisAvailable: bleManager.supportsMapPois &&
                         bleManager.activeMapRendererFormat == 5 &&
                         bleManager.activeMapPoiProfileVersion == 1 &&
                         bleManager.activeMapPoiIndexProfileVersion == 1 &&
                         bleManager.activeMapPoiDataHealthy &&
-                        bleManager.activeMapPoiIndexHealthy,
-                    supportsTerrainExperiments: bleManager.supportsTerrainExperiments
+                        bleManager.activeMapPoiIndexHealthy
                 )
             }
 

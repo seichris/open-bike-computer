@@ -39,6 +39,34 @@ or enabled merely because it exists in the branch.
 
 ## Baseline
 
+### October 19 review and integration follow-up
+
+The review-fix pass integrates `main` through
+`2bedd1fa061419ad53e830c57bcbad2ff5d9c185`, preserving friend indicators
+without offline tiles and delayed debug-shutdown reconciliation. The two
+lifecycle test conflicts retain main's stronger exact-authorization assertions.
+
+See the [review fix ledger](pr378-review-fix-ledger.md) for defects, verification
+and remaining gates. Production defaults must never publish unadvertised POI
+bits. Target-5 generation requests explicitly distinguish POIs with/without
+contours; target-4 FME terrain experiments remain a separate contract. Nearby
+queries resume between bounded index/header/record batches and release their
+SD handles before activation, storage control and shutdown. Transient failures
+do not invalidate installed assets. A multipolygon has one deterministic icon
+per OSM object, not one per ring.
+
+The first local uncommitted production image was 2,981,840 bytes, leaving
+163,888 bytes in the 3 MiB slot. This is diagnostic evidence for the pre-merge
+snapshot only, not final clean-head attestation or physical qualification.
+
+Nonshipping `WAVESHARE_AMOLED_{175,206}_POI_LIFECYCLE_QUALIFICATION`
+profiles now measure enabled Nearby with production behavior, existing lifecycle
+adapters, production trust, dual 3 MiB OTA and the unchanged 65,536-byte reserve.
+They do not enable remote debugging or enter factory/release workflows.
+The first 175 candidate was 3,041,408 bytes (104,320 bytes remaining), still
+dirty-build diagnostic evidence. The 206 candidate has not been built here.
+Final exact-head size and CI results belong in the review ledger and PR.
+
 ### October 18 integration
 
 PR #378 is updated against freshly fetched GitHub `main` at

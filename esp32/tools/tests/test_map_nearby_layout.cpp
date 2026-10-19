@@ -1,4 +1,5 @@
 #include "../../lib/maps/src/mapNearbyLayout.hpp"
+#include "../../lib/maps/src/mapNearbyViewport.hpp"
 
 #include <array>
 #include <cassert>
@@ -8,6 +9,35 @@
 using map_nearby_layout::Input;
 
 int main() {
+  struct Center { int32_t x, y; };
+  for (bool originalFollow : {false, true}) {
+    map_nearby_viewport::Bookmark bookmark;
+    Center center{123, -456};
+    bool follow = originalFollow;
+    bookmark.capture(follow, center);
+    center = {999, 888};
+    follow = false;
+    bookmark.capture(follow, center); // repeated entry cannot overwrite owner
+    assert(bookmark.restore(follow, center));
+    assert(follow == originalFollow && center.x == 123 && center.y == -456);
+    assert(!bookmark.restore(follow, center));
+  }
+  // Asymmetric control insets and physical round clipping move the anchor,
+  // but must not rotate the arrow away from the true projected bearing.
+  Input bearing{1000, 450, 3, 4, true, 1, 100};
+  auto bearingLayout = map_nearby_layout::arrange(&bearing, 1, 466, 466, true, 80, 20);
+  const auto &arrow = bearingLayout.placements[0];
+  assert(arrow.edge);
+  assert(std::fabs(arrow.directionY / arrow.directionX - 4.0 / 3.0) < 1e-9);
+  std::array<Input, 2> mixed{{
+      {405, 230, 0, 0, true, 1, 100},
+      {900, 230, 0, 0, true, 2, 200},
+  }};
+  auto mixedLayout = map_nearby_layout::arrange(mixed.data(), mixed.size(),
+      466, 466, false, 0, 0);
+  assert(mixedLayout.count == 1);
+  assert(mixedLayout.placements[0].edge && mixedLayout.placements[0].members == 3);
+  assert(mixedLayout.placements[0].nearestDistanceM == 100);
   std::array<Input, 5> places{{
       {233, 233, 0, 0, true, 1, 120},
       {238, 235, 0, 0, true, 2, 160},

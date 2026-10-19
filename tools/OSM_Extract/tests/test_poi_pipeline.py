@@ -97,13 +97,13 @@ class PoiPipelineTests(unittest.TestCase):
         records, report = prepare_pois(points, areas, self.config)
         blocks = records_by_block(records)
 
-        self.assertEqual(report["recordCount"], 5)
+        self.assertEqual(report["recordCount"], 4)
         self.assertEqual(report["pointRecordCount"], 2)
-        self.assertEqual(report["areaRecordCount"], 3)
+        self.assertEqual(report["areaRecordCount"], 2)
         self.assertEqual(report["shopsCount"], 1)
         self.assertEqual(report["restaurantsAndCafesCount"], 1)
         self.assertEqual(report["publicToiletsCount"], 1)
-        self.assertEqual(report["gasStationsCount"], 2)
+        self.assertEqual(report["gasStationsCount"], 1)
         self.assertIn((4096, 0), blocks)
         negative = next(record for record in records if record.object_key == "n2")
         self.assertEqual((negative.block_x, negative.local_x), (-4096, 4095))
@@ -117,8 +117,25 @@ class PoiPipelineTests(unittest.TestCase):
         )
         self.assertEqual(
             sorted(record.component_index for record in records if record.object_key == "r4"),
-            [0, 1],
+            [0],
         )
+        reversed_areas = areas[:-1] + [feature(MultiPolygon(list(reversed(multi.geoms))),
+                                             osm_id=4, amenity="fuel")]
+        self.assertEqual(records, prepare_pois(points, reversed_areas, self.config)[0])
+
+    def test_halo_records_are_not_counted_in_emitted_statistics(self):
+        records, report = prepare_pois(
+            [feature(Point(10, 10), osm_id=1, shop="books"),
+             feature(Point(9000, 10), osm_id=2, amenity="cafe")], [], self.config,
+            emitted_blocks=[(0, 0), (4096, 0)],
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(report["recordCount"], 1)
+        self.assertEqual(report["shopsCount"], 1)
+        self.assertEqual(report["restaurantsAndCafesCount"], 0)
+        self.assertEqual(report["pointRecordCount"], 1)
+        self.assertEqual(report["outsideEmittedBlocks"], 1)
+        self.assertEqual(report["blocksWithPois"], 1)
 
     def test_exact_duplicates_are_removed_without_fuzzy_merging(self):
         first = feature(Point(10, 10), osm_id=10, shop="bakery")

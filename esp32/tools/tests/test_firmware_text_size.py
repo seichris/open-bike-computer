@@ -16,10 +16,6 @@ def function(path, signature):
 
 class FirmwareTextSizeTests(unittest.TestCase):
     def test_actual_formatters_and_http_tokenizer_match_legacy(self):
-        source = (ROOT / 'lib/device_transfer/device_transfer_http.cpp').read_text()
-        start = source.index('    size_t position = 0;', source.index('  std::string requestLineTrailing;'))
-        end = source.index('\n  }', start)
-        tokenizer = source[start:end]
         program = r'''
 #include <cassert>
 #include <array>
@@ -30,20 +26,19 @@ class FirmwareTextSizeTests(unittest.TestCase):
 #include <sstream>
 #include <string>
 #include "gpxValueFormat.hpp"
+#include "device_transfer_http_limits.hpp"
 '''
         program += function('lib/storage/storage.cpp', 'std::string formatSize(') + '\n'
         program += function('lib/firmware_update/firmware_update_http.cpp', 'static std::string manifestPayload(') + '\n'
         program += r'''
-std::array<std::string,4> tokenize(const std::string &requestLine) {
-  struct {std::string method,path;} request;
-  std::string version,requestLineTrailing;
-'''+tokenizer+r'''
-  return {request.method,request.path,version,requestLineTrailing};
-}
 void checkTokens(const std::string &line) {
   std::istringstream old(line); std::array<std::string,4> expected;
   for(auto &part:expected) old>>part;
-  assert(tokenize(line)==expected);
+  const bool valid = !expected[0].empty() && !expected[1].empty() &&
+      expected[2] == "HTTP/1.1" && expected[3].empty();
+  std::string method, path;
+  assert(device_transfer::parseHttpRequestLine(line,method,path)==valid);
+  if (valid) { assert(method==expected[0]); assert(path==expected[1]); }
 }
 template<class T> void checkValue(T input) {
   std::ostringstream old; old<<input; assert(gpx_value_format::value(input)==old.str());
@@ -94,7 +89,8 @@ int main() {
             path = pathlib.Path(directory)
             (path / 'test.cpp').write_text(program)
             subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',
-                '-Wno-sign-compare','-I'+str(ROOT/'lib/gpx/src'),str(path/'test.cpp'),
+                '-Wno-sign-compare','-I'+str(ROOT/'lib/gpx/src'),
+                '-I'+str(ROOT/'lib/device_transfer'),str(path/'test.cpp'),
                 '-o',str(path/'test')], check=True)
             subprocess.run([str(path/'test')],check=True)
 

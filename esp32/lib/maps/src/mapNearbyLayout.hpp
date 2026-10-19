@@ -31,6 +31,8 @@ struct Placement {
   uint8_t category = 0; // zero means mixed categories
   uint8_t count = 0;
   bool edge = false;
+  double directionX = 0.0;
+  double directionY = -1.0;
 };
 
 struct Layout {
@@ -139,33 +141,57 @@ inline Layout arrange(const Input *inputs, size_t inputCount, double width,
       y = std::clamp(y, topInset + 35.0, height - bottomInset - 35.0);
     }
 
-    // The search supplies nearest-first input. Co-located pins and close
-    // edge anchors share one deterministic group, preserving all ten members.
-    size_t group = layout.count;
-    for (size_t candidate = 0; candidate < layout.count; ++candidate) {
-      const Placement &placed = layout.placements[candidate];
-      if (placed.edge != !onMap) continue;
-      const double deltaX = placed.x - x;
-      const double deltaY = placed.y - y;
-      const bool collides = onMap
-          ? std::fabs(deltaX) < 30.0 && std::fabs(deltaY) < 30.0
-          : std::fabs(deltaX) < 76.0 && std::fabs(deltaY) < 56.0;
-      if (collides) {
-        group = candidate;
+    double directionX = input.directionX;
+    double directionY = input.directionY;
+    if (input.projected && (!std::isfinite(directionX) ||
+        !std::isfinite(directionY) || std::hypot(directionX, directionY) < 1e-9)) {
+      directionX = input.x - width / 2.0;
+      directionY = input.y - height / 2.0;
+    }
+    const double length = std::hypot(directionX, directionY);
+    if (!std::isfinite(length) || length < 1e-9) {
+      directionX = 0.0;
+      directionY = -1.0;
+    } else {
+      directionX /= length;
+      directionY /= length;
+    }
+    layout.placements[layout.count++] = {
+        x, y, static_cast<uint16_t>(1U << index), input.directDistanceM,
+        input.category, 1, !onMap, directionX, directionY};
+  }
+
+  // Mixed pin/edge footprints also collide. Merge to a fixed point because
+  // promoting a pin group to an edge marker enlarges/moves its footprint.
+  // At most nine merges are possible. Nearest-first metadata and true bearing
+  // remain those of the nearest member, not of the clamped/grouped anchor.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t first = 0; first < layout.count && !changed; ++first) {
+      auto &group = layout.placements[first];
+      for (size_t second = first + 1; second < layout.count; ++second) {
+        const auto &other = layout.placements[second];
+        const double widthSum = (group.edge ? 76.0 : 30.0) +
+                                (other.edge ? 76.0 : 30.0);
+        const double heightSum = (group.edge ? 56.0 : 30.0) +
+                                 (other.edge ? 56.0 : 30.0);
+        if (std::fabs(group.x - other.x) * 2.0 >= widthSum ||
+            std::fabs(group.y - other.y) * 2.0 >= heightSum) continue;
+        if (!group.edge && other.edge) {
+          group.x = other.x;
+          group.y = other.y;
+          group.edge = true;
+        }
+        group.members |= other.members;
+        group.count += other.count;
+        if (group.category != other.category) group.category = 0;
+        for (size_t item = second + 1; item < layout.count; ++item)
+          layout.placements[item - 1] = layout.placements[item];
+        --layout.count;
+        changed = true;
         break;
       }
-    }
-    if (group == layout.count) {
-      if (layout.count >= layout.placements.size()) continue;
-      layout.placements[group] = {
-          x, y, static_cast<uint16_t>(1U << index), input.directDistanceM,
-          input.category, 1, !onMap};
-      ++layout.count;
-    } else {
-      Placement &placed = layout.placements[group];
-      placed.members |= static_cast<uint16_t>(1U << index);
-      placed.category = placed.category == input.category ? placed.category : 0;
-      ++placed.count;
     }
   }
   return layout;

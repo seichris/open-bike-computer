@@ -211,6 +211,15 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         instances: [nearby]
     )
     let nearbyCapabilities = DeviceScreenConfigurationCapabilities.v1
+    for style in [TerrainMapStyle.elevationTint, .hillshade, .terrain3D] {
+        var terrain = DeviceScreenMapProfile.mapDefault
+        terrain.visibilityMask |= style.rawValue
+        let supported = terrain.supported(by: legacyCapabilities)
+        assertEqual(supported.visibilityMask & DeviceScreenMapProfile.poiVisibilityMask, 0,
+                    "terrain defaults cannot poison a legacy editor draft")
+        assertEqual(terrain.supported(by: nearbyCapabilities), terrain,
+                    "POI-qualified peers retain their visibility defaults")
+    }
     assertEqual(
         try? DeviceScreenConfigurationCodec.decode(
             DeviceScreenConfigurationCodec.encode(
@@ -349,6 +358,36 @@ func testDeviceScreenConfigurationController() {
         return
     }
     defer { defaults.removePersistentDomain(forName: suite) }
+
+    for style in [TerrainMapStyle.hillshade, .elevationTint, .terrain3D] {
+        var capabilities = DeviceScreenConfigurationCapabilities.v1
+        capabilities.supportedScreenTypes &= ~ConfiguredDeviceScreenType.nearby.bit
+        var productionDocument = DeviceScreenConfigurationDocument.legacyDefault
+        for index in productionDocument.instances.indices {
+            productionDocument.instances[index].mapProfile =
+                productionDocument.instances[index].mapProfile?.supported(by: capabilities)
+        }
+        let terrainController = DeviceScreenConfigurationController(defaults: defaults)
+        var snapshotRequest: Data?
+        terrainController.connect(deviceID: "terrain-legacy", generation: 1,
+            capabilities: capabilities, maximumPlaintextWriteBytes: 40,
+            sendFrames: { frames, sent, _ in
+                snapshotRequest = frames.first
+                sent()
+                return true
+            })
+        let snapshotID = readUInt32LE(snapshotRequest!, offset: 4)
+        let snapshot = try! DeviceScreenConfigurationCodec.encode(
+            productionDocument, capabilities: capabilities)
+        for frame in screenConfigurationDownloadFrames(requestID: snapshotID,
+                revision: 1, document: snapshot) {
+            terrainController.receive(frame, deviceID: "terrain-legacy", generation: 1)
+        }
+        try! terrainController.addTerrainScreen(style)
+        assert(terrainController.canSave,
+               "adding a terrain screen must not block the entire production draft")
+        terrainController.disconnect(deviceID: "terrain-legacy", generation: 1)
+    }
 
     let source = ScreenConfigurationRequestIDSource()
     let controller = DeviceScreenConfigurationController(defaults: defaults)

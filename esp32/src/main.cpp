@@ -2079,6 +2079,9 @@ void setup() {
   mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
   mapTransferHttp.setStreamStorageProbe(
       [] { return storage.getSdLoaded(); });
+  mapTransferHttp.setRendererHealthProbes(
+      [] { return mapView.debugStreetLabelFontHealthy(); },
+      [] { return mapView.nearbyIndexHealthy(); });
   mapTransferHttp.setStreamStorageAvailable(sdResult == ESP_OK &&
                                             storage.getSdLoaded());
   mapTransferHttp.setStorageControlSubmit([](void (*work)(void *), void *context) {

@@ -16,6 +16,8 @@ on:
       - "map-platform/config/map-stream-trust.json"
       - "map-platform/config/generation-profile-policy-v1.json"
       - "map-platform/config/generation-profile-policy-v2.json"
+      - "map-platform/config/generation-profile-policy-v3.json"
+      - "map-platform/config/generation-profile-policy-v4.json"
       - "map-platform/deploy/detect_worker_change.py"
       - "map-platform/deploy/export_pending_compose.py"
       - "map-platform/deploy/select_worker_promotion.py"

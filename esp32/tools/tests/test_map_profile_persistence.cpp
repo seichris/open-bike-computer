@@ -95,7 +95,13 @@ int main() {
   assert(loadedMap.positionMarkerScale == 2);
   assert(loadedMap.zoomLevel == MAP_DEFAULT_ZOOM_LEVEL);
   assert((loadedMap.visibilityMask & VISIBILITY_POI_MASK) ==
-         VISIBILITY_POI_MASK);
+         (POIS_RUNTIME_ENABLED ? VISIBILITY_POI_MASK : 0U));
+  freshStore.putUInt("visMask", VISIBILITY_EXTENDED_MARKER | VISIBILITY_POI_MASK);
+  map_profile_persistence::load(freshStore, loadedMap, loadedNavigation);
+  assert((loadedMap.visibilityMask & VISIBILITY_POI_MASK) ==
+         (POIS_RUNTIME_ENABLED ? VISIBILITY_POI_MASK : 0U));
+  freshStore = FakeStore{};
+  map_profile_persistence::load(freshStore, loadedMap, loadedNavigation);
   assert(loadedNavigation.detailLevel ==
          MAP_NAVIGATION_DEFAULT_DETAIL_LEVEL);
   assert(loadedNavigation.routeLineWidth ==

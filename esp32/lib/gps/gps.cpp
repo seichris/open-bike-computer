@@ -9,7 +9,8 @@
 #include "gps.hpp"
 #include "lvgl.h"
 #include "settings.hpp"
-#include "widgets.hpp"
+// Only the LVGL label declared below is used here. Pulling the complete
+// widget/GUI graph into GPS creates circular LDF dependencies on storage.
 
 extern lv_obj_t *sunriseLabel;
 bool setTime = true;

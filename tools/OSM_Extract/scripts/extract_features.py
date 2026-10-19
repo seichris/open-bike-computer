@@ -345,6 +345,7 @@ if includes_pois:
             polygons["features"],
             poi_config,
             selection_geometry=(selection_geometry if apply_selection_mask else None),
+            emitted_blocks=block_positions,
         )
         poi_records_by_block = records_by_block(poi_records)
         poi_normalization_seconds = time.perf_counter() - poi_started

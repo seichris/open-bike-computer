@@ -47,6 +47,19 @@ bool intersects(float leftX, float leftY, float leftWidth, float leftHeight,
          std::fabs(leftY - rightY) * 2.0F < leftHeight + rightHeight;
 }
 
+bool intersectsReserved(
+    const Candidate &candidate,
+    const MapLabelLayoutVector<map_label_layout::ReservedRegion> &reserved) {
+  constexpr float paddedSize = kIconSize + 2.0F * kIconPadding;
+  for (const auto &region : reserved) {
+    if (region.width > 0 && region.height > 0 &&
+        intersects(candidate.x, candidate.y, paddedSize, paddedSize,
+                   region.centerX, region.centerY, region.width, region.height))
+      return true;
+  }
+  return false;
+}
+
 } // namespace
 
 uint32_t visibilityBit(map_poi_block::Category category) {
@@ -75,11 +88,35 @@ bool better(const Candidate &left, const Candidate &right, bool guidance) {
                          right.recordOrder);
 }
 
+bool fitsViewport(float x, float y, Viewport screen) {
+  constexpr float margin = (kIconSize + 2.0F * kIconPadding) * 0.5F;
+  const bool fits = std::isfinite(x) && std::isfinite(y) &&
+      x >= margin && y >= margin &&
+      x + margin < screen.width && y + margin < screen.height;
+  if (!fits || !std::isfinite(screen.clipRadius) || screen.clipRadius < 0) return false;
+  if (screen.clipRadius == 0) return true;
+  const float dx = std::fabs(x - screen.width * 0.5F) + margin;
+  const float dy = std::fabs(y - screen.height * 0.5F) + margin;
+  return dx * dx + dy * dy < screen.clipRadius * screen.clipRadius;
+}
+
 void retainBounded(MapPoiLayoutVector<Candidate> &candidates,
-                   const Candidate &candidate, bool guidance,
+                   const Candidate &candidate, Viewport screen,
+                   bool guidance,
+                   const MapLabelLayoutVector<map_label_layout::ReservedRegion>
+                       &reserved,
                    Diagnostics *diagnostics) {
   if (diagnostics != nullptr)
     ++diagnostics->gathered;
+  if (!fitsViewport(candidate.x, candidate.y, screen)) {
+    if (diagnostics != nullptr) ++diagnostics->offscreen;
+    return;
+  }
+  // Unrenderable high-priority POIs must not evict visible lower-priority POIs.
+  if (intersectsReserved(candidate, reserved)) {
+    if (diagnostics != nullptr) ++diagnostics->collisionRejected;
+    return;
+  }
   if (candidates.size() < kMaximumCandidates) {
     candidates.push_back(candidate);
     return;
@@ -96,7 +133,7 @@ void retainBounded(MapPoiLayoutVector<Candidate> &candidates,
 
 MapPoiLayoutVector<Placement>
 place(MapPoiLayoutVector<Candidate> candidates,
-      map_label_layout::Bounds screen, bool guidance,
+      Viewport screen, bool guidance,
       const MapLabelLayoutVector<map_label_layout::ReservedRegion> &reserved,
       Diagnostics *diagnostics) {
   Diagnostics local;
@@ -120,24 +157,11 @@ place(MapPoiLayoutVector<Candidate> candidates,
   const float paddedSize = kIconSize + 2.0F * kIconPadding;
   for (size_t index = 0; index < candidates.size(); ++index) {
     const Candidate &candidate = candidates[index];
-    if (!std::isfinite(candidate.x) || !std::isfinite(candidate.y) ||
-        candidate.x - paddedSize * 0.5F < 0 ||
-        candidate.y - paddedSize * 0.5F < 0 ||
-        candidate.x + paddedSize * 0.5F >= screen.width ||
-        candidate.y + paddedSize * 0.5F >= screen.height) {
+    if (!fitsViewport(candidate.x, candidate.y, screen)) {
       ++local.offscreen;
       continue;
     }
-    bool collision = false;
-    for (const auto &region : reserved) {
-      if (region.width > 0 && region.height > 0 &&
-          intersects(candidate.x, candidate.y, paddedSize, paddedSize,
-                     region.centerX, region.centerY, region.width,
-                     region.height)) {
-        collision = true;
-        break;
-      }
-    }
+    bool collision = intersectsReserved(candidate, reserved);
     if (!collision) {
       for (const Placement &placement : placements) {
         if (intersects(candidate.x, candidate.y, paddedSize, paddedSize,
@@ -165,10 +189,12 @@ place(MapPoiLayoutVector<Candidate> candidates,
     const size_t gatheredBefore = diagnostics->gathered;
     const size_t capacityBefore = diagnostics->capacityDeferred;
     const size_t offscreenBefore = diagnostics->offscreen;
+    const size_t collisionsBefore = diagnostics->collisionRejected;
     *diagnostics = local;
     diagnostics->gathered = std::max(gatheredBefore, local.gathered);
     diagnostics->capacityDeferred += capacityBefore;
     diagnostics->offscreen += offscreenBefore;
+    diagnostics->collisionRejected += collisionsBefore;
   }
   return placements;
 }
