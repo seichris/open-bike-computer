@@ -142,7 +142,7 @@ struct SocialHubView: View {
             if let notice = store.notice { Section { Text(notice) } }
             if let error = store.error { Section { Text(error).foregroundStyle(.red) } }
         }
-        .navigationTitle("Friends & Riding")
+        .navigationTitle("Friends & Group Rides")
         .disabled(busy)
         .overlay { if busy { ProgressView() } }
         .task { if store.session.state == .signedIn { perform { try await store.refresh() } } }

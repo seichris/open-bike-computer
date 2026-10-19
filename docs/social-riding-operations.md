@@ -19,7 +19,7 @@ Set build settings `BICINO_FIREBASE_APP_ID`, `BICINO_FIREBASE_SENDER_ID`,
 `BICINO_FIREBASE_API_KEY`, `BICINO_FIREBASE_PROJECT_ID`, `BICINO_GOOGLE_CLIENT_ID`,
 and `BICINO_GOOGLE_REVERSED_CLIENT_ID`, then `BICINO_SOCIAL_ENABLED = YES`.
 Their committed defaults are empty / NO, except for a valid inactive Google
-callback scheme. The disabled build hides Friends & Riding. Social startup
+callback scheme. The disabled build hides Friends & Group Rides. Social startup
 requires a configured Google reversed client ID. Firebase explicitly selects the
 app-private `BicinoSocialKeychainGroup`; the existing map-library group remains
 first in the enabled entitlement array, preserving all pre-existing unscoped credential
