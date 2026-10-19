@@ -1804,13 +1804,13 @@ extension NavigationProtocolTests {
         )
         assertEqual(
             BikeComputersMenuPolicy.title(knownDeviceCount: 1),
-            "My Bike Computer",
-            "one registered device uses the singular menu title"
+            "Bicino & Bike Sensors",
+            "one registered device includes sensor management in the menu title"
         )
         assertEqual(
             BikeComputersMenuPolicy.title(knownDeviceCount: 2),
-            "My Bike Computers",
-            "multiple registered devices use the plural menu title"
+            "Bicino & Bike Sensors",
+            "multiple registered devices include sensor management in the menu title"
         )
         assert(BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
             knownDeviceCount: 0
@@ -1905,8 +1905,8 @@ extension NavigationProtocolTests {
             BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
                 knownDeviceCount: 1
             ),
-            "My Bike Computer",
-            "registered settings keeps the existing singular title"
+            "Bicino & Bike Sensors",
+            "registered settings names Bicino and sensor management"
         )
         assert(
             BikeComputerSettingsPresentationPolicy.shouldPromoteSettingsLink(

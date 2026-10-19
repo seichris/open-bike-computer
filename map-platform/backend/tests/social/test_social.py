@@ -47,6 +47,55 @@ class SocialTest(unittest.TestCase):
         self.consentEpochs={}
         self.deletionReceipts={}
         self.ids={u:self.call(u,'GET','/me').json()['id'] for u in ('alice','bob','carol')}
+    def test_invite_preview_is_view_only_and_ends_with_ride(self):
+        self.client.app.state.features = SocialFeatures(True, True, True, True, True, True)
+        route = self.call('alice', 'POST', '/routes', self.route()).json()
+        ride = self.call('alice', 'POST', '/group-rides', {'routeID': route['id'], 'title': 'Morning loop'}).json()
+        buffer = BytesIO(); Image.new('RGB', (1200,630), 'blue').save(buffer, format='PNG')
+        data = buffer.getvalue()
+        path = f"/group-rides/{ride['id']}/invite-preview"
+        def upload(who='alice', key='preview-one', image=data):
+            return self.client.put(path, content=image, headers={'Authorization':'Bearer '+who, 'Idempotency-Key':key, 'Content-Type':'image/png'})
+        self.assertEqual(upload('bob').status_code,404)
+        self.assertEqual(upload(key='invalid-image', image=b'not an image').status_code,400)
+        result = upload(); self.assertEqual(result.status_code,200,result.text)
+        preview = result.json()['previewID']
+        public = f'/ride-previews/{preview}'
+        metadata = self.client.get(public)
+        self.assertEqual(metadata.status_code,200,metadata.text)
+        self.assertEqual(set(metadata.json()), {'previewID','title','distanceMeters','imageSHA256','expiresAt'})
+        self.assertEqual(metadata.json()['title'],'Morning loop')
+        self.assertNotIn(ride['joinCode'],metadata.text)
+        image = self.client.get(public+'/image')
+        self.assertEqual(image.status_code,200,image.text if image.status_code!=200 else '')
+        self.assertEqual(image.headers['content-type'],'image/png')
+        self.assertEqual(hashlib.sha256(image.content).hexdigest(),metadata.json()['imageSHA256'])
+        self.assertEqual(image.headers['cache-control'],'no-store')
+        self.assertEqual(Image.open(BytesIO(image.content)).size,(1200,630))
+        self.assertEqual(upload().json()['previewID'],preview,'idempotent replay keeps the same card')
+        new = upload(key='preview-two').json()['previewID']
+        self.assertNotEqual(new,preview)
+        self.assertEqual(self.client.get(public).status_code,404)
+        self.assertEqual(self.client.get(public+'/image').status_code,404)
+        self.assertEqual(self.call('alice','POST',f"/group-rides/{ride['id']}/end").status_code,200)
+        self.assertEqual(self.client.get(f'/ride-previews/{new}').status_code,404)
+        run_once(self.db,Identity(),self.media,Notifications(),self.clock)
+        self.assertFalse(any('/'+asset+'/' in key for key in self.media.objects for asset in (preview,new)), 'ended preview media is removed by the worker')
+
+    def test_invite_preview_rollout_and_expiry(self):
+        self.assertEqual(self.client.get('/ride-previews/'+str(uuid.uuid4())).status_code,503)
+        self.client.app.state.features = SocialFeatures(True, True, True, True, True, True)
+        route = self.call('alice','POST','/routes',self.route()).json()
+        ride = self.call('alice','POST','/group-rides',{'routeID':route['id'],'title':'Ride'}).json()
+        buffer=BytesIO(); Image.new('RGB',(1200,630),'white').save(buffer,format='PNG')
+        response=self.client.put(f"/group-rides/{ride['id']}/invite-preview",content=buffer.getvalue(),headers={'Authorization':'Bearer alice','Idempotency-Key':'preview-expiry','Content-Type':'image/png'})
+        preview=response.json()['previewID']
+        self.clock += 86401
+        self.assertEqual(self.client.get(f'/ride-previews/{preview}').status_code,404)
+        run_once(self.db,Identity(),self.media,Notifications(),self.clock)
+        run_once(self.db,Identity(),self.media,Notifications(),self.clock)
+        self.assertFalse(self.media.objects)
+
     def tearDown(self):
         self.client.close(); self.db.engine.dispose()
     def call(self, who, method, path, body=None, key=None, **kwargs):
@@ -130,7 +179,7 @@ class SocialTest(unittest.TestCase):
         from unittest.mock import patch
         with patch.dict(os.environ, {}, clear=True):
             features = SocialFeatures.from_environment()
-        self.assertEqual(features.document(), dict(media=False, routes=False, activities=False, groups=False, hardware=False))
+        self.assertEqual(features.document(), dict(media=False, routes=False, activities=False, groups=False, hardware=False, invitePreviews=False))
         self.client.app.state.features = features
         self.assertEqual(self.call('alice', 'GET', '/capabilities').json(), features.document())
         self.assertEqual(self.call('alice', 'GET', '/me').status_code, 200)

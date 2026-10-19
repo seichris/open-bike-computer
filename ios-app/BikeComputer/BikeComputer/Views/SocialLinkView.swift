@@ -42,7 +42,7 @@ struct SocialLinkView: View {
                     if let preview {
                         Text(preview.title).font(.headline)
                         SocialTrackPreview(content: preview.route).frame(height: 250)
-                        Text("Joining does not start location sharing.")
+                        Text("Joining shares your live location, speed, distance and times with riders in this group.")
                         Button("Join ride") { run {
                             guard let url = store.pendingLink, let target = SocialLinkTarget(url: url), target.kind == "ride" else { return }
                             let code = target.id

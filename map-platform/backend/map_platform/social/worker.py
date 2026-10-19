@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
+import uuid
 from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import OperationalError
 from ..user_auth import FirebaseIdentity
@@ -143,6 +144,10 @@ def run_once(database, identity, media_store, notifications, now=None, features=
         c.execute(update(members).where(and_(active, members.c.lease <= now))
                   .values(live=None, sharing=False, stats=False))
         expired = select(rides.c.id).where(and_(rides.c.expires <= now, rides.c.status != "expired"))
+        for expired_ride in c.execute(select(rides).where(rides.c.id.in_(expired)).with_for_update()).mappings():
+            if asset := expired_ride["route"].get("invitePreviewAssetID"):
+                c.execute(outbox.insert().values(id=str(uuid.uuid4()), owner=expired_ride["owner"],
+                    kind="delete_media", body={"assetID": asset}, created=now, attempts=0, next_attempt=now))
         c.execute(update(members).where(and_(active, members.c.ride.in_(expired)))
                   .values(live=None, sharing=False, stats=False))
         c.execute(update(rides).where(and_(rides.c.expires <= now, rides.c.status != "expired"))

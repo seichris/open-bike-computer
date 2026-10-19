@@ -594,7 +594,10 @@ class SocialService:
             condition = and_(condition, members.c.account == actor)
         c.execute(update(members).where(condition).values(status="left", sharing=False, stats=False, live=None))
         if end:
-            c.execute(update(rides).where(rides.c.id == ride_id).values(status="ended"))
+            route = dict(ride["route"])
+            if asset := route.pop("invitePreviewAssetID", None):
+                self.emit(c, actor, "delete_media", {"assetID": asset})
+            c.execute(update(rides).where(rides.c.id == ride_id).values(status="ended", route=route))
             c.execute(update(invites).where(invites.c.ride == ride_id).values(status="revoked"))
         return {"status": "ended" if end else "left"}
 

@@ -291,7 +291,7 @@ An exactly antipodal friend has no unique bearing and is omitted.
 The global `BICINO_SOCIAL_ENABLED` switch mounts social in the existing map API;
 the isolated social server is controlled by its deployment. Once the service is
 reachable, accounts, profiles, friends, blocking and account deletion are always
-available. All five additional features default to **false**. Set these exact
+available. All six additional features default to **false**. Set these exact
 environment variables to `true` in the shared API/worker runtime environment:
 
 | Variable | Enables |
@@ -301,6 +301,7 @@ environment variables to `true` in the shared API/worker runtime environment:
 | `BICINO_SOCIAL_FEATURE_ACTIVITIES` | Completed-ride publication, lists, detail and links |
 | `BICINO_SOCIAL_FEATURE_GROUPS` | Invitations, sessions, consent and live positions; also requires routes |
 | `BICINO_SOCIAL_FEATURE_HARDWARE` | Phone-to-device rider relay; also requires groups and routes |
+| `BICINO_SOCIAL_FEATURE_INVITE_PREVIEWS` | Public view-only invite cards; requires media, groups and routes, plus the website preview release |
 
 Use lowercase `true`/`false`; invalid values fail startup. The authenticated
 `GET /v1/social/capabilities` response drives native feature availability. Live
@@ -448,3 +449,45 @@ validated image and record device ID, image hash, portrait screenshots and logs:
 
 Record a 2.06-inch rectangular-screen qualification independently. Promote the
 firmware feature gate only with physical evidence for the enabled target families.
+
+
+### Group ride invitation cards
+
+Deploy the bicino.com website preview release before enabling
+`BICINO_SOCIAL_FEATURE_INVITE_PREVIEWS=true`. The website uses its existing
+`BICINO_SOCIAL_ENABLED=true` and HTTPS-origin-only `BICINO_SOCIAL_ORIGIN`
+configuration; no new credential is required. Ship the backend through the normal
+main/digest-pinned promotion workflow. Enable the preview flag consistently on API
+replicas and workers only after both releases are ready.
+
+The native app checks the advertised `invitePreviews` capability before uploading
+a real 1200×630 MapKit snapshot with the route drawn, title, distance and
+“Join the group ride.” Older backends and failed snapshots keep a working standard
+invitation link. Existing links remain supported and do not acquire a map preview
+retroactively. The snapshot retains MapKit attribution.
+
+Owner-only `PUT /v1/social/group-rides/{rideID}/invite-preview` sanitizes the image
+and attaches a new random preview asset ID to the immutable ride route snapshot.
+`GET /v1/social/ride-previews/{previewID}` returns only title, distance, image hash
+and expiration; `/image` returns the bounded sanitized PNG. Neither endpoint
+returns the join code, route archive/coordinates, roster, account IDs or live
+positions. The image itself intentionally reveals the route map to recipients.
+The website validates/proxies the image and renders Open Graph/Twitter metadata
+on the server. Both services use `no-store` responses.
+
+Invitation URLs are `/social/ride/{previewID}#join-code`. The preview ID permits
+viewing the card only. Joining still requires the separate secret in the URL
+fragment and an explicit Join action in the app. Native join/create actions
+start sharing location, speed, distance and moving/elapsed times by default,
+after any OS location prompt. Merely opening a link or reopening the profile
+screen does not start sharing. Stop sharing, Leave and End remain available;
+the existing four-hour sharing bound still applies. Permission denial preserves
+successful membership and starts sharing automatically when the rider grants location access and returns.
+
+The original invite is retained in the account-scoped, app-private device-only
+Keychain. A legacy ride or another device without the original secret offers
+Create invite link; a known invitation is never replaced automatically. Owner
+ending, account deletion, card replacement and ride expiration revoke preview
+reads. Worker jobs delete their private media objects, and the existing orphan
+reconciler also covers `ride-previews/`. External messaging clients can retain
+previously downloaded image previews in their own caches.

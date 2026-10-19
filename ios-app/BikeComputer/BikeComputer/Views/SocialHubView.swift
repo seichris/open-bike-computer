@@ -57,10 +57,10 @@ struct SocialHubView: View {
                 if store.live.ride != nil {
                     Section("Group Ride") { SocialLiveControls(store: store, routeLibrary: routeLibrary) }
                 }
-                if !store.rides.isEmpty {
+                if store.live.ride == nil && !store.rides.isEmpty {
                     Section("My Group Rides") {
                         ForEach(store.rides.filter { $0.id != store.live.ride?.id }) { ride in
-                            Button(ride.title) { perform { try await store.live.select(ride) } }
+                            Button(ride.title) { perform { try await store.live.select(ride, shareOnJoin: true) } }
                         }
                     }
                 }
@@ -119,6 +119,7 @@ struct SocialHubView: View {
                     Section("Join a Group Ride") {
                         TextField("Ride code", text: $joinCode).textInputAutocapitalization(.never).autocorrectionDisabled()
                         Button("Join") { perform { try await store.join(joinCode.trimmingCharacters(in: .whitespacesAndNewlines)) } }
+                        Text("Joining shares your live location, speed, distance and times with this group. You can stop sharing at any time.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 Section {
@@ -320,17 +321,12 @@ private struct SocialLiveControls: View {
     @Environment(\.savedRouteMapAction) private var mapAction
     @ObservedObject var store: SocialCoordinator
     let routeLibrary: PhoneRouteLibrary
-    @State private var stats = false
     var body: some View {
         if let ride = store.live.ride {
             Text(ride.title).font(.headline)
-            Text("\(ride.members.count) riders · Sharing \(store.live.isSharing ? "on" : "off")")
+            Text("\(ride.members.count) \(ride.members.count == 1 ? "rider" : "riders")")
             if store.live.isSharing {
                 Button("Stop sharing", role: .destructive) { Task { await store.live.stopSharing() } }
-            } else {
-                Toggle("Share GPS speed, distance and times", isOn: $stats)
-                Button("Share my live location") { run { try await store.live.startSharing(stats: stats) } }
-                Text("Sharing stops after four hours or when the ride ends. You can stop it at any time.").font(.caption)
             }
             Button("Save shared route") { run { try store.saveRideRoute(ride, to: routeLibrary) } }
             if let mapAction {
@@ -339,26 +335,15 @@ private struct SocialLiveControls: View {
                     try mapAction.perform { try routeLibrary.mapSelection(for: summary) }
                 } }
             }
-            ForEach(store.live.riders.filter { $0.id != store.profile?.id }) { rider in
-                VStack(alignment: .leading) {
-                    HStack {
-                        SocialAvatar(profile: rider.profile, image: rider.profile.avatarID.flatMap { store.photos[$0] })
-                        Text(rider.profile.displayName)
-                    }
-                    if let speed = rider.speed { Text(String(format: "%.1f km/h", speed * 3.6)) }
-                    if let distance = rider.distanceMeters { Text(String(format: "Ride distance: %.1f km", distance / 1000)) }
-                    if let own = store.live.riders.first(where: { $0.id == store.profile?.id }),
-                       own.age(at: Date()) < 15, rider.age(at: Date()) < 15,
-                       let ownProgress = own.routeProgressMeters, let progress = rider.routeProgressMeters,
-                       own.routeHash == rider.routeHash {
-                        let gap = progress - ownProgress
-                        Text("\(Int(abs(gap))) m \(gap >= 0 ? "ahead" : "behind") along the shared route").font(.caption)
-                    } else { Text("Route gap unavailable").font(.caption).foregroundStyle(.secondary) }
-                }
+            ForEach(ride.members.filter { $0.id != store.profile?.id }) { member in
+                SocialRideMemberRow(profile: member, store: store)
             }
-            if let code = store.live.invitationCode, let url = URL(string: "https://bicino.com/social/ride#\(code)") { ShareLink("Invite with link", item: url) }
+            if let url = store.live.invitationURL { ShareLink("Invite with link", item: url) }
             if ride.owner == store.profile?.id {
-                Button(store.live.invitationCode == nil ? "Create invite link" : "Replace invite link") { run { try await store.live.rotateInvitation() } }.disabled(store.live.isRotatingInvitation)
+                if store.live.invitationCode == nil {
+                    Button("Create invite link") { run { try await store.live.rotateInvitation() } }
+                        .disabled(store.live.isRotatingInvitation)
+                }
                 ForEach(store.friends) { friend in
                     if let invite = store.sentInvitations.first(where: { $0.ride == ride.id && $0.recipient == friend.id }) {
                         Button("Cancel invitation to \(friend.displayName)") { run { try await store.mutate("ride-invites/\(invite.id)", method: "DELETE") } }
@@ -421,7 +406,7 @@ private struct SocialInvitationDetail: View {
             Text(invite.title ?? "Group Ride").font(.headline)
             if let start = invite.startsAt { Text(Date(timeIntervalSince1970: start).formatted(date: .abbreviated, time: .shortened)) }
             if let route = invite.route { SocialTrackPreview(content: route).frame(height: 250) }
-            Text("Joining does not share your location.")
+            Text("Joining shares your live location, speed, distance and times with riders in this group.").font(.caption).foregroundStyle(.secondary)
             Button("Join ride") { Task {
                 do { try await store.acceptInvite(invite.id); dismiss() }
                 catch { store.error = error.localizedDescription }

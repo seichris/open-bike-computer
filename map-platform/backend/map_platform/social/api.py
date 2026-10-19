@@ -20,6 +20,7 @@ from .database import (RETRYABLE_SQLSTATES, Database, accounts, blocks, content,
 from .client_address import ClientAddressPolicy
 from .media import S3Media
 from .features import SocialFeatures
+from .invite_preview import InvitePreviews
 from .models import (ActivityUpload, Consent, ContentEdit, Deletion, DeletionReceipt, DeviceBinding,
                      DeviceRelease, Join, LiveState, ProfileEdit, QuickMessage, RideCreate,
                      RideInvitation, RouteUpload, ShareInput, Target, WebsiteDeletion)
@@ -34,6 +35,7 @@ TRANSIENT_CODES = frozenset({"identity_unavailable", "database_busy"})
 # signed website bridge, per verified account subject) in fixed hourly windows.
 # Each key is independent, so one network cannot spend another's allowance.
 ANONYMOUS_LIMITS = {
+    "ride_preview": 600,           # view-only card metadata/image, per network
     "link_resolve": 60,            # anonymous share-link resolution, per network
     "deletion_receipt": 30,        # receipt confirmation, per network
     "push_release": 30,            # installation binding release, per network
@@ -63,6 +65,8 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
         if request.method == "DELETE":
             return
         if parts[0] in {"group-rides", "ride-invites"}:
+            if parts[-1] == "invite-preview":
+                app.state.features.require("invitePreviews")
             if request.method == "GET" and parts[-1] == "consent":
                 return  # An explicit stop can refresh its epoch during rollback.
             if request.method == "POST" and parts[-1] in {"leave", "end", "decline"}:
@@ -75,6 +79,8 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
                 if isinstance(body, dict) and body.get("location") is False and body.get("stats", False) is False:
                     return
             app.state.features.require("groups")
+        elif parts[0] == "ride-previews":
+            app.state.features.require("invitePreviews")
         elif parts[0] in {"routes", "activities", "media"}:
             app.state.features.require(parts[0])
         elif parts == ["me", "avatar"]:
@@ -223,6 +229,40 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
     @app.get("/capabilities")
     def capabilities(auth=Depends(authenticate)):
         return app.state.features.document()
+
+    @app.put("/group-rides/{ride_id}/invite-preview")
+    async def upload_invite_preview(ride_id: str, request: Request, auth=Depends(authenticate)):
+        await limit(auth[0], "invite_preview", 10)
+        previews = InvitePreviews(service)
+        await run_in_threadpool(read, lambda c: previews.owner(c, auth[0], ride_id))
+        raw = await request.body()
+        try:
+            prepared = await run_in_threadpool(previews.prepare, auth[0], ride_id, raw)
+            return await operation(request, auth, lambda c, a: previews.attach(c, a, ride_id, prepared))
+        except (ValueError, OSError):
+            raise SocialError("invalid_image") from None
+
+    def public_preview(request, preview_id):
+        anonymous_limit("ride_preview", request)
+        if not INSTALLATION_ID.fullmatch(preview_id):
+            raise SocialError("not_found", 404)
+        return InvitePreviews(service)
+
+    @app.get("/ride-previews/{preview_id}")
+    def invite_preview_metadata(preview_id: str, request: Request):
+        previews = public_preview(request, preview_id)
+        return read(lambda c: previews.metadata(c, preview_id))
+
+    @app.get("/ride-previews/{preview_id}/image")
+    def invite_preview_image(preview_id: str, request: Request):
+        previews = public_preview(request, preview_id)
+        _, receipt = read(lambda c: previews.locate(c, preview_id))
+        data = service.media.get(receipt["key"])
+        if len(data) > 512000 or hashlib.sha256(data).hexdigest() != receipt["sha256"]:
+            raise SocialError("media_unavailable", 503)
+        # End/deletion/replacement during slow storage I/O still revokes access.
+        read(lambda c: previews.locate(c, preview_id))
+        return Response(data, media_type="image/png")
 
     @app.patch("/me")
     async def edit_me(data: ProfileEdit, request: Request, auth=Depends(authenticate)):

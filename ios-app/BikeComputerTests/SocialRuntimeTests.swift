@@ -40,6 +40,8 @@ private final class ProfileEditFixture {
 private final class RideFixture: SocialRideNetworking {
     var seconds=0.0
     var sequences:[Int]=[]
+    var lastState:[String:Any]=[:]
+    var serverStats=false
     var lostFirst=false,terminal=false,dropSocket=false,revoked=false
     var reads=0
     var leaseEpoch=0,acceptedSequence = -1
@@ -54,7 +56,7 @@ private final class RideFixture: SocialRideNetworking {
          "route":[:],"members":[],"riders":dropSocket ? [["profile":["id":"friend","displayName":"Friend"],
             "latitude":1.0,"longitude":2.0,"capturedAt":1000.0,"receivedAt":1000.0,
             "horizontalAccuracy":5.0,"sequence":1,"age":0.0]] : [],
-         "sharing":serverSharing,"stats":false,"epoch":"consent-\(leaseEpoch)","serverTime":1000.0,"sharingExpiresAt":15400.0]
+         "sharing":serverSharing,"stats":serverStats,"epoch":"consent-\(leaseEpoch)","serverTime":1000.0,"sharingExpiresAt":15400.0]
     }
     func selected() throws -> SocialGroupRide {
         try JSONDecoder().decode(SocialGroupRide.self,from:JSONSerialization.data(withJSONObject:room))
@@ -74,9 +76,10 @@ private final class RideFixture: SocialRideNetworking {
                 await withCheckedContinuation { held=$0 }
             }
             guard payload["epoch"] as? String == "consent-\(leaseEpoch)" else { throw SocialFailure.server("consent_changed") }
-            leaseEpoch+=1;acceptedSequence = -1;serverSharing=location;result=room
+            leaseEpoch+=1;acceptedSequence = -1;serverSharing=location;serverStats=payload["stats"] as? Bool ?? false;result=room
         } else if path.hasSuffix("/state") {
             let payload=try JSONSerialization.jsonObject(with:body!) as! [String:Any]
+            lastState=payload
             sequences.append(payload["sequence"] as! Int)
             if terminal || !serverSharing || payload["epoch"] as? String != "consent-\(leaseEpoch)" { throw SocialFailure.server("sharing_disabled") }
             guard sequences.last! > acceptedSequence else { throw SocialFailure.server("stale_state") }
@@ -147,8 +150,44 @@ struct SocialRuntimeTests {
         while !condition() && Date()<deadline { try await Task.sleep(nanoseconds:5_000_000) }
         require(condition(),"asynchronous social condition reached its deadline")
     }
+    static func automaticJoinSharing() async throws {
+        let network = RideFixture()
+        let live = LiveRideService(client: network, pollNanoseconds: 10_000_000)
+        live.prepareLocation = { true }
+        live.updateLocation(CLLocation(coordinate: .init(latitude: 1, longitude: 2), altitude: 0,
+            horizontalAccuracy: 5, verticalAccuracy: 5, course: 90, speed: 4, timestamp: Date()))
+        try await live.select(network.selected(), shareOnJoin: true)
+        require(live.isSharing && network.serverStats, "explicit joining enables GPS and ride stats")
+        try await wait { !network.lastState.isEmpty }
+        require(network.lastState["speed"] != nil && network.lastState["distanceMeters"] != nil &&
+                network.lastState["movingSeconds"] != nil && network.lastState["elapsedSeconds"] != nil,
+                "default publication includes speed, distance, moving and elapsed time")
+        try await live.select(network.selected())
+        require(!live.isSharing, "opening a room alone never restarts stopped sharing")
+        live.prepareLocation = { false }
+        try await live.select(network.selected(), shareOnJoin: true)
+        require(live.ride != nil && !live.isSharing && live.error?.contains("joined") == true,
+                "denied location keeps successful membership and explains the sharing failure")
+        live.prepareLocation = { true }
+        live.locationAuthorizationChanged(authorized: true)
+        try await wait { live.isSharing }
+        await live.stopSharing()
+        live.locationAuthorizationChanged(authorized: true)
+        require(!live.isSharing, "a later permission event never overrides explicit Stop sharing")
+        live.reset()
+        let store = SocialRideInvitationStore(store: SocialMemoryStore())
+        let invitation = SocialRideInvitation(code: "same-capability-secret-123456789", previewID: "00000000-0000-4000-8000-000000000001")
+        store.write(invitation, owner: "owner", ride: "ride")
+        require(store.read(owner: "owner", ride: "ride") == invitation, "reopening restores the same invitation")
+        require(store.read(owner: "another-owner", ride: "ride") == nil, "invites never cross accounts")
+        let capability = try JSONDecoder().decode(SocialCapabilities.self, from: Data("{\"media\":true}".utf8))
+        require(capability.media && !capability.invitePreviews, "old servers safely omit preview capability")
+        require(SocialLinkTarget(url: URL(string: "https://bicino.com/social/ride/00000000-0000-4000-8000-000000000001#capability-secret-123456789")!)?.kind == "ride", "preview links preserve native joining")
+    }
+
     static func main() async throws {
         profileSetupPresentation()
+        try await automaticJoinSharing()
         try await SocialSavedRouteSharingTests.run()
         try await profileMutationSerialization()
         let fixture=RideFixture();fixture.lostFirst=true

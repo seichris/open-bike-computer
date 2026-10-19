@@ -29,6 +29,8 @@ struct SavedRouteSocialActions: View {
             .disabled(busy || !loaded || (store.session.state == .signedIn && unavailable != nil))
             .accessibilityIdentifier("startSavedRouteGroupRide")
 
+            Text("Starting a group ride shares your live location, speed, distance and times with riders who join. You can stop sharing at any time.")
+                .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Text("Share with")
                 Picker("Share with", selection: Binding(get: { visibility }, set: saveVisibility)) {

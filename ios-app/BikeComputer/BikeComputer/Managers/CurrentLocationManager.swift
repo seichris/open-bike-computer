@@ -447,6 +447,19 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         locationManager.requestWhenInUseAuthorization()
     }
 
+    @MainActor
+    func prepareSocialRideLocation() async -> Bool {
+        if locationManager.authorizationStatus == .notDetermined {
+            requestWhenInUseAuthorization()
+            // The OS permission sheet completes the original Join action.
+            while locationManager.authorizationStatus == .notDetermined {
+                do { try await Task.sleep(nanoseconds: 200_000_000) }
+                catch { return false }
+            }
+        }
+        return isLocationAuthorized
+    }
+
     var isLocationAuthorized: Bool {
         locationManager.authorizationLevel == .always ||
             locationManager.authorizationLevel == .whenInUse

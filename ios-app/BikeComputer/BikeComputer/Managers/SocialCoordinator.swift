@@ -87,8 +87,17 @@ final class SocialCoordinator: ObservableObject {
         session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observers)
         live.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observers)
         session.$generation.dropFirst().sink { [weak self] _ in self?.clear() }.store(in: &observers)
+        let invitationStore = SocialRideInvitationStore(store: store)
+        live.loadInvitation = { [weak self] ride in
+            guard let owner = self?.profile?.id else { return nil }
+            return invitationStore.read(owner: owner, ride: ride)
+        }
+        live.saveInvitation = { [weak self] ride, value in
+            guard let owner = self?.profile?.id else { return }
+            invitationStore.write(value, owner: owner, ride: ride)
+        }
         live.onRidersChanged = { [weak self] riders in
-            Task { @MainActor [weak self] in await self?.loadPhotos(riders.map(\.profile)) }
+            Task { @MainActor [weak self] in await self?.loadPhotos((self?.live.ride?.members ?? []) + riders.map(\.profile)) }
         }
         live.onCapabilitiesChanged = { [weak self] capabilities in
             self?.capabilities = capabilities
@@ -346,18 +355,38 @@ final class SocialCoordinator: ObservableObject {
         let value = try await client.json("group-rides", method: "POST", body: body)
         guard session.generation == generation else { throw SocialFailure.accountChanged }
         let ride = try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value))
-        try await live.select(ride)
+        try await live.select(ride, shareOnJoin: true)
+        await prepareInvitePreview(for: ride)
+    }
+
+    /// Older backends keep the original fragment link. A preview failure never
+    /// turns an already-created group ride into a failed creation.
+    private func prepareInvitePreview(for ride: SocialGroupRide) async {
+        guard capabilities.invitePreviews else { return }
+        let generation = session.generation
+        do {
+            let data = try await SocialInvitePreview.render(ride: ride)
+            guard generation == session.generation, live.ride?.id == ride.id else { return }
+            let response = try await client.request("group-rides/\(ride.id)/invite-preview", method: "PUT", body: data, contentType: "image/png")
+            guard generation == session.generation, live.ride?.id == ride.id else { return }
+            let value = try JSONSerialization.jsonObject(with: response) as? [String: String]
+            guard let id = value?["previewID"] else { throw SocialFailure.invalidResponse }
+            live.setPreview(id, for: ride.id)
+        } catch {
+            guard generation == session.generation, live.ride?.id == ride.id else { return }
+            notice = "Your group ride is ready. The invite uses a standard link because the route preview could not be created."
+        }
     }
 
     func acceptInvite(_ id: String) async throws {
         let value = try await client.json("ride-invites/\(id)/accept", method: "POST")
-        try await live.select(try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value)))
+        try await live.select(try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value)), shareOnJoin: true)
         try await refresh()
     }
 
     func join(_ code: String) async throws {
         let value = try await client.json("group-rides/join", method: "POST", body: ["code": code])
-        try await live.select(try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value)))
+        try await live.select(try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value)), shareOnJoin: true)
     }
 
     func signOut() async throws {
