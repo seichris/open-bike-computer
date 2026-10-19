@@ -90,7 +90,10 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             unrelated.srcnode.return_value.get_abspath.return_value = str(project / "lib/lvgl/lvgl.cpp")
             env.Object.return_value = [Mock()]
             self.assertIs(callback(env, unrelated), env.Object.return_value[0])
-            env.Depends.assert_called_once_with(env.Object.return_value, str(project / ".pio/open-bike-build/build-identity/WAVESHARE_AMOLED_175/firmware_compile_clock.h"))
+            env.Depends.assert_called_once_with(env.Object.return_value, [
+                str(project / ".pio/open-bike-build/build-identity/WAVESHARE_AMOLED_175/firmware_compile_clock.h"),
+                str(project / "lib/lvgl/lv_conf.h"),
+            ])
             env.Clone.assert_not_called()
             env.Clone.return_value.Object.return_value = [Mock()]
             self.assertIs(callback(env, metadata), env.Clone.return_value.Object.return_value[0])
@@ -104,6 +107,58 @@ class FirmwareCompileCacheTests(unittest.TestCase):
             self.assertNotIn("a" * 40, after)
             self.assertIn("b" * 40, after)
             self.assertIn("2026-10-02T00:00:00Z", after)
+
+    @unittest.skipUnless(shutil.which("cc"), "host C compiler is unavailable")
+    def test_macro_included_configuration_invalidates_warm_scons_objects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            config = project / "lib/lvgl/lv_conf.h"
+            config.parent.mkdir(parents=True)
+            config.write_text("#define LV_MEM_SIZE (96 * 1024U)\n")
+            (project / "probe.c").write_text('''#include <stdio.h>
+#define STR_(x) #x
+#define STR(x) STR_(x)
+#include STR(LV_CONF_PATH)
+int main(void) { printf("%u\\n", LV_MEM_SIZE); }
+''')
+            tools = Path(__file__).resolve().parents[1]
+            (project / "SConstruct").write_text(f'''
+import sys
+sys.path.insert(0, {str(tools)!r})
+from firmware_compile_cache import configure_metadata_identity
+env = Environment()
+env["PROJECT_DIR"] = Dir(".").abspath
+env["PIOENV"] = "WAVESHARE_AMOLED_175"
+env.Append(CPPDEFINES=[("LV_CONF_PATH", {str(config)!r})])
+callbacks = []
+env.AddMethod(lambda self, callback: callbacks.append(callback), "AddBuildMiddleware")
+configure_metadata_identity(env, ARGUMENTS.get("commit", "a" * 40), "2026-10-01T00:00:00Z")
+env.CacheDir("objects-cache")
+obj = callbacks[0](env, File("probe.c"))
+env.Program("probe", [obj])
+''')
+            command = [sys.executable, "-c", "from SCons.Script import main; main()", "-Q"]
+
+            def build(expected, *, commit="a" * 40):
+                result = subprocess.run(command + ["commit=" + commit], cwd=project,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                output = subprocess.check_output([str(project / "probe")], text=True)
+                self.assertEqual(int(output), expected)
+                return result.stdout
+
+            build(96 * 1024)
+            config.write_text("#define LV_MEM_SIZE (192 * 1024U)\n")
+            build(192 * 1024)
+            # Reuse both versions from the object cache without clearing it.
+            for kib in (96, 192):
+                config.write_text(f"#define LV_MEM_SIZE ({kib} * 1024U)\n")
+                (project / "probe.o").unlink()
+                (project / "probe").unlink()
+                self.assertIn("from cache", build(kib * 1024))
+            before = (project / "probe.o").stat().st_mtime_ns
+            build(192 * 1024, commit="b" * 40)
+            self.assertEqual(before, (project / "probe.o").stat().st_mtime_ns)
 
     def test_symlinked_identity_header_is_rejected_without_touching_target(self):
         with tempfile.TemporaryDirectory() as directory:

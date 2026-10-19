@@ -1,4 +1,4 @@
-"""Keep source identity out of compilation commands for unrelated libraries."""
+"""Track macro-included UI configuration while keeping identity metadata scoped."""
 
 import json
 import os
@@ -59,16 +59,24 @@ def configure_metadata_identity(env, git_sha: str, timestamp: str) -> None:
         f"-ffile-prefix-map={project}=/open-bike-computer/esp32",
     ])
 
+    # LVGL includes LV_CONF_PATH through a stringifying macro. SCons' include
+    # scanner cannot discover that edge reliably, so a warm object cache can
+    # otherwise retain the old allocator size (and other ABI/config settings).
+    # Every application/library object must see this input, including local
+    # consumers of LVGL headers. The separately attested framework core is not
+    # built through this application middleware.
+    compile_inputs = [str(clock), str(project / "lib/lvgl/lv_conf.h")]
+
     def metadata_object(build_env, node):
         source = Path(node.srcnode().get_abspath())
         if source != project / "lib/firmware_metadata/firmware_metadata.cpp":
             result = build_env.Object(node)
-            build_env.Depends(result, str(clock))
+            build_env.Depends(result, compile_inputs)
             return result[0]
         identity_env = build_env.Clone()
         identity_env.Append(CCFLAGS=["-include", str(header)])
         result = identity_env.Object(node)
-        identity_env.Depends(result, str(clock))
+        identity_env.Depends(result, compile_inputs)
         identity_env.Depends(result, str(header))
         return result[0]
 
