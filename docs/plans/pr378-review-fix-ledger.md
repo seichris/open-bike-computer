@@ -36,6 +36,7 @@ validation on 2026-10-19.
 | R21 | P2 | A stored document with a Nearby screen failed to load on POI-disabled firmware, discarding custom screens | fixed+verified |
 | R22 | P2 | The 1,024-block Nearby coverage cap ran only at manifest time, after admission and extraction | fixed+verified |
 | R23 | P2 | Review hypothesis: old canary artifacts could be reused after the corrected worker is promoted | invalidated |
+| R24 | P1 | Linux GCC/glibc rejects the fclose function-pointer deleter type under the Nearby host test's warnings-as-errors | fixed+verified |
 
 Non-blocking observation: ambient limits 48/32 and 14 px icons differ from the
 plan's qualification targets. These are not demonstrated correctness defects;
@@ -278,6 +279,38 @@ found no additional code defect within P0/P1/P2. R10/R18 are still active
 verification gates, not claimed complete by that review. Final exact remote-head
 verification and bounded CI observation follow publication. Ledger: 20
 fixed+verified, two active, one invalidated, zero user-deferred.
+
+## CI portability repair, iterations 7-8
+
+The first `de81302207bfd81b7cf37ffdfa15d4446d4a9ee8` CI snapshot exposed R24
+in both automatic and manual host checks. The failing step is
+`Nearby POI query host tests`, job `117897240926` of run `39202140112`:
+GCC rejects `unique_ptr<FILE, decltype(&fclose)>` because glibc annotates the
+function type (`-Werror=ignored-attributes`). The expanded query test now
+includes this storage helper, so the macOS Clang pass did not cover that
+Linux compile failure. It is related, not waived as an environment failure.
+
+Reproduced the exact error on the clean `de813022` checkout with Ubuntu 24.04,
+GCC 13 and glibc 2.39 in an isolated OrbStack container. A stateless named
+`FileCloser` now owns the same `fclose` operation without a function-pointer
+template argument. No warning suppression or compiler flags changed. The
+same strict Linux compile and Nearby executable pass after the repair.
+macOS binary-map, Nearby query, feature-gate and transfer checks also passed
+with stable source, report `5aee69a5-d76a-405a-9ea5-571615e663e9`.
+
+Clean `de813022` verification also passed the Swift navigation executable,
+31 iOS script tests, development/CI routing and backend/deployment tests.
+The temporary GDAL wrapper initially escaped the clean checkout's `/private/tmp`
+prefix into literal backslashes. Confirmed the fixture exists in the container,
+fixed only that task-owned path mapping, and reran all 181 extractor tests:
+passed, report `30bce377-a81c-46cf-a5e8-5e18a4e6254e`. No repository/GDAL
+policy change or failing test was skipped.
+
+A fresh review of the RAII repair and its storage/cancellation callers found
+no additional code defect within P0/P1/P2. Publish the verified repair, then
+revalidate its exact remote head; earlier CI results do not attest that head.
+Ledger: 21 fixed+verified, two active (R10/R18 build/reserve), one invalidated,
+zero user-deferred. No device, deployment, reserve or production gate changed.
 
 ## Earlier diagnostic batch
 

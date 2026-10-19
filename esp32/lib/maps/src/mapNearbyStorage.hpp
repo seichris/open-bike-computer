@@ -29,9 +29,17 @@ inline bool cancelled(Cancel callback, void *context) {
   return callback != nullptr && callback(context);
 }
 
-using File = std::unique_ptr<std::FILE, decltype(&std::fclose)>;
+// glibc annotates fclose; GCC rejects those function-type attributes as an
+// ignored unique_ptr template argument under -Werror. Keep ownership in a
+// stateless deleter instead of depending on libc's function-pointer type.
+struct FileCloser {
+  void operator()(std::FILE *file) const noexcept {
+    if (file != nullptr) std::fclose(file);
+  }
+};
+using File = std::unique_ptr<std::FILE, FileCloser>;
 inline File open(const std::string &path) {
-  return File(std::fopen(path.c_str(), "rb"), &std::fclose);
+  return File(std::fopen(path.c_str(), "rb"));
 }
 
 inline bool readExact(std::FILE *file, void *buffer, size_t length) {
@@ -351,7 +359,7 @@ class SearchCursor {
   SearchResult result_{};
   MapNearbyVector<map_poi_index::Entry> entries_;
   MapNearbyVector<map_nearby_query::FrontierItem> frontier_;
-  File file_{nullptr, &std::fclose};
+  File file_{};
   std::unique_ptr<map_poi_index::StreamValidator> indexValidator_;
   map_nearby_coverage::CompletenessScan coverageScan_;
   uint32_t indexRemaining_ = 0;
