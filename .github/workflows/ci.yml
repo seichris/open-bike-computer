@@ -187,6 +187,13 @@ jobs:
           BUILD_ENVIRONMENT: ${{ matrix.target }}
           BICINO_BUILD_EVIDENCE_DIR: ${{ runner.temp }}/bicino-build-symbols
         run: python3 ../tools/build_evidence.py firmware --environment "$BUILD_ENVIRONMENT"
+      - name: Stress eight rider badges with the pinned LVGL renderer
+        if: contains(matrix.target, '_REMOTE_DEBUG')
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          python3 tools/run_social_riders_render_test.py --lvgl-source \
+            ".pio/open-bike-build/platformio/${BUILD_ENVIRONMENT}/libdeps/${BUILD_ENVIRONMENT}/lvgl"
       - name: Verify remote-debug excludes locale startup allocations
         if: contains(matrix.target, '_REMOTE_DEBUG')
         env:
@@ -436,7 +443,7 @@ jobs:
         working-directory: esp32
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Install host crypto dependencies
+      - name: Install host test dependencies
         run: |
           for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
             if [ -f "$source" ]; then
@@ -448,7 +455,7 @@ jobs:
           done
           sudo apt-get update
           sudo apt-get install -y libmbedtls-dev python3-cryptography
-          python3 -m pip install -r tools/preconnection-assets-requirements.txt
+          python3 -m pip install -r ../tools/development/requirements.txt
       - name: Firmware manifest tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-firmware-manifest-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-firmware-manifest-tests/results.json"
         working-directory: ${{ github.workspace }}
