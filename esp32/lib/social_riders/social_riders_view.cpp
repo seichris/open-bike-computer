@@ -4,8 +4,12 @@
 namespace social_riders {
 struct Badge { lv_obj_t *root=nullptr,*portrait=nullptr,*initials=nullptr,*label=nullptr,*countLabel=nullptr; unsigned count=0,nextCount=0; bool seen=false; PresentationCache cache; uint8_t *pixels=nullptr; std::array<uint8_t,32> hash{}; };
 static Badge badges[CAPACITY];
-void beginFrame() { for(auto &b:badges) {b.seen=false;b.nextCount=0;} }
+static lv_obj_t *orientation=nullptr;
+static bool orientationSeen=false;
+static bool orientationCourseUp=false;
+void beginFrame() { orientationSeen=false;for(auto &b:badges) {b.seen=false;b.nextCount=0;} }
 void endFrame() {
+  if(orientation && !orientationSeen)lv_obj_add_flag(orientation,LV_OBJ_FLAG_HIDDEN);
   for(auto &b:badges) if(b.root) {
     if(!b.seen && b.cache.hide())lv_obj_add_flag(b.root,LV_OBJ_FLAG_HIDDEN);
     if(b.count!=b.nextCount) {
@@ -15,6 +19,26 @@ void endFrame() {
   }
 }
 void hideView() { beginFrame();endFrame(); }
+void showFallbackOrientation(lv_obj_t *parent,bool courseUp) {
+  orientationSeen=true;
+  const bool created=orientation==nullptr;
+  if(!orientation) {
+    orientation=lv_label_create(parent);
+    lv_obj_add_event_cb(orientation,[](lv_event_t *){orientation=nullptr;},LV_EVENT_DELETE,nullptr);
+    lv_obj_set_style_text_font(orientation,&lv_font_montserrat_12,0);
+    lv_obj_set_style_text_color(orientation,lv_color_white(),0);
+    lv_obj_set_style_bg_color(orientation,lv_color_hex(0x101820),0);
+    lv_obj_set_style_bg_opa(orientation,LV_OPA_COVER,0);
+  }
+  if(created || orientationCourseUp!=courseUp) {
+    orientationCourseUp=courseUp;
+    lv_label_set_text(orientation,courseUp?"Friends: course up":"Friends: north up");
+    lv_obj_align(orientation,LV_ALIGN_CENTER,0,80);
+  }
+  const bool wasHidden=lv_obj_has_flag(orientation,LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(orientation,LV_OBJ_FLAG_HIDDEN);
+  if(created || wasHidden)lv_obj_move_foreground(orientation);
+}
 void addClusterMember(size_t slot) { if(slot<CAPACITY)++badges[slot].nextCount; }
 void draw(size_t slot,lv_obj_t *parent,double x,double y,const Rider &r,bool isEdge,double meters,uint32_t now) {
   if(slot>=CAPACITY||!parent)return;

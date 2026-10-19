@@ -8144,8 +8144,17 @@ void Maps::displayMap() {
 }
 
 void Maps::updateSocialOverlay() {
-  if (!social_riders::ENABLED || !mapTile || !hasVisibleProjection ||
-      !publishedMapFound || presentationGestureOwnsTransforms()) { social_riders::hideView(); return; }
+  if (!social_riders::ENABLED || !mapTile ||
+      presentationGestureOwnsTransforms()) { social_riders::hideView(); return; }
+  const uint32_t now=millis();
+  const bool mapAvailable=hasVisibleProjection && publishedMapFound;
+  const auto sourceSample=gps_input_freshness::presentationSample(
+      gps.presentationSample,bleNavServer.getDebugStats().gpsSource);
+  const bool locationFresh=sourceSample.fresh(now,15000) &&
+      social_riders::validCoordinate(gps.gpsData.latitude,gps.gpsData.longitude);
+  if(!mapAvailable && !locationFresh) {social_riders::hideView();return;}
+  const bool courseUp=rotationMode==ROT_COURSE_UP && hasPresentedPose &&
+      presentedPose.headingValid && std::isfinite(presentedPose.headingDegrees);
   const double w=lv_obj_get_width(mapTile),h=lv_obj_get_height(mapTile);
 #ifdef WAVESHARE_AMOLED_175
   const bool round=true;
@@ -8159,38 +8168,50 @@ void Maps::updateSocialOverlay() {
   if(!snapshots) {void *memory=heap_caps_malloc(sizeof(*snapshots),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);if(memory)snapshots=new(memory) std::array<social_riders::Rider,social_riders::CAPACITY>();}
   if(!snapshots)return;
   social_riders::beginFrame();
-  struct Candidate {size_t slot;double meters;};
+  struct Candidate {size_t slot;double meters;social_riders::RelativeLocation relative;};
   Candidate ordered[social_riders::CAPACITY];size_t candidates=0;
   for(size_t i=0;i<social_riders::CAPACITY;++i) {
     auto &r=(*snapshots)[i];if(!social_riders::snapshot(i,r))continue;
-    const double a=gps.gpsData.latitude*M_PI/180,b=r.latitude/1e6*M_PI/180;
-    const double dl=(r.longitude/1e6-gps.gpsData.longitude)*M_PI/180;
-    const double hav=pow(sin((b-a)/2),2)+cos(a)*cos(b)*pow(sin(dl/2),2);
-    ordered[candidates++]={i,6371008.8*2*asin(sqrt(std::max(0.0,std::min(1.0,hav))))};
+    const auto relative=locationFresh?social_riders::relativeLocation(
+        gps.gpsData.latitude,gps.gpsData.longitude,r.latitude/1e6,r.longitude/1e6):
+        social_riders::RelativeLocation{};
+    ordered[candidates++]={i,relative.valid?relative.meters:INFINITY,relative};
   }
   std::sort(ordered,ordered+candidates,[](const Candidate &a,const Candidate &b) {return a.meters==b.meters?a.slot<b.slot:a.meters<b.meters;});
   social_riders::Position used[social_riders::CAPACITY];size_t usedSlots[social_riders::CAPACITY];size_t count=0;
   for(size_t at=0;at<candidates;++at) {
     const size_t i=ordered[at].slot;const auto *r=&(*snapshots)[i];
-    const double lat=r->latitude/1e6,lon=r->longitude/1e6;
-    const map_transform::WorldPoint world{lon2x(lon),lat2y(lat)};
-    const auto p=social_riders::projectRider(visibleProjection,world,
-        w/2-ox+visibleRenderResult.overscanPixels,h/2-oy+visibleRenderResult.overscanPixels);
-    double x=ox+p.x-visibleRenderResult.overscanPixels,y=oy+p.y-visibleRenderResult.overscanPixels;
-    bool fits=p.valid && x>=32 && y>=31 && x<=w-32 && y<=h-31;
-    if(round)for(double dx:{-32.0,32.0})for(double dy:{-31.0,31.0})fits &= std::hypot(x-w/2+dx,y-h/2+dy)<=std::min(w,h)/2-4;
+    double x=w/2,y=h/2;
+    bool fits=false;
+    if(mapAvailable) {
+      const map_transform::WorldPoint world{lon2x(r->longitude/1e6),lat2y(r->latitude/1e6)};
+      const auto p=social_riders::projectRider(visibleProjection,world,
+          w/2-ox+visibleRenderResult.overscanPixels,h/2-oy+visibleRenderResult.overscanPixels);
+      x=ox+p.x-visibleRenderResult.overscanPixels;y=oy+p.y-visibleRenderResult.overscanPixels;
+      fits=p.valid && x>=32 && y>=31 && x<=w-32 && y<=h-31;
+      if(round)for(double dx:{-32.0,32.0})for(double dy:{-31.0,31.0})fits &= std::hypot(x-w/2+dx,y-h/2+dy)<=std::min(w,h)/2-4;
+      if(!p.valid)continue;
+    }
     double meters=0;
     if(!fits) {
-      if(!hasPresentedPose || !gps.presentationSample.fresh(millis(), 15000))continue;
+      if(!locationFresh || !ordered[at].relative.valid)continue;
       meters=ordered[at].meters;
-      if(!p.valid)continue;
-      auto edge=social_riders::edge(x-w/2,y-h/2,w,h,round);x=edge.x;y=edge.y;
+      double dx=x-w/2,dy=y-h/2;
+      if(!mapAvailable) {
+        // No tile/projection is needed for global GPS bearing and distance.
+        // Follow the selected orientation only when its heading is known.
+        const auto direction=social_riders::screenDirection(
+            ordered[at].relative,courseUp?presentedPose.headingDegrees:0);
+        dx=direction.x;dy=direction.y;
+      }
+      auto edge=social_riders::edge(dx,dy,w,h,round);x=edge.x;y=edge.y;
     }
     // Nearest-first order retains the closest rider when footprints overlap.
     bool overlaps=false;for(size_t j=0;j<count;++j)if(std::abs(used[j].x-x)<64&&std::abs(used[j].y-y)<62){social_riders::addClusterMember(usedSlots[j]);overlaps=true;break;}
     if(overlaps)continue;
-    usedSlots[count]=i;used[count++]={x,y};social_riders::draw(i,mapTile,x,y,*r,!fits,meters,millis());
+    usedSlots[count]=i;used[count++]={x,y};social_riders::draw(i,mapTile,x,y,*r,!fits,meters,now);
   }
+  if(!mapAvailable && count) social_riders::showFallbackOrientation(mapTile,courseUp);
   social_riders::endFrame();
 }
 
