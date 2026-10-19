@@ -160,6 +160,74 @@ env.Program("probe", [obj])
             build(192 * 1024, commit="b" * 40)
             self.assertEqual(before, (project / "probe.o").stat().st_mtime_ns)
 
+    def test_force_included_files_cover_platformio_and_direct_flag_forms(self):
+        from firmware_compile_cache import force_included_files
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            names = ["include/a.h", "b.h", "c.h", "d.h", "e.h"]
+            for name in names:
+                (project / name).parent.mkdir(parents=True, exist_ok=True)
+                (project / name).write_text("")
+
+            class Env(dict):
+                def subst(self, value):
+                    return value
+
+            env = Env(
+                # PlatformIO pair, direct pair of strings, joined, -imacros, and
+                # a missing file (never declared: SCons would fail the build).
+                CCFLAGS=[("-include", "include/a.h"), "-Wall", "-include", str(project / "b.h"),
+                         f"-include{project / 'c.h'}", ("-imacros", "d.h"), ("-include", "missing.h")],
+                CFLAGS="-include e.h",
+                CXXFLAGS=None,
+            )
+            self.assertEqual(force_included_files(env, project), [str(project / name) for name in names])
+
+    @unittest.skipUnless(shutil.which("cc"), "host C compiler is unavailable")
+    def test_force_included_header_invalidates_warm_scons_objects(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve()
+            forced = project / "include/forced_config.h"
+            forced.parent.mkdir(parents=True)
+            (project / "lib/lvgl").mkdir(parents=True)
+            (project / "lib/lvgl/lv_conf.h").write_text("")
+            (project / "probe.c").write_text(
+                '#include <stdio.h>\nint main(void) { printf("%d\\n", FORCED_LIMIT); }\n')
+            tools = Path(__file__).resolve().parents[1]
+            (project / "SConstruct").write_text(f'''
+import sys
+sys.path.insert(0, {str(tools)!r})
+from firmware_compile_cache import configure_metadata_identity
+env = Environment()
+env["PROJECT_DIR"] = Dir(".").abspath
+env["PIOENV"] = "WAVESHARE_AMOLED_175"
+# Like a PlatformIO build flag; SCons' scanner never reads compiler flags.
+env.MergeFlags("-include include/forced_config.h")
+callbacks = []
+env.AddMethod(lambda self, callback: callbacks.append(callback), "AddBuildMiddleware")
+configure_metadata_identity(env, "a" * 40, "2026-10-01T00:00:00Z")
+env.CacheDir("objects-cache")
+obj = callbacks[0](env, File("probe.c"))
+env.Program("probe", [obj])
+''')
+            command = [sys.executable, "-c", "from SCons.Script import main; main()", "-Q"]
+
+            def build(limit):
+                forced.write_text(f"#define FORCED_LIMIT {limit}\n")
+                result = subprocess.run(command, cwd=project, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                output = subprocess.check_output([str(project / "probe")], text=True)
+                self.assertEqual(int(output), limit)
+                return result.stdout
+
+            build(1)
+            build(3)
+            # Reuse both versions from the object cache without clearing it.
+            for limit in (1, 3):
+                (project / "probe.o").unlink()
+                (project / "probe").unlink()
+                self.assertIn("from cache", build(limit))
+
     def test_symlinked_identity_header_is_rejected_without_touching_target(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory).resolve()
