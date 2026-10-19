@@ -1961,10 +1961,11 @@ struct ContentView: View {
                 onStartNavigation: { source, destination, transport in
                     clearSavedRoutePreview()
                     isSearchPanelExpanded = false
-                    pendingFavoriteDestination = nil
+                    pendingFavoriteDestination = routePlanningPurpose == .saveOffline
+                        && coordinator.destinationStore.isFavorite(destination) ? destination : nil
                     coordinator.planNavigation(
                         from: source,
-                        to: destination,
+                        to: destination.routeEndpoint,
                         transportType: transport
                     )
                 },

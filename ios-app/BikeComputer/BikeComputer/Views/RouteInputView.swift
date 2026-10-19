@@ -60,7 +60,7 @@ struct RouteSearchPanel: View {
     let currentLocation: CLLocation?
     let maxExpandedHeight: CGFloat
     var initialDestination: SavedDestination? = nil
-    var onStartNavigation: (RouteEndpoint, RouteEndpoint, MKDirectionsTransportType) -> Void
+    var onStartNavigation: (RouteEndpoint, SavedDestination, MKDirectionsTransportType) -> Void
     var onSaveToFavorites:
         ((SavedDestination, RouteEndpoint, MKDirectionsTransportType) -> Void)? = nil
 
@@ -380,7 +380,7 @@ struct RouteSearchPanel: View {
             )
             guard let destination = activeDestination else { return }
             destinationStore.addRecent(destination)
-            onStartNavigation(sourceEndpoint, destination.routeEndpoint, selectedTransportType)
+            onStartNavigation(sourceEndpoint, destination, selectedTransportType)
         }) {
             Text("Go")
                 .font(.headline)
