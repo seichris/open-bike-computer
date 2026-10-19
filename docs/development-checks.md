@@ -111,9 +111,12 @@ Setup picks the first healthy Python 3.10-3.14 (3.13 preferred; override with
 `OPEN_BIKE_PYTHON`), creates the ignored `.venv/` from
 `tools/development/requirements.txt` and records an input fingerprint, so an
 unchanged rerun only verifies. Input changes update the environment in place;
-a broken environment is reported and moved aside only with `--recreate`. The
-map backend pins an incompatible `cryptography`, so `--map-backend` creates the
-separate `map-platform/backend/.venv/` (editable `.[api,test]`). Runs in the
+an environment that is broken or uses a Python outside its range is reported
+and moved aside (never deleted) only with `--recreate`. The map backend pins an
+incompatible `cryptography`, so `--map-backend` creates the separate
+`map-platform/backend/.venv/` with the map-platform CI extras plus `api`
+(`.[api,test,object-storage,topography,social]`) on Python 3.10-3.12, because
+the topography pins have no wheels for newer Pythons. Runs in the
 same worktree serialize on a lock in that worktree's Git directory; separate
 worktrees never share or modify each other's environments. Only pip's user
 download cache is shared.

@@ -37,15 +37,18 @@ class Environment(NamedTuple):
     install: tuple[str, ...]
     inputs: tuple[str, ...]
     setup_flag: str = ""
+    python: tuple[tuple[int, int], tuple[int, int]] = SUPPORTED_PYTHON
 
 
 # Host checks and the map backend pin incompatible cryptography versions, so
 # each gets its own ignored environment; pip's user download cache is shared.
 HOST = Environment("host", ".venv", ("-r", "tools/development/requirements.txt"),
                    ("tools/development/requirements.txt",))
+# Extras match the map-platform CI unit-test job plus `api` for local servers.
+# Its topography pins (numpy 1.26.4) have no wheels beyond Python 3.12, CI's version.
 MAP_BACKEND = Environment("map-backend", "map-platform/backend/.venv",
-                          ("-e", "./map-platform/backend[api,test]"),
-                          ("map-platform/backend/pyproject.toml",), " --map-backend")
+                          ("-e", "./map-platform/backend[api,test,object-storage,topography,social]"),
+                          ("map-platform/backend/pyproject.toml",), " --map-backend", ((3, 10), (3, 12)))
 
 
 class SetupError(Exception):
@@ -82,12 +85,20 @@ def probe(executable: str) -> tuple[int, ...] | None:
     return version if SUPPORTED_PYTHON[0] <= version[:2] <= SUPPORTED_PYTHON[1] else None
 
 
-def choose_interpreter() -> tuple[str, tuple[int, ...]]:
+def describe(supported) -> str:
+    return "{}.{}-{}.{}".format(*supported[0], *supported[1])
+
+
+def supports(supported, version: tuple[int, ...]) -> bool:
+    return supported[0] <= version[:2] <= supported[1]
+
+
+def choose_interpreter(supported=SUPPORTED_PYTHON) -> tuple[str, tuple[int, ...]]:
     requested = os.environ.get("OPEN_BIKE_PYTHON")
     if requested:
         version = probe(requested)
-        if version is None:
-            raise SetupError(f"OPEN_BIKE_PYTHON={requested} is not a healthy Python 3.10-3.14")
+        if version is None or not supports(supported, version):
+            raise SetupError(f"OPEN_BIKE_PYTHON={requested} is not a healthy Python {describe(supported)}")
         return requested, version
     seen = set()
     for name in INTERPRETERS:
@@ -96,10 +107,10 @@ def choose_interpreter() -> tuple[str, tuple[int, ...]]:
             continue
         seen.add(os.path.realpath(found))
         version = probe(found)
-        if version is not None:
+        if version is not None and supports(supported, version):
             return found, version
-    raise SetupError("no healthy Python 3.10-3.14 found; install one (for example "
-                     "`brew install python@3.13`) or set OPEN_BIKE_PYTHON")
+    raise SetupError(f"no healthy Python {describe(supported)} found; install one (for example "
+                     f"`brew install python@{supported[1][0]}.{supported[1][1]}`) or set OPEN_BIKE_PYTHON")
 
 
 def read_stamp(venv: Path) -> dict:
@@ -110,7 +121,7 @@ def read_stamp(venv: Path) -> dict:
 
 
 def state(environment: Environment, root: Path = ROOT) -> tuple[str, str | None]:
-    """Return (missing|broken|stale|ready, venv Python version)."""
+    """Return (missing|broken|unsupported|stale|ready, venv Python version)."""
     venv = root / environment.venv
     if not venv.exists():
         return "missing", None
@@ -118,6 +129,8 @@ def state(environment: Environment, root: Path = ROOT) -> tuple[str, str | None]
     if version is None:
         return "broken", None
     current = ".".join(map(str, version))
+    if not supports(environment.python, version):
+        return "unsupported", current
     stamp = read_stamp(venv)
     if stamp.get("inputs") != fingerprint(environment, root) or stamp.get("python") != current:
         return "stale", current
@@ -137,11 +150,14 @@ def ensure(environment: Environment, *, root: Path = ROOT, recreate: bool = Fals
            quiet: bool = False) -> str:
     venv = root / environment.venv
     status, version = state(environment, root)
-    if status == "broken" and not recreate:
-        raise SetupError(f"{environment.venv} exists but its Python does not run; rerun "
+    if status in ("broken", "unsupported") and not recreate:
+        problem = ("its Python does not run" if status == "broken" else
+                   f"it uses Python {version}, outside {describe(environment.python)}")
+        raise SetupError(f"{environment.venv} exists but {problem}; rerun "
                          f"`tools/dev-setup{environment.setup_flag} --recreate` "
                          f"(the old environment is moved aside, not deleted)")
-    if recreate and venv.exists():
+    # Only an environment that cannot be updated in place is replaced.
+    if recreate and status in ("broken", "unsupported"):
         kept = venv.with_name(f"{venv.name}.previous-{time.strftime('%Y%m%d-%H%M%S')}")
         venv.rename(kept)
         print(f"dev-setup: moved {environment.venv} to {os.path.relpath(kept, root)}", flush=True)
@@ -149,7 +165,7 @@ def ensure(environment: Environment, *, root: Path = ROOT, recreate: bool = Fals
     if status == "ready":
         return f"{environment.venv} up to date (Python {version})"
     if status == "missing":
-        interpreter, chosen = choose_interpreter()
+        interpreter, chosen = choose_interpreter(environment.python)
         subprocess.run([interpreter, "-m", "venv", str(venv)], cwd=root, check=True)
         version = ".".join(map(str, chosen))
     pip_install(venv / "bin/python", environment, root, quiet)
@@ -238,7 +254,7 @@ def run(args) -> int:
         return 2
     status, _ = state(environment)
     if status != "ready":
-        recreate = " --recreate" if status == "broken" else ""
+        recreate = " --recreate" if status in ("broken", "unsupported") else ""
         print(f"dev-env: {environment.venv} is {status}; run tools/dev-setup{environment.setup_flag}{recreate}",
               file=sys.stderr)
         return 3
@@ -261,7 +277,7 @@ def main(argv=None) -> int:
     setup_parser.add_argument("--map-backend", action="store_true",
                               help="also prepare map-platform/backend/.venv for map checks")
     setup_parser.add_argument("--recreate", action="store_true",
-                              help="move existing environments aside and create them again")
+                              help="move broken or wrong-Python environments aside and create them again")
     setup_parser.add_argument("--check", action="store_true", help="report state without installing")
     setup_parser.add_argument("--quiet", action="store_true", help="show pip output only on failure")
     run_parser = commands.add_parser("run", help="run a command inside an environment")

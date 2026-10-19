@@ -59,6 +59,14 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
              patch.object(environment, "probe", side_effect=lambda path: versions.get(path)):
             os.environ.pop("OPEN_BIKE_PYTHON", None)
             self.assertEqual(environment.choose_interpreter(), ("/bin/python3.12", (3, 12, 4)))
+        versions = {"/bin/python3.13": (3, 13, 1), "/bin/python3.12": None, "/bin/python3.11": (3, 11, 9)}
+        with patch.dict(os.environ, {}, clear=False), \
+             patch.object(environment.shutil, "which", side_effect=lambda name: f"/bin/{name}"), \
+             patch.object(environment.os.path, "realpath", side_effect=lambda path: path), \
+             patch.object(environment, "probe", side_effect=lambda path: versions.get(path)):
+            os.environ.pop("OPEN_BIKE_PYTHON", None)
+            self.assertEqual(environment.choose_interpreter(environment.MAP_BACKEND.python),
+                             ("/bin/python3.11", (3, 11, 9)))
         with patch.dict(os.environ, {"OPEN_BIKE_PYTHON": "/broken/python"}), \
              patch.object(environment, "probe", return_value=None):
             with self.assertRaisesRegex(environment.SetupError, "OPEN_BIKE_PYTHON"):
@@ -99,6 +107,29 @@ class DevelopmentEnvironmentTests(unittest.TestCase):
         kept = [path for path in root.iterdir() if path.name.startswith(".venv.previous-")]
         self.assertEqual(len(kept), 1)
         self.assertEqual((kept[0] / "bin/python").read_text(), "not an interpreter")
+
+    def test_environment_outside_its_python_range_requires_recreate(self):
+        root = self.temporary_root()
+        (root / "requirements.txt").write_text("")
+        (root / ".venv/bin").mkdir(parents=True)
+        narrow = SPEC._replace(python=((3, 10), (3, 12)))
+        with patch.object(environment, "probe", return_value=(3, 13, 1)):
+            self.assertEqual(environment.state(narrow, root), ("unsupported", "3.13.1"))
+            with self.assertRaisesRegex(environment.SetupError, r"3\.13\.1, outside 3\.10-3\.12.*--recreate"):
+                environment.ensure(narrow, root=root)
+        arguments = type("Arguments", (), {"map_backend": True, "command": ["python3", "-V"]})
+        with patch.object(environment, "state", return_value=("unsupported", "3.13.1")), \
+             patch.object(environment.os, "execvpe") as execute, contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(environment.run(arguments), 3)
+        execute.assert_not_called()
+        self.assertIn("--map-backend --recreate", error.getvalue())
+
+    def test_recreate_leaves_healthy_environments_in_place(self):
+        root = self.temporary_root()
+        (root / ".venv").mkdir()
+        with patch.object(environment, "state", return_value=("ready", "3.13.0")):
+            self.assertIn("up to date", environment.ensure(SPEC, root=root, recreate=True))
+        self.assertEqual([path.name for path in root.iterdir()], [".venv"])
 
     def test_setup_lock_is_exclusive_and_lives_in_the_worktree_git_directory(self):
         path = self.temporary_root() / "setup.lock"
