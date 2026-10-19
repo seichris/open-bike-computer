@@ -30,7 +30,197 @@ static Document makeDocument() {
   return document;
 }
 
+static ScreenInstance nearbyProfile(uint32_t id, const char *name,
+                                    bool enabled = true) {
+  ScreenInstance instance = makeInstance(id, ScreenType::Map, name);
+  instance.enabled = enabled;
+  instance.mapProfile = defaultMapProfile(ScreenType::Nearby);
+  instance.mapProfile.zoomLevel = 4;
+  return instance;
+}
+
+static size_t instanceOffset(const std::array<uint8_t, MAX_DOCUMENT_BYTES> &bytes,
+                             uint8_t target) {
+  size_t offset = DOCUMENT_HEADER_BYTES;
+  for (uint8_t index = 0; index < target; ++index)
+    offset += INSTANCE_HEADER_BYTES + bytes[offset + 6] +
+              wire_bytes::readU16(bytes.data() + offset + 7);
+  return offset;
+}
+
+static void resealDocument(std::array<uint8_t, MAX_DOCUMENT_BYTES> &bytes,
+                           size_t size) {
+  wire_bytes::writeU32(bytes.data() + size - DOCUMENT_CRC_BYTES,
+                       crc32(bytes.data(), size - DOCUMENT_CRC_BYTES));
+}
+
+// POI-enabled firmware stored these Map-format payloads as Nearby screens.
+static size_t encodeStoredNearby(const Document &document, uint32_t nearbyIndexes,
+                                 std::array<uint8_t, MAX_DOCUMENT_BYTES> &bytes) {
+  const size_t size = encodeDocument(document, bytes.data(), bytes.size());
+  assert(size > 0);
+  for (uint8_t index = 0; index < document.instanceCount; ++index) {
+    if ((nearbyIndexes & (1UL << index)) == 0) continue;
+    const size_t offset = instanceOffset(bytes, index);
+    assert(bytes[offset + 4] == static_cast<uint8_t>(ScreenType::Map));
+    bytes[offset + 4] = static_cast<uint8_t>(ScreenType::Nearby);
+  }
+  assert(instanceOffset(bytes, document.instanceCount) == size - DOCUMENT_CRC_BYTES);
+  resealDocument(bytes, size);
+  return size;
+}
+
+static bool hasName(const ScreenInstance &instance, const char *name) {
+  return instance.nameLength == std::strlen(name) &&
+         std::memcmp(instance.name.data(), name, instance.nameLength) == 0;
+}
+
+// The normalized document is itself a valid upload for this firmware build.
+static void assertPersistable(const Document &document) {
+  std::array<uint8_t, MAX_DOCUMENT_BYTES> bytes{};
+  const size_t size = encodeDocument(document, bytes.data(), bytes.size());
+  assert(size > 0);
+  Document decoded{};
+  assert(decodeDocument(bytes.data(), size, decoded) == DecodeResult::Complete);
+  assert(decoded.instanceCount == document.instanceCount);
+}
+
+static void testStoredNearbyScreens() {
+  constexpr bool runtime = map_profile_protocol::POIS_RUNTIME_ENABLED;
+  std::array<uint8_t, MAX_DOCUMENT_BYTES> bytes{};
+  Document decoded{};
+  bool normalized = true;
+
+  // Custom screens around two Nearby screens keep order, IDs and settings.
+  Document mixed{};
+  mixed.defaultInstanceID = 4;
+  mixed.instanceCount = 6;
+  mixed.instances[0] = makeInstance(4, ScreenType::MapNavigation, "Map + Navigation");
+  mixed.instances[1] = nearbyProfile(9, "Nearby");
+  mixed.instances[2] = makeInstance(3, ScreenType::RideStats, "Ride Stats");
+  mixed.instances[2].rideStatsLayout.slots[0] = RideStatsWidget::Distance;
+  mixed.instances[3] = makeInstance(1, ScreenType::Map, "Commute");
+  mixed.instances[3].mapProfile.zoomLevel = 5;
+  mixed.instances[4] = nearbyProfile(10, "Food", false);
+  mixed.instances[5] = makeInstance(2, ScreenType::Navigation, "Navigation");
+  mixed.instances[5].enabled = false;
+  size_t size = encodeStoredNearby(mixed, (1U << 1) | (1U << 4), bytes);
+  assert(decodeDocument(bytes.data(), size, decoded) ==
+         (runtime ? DecodeResult::Complete : DecodeResult::Unsupported));
+  assert(decodeDocument(bytes.data(), size, decoded, true, &normalized) ==
+         DecodeResult::Complete);
+  if (runtime) {
+    assert(!normalized && decoded.instanceCount == 6);
+    assert(decoded.instances[1].type == ScreenType::Nearby);
+    assert(decoded.instances[4].type == ScreenType::Nearby &&
+           !decoded.instances[4].enabled);
+  } else {
+    assert(normalized && decoded.instanceCount == 4);
+    const uint32_t ids[] = {4, 3, 1, 2};
+    for (uint8_t index = 0; index < 4; ++index)
+      assert(decoded.instances[index].id == ids[index]);
+    assert(decoded.defaultInstanceID == 4);
+    assert(decoded.instances[1].rideStatsLayout.slots[0] == RideStatsWidget::Distance);
+    assert(hasName(decoded.instances[2], "Commute") &&
+           decoded.instances[2].mapProfile.zoomLevel == 5);
+    assert(!decoded.instances[3].enabled);
+    assert(decoded.instances[4].id == 0); // no stale trailing instance
+    assertPersistable(decoded);
+  }
+
+  // A removed default moves to the first enabled screen; disabled screens
+  // stay disabled.
+  Document defaultNearby{};
+  defaultNearby.defaultInstanceID = 9;
+  defaultNearby.instanceCount = 3;
+  defaultNearby.instances[0] = makeInstance(3, ScreenType::RideStats, "Ride Stats");
+  defaultNearby.instances[0].enabled = false;
+  defaultNearby.instances[1] = nearbyProfile(9, "Nearby");
+  defaultNearby.instances[2] = makeInstance(1, ScreenType::Map, "Map");
+  size = encodeStoredNearby(defaultNearby, 1U << 1, bytes);
+  assert(decodeDocument(bytes.data(), size, decoded, true, &normalized) ==
+         DecodeResult::Complete);
+  if (runtime) {
+    assert(!normalized && decoded.defaultInstanceID == 9);
+  } else {
+    assert(normalized && decoded.instanceCount == 2);
+    assert(decoded.instances[0].id == 3 && !decoded.instances[0].enabled);
+    assert(decoded.instances[1].id == 1 && decoded.defaultInstanceID == 1);
+    assertPersistable(decoded);
+  }
+
+  // With no other enabled screen, the default Nearby screen becomes an
+  // enabled Map screen in place, keeping its ID and map settings.
+  Document onlyNearby{};
+  onlyNearby.defaultInstanceID = 7;
+  onlyNearby.instanceCount = 2;
+  onlyNearby.instances[0] = nearbyProfile(7, "Nearby");
+  onlyNearby.instances[1] = nearbyProfile(8, "Food", false);
+  size = encodeStoredNearby(onlyNearby, 0b11, bytes);
+  assert(decodeDocument(bytes.data(), size, decoded, true, &normalized) ==
+         DecodeResult::Complete);
+  if (runtime) {
+    assert(!normalized && decoded.instanceCount == 2);
+  } else {
+    assert(normalized && decoded.instanceCount == 1);
+    const ScreenInstance &map = decoded.instances[0];
+    assert(map.id == 7 && map.type == ScreenType::Map && map.enabled);
+    assert(hasName(map, "Map") && map.mapProfile.zoomLevel == 4);
+    assert((map.mapProfile.visibilityMask &
+            map_profile_protocol::VISIBILITY_POI_MASK) == 0);
+    assert(decoded.defaultInstanceID == 7);
+    assertPersistable(decoded);
+  }
+
+  Document disabledOthers{};
+  disabledOthers.defaultInstanceID = 7;
+  disabledOthers.instanceCount = 3;
+  disabledOthers.instances[0] = makeInstance(1, ScreenType::Map, "Map");
+  disabledOthers.instances[0].enabled = false;
+  disabledOthers.instances[1] = nearbyProfile(7, "Nearby");
+  disabledOthers.instances[2] = makeInstance(2, ScreenType::Navigation, "Navigation");
+  disabledOthers.instances[2].enabled = false;
+  size = encodeStoredNearby(disabledOthers, 1U << 1, bytes);
+  assert(decodeDocument(bytes.data(), size, decoded, true, &normalized) ==
+         DecodeResult::Complete);
+  if (!runtime) {
+    assert(normalized && decoded.instanceCount == 3);
+    assert(decoded.instances[0].id == 1 && !decoded.instances[0].enabled);
+    assert(decoded.instances[1].id == 7 &&
+           decoded.instances[1].type == ScreenType::Map &&
+           decoded.instances[1].enabled);
+    assert(decoded.instances[2].id == 2 && !decoded.instances[2].enabled);
+    assert(decoded.defaultInstanceID == 7);
+    assertPersistable(decoded);
+  }
+
+  // An already invalid document (every screen disabled) is not repaired.
+  size = encodeStoredNearby(disabledOthers, 1U << 1, bytes);
+  bytes[instanceOffset(bytes, 1) + 5] = 0;
+  resealDocument(bytes, size);
+  assert(decodeDocument(bytes.data(), size, decoded, true, &normalized) ==
+         DecodeResult::Malformed);
+
+  // CRC, truncation and unknown screen types still fail closed when stored.
+  size = encodeStoredNearby(mixed, (1U << 1) | (1U << 4), bytes);
+  auto corrupted = bytes;
+  corrupted[DOCUMENT_HEADER_BYTES + INSTANCE_HEADER_BYTES + 3] ^= 1;
+  assert(decodeDocument(corrupted.data(), size, decoded, true, &normalized) ==
+         DecodeResult::Malformed);
+  assert(decodeDocument(bytes.data(), size - 1, decoded, true, &normalized) ==
+         DecodeResult::Malformed);
+  auto unknown = bytes;
+  assert(unknown[instanceOffset(unknown, 1) + 4] ==
+         static_cast<uint8_t>(ScreenType::Nearby));
+  unknown[instanceOffset(unknown, 1) + 4] =
+      static_cast<uint8_t>(ScreenType::Nearby) + 1;
+  resealDocument(unknown, size);
+  assert(decodeDocument(unknown.data(), size, decoded, true, &normalized) ==
+         DecodeResult::Unsupported);
+}
+
 int main() {
+  testStoredNearbyScreens();
   assert((defaultMapProfile(ScreenType::Map).visibilityMask &
           map_profile_protocol::VISIBILITY_POI_MASK) ==
          (map_profile_protocol::POIS_RUNTIME_ENABLED ?

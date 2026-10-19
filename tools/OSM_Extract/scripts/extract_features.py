@@ -58,6 +58,10 @@ parser.add_argument("--preferred-language", action="append", default=[])
 parser.add_argument("--international-fallback", default="en")
 parser.add_argument("--selection-geometry")
 parser.add_argument("--selection-buffer-m", type=float, default=0.0)
+parser.add_argument(
+    "--output-blocks",
+    help="canonical target-5 output blocks, equal to the signed Nearby coverage",
+)
 parser.add_argument("--scope-plan")
 parser.add_argument("--suppress-scope-marker", action="store_true")
 parser.add_argument("--calibration-manifest")
@@ -93,6 +97,8 @@ if (args.debug_image_dir is None) != (args.debug_image_limit is None):
     parser.error("debug image directory and limit must be supplied together")
 if args.debug_image_limit is not None and not 1 <= args.debug_image_limit <= 10000:
     parser.error("--debug-image-limit must be between 1 and 10000")
+if args.output_blocks is not None and args.renderer_format != 5:
+    parser.error("--output-blocks requires renderer format 5")
 
 LINES_INPUT_FILE = "{}_lines.geojson".format(args.geojson_prefix)
 POLYGONS_INPUT_FILE = "{}_polygons.geojson".format(args.geojson_prefix)
@@ -179,6 +185,40 @@ def fail_poi(error):
         flush=True,
     )
     raise SystemExit(2)
+
+
+# Mirrors the signed Nearby coverage limit enforced by the backend and readers.
+MAX_OUTPUT_BLOCKS = 1024
+
+
+def load_output_blocks(path):
+    """Return canonical target-5 output block origins in ascending (x, y) order."""
+    with open(path, "rb") as source:
+        document = json.load(source)
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schemaVersion", "blockSizeMeters", "blocks"}
+        or type(document["schemaVersion"]) is not int
+        or document["schemaVersion"] != 1
+        or type(document["blockSizeMeters"]) is not int
+        or document["blockSizeMeters"] != 4096
+        or not isinstance(document["blocks"], list)
+        or not 1 <= len(document["blocks"]) <= MAX_OUTPUT_BLOCKS
+    ):
+        raise ValueError("target-5 output block set is invalid")
+    positions = []
+    previous = None
+    for block in document["blocks"]:
+        if (
+            not isinstance(block, list)
+            or len(block) != 2
+            or any(type(value) is not int for value in block)
+            or (previous is not None and tuple(block) <= previous)
+        ):
+            raise ValueError("target-5 output blocks are not canonical")
+        previous = tuple(block)
+        positions.append((block[0] * 4096, block[1] * 4096))
+    return tuple(positions)
 
 
 conf = yaml.safe_load( open( CONF_FEATURES, "r"))
@@ -282,6 +322,21 @@ block_positions = tuple(
     if scope_block_positions is not None
     else product(x_positions, y_positions)
 )
+if args.output_blocks is not None:
+    # Selection masks keep whole crossing features and the request grid is a
+    # rectangle, so neither bounds the emitted blocks. The signed coverage
+    # does; calibration, closure and feature selection are left unchanged.
+    try:
+        output_block_positions = load_output_blocks(args.output_blocks)
+    except (OSError, TypeError, ValueError) as exc:
+        fail_poi(exc)
+    if scope_block_positions is not None:
+        if not set(output_block_positions).issuperset(block_positions):
+            fail_poi(ValueError("scope plan blocks lie outside the target-5 output blocks"))
+    else:
+        if not set(block_positions).issuperset(output_block_positions):
+            fail_poi(ValueError("target-5 output blocks lie outside the extracted area"))
+        block_positions = output_block_positions
 total = len(block_positions)
 if total <= 0:
     if scope_plan is not None:

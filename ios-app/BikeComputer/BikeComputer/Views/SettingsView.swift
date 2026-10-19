@@ -2723,7 +2723,8 @@ private struct MapStyleSettingsView: View {
                     if !poisAvailable {
                         Button("Download Active Map Again") {
                             offlineMapManager.regenerateActiveMap(
-                                bleManager: bleManager
+                                bleManager: bleManager,
+                                purpose: .pointsOfInterest
                             )
                         }
                         .disabled(offlineMapManager.isBusy ||

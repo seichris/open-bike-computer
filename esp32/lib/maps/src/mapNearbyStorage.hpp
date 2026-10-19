@@ -150,7 +150,8 @@ inline bool readIndex(const std::string &root,
 inline bool invalidatesHealth(Status status) { return status == Status::Corrupt; }
 
 // A cursor is owned exclusively by the map worker. Each step scans at most
-// 128 geometry headers (seeking over coordinates), or 256 POI records. Installed
+// 128 geometry headers (seeking over coordinates), 256 POI records, or 64
+// signed-coverage window blocks. Installed
 // blocks were already fully authenticated and validated; a query checks their
 // header, section directory, signed FPI1 identity, POI records, counts and CRC
 // without reading unrelated geometry payloads again.
@@ -213,8 +214,14 @@ class SearchCursor {
     }
     if (phase_ == Phase::Block) {
       if (nextBlock_ == frontier_.size() ||
-          nearest_.canFinishBefore(frontier_[nextBlock_].lowerBoundM()))
-        return finish(Status::Ok);
+          nearest_.canFinishBefore(frontier_[nextBlock_].lowerBoundM())) {
+        if (coverage_ == nullptr) return finish(Status::Ok);
+        // The nearest set stays private until coverage is known too.
+        coverageScan_ = map_nearby_coverage::CompletenessScan(
+            *coverage_, rider_, radiusM_);
+        phase_ = Phase::Coverage;
+        return false;
+      }
       entry_ = entries_[frontier_[nextBlock_].index];
       const auto relative = map_poi_index::relativeBlockPath(entry_.blockX, entry_.blockY);
       if (relative.empty()) return finish(Status::Corrupt);
@@ -230,6 +237,10 @@ class SearchCursor {
       shapes_ = map_poi_index::u16(header + 4);
       phase_ = Phase::Polygons;
       return false;
+    }
+    if (phase_ == Phase::Coverage) {
+      if (!coverageScan_.step(kCoverageBlocksPerStep)) return false;
+      return finish(Status::Ok);
     }
     if (phase_ == Phase::Polygons || phase_ == Phase::Lines) {
       const bool polygons = phase_ == Phase::Polygons;
@@ -314,15 +325,17 @@ class SearchCursor {
   }
 
  private:
-  enum class Phase { Index, IndexRead, Block, Polygons, Lines, Directory, Records, Done };
+  enum class Phase {
+    Index, IndexRead, Block, Polygons, Lines, Directory, Records, Coverage, Done
+  };
+  static constexpr uint32_t kCoverageBlocksPerStep = 64;
   bool finish(Status status) {
     result_.status = status;
     if (status == Status::Ok) {
       result_.count = static_cast<uint8_t>(nearest_.size());
       for (size_t index = 0; index < nearest_.size(); ++index)
         result_.places[index] = nearest_[index];
-      result_.coverageComplete = coverage_ != nullptr &&
-          map_nearby_coverage::completeWithinRadius(*coverage_, rider_, radiusM_);
+      result_.coverageComplete = coverageScan_.complete();
     } else result_.count = 0; // never expose a partially searched set
     file_.reset();
     indexValidator_.reset();
@@ -340,6 +353,7 @@ class SearchCursor {
   MapNearbyVector<map_nearby_query::FrontierItem> frontier_;
   File file_{nullptr, &std::fclose};
   std::unique_ptr<map_poi_index::StreamValidator> indexValidator_;
+  map_nearby_coverage::CompletenessScan coverageScan_;
   uint32_t indexRemaining_ = 0;
   map_poi_index::Entry entry_{};
   Phase phase_ = Phase::Index;

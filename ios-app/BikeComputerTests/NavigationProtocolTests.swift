@@ -968,6 +968,7 @@ struct NavigationProtocolTests {
         testNavigationEngineIgnoresFarLocationForRouteProgress()
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
+        testOfflineMapPoiTargetNegotiation()
         testOfflineMapServiceConfigChannels()
         testOfflineMapCatalogConfigChannels()
         testOfflineMapCatalogTrustStoreChannels()
@@ -7144,6 +7145,19 @@ struct NavigationProtocolTests {
     }
 
     static func testOfflineMapCustomBBoxRequest() {
+        let signedManifest = try! JSONDecoder().decode(OfflineMapPackManifest.self,
+            from: Data(#"{"boundsE7":[1030000000,-10000000,1040000000,10000000]}"#.utf8))
+        let archiveManifest = try! JSONDecoder().decode(OfflineMapPackManifest.self,
+            from: Data(#"{"bounds":[103,-1,104,1]}"#.utf8))
+        assert(signedManifest.bounds == nil, "signed streams do not carry legacy decimal bounds")
+        assertEqual(signedManifest.previewBounds, archiveManifest.previewBounds,
+                    "signed-stream and ZIP maps regenerate the same geographic area")
+        assertEqual(signedManifest.previewBounds?.minLongitude, 103.0, "E7 longitude converts to degrees")
+        assertEqual(signedManifest.previewBounds?.minLatitude, -1.0, "E7 preserves negative latitude")
+        let invalidManifest = try! JSONDecoder().decode(OfflineMapPackManifest.self,
+            from: Data(#"{"boundsE7":[1040000000,-10000000,1030000000,10000000]}"#.utf8))
+        assert(invalidManifest.previewBounds == nil, "invalid geography cannot be regenerated")
+
         let bounds = OfflineMapBounds(
             center: CLLocationCoordinate2D(latitude: 35.0, longitude: 136.0),
             sideLengthKm: 22.264
@@ -7222,6 +7236,120 @@ struct NavigationProtocolTests {
                     "3D requests remain target 3 without firmware metadata")
         assert(noFirmware.target?.firmwareVersion == nil,
                "empty firmware metadata is omitted")
+    }
+
+    static func testOfflineMapPoiTargetNegotiation() {
+        func capabilities(_ profiles: String) -> OfflineMapGenerationCapabilities {
+            let document = "{\"schemaVersion\":1,\"deploymentChannel\":\"development\"," +
+                "\"policySha256\":\"" + String(repeating: "e", count: 64) + "\"," +
+                "\"generationProfiles\":[" + profiles + "]}"
+            return try! JSONDecoder().decode(
+                OfflineMapGenerationCapabilities.self, from: Data(document.utf8)
+            )
+        }
+        let legacy = "{\"id\":\"legacy-vector-v1\",\"rendererFormatVersion\":1,\"features\":[]}," +
+            "{\"id\":\"street-labels-v1\",\"rendererFormatVersion\":2,\"features\":[\"street-labels\"]}," +
+            "{\"id\":\"buildings-3d-v1\",\"rendererFormatVersion\":3," +
+            "\"features\":[\"street-labels\",\"3d-buildings\"]}"
+        let topography = ",{\"id\":\"topographic-contours-v1\",\"rendererFormatVersion\":4," +
+            "\"features\":[\"3d-buildings\",\"contours\",\"street-labels\"]}"
+        func pois(_ optional: String) -> String {
+            ",{\"id\":\"map-pois-v1\",\"rendererFormatVersion\":5," +
+                "\"features\":[\"3d-buildings\",\"map-pois\",\"street-labels\"]," +
+                "\"optionalFeatures\":[" + optional + "]}"
+        }
+        // (service, capabilities, offers target 5, offers contours with target 5)
+        let services: [(String, OfflineMapGenerationCapabilities?, Bool, Bool)] = [
+            ("no capabilities endpoint", nil, false, false),
+            ("production v1", capabilities(legacy), false, false),
+            ("development v2", capabilities(legacy + topography), false, false),
+            ("POI canary", capabilities(legacy + topography + pois("")), true, false),
+            ("POI and contour canary",
+             capabilities(legacy + topography + pois("\"contours\"")), true, true),
+        ]
+        let requirements: [OfflineMapPoiRequestPolicy.Requirement] = [.opportunistic, .required]
+        let bounds = OfflineMapBounds(
+            center: CLLocationCoordinate2D(latitude: 1.3, longitude: 103.8),
+            sideLengthKm: 10
+        )
+        for (name, service, offersPois, offersContours) in services {
+            for device in [false, true] {
+                for contours in [false, true] {
+                    let base = OfflineMapJobRequest.customBBox(bounds)
+                        .withTopography(contours)
+                        .forDevice(firmwareVersion: "1.0.0")
+                        .identified(clientInstallationId: "installation",
+                                    clientRequestId: "request", installOnDevice: true)
+                    let upgrade = device && offersPois && (!contours || offersContours)
+                    for requirement in requirements {
+                        let label = "\(name), device POIs \(device), contours \(contours), \(requirement)"
+                        do {
+                            let selected = try OfflineMapPoiRequestPolicy.request(
+                                base, deviceSupportsMapPois: device,
+                                capabilities: service, requirement: requirement
+                            )
+                            assert(upgrade || requirement == .opportunistic,
+                                   "\(label): unavailable required POIs fail closed")
+                            if upgrade {
+                                assertEqual(selected.target?.rendererFormatVersion, 5,
+                                            "\(label): selects target 5 before submission")
+                                assertEqual(
+                                    selected.target?.requestedFeatures?.contains("contours") ?? false,
+                                    contours, "\(label): keeps exactly the requested contour layer"
+                                )
+                                assertEqual(selected.target?.firmwareVersion, "1.0.0",
+                                            "\(label): keeps the device firmware identity")
+                                assertEqual(selected.clientRequestId, "request",
+                                            "\(label): keeps the request identity")
+                            } else {
+                                assertEqual(selected, base,
+                                            "\(label): keeps the existing target-3/4 request")
+                            }
+                        } catch OfflineMapPlatformError.unsupportedRendererTarget(let requested, _, let message) {
+                            assert(!upgrade && requirement == .required,
+                                   "\(label): only an unavailable required POI request fails")
+                            assertEqual(requested, 5, "\(label): the failure names target 5")
+                            assert(!message.isEmpty, "\(label): the failure explains why")
+                        } catch {
+                            assert(false, "\(label): unexpected negotiation error \(error)")
+                        }
+                    }
+                }
+            }
+        }
+
+        let base = OfflineMapJobRequest.customBBox(bounds).withTopography(false)
+        for invalid in [capabilities(legacy + pois("\"terrain\"")),
+                        capabilities(legacy + pois("\"contours\",\"contours\""))] {
+            for device in [false, true] {
+                for requirement in requirements {
+                    do {
+                        _ = try OfflineMapPoiRequestPolicy.request(
+                            base, deviceSupportsMapPois: device,
+                            capabilities: invalid, requirement: requirement
+                        )
+                        assert(false, "an invalid capability payload never selects a target")
+                    } catch OfflineMapPlatformError.invalidResponse {
+                        // Expected: malformed capability documents fail closed.
+                    } catch {
+                        assert(false, "an invalid capability payload is an invalid response")
+                    }
+                }
+            }
+        }
+
+        assertEqual(OfflineMapPoiRequestPolicy.regenerationRequirement(
+            purpose: .pointsOfInterest, activeRendererFormatVersion: 3), .required,
+            "the Points of Interest action requires POIs")
+        assertEqual(OfflineMapPoiRequestPolicy.regenerationRequirement(
+            purpose: .streetLabels, activeRendererFormatVersion: 4), .opportunistic,
+            "a label refresh only opportunistically adds POIs to target 3/4")
+        assertEqual(OfflineMapPoiRequestPolicy.regenerationRequirement(
+            purpose: .streetLabels, activeRendererFormatVersion: 5), .required,
+            "a label refresh never drops an active target-5 POI layer")
+        assertEqual(OfflineMapPoiRequestPolicy.regenerationRequirement(
+            purpose: .streetLabels, activeRendererFormatVersion: nil), .opportunistic,
+            "an unknown active target opportunistically adds POIs")
     }
 
     static func testOfflineMapClientRejectsUnsupportedRendererWithoutDowngrade() async {

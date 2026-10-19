@@ -200,11 +200,26 @@ def aligned_processing_bounds(
     job: MapJob,
     *,
     complete_blocks: bool = False,
+    output_blocks: tuple[MapBlock, ...] = (),
 ) -> Bounds:
-    """Expand builds that require complete fixed Web Mercator blocks."""
-    if not complete_blocks and job.geometry.mode != GeometryMode.CUSTOM_BBOX:
+    """Expand builds that require complete fixed Web Mercator blocks.
+
+    ``output_blocks`` are canonical selection blocks that must be extracted in
+    full. A route corridor's physical buffer can reach one block past the
+    request bounds, which expand by the centre latitude's metre scale.
+    """
+    if (
+        not complete_blocks
+        and not output_blocks
+        and job.geometry.mode != GeometryMode.CUSTOM_BBOX
+    ):
         return job.geometry.bounds
     min_x, min_y, max_x, max_y = aligned_projected_extent(job.geometry.bounds)
+    if output_blocks:
+        min_x = min(min_x, min(block.x for block in output_blocks) * MAP_BLOCK_SIZE_METERS)
+        min_y = min(min_y, min(block.y for block in output_blocks) * MAP_BLOCK_SIZE_METERS)
+        max_x = max(max_x, (max(block.x for block in output_blocks) + 1) * MAP_BLOCK_SIZE_METERS)
+        max_y = max(max_y, (max(block.y for block in output_blocks) + 1) * MAP_BLOCK_SIZE_METERS)
     return Bounds(
         _x_to_lon(min_x),
         _y_to_lat(min_y),

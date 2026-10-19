@@ -832,6 +832,16 @@ its exact feature set, not the whole supported set, and must match the request
 and signed layer discriminator. Existing target-1 through target-4 requests
 and schema-1/2 policies retain their current shapes and semantics.
 
+The iPhone negotiates the request target before submission. It requests
+target 5 only when the connected firmware advertises `map_pois` and this
+installation's validated `/v1/capabilities` response offers the format-5
+profile. That profile must list `contours` in `optionalFeatures` whenever the
+request keeps or adds contours. Otherwise an ordinary new or label-refresh
+request keeps its target-3/4 shape, so POI-capable firmware still gets maps
+from services without the canary. An invalid capability payload is an error,
+never a guess, and a missing capabilities endpoint (HTTP 404) offers no
+target 5. A rejected request is never resubmitted at another target.
+
 Replace numeric range assumptions with exact feature predicates. Building
 preprocessing is shared by targets 3, 4, and 5; contour generation runs for
 target 4 and target 5 with requested contours; POIs belong to target 5. In
@@ -1200,6 +1210,10 @@ Show the section only when the connected firmware advertises `map_pois`. Enable
 the switches only when the active map reports renderer format 5, POI profile 1,
 and verified health. Otherwise show a regeneration explanation and
 **Download Active Map Again**, matching the established street-label workflow.
+That action requires target 5. If the firmware or this installation's service
+cannot provide it, including an active target-4 map's contours, it fails closed
+with the reason instead of submitting a target-3/4 request. Regenerating an
+active target-5 map for labels likewise requires target 5.
 Preserve contour inclusion when upgrading an active target-4 map. Present
 **Contours** beside the POI layer section; one switch never disables the other.
 If elevation was explicitly omitted, disable the contour switch with
@@ -1619,6 +1633,9 @@ Do not advertise the capability from firmware that cannot validate every
 target-5 section. Do not globally disable target-5 generation after shipping an
 iPhone build that exclusively requests it without simultaneously providing a
 compatible app rollback; silent target downgrade is intentionally forbidden.
+Pre-submission negotiation is not such a downgrade: an ordinary request uses
+target 3/4 only when this installation's capabilities do not offer target 5,
+while explicit POI and active target-5 regeneration fail closed.
 
 ## Expected implementation surface
 

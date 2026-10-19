@@ -525,6 +525,49 @@ inline bool decodeMapProfile(Reader &reader, std::size_t payloadLength,
          (legacyNavigation || reader.byte(profile.rotationMode));
 }
 
+// Stored documents only: firmware without the Nearby runtime keeps every
+// other screen with its order, ID and settings. A removed default moves to the
+// first enabled screen. If none remains, the enabled default Nearby screen
+// becomes a Map screen with the same ID and map settings. Documents that were
+// already invalid are not repaired and still fail validation.
+inline void removeUnsupportedNearby(Document &document, uint32_t nearbyIndexes) {
+  static_assert(MAX_INSTANCES <= 32, "Nearby index mask must fit 32 bits");
+  bool enabledRemains = false;
+  bool defaultRemoved = false;
+  int replacement = -1;
+  for (uint8_t index = 0; index < document.instanceCount; ++index) {
+    const ScreenInstance &instance = document.instances[index];
+    if ((nearbyIndexes & (1UL << index)) == 0) {
+      enabledRemains = enabledRemains || instance.enabled;
+    } else if (instance.id == document.defaultInstanceID) {
+      defaultRemoved = true;
+      if (instance.enabled) replacement = index;
+    }
+  }
+  if (enabledRemains) replacement = -1;
+  uint8_t count = 0;
+  for (uint8_t index = 0; index < document.instanceCount; ++index) {
+    if ((nearbyIndexes & (1UL << index)) != 0 && index != replacement) continue;
+    ScreenInstance instance = document.instances[index];
+    if (index == replacement) {
+      instance.type = ScreenType::Map;
+      (void)setName(instance, "Map", 3);
+    }
+    document.instances[count++] = instance;
+  }
+  for (uint8_t index = count; index < MAX_INSTANCES; ++index)
+    document.instances[index] = ScreenInstance{};
+  document.instanceCount = count;
+  if (defaultRemoved && replacement < 0) {
+    for (uint8_t index = 0; index < count; ++index) {
+      if (document.instances[index].enabled) {
+        document.defaultInstanceID = document.instances[index].id;
+        break;
+      }
+    }
+  }
+}
+
 inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
                                    Document &document, bool stored = false,
                                    bool *normalized = nullptr) {
@@ -549,6 +592,7 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
       !reader.uint32(document.defaultInstanceID))
     return DecodeResult::Malformed;
   document.instanceCount = count;
+  uint32_t unsupportedNearby = 0;
   for (uint8_t index = 0; index < count; ++index) {
     ScreenInstance &instance = document.instances[index];
     uint8_t rawType = 0;
@@ -562,8 +606,14 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
         reader.remaining() < static_cast<std::size_t>(nameLength) +
                                  payloadLength)
       return DecodeResult::Malformed;
-    if (!isSupportedScreenType(static_cast<ScreenType>(rawType)))
+    // A wire upload of an unsupported Nearby screen is still rejected.
+    const bool storedNearbyWithoutRuntime =
+        stored && rawType == static_cast<uint8_t>(ScreenType::Nearby) &&
+        !isSupportedScreenType(ScreenType::Nearby);
+    if (!storedNearbyWithoutRuntime &&
+        !isSupportedScreenType(static_cast<ScreenType>(rawType)))
       return DecodeResult::Unsupported;
+    if (storedNearbyWithoutRuntime) unsupportedNearby |= 1UL << index;
     instance.type = static_cast<ScreenType>(rawType);
     instance.enabled = (flags & INSTANCE_ENABLED_FLAG) != 0;
     instance.nameLength = nameLength;
@@ -626,6 +676,10 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
   }
   if (reader.remaining() != 0)
     return DecodeResult::Malformed;
+  if (unsupportedNearby != 0) {
+    removeUnsupportedNearby(document, unsupportedNearby);
+    if (normalized) *normalized = true;
+  }
   const ValidationError error = validate(document);
   if (error == ValidationError::UnsupportedType ||
       error == ValidationError::UnsupportedWidget)

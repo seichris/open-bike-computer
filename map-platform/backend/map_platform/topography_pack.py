@@ -30,10 +30,13 @@ from .topography_pipeline import canonical_bytes
 def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
                               compiled: CompiledTopography, sample: dict, attribution: bytes,
                               *, cancel: Callable[[], None] = lambda: None,
-                              renderer_format_version: int = 4) -> dict:
+                              renderer_format_version: int = 4,
+                              output_blocks: set[tuple[int, int]] | None = None) -> dict:
     if type(renderer_format_version) is not int or renderer_format_version not in {4, 5}:
         raise ValueError("unsupported contour map target")
     combined = renderer_format_version == 5
+    if output_blocks is not None and (not combined or not output_blocks):
+        raise ValueError("output blocks require a nonempty combined POI target")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", map_id):
         raise ValueError("invalid topographic map ID")
     if output.exists() or output.is_symlink():
@@ -63,6 +66,8 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
         if key is None or (key.x, key.y) in blocks:
             raise ValueError("invalid or duplicate vector block path")
         blocks[key.x, key.y] = path
+    if output_blocks is not None and not set(blocks).issubset(output_blocks):
+        raise ValueError("vector blocks lie outside the target-5 output blocks")
     terrain_grids = {}
     encoded_grids = sample.get("terrainGrids", [])
     if not isinstance(encoded_grids, list) or len(encoded_grids) > MAX_BLOCKS:
@@ -83,6 +88,10 @@ def assemble_topographic_pack(vector_root: Path, output: Path, map_id: str,
             terrain_grids[key] = clipped
     # Device coverage is clipped by the same selection as vector/contour data.
     keys = sorted(set(blocks) | set(compiled.sections) | set(terrain_grids))
+    if output_blocks is not None:
+        # Signed Nearby coverage bounds every device block. Contours beyond it
+        # remain only in the iPhone companion; terrain grids follow ``keys``.
+        keys = [key for key in keys if key in output_blocks]
     if not keys or len(keys) > MAX_BLOCKS:
         raise ValueError("topographic map exceeds block budget or has no device coverage")
     empty = ContourSection(sample["minorIntervalM"], sample["indexIntervalM"], ())

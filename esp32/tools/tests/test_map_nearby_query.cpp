@@ -2,14 +2,285 @@
 #define radians(deg) ((deg) * 0.017453292519943295)
 #include "../../lib/maps/src/mapNearbyQuery.hpp"
 #include "../../lib/maps/src/mapNearbyCoverage.hpp"
+#include "../../lib/maps/src/mapNearbyStorage.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <random>
+#include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
+
+namespace {
+using map_nearby_coverage::Block;
+using map_nearby_query::Position;
+
+struct Window {
+  int32_t firstX = 0, lastX = 0, firstY = 0, lastY = 0;
+};
+
+// The pre-resumable single-pass window and evaluation, kept as an oracle.
+bool referenceWindow(Position rider, double radiusM, Window &window) {
+  using namespace map_nearby_query;
+  if (!valid(rider) || !std::isfinite(radiusM) || radiusM <= 0.0 ||
+      radiusM > 25000.0 || std::fabs(rider.latitude) >= 85.05112878)
+    return false;
+  const double extremeLatitude = std::fabs(rider.latitude) +
+      radiusM / kWgs84MinimumRadiusM * 180.0 / kPi;
+  if (extremeLatitude >= 85.05112878) return false;
+  const double minimumCosine = std::cos(degreesToRadians(extremeLatitude));
+  const double x = kMercatorRadiusM * degreesToRadians(rider.longitude);
+  const double y = kMercatorRadiusM *
+      std::log(std::tan(kPi / 4.0 + degreesToRadians(rider.latitude) / 2.0));
+  const double projectedRadius =
+      radiusM * kMercatorRadiusM / (kWgs84MinimumRadiusM * minimumCosine) +
+      kBlockSizeM;
+  window.firstX = static_cast<int32_t>(std::floor((x - projectedRadius) / kBlockSizeM));
+  window.lastX = static_cast<int32_t>(std::floor((x + projectedRadius) / kBlockSizeM));
+  window.firstY = static_cast<int32_t>(std::floor((y - projectedRadius) / kBlockSizeM));
+  window.lastY = static_cast<int32_t>(std::floor((y + projectedRadius) / kBlockSizeM));
+  return true;
+}
+
+bool referenceComplete(const std::vector<Block> &blocks, Position rider,
+                       double radiusM) {
+  Window window;
+  if (blocks.empty() || !referenceWindow(rider, radiusM, window)) return false;
+  for (int32_t blockX = window.firstX; blockX <= window.lastX; ++blockX)
+    for (int32_t blockY = window.firstY; blockY <= window.lastY; ++blockY) {
+      map_poi_index::Entry entry;
+      entry.blockX = blockX;
+      entry.blockY = blockY;
+      const double bound = map_nearby_query::blockLowerBoundMeters(rider, entry);
+      if ((!std::isfinite(bound) || bound <= radiusM) &&
+          !map_nearby_coverage::contains(blocks, {blockX, blockY}))
+        return false;
+    }
+  return true;
+}
+
+std::vector<Block> squareCoverage(int32_t centerX, int32_t centerY,
+                                  int32_t halfSize) {
+  std::vector<Block> blocks;
+  for (int32_t x = centerX - halfSize; x <= centerX + halfSize; ++x)
+    for (int32_t y = centerY - halfSize; y <= centerY + halfSize; ++y)
+      blocks.push_back({x, y});
+  return blocks; // generated in canonical (x, y) order
+}
+
+std::vector<Block> windowCoverage(Position rider, double radiusM) {
+  Window window;
+  assert(referenceWindow(rider, radiusM, window));
+  std::vector<Block> blocks;
+  for (int32_t x = window.firstX; x <= window.lastX; ++x)
+    for (int32_t y = window.firstY; y <= window.lastY; ++y)
+      blocks.push_back({x, y});
+  return blocks;
+}
+
+// Every split of the scan matches the single-pass oracle, and each step
+// evaluates no more than its budget.
+void testResumableCoverageMatchesSinglePass() {
+  using map_nearby_coverage::CompletenessScan;
+  std::mt19937 random(338);
+  std::uniform_real_distribution<double> latitude(-70.0, 70.0);
+  std::uniform_real_distribution<double> longitude(-180.0, 180.0);
+  std::uniform_real_distribution<double> radius(100.0, 8000.0);
+  size_t completeCases = 0, incompleteCases = 0;
+  for (int trial = 0; trial < 400; ++trial) {
+    const Position rider{latitude(random), longitude(random)};
+    const double radiusM = radius(random);
+    Window window;
+    assert(referenceWindow(rider, radiusM, window));
+    const int32_t centerX = (window.firstX + window.lastX) / 2;
+    const int32_t centerY = (window.firstY + window.lastY) / 2;
+    const int32_t span = (window.lastX - window.firstX) / 2 + 2;
+    auto coverage = squareCoverage(
+        centerX, centerY, std::uniform_int_distribution<int32_t>(0, span)(random));
+    if (trial % 3 == 0 && coverage.size() > 1) // a hole may or may not matter
+      coverage.erase(coverage.begin() + static_cast<std::ptrdiff_t>(
+          std::uniform_int_distribution<size_t>(0, coverage.size() - 1)(random)));
+    const bool expected = referenceComplete(coverage, rider, radiusM);
+    expected ? ++completeCases : ++incompleteCases;
+    assert(map_nearby_coverage::completeWithinRadius(coverage, rider, radiusM) ==
+           expected);
+    for (uint32_t budget : {1U, 7U, 64U, UINT32_MAX}) {
+      CompletenessScan scan(coverage, rider, radiusM);
+      uint32_t previous = 0;
+      while (!scan.step(budget)) {
+        assert(scan.evaluatedBlocks() - previous == budget);
+        previous = scan.evaluatedBlocks();
+      }
+      assert(scan.evaluatedBlocks() - previous <= budget);
+      assert(scan.complete() == expected);
+      assert(scan.step(budget) && scan.evaluatedBlocks() >= previous);
+    }
+  }
+  assert(completeCases >= 40 && incompleteCases >= 40);
+
+  // Invalid inputs never claim completeness, in any number of steps.
+  const std::vector<Block> one{{0, 0}};
+  for (const auto &scan : {
+           CompletenessScan(), CompletenessScan({}, {0.0, 0.0}, 1000.0),
+           CompletenessScan(one, {NAN, 0.0}, 1000.0),
+           CompletenessScan(one, {0.0, 0.0}, 25001.0),
+           CompletenessScan(one, {85.06, 0.0}, 1000.0),
+           CompletenessScan(one, {85.0, 0.0}, 25000.0)}) {
+    assert(scan.done() && !scan.complete() && scan.evaluatedBlocks() == 0);
+  }
+}
+
+// Near the Mercator limit a complete 25 km window spans thousands of blocks.
+// It finishes only after many bounded steps, with the single-pass answer.
+void testHighLatitudeWindowIsEvaluatedInBoundedSteps() {
+  const Position rider{84.0, 10.0};
+  const auto coverage = windowCoverage(rider, 25000.0);
+  assert(coverage.size() > 10000);
+  map_nearby_coverage::CompletenessScan scan(coverage, rider, 25000.0);
+  size_t steps = 0;
+  while (!scan.step(64)) ++steps;
+  assert(scan.complete());
+  assert(scan.evaluatedBlocks() == coverage.size());
+  assert(steps + 1 >= coverage.size() / 64);
+  assert(referenceComplete(coverage, rider, 25000.0));
+}
+
+void appendLe16(std::string &data, uint16_t value) {
+  data.push_back(static_cast<char>(value & 0xffU));
+  data.push_back(static_cast<char>(value >> 8U));
+}
+
+void appendLe32(std::string &data, uint32_t value) {
+  for (unsigned shift = 0; shift < 32; shift += 8)
+    data.push_back(static_cast<char>((value >> shift) & 0xffU));
+}
+
+uint32_t crc32(const std::string &data) {
+  return map_nearby_storage::crcUpdate(
+             0xffffffffU, reinterpret_cast<const uint8_t *>(data.data()),
+             data.size()) ^ 0xffffffffU;
+}
+
+void writeFile(const std::string &path, const std::string &bytes) {
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  assert(out.good());
+  out << bytes;
+  assert(out.good());
+}
+
+// One block (0, 0) with a single shop about 141 m from the origin: an empty
+// FMB6 geometry prefix, the EXT6 directory and section 6, plus its FPI1 entry.
+std::string installedShopMap() {
+  char pattern[] = "/tmp/open-bike-nearby-coverage-XXXXXX";
+  const char *created = ::mkdtemp(pattern);
+  assert(created != nullptr);
+  const std::string root(created);
+  assert(::mkdir((root + "/assets").c_str(), 0700) == 0);
+  assert(::mkdir((root + "/+000+000").c_str(), 0700) == 0);
+  std::string section;
+  appendLe16(section, 1);
+  appendLe16(section, 8);
+  appendLe32(section, 1);
+  appendLe16(section, 100);
+  appendLe16(section, 100);
+  section.append({1, 2, 0, 0});
+  std::string block("FMB\x06\0\0\0\0", 8);
+  block.append({'E', 'X', 'T', '6', 6, 0, 0, 0});
+  block.append(5 * 16, '\0');
+  block.append({6, 1, 0, 0});
+  appendLe32(block, 112);
+  appendLe32(block, static_cast<uint32_t>(section.size()));
+  appendLe32(block, crc32(section));
+  assert(block.size() == 112);
+  block += section;
+  writeFile(root + "/+000+000/0_0.fmb", block);
+  std::string entry;
+  appendLe32(entry, 0);
+  appendLe32(entry, 0);
+  appendLe32(entry, 1);
+  appendLe16(entry, 1);
+  for (int category = 1; category < 5; ++category) appendLe16(entry, 0);
+  appendLe32(entry, 112);
+  appendLe32(entry, static_cast<uint32_t>(section.size()));
+  appendLe16(entry, 0);
+  assert(entry.size() == 32);
+  std::string index("FPI1", 4);
+  appendLe16(index, 32);
+  appendLe16(index, 0);
+  appendLe32(index, 1);
+  appendLe32(index, crc32(entry));
+  writeFile(root + "/assets/nearby-pois.fpi", index + entry);
+  return root;
+}
+
+size_t stepsUntilDone(map_nearby_storage::SearchCursor &cursor) {
+  size_t slices = 0;
+  while (!cursor.step()) {
+    // Neither the nearest set nor a status is visible before coverage ends.
+    assert(cursor.result().count == 0);
+    assert(cursor.result().status == map_nearby_storage::Status::Unavailable);
+    assert(++slices < 1000);
+  }
+  return slices;
+}
+
+void testCursorPublishesAfterResumableCoverage() {
+  using map_nearby_storage::SearchCursor;
+  using map_nearby_storage::Status;
+  const std::string root = installedShopMap();
+  const Position rider{0.0, 0.0};
+  const auto window = windowCoverage(rider, 25000.0);
+  assert(window.size() > 3 * 64);
+
+  SearchCursor uncovered(root, rider, 1, 25000.0);
+  const size_t searchSlices = stepsUntilDone(uncovered);
+  assert(uncovered.result().status == Status::Ok);
+  assert(uncovered.result().count == 1 && !uncovered.result().coverageComplete);
+
+  SearchCursor covered(root, rider, 1, 25000.0, &window);
+  const size_t coveredSlices = stepsUntilDone(covered);
+  assert(coveredSlices >= searchSlices + window.size() / 64);
+  assert(covered.result().status == Status::Ok);
+  assert(covered.result().count == 1 && covered.result().coverageComplete);
+  assert(covered.result().places[0].category == 1);
+  assert(covered.result().searchedBlocks == 1);
+
+  // A gap inside the circle ends the scan early and only drops the claim.
+  auto gap = window;
+  gap.erase(std::lower_bound(gap.begin(), gap.end(), Block{0, 0},
+                             map_nearby_coverage::less));
+  SearchCursor partial(root, rider, 1, 25000.0, &gap);
+  assert(stepsUntilDone(partial) < coveredSlices);
+  assert(partial.result().status == Status::Ok);
+  assert(partial.result().count == 1 && !partial.result().coverageComplete);
+
+  // After the record search the cursor is mid-coverage: cancelling there must
+  // not publish the already complete nearest set.
+  auto cancel = [](void *) { return true; };
+  SearchCursor interrupted(root, rider, 1, 25000.0, &window);
+  for (size_t slice = 0; slice <= searchSlices + 1; ++slice)
+    assert(!interrupted.step());
+  assert(interrupted.step(cancel));
+  assert(interrupted.result().status == Status::Cancelled);
+  assert(interrupted.result().count == 0 &&
+         !interrupted.result().coverageComplete);
+  assert(interrupted.step(cancel) && interrupted.done());
+
+  assert(std::remove((root + "/+000+000/0_0.fmb").c_str()) == 0);
+  assert(std::remove((root + "/assets/nearby-pois.fpi").c_str()) == 0);
+  assert(::rmdir((root + "/+000+000").c_str()) == 0);
+  assert(::rmdir((root + "/assets").c_str()) == 0);
+  assert(::rmdir(root.c_str()) == 0);
+}
+} // namespace
 
 int main() {
   using namespace map_nearby_query;
@@ -286,6 +557,10 @@ int main() {
   assert(prepareFrontier(denseIndex.data(), denseIndex.size(), origin,
                          selectedCategories, 25000.0, frontier));
   assert(frontier.size() == 3);
+
+  testResumableCoverageMatchesSinglePass();
+  testHighLatitudeWindowIsEvaluatedInBoundedSteps();
+  testCursorPublishesAfterResumableCoverage();
 
   std::cout << "Nearby query geometry and bounded nearest-ten tests passed\n";
 }

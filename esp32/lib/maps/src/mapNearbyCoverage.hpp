@@ -152,41 +152,90 @@ inline bool contains(const std::vector<Block> &blocks, Block block) {
 // Conservative: warn whenever any block that might meet the WGS-84 search
 // circle was not selected. Extra warnings near boundaries are acceptable;
 // falsely claiming a searched-but-undownloaded area is not.
+//
+// Resumable so the sole map worker never evaluates a whole window in one slice:
+// a 25 km window near the Mercator limit spans about 21,000 blocks. Any split
+// into bounded steps yields the same answer as one uninterrupted evaluation.
+class CompletenessScan {
+ public:
+  // A default scan is finished and incomplete.
+  CompletenessScan() = default;
+  CompletenessScan(const std::vector<Block> &blocks,
+                   map_nearby_query::Position rider, double radiusM)
+      : blocks_(&blocks), rider_(rider), radiusM_(radiusM) {
+    using namespace map_nearby_query;
+    if (blocks.empty() || !valid(rider) || !std::isfinite(radiusM) ||
+        radiusM <= 0.0 || radiusM > 25000.0 ||
+        std::fabs(rider.latitude) >= 85.05112878) return;
+    const double angle = radiusM / kWgs84MinimumRadiusM;
+    const double latitudeDelta = angle * 180.0 / kPi;
+    const double extremeLatitude = std::fabs(rider.latitude) + latitudeDelta;
+    if (extremeLatitude >= 85.05112878) return;
+    const double minimumCosine = std::cos(degreesToRadians(extremeLatitude));
+    const double x = kMercatorRadiusM * degreesToRadians(rider.longitude);
+    const double y = kMercatorRadiusM *
+        std::log(std::tan(kPi / 4.0 + degreesToRadians(rider.latitude) / 2.0));
+    const double projectedRadius =
+        radiusM * kMercatorRadiusM / (kWgs84MinimumRadiusM * minimumCosine) +
+        kBlockSizeM;
+    firstX_ = static_cast<int32_t>(std::floor((x - projectedRadius) / kBlockSizeM));
+    lastX_ = static_cast<int32_t>(std::floor((x + projectedRadius) / kBlockSizeM));
+    firstY_ = static_cast<int32_t>(std::floor((y - projectedRadius) / kBlockSizeM));
+    lastY_ = static_cast<int32_t>(std::floor((y + projectedRadius) / kBlockSizeM));
+    blockX_ = firstX_;
+    blockY_ = firstY_;
+    done_ = false;
+  }
+
+  bool done() const { return done_; }
+  bool complete() const { return done_ && complete_; }
+  uint32_t evaluatedBlocks() const { return evaluated_; }
+
+  // Evaluates at most `budget` window blocks; returns done().
+  bool step(uint32_t budget) {
+    for (; !done_ && budget != 0; --budget) {
+      ++evaluated_;
+      // The selection test is a binary search; only unselected blocks need
+      // the trigonometric distance bound, which is costly on the ESP32-S3.
+      if (!contains(*blocks_, {blockX_, blockY_})) {
+        map_poi_index::Entry entry;
+        entry.blockX = blockX_;
+        entry.blockY = blockY_;
+        const double bound =
+            map_nearby_query::blockLowerBoundMeters(rider_, entry);
+        if (!std::isfinite(bound) || bound <= radiusM_) {
+          done_ = true;
+          return true;
+        }
+      }
+      if (blockY_ != lastY_) ++blockY_;
+      else if (blockX_ != lastX_) {
+        ++blockX_;
+        blockY_ = firstY_;
+      } else {
+        complete_ = true;
+        done_ = true;
+      }
+    }
+    return done_;
+  }
+
+ private:
+  const std::vector<Block> *blocks_ = nullptr;
+  map_nearby_query::Position rider_{};
+  double radiusM_ = 0.0;
+  int32_t firstX_ = 0, lastX_ = 0, firstY_ = 0, lastY_ = 0;
+  int32_t blockX_ = 0, blockY_ = 0;
+  uint32_t evaluated_ = 0;
+  bool done_ = true;
+  bool complete_ = false;
+};
+
 inline bool completeWithinRadius(const std::vector<Block> &blocks,
                                  map_nearby_query::Position rider,
                                  double radiusM) {
-  using namespace map_nearby_query;
-  if (blocks.empty() || !valid(rider) || !std::isfinite(radiusM) ||
-      radiusM <= 0.0 || radiusM > 25000.0 ||
-      std::fabs(rider.latitude) >= 85.05112878) return false;
-  const double angle = radiusM / kWgs84MinimumRadiusM;
-  const double latitudeDelta = angle * 180.0 / kPi;
-  const double extremeLatitude = std::fabs(rider.latitude) + latitudeDelta;
-  if (extremeLatitude >= 85.05112878) return false;
-  const double minimumCosine = std::cos(degreesToRadians(extremeLatitude));
-  const double x = kMercatorRadiusM * degreesToRadians(rider.longitude);
-  const double y = kMercatorRadiusM *
-      std::log(std::tan(kPi / 4.0 + degreesToRadians(rider.latitude) / 2.0));
-  const double projectedRadius =
-      radiusM * kMercatorRadiusM / (kWgs84MinimumRadiusM * minimumCosine) +
-      kBlockSizeM;
-  const int32_t firstX = static_cast<int32_t>(std::floor((x - projectedRadius) /
-                                                         kBlockSizeM));
-  const int32_t lastX = static_cast<int32_t>(std::floor((x + projectedRadius) /
-                                                        kBlockSizeM));
-  const int32_t firstY = static_cast<int32_t>(std::floor((y - projectedRadius) /
-                                                         kBlockSizeM));
-  const int32_t lastY = static_cast<int32_t>(std::floor((y + projectedRadius) /
-                                                        kBlockSizeM));
-  for (int32_t blockX = firstX; blockX <= lastX; ++blockX)
-    for (int32_t blockY = firstY; blockY <= lastY; ++blockY) {
-      map_poi_index::Entry entry;
-      entry.blockX = blockX;
-      entry.blockY = blockY;
-      const double bound = blockLowerBoundMeters(rider, entry);
-      if ((!std::isfinite(bound) || bound <= radiusM) &&
-          !contains(blocks, {blockX, blockY})) return false;
-    }
-  return true;
+  CompletenessScan scan(blocks, rider, radiusM);
+  while (!scan.step(UINT32_MAX)) {}
+  return scan.complete();
 }
 } // namespace map_nearby_coverage

@@ -85,6 +85,15 @@ def selection_output_blocks(job: MapJob, maximum_blocks: int) -> tuple[MapBlock,
     return blocks
 
 
+def nearby_output_blocks(job: MapJob) -> tuple[MapBlock, ...]:
+    """Signed target-5 Nearby coverage and its canonical output block set.
+
+    Admission, extraction, subset reuse, contour composition and the signed
+    manifest all use this one set, bounded by the device/iPhone reader limit.
+    """
+    return selection_output_blocks(job, GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS)
+
+
 class BuildingScopeError(RuntimeError):
     """A target-3 scope cannot be planned without violating its policy."""
 

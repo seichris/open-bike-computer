@@ -89,6 +89,31 @@ class UnsupportedRendererFeaturesError(UnsupportedRendererTargetError):
                 "availableFeatures": list(self.available_features)}
 
 
+class NearbyCoverageLimitError(ValueError):
+    code = "nearby_coverage_exceeded"
+
+
+def _require_nearby_coverage(geometry) -> None:
+    """Bound signed target-5 coverage before a job is persisted or extracted."""
+    from types import SimpleNamespace
+
+    from .building_scope import (
+        GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS,
+        BuildingScopeError,
+        nearby_output_blocks,
+    )
+
+    try:
+        nearby_output_blocks(SimpleNamespace(geometry=geometry))
+    except BuildingScopeError as exc:
+        if exc.code != "building_scope_exceeded":
+            raise ValueError(str(exc)) from exc
+        raise NearbyCoverageLimitError(
+            "POI map coverage exceeds "
+            f"{GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS} map blocks"
+        ) from exc
+
+
 def _serialized(method):
     @wraps(method)
     def locked(self, *args, **kwargs):
@@ -1883,6 +1908,9 @@ class MapJobService:
         try:
             geometry = normalize_geometry(request)
             self.limits.validate_geometry(geometry)
+            # resolve_client_request has already normalized the target.
+            if request.get("target", {}).get("rendererFormatVersion") == 5:
+                _require_nearby_coverage(geometry)
             source = self.source_index.resolve_for_bounds(geometry.bounds)
         except (GeometryError, LimitError, SourceResolutionError) as exc:
             raise ValueError(str(exc)) from exc

@@ -2376,8 +2376,8 @@ final class OfflineMapManager: ObservableObject {
         createJobAndDownload(
             request: OfflineMapJobRequest
                 .customBBox(selectedMapBounds)
-                .withTopography(includeTopographyInNewMaps, terrain: bleManager.supportsTerrainExperiments)
-                .withMapPois(bleManager.supportsMapPois)
+                .withTopography(includeTopographyInNewMaps, terrain: bleManager.supportsTerrainExperiments),
+            deviceSupportsMapPois: bleManager.supportsMapPois
         )
     }
 
@@ -2395,36 +2395,50 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
-    func regenerateActiveMap(bleManager: BLEManager) {
+    func regenerateActiveMap(
+        bleManager: BLEManager,
+        purpose: OfflineMapRegenerationPurpose = .streetLabels
+    ) {
         guard canStartNewMapJob(),
               !bleManager.mapTransferActiveMapId.isEmpty,
               let packURL = cachedPackURLs.first(where: {
                   savedMapID(for: $0) == bleManager.mapTransferActiveMapId
               }),
               let manifest = OfflineMapPackPreviewReader.manifest(for: packURL),
-              let coordinates = manifest.bounds,
-              coordinates.count == 4 else {
+              let bounds = manifest.previewBounds else {
             errorMessage = "The active map area is unavailable. Choose the area again in Saved Maps."
+            return
+        }
+        // The POI action and every active target-5 map require POIs; a label
+        // refresh of target 3/4 adds them only when the service offers them.
+        let poiRequirement = OfflineMapPoiRequestPolicy.regenerationRequirement(
+            purpose: purpose,
+            activeRendererFormatVersion: manifest.target?.formatVersion
+        )
+        guard poiRequirement == .opportunistic || bleManager.supportsMapPois else {
+            errorMessage = bleManager.hasReceivedDeviceCapabilities
+                ? "Update the Bike Computer firmware to add points of interest."
+                : "Connect to the Bike Computer to check point-of-interest support."
             return
         }
         installBoundsMap(
             OfflineMapBounds(
-                minLon: coordinates[0],
-                minLat: coordinates[1],
-                maxLon: coordinates[2],
-                maxLat: coordinates[3]
+                minLon: bounds.minLongitude, minLat: bounds.minLatitude,
+                maxLon: bounds.maxLongitude, maxLat: bounds.maxLatitude
             ),
             bleManager: bleManager,
             preserveContours: manifest.target?.formatVersion == 4 ||
                 manifest.target?.requestedFeatures?.contains("contours") == true ||
-                bleManager.activeMapContourLayerIncluded
+                bleManager.activeMapContourLayerIncluded,
+            poiRequirement: poiRequirement
         )
     }
 
     private func installBoundsMap(
         _ bounds: OfflineMapBounds,
         bleManager: BLEManager,
-        preserveContours: Bool = false
+        preserveContours: Bool = false,
+        poiRequirement: OfflineMapPoiRequestPolicy.Requirement = .opportunistic
     ) {
         let includeContours = includeTopographyInNewMaps || preserveContours
         guard canStartNewMapJob() else { return }
@@ -2449,20 +2463,20 @@ final class OfflineMapManager: ObservableObject {
             ) {
                 return
             }
-            let request = OfflineMapJobRequest
-                .customBBox(bounds)
-                .withTopography(includeContours, terrain: bleManager.supportsTerrainExperiments)
-                .withMapPois(bleManager.supportsMapPois)
-                .forDevice(
-                    firmwareVersion: bleManager.firmwareVersion
-                )
-                .identified(
-                    clientInstallationId: client.clientInstallationId,
-                    clientRequestId: UUID().uuidString.lowercased(),
-                    installOnDevice: true
-                )
-            try await manager.requireGenerationCapability(
-                for: request,
+            let request = try await manager.negotiatedGenerationRequest(
+                OfflineMapJobRequest
+                    .customBBox(bounds)
+                    .withTopography(includeContours, terrain: bleManager.supportsTerrainExperiments)
+                    .forDevice(
+                        firmwareVersion: bleManager.firmwareVersion
+                    )
+                    .identified(
+                        clientInstallationId: client.clientInstallationId,
+                        clientRequestId: UUID().uuidString.lowercased(),
+                        installOnDevice: true
+                    ),
+                deviceSupportsMapPois: bleManager.supportsMapPois,
+                poiRequirement: poiRequirement,
                 client: client
             )
             manager.currentJob = try await manager.createJob(request, client: client)
@@ -4439,7 +4453,10 @@ final class OfflineMapManager: ObservableObject {
             .withTopography(includeTopographyInNewMaps, terrain: supportsTerrainExperiments)
     }
 
-    private func createJobAndDownload(request: OfflineMapJobRequest) {
+    private func createJobAndDownload(
+        request: OfflineMapJobRequest,
+        deviceSupportsMapPois: Bool = false
+    ) {
         guard canStartNewMapJob() else { return }
         startMapJobTask { manager in
             var client = try manager.makeClient()
@@ -4458,13 +4475,14 @@ final class OfflineMapManager: ObservableObject {
             manager.transferProgress = 0
             manager.statusMessage = "creating map job"
 
-            let identifiedRequest = request.identified(
-                clientInstallationId: client.clientInstallationId,
-                clientRequestId: UUID().uuidString.lowercased(),
-                installOnDevice: false
-            )
-            try await manager.requireGenerationCapability(
-                for: identifiedRequest,
+            let identifiedRequest = try await manager.negotiatedGenerationRequest(
+                request.identified(
+                    clientInstallationId: client.clientInstallationId,
+                    clientRequestId: UUID().uuidString.lowercased(),
+                    installOnDevice: false
+                ),
+                deviceSupportsMapPois: deviceSupportsMapPois,
+                poiRequirement: .opportunistic,
                 client: client
             )
             manager.currentJob = try await manager.createJob(identifiedRequest, client: client)
@@ -4589,24 +4607,35 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
-    private func requireGenerationCapability(
-        for request: OfflineMapJobRequest,
+    /// Fetches this installation's capabilities once, chooses the renderer
+    /// target before submission, then checks that exact target. Nothing here
+    /// runs after createJob, so a rejected request is never resubmitted.
+    private func negotiatedGenerationRequest(
+        _ base: OfflineMapJobRequest,
+        deviceSupportsMapPois: Bool,
+        poiRequirement: OfflineMapPoiRequestPolicy.Requirement,
         client: OfflineMapPlatformClient
-    ) async throws {
-        guard let rendererFormatVersion = request.target?.rendererFormatVersion else {
-            return
-        }
+    ) async throws -> OfflineMapJobRequest {
+        let capabilities: OfflineMapGenerationCapabilities?
         do {
-            let capabilities = try await client.generationCapabilities()
-            try capabilities.require(
-                rendererFormatVersion: rendererFormatVersion
-            )
+            capabilities = try await client.generationCapabilities()
         } catch OfflineMapPlatformError.serverStatus(let status, _) where status == 404 {
             // Preserve compatibility while the production control plane rolls
-            // to the capabilities contract. The create endpoint remains the
-            // authoritative fail-closed gate and never downgrades the request.
-            return
+            // to the capabilities contract. Without that evidence target 5 is
+            // never selected; the create endpoint remains authoritative.
+            capabilities = nil
         }
+        let request = try OfflineMapPoiRequestPolicy.request(
+            base,
+            deviceSupportsMapPois: deviceSupportsMapPois,
+            capabilities: capabilities,
+            requirement: poiRequirement
+        )
+        if let capabilities,
+           let rendererFormatVersion = request.target?.rendererFormatVersion {
+            try capabilities.require(rendererFormatVersion: rendererFormatVersion)
+        }
+        return request
     }
 
     private func listJobsWithRetry(

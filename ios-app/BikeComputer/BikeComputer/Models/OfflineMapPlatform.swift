@@ -1199,6 +1199,25 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
     let generationProfiles: [OfflineMapGenerationProfile]
 
     func require(rendererFormatVersion: Int) throws {
+        try validate()
+        let supported = generationProfiles.map(\.rendererFormatVersion)
+        guard supported.contains(rendererFormatVersion) else {
+            throw OfflineMapPlatformError.unsupportedRendererTarget(
+                requestedRendererFormatVersion: rendererFormatVersion,
+                supportedRendererFormatVersions: supported,
+                message: "Renderer format \(rendererFormatVersion) generation is not available in the \(deploymentChannel) map service."
+            )
+        }
+    }
+
+    /// The installation-scoped target-5 profile, after validating the whole
+    /// response. Its optional features are this installation's authorization.
+    func mapPoiProfile() throws -> OfflineMapGenerationProfile? {
+        try validate()
+        return generationProfiles.first { $0.rendererFormatVersion == 5 }
+    }
+
+    func validate() throws {
         let supported = generationProfiles.map(\.rendererFormatVersion)
         let profileIDs = generationProfiles.map(\.id)
         let profileContracts: [Int: (id: String, features: Set<String>)] = [
@@ -1235,13 +1254,73 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
               }) else {
             throw OfflineMapPlatformError.invalidResponse
         }
-        guard supported.contains(rendererFormatVersion) else {
+    }
+}
+
+// Default (MainActor in the app) isolation, matching the request and
+// capability models these policies read; callers are UI/manager code.
+enum OfflineMapRegenerationPurpose: Equatable {
+    /// Street-label refresh: add POIs only when available, but never drop the
+    /// POI layer of an active target-5 map.
+    case streetLabels
+    /// The Points of Interest action: POIs are the reason for the request.
+    case pointsOfInterest
+}
+
+/// Chooses the renderer target before submission. Target 5 is selected only
+/// when the device and this installation's validated service capabilities
+/// support every requested layer. The create endpoint stays authoritative and
+/// a submitted request is never retried as another target.
+enum OfflineMapPoiRequestPolicy {
+    enum Requirement: Equatable {
+        /// Otherwise keep the existing target-3/4 request unchanged.
+        case opportunistic
+        /// Fail closed before submission instead of dropping POIs or contours.
+        case required
+    }
+
+    static func regenerationRequirement(
+        purpose: OfflineMapRegenerationPurpose,
+        activeRendererFormatVersion: Int?
+    ) -> Requirement {
+        purpose == .pointsOfInterest || activeRendererFormatVersion == 5
+            ? .required : .opportunistic
+    }
+
+    static func request(
+        _ base: OfflineMapJobRequest,
+        deviceSupportsMapPois: Bool,
+        capabilities: OfflineMapGenerationCapabilities?,
+        requirement: Requirement
+    ) throws -> OfflineMapJobRequest {
+        // A malformed response is never evidence for any target.
+        let profile = try capabilities?.mapPoiProfile()
+        let baseFormat = base.target?.rendererFormatVersion
+        let unavailable: String?
+        if !deviceSupportsMapPois {
+            unavailable = "Update the Bike Computer firmware to add points of interest."
+        } else if baseFormat != 3 && baseFormat != 4 {
+            unavailable = "Points of interest require a street-label and 3D-building map."
+        } else if capabilities == nil {
+            unavailable = "This map service does not report point-of-interest map support."
+        } else if let profile {
+            unavailable = baseFormat == 4 &&
+                !(profile.optionalFeatures ?? []).contains("contours")
+                ? "This map service cannot add points of interest while keeping this map's contours."
+                : nil
+        } else {
+            unavailable = "Points of interest are not available from this map service for this app installation."
+        }
+        guard let unavailable else { return base.withMapPois(true) }
+        guard requirement == .opportunistic else {
             throw OfflineMapPlatformError.unsupportedRendererTarget(
-                requestedRendererFormatVersion: rendererFormatVersion,
-                supportedRendererFormatVersions: supported,
-                message: "Renderer format \(rendererFormatVersion) generation is not available in the \(deploymentChannel) map service."
+                requestedRendererFormatVersion: 5,
+                supportedRendererFormatVersions:
+                    capabilities?.generationProfiles.map(\.rendererFormatVersion) ?? [],
+                message: unavailable
             )
         }
+        return base
     }
 }
 

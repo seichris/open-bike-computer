@@ -86,6 +86,7 @@ from .building_scope import (
     GlobalBuildingPlan,
     ScopePlan,
     legacy_building_scope_diagnostics,
+    nearby_output_blocks,
     plan_building_chunk_scope,
     plan_global_building_scope,
     plan_building_scope,
@@ -138,6 +139,7 @@ from .models import JobStatus, MapJob, SourceRegion
 from .monitoring import MapMonitoringStore
 from .preview import render_boundary_preview
 from .reuse import (
+    MAP_BLOCK_SIZE_METERS,
     MapReuseKeys,
     MapBlock,
     SubsetReuseUnavailable,
@@ -1967,9 +1969,15 @@ class MapBuildPipeline:
         archive_path = job_dir / f"{map_id}.zip"
         building_block_cache_identity_path: Path | None = None
         format_version = renderer_format_version(job.request)
+        # Admission rejects oversized target-5 coverage. Persisted jobs still
+        # fail typed here, before extraction, in every building scope mode.
+        nearby_blocks = (
+            nearby_output_blocks(job) if renderer_includes_pois(format_version) else ()
+        )
         processing_bounds = aligned_processing_bounds(
             job,
             complete_blocks=renderer_has_buildings(format_version),
+            output_blocks=nearby_blocks,
         )
         scope_plan: ScopePlan | None = None
         scope_diagnostics: dict[str, Any] | None = None
@@ -5877,6 +5885,11 @@ class MapBuildPipeline:
             self._topography_attribution(sample),
             cancel=cancel,
             renderer_format_version=renderer_format_version(job.request),
+            output_blocks=(
+                {(block.x, block.y) for block in nearby_output_blocks(job)}
+                if renderer_includes_pois(renderer_format_version(job.request))
+                else None
+            ),
         )
         generated_vectmap = pair_root / "device" / "VECTMAP"
         current_vectmap = pack_root / "VECTMAP"
@@ -7806,6 +7819,26 @@ class MapBuildPipeline:
                 args.extend(
                     ["--selection-buffer-m", str(job.geometry.corridor_width_m)]
                 )
+        if renderer_includes_pois(format_version):
+            # The signed Nearby coverage is the complete target-5 output set.
+            # Selection masks, calibration and closure inputs are unchanged;
+            # features crossing the selection edge cannot emit extra blocks.
+            output_blocks_path = geojson_prefix.parent / "nearby-output-blocks.json"
+            output_blocks_path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "blockSizeMeters": MAP_BLOCK_SIZE_METERS,
+                        "blocks": [
+                            [block.x, block.y] for block in nearby_output_blocks(job)
+                        ],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            args.extend(["--output-blocks", str(output_blocks_path)])
         progress_coalescer = ProgressCoalescer()
         label_stats: dict[str, Any] | None = None
         building_stats: dict[str, Any] | None = None
@@ -8047,10 +8080,15 @@ class MapBuildPipeline:
             raise SubsetReuseUnavailable("parent map pack cannot be read") from exc
         if not parent_identity_matches:
             raise SubsetReuseUnavailable("parent map pack identity is invalid")
-        if (
+        if renderer_includes_pois(renderer_format_version(child.request)):
+            try:
+                required = set(nearby_output_blocks(child))
+            except BuildingScopeError as exc:
+                raise SubsetReuseUnavailable(str(exc)) from exc
+        elif (
             self.building_scope_mode == "selected"
             and renderer_format_version(child.request)
-            in {BUILDING_RENDERER_FORMAT_VERSION, POI_RENDERER_FORMAT_VERSION}
+            == BUILDING_RENDERER_FORMAT_VERSION
         ):
             calibration = load_building_calibration_window(
                 self.paths.osm_extract_root / "conf" / "building_height_rules.yaml"

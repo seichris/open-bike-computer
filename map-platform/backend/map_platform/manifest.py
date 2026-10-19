@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .building_scope import GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS, selection_output_blocks
+from .building_scope import nearby_output_blocks
 from .map_artifact_validation import (
     summarize_fmb_buildings,
     validate_fmb5,
@@ -300,7 +300,7 @@ def build_manifest(
     elif building_preprocessing is not None:
         raise ValueError("building preprocessing metadata requires renderer target 3 or 4")
     if format_version == 5:
-        coverage_blocks = selection_output_blocks(job, GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS)
+        coverage_blocks = nearby_output_blocks(job)
         coverage_set = set(coverage_blocks)
         for entry in files:
             if entry["path"].endswith(".fmb") and block_from_pack_path(entry["path"]) not in coverage_set:
