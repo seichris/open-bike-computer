@@ -42,7 +42,10 @@ nonisolated enum DiagnosticsBrokerKeychain {
 }
 
 nonisolated private enum DiagnosticsBrokerHTTP {
-    enum Failure: Error { case unavailable, invalidResponse, authorizationDenied, inboxFull }
+    enum Failure: Error {
+        case unavailable, invalidResponse, authorizationDenied, inboxFull
+        case uploadRejected(Int)
+    }
     static func request(_ pairing: DiagnosticsBrokerPairing, method: String, path: String,
                         body: Data? = nil, file: URL? = nil, digest: String? = nil) async throws -> Data {
         guard pairing.valid(), let base = pairing.baseURL else { throw Failure.unavailable }
@@ -89,6 +92,9 @@ nonisolated private enum DiagnosticsBrokerHTTP {
         let (stream, response) = try await session.bytes(for: request)
         if (response as? HTTPURLResponse)?.statusCode == 401 { throw Failure.authorizationDenied }
         let statusCode = (response as? HTTPURLResponse)?.statusCode
+        if file != nil, let statusCode, [400, 409, 413, 415, 422].contains(statusCode) {
+            throw Failure.uploadRejected(statusCode)
+        }
         guard statusCode == 200 || (file != nil && statusCode == 507),
               response.expectedContentLength <= 64 * 1024 else { throw Failure.invalidResponse }
         var data = Data()
@@ -117,6 +123,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
     private weak var recorder: RideDiagnosticsRecorder?
     private weak var bleManager: BLEManager?
     private var pairing: DiagnosticsBrokerPairing?
+    private var rejectedHandoffCount = 0
     private var active = false
     private var loop: Task<Void, Never>?
     private var exportTask: Task<Void, Never>?
@@ -247,6 +254,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
             defer {
                 if self?.loopGeneration == generation { self?.loop = nil }
             }
+            var retryDelay = 5
             while !Task.isCancelled {
                 guard let self, active, let candidate = pairing else { return }
                 guard candidate.valid(), candidate.phoneID == nil || candidate.phoneID == phoneID else {
@@ -265,7 +273,10 @@ final class DiagnosticsBrokerClient: ObservableObject {
                         pairing = confirmed
                     } else { confirmed = candidate }
                     try await poll(confirmed, generation: generation)
-                    status = "Mac connected. Local recording remains independent."
+                    retryDelay = 5
+                    status = rejectedHandoffCount == 0
+                        ? "Mac connected. Local recording remains independent."
+                        : "Mac connected. \(rejectedHandoffCount) rejected handoff(s) preserved in the outbox; later eligible bundles can still deliver. Export source evidence or delete retained diagnostics to release outbox capacity."
                 } catch DiagnosticsBrokerHTTP.Failure.authorizationDenied {
                     if !Task.isCancelled, loopGeneration == generation {
                         isPaired = false
@@ -279,7 +290,8 @@ final class DiagnosticsBrokerClient: ObservableObject {
                 } catch {
                     if !Task.isCancelled, loopGeneration == generation { status = "Mac unavailable; local logs and pending handoffs are retained." }
                 }
-                try? await Task.sleep(for: .seconds(5))
+                try? await Task.sleep(for: .seconds(retryDelay))
+                retryDelay = min(retryDelay * 2, 60)
             }
         }
     }
@@ -593,7 +605,8 @@ final class DiagnosticsBrokerClient: ObservableObject {
         let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isSymbolicLinkKey])
             .filter { $0.pathExtension == "zip" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard files.count <= 8 else { throw DiagnosticsAcquisitionStore.Failure.storageFull }
-        for file in files.prefix(1) {
+        rejectedHandoffCount = 0
+        for file in files {
             guard let id = UUID(uuidString: file.deletingPathExtension().lastPathComponent),
                   try file.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else {
                 throw DiagnosticsAcquisitionStore.Failure.invalidManifest
@@ -607,8 +620,20 @@ final class DiagnosticsBrokerClient: ObservableObject {
                     .map { String(format: "%02x", $0) }.joined()
             }.value
             try checkOwner(pairing, generation: generation)
-            let response = try await DiagnosticsBrokerHTTP.request(pairing, method: "PUT",
-                path: "v2/uploads/\(id.uuidString.lowercased())", file: file, digest: hash)
+            if try DiagnosticsHandoffRejection.contains(id, sha256: hash, root: root) {
+                rejectedHandoffCount += 1
+                continue
+            }
+            let response: Data
+            do {
+                response = try await DiagnosticsBrokerHTTP.request(pairing, method: "PUT",
+                    path: "v2/uploads/\(id.uuidString.lowercased())", file: file, digest: hash)
+            } catch DiagnosticsBrokerHTTP.Failure.uploadRejected(let code) {
+                try checkOwner(pairing, generation: generation)
+                try DiagnosticsHandoffRejection.save(id, sha256: hash, statusCode: code, root: root)
+                rejectedHandoffCount += 1
+                continue
+            }
             try checkOwner(pairing, generation: generation)
             struct Receipt: Decodable { let schema: Int; let id: UUID; let sha256: String; let accepted: Bool }
             let receipt = try JSONDecoder().decode(Receipt.self, from: response)
@@ -617,6 +642,7 @@ final class DiagnosticsBrokerClient: ObservableObject {
             }
             try DiagnosticsHandoffReceipt.acknowledge(id, sha256: hash, root: root)
             try FileManager.default.removeItem(at: file)
+            return // At most one successful upload per foreground poll.
         }
     }
 }

@@ -17,6 +17,14 @@ SPEC.loader.exec_module(changed_components)
 
 
 class ChangedComponentsTests(unittest.TestCase):
+    def test_pinned_social_renderer_inputs_select_its_build_job(self):
+        for path in changed_components.FIRMWARE_RENDER_TEST_PATHS:
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["firmware_build"])
+                self.assertTrue(selected["firmware_host"])
+                self.assertFalse(selected["ios"])
+
     def test_diagnostics_registry_selects_all_producers_and_consumers(self) -> None:
         for path in ("protocol/diagnostics/registry-v2.json",
                      "tools/generate_diagnostics_contract.py"):
@@ -80,6 +88,12 @@ class ChangedComponentsTests(unittest.TestCase):
             self.assertIsNone(changed_components.registry_affected_components(valid,value))
         self.assertTrue(all(changed_components.classify_paths([changed_components.CHECK_REGISTRY]).values()))
         self.assertTrue(changed_components.native_ios_required([changed_components.CHECK_REGISTRY]))
+
+    def test_development_environment_entry_points_select_all_components(self):
+        for path in ("tools/dev-setup", "tools/dev-env", "tools/development/environment.py"):
+            with self.subTest(path=path):
+                self.assertTrue(all(changed_components.classify_paths([path]).values()))
+                self.assertTrue(changed_components.native_ios_required([path]))
 
     def test_development_unit_tests_do_not_select_product_builds(self):
         self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))

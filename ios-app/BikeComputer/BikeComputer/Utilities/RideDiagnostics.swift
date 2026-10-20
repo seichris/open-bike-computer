@@ -99,6 +99,7 @@ nonisolated enum RideDiagnosticsFieldPolicy {
         "minimumFreeBytes", "minimumInternalBytes", "minimumLargestBytes", "missingChunks",
         "mode", "navigating", "netifUp", "networkObservation",
         "networkProtocol", "networkTransport", "operationId", "origin",
+        "originCaptureAssociation", "originClockUncertainty", "originProcessId", "originUnixTimeMs",
         "otaState", "outcome", "ownerStackBytes", "pendingControl",
         "phase", "policyGeneration", "policyMask", "profileVersion",
         "providerId", "proxyConnection", "queueBytes", "queueDepth",
@@ -112,14 +113,14 @@ nonisolated enum RideDiagnosticsFieldPolicy {
         "simulation", "sizeBucket", "sourceAgeKnown", "sourceAgeMs",
         "sourceHealthMask", "speedAvailable", "stackAvailableMask", "startMode",
         "state", "stationMode", "storage", "storageErrorCount",
-        "taskCount", "tlsChallenge", "tlsCompleted", "tlsDurationMs",
-        "tlsFailed", "tlsStackBytes", "tlsStarted", "tlsSucceeded",
-        "transactionCount", "transition", "uiPhase", "uiProgressMs",
-        "underlyingErrorCode", "underlyingErrorDomain", "unsupportedReason", "verifiedChunks",
-        "viewingMap", "visitedEntries", "waitedForConnectivity", "watchSequence",
-        "watchUptimeMs", "watchdogCoreMask", "watchdogUptimeMs", "workoutActive",
-        "writerDelayMs", "writerDetail", "writerPhase", "writerProgressMs",
-        "writtenCount",
+        "taskCount", "timeBasis", "tlsChallenge", "tlsCompleted",
+        "tlsDurationMs", "tlsFailed", "tlsStackBytes", "tlsStarted",
+        "tlsSucceeded", "transactionCount", "transition", "uiPhase",
+        "uiProgressMs", "underlyingErrorCode", "underlyingErrorDomain", "unsupportedReason",
+        "verifiedChunks", "viewingMap", "visitedEntries", "waitedForConnectivity",
+        "watchSequence", "watchUptimeMs", "watchdogCoreMask", "watchdogUptimeMs",
+        "workoutActive", "writerDelayMs", "writerDetail", "writerPhase",
+        "writerProgressMs", "writtenCount",
     ]
     static let firmwareNumberKeys: Set<String> = [
         "acceptedClients", "accuracy", "activeStage", "ageMs",
@@ -140,17 +141,17 @@ nonisolated enum RideDiagnosticsFieldPolicy {
         "leaseGeneration", "mailboxDelayMs", "mapDetail", "mapProgressMs",
         "maxQueueDepth", "maximumGapMs", "members", "messageBytes",
         "minimumFreeBytes", "minimumInternalBytes", "minimumLargestBytes", "missingChunks",
-        "ownerStackBytes", "policyGeneration", "policyMask", "profileVersion",
-        "queueBytes", "queueDepth", "readinessElapsedMs", "readinessRemainingMs",
-        "rejectedCount", "rendererStackBytes", "replacedCount", "resetReason",
-        "retries", "rideGeneration", "runtimeBootSequence", "sampleCount",
-        "sampleIntervalMs", "schemaVersion", "sequence", "sourceAgeMs",
-        "sourceHealthMask", "stackAvailableMask", "storageErrorCount", "taskCount",
-        "tlsDurationMs", "tlsFailed", "tlsStackBytes", "tlsSucceeded",
-        "transactionCount", "uiProgressMs", "underlyingErrorCode", "verifiedChunks",
-        "visitedEntries", "watchSequence", "watchUptimeMs", "watchdogCoreMask",
-        "watchdogUptimeMs", "writerDelayMs", "writerDetail", "writerProgressMs",
-        "writtenCount",
+        "originUnixTimeMs", "ownerStackBytes", "policyGeneration", "policyMask",
+        "profileVersion", "queueBytes", "queueDepth", "readinessElapsedMs",
+        "readinessRemainingMs", "rejectedCount", "rendererStackBytes", "replacedCount",
+        "resetReason", "retries", "rideGeneration", "runtimeBootSequence",
+        "sampleCount", "sampleIntervalMs", "schemaVersion", "sequence",
+        "sourceAgeMs", "sourceHealthMask", "stackAvailableMask", "storageErrorCount",
+        "taskCount", "tlsDurationMs", "tlsFailed", "tlsStackBytes",
+        "tlsSucceeded", "transactionCount", "uiProgressMs", "underlyingErrorCode",
+        "verifiedChunks", "visitedEntries", "watchSequence", "watchUptimeMs",
+        "watchdogCoreMask", "watchdogUptimeMs", "writerDelayMs", "writerDetail",
+        "writerProgressMs", "writtenCount",
     ]
     static let firmwareBooleanKeys: Set<String> = [
         "accuracyAvailable", "active", "apEventStarted", "authorized",
@@ -1367,7 +1368,7 @@ final class RideDiagnosticsRecorder:
                         guard !data.isEmpty, data.count <= 256 * 1024 else {
                             throw RideDiagnosticsError.unavailable("Invalid app evidence chunk size.")
                         }
-                        guard result.count < 256, bytes <= DiagnosticsAcquisitionEvidencePolicy.maximumBytes else {
+                        guard result.count < 256, bytes <= DiagnosticsAcquisitionEvidencePolicy.maximumAppBytes else {
                             throw DiagnosticsAcquisitionStore.Failure.storageFull
                         }
                         result[path] = data
@@ -1378,12 +1379,47 @@ final class RideDiagnosticsRecorder:
         }
     }
 
-    func exportBundle(additionalDeviceChunks: [String: Data] = [:], additionalAppChunks: [String: Data] = [:]) throws -> URL {
-        let prepared = try queue.sync { try prepareExportOnQueue(additionalDeviceChunks: additionalDeviceChunks, additionalAppChunks: additionalAppChunks) }
+    func exportBundle(additionalDeviceChunks: [String: Data] = [:], additionalAppChunks: [String: Data] = [:], acquisitionOnly: Bool = false) throws -> URL {
+        let prepared = try queue.sync { try prepareExportOnQueue(additionalDeviceChunks: additionalDeviceChunks, additionalAppChunks: additionalAppChunks, acquisitionOnly: acquisitionOnly) }
         return try Self.writePreparedExport(prepared)
     }
 
-    func exportBundleAsync(additionalDeviceChunks: [String: Data] = [:], additionalAppChunks: [String: Data] = [:]) async throws -> URL {
+    /// Old manifests predate cache ownership. Recover only their referenced
+    /// bytes and original capture from ordinary retention, never unrelated rides.
+    func exportAcquisitionBundleAsync(manifests: [DiagnosticsAcquisitionManifest],
+                                      deviceChunks: [String: Data], appChunks: [String: Data]) async throws -> URL {
+        var device = deviceChunks, app = appChunks
+        var bytes = device.values.reduce(0) { $0 + $1.count } + app.values.reduce(0) { $0 + $1.count }
+        for value in manifests where value.evidenceRetained != true {
+            for item in value.expected where value.verified.contains(item.key) {
+                let name = String(format: "events-%06u-%@.jsonl", item.chunk, String(item.sha256.prefix(16)))
+                let path = "\(value.deviceDigest)/\(item.bootSequence)/\(name)"
+                if device[path] == nil, let data = await importedDeviceChunkDataAsync(
+                    deviceDigest: value.deviceDigest, bootSequence: item.bootSequence,
+                    chunk: item.chunk, sha256: item.sha256) {
+                    guard data.count == item.bytes else { throw DiagnosticsAcquisitionStore.Failure.invalidManifest }
+                    bytes += data.count
+                    guard bytes <= DiagnosticsAcquisitionEvidencePolicy.maximumBytes else { throw DiagnosticsAcquisitionStore.Failure.storageFull }
+                    device[path] = data
+                }
+            }
+            if value.appEvidence == nil, let capture = value.captureID {
+                for (path, data) in try await appEvidenceSnapshot(captureID: capture) {
+                    if let existing = app[path] {
+                        guard existing == data else { throw DiagnosticsAcquisitionStore.Failure.inventoryChanged }
+                    } else {
+                        bytes += data.count
+                        guard bytes <= DiagnosticsAcquisitionEvidencePolicy.maximumBytes else { throw DiagnosticsAcquisitionStore.Failure.storageFull }
+                        app[path] = data
+                    }
+                }
+            }
+        }
+        return try await exportBundleAsync(additionalDeviceChunks: device,
+            additionalAppChunks: app, acquisitionOnly: true)
+    }
+
+    func exportBundleAsync(additionalDeviceChunks: [String: Data] = [:], additionalAppChunks: [String: Data] = [:], acquisitionOnly: Bool = false) async throws -> URL {
         let prepared: PreparedExport = try await withCheckedThrowingContinuation {
             continuation in
             let workItem = DispatchWorkItem { [weak self] in
@@ -1397,7 +1433,7 @@ final class RideDiagnosticsRecorder:
                 }
                 do {
                     continuation.resume(
-                        returning: try self.prepareExportOnQueue(additionalDeviceChunks: additionalDeviceChunks, additionalAppChunks: additionalAppChunks)
+                        returning: try self.prepareExportOnQueue(additionalDeviceChunks: additionalDeviceChunks, additionalAppChunks: additionalAppChunks, acquisitionOnly: acquisitionOnly)
                     )
                 } catch {
                     continuation.resume(throwing: error)
@@ -1986,7 +2022,7 @@ final class RideDiagnosticsRecorder:
         return entries.sorted { $0.0 < $1.0 }
     }
 
-    private func prepareExportOnQueue(additionalDeviceChunks: [String: Data] = [:], additionalAppChunks: [String: Data] = [:]) throws -> PreparedExport {
+    private func prepareExportOnQueue(additionalDeviceChunks: [String: Data] = [:], additionalAppChunks: [String: Data] = [:], acquisitionOnly: Bool = false) throws -> PreparedExport {
         guard flushOnQueue() else {
             throw RideDiagnosticsError.unavailable(
                 "Diagnostic files could not be synchronized for export."
@@ -2025,7 +2061,27 @@ final class RideDiagnosticsRecorder:
                 withIntermediateDirectories: true
             )
             applyFileProtection(to: snapshotRoot)
-            for directoryName in ["app", "imported-device"] {
+            if acquisitionOnly {
+                // V1 requires the exporting process manifest. Referenced older
+                // process manifests retain their loss counters when available.
+                // These are small metadata sidecars, never unrelated events.
+                let processes = Set(additionalAppChunks.keys.compactMap { $0.split(separator: "/").first.map(String.init) })
+                    .union([processId.uuidString.lowercased()])
+                for process in processes {
+                    guard UUID(uuidString: process) != nil else { throw RideDiagnosticsError.invalidArchiveEntry }
+                    let source = rootURL.appendingPathComponent("app/\(process)/manifest.json")
+                    guard fileManager.fileExists(atPath: source.path) else {
+                        if process == processId.uuidString.lowercased() {
+                            throw RideDiagnosticsError.unavailable("Current recorder manifest is unavailable.")
+                        }
+                        continue
+                    }
+                    let destination = snapshotRoot.appendingPathComponent("app/\(process)/manifest.json")
+                    try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try fileManager.copyItem(at: source, to: destination)
+                }
+            }
+            for directoryName in (acquisitionOnly ? [] : ["app", "imported-device"]) {
                 let sourceRoot = rootURL.appendingPathComponent(
                     directoryName,
                     isDirectory: true

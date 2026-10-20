@@ -163,12 +163,23 @@ The phone stamps occurrence time, uptime, capture and an emission sequence befor
 enqueueing. The v1 storage sequence remains writer order; `writerDelayMs` measures
 queue delay. Firmware uses its boot identity and monotonic sequence. Existing
 clock anchors remain raw evidence; host correlation does not rewrite them.
+Derived firmware times report 1000 ms timestamp resolution and null (unknown)
+clock uncertainty: synchronization delay and oscillator drift are unbounded by
+this evidence, including at the anchor itself. Phone clock uncertainty is also
+unknown unless independently established.
 
 ## Ride now, collect later
 
 Both producers record locally through a BLE disconnection. Standard retention
 and fault capsules continue to apply; volatile tails are not guaranteed through
-power loss. Mark an issue using the predefined phone categories. Device marker
+power loss. Firmware checkpoints commit libc buffers and call the filesystem
+VFS fsync at a bounded five-second cadence, critical events, markers, fault
+receipts and chunk close/seal. Sync errors preserve RTC capsules for retry;
+no capsule is acknowledged before its checked sync/close boundary. A successful
+fsync is not proof of arbitrary SD-controller power-loss durability. A firmware
+boot without a retained controlled-shutdown marker reports
+`unknown_unsealed_boot` (or degraded when measured losses exist); its unwritten
+tail count is unknown rather than zero. Mark an issue using the predefined phone categories. Device marker
 queueing is not claimed as durable device acknowledgement. The phone assigns a
 shared incident UUID to matching-registry v2 device markers. Older firmware uses
 the v1 marker without claiming that shared UUID. On the bike, **Device Settings →
@@ -217,30 +228,43 @@ app is active and neither navigation nor workout is active. The existing shared
 operation coordinator prevents diagnostic cleanup from displacing maps or OTA.
 
 Verified acquisition chunks are stored before their receipts in a separate,
-deduplicated evidence cache (32 MiB total, 256 KiB per chunk, at most 20 jobs
+deduplicated evidence cache (64 MiB total, 256 KiB per chunk, at most 20 jobs
 with 256 chunks each). This is additional to ordinary recorder retention.
 Completing a collection revalidates every retained body. Ordinary capture/age/
 byte pruning cannot remove these acquisition bytes. Admission evicts the oldest
 completed or cancelled jobs when either the job limit or the evidence byte/file
 limit requires space. Only cache files no remaining job references are removed;
 the current acquisition and all incomplete jobs are protected. App snapshots
-are admitted as a whole; firmware bodies are admitted individually as verified.
+are admitted as a whole; all outstanding immutable firmware inventories are
+reserved before body download. A supported cutoff can contain 32 MiB firmware
+plus 32 MiB app evidence. Verified acquisition bodies are not duplicated into
+the ordinary phone recorder's capture/age/byte retention pool.
 Shared bodies count once, including prospective app-snapshot references. The
 store plans a feasible reclamation before eviction: if the request still cannot
 fit, even terminal receipts and bodies are left intact. A full cache leaves the
 collection partial with `failureCode=cache_full`, an explicit cache-full status
 and a privacy-safe `diagnostics_download_failed` event, including failures before
 network entry. Earlier verified bodies survive. Retrying requires user action.
-Restart and export rehash cached bytes. Export combines them with the recorder
-snapshot under their original device/boot/chunk paths, through the existing v1
-validator; it does not restore them into ordinary recorder retention. Receipts
+Restart and export rehash cached bytes. Export uses the selected acquisition's
+frozen app and firmware evidence (all cached acquisitions if no selection is
+loaded), without merging unrelated ordinary recorder history. When there are no
+acquisitions it exports ordinary recorder history. This keeps acquisition
+archives below the unchanged 100 MiB reader bound. The existing v1 validator
+checks original device/boot/chunk paths; export does not restore bodies into
+ordinary recorder retention. Small current/referenced app process manifests
+remain in the archive so required sidecars and available historical loss
+counters stay valid. Export Recorder History provides newer retained phone
+events separately; the collection export labels its saved cutoff.
+Export Partial Evidence preserves an incomplete
+cutoff; Release Incomplete Collection makes that job eligible for later cache
+reclamation without deleting other incomplete jobs. Receipts
 from older app versions have no guaranteed cache and still require actual
 archive bytes to prove delivery. This protects retrieval evidence, not physical
 card durability or completeness of the original recording.
 
 New collections also freeze the recorder's existing iOS chunks for their original
 capture, closing the mutable chunk before caching it. App and firmware evidence
-share the same 32 MiB budget; app chunks retain their original process/chunk
+share the same 64 MiB budget (at most 32 MiB app evidence per job); app chunks retain their original process/chunk
 paths and are deduplicated by SHA-256. Each job can reference at most 256 app
 chunks; the cache keeps its existing total file bound. Optional `appEvidence`
 receipts record path, byte count and hash. Export and the CLI verify the actual
@@ -283,6 +307,14 @@ scope; no zero-loss proof is invented for a filtered time/capture interval.
 a firmware Wi-Fi session. An iPhone-only policy is never forwarded to a device.
 The Mac outbox checks the prospective byte total, including the prepared file,
 before publication. It never exceeds eight files / 400 MiB through admission.
+Permanent upload rejection (400/409/413/415/422) leaves the ZIP in that quota with
+a synchronized, hash-bound rejection receipt. Future polls/relaunch skip the
+unchanged rejected bytes and continue later eligible files; rejection is never
+a delivery acknowledgement. UI reports preserved rejected handoffs separately
+from connectivity. Authentication revocation, inbox capacity, and transient
+transport failures keep their distinct handling; failures back off up to 60s.
+Source evidence can be exported, or explicit retained-diagnostics deletion can
+release local outbox capacity. Broker validation remains strict.
 
 Deleting retained iPhone diagnostics first stops and joins collection and
 handoff tasks, then erases acquisition manifests/cache, every local recipient
@@ -296,6 +328,11 @@ Watch transport batches carry an optional stable producer UUID and cumulative
 truncation count. These survive queued retries/relaunch and are imported as
 privacy-bounded `watch_ble_diagnostics_loss` events; older batches remain
 readable. Producer truncation is distinct from BLE payload queue counters.
+New events additionally preserve origin Unix milliseconds and a per-process
+Watch clock identity; the persistent producer UUID is not a boot identity.
+The phone envelope is explicitly receipt time, uses a process-level capture,
+and marks original ride association and clock uncertainty unknown. Legacy
+batches keep Watch uptime but never inherit the phone's current ride.
 
 Delivery completeness and recording coverage are separate. Retained firmware
 health/index storage errors and drops, and historical iPhone process drop counters, degrade
@@ -418,3 +455,8 @@ from association or HTTPS failure. `transfer.diagnostics_resume_selected` record
 the original acquisition UUID, phase, origin and persisted eligibility reason.
 All new records omit SSIDs, client MACs/addresses, tokens, passwords and payloads.
 Delivery, recording loss and physical qualification remain separate gates.
+
+The firmware index stays bounded to 256 chunks and 64 KiB. If a snapshot lease
+or deferred pruning exposes more closed chunks, the index fails explicitly with
+`diagnostics_index_unreadable`; it never advertises a truncated subset as a
+complete inventory. Retry after the lease ends and retention runs.

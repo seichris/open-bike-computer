@@ -9,22 +9,30 @@ and add a personal cloud environment named **Open Bike Computer**.
 - Set `BASH_DEFAULT_TIMEOUT_MS=600000` and `BASH_MAX_TIMEOUT_MS=600000` in
   **Environment variables** for longer checks. Do not put credentials there.
 - Select a branch containing this setup. `CLAUDE.md` imports `AGENTS.md`, and
-  `.claude/settings.json` runs the cloud-only dependency hook after checkout.
+  the shared `.claude/settings.json` hook runs `tools/dev-setup --quiet`.
 
-The hook fetches `main` into `origin/main` without changing the checkout. Claude
-cloud clones may initially track only the selected branch, while `dev-check`
-needs `origin/main` for its comparison. The hook then installs
-`tools/development/requirements.txt` in `.claude/.venv` and
-persists its PATH using `CLAUDE_ENV_FILE`. It skips installation when its inputs
-are unchanged, and does nothing in local sessions. Environment setup is cached;
-the repository hook checks dependencies again on startup and resume.
+The hook uses the same per-worktree development environment as Codex. Keep
+installation and dependency fingerprinting in `tools/development/environment.py`;
+do not add a separate cloud installer or virtual environment. Run commands through
+`tools/dev-env`, which checks that the selected environment is current.
+Environment setup is cached independently of the checkout; rerun `tools/dev-setup`
+if requirements change during a session.
+
+Cloud clones may initially track only the selected branch. Before using the
+`origin/main` comparison, materialize it without changing the checkout:
+
+```sh
+git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+tools/dev-env tools/dev-check --plan
+```
 
 Start a smoke-check session with:
 
-> Read CLAUDE.md and AGENTS.md. Verify the cloud hook completed, run
-> tools/dev-check --plan, then run the development registry and CI policy checks
-> selected by the plan. Report the commit, results, and blocked prerequisites.
-> Do not edit files, build firmware, deploy, or access physical devices.
+> Read CLAUDE.md and AGENTS.md. Verify the shared setup completed, fetch the
+> origin/main comparison ref as documented, run tools/dev-env tools/dev-check
+> --plan, then run the development registry and CI policy checks selected by the
+> plan. Report the commit, results, and blocked prerequisites. Do not edit files,
+> build firmware, deploy, or access physical devices.
 
 Linux supports the repository's Python and C/C++ host checks. Apple SDK,
 Xcode/Simulator, and physical-device checks still require Mac/CI/device evidence.
@@ -33,18 +41,15 @@ passing test run. Full firmware builds use the existing locked runtime on demand
 and may require additional network hosts; report a blocked download rather than
 switching to ambient PlatformIO or broadening network access automatically.
 
-For map-platform work, install into its separate ignored environment:
+For map-platform work, use the separate environment:
 
 ```sh
-python3 -m venv map-platform/backend/.venv
-map-platform/backend/.venv/bin/python -m pip install \
-  -e 'map-platform/backend[test,api,object-storage]'
+tools/dev-setup --map-backend
+tools/dev-env --map-backend tools/dev-check --suite map
 ```
 
-Use that interpreter for backend tests. Add the `topography` extra only when
-needed; use Python 3.11 or 3.12 for its pinned NumPy version. Read the backend
-and extractor documentation before running services or map builds. The host-test
-environment pins cryptography 50 while the backend requires a version below 49,
-so combining them breaks dependency resolution.
+This selects Python 3.10-3.12 for the pinned topography dependencies and keeps the
+backend's cryptography constraints separate from host tests. Read the backend
+and extractor documentation before running services or map builds.
 
 Reference: [Claude cloud environment documentation](https://code.claude.com/docs/en/cloud-environments).

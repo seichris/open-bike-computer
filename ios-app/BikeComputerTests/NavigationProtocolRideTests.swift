@@ -1804,13 +1804,13 @@ extension NavigationProtocolTests {
         )
         assertEqual(
             BikeComputersMenuPolicy.title(knownDeviceCount: 1),
-            "My Bike Computer",
-            "one registered device uses the singular menu title"
+            "Bicino & Bike Sensors",
+            "one registered device includes sensor management in the menu title"
         )
         assertEqual(
             BikeComputersMenuPolicy.title(knownDeviceCount: 2),
-            "My Bike Computers",
-            "multiple registered devices use the plural menu title"
+            "Bicino & Bike Sensors",
+            "multiple registered devices include sensor management in the menu title"
         )
         assert(BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
             knownDeviceCount: 0
@@ -1905,8 +1905,8 @@ extension NavigationProtocolTests {
             BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
                 knownDeviceCount: 1
             ),
-            "My Bike Computer",
-            "registered settings keeps the existing singular title"
+            "Bicino & Bike Sensors",
+            "registered settings names Bicino and sensor management"
         )
         assert(
             BikeComputerSettingsPresentationPolicy.shouldPromoteSettingsLink(
@@ -3628,6 +3628,76 @@ extension NavigationProtocolTests {
                "no-response recovery closes the wedged navigation session")
     }
 
+    static func testFailedClearRetiresSiblingsAndReplaysIntent() {
+        for failedMember in 0...1 {
+            let manager = BLEManager()
+            var writes: [Data] = []
+            var recoveries = 0
+            let endpoint = NavigationWriteEndpoint(maximumWriteLength: 185,
+                expectsWriteResponse: true, canSend: { true }, write: { writes.append($0) })
+            manager.configureNavigationClearForTesting(endpoint)
+            manager.installNavigationWriteStallRecoveryForTesting(timeout: 60) { recoveries += 1 }
+            manager.clearRouteGeometry()
+            assertEqual(writes.count, 1, "clear starts with the route member")
+            if failedMember == 1 { manager.completeNavigationWriteForTesting(error: nil) }
+            manager.completeNavigationWriteForTesting(error: NSError(domain: "ATT", code: 1))
+            assertEqual(recoveries, 1, "ATT failure recovers the logical command")
+            assertEqual(writes.count, failedMember + 1, "failed command never dispatches another member")
+            assert(manager.pendingNavigationClearForTesting, "unconfirmed clear intent survives failure")
+            let retryStart = writes.count
+            manager.clearConnectionStateForTesting()
+            manager.configureNavigationClearForTesting(endpoint)
+            manager.retryNavigationClearForTesting()
+            assertEqual(writes.count, retryStart + 1, "reconnected clear starts a new complete group")
+            manager.completeNavigationWriteForTesting(error: nil)
+            assertEqual(writes.count, retryStart + 2, "new clear includes its own maneuver member")
+            manager.completeNavigationWriteForTesting(error: nil)
+            assert(manager.pendingNavigationClearForTesting, "ATT completion is not application confirmation")
+            let envelope = RideBLEApplicationCommandEnvelopeV1.decode(writes[retryStart])!
+            manager.handleRideApplicationAcknowledgementForTesting(.init(
+                commandType: .navigationClear, result: .success,
+                commandID: envelope.commandID, stateGeneration: envelope.stateGeneration,
+                leaseGeneration: 1))
+            assert(!manager.pendingNavigationClearForTesting, "matching application ACK settles intent")
+        }
+    }
+
+    static func testRideRecoveryKeepsSpecificFailureReason() {
+        let manager = BLEManager()
+        var writes: [Data] = []
+        var recoveries = 0
+        let endpoint = NavigationWriteEndpoint(maximumWriteLength: 185,
+            expectsWriteResponse: true, canSend: { true }, write: { writes.append($0) })
+        assert(manager.adoptConnectionForTesting(connected: true), "transport can record a failure")
+        manager.configureNavigationClearForTesting(endpoint)
+        manager.installNavigationWriteStallRecoveryForTesting(timeout: 60) { recoveries += 1 }
+        manager.setRideApplicationAcknowledgementTimeoutForTesting(0.01)
+        manager.clearRouteGeometry()
+        manager.completeNavigationWriteForTesting(error: nil)
+        assertEqual(writes.count, 2, "both clear members were dispatched")
+        // The maneuver member's ATT callback never arrives before the ACK deadline.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        assertEqual(recoveries, 1, "lost ATT callback and ACK recover once")
+        assertEqual(manager.rideTransportFailureReason, .attTimeout,
+                    "the caller's diagnosis is not replaced by a generic ATT failure")
+        manager.clearConnectionStateForTesting()
+    }
+
+    static func testPhoneConnectionAdoptionOwnsGeneration() {
+        for alreadyConnected in [false, true] {
+            let manager = BLEManager()
+            assert(manager.adoptConnectionForTesting(connected: alreadyConnected),
+                   "fresh and restored contexts enter the authoritative lifecycle")
+            assertEqual(manager.rideTransportPhase, alreadyConnected ? .authenticating : .connecting,
+                        "restored phase matches platform state")
+            assert(manager.rideConnectionGenerationForTesting > 0, "adoption advances the write generation")
+            assert(!manager.isNavigationReady, "adoption never publishes ride readiness")
+            assert(!manager.adoptConnectionForTesting(connected: alreadyConnected),
+                   "a live context cannot be silently replaced")
+            manager.clearConnectionStateForTesting()
+        }
+    }
+
     static func testRideApplicationAcknowledgementWaitsForATTCallback() {
         let manager = BLEManager()
         let commandID = UUID(
@@ -3788,6 +3858,42 @@ extension NavigationProtocolTests {
                "CAP2 topographic contour capability is accepted")
         assert(manager.supportsTopographicContours,
                "CAP2 bit 30 enables contour-aware transfer and settings")
+        assert(!manager.supportsTerrainExperiments, "legacy contour capability does not advertise terrain")
+        assert(manager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 0, 0xc0])),
+            "CAP2 terrain capability is accepted")
+        assert(manager.supportsTerrainExperiments, "CAP2 bit 31 unlocks experimental Map presets")
+        assert(!manager.supportsGroupRiders, "terrain bit 31 must never unlock social packets")
+        assert(RideBLEGeneratedProtocolV1.extendedGroupRidersV1Feature == 1 << 0 &&
+               RideBLEGeneratedProtocolV1.extendedGroupRidersV1MinimumClientVersion == 30 &&
+               RideBLEGeneratedProtocolV1.terrainExperimentsFeature == 1 << 31,
+               "extended-word constants carry their own prefix and keep the shipped wire values")
+        let groupTLV = Data([RideBLEGeneratedProtocolV1.extendedFeatureTLVType, 4, 1, 0, 0, 0])
+        let groupCapabilities = Data("CAP2".utf8) + Data([1, 0, 0, 0, 0]) + groupTLV
+        assert(manager.handleDeviceCapabilitiesNotification(groupCapabilities),
+               "extended feature word is accepted independently")
+        assert(manager.supportsGroupRiders && !manager.supportsTerrainExperiments,
+               "extended bit 0 advertises group riders without terrain")
+        let bothCapabilities = Data("CAP2".utf8) + Data([1, 0, 0, 0, 0xc0]) + groupTLV
+        assert(manager.handleDeviceCapabilitiesNotification(bothCapabilities),
+               "terrain and group riders coexist")
+        assert(manager.supportsGroupRiders && manager.supportsTerrainExperiments,
+               "both words are interpreted independently")
+        assert(manager.handleDeviceCapabilitiesNotification(bothCapabilities + groupTLV),
+               "duplicate extended words are consumed for retry")
+        assert(!manager.supportsGroupRiders && !manager.supportsTerrainExperiments,
+               "duplicate TLVs reject the complete response")
+        for invalid in [Data([3, 3, 1, 0, 0]), Data([3, 4, 1, 0])] {
+            assert(manager.handleDeviceCapabilitiesNotification(capabilities + invalid),
+                   "invalid extended words are consumed for retry")
+            assert(!manager.supportsGroupRiders, "malformed extensions cannot enable social")
+        }
+        assert(manager.handleDeviceCapabilitiesNotification(
+            groupCapabilities + Data([254, 1, 42])), "unknown well-formed TLVs remain compatible")
+        assert(manager.supportsGroupRiders, "unknown TLV does not hide known extended flags")
+        assert(manager.handleDeviceCapabilitiesNotification(capabilities), "legacy capabilities remain accepted")
+        assert(!manager.supportsTerrainExperiments, "renegotiation clears terrain capability")
+        assert(!manager.supportsGroupRiders, "missing extended word clears social on renegotiation")
         let status = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
             """
             {"enabled":true,"activeMapId":"topo-map","activeRendererFormat":4,"topographyProfileVersion":1,"topographyQualityMode":"standard-20m-v1","contourMinorIntervalM":20,"contourIndexIntervalM":100,"contourNoDataMillionths":0,"containsContours":true,"topographySourcePolicyReceiptPrefix":"abcdef012345","topographySectionHealthy":true}
@@ -5160,6 +5266,45 @@ extension NavigationProtocolTests {
         } catch {
             assert(false, "cache failure fixture and reporting succeed: \(error)")
         }
+
+        // Twenty older uncorrelated boots used to enter ordinary retention with
+        // today's mtime and evict the phone's newer captures.
+        do {
+            for _ in 0..<15 {
+                recorder.endRideCapture()
+                recorder.record(category: .lifecycle, event: "newer_phone_history")
+                recorder.flush()
+            }
+            let appRoot = root.appendingPathComponent("app")
+            let before = (FileManager.default.enumerator(at: appRoot, includingPropertiesForKeys: nil)!.allObjects as! [URL])
+                .filter { $0.pathExtension == "jsonl" }
+            var bodies: [UInt32: Data] = [:]
+            var receipts: [DiagnosticsChunkReceipt] = []
+            for boot in UInt32(1)...20 {
+                let data = Data("{\"schema\":1,\"source\":\"firmware\",\"sequence\":0,\"level\":\"info\",\"category\":\"boot\",\"event\":\"old_boot\",\"wallTime\":\"2000-01-01T00:00:00Z\",\"fields\":{\"bootSequence\":\(boot),\"firmwareFingerprint\":\"A1B2C3D4\"}}\n".utf8)
+                bodies[boot] = data
+                receipts.append(.init(bootSequence: boot, chunk: 1, bytes: data.count,
+                    sha256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()))
+            }
+            let index = try JSONSerialization.data(withJSONObject: ["schema": 1, "source": "firmware",
+                "bootSequence": 20, "activeChunk": 2,
+                "stats": ["enqueued": 1, "written": 1, "dropped": 0, "storageErrors": 0],
+                "chunks": try JSONSerialization.jsonObject(with: JSONEncoder().encode(receipts))])
+            OfflineMapTestURLProtocol.configure { request in
+                if request.url?.path == "/device-diagnostics/v1/index" { return (200, index) }
+                if let parts = request.url?.path.split(separator: "/"), parts.count == 5,
+                   let boot = UInt32(parts[3]), let body = bodies[boot] { return (200, body) }
+                return (200, Data("{\"ok\":true}".utf8))
+            }
+            let cache = DiagnosticsAcquisitionStore(root: root.appendingPathComponent("owned-acquisition"))
+            let job = try await cache.create(deviceDigest: recorder.deviceDigest(for: bleManager.connectedDeviceID!), captureID: nil)
+            _ = try await manager.downloadDeviceLogs(bleManager: bleManager, recorder: recorder,
+                acquisitionStore: cache, acquisitionID: job.id, status: { _ in })
+            let acquired = try await cache.load(job.id)
+            assert(acquired.deliveryComplete && acquired.verified.count == 20, "acquisition owns every old firmware body")
+            assert(before.allSatisfy { FileManager.default.fileExists(atPath: $0.path) },
+                "old firmware acquisition cannot evict newer ordinary phone history")
+        } catch { assert(false, "cross-source acquisition retention succeeds: \(error)") }
     }
 
     static func testDeviceTransferManagerWaitsForFreshDebugToken() async {
@@ -5542,10 +5687,19 @@ extension NavigationProtocolTests {
     }
 
     static func testDeviceTransferManagerConfirmsDebugExit() async {
+        await assertDeviceTransferManagerConfirmsDebugExit(delayed: false)
+        await assertDeviceTransferManagerConfirmsDebugExit(delayed: true)
+        await assertDeviceTransferManagerConfirmsDebugExit(delayed: true, recoverActive: true)
+    }
+
+    private static func assertDeviceTransferManagerConfirmsDebugExit(
+        delayed: Bool, recoverActive: Bool = false
+    ) async {
         let suiteName = "transfer-fixture.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
+        let coordinator = DeviceOperationCoordinator(defaults: defaults)
+        let manager = DeviceTransferManager(coordinator: coordinator)
         let bleManager = BLEManager()
         bleManager.setConnectedDeviceIDForTesting("device-a")
         bleManager.isConnected = true
@@ -5558,10 +5712,28 @@ extension NavigationProtocolTests {
             Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
         )
         var sentPackets: [Data] = []
+        var statusReply: Data?
+        var replyOnlyWithoutOwner = true
+        var activeRecoveryRequested = false
         bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
             maximumWriteLength: 64,
             canSend: { true },
-            write: { sentPackets.append($0) }
+            write: { [weak bleManager] packet in
+                sentPackets.append(packet)
+                guard packet == Data("DSTS".utf8), let reply = statusReply,
+                      !replyOnlyWithoutOwner || coordinator.lease == nil else { return }
+                if replyOnlyWithoutOwner {
+                    guard !activeRecoveryRequested else { return }
+                    activeRecoveryRequested = true
+                }
+                // Leave enough time for the old two-second polling task to
+                // observe the released lease and stop before active recovery.
+                let delay: UInt64 = replyOnlyWithoutOwner ? 2_500_000_000 : 1_000_000
+                Task { @MainActor [weak bleManager] in
+                    try? await Task.sleep(nanoseconds: delay)
+                    _ = bleManager?.handleDeviceTransferStatusNotification(reply)
+                }
+            }
         ))
         let entry = Task {
             try await manager.enterRemoteDebug(bleManager: bleManager, status: { _ in })
@@ -5583,6 +5755,9 @@ extension NavigationProtocolTests {
         do { _ = try await entry.value }
         catch { assert(false, "debug exit fixture acquires ownership first: \(error)") }
         sentPackets.removeAll()
+        if recoverActive {
+            statusReply = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(activeStatus.utf8)
+        }
 
         let task = Task {
             try await manager.exitRemoteDebug(
@@ -5595,20 +5770,150 @@ extension NavigationProtocolTests {
         assertEqual(String(data: sentPackets.first ?? Data(), encoding: .utf8),
                     "DTRNexit",
                     "debug exit starts with an authenticated exit command")
+        if delayed {
+            for _ in 0..<4000 {
+                if recoverActive ? activeRecoveryRequested : coordinator.lease == nil { break }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            assert(recoverActive ? activeRecoveryRequested : coordinator.lease == nil,
+                   "fixture must reach the failed first confirmation window")
+        }
         let stoppedStatus = """
         {"configured":true,"enabled":false,"mode":"","firmware":{"status":"idle","target":"","version":"","build":0,"updaterProtocol":1,"receivedBytes":0,"totalBytes":0}}
         """
-        _ = bleManager.handleDeviceTransferStatusNotification(
-            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
-                Data(stoppedStatus.utf8)
-        )
+        if recoverActive {
+            do {
+                try await task.value
+                assert(false, "an active recovery cannot claim that debug has stopped")
+            } catch {
+                assert(error as? DeviceOperationCoordinator.Failure == .cleanupUnresolved,
+                       "a matching active recovery stays owned and retryable")
+            }
+            assert(coordinator.lease != nil && coordinator.unresolved != nil,
+                   "fresh matching active status must retain ownership")
+        }
+        statusReply = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(stoppedStatus.utf8)
+        replyOnlyWithoutOwner = false
+        if !recoverActive {
+            _ = bleManager.handleDeviceTransferStatusNotification(statusReply!)
+        }
         do {
-            try await task.value
+            if !recoverActive { try await task.value }
+            // No unsolicited idle notification in the recovered-active case:
+            // the restarted model poll must discover shutdown by itself.
+            for _ in 0..<2000 where !coordinator.isCleanupComplete {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            assert(coordinator.isCleanupComplete, "debug shutdown must release local ownership")
             assert(bleManager.deviceTransferSessionToken == nil,
                    "confirmed debug exit clears the session token")
+            assert(defaults.data(forKey: "device-operation-cleanup-v1") == nil,
+                   "late exit confirmation must also clear durable cleanup ownership")
+            assert(sentPackets.filter { $0 == Data("DTRNexit".utf8) }.count == 1,
+                   "recovery confirms status without sending another exit")
         } catch {
             assert(false, "fresh empty status should confirm debug exit: \(error)")
         }
+    }
+
+    static func testBrowserDebugExitReleasesLeaseAfterFreshConfirmation() async {
+        await assertBrowserDebugExitReleasesLease(readinessRecovery: false)
+        await assertBrowserDebugExitReleasesLease(readinessRecovery: true)
+        await assertBrowserDebugExitReleasesLease(readinessRecovery: true, newConnection: true)
+    }
+
+    private static func assertBrowserDebugExitReleasesLease(
+        readinessRecovery: Bool, newConnection: Bool = false
+    ) async {
+        let suiteName = "browser-debug-exit.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let coordinator = DeviceOperationCoordinator(defaults: defaults)
+        let manager = DeviceTransferManager(coordinator: coordinator)
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        _ = bleManager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 1, 0])
+        )
+        var packets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64, canSend: { true }, write: { packets.append($0) }
+        ))
+        let entry = Task {
+            try await manager.enterRemoteDebug(bleManager: bleManager, status: { _ in })
+        }
+        for _ in 0..<100 where !packets.contains(Data("DTRNenter|debug".utf8)) {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let pin = String(repeating: "a", count: 64)
+        let active = """
+        {"configured":true,"enabled":true,"mode":"debug","baseUrl":"https://192.168.31.195:8080","networkTransport":"lan","sessionToken":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tls":{"identityVersion":1,"certificateSha256":"\(pin)"},"transferGeneration":1,"capabilities":{"secureTransferV1":true}}
+        """
+        _ = bleManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(active.utf8)
+        )
+        do { _ = try await entry.value }
+        catch { assert(false, "browser-exit fixture enters debug: \(error)"); return }
+        packets.removeAll()
+        await manager.reconcileEndedRemoteDebug(bleManager: bleManager)
+        assert(packets.isEmpty && coordinator.lease?.mode == "debug",
+               "an active browser session retains its root")
+        let stopped = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+            Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+        if readinessRecovery { bleManager.isNavigationReady = false }
+        if newConnection {
+            let previousEpoch = bleManager.transferConnectionEpoch
+            bleManager.clearConnectionStateForTesting()
+            bleManager.setConnectedDeviceIDForTesting("device-a")
+            bleManager.isConnected = true
+            bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 64, canSend: { true }, write: { packets.append($0) }
+            ))
+            assert(bleManager.transferConnectionEpoch != previousEpoch,
+                   "reconnect fixture advances the connection epoch")
+        }
+        _ = bleManager.handleDeviceTransferStatusNotification(stopped)
+        if readinessRecovery {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            assert(packets.isEmpty && coordinator.lease?.mode == "debug",
+                   "disconnected empty state cannot release a debug lease")
+            bleManager.isNavigationReady = true
+        }
+        // No Settings view or manual reconcile call: the model must react.
+        if newConnection {
+            for _ in 0..<1000 where coordinator.lease != nil {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+            assert(coordinator.lease == nil && coordinator.unresolved != nil,
+                   "a retired connection releases its local root but retains durable cleanup quarantine")
+            assert(!packets.contains(Data("DTRNexit".utf8)),
+                   "reconnect cleanup never sends an old session's exit on the new connection")
+            do {
+                _ = try coordinator.acquire(deviceID: "device-a", mode: "map", epoch: bleManager.transferConnectionEpoch)
+                assert(false, "a successor must confirm fresh idle status before admission")
+            } catch { assert(error as? DeviceOperationCoordinator.Failure == .cleanupUnresolved) }
+            return
+        }
+        for _ in 0..<1000 where !packets.contains(Data("DSTS".utf8)) {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assert(packets.contains(Data("DSTS".utf8)) && coordinator.lease != nil,
+               "browser exit must obtain a fresh authenticated confirmation before releasing ownership")
+        assert(!packets.contains(Data("DTRNexit".utf8)),
+               "external exit cleanup cannot send a stale exit command")
+        _ = bleManager.handleDeviceTransferStatusNotification(stopped)
+        for _ in 0..<1000 where !coordinator.isCleanupComplete {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        assert(coordinator.isCleanupComplete, "model-owned cleanup releases the root without a view")
+        do {
+            let map = try coordinator.acquire(deviceID: "device-a", mode: "map", epoch: 1)
+            await manager.reconcileEndedRemoteDebug(bleManager: bleManager)
+            assert(coordinator.owns(map), "late browser cleanup cannot displace a new map operation")
+            coordinator.finish(map, remoteClear: true)
+        } catch { assert(false, "map transfer must be admitted after browser exit: \(error)") }
     }
 
     static func testDeviceTransferManagerCompensatesCancelledDebugEntry() async {

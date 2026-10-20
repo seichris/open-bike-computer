@@ -172,7 +172,7 @@ static void processFirmwareMaintenanceMode() {
       firmware_maintenance::policy::bootButtonExitRequested(
           bootButtonExit, digitalRead(BOARD_BOOT_PIN) == LOW, now)) {
     (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "maintenance", "exit_boot_button", "{}");
+                                   "ota", "exit_boot_button", "{}");
     firmware_maintenance::requestExit();
   }
 
@@ -186,7 +186,7 @@ static void processFirmwareMaintenanceMode() {
         "maintenance_authentication_timeout",
         "owner authentication did not complete before the deadline");
     (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "maintenance", "exit_auth_timeout", "{}");
+                                   "ota", "exit_auth_timeout", "{}");
     firmware_maintenance::requestExit();
   } else if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
              firmware_maintenance::policy::transferTimedOut(
@@ -197,7 +197,7 @@ static void processFirmwareMaintenanceMode() {
         "maintenance_inactivity_timeout",
         "firmware transfer made no useful progress before the deadline");
     (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "maintenance", "exit_inactivity", "{}");
+                                   "ota", "exit_inactivity", "{}");
     firmware_maintenance::requestExit();
   }
   if (!firmware_maintenance::exitRequested() && !commitOwnsReboot &&
@@ -207,7 +207,7 @@ static void processFirmwareMaintenanceMode() {
         "maintenance_deadline",
         "firmware maintenance exceeded its overall deadline");
     (void)ride_diagnostics::record(ride_diagnostics::Level::Warning,
-                                   "maintenance", "exit_deadline", "{}");
+                                   "ota", "exit_deadline", "{}");
     firmware_maintenance::requestExit();
   }
 

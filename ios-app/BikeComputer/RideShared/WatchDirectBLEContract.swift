@@ -770,6 +770,10 @@ struct WatchBLETransportDiagnosticEventV1: Codable, Equatable, Sendable {
     let rejectedGroups: Int
     let uptimeMs: Int
     let latencyMs: Int?
+    // Optional additions keep queued V1 batches from older apps decodable.
+    // This is a process epoch, not the persistent producer identity or a ride.
+    var originUnixTimeMs: Int64? = nil
+    var originProcessID: UUID? = nil
 }
 
 struct WatchBLETransportDiagnosticBatchV1: Codable, Equatable, Sendable {
@@ -819,6 +823,7 @@ struct WatchBLETransportDiagnosticBatchV1: Codable, Equatable, Sendable {
                       event.replacedGroups >= 0 &&
                       event.rejectedGroups >= 0 &&
                       event.uptimeMs >= 0 &&
+                      (event.originUnixTimeMs.map { $0 >= 0 && $0 <= 32_503_680_000_000 } ?? true) &&
                       (event.latencyMs.map { $0 >= 0 } ?? true) &&
                       event.phase.utf8.count <= 24 &&
                       (event.reason?.utf8.count ?? 0) <= 48
@@ -1105,9 +1110,12 @@ struct WatchBLEOutboundQueueV1: Equatable {
 }
 
 enum WatchRidePacketEncoderV1 {
+    /// Exact maneuver packet firmware accepts as the navigation-clear member.
+    static let navigationIdlePacket = "1|0|Navigation idle"
+
     static func maneuver(_ snapshot: NavigationSnapshotV1?) -> Data {
         guard let snapshot else {
-            return Data("1|0|Navigation idle".utf8)
+            return Data(navigationIdlePacket.utf8)
         }
         let distance = min(
             max(Int(snapshot.distanceToManeuverMeters.rounded()), 0),

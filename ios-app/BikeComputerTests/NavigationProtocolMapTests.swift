@@ -3407,7 +3407,7 @@ extension NavigationProtocolTests {
                 !screensSource.contains("Button(\"Save to Bicino\")") &&
                 !screensSource.contains("Button(\"Cancel Changes\"") &&
                 screensSource.contains("Text(\"Bicino Screens\")") &&
-                settingsSource.contains("header: Text(\"Bicino Screens\")") &&
+                settingsSource.contains("Text(\"Bicino Screens\")") &&
                 !screensSource.contains("Changes save automatically.") &&
                 !screensSource.contains("Changes will save automatically.") &&
                 !screensSource.contains("Saving changes to Bicino…") &&
@@ -3880,14 +3880,14 @@ extension NavigationProtocolTests {
         assert(
             source.contains("Text(\"Saved Routes\")") &&
                 source.contains(
-                    "Choose an online route to save or preview a saved route. Watch-supported routes are queued automatically."
+                    "Create a route or preview a saved route. Watch-supported routes are queued automatically."
                 ),
             "Saved Routes uses the requested title and explanatory copy"
         )
         assert(
             source.contains("favoriteButton(for: route") &&
                 source.contains("Image(systemName: favorite == nil ? \"star\" : \"star.fill\")") &&
-                source.contains("Label(\"Save an Online Route\"") &&
+                source.contains("Label(\"Create a Route\"") &&
                 !source.contains("Navigate on iPhone") &&
                 !source.contains("Available offline") &&
                 !source.contains("Apple Maps · Saved on this iPhone"),
@@ -3905,10 +3905,9 @@ extension NavigationProtocolTests {
             "saved route names are editable inline"
         )
         assert(
-            source.contains("case .ready:") &&
-                source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
+            !source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
                 !source.contains("Ready on Watch"),
-            "Watch-ready routes use an inline green status icon without a second-row label"
+            "Watch-ready routes avoid passive green checkmarks"
         )
         assert(
             !source.contains("Powered by Strava") &&
@@ -3942,6 +3941,10 @@ extension NavigationProtocolTests {
             4,
             "topographic map detail requests format 4 independently of iPhone visibility"
         )
+        assertEqual(try? manager.makeCustomBBoxRequest().target?.terrainProfileVersion,
+                    nil, "custom cutouts must not assume a diagnostics peer")
+        assertEqual(try? manager.makeCustomBBoxRequest(supportsTerrainExperiments: true).target?.terrainProfileVersion,
+                    1, "terrain requires an explicit compatible-peer choice")
         let restored = OfflineMapManager(defaults: defaults)
         assert(restored.includeTopographyInNewMaps,
                "topographic map detail remains selected on the supported production server")
@@ -8968,7 +8971,7 @@ extension NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 28, "capability version negotiates signed topographic contours alongside existing capabilities")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 30, "capability version negotiates extended group riders alongside terrain")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1Feature, 1 << 29, "CAP2 bit 29 advertises versioned workout zones without reusing the display inactivity capability")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1MinimumClientVersion, 27, "zone negotiation requires protocol 27, independent of the iOS version")
         assertEqual(DeviceBLEProtocol.topographicContoursCapabilityMask, 1 << 30, "CAP2 bit 30 advertises signed topographic contour support")

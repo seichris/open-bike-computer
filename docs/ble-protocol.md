@@ -131,6 +131,19 @@ a captured handshake unusable on a later connection. No navigation, map,
 settings, workout, rename, or deregistration command is accepted before this
 completes.
 
+CoreBluetooth can restore a connected physical link after the iPhone app process
+exits. The new process does not retain the prior session's ephemeral keys or
+counters. After Bluetooth becomes powered on, iOS retires that restored link,
+waits for local disconnection through the bounded recovery lifecycle, then scans
+for a fresh bike advertisement before connecting and authenticating a new session.
+CoreBluetooth's local disconnect callback alone does not prove physical teardown;
+this firmware stops advertising while connected and restarts only after resetting
+the secure session. A cached or manual reconnect cannot bypass that advertisement
+barrier. The trusted scan stays active in the background without a pairing timeout.
+The app does not send a plaintext
+handshake on the retained authenticated link or weaken firmware frame checks.
+Restored pending connections remain owned by CoreBluetooth until they connect.
+
 1. iOS writes `OWNER|<OwnerID>|<ClientNonce>`.
 2. ESP32 notifies
    `SERVER2|<DeviceID>|<ClientNonce>|<ServerNonce>|<HMAC-SHA256(OwnerKey, "server2|<DeviceID>|<OwnerID>|<ClientNonce>|<ServerNonce>")>`.
@@ -311,7 +324,7 @@ Offset  Size  Field
 ```
 
 Command type `1` is `navigationClear`; type `2` is `workoutState`. A navigation
-clear is one owner member (empty route) or two Watch members (empty route plus
+clear is two members on both iPhone and Watch (empty route plus
 the canonical `1|0|Navigation idle` maneuver). A workout group contains the
 canonical core, extended, and optional origin frames in their existing order.
 Only terminal/idle workout state and explicit navigation clear require this
@@ -815,7 +828,30 @@ ownership-v2 channel `7`. A cached GATT table uses:
 
 The native protected wire frame is 74 bytes; the protected fallback is 78
 bytes. Native and fallback paths unwrap authentication before entering the same
-strict parser. Frames use little-endian numeric fields:
+strict parser. Feature-channel decoding always requires both the transport and
+ownership sessions to be authenticated; only the ownership handshake entry point
+admits plaintext. This includes navigation and settings multiplexing.
+
+Queue admission is provisional. Every automation frame carries the admission
+session and lease generations. The runtime revalidates them under the ownership
+mutex immediately before applying the command, serializing application against
+release, expiry, disconnect, and revocation. Configuration becomes durable only
+after this check and successful persistence. Flash writes (configuration and
+start suppression) run after the ownership mutex is released, because BLE host
+callbacks wait at most 100 ms for it; the single runtime consumer finishes them
+before it dequeues the next command, so command order is unchanged. A disconnect
+before application invalidates configuration and live controls alike; the
+controller retries or resynchronizes on the new lease. Responses are generated
+by that consumer, the configuration acknowledgement after persistence, and sent
+after unlocking, still fenced to its original session/lease.
+
+Notifications select a subscribed channel before encryption: native RAUT first,
+otherwise navigation fallback, only if the cached peer MTU fits the protected
+frame. Host callbacks maintain subscription snapshots; producers do not query
+NimBLE. No subscribed channel, insufficient MTU, or a full queue causes failure
+for protocol retry. Queue admission is not delivery or application confirmation.
+
+Frames use little-endian numeric fields:
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
@@ -1297,7 +1333,9 @@ Version `24` requests bit `26` plus TLV type `2`, configurable screen instances.
 Version `25` requests bit `27`, World Radio. Version `26` requests bit `28`,
 configurable display inactivity timeouts. Version `27` requests bit `29`,
 versioned workout zones. Version `28` requests bit `30`, topographic contours.
-The current iPhone client negotiates version `28`; older direct Watch clients
+Version `29` requests bit `31`, diagnostic terrain experiments. Version `30`
+requests the extended feature word (TLV type `3`), with bit `0` for group riders.
+The current iPhone client negotiates version `30`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
@@ -1330,7 +1368,17 @@ therefore unavailable in production.
 Bits `0...7` retain their legacy meanings above. TLV type `1` carries the
 persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
-carries the 14-byte screen-configuration limits and support masks. Types are unique;
+carries the 14-byte screen-configuration limits and support masks. TLV type `3`
+carries exactly four bytes of little-endian extended feature flags, independently
+numbered from the first word. Its bit `0` is `group_riders_v1`; absent means zero.
+Because extended bits restart at zero, generated constants for this word carry
+their own prefix (`EXTENDED_GROUP_RIDERS_V1_FEATURE` in C++,
+`extendedGroupRidersV1Feature` in Swift) so they cannot be mistaken for the
+first word's same-valued bit.
+Firmware includes this extension only when at least one extended feature is
+available to the negotiated client. Bit `31` of the first word remains terrain;
+it never enables social packets. Older clients skip the new TLV, and version-29
+firmware remains usable without group riders. Types are unique;
 malformed, duplicate, or overrun TLVs invalidate the complete response. Unknown
 well-formed types are skipped. Firmware sends legacy `CAPS` to clients below
 version `10`, preserving the version `7...9` extended-byte contract, and current
@@ -2285,6 +2333,32 @@ contract generates Swift/C++ constants and append-only widget IDs. Golden
 packets are in `protocol/fixtures/workout-zones-v1.json` and tested independently
 by both languages.
 
+### Experimental terrain map presets (client 29)
+
+CAP2 bit 31 (`terrain_experiments`) is advertised only by diagnostics firmware.
+It enables presets of existing configurable `Map` screen instances: Hillshade,
+Tint & Slope, and 3D Terrain. There are no new screen IDs or larger legacy masks.
+The instance's UInt32 visibility field uses bits 14 hillshade, 15 elevation tint,
+16 slope shading, and 17 terrain height exploration. Tint combines bits 14+15;
+slope uses bit 16 independently. Ordinary Map and Map+Navigation defaults do not
+change. Terrain bits are valid only on Map instances; incoming production
+commands reject them. Loading a local diagnostics-era layout on production
+masks these bits while preserving the revision, instances, and other settings.
+Signed FME1 sidecars remain accepted and fully validated on production so
+saved maps and activation recovery work across a firmware change. Production
+does not load or render the terrain grids. The phone still requires the
+terrain capability before transferring a terrain-bearing saved artifact, since
+older contour-capable firmware cannot accept FME1. This check uses the verified
+signed manifest, including for saved maps without terrain metadata. Custom
+cutouts require an explicit terrain opt-in instead of assuming a diagnostics peer.
+
+Contour numbers follow bit 13 in both existing map screens, independently of
+street-label density. Firmware-owned numeric glyphs support existing font packs.
+3D Terrain is an isolated height-surface experiment; route/position overlays
+are suppressed because navigation has not been qualified on a draped surface.
+These screens must pass separate physical performance/readability gates before
+any production enablement. Old maps without FME1 sidecars remain readable.
+
 ### Device operation lifecycle clarification
 
 Signed-stream HTTP `ready` acknowledges validated/finalized staging, not an
@@ -2483,3 +2557,132 @@ match `root`, `mapID`, and `sessionID` to the independently reported active
 selection, and suppress current-use presence for anything other than `ready`.
 A live install additionally requires its exact durable Installed receipt: a
 renderer ACK with failed receipt persistence cannot confer operation success.
+
+
+
+## Companion delivery lifetime
+
+Fresh and CoreBluetooth-restored iPhone connections enter the same generation
+and authentication lifecycle. Connected restorations enter service discovery;
+connecting restorations retain the system attempt without a new deadline
+(only interactive pairing attempts time out); disconnecting restorations
+wait for the real callback with the existing bounded cancellation deadline.
+Neither an authentication callback nor elapsed time revives a retiring attempt.
+Rejected Watch phone preparation uses the same cancellation boundary.
+
+A critical application command owns all its members. Completion, failure,
+cancellation, and supersession invalidate every unsent member before external
+callbacks. iPhone retains an unconfirmed navigation-clear intent for the selected
+peripheral across reconnect, resends a complete group after capabilities, and
+settles it only on its matching application acknowledgement. New explicit route
+or maneuver state supersedes that intent. Legacy peers retain their documented
+best-effort empty-route behavior.
+
+HealthKit send completion and authoritative workout confirmation have independent
+deadlines. iPhone retires a missing framework completion after eight seconds and
+allows queued controls to progress, preserving monotonic control sequences and
+terminal-choice uncertainty. A late callback cannot finish a successor attempt.
+Watch bounds both mirroring startup and live sends at ten seconds and retries
+through its recovery owner with the newest buffered snapshot. A timed-out attempt
+cannot complete a successor, and debug checkpoints retain the recovery reason.
+Terminal delivery keeps its separate shutdown bound.
+
+WatchConnectivity route schema 2 adds `bicino.route.operationGeneration` (a
+positive UInt64 encoded as decimal text) and `bicino.route.operationID` (UUID).
+The content identity remains route UUID, revision, and hash. iPhone persists an
+operation before submitting either immediate or file delivery; both carry the
+same token. Retries retain it; a deliberate new install or delete advances it.
+The Watch writes an operation journal before touching bytes and marks successful
+application before acknowledging the exact token. Startup finishes journaled
+deletions before making routes available. Completed deletion fences survive
+archive removal, so delayed files cannot resurrect deleted content. An active
+route may finish after a durable delete receipt, but cannot start again. A newer
+install may intentionally supersede deletion. Conflicting or stale operations,
+corrupt journals, and persistence failures fail closed.
+
+Watch advertises `bicino.route.supportedSchema = 2` in application context.
+The phone requires this before new transfers and shows an update instruction for
+older Watch apps. Schema-1 messages remain readable for upgrade recovery, but cannot overwrite a
+schema-2 fence or reinstall a legacy-deleted identity. New transfers require both
+apps to support schema 2; a receipt without the submitted token cannot mark them
+ready. Eviction and error receipts also identify their operation. The sender
+cancels redundant file transfers after an exact ready receipt. The sender also
+replays journaled deletion intent after a crash before UI bookkeeping, and
+finishes local unlink after a crash following the receiver receipt. Rejection
+keeps deletion pending for retry with 30-second to 30-minute backoff; a
+`stale_operation` or `operation_conflict` rejection advances the deletion's
+generation first, because resending the same token can never apply. When the
+Watch is unavailable or predates schema 2, deleting a synced route removes the
+iPhone copy immediately and delivers the journaled deletion once an updated
+Watch is available, without waiting for reachability. Only a new explicit import
+after completed cleanup can restore identical content.
+
+Watch controller keychain cleanup uses a separate applied receipt containing the
+exact validated revoke request and its response (`watchControllerRevocationReceiptV1`).
+No owner key or controller credential is included. The phone retains its persisted
+outbox until an accepted matching receipt arrives, including after restart.
+Watch builds that send receipts advertise `bicino.controller.revocationReceipt = 1`
+in application context; for them, WatchConnectivity enqueue/didFinish never
+settles cleanup. A Watch without that flag predates receipts, so a successful
+didFinish for the exact request is its strongest confirmation and settles it,
+instead of retrying forever. Outstanding system
+transfers are deduplicated, and absent/rejected receipts retry with 30–300 second
+backoff when activated. Repeated keychain deletion is idempotent and scoped to the
+same DeviceID and ControllerID; an old receipt cannot revoke a successor key.
+Bike settings expose pending cleanup until it settles.
+
+## Group rider portraits (GRUP v1, diagnostic rollout)
+
+CAP2 extended feature word (TLV type `3`) bit `0` (`group_riders_v1`) requires
+client version `30`, owner-authenticated
+navigation writes, at least ATT MTU 150, PSRAM allocation, and diagnostic firmware.
+Scoped Watch sessions cannot send these packets. Production does not advertise
+the feature until physical display/transport qualification is recorded.
+
+All fields are little endian. Packets use the existing protected navigation
+characteristic, not a new characteristic. The 10-byte header is `GRUP`, version
+`1` (u8), operation (u8), and a nonzero per-session epoch (u32). Phone resets the
+epoch on connection, account, or ride change; disconnect/auth reset erases state
+and pixel caches. An identical state retransmission is acknowledged as applied,
+but never renews its position age; a reused sequence with different fields is stale.
+The UI compares each badge presentation before touching LVGL and copies portrait
+pixels only when its committed hash changes. Off-screen placement uses the ray
+from the viewport center to the camera-projected rider, including near-plane
+clipping; colliding badges retain the nearest rider. Up to eight stable local slots represent the nearest riders;
+no Firebase UID, public ID, URL, or account token reaches firmware. Slot changes
+are incremental within a session: an unchanged rider keeps its slot and committed
+portrait, a rider who leaves or stops sharing before expiry is removed with
+operation `2` at once, and a slot is cleared before reuse only when a nearer
+rider replaces its occupant. A rider whose position expired stays parked in its
+slot (firmware already hides it after 60 seconds), so a return resumes with the
+same portrait hash and no transfer. The phone starts a new epoch (operation `0`)
+only for a new BLE session, account, room or hardware capability, or when the
+device answers a state or remove with result `1` because it no longer knows the
+session.
+
+| Operation | Bytes after header | Meaning |
+| --- | --- | --- |
+| 0 reset | none | Start epoch; repeated same-epoch reset is idempotent |
+| 1 state | slot:u8, sequence:u32, lat:i32 E6, lon:i32 E6, age:u16 seconds, accuracy:u16 meters, course:u16 degrees or 65535, ASCII initials:4, pixel SHA256:32 | Exactly 65 bytes; WGS-84; reject invalid coordinates, age >=60, accuracy >100, or old sequence |
+| 2 remove | slot:u8 | Immediately clear this slot and matching staging transfer |
+| 3 image begin | slot:u8, SHA256:32 | One shared staging image; hash must match the current rider reference |
+| 4 image chunk | slot:u8, offset:u16, 1–112 pixel bytes | Contiguous byte offsets; identical repeated chunks are safe |
+| 5 image commit | slot:u8 | Exactly 3200 bytes of 40×40 RGB565 little endian; SHA256 verified before atomic publication |
+
+Each accepted protocol attempt returns protected `GACK` (17 bytes): magic:4,
+epoch:u32, slot:u8 (255 for reset), next image offset:u16, result:u8,
+operation:u8, current rider sequence:u32. Result 0=applied, 1=stale/session or
+offset mismatch, 2=malformed, 3=image hash mismatch. The phone permits only one
+outstanding operation, checks epoch/slot/operation/sequence/offset, and retries at
+most three times with a two-second ACK timeout. Navigation retains queue priority.
+Image errors leave an initials fallback and never publish partial pixels.
+
+Age includes server-reported capture age plus monotonic elapsed time; retries
+cannot refresh an old fix. Rider markers fade at 15 seconds and expire at 60.
+The complete portrait/distance footprint is constrained to the round screen (or
+a rectangular safe boundary for 2.06-inch). Offscreen bearing is derived from
+fresh own GPS through the same visible map projection; its distance is straight
+line distance, distinct from the phone's confident same-route progress gap.
+Overlapping footprints show a count badge. Pan/zoom gestures hide the layer until
+the published projection is stable. The existing full-buffer/full-refresh display
+strategy is unchanged.

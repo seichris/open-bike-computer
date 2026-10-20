@@ -97,6 +97,7 @@ ALLOWED_FIELD_KEYS = {
     "minimumFreeBytes", "minimumInternalBytes", "minimumLargestBytes", "missingChunks",
     "mode", "navigating", "netifUp", "networkObservation",
     "networkProtocol", "networkTransport", "operationId", "origin",
+    "originCaptureAssociation", "originClockUncertainty", "originProcessId", "originUnixTimeMs",
     "otaState", "outcome", "ownerStackBytes", "pendingControl",
     "phase", "policyGeneration", "policyMask", "profileVersion",
     "providerId", "proxyConnection", "queueBytes", "queueDepth",
@@ -110,14 +111,14 @@ ALLOWED_FIELD_KEYS = {
     "simulation", "sizeBucket", "sourceAgeKnown", "sourceAgeMs",
     "sourceHealthMask", "speedAvailable", "stackAvailableMask", "startMode",
     "state", "stationMode", "storage", "storageErrorCount",
-    "taskCount", "tlsChallenge", "tlsCompleted", "tlsDurationMs",
-    "tlsFailed", "tlsStackBytes", "tlsStarted", "tlsSucceeded",
-    "transactionCount", "transition", "uiPhase", "uiProgressMs",
-    "underlyingErrorCode", "underlyingErrorDomain", "unsupportedReason", "verifiedChunks",
-    "viewingMap", "visitedEntries", "waitedForConnectivity", "watchSequence",
-    "watchUptimeMs", "watchdogCoreMask", "watchdogUptimeMs", "workoutActive",
-    "writerDelayMs", "writerDetail", "writerPhase", "writerProgressMs",
-    "writtenCount",
+    "taskCount", "timeBasis", "tlsChallenge", "tlsCompleted",
+    "tlsDurationMs", "tlsFailed", "tlsStackBytes", "tlsStarted",
+    "tlsSucceeded", "transactionCount", "transition", "uiPhase",
+    "uiProgressMs", "underlyingErrorCode", "underlyingErrorDomain", "unsupportedReason",
+    "verifiedChunks", "viewingMap", "visitedEntries", "waitedForConnectivity",
+    "watchSequence", "watchUptimeMs", "watchdogCoreMask", "watchdogUptimeMs",
+    "workoutActive", "writerDelayMs", "writerDetail", "writerPhase",
+    "writerProgressMs", "writtenCount",
 }
 FIRMWARE_NUMBER_FIELD_KEYS = {
     "acceptedClients", "accuracy", "activeStage", "ageMs",
@@ -138,17 +139,17 @@ FIRMWARE_NUMBER_FIELD_KEYS = {
     "leaseGeneration", "mailboxDelayMs", "mapDetail", "mapProgressMs",
     "maxQueueDepth", "maximumGapMs", "members", "messageBytes",
     "minimumFreeBytes", "minimumInternalBytes", "minimumLargestBytes", "missingChunks",
-    "ownerStackBytes", "policyGeneration", "policyMask", "profileVersion",
-    "queueBytes", "queueDepth", "readinessElapsedMs", "readinessRemainingMs",
-    "rejectedCount", "rendererStackBytes", "replacedCount", "resetReason",
-    "retries", "rideGeneration", "runtimeBootSequence", "sampleCount",
-    "sampleIntervalMs", "schemaVersion", "sequence", "sourceAgeMs",
-    "sourceHealthMask", "stackAvailableMask", "storageErrorCount", "taskCount",
-    "tlsDurationMs", "tlsFailed", "tlsStackBytes", "tlsSucceeded",
-    "transactionCount", "uiProgressMs", "underlyingErrorCode", "verifiedChunks",
-    "visitedEntries", "watchSequence", "watchUptimeMs", "watchdogCoreMask",
-    "watchdogUptimeMs", "writerDelayMs", "writerDetail", "writerProgressMs",
-    "writtenCount",
+    "originUnixTimeMs", "ownerStackBytes", "policyGeneration", "policyMask",
+    "profileVersion", "queueBytes", "queueDepth", "readinessElapsedMs",
+    "readinessRemainingMs", "rejectedCount", "rendererStackBytes", "replacedCount",
+    "resetReason", "retries", "rideGeneration", "runtimeBootSequence",
+    "sampleCount", "sampleIntervalMs", "schemaVersion", "sequence",
+    "sourceAgeMs", "sourceHealthMask", "stackAvailableMask", "storageErrorCount",
+    "taskCount", "tlsDurationMs", "tlsFailed", "tlsStackBytes",
+    "tlsSucceeded", "transactionCount", "uiProgressMs", "underlyingErrorCode",
+    "verifiedChunks", "visitedEntries", "watchSequence", "watchUptimeMs",
+    "watchdogCoreMask", "watchdogUptimeMs", "writerDelayMs", "writerDetail",
+    "writerProgressMs", "writtenCount",
 }
 FIRMWARE_BOOLEAN_FIELD_KEYS = {
     "accuracyAvailable", "active", "apEventStarted", "authorized",
@@ -1055,8 +1056,10 @@ def _correlate_events(
     for scope, raw in scoped_events:
         event = dict(raw)
         timestamp = _event_timestamp(raw)
-        uncertainty_ms = 0
+        uncertainty_ms = None
         if raw.get("source") == "firmware":
+            event["clockResolutionMs"] = 1_000
+            event["clockUncertaintyReason"] = "sync_and_drift_unbounded"
             uptime = raw.get("uptimeMs")
             candidates = anchors.get(firmware_scope(scope, raw), [])
             if isinstance(uptime, int) and candidates:
@@ -1072,7 +1075,10 @@ def _correlate_events(
                 # Always correlate firmware against its nearest same-device
                 # anchor. Raw wallTime remains untouched evidence, while this
                 # derived value reflects later RTC corrections and uptime wrap.
-                uncertainty_ms = 0 if raw.get("event") == "clock_anchor" else 1_000
+                # Neither synchronization latency nor oscillator drift has an
+                # established bound. Whole-second firmware timestamps add up
+                # to 999 ms quantization even at the anchor itself.
+                uncertainty_ms = None
         if timestamp is not None:
             event["correlatedWallTime"] = (
                 timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -1185,7 +1191,7 @@ def summarize(
             1 for event in events if event.get("correlatedWallTime")
         ),
         "inferredClockEventCount": sum(
-            1 for event in events if event.get("clockUncertaintyMs", 0) > 0
+            1 for event in events if event.get("clockUncertaintyReason") == "sync_and_drift_unbounded"
         ),
         "streams": [
             {

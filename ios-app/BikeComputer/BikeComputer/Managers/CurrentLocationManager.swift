@@ -350,6 +350,11 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     // MARK: - Optimization #3: Intelligent Location Update Management
     private var isNavigating = false
     private var isViewingMap = false
+    private var isSocialRideSharing = false
+    func setSocialRideSharing(_ sharing: Bool) {
+        isSocialRideSharing = sharing
+        updateLocationTracking()
+    }
     private var isWorkoutActive = false
     private var isPhoneWorkoutActive = false
     private var isRideDetectionArmed = false
@@ -442,6 +447,19 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         locationManager.requestWhenInUseAuthorization()
     }
 
+    @MainActor
+    func prepareSocialRideLocation() async -> Bool {
+        if locationManager.authorizationStatus == .notDetermined {
+            requestWhenInUseAuthorization()
+            // The OS permission sheet completes the original Join action.
+            while locationManager.authorizationStatus == .notDetermined {
+                do { try await Task.sleep(nanoseconds: 200_000_000) }
+                catch { return false }
+            }
+        }
+        return isLocationAuthorized
+    }
+
     var isLocationAuthorized: Bool {
         locationManager.authorizationLevel == .always ||
             locationManager.authorizationLevel == .whenInUse
@@ -498,7 +516,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         let shouldTrack = RideActivityPolicy.shouldTrackLocation(
             isNavigating: isNavigating,
             isViewingMap: isViewingMap && isApplicationActive,
-            isWorkoutActive: isWorkoutActive,
+            isWorkoutActive: isWorkoutActive || isSocialRideSharing,
             isRefreshingDeviceDestinationLocation:
                 isRefreshingDeviceDestinationLocation,
             isRideDetectionArmed: isRideDetectionArmed
@@ -506,7 +524,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         let shouldTrackInBackground =
             RideActivityPolicy.shouldTrackLocationInBackground(
                 isNavigating: isNavigating,
-                isWorkoutActive: isWorkoutActive,
+                isWorkoutActive: isWorkoutActive || isSocialRideSharing,
                 isRefreshingDeviceDestinationLocation:
                     isRefreshingDeviceDestinationLocation,
                 isRideDetectionArmed: isRideDetectionArmed
@@ -523,17 +541,17 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         if shouldTrackInBackground &&
             locationManager.authorizationLevel == .whenInUse &&
             isApplicationActive &&
-            (!isPhoneWorkoutActive || isNavigating || isRideDetectionArmed) &&
+            ((!isPhoneWorkoutActive && !isSocialRideSharing) || isNavigating || isRideDetectionArmed) &&
             !hasRequestedAlwaysAuthorizationForRideActivity {
             hasRequestedAlwaysAuthorizationForRideActivity = true
             locationManager.requestAlwaysAuthorization()
         }
 
-        // A phone workout explicitly started in foreground may continue the
+        // A phone workout or explicitly consented social ride started in foreground may continue the
         // same When-In-Use location stream with the system background indicator.
         // Do not grant this exception to navigation, Watch mirroring or passive
         // ride detection, and never cold-start When-In-Use GPS in background.
-        let phoneWhenInUse = isPhoneWorkoutActive
+        let phoneWhenInUse = (isPhoneWorkoutActive || isSocialRideSharing)
             && locationManager.authorizationLevel == .whenInUse
         let canTrackInBackground = shouldTrackInBackground &&
             (locationManager.authorizationLevel == .always || phoneWhenInUse)

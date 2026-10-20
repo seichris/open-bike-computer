@@ -1,10 +1,56 @@
-"""Keep source identity out of compilation commands for unrelated libraries."""
+"""Track macro-included UI configuration while keeping identity metadata scoped."""
 
 import json
 import os
 import shlex
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
+
+
+FORCE_INCLUDE_OPTIONS = ("-include", "-imacros")
+
+
+def force_included_files(build_env, project: Path) -> list[str]:
+    """Existing files named by -include/-imacros in this environment's flags.
+
+    SCons' C scanner never reads compiler flags, so these headers are absent
+    from dependency and cache signatures unless declared. PlatformIO stores a
+    build flag as a ("-include", "relative/path") pair; flags appended directly
+    are separate strings. Relative paths resolve from the project directory,
+    where the compiler runs. Only existing files are returned, because SCons
+    fails a build that depends on a missing file.
+    """
+    named = []
+    for variable in ("CCFLAGS", "CFLAGS", "CXXFLAGS"):
+        flags = build_env.get(variable)
+        if isinstance(flags, str):
+            flags = shlex.split(flags)
+        if not isinstance(flags, Iterable):
+            continue
+        pending = False
+        for flag in flags:
+            if isinstance(flag, (tuple, list)):
+                if len(flag) == 2 and str(flag[0]) in FORCE_INCLUDE_OPTIONS:
+                    named.append(flag[1])
+                pending = False
+                continue
+            text = str(flag)
+            if pending:
+                named.append(flag)
+                pending = False
+            elif text in FORCE_INCLUDE_OPTIONS:
+                pending = True
+            else:
+                named.extend(text[len(option):] for option in FORCE_INCLUDE_OPTIONS
+                             if text.startswith(option) and len(text) > len(option))
+    files = []
+    for value in named:
+        path = Path(value.get_abspath() if hasattr(value, "get_abspath") else build_env.subst(str(value)))
+        path = path if path.is_absolute() else project / path
+        if path.is_file():
+            files.append(str(path.resolve()))
+    return files
 
 
 def configure_metadata_identity(env, git_sha: str, timestamp: str) -> None:
@@ -59,16 +105,29 @@ def configure_metadata_identity(env, git_sha: str, timestamp: str) -> None:
         f"-ffile-prefix-map={project}=/open-bike-computer/esp32",
     ])
 
+    # LVGL includes LV_CONF_PATH through a stringifying macro. SCons' include
+    # scanner cannot discover that edge reliably, so a warm object cache can
+    # otherwise retain the old allocator size (and other ABI/config settings).
+    # Every application/library object must see this input, including local
+    # consumers of LVGL headers. The separately attested framework core is not
+    # built through this application middleware.
+    compile_inputs = [str(clock), str(project / "lib/lvgl/lv_conf.h")]
+
+    def inputs_for(build_env):
+        # Force-included headers (for example the NimBLE connection limit) are
+        # equally invisible to the scanner, so they are declared as well.
+        return list(dict.fromkeys(compile_inputs + force_included_files(build_env, project)))
+
     def metadata_object(build_env, node):
         source = Path(node.srcnode().get_abspath())
         if source != project / "lib/firmware_metadata/firmware_metadata.cpp":
             result = build_env.Object(node)
-            build_env.Depends(result, str(clock))
+            build_env.Depends(result, inputs_for(build_env))
             return result[0]
         identity_env = build_env.Clone()
         identity_env.Append(CCFLAGS=["-include", str(header)])
         result = identity_env.Object(node)
-        identity_env.Depends(result, str(clock))
+        identity_env.Depends(result, inputs_for(identity_env))
         identity_env.Depends(result, str(header))
         return result[0]
 

@@ -42,6 +42,7 @@ struct BikeComputerApp: App {
                     appDelegate.setApplicationActive($0)
                 }
             )
+            .environmentObject(appDelegate.social)
         }
     }
 }
@@ -50,6 +51,11 @@ struct BikeComputerApp: App {
 
 @MainActor
 class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        social.didRegisterNotifications(deviceToken)
+    }
+
+    let social = SocialCoordinator()
     let workoutMirrorManager: WorkoutMirrorManager
     let workoutSessionCoordinator: WorkoutSessionCoordinator
     let cyclingSensorStore: CyclingSensorStore
@@ -154,6 +160,19 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             callbackScheme: callbackScheme
         )
         super.init()
+        social.live.prepareLocation = { [weak locationManager] in
+            guard let locationManager else { return false }
+            return await locationManager.prepareSocialRideLocation()
+        }
+        locationManager.$authorizationStatus.removeDuplicates().sink { [weak social] status in
+            social?.live.locationAuthorizationChanged(authorized: status == .authorizedAlways || status == .authorizedWhenInUse)
+        }.store(in: &cancellables)
+        social.live.$isSharing.removeDuplicates().sink { [weak locationManager] sharing in
+            locationManager?.setSocialRideSharing(sharing)
+        }.store(in: &cancellables)
+        locationManager.$currentLocation.sink { [weak social] location in
+            social?.live.updateLocation(location)
+        }.store(in: &cancellables)
         destinationStore.$favoriteDestinations
             .map { destinations in
                 Array(destinations.compactMap { destination in
@@ -203,6 +222,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ = coordinator
         _ = rideAutomationCoordinator
         let bleManager = coordinator.bleManager
+        social.bindBLE(bleManager)
+
         bleManager.diagnosticsRecorder = rideDiagnosticsRecorder
         DiagnosticsBrokerClient.shared.configure(recorder: rideDiagnosticsRecorder, bleManager: bleManager)
         DiagnosticsCollectionCoordinator.shared.configure(
@@ -266,7 +287,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             .scan((previous: false, current: false)) { state, active in
                 (previous: state.current, current: active)
             }
-            .sink { [weak rideDiagnosticsRecorder] state in
+            .sink { [weak rideDiagnosticsRecorder, weak social] state in
                 // Snapshot the finished ride's original identities BEFORE the
                 // recorder rotates its capture. Delivery may occur much later.
                 DiagnosticsCollectionCoordinator.shared.observeRide(active: state.current)
@@ -274,6 +295,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
                     previous: state.previous, current: state.current
                 ) {
                     rideDiagnosticsRecorder?.endRideCapture()
+                    Task { @MainActor in await social?.live.stopSharing() }
                 }
             }
             .store(in: &cancellables)

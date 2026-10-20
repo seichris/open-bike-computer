@@ -47,7 +47,7 @@ import Foundation
             chunks: [receipt(first), receipt(second, chunk: 2)])
         try await store.verified(active.id, receipt: receipt(first), data: first)
         let before = try await store.manifests()
-        precondition(before.count == 5, "reproduce byte pressure well below the 20-job limit")
+        precondition(before.count == 3, "reserve the whole immutable inventory before admitting its first body")
         try await store.verified(active.id, receipt: receipt(second, chunk: 2), data: second)
         let restarted = DiagnosticsAcquisitionStore(root: root, maximumEvidenceBytes: 110)
         let remaining = try await restarted.manifests()
@@ -166,7 +166,7 @@ import Foundation
             precondition(after == before,
                 "infeasible admission must preserve terminal jobs as well as incomplete jobs")
             let status = DiagnosticsAcquisitionFailureReporting.status(for: error)
-            precondition(status.contains("cache is full") && status.contains("32 MiB") && status.contains("preserved"))
+            precondition(status.contains("cache is full") && status.contains("64 MiB") && status.contains("preserved"))
             let fields = DiagnosticsAcquisitionFailureReporting.fields(for: error, acquisitionID: active.id, phase: "device_download")
             precondition(fields == ["code": "cache_full", "reason": "cache_full", "phase": "device_download",
                 "operationId": active.id.uuidString.lowercased()])
@@ -283,7 +283,46 @@ import Foundation
         precondition(journaled.count == 3, "the unjournaled request leaves no receipt")
     }
 
+    static func fullSupportedHistoryTests() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = DiagnosticsAcquisitionStore(root: root)
+        let capture = UUID(), process = UUID().uuidString.lowercased()
+        let job = try await store.create(deviceDigest: "0123456789abcdef", captureID: capture)
+        func body(_ tag: Int, source: String) -> Data {
+            (0..<32).reduce(into: Data()) { data, offset in
+                var event: [String: Any] = ["schema": 1, "source": source,
+                    "captureId": capture.uuidString.lowercased(), "sequence": (tag - 1) * 32 + offset,
+                    "level": "info", "category": "boot", "event": "test",
+                    "fields": source == "firmware" ? ["bootSequence": 1, "firmwareFingerprint": "A1B2C3D4"] : [:]]
+                if source == "ios" { event["processId"] = process }
+                var line = try! JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
+                line.append(Data(repeating: 32, count: 8191 - line.count)); line.append(10)
+                data.append(line)
+            }
+        }
+        let app = Dictionary(uniqueKeysWithValues: (1...128).map {
+            (String(format: "%@/events-%06d.jsonl", process, $0), body($0, source: "ios"))
+        })
+        try await store.retainAppEvidence(job.id, chunks: app)
+        let device = (1...128).map { body($0, source: "firmware") }
+        let receipts = device.enumerated().map { receipt($0.element, chunk: UInt32($0.offset + 1)) }
+        _ = try await store.inventory(job.id, deviceDigest: job.deviceDigest, index: Data("frozen".utf8), chunks: receipts)
+        try await store.reserveInventory(job.id)
+        for (item, data) in zip(receipts, device) { try await store.verified(job.id, receipt: item, data: data) }
+        try await store.finish(job.id)
+        let exported = try await store.exportSnapshot(acquisitionID: job.id)
+        precondition(exported.chunks.count == 128 && exported.appChunks.count == 128)
+        precondition(exported.chunks.values.reduce(0) { $0 + $1.count } +
+            exported.appChunks.values.reduce(0) { $0 + $1.count } == 64 * 1024 * 1024)
+        precondition(exported.manifests.first!.deliveryComplete)
+        // A later impossible job fails before copying app evidence, and an
+        // explicit release makes the old partial inventory reclaimable.
+        print("Full supported 32 MiB firmware + 32 MiB app cutoff completes and exports")
+    }
+
     static func main() async throws {
+        try await fullSupportedHistoryTests()
         try await postRideJournalTests()
         try await bytePressureTests()
         try await appPressureAndOversizeTests()
@@ -393,14 +432,12 @@ import Foundation
         let bounded = DiagnosticsAcquisitionStore(root: boundedRoot, maximumEvidenceBytes: 10)
         let limited = try await bounded.create(deviceDigest: job.deviceDigest, captureID: nil)
         _ = try await bounded.inventory(limited.id, deviceDigest: job.deviceDigest, index: Data(), chunks: [first, second])
-        try await bounded.verified(limited.id, receipt: first, data: firstData)
-        try await bounded.verified(limited.id, receipt: first, data: firstData)
-        do { try await bounded.verified(limited.id, receipt: second, data: secondData); fatalError("evidence budget exceeded") }
+        do { try await bounded.reserveInventory(limited.id); fatalError("oversized cutoff accepted") }
         catch DiagnosticsAcquisitionStore.Failure.storageFull {}
         let boundedReceipt = try await bounded.load(limited.id)
         let boundedBytes = try await bounded.chunkData(limited.id, receipt: first)
-        precondition(boundedReceipt.verified == [first.key] && boundedBytes == firstData,
-            "a full evidence store must preserve existing bytes and partial receipts")
+        precondition(boundedReceipt.verified.isEmpty && boundedBytes == nil,
+            "oversized inventories must fail before any body download, preserving their cutoff for partial export/release")
         print("Diagnostics acquisition persistence, cutoff, identity and completeness tests passed")
     }
 }

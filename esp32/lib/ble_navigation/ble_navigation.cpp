@@ -1,3 +1,4 @@
+#include "../social_riders/social_riders.hpp"
 #include "../firmware_update/firmware_metadata_compatibility.hpp"
 #include "power.hpp"
 extern Power power;
@@ -16,6 +17,7 @@ extern Power power;
 #define FIRMWARE_DIAGNOSTICS 1
 #endif
 #include "ble_connection_policy.hpp"
+#include "ride_command_admission.hpp"
 #include "device_ownership.hpp"
 #include "ownership_button_policy.hpp"
 #include "ownership_ui_dispatch_policy.hpp"
@@ -146,6 +148,7 @@ static std::atomic<bool> bleSessionSupportsRendererBenchmarkSample{false};
 static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
 static std::atomic<bool> bleSessionSupportsWorkoutZones{false};
+static std::atomic<bool> bleSessionSupportsGroupRiders{false};
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 static std::atomic<bool> bleSessionSupportsWorldRadio{false};
 #endif
@@ -207,6 +210,10 @@ static std::atomic<uint16_t> radioConnectionHandle{BLE_HS_CONN_HANDLE_NONE};
 // not deliver the latter callback even though their ATT MTU is already larger
 // than 23. Chunking must never call getPeerMTU() outside the host task.
 static std::atomic<uint16_t> activePeerMtu{23};
+// Updated only by host subscription callbacks; producers never call NimBLE.
+static std::atomic<uint8_t> rideNotificationSubscriptions{0};
+static constexpr uint8_t kNavigationSubscription = 1;
+static constexpr uint8_t kAutomationSubscription = 2;
 static std::atomic<uint32_t> lastConnectionParameterSampleMs{0};
 struct RadioDebugSnapshot {
   bool connectionParametersValid = false;
@@ -1354,23 +1361,25 @@ static bool requireAuthenticated(const char *payloadName) {
   return false;
 }
 
-static bool unwrapOwnerAuthenticatedPayload(
+static bool decodeSessionPayload(
     device_ownership::AuthenticatedChannel channel, const std::string &frame,
     std::string &payload, const char *payloadName,
-    bool *wasScopedWatchSession = nullptr) {
+    bool handshake, bool *wasScopedWatchSession = nullptr) {
   if (wasScopedWatchSession != nullptr) {
     *wasScopedWatchSession = false;
   }
   if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
       xSemaphoreTake(deviceOwnershipMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     payload = frame;
-    return !deviceOwnershipReady;
+    return handshake && !deviceOwnershipReady;
   }
   const bool requiresFrame = deviceOwnership.isSessionAuthenticated();
   const bool authenticationStateDiverged =
       bleSessionAuthenticated && !requiresFrame;
   const bool validFrame =
       !authenticationStateDiverged &&
+      ride_command_admission::mayDecode(handshake, deviceOwnershipReady,
+                                        bleSessionAuthenticated, requiresFrame) &&
       (!requiresFrame ||
        deviceOwnership.unwrapAuthenticatedPayload(channel, frame, payload));
   const uint32_t nowMs = millis();
@@ -1406,6 +1415,8 @@ static bool unwrapOwnerAuthenticatedPayload(
   if (authenticationStateDiverged) {
     bleSessionAuthenticated = false;
     clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
@@ -1430,6 +1441,45 @@ static bool unwrapOwnerAuthenticatedPayload(
                   payloadName == nullptr ? "payload" : payloadName);
   }
   return accepted;
+}
+
+// Deliberately distinct APIs: feature code cannot opt into handshake decoding.
+static bool decodeProtectedCommand(
+    device_ownership::AuthenticatedChannel channel, const std::string &frame,
+    std::string &payload, const char *name, bool *scopedWatch = nullptr) {
+  if (channel == device_ownership::AuthenticatedChannel::Auth) return false;
+  return decodeSessionPayload(channel, frame, payload, name, false, scopedWatch);
+}
+
+static bool decodeOwnershipHandshake(const std::string &frame,
+                                     std::string &payload) {
+  return decodeSessionPayload(device_ownership::AuthenticatedChannel::Auth,
+                              frame, payload, "ownership command", true);
+}
+
+// Execution and revocation are serialized by the ownership mutex. Admission to
+// the queue is provisional; configuration persists only after an authorized
+// apply, and the caller performs that flash write after this lock is released.
+bool BLENavigationServer::applyAuthorizedRideCommand(
+    ride_command_admission::Authorization admitted,
+    bool (*apply)(void *), void *context) {
+  if (!deviceOwnershipReady || deviceOwnershipMutex == nullptr ||
+      xSemaphoreTake(deviceOwnershipMutex, portMAX_DELAY) != pdTRUE) return false;
+  const ride_command_admission::Authorization current{
+      ridePayloadGeneration.load(std::memory_order_acquire),
+      deviceOwnership.authenticatedRideLeaseGeneration(millis())};
+  const bool accepted = ride_command_admission::mayApply(
+      admitted, current, bleSessionAuthenticated &&
+                            deviceOwnership.isSessionAuthenticated()) &&
+      apply(context);
+  xSemaphoreGive(deviceOwnershipMutex);
+  return accepted;
+}
+
+static bool admitRideAutomationFrame(const uint8_t *data, size_t length) {
+  return ride_automation_runtime::ingestTransportFrame(data, length, millis(),
+      {ridePayloadGeneration.load(std::memory_order_acquire),
+       rideDeliveryLeaseGenerationSnapshot.load(std::memory_order_acquire)});
 }
 
 static bool isHexNonce(const char *nonce) {
@@ -1727,7 +1777,8 @@ static void completeBleSessionAuthentication() {
 static bool notifyAuthenticatedPayload(
     NimBLECharacteristic *characteristic,
     device_ownership::AuthenticatedChannel channel, const uint8_t *data,
-    size_t length, const char *label) {
+    size_t length, const char *label,
+    ride_command_admission::Authorization expected = {}) {
   (void)label;
   if (characteristic == nullptr || data == nullptr ||
       !bleSessionAuthenticated || !deviceOwnershipReady ||
@@ -1735,6 +1786,14 @@ static bool notifyAuthenticatedPayload(
       xSemaphoreTake(deviceOwnershipMutex,
                      isNimbleCallbackContext() ? 0 : pdMS_TO_TICKS(100)) !=
           pdTRUE) {
+    return false;
+  }
+  if (expected.sessionGeneration != 0 &&
+      !ride_command_admission::mayApply(
+          expected, {ridePayloadGeneration.load(std::memory_order_acquire),
+                     deviceOwnership.authenticatedRideLeaseGeneration(millis())},
+          deviceOwnership.isSessionAuthenticated())) {
+    xSemaphoreGive(deviceOwnershipMutex);
     return false;
   }
   std::string frame;
@@ -2082,24 +2141,33 @@ static RideDeliveryDecodeResult decodeRideDeliveryPayload(
   return RideDeliveryDecodeResult::Decoded;
 }
 
-bool BLENavigationServer::notifyRideAutomationFrame(const uint8_t *data,
-                                                    size_t length) {
+bool BLENavigationServer::notifyRideAutomationFrame(
+    const uint8_t *data, size_t length,
+    ride_command_admission::Authorization expected) {
   if (data == nullptr || length != ride_automation_protocol::FRAME_SIZE)
     return false;
-  const bool native = notifyAuthenticatedPayload(
-      pRideAutomationCharacteristic,
-      device_ownership::AuthenticatedChannel::RideAutomation, data, length,
-      "ride automation");
-  if (native)
-    return true;
+  const uint8_t subscriptions =
+      rideNotificationSubscriptions.load(std::memory_order_acquire);
+  const auto channel = ride_command_admission::notificationChannel(
+      subscriptions & kAutomationSubscription,
+      subscriptions & kNavigationSubscription,
+      activePeerMtu.load(std::memory_order_acquire), length);
+  if (channel == ride_command_admission::NotificationChannel::None)
+    return false;
+  if (channel == ride_command_admission::NotificationChannel::Native)
+    return notifyAuthenticatedPayload(
+        pRideAutomationCharacteristic,
+        device_ownership::AuthenticatedChannel::RideAutomation, data, length,
+        "ride automation", expected);
   uint8_t fallback[ride_automation_protocol::FALLBACK_PREFIX_SIZE +
                    ride_automation_protocol::FRAME_SIZE]{};
   std::memcpy(fallback, ride_automation_protocol::FALLBACK_PREFIX,
               ride_automation_protocol::FALLBACK_PREFIX_SIZE);
   std::memcpy(fallback + ride_automation_protocol::FALLBACK_PREFIX_SIZE, data,
               length);
-  return notifyAuthenticatedNavigation(mapTransferStatusCharacteristic,
-                                       fallback, sizeof(fallback));
+  return notifyAuthenticatedPayload(mapTransferStatusCharacteristic,
+      device_ownership::AuthenticatedChannel::Navigation, fallback,
+      sizeof(fallback), "ride automation fallback", expected);
 }
 
 static void logAuthPayloadPreview(const std::string &value) {
@@ -2121,9 +2189,7 @@ static void logAuthPayloadPreview(const std::string &value) {
 
 static void handleAuthPayload(const std::string &frame) {
   std::string value;
-  if (!unwrapOwnerAuthenticatedPayload(
-          device_ownership::AuthenticatedChannel::Auth, frame, value,
-          "ownership command")) {
+  if (!decodeOwnershipHandshake(frame, value)) {
     return;
   }
   if (value.length() == 2 &&
@@ -2178,6 +2244,8 @@ static void handleAuthPayload(const std::string &frame) {
     if (bleSessionAuthenticated && !ownershipSessionAuthenticated) {
       bleSessionAuthenticated = false;
       clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
       bleSessionSupportsExplicitInvalidGpsHeading.store(
           false, std::memory_order_release);
       bleSessionSupportsRendererDiagnostics.store(false,
@@ -2221,6 +2289,8 @@ static void handleAuthPayload(const std::string &frame) {
                 break;
               case device_ownership::Event::LeaseReleased:
                 clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
                 rideDeliveryLeaseGenerationSnapshot.store(
                     0, std::memory_order_release);
                 advanceRidePayloadGeneration();
@@ -2234,6 +2304,8 @@ static void handleAuthPayload(const std::string &frame) {
               case device_ownership::Event::Unpaired:
                 bleSessionAuthenticated = false;
                 clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
                 bleSessionSupportsExplicitInvalidGpsHeading.store(
                     false, std::memory_order_release);
                 bleSessionSupportsRendererDiagnostics.store(
@@ -2306,6 +2378,8 @@ static void handleAuthPayload(const std::string &frame) {
     char response[112];
     bleSessionAuthenticated = false;
     clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
@@ -4240,11 +4314,21 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
       featureFlags |=
           device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE;
     }
+    const bool supportsGroup =
+        activePeerMtu.load(std::memory_order_acquire) >= 150 &&
+        clientVersion >= ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_MINIMUM_CLIENT_VERSION &&
+        social_riders::ready();
+    bleSessionSupportsGroupRiders.store(supportsGroup, std::memory_order_release);
+    const uint32_t extendedFeatureFlags = supportsGroup
+        ? ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE : 0;
+    if (map_profile_protocol::VISIBILITY_TERRAIN != 0 && clientVersion >=
+        ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_MINIMUM_CLIENT_VERSION)
+      featureFlags |= ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE;
     responseSize = device_capabilities_protocol::encodeCap2(
         featureFlags, powerPayload,
         includePowerButtonConfig && powerButtonHonkAvailable, response,
         sizeof(response), screenConfigurationTLV,
-        screenConfigurationTLVLength);
+        screenConfigurationTLVLength, extendedFeatureFlags);
     if (responseSize == 0) {
       Serial.println("BLE Capabilities: CAP2 encoding failed");
       return;
@@ -5388,7 +5472,7 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
         normalizedMapFeatureVisibilityMask(mask);
     if (mirrorLegacyMapProfile) {
       mapRenderSettings.mapNavigationStyle.visibilityMask =
-          mapRenderSettings.mapStyle.visibilityMask;
+          mapRenderSettings.mapStyle.visibilityMask & ~map_profile_protocol::TERRAIN_EXPERIMENT_MASK;
     }
     mapRenderSettings.navigationOverlayVisibilityMask =
         mask & MAP_VISIBILITY_OVERLAY_MASK;
@@ -5423,7 +5507,8 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     break;
   case 20:
     mapRenderSettings.mapNavigationStyle.visibilityMask =
-        normalizedMapFeatureVisibilityMask((uint32_t)settingValue);
+        normalizedMapFeatureVisibilityMask((uint32_t)settingValue) &
+        ~map_profile_protocol::TERRAIN_EXPERIMENT_MASK;
     persistMapProfileSetting();
     break;
   case 21:
@@ -5859,6 +5944,7 @@ public:
     }
     radioConnectionHandle.store(desc->conn_handle, std::memory_order_release);
     activePeerMtu.store(23, std::memory_order_release);
+    rideNotificationSubscriptions.store(0, std::memory_order_release);
 #if BLE_RADIO_CHARACTERIZATION
     radioRequestedConnectionProfile.store(
         static_cast<uint8_t>(ble_radio_policy::ConnectionProfile::Unset),
@@ -5880,6 +5966,8 @@ public:
 
   void acceptConnection() {
     clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     resetScreenConfigurationTransport();
     server->connected = true;
     bleSessionAuthenticated = false;
@@ -5956,6 +6044,7 @@ public:
     radioConnectionHandle.store(BLE_HS_CONN_HANDLE_NONE,
                                 std::memory_order_release);
     activePeerMtu.store(23, std::memory_order_release);
+    rideNotificationSubscriptions.store(0, std::memory_order_release);
     portENTER_CRITICAL(&radioDebugMux);
     radioDebugSnapshot.connectionParametersValid = false;
     portEXIT_CRITICAL(&radioDebugMux);
@@ -6034,6 +6123,8 @@ public:
         std::memory_order_release);
     clearRendererWindowRequest();
     clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -6083,6 +6174,17 @@ public:
 
 class MyNavCharacteristicCallbacks : public NimBLECharacteristicCallbacks {
 public:
+  void onSubscribe(NimBLECharacteristic *, ble_gap_conn_desc *desc,
+                   uint16_t subscriptions) override {
+    if (desc == nullptr || desc->conn_handle !=
+        radioConnectionHandle.load(std::memory_order_acquire)) return;
+    if ((subscriptions & 1U) != 0)
+      rideNotificationSubscriptions.fetch_or(kNavigationSubscription, std::memory_order_acq_rel);
+    else
+      rideNotificationSubscriptions.fetch_and(
+          static_cast<uint8_t>(~kNavigationSubscription), std::memory_order_acq_rel);
+  }
+
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
@@ -6092,7 +6194,7 @@ public:
     }
     std::string value;
     bool scopedWatchSession = false;
-    if (!unwrapOwnerAuthenticatedPayload(
+    if (!decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::Navigation, frame, value,
             "navigation characteristic", &scopedWatchSession)) {
       return;
@@ -6172,6 +6274,17 @@ public:
     }
 #endif
 
+    if (value.size() >= 4 && std::memcmp(value.data(), "GRUP", 4) == 0) {
+      if (scopedWatchSession || !requireAuthenticated("group riders") ||
+          !bleSessionSupportsGroupRiders.load(std::memory_order_acquire)) return;
+      uint8_t acknowledgement[17] = {};
+      if (social_riders::ingest(reinterpret_cast<const uint8_t *>(value.data()), value.size(), acknowledgement)) {
+        notifyAuthenticatedNavigation(pChar, acknowledgement, sizeof(acknowledgement));
+        ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+      }
+      return;
+    }
+
     if (handleDestinationPickerPayload(value, "destination picker")) {
       power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
       return;
@@ -6186,10 +6299,10 @@ public:
                             ride_automation_protocol::FRAME_SIZE &&
         std::memcmp(value.data(), ride_automation_protocol::FALLBACK_PREFIX,
                     ride_automation_protocol::FALLBACK_PREFIX_SIZE) == 0) {
-      if (!ride_automation_runtime::ingestTransportFrame(
+      if (!admitRideAutomationFrame(
               reinterpret_cast<const uint8_t *>(value.data()) +
                   ride_automation_protocol::FALLBACK_PREFIX_SIZE,
-              ride_automation_protocol::FRAME_SIZE, millis()))
+              ride_automation_protocol::FRAME_SIZE))
         Serial.println("BLE Ride Automation: rejected navigation fallback frame");
       return;
     }
@@ -6329,7 +6442,7 @@ public:
     timing.setupComplete();
     const std::string frame = pChar->getValue();
     std::string value;
-    if (!unwrapOwnerAuthenticatedPayload(
+    if (!decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::Route, frame, value,
             "route characteristic")) {
       return;
@@ -6394,7 +6507,7 @@ public:
     const std::string frame = pChar->getValue();
     const uint32_t receivedAtMs = millis();
     std::string value;
-    if (!unwrapOwnerAuthenticatedPayload(
+    if (!decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::Gps, frame, value,
             "GPS characteristic")) {
 #if FIRMWARE_DIAGNOSTICS
@@ -6484,7 +6597,7 @@ public:
     workout_telemetry_transport::dispatchAuthenticatedNativeFrame(
         frame,
         [](const std::string &protectedFrame, std::string &payload) {
-          return unwrapOwnerAuthenticatedPayload(
+          return decodeProtectedCommand(
               device_ownership::AuthenticatedChannel::Workout,
               protectedFrame, payload, "workout telemetry characteristic");
         },
@@ -6568,19 +6681,29 @@ public:
 class MyRideAutomationCharacteristicCallbacks
     : public NimBLECharacteristicCallbacks {
 public:
+  void onSubscribe(NimBLECharacteristic *, ble_gap_conn_desc *desc,
+                   uint16_t subscriptions) override {
+    if (desc == nullptr || desc->conn_handle !=
+        radioConnectionHandle.load(std::memory_order_acquire)) return;
+    if ((subscriptions & 1U) != 0)
+      rideNotificationSubscriptions.fetch_or(kAutomationSubscription, std::memory_order_acq_rel);
+    else
+      rideNotificationSubscriptions.fetch_and(
+          static_cast<uint8_t>(~kAutomationSubscription), std::memory_order_acq_rel);
+  }
+
   void onWrite(NimBLECharacteristic *pChar) override {
     ScopedNimbleCallback callbackScope;
     if (shutdownWritesClosed.load()) return;
     const std::string frame = pChar->getValue();
     std::string payload;
-    if (!unwrapOwnerAuthenticatedPayload(
+    if (!decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::RideAutomation, frame,
             payload, "ride automation characteristic") ||
         !requireAuthenticated("ride automation"))
       return;
-    if (!ride_automation_runtime::ingestTransportFrame(
-            reinterpret_cast<const uint8_t *>(payload.data()), payload.size(),
-            millis()))
+    if (!admitRideAutomationFrame(
+            reinterpret_cast<const uint8_t *>(payload.data()), payload.size()))
       Serial.println("BLE Ride Automation: rejected native frame");
   }
 };
@@ -6594,7 +6717,7 @@ public:
     const std::string frame = pChar->getValue();
     std::string payload;
     if (!screen_configuration::isReady() ||
-        !unwrapOwnerAuthenticatedPayload(
+        !decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::ScreenConfiguration,
             frame, payload, "screen configuration characteristic") ||
         !requireAuthenticated("screen configuration")) {
@@ -6686,7 +6809,7 @@ public:
     const std::string frame = pChar->getValue();
     std::string value;
     bool scopedWatchSession = false;
-    if (!unwrapOwnerAuthenticatedPayload(
+    if (!decodeProtectedCommand(
             device_ownership::AuthenticatedChannel::Settings, frame, value,
             "settings characteristic", &scopedWatchSession)) {
       return;
@@ -6702,10 +6825,10 @@ public:
                             ride_automation_protocol::FRAME_SIZE &&
         std::memcmp(value.data(), ride_automation_protocol::FALLBACK_PREFIX,
                     ride_automation_protocol::FALLBACK_PREFIX_SIZE) == 0) {
-      if (!ride_automation_runtime::ingestTransportFrame(
+      if (!admitRideAutomationFrame(
               reinterpret_cast<const uint8_t *>(value.data()) +
                   ride_automation_protocol::FALLBACK_PREFIX_SIZE,
-              ride_automation_protocol::FRAME_SIZE, millis()))
+              ride_automation_protocol::FRAME_SIZE))
         Serial.println("BLE Ride Automation: rejected fallback frame");
       return;
     }
@@ -7434,6 +7557,8 @@ bool BLENavigationServer::forgetOwner() {
       std::memory_order_release);
   clearRendererWindowRequest();
   clearAuthenticatedBleGpsRideObservation();
+    social_riders::reset();
+    bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
   bleDebugStats.updateWith([](BLEDebugStats &stats) {
     stats.authenticated = false;
   });

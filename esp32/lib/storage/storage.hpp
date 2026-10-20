@@ -202,6 +202,7 @@ public:
   size_t write(FILE *file, const uint8_t *buffer, size_t size);
   size_t write(FILE *file, const char *buffer, size_t size);
   int flush(FILE *file);
+  int sync(FILE *file);
   int seek(FILE *file, long offset, int whence);
   int print(FILE *file, const char *str);
   int println(FILE *file, const char *str);

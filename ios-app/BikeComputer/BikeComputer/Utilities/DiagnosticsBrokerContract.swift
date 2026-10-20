@@ -337,3 +337,43 @@ nonisolated enum DiagnosticsHandoffReceipt {
         }
     }
 }
+
+/// A permanent rejection is a durable quarantine marker, never a delivery
+/// acknowledgement. The unchanged ZIP stays in the same bounded outbox.
+nonisolated enum DiagnosticsHandoffRejection {
+    private struct Receipt: Codable {
+        let schema: Int
+        let id: UUID
+        let sha256: String
+        let statusCode: Int
+    }
+    private static func path(_ id: UUID, root: URL) -> URL {
+        root.appendingPathComponent("rejected-" + id.uuidString.lowercased() + ".json")
+    }
+    static func contains(_ id: UUID, sha256: String, root: URL) throws -> Bool {
+        let file = path(id, root: root)
+        guard FileManager.default.fileExists(atPath: file.path) else { return false }
+        let attributes = try file.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .fileSizeKey])
+        guard attributes.isSymbolicLink != true, attributes.isRegularFile == true,
+              let bytes = attributes.fileSize, bytes <= 1024 else {
+            throw DiagnosticsAcquisitionStore.Failure.invalidManifest
+        }
+        let receipt = try JSONDecoder().decode(Receipt.self, from: Data(contentsOf: file))
+        guard receipt.schema == 1, receipt.id == id, DiagnosticsBrokerAddress.hex(receipt.sha256),
+              [400, 409, 413, 415, 422].contains(receipt.statusCode) else {
+            throw DiagnosticsAcquisitionStore.Failure.invalidManifest
+        }
+        return receipt.sha256 == sha256
+    }
+    static func save(_ id: UUID, sha256: String, statusCode: Int, root: URL) throws {
+        guard DiagnosticsBrokerAddress.hex(sha256), [400, 409, 413, 415, 422].contains(statusCode) else {
+            throw DiagnosticsAcquisitionStore.Failure.invalidManifest
+        }
+        let file = path(id, root: root)
+        try JSONEncoder().encode(Receipt(schema: 1, id: id, sha256: sha256, statusCode: statusCode))
+            .write(to: file, options: .atomic)
+        let handle = try FileHandle(forWritingTo: file)
+        defer { try? handle.close() }
+        try handle.synchronize()
+    }
+}

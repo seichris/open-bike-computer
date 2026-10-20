@@ -504,6 +504,12 @@ final class TestBLEManager: BLEManager {
         return true
     }
 
+    override func clearRouteGeometry() {
+        // This double records NavigationEngine intent. Actual BLE clear
+        // lifecycle/ACK/reconnect behavior has separate manager tests.
+        _ = sendRouteGeometry(Data())
+    }
+
     override func sendGPSPosition(
         lat: Double,
         lon: Double,
@@ -796,6 +802,13 @@ struct NavigationProtocolTests {
     }
 
     static func main() async {
+#if BLUETOOTH_RESTORATION_ADAPTER_TESTING
+        if CommandLine.arguments.contains("--bluetooth-restoration-adapter-only") {
+            testBluetoothRestorationAdapter()
+            print("Bluetooth restoration adapter regressions passed (host API double; no radio)")
+            return
+        }
+#endif
         if CommandLine.arguments.contains("--background-upload-state-only") {
             await testBackgroundMapUploadStateObserverReentrancy()
             testBackgroundMapUploadRestorationState()
@@ -807,6 +820,13 @@ struct NavigationProtocolTests {
             await testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit()
             await testOfflineMapManagerCancelsUnusedIncompatibleMapAdmission()
             print("Map operation recovery regression passed")
+            return
+        }
+        if CommandLine.arguments.contains("--debug-cleanup-only") {
+            await testDeviceTransferManagerConfirmsDebugExit()
+            await testBrowserDebugExitReleasesLeaseAfterFreshConfirmation()
+            await testDeviceTransferManagerCompensatesCancelledDebugEntry()
+            print("Debug shutdown and delayed confirmation regressions passed")
             return
         }
         testIconMapping()
@@ -894,6 +914,9 @@ struct NavigationProtocolTests {
         testDeviceOwnershipProtocol()
         testBLEManagerRequiresNavigationReadinessForWrites()
         testRideApplicationAcknowledgementWaitsForATTCallback()
+        testFailedClearRetiresSiblingsAndReplaysIntent()
+        testRideRecoveryKeepsSpecificFailureReason()
+        testPhoneConnectionAdoptionOwnsGeneration()
         testBLEManagerSendsFallbackMapSettings()
         testBLEManagerSendsSeparateMapProfileSettings()
         testBLEManagerGatesTopographicContourVisibility()
@@ -985,6 +1008,7 @@ struct NavigationProtocolTests {
         await testDeviceTransferManagerKeepsConfirmedLANDebugSession()
         await testDeviceTransferManagerCompensatesCancelledDebugEntry()
         await testDeviceTransferManagerConfirmsDebugExit()
+        await testBrowserDebugExitReleasesLeaseAfterFreshConfirmation()
         await testDeviceTransferManagerUsesFreshDeviceSessionWithoutMapStatus()
         await testFirmwareTransferSurvivesNetworkStartupReconnect()
         await testFirmwareTransferSurfacesFreshRejectionAndExits()
@@ -4906,6 +4930,21 @@ struct NavigationProtocolTests {
         let coldClient = TestLocationManagerClient(authorizationLevel: .whenInUse)
         let coldManager = CurrentLocationManager(locationManager: coldClient,
             applicationIsActive: { false })
+        foreground = true
+        manager.setSocialRideSharing(true)
+        assertEqual(client.startUpdatingLocationCallCount, 2,
+                    "Explicit social consent starts the existing GPS manager")
+        foreground = false
+        manager.applicationStateDidChange()
+        assertEqual(client.stopUpdatingLocationCallCount, 1,
+                    "Social sharing continues a foreground-started stream while locked")
+        manager.setSocialRideSharing(false)
+        assertEqual(client.stopUpdatingLocationCallCount, 2,
+                    "Stopping social sharing releases its location demand")
+        coldManager.setSocialRideSharing(true)
+        assertEqual(coldClient.startUpdatingLocationCallCount, 0,
+                    "Social consent cannot cold-start When-In-Use GPS in background")
+        coldManager.setSocialRideSharing(false)
         coldManager.setWorkoutActive(true, phoneOwned: true)
         assertEqual(coldClient.startUpdatingLocationCallCount, 0,
                     "Cold background recovery does not pretend When-In-Use is Always")
@@ -6959,6 +6998,10 @@ struct NavigationProtocolTests {
             sideLengthKm: 22.264
         )
         let request = OfflineMapJobRequest.customBBox(bounds)
+        let terrainRequest = request.withTopography(true, terrain: true).forDevice(firmwareVersion: "1.0.0")
+        assertEqual(terrainRequest.target?.rendererFormatVersion, 4, "terrain needs renderer 4")
+        assertEqual(terrainRequest.target?.terrainProfileVersion, 1, "device request retains terrain opt-in")
+        assertEqual(request.withTopography(true).target?.terrainProfileVersion, nil, "legacy topography does not opt in to terrain")
         assertEqual(request.mode, "custom_bbox", "custom cut-out uses backend bbox mode")
         assert(request.bbox != nil, "custom cut-out includes bbox")
         assert(abs((request.bbox?[1] ?? 0) - 34.9) < 0.001, "bbox min latitude uses requested size")
@@ -9003,6 +9046,15 @@ struct NavigationProtocolTests {
     }
 
     static func testSavedMapRendererCompatibilityPolicy() {
+        assert(!SavedMapRendererCompatibilityPolicy.isCompatible(
+            rendererFormatVersion: 4, supportsStreetLabels: true,
+            supports3DBuildings: true, supportsTopographicContours: true,
+            containsTerrain: true, supportsTerrainExperiments: false),
+            "terrain-bearing saved maps require an explicitly negotiated peer before transfer")
+        assert(SavedMapRendererCompatibilityPolicy.isCompatible(
+            rendererFormatVersion: 4, supportsStreetLabels: true,
+            supports3DBuildings: true, supportsTopographicContours: true,
+            containsTerrain: true, supportsTerrainExperiments: true))
         assert(
             SavedMapRendererCompatibilityPolicy.isCompatible(
                 rendererFormatVersion: 1,

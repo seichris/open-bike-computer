@@ -113,6 +113,10 @@ int main() {
   assert(loadedNavigation.labelTextSize == DEFAULT_LABEL_TEXT_SIZE);
   assert(loadedNavigation.labelOrientation == DEFAULT_LABEL_ORIENTATION);
 
+  freshStore.putUInt("navVis", (1u << 17) | map_profile_protocol::VISIBILITY_EXTENDED_MARKER);
+  map_profile_persistence::load(freshStore, loadedMap, loadedNavigation);
+  assert((loadedNavigation.visibilityMask & map_profile_protocol::TERRAIN_EXPERIMENT_MASK) == 0);
+
   FakeStore legacyStore;
   const TestProfile legacyMap = profile(1, VISIBILITY_LEGACY_FEATURE_MASK);
   legacyStore.putUChar("minPolySize", legacyMap.minPolygonSize);

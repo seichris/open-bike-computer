@@ -34,7 +34,7 @@ COPY tools/OSM_Extract /app/tools/OSM_Extract
 RUN ln -s /app/map-platform/backend /app/backend \
   && ln -s /app/map-platform/config /app/config
 
-RUN python -m pip install '/app/map-platform/backend[api,object-storage,topography]' \
+RUN python -m pip install '/app/map-platform/backend[api,object-storage,topography,social]' \
   && python -m pip install "matplotlib<3.6" pyyaml
 
 ENV PYTHONPATH=/app/map-platform/backend
