@@ -43,11 +43,12 @@ ID and token bundle linked to that installation.
 | Name | Yes | App Functionality | Yes | No | The optional profile stores the chosen rider name; the sign-in provider can supply an account name. |
 | Email Address | Yes | App Functionality | Yes | No | Firebase Authentication stores the email or private relay address supplied by the selected sign-in provider. |
 | Photos or Videos | Yes | App Functionality | Yes | No | The optional profile photo is sanitized and stored privately; group invitations can expose route-map preview images through an unguessable public preview URL. |
+| Contacts | Yes | App Functionality | Yes | No | The optional friends feature stores the rider’s accepted friendships, which form the account’s social graph. The app does not read the phone address book. |
 | Health | No | — | — | — | HealthKit values and workout routes remain within HealthKit and the rider's paired Watch/iPhone workflow. They are not uploaded to a developer or third-party server. |
 | Fitness | Yes | App Functionality | Yes | No | Creating or joining a group ride shares GPS-derived speed, distance, moving time, and elapsed time with accepted riders. HealthKit measurements remain excluded. |
 | Crash Data / Performance Data | No | — | — | — | The app contains no developer or third-party crash-reporting or performance SDK. Apple-operated diagnostics are not developer collection unless exported to the developer. |
 
-For all nine selected types, choose **App Functionality**, **Data Linked to the
+For all ten selected types, choose **App Functionality**, **Data Linked to the
 User**, and **Not Used for Tracking**. Apple treats linkage through a device or
 other identifier as linked even when the app has no account or real-world name.
 
@@ -119,7 +120,7 @@ other identifier as linked even when the app has no account or real-world name.
 
 `BikeComputer/PrivacyInfo.xcprivacy` declares the precise-location, device-ID,
 user-ID, other-user-content, product-interaction, name, email-address, photo,
-and GPS-derived fitness collection above, no
+social-graph contacts, and GPS-derived fitness collection above, no
 tracking, and the iOS app's required-reason API use.
 `BikeComputerWatch/PrivacyInfo.xcprivacy` declares no developer collection or
 tracking. HealthKit access itself remains controlled by the entitlement,
