@@ -185,8 +185,42 @@ struct SocialRuntimeTests {
         require(SocialLinkTarget(url: URL(string: "https://bicino.com/social/ride/00000000-0000-4000-8000-000000000001#capability-secret-123456789")!)?.kind == "ride", "preview links preserve native joining")
     }
 
+    /// The phone stream has no Core Location distance filter, so a stop now
+    /// delivers 1 Hz jittered fixes. They must not become shared ride stats.
+    static func sharedRideProgressIgnoresStationaryJitter() {
+        let base = Date()
+        func fix(_ northMeters: Double, _ second: Int, speed: CLLocationSpeed) -> CLLocation {
+            CLLocation(coordinate: .init(latitude: 1.3 + northMeters / 111_000, longitude: 103.8),
+                altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5, course: 0, speed: speed,
+                timestamp: base.addingTimeInterval(Double(second)))
+        }
+        var progress = SharedRideProgress()
+        let jitter = [0.0, 2.5, -1.5, 3.0, -2.0, 4.0, -3.5]
+        for second in 0..<600 {
+            // Stationary fixes report zero or unavailable Doppler speed.
+            progress.add(fix(jitter[second % jitter.count], second, speed: second.isMultiple(of: 2) ? 0 : -1))
+        }
+        require(progress.distanceMeters == 0 && progress.movingSeconds == 0,
+                "a ten-minute stop adds no shared distance or moving time")
+        for step in 1...60 {
+            progress.add(fix(Double(step) * 6, 599 + step, speed: 6))
+        }
+        require(abs(progress.distanceMeters - fix(360, 0, speed: 0).distance(from: fix(0, 0, speed: 0))) < 1 &&
+                abs(progress.movingSeconds - 60) < 0.001, "riding after a stop counts distance and only riding time")
+        let ridden = progress.distanceMeters
+        for step in 1...30 {
+            progress.add(fix(360 + Double(step) * 2, 659 + step, speed: -1))
+        }
+        require(progress.distanceMeters - ridden > 60 - SharedRideProgress.minimumDisplacementMeters &&
+                progress.movingSeconds > 60, "slow riding without Doppler speed still accumulates")
+        let beforeGap = progress.distanceMeters
+        progress.add(fix(1_000, 760, speed: 6))
+        require(progress.distanceMeters == beforeGap, "a silent interval is never credited as ride distance")
+    }
+
     static func main() async throws {
         profileSetupPresentation()
+        sharedRideProgressIgnoresStationaryJitter()
         try await automaticJoinSharing()
         try await SocialSavedRouteSharingTests.run()
         try await profileMutationSerialization()

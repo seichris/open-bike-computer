@@ -7869,6 +7869,54 @@ extension NavigationProtocolTests {
         assertEqual(String(fields?[1] ?? ""), "\(expectedDistance)", "fallback distance is sent to the BLE device")
     }
 
+    /// The phone stream has no Core Location distance filter, so a stop now
+    /// delivers 1 Hz jittered fixes. They must not inflate ride distance.
+    static func testNavigationRideDistanceIgnoresStationaryJitter() {
+        let start = CLLocation(latitude: 37.0000, longitude: -122.0000)
+        let route = TestRoute(instructions: "Head north", coordinates: [
+            start.coordinate,
+            CLLocationCoordinate2D(latitude: 37.0100, longitude: -122.0000),
+        ])
+        let base = Date()
+        func fix(northMeters: Double, second: Int) -> CLLocation {
+            CLLocation(
+                coordinate: CLLocationCoordinate2D(
+                    latitude: start.coordinate.latitude + northMeters / 111_000,
+                    longitude: start.coordinate.longitude),
+                altitude: 0, horizontalAccuracy: 5, verticalAccuracy: -1,
+                course: 0, speed: -1,
+                timestamp: base.addingTimeInterval(Double(second) - 600))
+        }
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        engine.startNavigation(with: route, initialLocation: start)
+        let jitter = [0.0, 2.5, -1.5, 3.0, -2.0, 4.0, -3.5]
+        for second in 0..<300 {
+            engine.processExternalLocation(fix(northMeters: jitter[second % jitter.count], second: second))
+        }
+        assert(engine.isNavigating, "the stationary rider is still navigating")
+        assertEqual(engine.rideDistanceMeters, 0, "five minutes of stop jitter add no ride distance")
+
+        var last = start
+        for step in 1...50 {
+            last = fix(northMeters: Double(step) * 6, second: 300 + step)
+            engine.processExternalLocation(last)
+        }
+        assert(abs(engine.rideDistanceMeters - last.distance(from: start)) < 1,
+               "every riding fix beyond the 5 m threshold counts in full")
+        let ridden = engine.rideDistanceMeters
+        for step in 1...30 {
+            last = fix(northMeters: 300 + Double(step) * 2, second: 350 + step)
+            engine.processExternalLocation(last)
+        }
+        assert(engine.rideDistanceMeters - ridden > 60 - NavigationEngine.minimumRideDistanceIncrementMeters,
+               "slow riding still accumulates from the last counted point")
+        engine.stopNavigation()
+    }
+
     static func testNavigationEngineKeepsProgressAtRouteCrossing() {
         let coordinates = [
             CLLocationCoordinate2D(latitude: 37.0000, longitude: -122.0000),

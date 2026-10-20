@@ -406,6 +406,7 @@ class StreamResult:
     truncated_tail: bool = False
     dropped_sequences: int = 0
     firmware_identity: tuple[int, str] | None = None
+    unretained_leading_sequences: int = 0
 
 
 def validate_jsonl(data: bytes, source_path: str, expected_source: str | None = None) -> StreamResult:
@@ -983,6 +984,14 @@ def _validate_stream_boundaries(streams: list[StreamResult]) -> None:
                 stream.path,
             )
         )
+        # Every iPhone process stream starts at sequence 0. A later first
+        # retained sequence means rolling byte retention, deletion or an
+        # acquisition's capture scope left that history out of this bundle.
+        # Report it separately from recording loss and inter-chunk gaps.
+        if APP_EVENT_MEMBER_RE.fullmatch(members[0].path):
+            members[0].unretained_leading_sequences = int(
+                members[0].events[0]["sequence"]
+            )
         previous: int | None = None
         previous_stream: StreamResult | None = None
         firmware_identity: tuple[int, str] | None = None
@@ -1199,6 +1208,7 @@ def summarize(
                 "eventCount": len(stream.events),
                 "truncatedTail": stream.truncated_tail,
                 "droppedSequences": stream.dropped_sequences,
+                "unretainedLeadingSequences": stream.unretained_leading_sequences,
             }
             for stream in streams
         ],
@@ -1210,7 +1220,7 @@ def summarize(
         f"Events: {len(events)}",
         f"Streams: {len(streams)}",
         "",
-        "Immutable raw archive entries are preserved under `raw/`. Sequence gaps and recoverable tails are reported in `summary.json`.",
+        "Immutable raw archive entries are preserved under `raw/`. Sequence gaps, unretained leading iPhone history and recoverable tails are reported in `summary.json`.",
         "",
     ]
     (output / "report.md").write_text("\n".join(report_lines))
