@@ -17,7 +17,14 @@ final class LiveRideService: ObservableObject {
         static func < (a: Notice, b: Notice) -> Bool { a.rawValue < b.rawValue }
     }
     private(set) var notice: Notice?
-    var prepareLocation: (() -> Bool)?
+    var prepareLocation: (() async -> Bool)?
+    var loadInvitation: ((String) -> SocialRideInvitation?)?
+    var saveInvitation: ((String, SocialRideInvitation?) -> Void)?
+    @Published private(set) var previewID: String?
+    var invitationURL: URL? {
+        guard let invitationCode else { return nil }
+        return URL(string: "https://bicino.com/social/ride" + (previewID.map { "/\($0)" } ?? "") + "#\(invitationCode)")
+    }
     var onRidersChanged: (([SocialRider]) -> Void)?
     var onCapabilitiesChanged: ((SocialCapabilities) -> Void)?
     private let client: any SocialRideNetworking
@@ -41,6 +48,7 @@ final class LiveRideService: ObservableObject {
     private var lastPublished: Date?
     private var sequence = 0
     private var localEpoch = UUID()
+    private var awaitingLocationAuthorization = false
 
     init(client: any SocialRideNetworking, uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          pollNanoseconds: UInt64 = 3_000_000_000, reconnectNanoseconds: UInt64 = 3_000_000_000) {
@@ -82,7 +90,7 @@ final class LiveRideService: ObservableObject {
         previousSharedLocation = location
     }
 
-    func select(_ selected: SocialGroupRide) async throws {
+    func select(_ selected: SocialGroupRide, shareOnJoin: Bool = false) async throws {
         let previousEpoch = localEpoch
         let ride = try JSONDecoder().decode(SocialGroupRide.self,
             from: await client.request("group-rides/\(selected.id)", method: "GET", body: nil, contentType: "application/json", query: []))
@@ -91,7 +99,11 @@ final class LiveRideService: ObservableObject {
         guard previousEpoch == localEpoch else { return }
         reset()
         self.ride = ride
-        invitationCode = selected.joinCode
+        let stored = loadInvitation?(ride.id)
+        invitationCode = selected.joinCode ?? stored?.code
+        previewID = stored?.previewID
+        rememberInvitation()
+        onRidersChanged?(ride.riders)
         // Reopening a server session never silently restarts this phone's GPS publication.
         isSharing = false
         let epoch = localEpoch
@@ -155,6 +167,43 @@ final class LiveRideService: ObservableObject {
                 }
             }
         }
+        if shareOnJoin { await beginSharingOnJoin() }
+    }
+
+    private func beginSharingOnJoin() async {
+        let selection = localEpoch
+        do { try await startSharing(stats: true) }
+        catch SocialFailure.cancelled { }
+        catch {
+            guard selection == localEpoch else { return }
+            if case SocialFailure.server("location_access_required") = error {
+                awaitingLocationAuthorization = true
+                show(.sharingEnded, "You joined the ride. Allow location access in iPhone Settings, then return to Bicino to share your live ride.")
+            } else {
+                show(.sharingEnded, "You joined the ride, but live sharing could not start. \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func locationAuthorizationChanged(authorized: Bool) {
+        guard authorized, awaitingLocationAuthorization, ride != nil else { return }
+        awaitingLocationAuthorization = false
+        let selection = localEpoch
+        Task {
+            guard selection == localEpoch else { return }
+            await beginSharingOnJoin()
+        }
+    }
+
+    private func rememberInvitation() {
+        guard let ride, let invitationCode else { return }
+        saveInvitation?(ride.id, SocialRideInvitation(code: invitationCode, previewID: previewID))
+    }
+
+    func setPreview(_ id: String, for rideID: String) {
+        guard ride?.id == rideID, UUID(uuidString: id) != nil else { return }
+        previewID = id
+        rememberInvitation()
     }
 
     private func changeConsent(ride: SocialGroupRide, location: Bool, stats: Bool, revision: UUID) async throws -> SocialGroupRide {
@@ -182,9 +231,11 @@ final class LiveRideService: ObservableObject {
     }
 
     func startSharing(stats: Bool) async throws {
-        guard prepareLocation?() == true else { throw SocialFailure.server("allow_precise_location_in_settings_then_start_sharing") }
-        guard let ride else { throw SocialFailure.unavailable }
         let selectionEpoch = localEpoch
+        let initialRevision = sharingRevision
+        guard await prepareLocation?() == true else { throw SocialFailure.server("location_access_required") }
+        guard selectionEpoch == localEpoch, initialRevision == sharingRevision else { throw SocialFailure.cancelled }
+        guard let ride else { throw SocialFailure.unavailable }
         sharingRevision = UUID()
         let revision = sharingRevision
         let requestedAt = uptime()
@@ -208,7 +259,7 @@ final class LiveRideService: ObservableObject {
             while !Task.isCancelled && epoch == self.localEpoch && revision == self.sharingRevision && self.isSharing {
                 if self.uptime() >= self.sharingDeadline {
                     await self.stopSharing()
-                    self.show(.sharingEnded, "Location sharing ended. Start it again to continue.")
+                    self.show(.sharingEnded, "Location sharing ended.")
                     return
                 }
                 if let location = self.latestLocation,
@@ -238,7 +289,7 @@ final class LiveRideService: ObservableObject {
                         guard revision == self.sharingRevision, epoch == self.localEpoch else { return }
                         if case SocialFailure.server(let code) = error, ["sharing_disabled", "ride_ended", "membership_required", "account_unavailable", "account_deleting"].contains(code) {
                             await self.stopSharing()
-                            self.show(.sharingEnded, "Location sharing ended. Start it again to continue.")
+                            self.show(.sharingEnded, "Location sharing ended.")
                             return
                         }
                         self.show(.publishFailed, "Your last location update could not be shared.")
@@ -250,6 +301,7 @@ final class LiveRideService: ObservableObject {
     }
 
     func stopSharing() async {
+        awaitingLocationAuthorization = false
         sharingRevision = UUID()
         let revision = sharingRevision
         isSharing = false
@@ -271,11 +323,13 @@ final class LiveRideService: ObservableObject {
         let value = try await client.json("group-rides/\(ride.id)/rotate-code", method: "POST")
         guard revision == localEpoch else { throw SocialFailure.cancelled }
         invitationCode = value["joinCode"] as? String
+        rememberInvitation()
     }
 
     func leave(end: Bool = false) async throws {
         guard let ride else { return }
         await stopSharing()
+        if end { saveInvitation?(ride.id, nil) }
         reset()
         _ = try await client.json("group-rides/\(ride.id)/\(end ? "end" : "leave")", method: "POST")
     }
@@ -293,13 +347,14 @@ final class LiveRideService: ObservableObject {
     }
 
     func reset() {
+        awaitingLocationAuthorization = false
         sharingRevision = UUID()
         localEpoch = UUID()
         retiredEpochs = []
         stream?.cancel(); stream = nil
         publisher?.cancel(); publisher = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
-        isSharing = false; ride = nil; riders = []; messages = []; invitationCode = nil; isRotatingInvitation = false
+        isSharing = false; ride = nil; riders = []; messages = []; invitationCode = nil; isRotatingInvitation = false; previewID = nil
         clearNotice()  // Notices describe the room being left, never the next one.
         onRidersChanged?([])
     }

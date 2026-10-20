@@ -9,6 +9,7 @@ final class SocialCoordinator: ObservableObject {
     let session: BicinoUserSession
     let client: BicinoSocialClient
     let live: LiveRideService
+    let savedRouteSharing: SocialSavedRouteSharing
     @Published private(set) var profile: SocialProfile?
     @Published private(set) var capabilities = SocialCapabilities()
     @Published private(set) var friends: [SocialProfile] = []
@@ -29,11 +30,23 @@ final class SocialCoordinator: ObservableObject {
     @Published private(set) var notificationStatus: SocialNotificationBinding.Status = .inactive
     let notifications: SocialNotificationBinding
     let deletion: SocialAccountDeletion
+    private let profileEdits = SocialProfileMutationQueue()
+    @Published private(set) var alertsAuthorized = false
+    @Published private(set) var alertsDenied = false
     private var pushToken: String?
-    func enableNotifications() async throws {
-        if try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) {
+    @discardableResult
+    func enableNotifications() async throws -> Bool {
+        let allowed = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
+        await refreshNotificationAuthorization()
+        if allowed {
             UIApplication.shared.registerForRemoteNotifications()
         }
+        return allowed
+    }
+    func refreshNotificationAuthorization() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        alertsAuthorized = [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus)
+        alertsDenied = settings.authorizationStatus == .denied
     }
     func didRegisterNotifications(_ data: Data) {
         pushToken = data.map { String(format: "%02x", $0) }.joined()
@@ -46,9 +59,8 @@ final class SocialCoordinator: ObservableObject {
     /// Re-register on sign-in and launch so a migrated or rotated installation
     /// binding is restored without the rider re-enabling alerts.
     private func registerForAlertsIfAuthorized() async {
-        let settings = await UNUserNotificationCenter.current().notificationSettings()
-        guard session.state == .signedIn,
-              [.authorized, .provisional, .ephemeral].contains(settings.authorizationStatus) else { return }
+        await refreshNotificationAuthorization()
+        guard session.state == .signedIn, alertsAuthorized else { return }
         UIApplication.shared.registerForRemoteNotifications()
     }
     private var relay: SocialBLERelay?
@@ -61,6 +73,7 @@ final class SocialCoordinator: ObservableObject {
         let client = BicinoSocialClient(session: session, baseURL: URL(string: OfflineMapServiceConfig.defaultServerURLString)?.appendingPathComponent("v1/social"))
         self.client = client
         live = LiveRideService(client: client)
+        savedRouteSharing = SocialSavedRouteSharing(client: client, currentGeneration: { session.generation })
         // The existing explicit app-private group; no shared group is introduced.
         let store: any SocialSecureStore = session.keychainGroup.map { SocialKeychainStore(accessGroup: $0) } ?? SocialMemoryStore()
         #if DEBUG
@@ -74,8 +87,17 @@ final class SocialCoordinator: ObservableObject {
         session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observers)
         live.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observers)
         session.$generation.dropFirst().sink { [weak self] _ in self?.clear() }.store(in: &observers)
+        let invitationStore = SocialRideInvitationStore(store: store)
+        live.loadInvitation = { [weak self] ride in
+            guard let owner = self?.profile?.id else { return nil }
+            return invitationStore.read(owner: owner, ride: ride)
+        }
+        live.saveInvitation = { [weak self] ride, value in
+            guard let owner = self?.profile?.id else { return }
+            invitationStore.write(value, owner: owner, ride: ride)
+        }
         live.onRidersChanged = { [weak self] riders in
-            Task { @MainActor [weak self] in await self?.loadPhotos(riders.map(\.profile)) }
+            Task { @MainActor [weak self] in await self?.loadPhotos((self?.live.ride?.members ?? []) + riders.map(\.profile)) }
         }
         live.onCapabilitiesChanged = { [weak self] capabilities in
             self?.capabilities = capabilities
@@ -129,7 +151,9 @@ final class SocialCoordinator: ObservableObject {
         let routes = try await content(kind: "routes")
         let activities = try await content(kind: "activities")
         guard expected == session.generation else { return }
-        self.profile = me; self.friends = friends; self.requests = requests
+        // A background refresh must not replace a newer autosave response.
+        if profile?.id != me.id || (profile?.version ?? 0) <= (me.version ?? 0) { profile = me }
+        self.friends = friends; self.requests = requests
         invitations = invites; sentInvitations = sent; rides = rooms; self.blocked = blocked; self.routes = routes; self.activities = activities
         await loadPhotos(friends + [me])
         await bindNotifications()
@@ -168,15 +192,50 @@ final class SocialCoordinator: ObservableObject {
     }
 
     func saveProfile(username: String, name: String, privacy: SocialPrivacy) async throws {
-        guard let profile else { return }
-        let privacyJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(privacy))
-        _ = try await client.json("me", method: "PATCH", body: ["version": profile.version ?? 1,
-            "username": username.lowercased(), "displayName": name, "privacy": privacyJSON])
-        try await refresh()
+        try await editProfile { draft, settings in
+            draft.username = username
+            draft.name = name
+            settings = privacy
+        }
+    }
+
+    func saveProfileName(_ name: String) async throws {
+        try await editProfile { draft, _ in draft.name = name }
+    }
+
+    func saveProfileUsername(_ username: String) async throws {
+        try await editProfile { draft, _ in draft.username = SocialUsername.normalized(username) }
+    }
+
+    func savePrivacy(_ flag: SocialPrivacyFlag, value: Bool) async throws {
+        try await editProfile { _, settings in settings[keyPath: flag.keyPath] = value }
+    }
+
+    func savePrivateAreas(_ zones: [SocialZone]) async throws {
+        try await editProfile { _, settings in settings.zones = zones }
+    }
+
+    private func editProfile(
+        _ change: @escaping @MainActor @Sendable (inout SocialProfileDraft, inout SocialPrivacy) -> Void
+    ) async throws {
+        let expected = session.generation
+        try await profileEdits.perform(generation: expected, currentGeneration: { self.session.generation }) {
+            guard let profile = self.profile else { throw SocialFailure.signedOut }
+            var draft = SocialProfileDraft(profile: profile)
+            var privacy = profile.privacy ?? SocialPrivacy()
+            change(&draft, &privacy)
+            guard draft.isValid else { throw SocialFailure.server("enter_a_valid_name_and_username") }
+            let privacyJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(privacy))
+            let data = try await self.client.request("me", method: "PATCH", body: JSONSerialization.data(withJSONObject: [
+                "version": profile.version ?? 1, "username": draft.normalizedUsername,
+                "displayName": draft.normalizedName, "privacy": privacyJSON
+            ]))
+            _ = try self.acceptProfileResponse(data, generation: expected)
+        }
     }
 
     func setPhoto(_ data: Data) async throws {
-        guard let profile, let image = UIImage(data: data), image.size.width > 0, image.size.height > 0 else {
+        guard let image = UIImage(data: data), image.size.width > 0, image.size.height > 0 else {
             throw SocialFailure.invalidResponse
         }
         // Server repeats crop/validation and removes all metadata.
@@ -188,19 +247,37 @@ final class SocialCoordinator: ObservableObject {
             image.draw(in: CGRect(x: (256-size.width)/2, y: (256-size.height)/2, width: size.width, height: size.height))
         }
         guard let png = thumbnail.pngData() else { throw SocialFailure.invalidResponse }
-        _ = try await client.request("me/avatar", method: "PUT", body: png, contentType: "image/png",
-            query: [URLQueryItem(name: "version", value: String(profile.version ?? 1))])
-        photos = [:]
-        try await refresh()
+        let expected = session.generation
+        try await profileEdits.perform(generation: expected, currentGeneration: { self.session.generation }) {
+            guard let profile = self.profile else { throw SocialFailure.signedOut }
+            let data = try await self.client.request("me/avatar", method: "PUT", body: png, contentType: "image/png",
+                query: [URLQueryItem(name: "version", value: String(profile.version ?? 1))])
+            let updated = try self.acceptProfileResponse(data, generation: expected)
+            self.photos = [:]
+            await self.loadPhotos([updated])
+        }
     }
 
     func removePhoto() async throws {
-        _ = try await client.json("me/avatar", method: "DELETE")
-        photos = [:]
-        try await refresh()
+        let expected = session.generation
+        try await profileEdits.perform(generation: expected, currentGeneration: { self.session.generation }) {
+            let data = try await self.client.request("me/avatar", method: "DELETE")
+            let updated = try self.acceptProfileResponse(data, generation: expected)
+            self.photos = [:]
+            await self.loadPhotos([updated])
+        }
+    }
+
+    private func acceptProfileResponse(_ data: Data, generation: UUID) throws -> SocialProfile {
+        guard generation == session.generation else { throw SocialFailure.accountChanged }
+        let profile = try JSONDecoder().decode(SocialProfile.self, from: data)
+        guard self.profile?.id == profile.id else { throw SocialFailure.accountChanged }
+        self.profile = profile
+        return profile
     }
 
     func lookup(_ username: String) async throws -> SocialProfile {
+        let username = SocialUsername.normalized(username)
         guard username.range(of: "^[a-z][a-z0-9_]{2,29}$", options: .regularExpression) != nil else {
             throw SocialFailure.server("enter_an_exact_username")
         }
@@ -225,22 +302,29 @@ final class SocialCoordinator: ObservableObject {
         library.socialPublication(for: summary, currentProfileID: profile?.id)
     }
 
-    func publish(_ summary: PlannedRouteSummaryV1, from library: PhoneRouteLibrary,
-                 title: String, visibility: String) async throws {
-        guard profile != nil else { throw SocialFailure.signedOut }
-        guard publication(for: summary, in: library).mayPublish else {
-            throw SocialFailure.server("only_the_route_owner_can_share_it")
+    func sharingUnavailableReason(for summary: PlannedRouteSummaryV1, in library: PhoneRouteLibrary) -> String? {
+        guard session.state == .signedIn else { return "Sign in from your profile to start a group ride or share this route." }
+        guard capabilities.routes, capabilities.groups else { return "Group rides and route sharing are unavailable right now." }
+        guard summary.providerID == RouteProviderPolicyV1.importedGPX.providerID else {
+            return "This provider’s routes can be navigated privately. Group rides and sharing are available for your own GPX routes."
         }
+        guard publication(for: summary, in: library).mayPublish else { return "Only this route’s owner can share it or start a group ride with it." }
+        return nil
+    }
+
+    func shareSavedRoute(_ summary: PlannedRouteSummaryV1, from library: PhoneRouteLibrary,
+                        visibility: String) async throws -> SocialContent {
+        if let reason = sharingUnavailableReason(for: summary, in: library) { throw SocialFailure.server(reason) }
+        guard let owner = profile?.id else { throw SocialFailure.signedOut }
         let archive = try library.offlineArchive(for: summary)
         guard archive.route.provider == RouteProviderPolicyV1.importedGPX else {
             throw SocialFailure.server("this_route_provider_does_not_allow_social_sharing")
         }
-        let data = try archive.encoded(purpose: .offlineNavigation)
-        guard let encoded = String(data: data, encoding: .utf8) else { throw SocialFailure.invalidResponse }
-        let payload = String(decoding: try archive.socialHashPayload(), as: UTF8.self)
-        _ = try await client.json("routes", method: "POST", body: ["archive": encoded, "hashPayload": payload, "title": title,
-            "visibility": visibility, "sharingRightsConfirmed": true])
-        try await refresh()
+        let encoded = try archive.encoded(purpose: .offlineNavigation)
+        return try await savedRouteSharing.save(owner: owner, hash: archive.contentHash,
+            archive: String(decoding: encoded, as: UTF8.self),
+            hashPayload: String(decoding: try archive.socialHashPayload(), as: UTF8.self),
+            title: library.displayName(for: summary), visibility: visibility, generation: session.generation)
     }
 
     func save(_ item: SocialContent, to library: PhoneRouteLibrary, duplicate: Bool = false) throws {
@@ -265,22 +349,44 @@ final class SocialCoordinator: ObservableObject {
     }
 
     func createRide(route: SocialContent, title: String, startsAt: Date? = nil) async throws {
+        let generation = session.generation
         var body: [String: Any] = ["routeID": route.id, "title": title]
         if let startsAt { body["startsAt"] = startsAt.timeIntervalSince1970 }
         let value = try await client.json("group-rides", method: "POST", body: body)
+        guard session.generation == generation else { throw SocialFailure.accountChanged }
         let ride = try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value))
-        try await live.select(ride)
+        try await live.select(ride, shareOnJoin: true)
+        await prepareInvitePreview(for: ride)
+    }
+
+    /// Older backends keep the original fragment link. A preview failure never
+    /// turns an already-created group ride into a failed creation.
+    private func prepareInvitePreview(for ride: SocialGroupRide) async {
+        guard capabilities.invitePreviews else { return }
+        let generation = session.generation
+        do {
+            let data = try await SocialInvitePreview.render(ride: ride)
+            guard generation == session.generation, live.ride?.id == ride.id else { return }
+            let response = try await client.request("group-rides/\(ride.id)/invite-preview", method: "PUT", body: data, contentType: "image/png")
+            guard generation == session.generation, live.ride?.id == ride.id else { return }
+            let value = try JSONSerialization.jsonObject(with: response) as? [String: String]
+            guard let id = value?["previewID"] else { throw SocialFailure.invalidResponse }
+            live.setPreview(id, for: ride.id)
+        } catch {
+            guard generation == session.generation, live.ride?.id == ride.id else { return }
+            notice = "Your group ride is ready. The invite uses a standard link because the route preview could not be created."
+        }
     }
 
     func acceptInvite(_ id: String) async throws {
         let value = try await client.json("ride-invites/\(id)/accept", method: "POST")
-        try await live.select(try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value)))
+        try await live.select(try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value)), shareOnJoin: true)
         try await refresh()
     }
 
     func join(_ code: String) async throws {
         let value = try await client.json("group-rides/join", method: "POST", body: ["code": code])
-        try await live.select(try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value)))
+        try await live.select(try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value)), shareOnJoin: true)
     }
 
     func signOut() async throws {

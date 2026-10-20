@@ -465,9 +465,9 @@ enum BikeComputersMenuPolicy {
         case 0:
             return "Connect your Bicino"
         case 1:
-            return "My Bike Computer"
+            return "Bicino & Bike Sensors"
         default:
-            return "My Bike Computers"
+            return "Bicino & Bike Sensors"
         }
     }
 
@@ -556,9 +556,7 @@ enum BikeComputerSettingsPresentationPolicy {
         if knownDeviceCount == 0 {
             return "Connect your Bicino!"
         }
-        return knownDeviceCount > 1
-            ? "My Bike Computers"
-            : "My Bike Computer"
+        return "Bicino & Bike Sensors"
     }
 
     static func shouldPromoteSettingsLink(knownDeviceCount: Int) -> Bool {
@@ -590,9 +588,7 @@ enum BikeComputerSettingsPresentationPolicy {
         if knownDeviceCount == 0 {
             return "Connect your Bicino"
         }
-        return knownDeviceCount > 1
-            ? "My Bike Computers"
-            : "My Bike Computer"
+        return "Bicino & Bike Sensors"
     }
 
     static func shouldStartDiscovery(

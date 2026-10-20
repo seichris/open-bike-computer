@@ -215,11 +215,7 @@ struct BikeComputersSettingsView: View {
                     }
                 }
             } header: {
-                Text(
-                    bleManager.knownDevices.count == 1
-                        ? "My Bike Computer"
-                        : "My Bike Computers"
-                )
+                Text("Bicino")
             }
         }
     }

@@ -12,12 +12,14 @@ class SocialFeatures:
     activities: bool = False
     groups: bool = False
     hardware: bool = False
+    invitePreviews: bool = False
 
     @classmethod
     def from_environment(cls):
         values = {}
         for name in cls.__dataclass_fields__:
-            raw = os.environ.get("BICINO_SOCIAL_FEATURE_" + name.upper(), "false").lower()
+            env_name = "INVITE_PREVIEWS" if name == "invitePreviews" else name.upper()
+            raw = os.environ.get("BICINO_SOCIAL_FEATURE_" + env_name, "false").lower()
             if raw not in {"true", "false"}:
                 raise ValueError("Social feature flags must be true or false")
             values[name] = raw == "true"
@@ -28,6 +30,7 @@ class SocialFeatures:
         # Every group includes an immutable route; hardware is a group consumer.
         values["groups"] = self.groups and self.routes
         values["hardware"] = self.hardware and values["groups"]
+        values["invitePreviews"] = self.invitePreviews and values["groups"] and self.media
         return values
 
     def require(self, name):

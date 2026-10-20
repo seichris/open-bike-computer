@@ -24,6 +24,13 @@
 
 ## Quick commands
 
+Prepare a new worktree with `tools/dev-setup` (the Codex app and Claude Code run
+it automatically) and run Python-dependent commands through `tools/dev-env`,
+for example `tools/dev-env tools/dev-check --plan`. Map backend checks use a
+separate environment: `tools/dev-setup --map-backend`, then
+`tools/dev-env --map-backend tools/dev-check --suite map`. See
+`docs/development-checks.md` for shared and worktree-private paths.
+
 Start validation with `tools/dev-check --plan`, then `tools/dev-check` for
 affected fast checks. Use `--suite ios --level full` or
 `--suite firmware --level full --board 175` for explicit build validation after

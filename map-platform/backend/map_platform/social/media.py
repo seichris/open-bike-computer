@@ -86,16 +86,17 @@ def reconcile_orphans(database, media_store, now):
     if not isinstance(media_store, S3Media):
         return
     paginator = media_store.client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=media_store.bucket, Prefix="avatars/"):
-        for item in page.get("Contents", []):
-            key = item["Key"]
-            if item["LastModified"].timestamp() >= now-86400:
-                continue
-            parts = key.split("/")
-            if len(parts) != 4:
-                continue
-            with database.transaction() as c:
-                asset = c.execute(select(media).where(media.c.id == parts[2])).mappings().first()
-                referenced = asset and any(v["key"] == key for v in asset["variants"].values())
-            if not referenced:
-                media_store.delete(key)
+    for prefix in ("avatars/", "ride-previews/"):
+        for page in paginator.paginate(Bucket=media_store.bucket, Prefix=prefix):
+            for item in page.get("Contents", []):
+                key = item["Key"]
+                if item["LastModified"].timestamp() >= now-86400:
+                    continue
+                parts = key.split("/")
+                if len(parts) != 4:
+                    continue
+                with database.transaction() as c:
+                    asset = c.execute(select(media).where(media.c.id == parts[2])).mappings().first()
+                    referenced = asset and any(v["key"] == key for v in asset["variants"].values())
+                if not referenced:
+                    media_store.delete(key)
