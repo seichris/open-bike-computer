@@ -1,6 +1,6 @@
 # Watch workout companion release notes
 
-Release candidate: **1.9 (25)**. App Store version 1.8 is already distributed,
+Release candidate: **1.10 (28)**. App Store version 1.9 is already distributed,
 and App Store Connect already contains build 24. Build 25 includes the current
 map-download recovery changes and ships with its embedded Watch companion.
 
