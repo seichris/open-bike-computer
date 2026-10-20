@@ -1,6 +1,6 @@
 # App Store privacy disclosures
 
-Prepared for the Strava route-import release on August 27, 2026.
+Updated for the optional Friends and Group Riding release on October 20, 2026.
 
 This file is the source-of-truth answer sheet for App Store Connect. It does not
 publish or change App Store Connect. Reconfirm the production configuration and
@@ -35,16 +35,20 @@ ID and token bundle linked to that installation.
 
 | Data type | Collected | Purpose | Linked to identity | Tracking | Reason |
 | --- | --- | --- | --- | --- | --- |
-| Precise Location | Yes | App Functionality | Yes | No | An offline-map bounds, polygon, or route-corridor request contains precise coordinates and is stored with the requesting app installation ID so the service can build, recover, and deliver the map. |
+| Precise Location | Yes | App Functionality | Yes | No | Group rides share fresh location with accepted riders, and optional route sharing and invitation previews contain route geometry. An offline-map bounds, polygon, or route-corridor request contains precise coordinates and is stored with the requesting app installation ID so the service can build, recover, and deliver the map. |
 | Device ID | Yes | App Functionality | Yes | No | The app creates a random installation ID used to authenticate and scope map jobs. It is not an advertising ID or hardware identifier. |
-| User ID | Yes | App Functionality | Yes | No | When the rider optionally connects Strava, Bicino stores the Strava athlete ID and OAuth token bundle encrypted at rest and bound to the random app-installation ID so it can import that rider's routes. |
+| User ID | Yes | App Functionality | Yes | No | Optional social features use a stable Firebase account ID, username, friendships and invitations. When the rider optionally connects Strava, Bicino stores the Strava athlete ID and OAuth token bundle encrypted at rest and bound to the random app-installation ID so it can import that rider's routes. |
 | Other User Content | Yes | App Functionality | Yes | No | A custom saved-map display name is free-form text that can be synced to the map job so the rider sees the same name when the app recovers that job. |
 | Product Interaction | Yes | App Functionality | Yes | No | The service retains installation-linked map-job state, request/status timestamps, and download receipts so the app can list, recover, retry, and explain offline-map requests. Strava may also monitor API usage for a connected athlete under its API Policy. |
+| Name | Yes | App Functionality | Yes | No | The optional profile stores the chosen rider name; the sign-in provider can supply an account name. |
+| Email Address | Yes | App Functionality | Yes | No | Firebase Authentication stores the email or private relay address supplied by the selected sign-in provider. |
+| Photos or Videos | Yes | App Functionality | Yes | No | The optional profile photo is sanitized and stored privately; group invitations can expose route-map preview images through an unguessable public preview URL. |
+| Contacts | Yes | App Functionality | Yes | No | The optional friends feature stores the rider’s accepted friendships, which form the account’s social graph. The app does not read the phone address book. |
 | Health | No | — | — | — | HealthKit values and workout routes remain within HealthKit and the rider's paired Watch/iPhone workflow. They are not uploaded to a developer or third-party server. |
-| Fitness | No | — | — | — | Cycling workout and sensor values follow the same local-only path. Relaying them to the rider's authenticated bike computer does not make them accessible to the developer. |
+| Fitness | Yes | App Functionality | Yes | No | Creating or joining a group ride shares GPS-derived speed, distance, moving time, and elapsed time with accepted riders. HealthKit measurements remain excluded. |
 | Crash Data / Performance Data | No | — | — | — | The app contains no developer or third-party crash-reporting or performance SDK. Apple-operated diagnostics are not developer collection unless exported to the developer. |
 
-For all five selected types, choose **App Functionality**, **Data Linked to the
+For all ten selected types, choose **App Functionality**, **Data Linked to the
 User**, and **Not Used for Tracking**. Apple treats linkage through a device or
 other identifier as linked even when the app has no account or real-world name.
 
@@ -52,8 +56,10 @@ other identifier as linked even when the app has no account or real-world name.
 
 - Confirm the release build still has no analytics, advertising, crash-report,
   or diagnostic-upload SDK.
-- Confirm Health, workout route, and raw workout telemetry are absent from
-  backend requests and logs.
+- Confirm HealthKit measurements and raw workout tracks are absent from backend
+  requests and logs. Social group rides send only the disclosed live GPS and
+  basic statistics; user-owned shared routes and invite images follow their
+  explicit sharing actions.
 - Confirm Watch online-routing origin/destination and returned MapKit route are
   used only for the rider's real-time request, remain absent from Bicino backend
   traffic and logs, and are not written to the offline route store.
@@ -113,7 +119,8 @@ other identifier as linked even when the app has no account or real-world name.
 ## Bundled privacy manifests
 
 `BikeComputer/PrivacyInfo.xcprivacy` declares the precise-location, device-ID,
-user-ID, other-user-content, and product-interaction collection above, no
+user-ID, other-user-content, product-interaction, name, email-address, photo,
+social-graph contacts, and GPS-derived fitness collection above, no
 tracking, and the iOS app's required-reason API use.
 `BikeComputerWatch/PrivacyInfo.xcprivacy` declares no developer collection or
 tracking. HealthKit access itself remains controlled by the entitlement,

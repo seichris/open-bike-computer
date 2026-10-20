@@ -506,6 +506,7 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
                 "NSPrivacyCollectedDataTypeEmailAddress",
                 "NSPrivacyCollectedDataTypePhotosorVideos",
                 "NSPrivacyCollectedDataTypeFitness",
+                "NSPrivacyCollectedDataTypeContacts",
             },
         )
         for entry in collected.values():
