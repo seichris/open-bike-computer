@@ -96,6 +96,29 @@ def target_build_configurations(project: str, target_name: str) -> dict[str, str
 
 
 class WorkoutReleaseAssetsTests(unittest.TestCase):
+    def test_background_audio_is_development_only(self):
+        production = load_plist(IOS_PROJECT / "BikeComputer" / "Info.plist")
+        development = load_plist(
+            IOS_PROJECT / "BikeComputer" / "Info-Development.plist"
+        )
+        self.assertEqual(
+            set(production["UIBackgroundModes"]), {"location", "bluetooth-central"}
+        )
+        self.assertEqual(
+            set(development["UIBackgroundModes"]),
+            {"audio", "location", "bluetooth-central"},
+        )
+        development["UIBackgroundModes"].remove("audio")
+        self.assertEqual(development, production, "Shared app metadata must stay aligned")
+
+        project = (IOS_PROJECT / "BikeComputer.xcodeproj/project.pbxproj").read_text()
+        configurations = target_build_configurations(project, "BikeComputer")
+        self.assertIn(
+            "INFOPLIST_FILE = BikeComputer/Info-Development.plist;",
+            configurations["Debug"],
+        )
+        self.assertIn("INFOPLIST_FILE = BikeComputer/Info.plist;", configurations["Release"])
+
     def test_development_and_production_identities_are_separate(self):
         project = (
             IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"
@@ -552,6 +575,15 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(len(watch_icons), 1)
         self.assertEqual(watch_icons[0]["size"], "1024x1024")
         self.assertTrue(watch_icons[0].get("filename"))
+        self.assertNotIn(
+            watch_icons[0]["filename"],
+            {
+                image.get("filename")
+                for image in icon_contents["images"]
+                if image.get("platform") == "ios"
+            },
+            "Watch needs its own light background for the circular launcher mask",
+        )
 
         project = (
             IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"
