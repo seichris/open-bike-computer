@@ -351,6 +351,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     private var lastUsableLocationAt: Date?
     private var lastRecoveryAt: Date?
     private var locationUpdatesPaused = false
+    private var isRecoveryDeferred = false
     static let locationStallInterval: TimeInterval = 45
     static let locationRecoveryInterval: TimeInterval = 30
     private var lastGeocodedLocation: CLLocation?
@@ -574,11 +575,16 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             locationManager.authorizationLevel == .always
                 || isApplicationActive
                 || (phoneWhenInUse && isLocationUpdating)
-        
+        // A restart stops the stream before starting it again. When-In-Use
+        // may only continue a foreground-started stream in background, so a
+        // restart there would be a background cold start.
+        let canRestartUpdates =
+            locationManager.authorizationLevel == .always || isApplicationActive
+
         if shouldTrack &&
             isLocationAuthorized &&
             canStartUpdates &&
-            (!isLocationUpdating || restart) {
+            (!isLocationUpdating || (restart && canRestartUpdates)) {
             if isLocationUpdating {
                 locationManager.stopUpdatingLocation()
             }
@@ -586,6 +592,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             locationManager.startUpdatingLocation()
             isLocationUpdating = true
             locationUpdatesPaused = false
+            isRecoveryDeferred = false
             trackingStartedAt = now()
             startRecoveryTimerIfNeeded()
             diagnosticsRecorder?.record(
@@ -654,6 +661,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         lastUsableLocationAt = nil
         lastRecoveryAt = nil
         locationUpdatesPaused = false
+        isRecoveryDeferred = false
     }
 
     // Packet delivery to BLE is not evidence that Core Location is still
@@ -663,11 +671,23 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         guard isLocationUpdating else { return }
         let date = now()
         let baseline = max(trackingStartedAt ?? date, lastUsableLocationAt ?? .distantPast)
-        guard locationUpdatesPaused || date.timeIntervalSince(baseline) >= Self.locationStallInterval,
-              lastRecoveryAt.map({ date.timeIntervalSince($0) >= Self.locationRecoveryInterval }) ?? true else { return }
+        guard locationUpdatesPaused || date.timeIntervalSince(baseline) >= Self.locationStallInterval else { return }
+        let reason = locationUpdatesPaused ? "paused" : "stale"
+        // Keep a background When-In-Use stream and its indicator rather than
+        // stopping it; foreground activation performs the deferred restart.
+        guard applicationIsActive() || locationManager.authorizationLevel == .always else {
+            if !isRecoveryDeferred {
+                isRecoveryDeferred = true
+                diagnosticsRecorder?.record(category: .gps, event: "tracking_restart_deferred",
+                    fields: ["reason": reason])
+            }
+            return
+        }
+        guard lastRecoveryAt.map({ date.timeIntervalSince($0) >= Self.locationRecoveryInterval }) ?? true else { return }
         lastRecoveryAt = date
+        isRecoveryDeferred = false
         diagnosticsRecorder?.record(category: .gps, event: "tracking_restarted",
-            fields: ["reason": locationUpdatesPaused ? "paused" : "stale"])
+            fields: ["reason": reason])
         updateLocationTracking(restart: true)
     }
 
@@ -701,6 +721,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
            sourceAge >= -1, sourceAge < Self.locationStallInterval {
             lastUsableLocationAt = location.timestamp
             locationUpdatesPaused = false
+            isRecoveryDeferred = false
         }
 
         let now = receivedAt
@@ -802,10 +823,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         print("Location error: \(error.localizedDescription)")
         let nsError = error as NSError
-        // Transient locationUnknown errors do not invalidate a running stream.
-        // The watchdog retries a stalled stream without an error/restart loop.
-        updateLocationTracking()
-        recoverLocationIfNeeded()
+        // Record the cause before any stop/restart it triggers.
         diagnosticsRecorder?.record(
             level: .warning,
             category: .gps,
@@ -816,6 +834,10 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             ],
             captureId: nil
         )
+        // Transient locationUnknown errors do not invalidate a running stream.
+        // The watchdog retries a stalled stream without an error/restart loop.
+        updateLocationTracking()
+        recoverLocationIfNeeded()
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {

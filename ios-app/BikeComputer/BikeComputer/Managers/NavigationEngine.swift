@@ -54,6 +54,7 @@ class NavigationEngine: NSObject, ObservableObject {
     private var courseResolver = NavigationCourseResolver()
     private var rideStartDate: Date?
     @Published private(set) var rideDistanceMeters: CLLocationDistance = 0
+    static let minimumRideDistanceIncrementMeters: CLLocationDistance = 5
     private var lastRideLocation: CLLocation?
     private var lastRouteRemainingMeters: CLLocationDistance?
     private var rideTelemetryTimer: Timer?
@@ -773,13 +774,20 @@ class NavigationEngine: NSObject, ObservableObject {
             rideStartDate = now()
         }
 
+        // Count from the last counted point, like the former 5 m Core Location
+        // filter. The stream now reports every stationary fix for its stall
+        // watchdog; jitter around a stop must not become ride distance.
         if let lastRideLocation {
             let distanceIncrement = gpsLocation.distance(from: lastRideLocation)
-            if distanceIncrement >= 0 && distanceIncrement < 100 {
-                rideDistanceMeters += distanceIncrement
+            if distanceIncrement >= Self.minimumRideDistanceIncrementMeters {
+                if distanceIncrement < 100 {
+                    rideDistanceMeters += distanceIncrement
+                }
+                self.lastRideLocation = gpsLocation
             }
+        } else {
+            lastRideLocation = gpsLocation
         }
-        lastRideLocation = gpsLocation
 
         if isNavigating, let route = currentRoute, routeLocation != nil,
            let runtimeSnapshot = navigationRuntime.snapshot {

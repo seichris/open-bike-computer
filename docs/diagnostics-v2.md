@@ -175,7 +175,13 @@ is a rolling 50 MiB history: byte pressure overwrites the oldest chunks, even
 within an active capture, so old evidence cannot prevent the latest events from
 being recorded. The open writer and its manifest remain intact; immutable
 acquisition snapshots use their separate cache. Retention can leave a partial
-capture, and validation must continue to report its missing history. Standard retention
+capture. Every iPhone process stream starts at sequence 0, so `tools/bicino diag
+verify` reports `unretainedLeadingSequences` and `iosProcessHistory:
+leading_history_unretained` when a bundle lacks a process's earliest events
+(rolling retention, deletion or an acquisition's capture scope). This is
+missing history, separate from `sequenceGaps` and recording loss. Exports,
+issue markers, capture transitions and deletion first persist every event
+already admitted to the bounded writer mailbox. Standard retention
 and fault capsules continue to apply; volatile tails are not guaranteed through
 power loss. Firmware checkpoints commit libc buffers and call the filesystem
 VFS fsync at a bounded five-second cadence, critical events, markers, fault

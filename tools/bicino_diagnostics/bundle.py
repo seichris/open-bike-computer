@@ -191,6 +191,16 @@ class Evidence:
         scoped = any(scope[key] is not None for key in ('capture', 'acquisition', 'device'))
         streams = [stream for stream in self.streams if not scoped or stream.path in selected_paths]
         gaps = sum(stream.dropped_sequences for stream in streams)
+        # Rolling phone retention removes the oldest chunks of a process. That
+        # is missing history, not recording loss, so it is reported separately.
+        # A selected process is measured from its first retained stream even
+        # when the selected capture begins in a later chunk.
+        ios_processes = {Path(stream.path).parent for stream in streams
+                         if v1.APP_EVENT_MEMBER_RE.fullmatch(stream.path)}
+        unretained = sum(stream.unretained_leading_sequences for stream in self.streams
+                         if Path(stream.path).parent in ios_processes)
+        ios_history = ('no_ios_streams' if not ios_processes else
+                       'leading_history_unretained' if unretained else 'retained_from_process_start')
         tails = sum(bool(stream.truncated_tail) for stream in streams)
         counters = []
         for event in events:
@@ -267,6 +277,8 @@ class Evidence:
                 'unwrittenTailEventCount':None if unsealed else 0,
                 'coverageCaveat':'An unsealed boot may have an unmeasurable unwritten tail. No detected loss is not proof that every requested provider was enabled.',
                 'sequenceGaps':gaps, 'recoverableTails':tails, 'lossCounters':counters[:100],
+                'unretainedLeadingSequences':unretained,
+                'iosProcessHistory':ios_history,
                 'lossAccountingVersion':3,
                 'lossAccountingScope':'selected_streams_and_bundle_global_counters' if scoped else 'bundle',
                 'nativeCrashEvidence':'not_in_standard_bundle',

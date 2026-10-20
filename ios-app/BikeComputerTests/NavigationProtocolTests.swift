@@ -791,6 +791,20 @@ final class TestLocationManagerClient: LocationManagerClient {
     }
 }
 
+final class LocationDiagnosticsProbe: RideDiagnosticsEventSink {
+    private(set) var events: [String] = []
+
+    func record(
+        level: RideDiagnosticLevel,
+        category: RideDiagnosticCategory,
+        event: String,
+        fields: [String: String],
+        captureId: UUID?
+    ) {
+        events.append(event)
+    }
+}
+
 @main
 @MainActor
 struct NavigationProtocolTests {
@@ -840,6 +854,7 @@ struct NavigationProtocolTests {
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
         testLocationStreamRecovery()
+        testBackgroundWhenInUseLocationRecovery()
         testRideActivityRuntimeIntegration()
         testPhoneWorkoutLocationContinuation()
         testCoordinatorRejectsStaleRerouteLocations()
@@ -952,6 +967,7 @@ struct NavigationProtocolTests {
         testNavigationEngineSeedsCurvedProgressAfterStepTransition()
         testNavigationEngineReportsDistanceAfterPassingManeuver()
         testNavigationEngineUsesDegenerateStepFallback()
+        testNavigationRideDistanceIgnoresStationaryJitter()
         testNavigationEngineKeepsProgressAtRouteCrossing()
         testNavigationEngineResendsWhenBLEBecomesReady()
         testNavigationEngineDefersReconnectGPSUntilReadinessCommits()
@@ -5005,6 +5021,76 @@ struct NavigationProtocolTests {
         restricted.recoverLocationIfNeeded()
         assertEqual(restrictedClient.startUpdatingLocationCallCount, 2, "permission denial stops recovery")
         restricted.setRideDetectionArmed(false)
+    }
+
+    /// A restart stops Core Location before starting it again. Under
+    /// When-In-Use that would be a background cold start of a phone ride or
+    /// social stream which may only continue from its foreground start.
+    @MainActor
+    static func testBackgroundWhenInUseLocationRecovery() {
+        var date = Date(timeIntervalSinceReferenceDate: 800_300_100)
+        var foreground = true
+        let native = CLLocationManager()
+        let unknown = NSError(domain: kCLErrorDomain, code: CLError.locationUnknown.rawValue)
+        for social in [false, true] {
+            let client = TestLocationManagerClient(authorizationLevel: .whenInUse)
+            let probe = LocationDiagnosticsProbe()
+            let manager = CurrentLocationManager(locationManager: client,
+                applicationIsActive: { foreground }, now: { date })
+            manager.diagnosticsRecorder = probe
+            foreground = true
+            if social {
+                manager.setSocialRideSharing(true)
+            } else {
+                manager.setWorkoutActive(true, phoneOwned: true)
+            }
+            assertEqual(client.startUpdatingLocationCallCount, 1, "foreground starts the When-In-Use stream")
+            foreground = false
+            manager.applicationStateDidChange()
+            date.addTimeInterval(CurrentLocationManager.locationStallInterval + 1)
+            // Timer ticks and a transient error all observe the stale stream.
+            manager.recoverLocationIfNeeded()
+            manager.locationManager(native, didFailWithError: unknown)
+            date.addTimeInterval(CurrentLocationManager.locationRecoveryInterval)
+            manager.recoverLocationIfNeeded()
+            assertEqual(client.stopUpdatingLocationCallCount, 0,
+                        "background When-In-Use recovery keeps the continuing stream")
+            assertEqual(client.startUpdatingLocationCallCount, 1,
+                        "background When-In-Use recovery never cold-starts GPS")
+            assertEqual(probe.events.filter { $0 == "tracking_restart_deferred" }.count, 1,
+                        "a deferred restart is recorded once per stale episode")
+            assert(!probe.events.contains("tracking_restarted"), "no background restart is reported")
+            foreground = true
+            manager.applicationDidBecomeActive()
+            assertEqual(client.stopUpdatingLocationCallCount, 1, "foreground activation performs the deferred restart")
+            assertEqual(client.startUpdatingLocationCallCount, 2, "the deferred restart starts in foreground")
+            if social {
+                manager.setSocialRideSharing(false)
+            } else {
+                manager.setWorkoutActive(false)
+            }
+        }
+
+        // Always authorization may restart in background. The error that
+        // triggered recovery precedes the restart in the diagnostic timeline.
+        let alwaysClient = TestLocationManagerClient(authorizationLevel: .always)
+        let probe = LocationDiagnosticsProbe()
+        foreground = true
+        let navigation = CurrentLocationManager(locationManager: alwaysClient,
+            applicationIsActive: { foreground }, now: { date })
+        navigation.diagnosticsRecorder = probe
+        navigation.setNavigating(true)
+        foreground = false
+        navigation.applicationStateDidChange()
+        date.addTimeInterval(CurrentLocationManager.locationStallInterval)
+        navigation.locationManager(native, didFailWithError: unknown)
+        assertEqual(alwaysClient.startUpdatingLocationCallCount, 2,
+                    "Always navigation restarts a stale stream in background")
+        let errorIndex = probe.events.firstIndex(of: "error")
+        let restartIndex = probe.events.firstIndex(of: "tracking_restarted")
+        assert(errorIndex != nil && restartIndex != nil && errorIndex! < restartIndex!,
+               "the GPS error is recorded before the recovery it triggers")
+        navigation.setNavigating(false)
     }
 
     @MainActor

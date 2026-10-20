@@ -2,6 +2,52 @@ import Combine
 import CoreLocation
 import Foundation
 
+/// Shared distance and moving time. The phone stream now reports every
+/// stationary fix for its stall watchdog, so jitter at a stop must not become
+/// progress: distance counts from the last counted point, like the former 5 m
+/// Core Location filter, and moving time prefers Core Location's speed.
+nonisolated struct SharedRideProgress {
+    static let minimumDisplacementMeters: CLLocationDistance = 5
+    static let continuityInterval: TimeInterval = 30
+    static let movingSpeed: CLLocationSpeed = 0.5
+    private(set) var distanceMeters = 0.0
+    private(set) var movingSeconds = 0.0
+    private var anchor: CLLocation?
+    private var previousFixAt: Date?
+
+    mutating func add(_ location: CLLocation) {
+        guard let anchor, let previousFixAt else {
+            self.anchor = location
+            previousFixAt = location.timestamp
+            return
+        }
+        let interval = location.timestamp.timeIntervalSince(previousFixAt)
+        guard interval > 0 else { return }
+        self.previousFixAt = location.timestamp
+        // A silent interval cannot be credited; restart from this fix.
+        guard interval <= Self.continuityInterval else {
+            self.anchor = location
+            return
+        }
+        let meters = anchor.distance(from: location)
+        var countedSpeed: CLLocationSpeed?
+        if meters >= Self.minimumDisplacementMeters {
+            let speed = meters / location.timestamp.timeIntervalSince(anchor.timestamp)
+            if speed <= 60 {
+                distanceMeters += meters
+                countedSpeed = speed
+            }
+            self.anchor = location
+        }
+        // Doppler speed is not inflated by stationary position jitter. Without
+        // it, only an interval that left the last counted point is moving.
+        let moving = location.speed >= 0
+            ? location.speed > Self.movingSpeed
+            : (countedSpeed ?? 0) > Self.movingSpeed
+        if moving { movingSeconds += interval }
+    }
+}
+
 @MainActor
 final class LiveRideService: ObservableObject {
     @Published private(set) var ride: SocialGroupRide?
@@ -41,9 +87,7 @@ final class LiveRideService: ObservableObject {
     private var publisher: Task<Void, Never>?
     private var socket: (any SocialSocket)?
     private(set) var latestLocation: CLLocation?
-    private var previousSharedLocation: CLLocation?
-    private var sharedDistance = 0.0
-    private var sharedMovingSeconds = 0.0
+    private var sharedProgress = SharedRideProgress()
     private var sharingStartedAt = 0.0
     private var lastPublished: Date?
     private var sequence = 0
@@ -78,16 +122,7 @@ final class LiveRideService: ObservableObject {
         latestLocation = location
         guard isSharing, let location, location.horizontalAccuracy >= 0,
               location.horizontalAccuracy <= 100, abs(location.timestamp.timeIntervalSinceNow) < 30 else { return }
-        if let previous = previousSharedLocation {
-            let seconds = location.timestamp.timeIntervalSince(previous.timestamp)
-            guard seconds > 0 else { return }
-            let meters = previous.distance(from: location)
-            if seconds <= 30 && meters / seconds <= 60 {
-                sharedDistance += meters
-                if meters / seconds > 0.5 { sharedMovingSeconds += seconds }
-            }
-        }
-        previousSharedLocation = location
+        sharedProgress.add(location)
     }
 
     func select(_ selected: SocialGroupRide, shareOnJoin: Bool = false) async throws {
@@ -244,8 +279,7 @@ final class LiveRideService: ObservableObject {
         guard selectionEpoch == localEpoch, revision == sharingRevision else { throw SocialFailure.cancelled }
         guard updated.sharing else { throw SocialFailure.server("sharing_disabled") }
         self.ride = updated
-        previousSharedLocation = nil
-        sharedDistance = 0; sharedMovingSeconds = 0
+        sharedProgress = SharedRideProgress()
         sharingStartedAt = uptime()
         sharingDeadline = requestedAt + min(4 * 3600, max(0, (updated.sharingExpiresAt ?? (updated.serverTime + 60)) - updated.serverTime))
         clearNotice()
@@ -274,8 +308,8 @@ final class LiveRideService: ObservableObject {
                     if location.course >= 0 { state["course"] = location.course }
                     if stats && location.speed >= 0 { state["speed"] = min(60, location.speed) }
                     if stats {
-                        state["distanceMeters"] = self.sharedDistance
-                        state["movingSeconds"] = self.sharedMovingSeconds
+                        state["distanceMeters"] = self.sharedProgress.distanceMeters
+                        state["movingSeconds"] = self.sharedProgress.movingSeconds
                         state["elapsedSeconds"] = max(0, self.uptime()-self.sharingStartedAt)
                     }
                     // An accepted request can lose its response. Never reuse its sequence.

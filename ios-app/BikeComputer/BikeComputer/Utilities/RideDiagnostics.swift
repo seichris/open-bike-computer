@@ -600,6 +600,9 @@ final class RideDiagnosticsRecorder:
 
     let processId: UUID
     let rootURL: URL
+    /// Rolling byte budget for this store. Production uses the 50 MiB default;
+    /// host tests use a smaller budget to exercise real chunk rollover.
+    let retainedByteLimit: Int
 
     private let queue: DispatchQueue
     private let now: () -> Date
@@ -623,6 +626,10 @@ final class RideDiagnosticsRecorder:
     private var detailedTraceExpiry: Date?
     private var totalDropped = 0
     private var lastErrorOnQueue: String?
+    /// Append failures and durability-checkpoint failures recover separately.
+    private enum ErrorScope { case storage, checkpoint }
+    private var errorsOnQueue: [ErrorScope: String] = [:]
+    private var lastErrorScope: ErrorScope?
     private var lastDeviceImportAtOnQueue: Date?
     // Queue-confined storage state. The @Published value is a main-thread UI
     // snapshot and must never be mutated from the recorder queue.
@@ -690,8 +697,13 @@ final class RideDiagnosticsRecorder:
         rootURL: URL? = nil,
         now: @escaping () -> Date = Date.init,
         uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        retainedBytesLimit: Int = RideDiagnosticsRecorder.retainedBytesLimit
     ) {
+        // Pruning reserves one whole chunk ahead of the open writer.
+        precondition(retainedBytesLimit >= 2 * Self.chunkLimit &&
+            retainedBytesLimit <= Self.retainedBytesLimit)
+        self.retainedByteLimit = retainedBytesLimit
         let initialCaptureID = UUID()
         let initializedAt = now()
         self.processId = UUID()
@@ -737,7 +749,7 @@ final class RideDiagnosticsRecorder:
             do {
                 try prepareStorage()
             } catch {
-                publishError(error.localizedDescription)
+                publishError(error.localizedDescription, scope: .storage)
             }
         }
         record(
@@ -941,7 +953,7 @@ final class RideDiagnosticsRecorder:
             } catch {
                 totalDropped += 1
                 publishDropCount()
-                publishError(error.localizedDescription)
+                publishError(error.localizedDescription, scope: .storage)
                 queueStorageOutcome(
                     event: "write_failed",
                     fields: ["reason": "storage_unavailable"]
@@ -953,10 +965,20 @@ final class RideDiagnosticsRecorder:
         }
     }
 
+    /// Persist the whole bounded mailbox before a checkpoint observes or
+    /// changes capture, chunk or store state; batch yielding must not let an
+    /// export, marker, rotation or deletion overtake earlier events. Call only
+    /// from a top-level writer-queue block, never from a drain-triggered
+    /// capture transition.
+    private func drainBacklogOnQueue() {
+        drainPendingRecords(limit: Self.pendingRecordLimit, scheduleContinuation: false)
+    }
+
     func beginDetailedTrace() {
         queue.async { [weak self] in
             guard let self else { return }
             guard !self.detailedTraceActive else { return }
+            self.drainBacklogOnQueue()
             self.expireStandardCaptureIfNeeded()
             self.preDetailedContextURL = self.currentChunkURL
             self.rotateChunk()
@@ -976,6 +998,7 @@ final class RideDiagnosticsRecorder:
                 guard let self,
                       self.detailedTraceActive,
                       self.detailedTraceExpiry == expiry else { return }
+                self.drainBacklogOnQueue()
                 self.expireDetailedTraceIfNeeded(force: true)
                 self.flushOnQueue()
             }
@@ -985,6 +1008,7 @@ final class RideDiagnosticsRecorder:
     func endDetailedTrace(reason: String = "user") {
         queue.async { [weak self] in
             guard let self else { return }
+            self.drainBacklogOnQueue()
             self.endDetailedTraceOnQueue(reason: reason)
         }
     }
@@ -995,6 +1019,7 @@ final class RideDiagnosticsRecorder:
     func endRideCapture() {
         queue.async { [weak self] in
             guard let self else { return }
+            self.drainBacklogOnQueue()
             if self.detailedTraceActive {
                 self.endDetailedTraceOnQueue(reason: "ride_ended")
                 return
@@ -1014,6 +1039,7 @@ final class RideDiagnosticsRecorder:
     @discardableResult
     func markIssue(_ code: RideIssueCode, incidentID: UUID = UUID()) -> Bool {
         queue.sync {
+            drainBacklogOnQueue()
             expireDetailedTraceIfNeeded()
             expireStandardCaptureIfNeeded()
             let saved = recordOnQueue(
@@ -1345,7 +1371,7 @@ final class RideDiagnosticsRecorder:
 
     func flush() {
         queue.sync {
-            drainPendingRecords(limit: Self.pendingRecordLimit, scheduleContinuation: false)
+            drainBacklogOnQueue()
             _ = flushOnQueue()
         }
     }
@@ -1357,7 +1383,7 @@ final class RideDiagnosticsRecorder:
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 do {
-                    self.drainPendingRecords(limit: Self.pendingRecordLimit, scheduleContinuation: false)
+                    self.drainBacklogOnQueue()
                     guard self.flushOnQueue() else {
                         throw RideDiagnosticsError.unavailable("Diagnostic files could not be synchronized.")
                     }
@@ -1475,6 +1501,9 @@ final class RideDiagnosticsRecorder:
 
     func deleteLocalLogs() throws {
         try queue.sync {
+            // Events emitted before deletion are deleted with the store; they
+            // must not be written into the fresh store afterwards.
+            drainBacklogOnQueue()
             try? FileManager.default.removeItem(
                 at: exportSnapshotContainerURL
             )
@@ -1566,9 +1595,9 @@ final class RideDiagnosticsRecorder:
         guard data.count <= 8 * 1024 else {
             throw RideDiagnosticsError.unavailable("Diagnostic event exceeded the record limit.")
         }
-        if retainedBytesOnQueue + data.count > Self.retainedBytesLimit {
+        if retainedBytesOnQueue + data.count > retainedByteLimit {
             try pruneRetention(reserving: max(data.count, Self.chunkLimit))
-            guard retainedBytesOnQueue + data.count <= Self.retainedBytesLimit else {
+            guard retainedBytesOnQueue + data.count <= retainedByteLimit else {
                 throw RideDiagnosticsError.unavailable(
                     "Diagnostic storage cannot make room for new events."
                 )
@@ -1602,13 +1631,15 @@ final class RideDiagnosticsRecorder:
         retainedBytesOnQueue += data.count
         publishRetainedBytes(retainedBytesOnQueue)
         let shouldPrune = event.sequence == 0 ||
-            retainedBytesOnQueue > Self.retainedBytesLimit
+            retainedBytesOnQueue > retainedByteLimit
         if sequence % 16 == 0 {
             try writeManifest(enforceRetention: shouldPrune)
         } else if shouldPrune {
             try pruneRetention()
         }
-        if lastErrorOnQueue != nil { publishError(nil) }
+        // A durable append proves append storage recovered. It does not prove
+        // a failed fsync/manifest checkpoint did; only flushOnQueue clears that.
+        clearError(.storage)
     }
 
     @discardableResult
@@ -1643,7 +1674,7 @@ final class RideDiagnosticsRecorder:
         } catch {
             totalDropped += 1
             publishDropCount()
-            publishError(error.localizedDescription)
+            publishError(error.localizedDescription, scope: .storage)
             queueStorageOutcome(
                 event: "write_failed",
                 fields: ["reason": "storage_unavailable"]
@@ -1681,7 +1712,7 @@ final class RideDiagnosticsRecorder:
                 try handle.synchronize()
             } catch {
                 synchronized = false
-                publishError(error.localizedDescription)
+                publishError(error.localizedDescription, scope: .checkpoint)
                 queueStorageOutcome(
                     event: "write_failed",
                     fields: ["reason": "synchronize_failed"]
@@ -1696,12 +1727,13 @@ final class RideDiagnosticsRecorder:
             try writeManifest(enforceRetention: false)
         } catch {
             synchronized = false
-            publishError(error.localizedDescription)
+            publishError(error.localizedDescription, scope: .checkpoint)
             queueStorageOutcome(
                 event: "write_failed",
                 fields: ["reason": "manifest_failed"]
             )
         }
+        if synchronized { clearError(.checkpoint) }
         drainStorageOutcomes()
         return synchronized
     }
@@ -1713,7 +1745,7 @@ final class RideDiagnosticsRecorder:
             "processId": processId.uuidString.lowercased(),
             "createdAt": isoFormatter.string(from: now()),
             "chunkLimitBytes": Self.chunkLimit,
-            "retentionBytes": Self.retainedBytesLimit,
+            "retentionBytes": retainedByteLimit,
             "retentionCaptureCount": Self.retainedCaptureLimit,
             "retentionAgeDays": 14,
             "droppedEventCount": totalDropped,
@@ -2039,6 +2071,7 @@ final class RideDiagnosticsRecorder:
     }
 
     private func prepareExportOnQueue(additionalDeviceChunks: [String: Data] = [:], additionalAppChunks: [String: Data] = [:], acquisitionOnly: Bool = false) throws -> PreparedExport {
+        drainBacklogOnQueue()
         guard flushOnQueue() else {
             throw RideDiagnosticsError.unavailable(
                 "Diagnostic files could not be synchronized for export."
@@ -2630,7 +2663,7 @@ final class RideDiagnosticsRecorder:
                 $0.standardizedFileURL.path != currentManifest
         }
         for candidate in byteCandidates {
-            guard retainedBytesOnQueue + requiredBytes > Self.retainedBytesLimit else { break }
+            guard retainedBytesOnQueue + requiredBytes > retainedByteLimit else { break }
             let size = (try candidate.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0
             // Keep sidecars while their streams remain exportable.
             if candidate.pathExtension != "jsonl" {
@@ -2791,7 +2824,7 @@ final class RideDiagnosticsRecorder:
             } catch {
                 sequence -= 1
                 pendingStorageOutcomes.insert(outcome, at: 0)
-                publishError(error.localizedDescription)
+                publishError(error.localizedDescription, scope: .storage)
                 break
             }
             drained += 1
@@ -2834,8 +2867,20 @@ final class RideDiagnosticsRecorder:
         }
     }
 
-    private func publishError(_ message: String?) {
-        let snapshot = message.map { String($0.prefix(160)) }
+    private func publishError(_ message: String, scope: ErrorScope) {
+        errorsOnQueue[scope] = String(message.prefix(160))
+        lastErrorScope = scope
+        publishLastError()
+    }
+
+    private func clearError(_ scope: ErrorScope) {
+        guard errorsOnQueue.removeValue(forKey: scope) != nil else { return }
+        publishLastError()
+    }
+
+    private func publishLastError() {
+        let snapshot = lastErrorScope.flatMap { errorsOnQueue[$0] } ??
+            errorsOnQueue.values.first
         lastErrorOnQueue = snapshot
         DispatchQueue.main.async { [weak self] in
             self?.lastError = snapshot
