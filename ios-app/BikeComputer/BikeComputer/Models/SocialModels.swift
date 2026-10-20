@@ -8,6 +8,18 @@ struct SocialCapabilities: Codable, Equatable {
     var activities = false
     var groups = false
     var hardware = false
+    var invitePreviews = false
+    enum CodingKeys: String, CodingKey { case media, routes, activities, groups, hardware, invitePreviews }
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        media = try c.decodeIfPresent(Bool.self, forKey: .media) ?? false
+        routes = try c.decodeIfPresent(Bool.self, forKey: .routes) ?? false
+        activities = try c.decodeIfPresent(Bool.self, forKey: .activities) ?? false
+        groups = try c.decodeIfPresent(Bool.self, forKey: .groups) ?? false
+        hardware = try c.decodeIfPresent(Bool.self, forKey: .hardware) ?? false
+        invitePreviews = try c.decodeIfPresent(Bool.self, forKey: .invitePreviews) ?? false
+    }
 }
 
 struct SocialProfile: Codable, Identifiable, Equatable {
@@ -98,13 +110,15 @@ struct SocialRider: Decodable, Identifiable {
     let course: Double?
     let speed: Double?
     let distanceMeters: Double?
+    let movingSeconds: Double?
+    let elapsedSeconds: Double?
     let sequence: Int
     let routeProgressMeters: Double?
     let routeHash: String?
     let ageSeconds: Double
     private let observedAt = ProcessInfo.processInfo.systemUptime
     enum CodingKeys: String, CodingKey {
-        case profile, latitude, longitude, capturedAt, receivedAt, horizontalAccuracy, course, speed, distanceMeters, sequence, routeProgressMeters, routeHash
+        case profile, latitude, longitude, capturedAt, receivedAt, horizontalAccuracy, course, speed, distanceMeters, movingSeconds, elapsedSeconds, sequence, routeProgressMeters, routeHash
         case ageSeconds = "age"
     }
     var coordinate: CLLocationCoordinate2D { .init(latitude: latitude, longitude: longitude) }
@@ -154,7 +168,7 @@ struct SocialLinkTarget {
         guard path.count >= 3, path[1] == "social" else { return nil }
         kind = path[2]
         if kind == "profile", path.count == 4, parts.fragment == nil { id = path[3] }
-        else if ["ride", "shared"].contains(kind), path.count == 3, let secret = parts.fragment { id = secret }
+        else if ["ride", "shared"].contains(kind), (path.count == 3 || (kind == "ride" && path.count == 4 && UUID(uuidString: path[3]) != nil)), let secret = parts.fragment { id = secret }
         else { return nil }
         guard id.range(of: "^[A-Za-z0-9_-]{20,100}$", options: .regularExpression) != nil else { return nil }
         canonicalURL = canonical

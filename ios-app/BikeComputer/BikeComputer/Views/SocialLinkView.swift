@@ -29,7 +29,7 @@ struct SocialLinkView: View {
     var body: some View {
         Group {
             if store.session.state != .signedIn {
-                SocialHubView(store: store, routeLibrary: routeLibrary)
+                SocialHubView(store: store, routeLibrary: routeLibrary, offersProfileSetup: false)
             } else if let content {
                 SocialContentDetail(store: store, item: content, routeLibrary: routeLibrary)
             } else {
@@ -42,20 +42,23 @@ struct SocialLinkView: View {
                     if let preview {
                         Text(preview.title).font(.headline)
                         SocialTrackPreview(content: preview.route).frame(height: 250)
-                        Text("Joining does not start location sharing.")
+                        Text("Joining shares your live location, speed, distance and times with riders in this group.")
                         Button("Join ride") { run {
                             guard let url = store.pendingLink, let target = SocialLinkTarget(url: url), target.kind == "ride" else { return }
                             let code = target.id
                             try await store.join(code); completed = true
                         } }.disabled(completed)
                     }
-                    if completed { Text("Done. Open Friends & Riding to continue.") }
+                    if completed { Text("Done. Open your profile to continue.") }
                     if let error { Text(error).foregroundStyle(.red) }
                 }.navigationTitle("Bicino link")
             }
-        }.task(id: store.session.state) {
+        }
+        .modifier(SocialProfileSetupPresentation(store: store))
+        .task(id: store.session.state) {
             guard store.session.state == .signedIn, let url = store.pendingLink else { return }
             run {
+                try await store.refresh()
                 guard let target = SocialLinkTarget(url: url) else { throw SocialFailure.invalidResponse }
                 let id = target.id
                 switch target.kind {

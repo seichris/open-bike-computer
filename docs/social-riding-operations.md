@@ -19,7 +19,7 @@ Set build settings `BICINO_FIREBASE_APP_ID`, `BICINO_FIREBASE_SENDER_ID`,
 `BICINO_FIREBASE_API_KEY`, `BICINO_FIREBASE_PROJECT_ID`, `BICINO_GOOGLE_CLIENT_ID`,
 and `BICINO_GOOGLE_REVERSED_CLIENT_ID`, then `BICINO_SOCIAL_ENABLED = YES`.
 Their committed defaults are empty / NO, except for a valid inactive Google
-callback scheme. The disabled build hides Friends & Riding. Social startup
+callback scheme. The disabled build hides Friends & Group Rides. Social startup
 requires a configured Google reversed client ID. Firebase explicitly selects the
 app-private `BicinoSocialKeychainGroup`; the existing map-library group remains
 first in the enabled entitlement array, preserving all pre-existing unscoped credential
@@ -31,6 +31,67 @@ not linked into Watch or widgets. A website cookie does not
 sign the native app in. Test separate web/native Apple and Google sessions for
 matching UID, conflict handling, explicit linking, cancellation, expiry, logout,
 and recent-auth deletion before enabling either production surface.
+
+## Settings and profile setup
+
+When social riding is configured, Settings opens with a centered account header.
+The header opens the unified Profile, Friends & Group Rides screen with profile
+editing, friends, requests, invitations, existing rides, join-by-code and account
+controls. There is no duplicate social entry at the bottom of Settings. The
+header shows up to five overlapping friend portraits beside the rider's portrait,
+with a count for additional friends. Native provider-linking controls are removed;
+account deletion still supports recent-authentication with the original provider.
+Dismissing Apple or Google sign-in is treated as cancellation, not a profile error.
+
+Sign-in is optional. After sign-in, an incomplete profile is offered a short
+name/username/photo setup, including sign-ins opened from a shared link. The
+offer is recorded per profile on this installation, so Not now or dismissing it
+does not cause repeated prompts after relaunch or later sign-ins. The header
+and account row keep a Complete your profile reminder. Photos are optional;
+a name and username complete setup. Existing complete profiles are not prompted.
+The same public profile is used on bicino.com; setup does not change privacy
+preferences or begin live-location sharing.
+
+Profile sharing and the QR-code action share one row. Rider lookup accepts an
+exact username with or without a leading @. Native completed-ride publishing
+has been removed. Shared-route publishing is no longer a separate native screen.
+Private Health workout recording and group rides do not depend on publishing.
+
+Privacy and notifications appears at the bottom of the unified profile screen.
+Private-area editing is removed from the native UI; existing server settings are
+preserved. Profile fields save when focus leaves a field or the editor closes;
+choosing/removing a photo and preference toggles save immediately. Profile and avatar writes are serialized against the server's
+profile version. Failed changes are reported; preferences roll back to the
+confirmed server state. An account switch rejects queued edits from the old
+account. The deployed profile-write contract requires a completed name and
+username before account preferences can be changed.
+
+The request/invitation alerts toggle includes the iPhone notification permission
+step. Denied system permission keeps alerts off and offers an iPhone Settings
+link. The account's notification preference still controls server delivery.
+
+## Saved routes and group creation
+
+Saved Routes uses Create a Route for online planning. A favorite destination's
+map icon opens the selected-destination controls (From/To, transport, favorite
+state and Go), preserving its saved coordinate rather than performing a new
+address search. An archived route's map icon continues to preview that archive.
+The passive Watch-ready checkmark is hidden; transfer failures retain retry.
+
+The saved-route preview offers Start Offline Navigation and Start Group Ride,
+followed by a Share with picker (Friends, Only Me, Anyone with the link). A local
+route starts as Only Me and opening it never uploads it. Selecting a nonprivate
+visibility or starting a group prepares a server snapshot automatically; no
+separate Publish step is required. Account plus exact archive content hash map
+to a server content ID, so later starts and visibility edits reuse the snapshot.
+Changing back to Only Me uses the server's existing share-link revocation.
+Link visibility offers a Share route link action. Live location remains opt-in.
+
+The deployed server accepts only owned, redistributable imported GPX archives.
+MapKit remains phone-only; Strava and another rider's saved route cannot be
+republished. Those previews retain private navigation and explain why sharing
+and group creation are disabled. This UI change does not change provider policy,
+route archive hashes, backend schemas, or the deployment contract.
 
 ## Upgrade and lifecycle contracts
 
@@ -62,7 +123,7 @@ HTTP client retries one ambiguous timeout/disconnect with the same operation key
 live state instead uses its publisher's monotonic sequence. Invite replacement
 hides the old code while pending and serializes native rotation requests.
 
-Group Ride creation requires ownership of the published route. Route
+The group-ride API requires ownership of its stored route snapshot. Route
 redistribution follows what Bicino actually handed to a rider: viewing a
 friends-visible route, resolving a link while signed in, previewing a room code,
 opening an invitation or joining a room records an exposure of that geometry.
@@ -230,7 +291,7 @@ An exactly antipodal friend has no unique bearing and is omitted.
 The global `BICINO_SOCIAL_ENABLED` switch mounts social in the existing map API;
 the isolated social server is controlled by its deployment. Once the service is
 reachable, accounts, profiles, friends, blocking and account deletion are always
-available. All five additional features default to **false**. Set these exact
+available. All six additional features default to **false**. Set these exact
 environment variables to `true` in the shared API/worker runtime environment:
 
 | Variable | Enables |
@@ -240,6 +301,7 @@ environment variables to `true` in the shared API/worker runtime environment:
 | `BICINO_SOCIAL_FEATURE_ACTIVITIES` | Completed-ride publication, lists, detail and links |
 | `BICINO_SOCIAL_FEATURE_GROUPS` | Invitations, sessions, consent and live positions; also requires routes |
 | `BICINO_SOCIAL_FEATURE_HARDWARE` | Phone-to-device rider relay; also requires groups and routes |
+| `BICINO_SOCIAL_FEATURE_INVITE_PREVIEWS` | Public view-only invite cards; requires media, groups and routes, plus the website preview release |
 
 Use lowercase `true`/`false`; invalid values fail startup. The authenticated
 `GET /v1/social/capabilities` response drives native feature availability. Live
@@ -387,3 +449,45 @@ validated image and record device ID, image hash, portrait screenshots and logs:
 
 Record a 2.06-inch rectangular-screen qualification independently. Promote the
 firmware feature gate only with physical evidence for the enabled target families.
+
+
+### Group ride invitation cards
+
+Deploy the bicino.com website preview release before enabling
+`BICINO_SOCIAL_FEATURE_INVITE_PREVIEWS=true`. The website uses its existing
+`BICINO_SOCIAL_ENABLED=true` and HTTPS-origin-only `BICINO_SOCIAL_ORIGIN`
+configuration; no new credential is required. Ship the backend through the normal
+main/digest-pinned promotion workflow. Enable the preview flag consistently on API
+replicas and workers only after both releases are ready.
+
+The native app checks the advertised `invitePreviews` capability before uploading
+a real 1200×630 MapKit snapshot with the route drawn, title, distance and
+“Join the group ride.” Older backends and failed snapshots keep a working standard
+invitation link. Existing links remain supported and do not acquire a map preview
+retroactively. The snapshot retains MapKit attribution.
+
+Owner-only `PUT /v1/social/group-rides/{rideID}/invite-preview` sanitizes the image
+and attaches a new random preview asset ID to the immutable ride route snapshot.
+`GET /v1/social/ride-previews/{previewID}` returns only title, distance, image hash
+and expiration; `/image` returns the bounded sanitized PNG. Neither endpoint
+returns the join code, route archive/coordinates, roster, account IDs or live
+positions. The image itself intentionally reveals the route map to recipients.
+The website validates/proxies the image and renders Open Graph/Twitter metadata
+on the server. Both services use `no-store` responses.
+
+Invitation URLs are `/social/ride/{previewID}#join-code`. The preview ID permits
+viewing the card only. Joining still requires the separate secret in the URL
+fragment and an explicit Join action in the app. Native join/create actions
+start sharing location, speed, distance and moving/elapsed times by default,
+after any OS location prompt. Merely opening a link or reopening the profile
+screen does not start sharing. Stop sharing, Leave and End remain available;
+the existing four-hour sharing bound still applies. Permission denial preserves
+successful membership and starts sharing automatically when the rider grants location access and returns.
+
+The original invite is retained in the account-scoped, app-private device-only
+Keychain. A legacy ride or another device without the original secret offers
+Create invite link; a known invitation is never replaced automatically. Owner
+ending, account deletion, card replacement and ride expiration revoke preview
+reads. Worker jobs delete their private media objects, and the existing orphan
+reconciler also covers `ride-previews/`. External messaging clients can retain
+previously downloaded image previews in their own caches.

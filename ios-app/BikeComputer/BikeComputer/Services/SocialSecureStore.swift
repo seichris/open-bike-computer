@@ -83,3 +83,24 @@ nonisolated enum SocialSecret {
         SHA256.hash(data: Data(secret.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }
+
+/// Join capabilities stay in the same app-private, device-only Keychain as other
+/// installation proofs. The account ID prevents cross-account restoration.
+struct SocialRideInvitation: Codable, Equatable {
+    let code: String
+    let previewID: String?
+}
+
+@MainActor
+final class SocialRideInvitationStore {
+    private let store: any SocialSecureStore
+    init(store: any SocialSecureStore) { self.store = store }
+    private func key(_ owner: String, _ ride: String) -> String { "ride-invite.\(owner).\(ride)" }
+    func read(owner: String, ride: String) -> SocialRideInvitation? {
+        guard let data = try? store.read(key(owner, ride)) else { return nil }
+        return try? JSONDecoder().decode(SocialRideInvitation.self, from: data)
+    }
+    func write(_ value: SocialRideInvitation?, owner: String, ride: String) {
+        try? store.write(value.flatMap { try? JSONEncoder().encode($0) }, for: key(owner, ride))
+    }
+}

@@ -12,6 +12,7 @@ import UIKit
 private enum ContentSheetDestination: Identifiable, Equatable {
     case settings
     case socialLink
+    case socialProfile
     case offlineRoutes
     case savePlannedRoute(OfflineRouteSaveDraft)
     case bikeComputerSetup
@@ -24,6 +25,7 @@ private enum ContentSheetDestination: Identifiable, Equatable {
     var id: String {
         switch self {
         case .socialLink: return "social-link"
+        case .socialProfile: return "social-profile"
         case .settings: return "settings"
         case .offlineRoutes: return "offline-routes"
         case .savePlannedRoute(let draft): return "save-route:\(draft.id.uuidString)"
@@ -111,6 +113,7 @@ struct ContentView: View {
     @State private var isSearchPanelExpanded = false
     @State private var routePlanningPurpose: RoutePlanningPurpose = .navigate
     @State private var pendingFavoriteDestination: SavedDestination?
+    @State private var routeSearchInitialDestination: SavedDestination?
     @State private var pendingRouteSearchAfterSheetDismissal: SavedDestination?
     @State private var hasPendingRouteSearchAfterSheetDismissal = false
     @State private var dismissedOfflineMapOnboarding = false
@@ -463,6 +466,7 @@ struct ContentView: View {
         }
         .onChange(of: isSearchPanelExpanded) { isExpanded in
             if isExpanded { clearSavedRoutePreview() }
+            else { routeSearchInitialDestination = nil }
         }
         .onChange(of: savedRouteMapPreview?.identity) { identity in
             if identity == nil { synchronizeRideMetricsSheet() }
@@ -857,6 +861,12 @@ struct ContentView: View {
         for destination: ContentSheetDestination
     ) -> some View {
         switch destination {
+        case .socialProfile:
+            NavigationStack { SocialHubView(store: social, routeLibrary: routeLibrary) }
+                .environment(\.savedRouteMapAction, SavedRouteMapAction(
+                    isNavigationActive: coordinator.isNavigating,
+                    show: { selection in try showOfflineRouteFromLibrary(selection) }
+                ))
         case .socialLink:
             NavigationStack { SocialLinkView(store: social, routeLibrary: routeLibrary) }
                 .environment(\.savedRouteMapAction, SavedRouteMapAction(
@@ -1339,7 +1349,8 @@ struct ContentView: View {
         pendingFavoriteDestination = destination
         routePlanningPurpose = .saveOffline
         sourceAddress = ""
-        destinationAddress = destination?.name ?? ""
+        destinationAddress = ""
+        routeSearchInitialDestination = destination
         isSearchPanelExpanded = true
     }
 
@@ -1809,10 +1820,15 @@ struct ContentView: View {
             if let preview = visibleSavedRouteMapPreview {
                 SavedRouteMapPreviewCard(
                     preview: preview,
-                    maximumHeight: min(220, maxHeight * 0.45),
+                    maximumHeight: min(360, maxHeight * 0.6),
                     onHide: clearSavedRoutePreview,
                     onStart: { startPreviewedOfflineRoute(preview) }
-                )
+                ) {
+                    SavedRouteSocialActions(store: social, library: routeLibrary, identity: preview.identity,
+                        openProfile: { presentedSheet = .socialProfile },
+                        groupCreated: { presentedSheet = .socialProfile })
+                        .id(preview.layoutIdentity)
+                }
                 .padding(.horizontal, 12)
             }
 
@@ -1941,13 +1957,15 @@ struct ContentView: View {
                 currentAddress: coordinator.currentAddress,
                 currentLocation: coordinator.currentLocation,
                 maxExpandedHeight: maxHeight,
+                initialDestination: routeSearchInitialDestination,
                 onStartNavigation: { source, destination, transport in
                     clearSavedRoutePreview()
                     isSearchPanelExpanded = false
-                    pendingFavoriteDestination = nil
+                    pendingFavoriteDestination = routePlanningPurpose == .saveOffline
+                        && coordinator.destinationStore.isFavorite(destination) ? destination : nil
                     coordinator.planNavigation(
                         from: source,
-                        to: destination,
+                        to: destination.routeEndpoint,
                         transportType: transport
                     )
                 },

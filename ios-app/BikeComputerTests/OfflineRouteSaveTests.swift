@@ -1071,7 +1071,7 @@ struct OfflineRouteSaveTests {
             panel.contains("RouteSaveSheet(library: library, draft: draft)"),
             "GPX confirmation is item-driven by stable parent presenters, never a transient Section")
         check(section.contains("favoriteButton(for: route") &&
-            section.contains("Label(\"Save an Online Route\"") &&
+            section.contains("Label(\"Create a Route\"") &&
             !section.contains("Navigate on iPhone") &&
             !section.contains("Available offline") &&
             !section.contains("Apple Maps · Saved on this iPhone"),
