@@ -289,11 +289,13 @@ final class CoreLocationManagerClient: LocationManagerClient {
 
     func configureForCycling() {
         manager.desiredAccuracy = kCLLocationAccuracyBest
-        manager.distanceFilter = 5
+        // Consumers explicitly stop this manager when idle. A distance filter
+        // would make stationary silence indistinguishable from a stalled stream.
+        manager.distanceFilter = kCLDistanceFilterNone
         manager.activityType = .fitness
 #if !os(macOS)
         manager.allowsBackgroundLocationUpdates = false
-        manager.pausesLocationUpdatesAutomatically = true
+        manager.pausesLocationUpdatesAutomatically = false
         manager.showsBackgroundLocationIndicator = false
 #endif
     }
@@ -301,14 +303,14 @@ final class CoreLocationManagerClient: LocationManagerClient {
     func setBackgroundTrackingEnabled(_ enabled: Bool) {
 #if !os(macOS)
         manager.allowsBackgroundLocationUpdates = enabled
-        manager.pausesLocationUpdatesAutomatically = !enabled
+        manager.pausesLocationUpdatesAutomatically = false
         manager.showsBackgroundLocationIndicator = enabled
 #endif
     }
 
     func setRideDetectionTrackingEnabled(_ enabled: Bool) {
         manager.desiredAccuracy = kCLLocationAccuracyBest
-        manager.distanceFilter = enabled ? kCLDistanceFilterNone : 5
+        manager.distanceFilter = kCLDistanceFilterNone
         manager.activityType = .fitness
     }
 
@@ -343,6 +345,14 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     
     private let locationManager: LocationManagerClient
     private let applicationIsActive: () -> Bool
+    private let now: () -> Date
+    private var recoveryTimer: Timer?
+    private var trackingStartedAt: Date?
+    private var lastUsableLocationAt: Date?
+    private var lastRecoveryAt: Date?
+    private var locationUpdatesPaused = false
+    static let locationStallInterval: TimeInterval = 45
+    static let locationRecoveryInterval: TimeInterval = 30
     private var lastGeocodedLocation: CLLocation?
     private var lastGeocodeTime: Date?
     private var workoutActivityCancellable: AnyCancellable?
@@ -373,9 +383,11 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     
     init(
         locationManager: LocationManagerClient = CoreLocationManagerClient(),
-        applicationIsActive: (() -> Bool)? = nil
+        applicationIsActive: (() -> Bool)? = nil,
+        now: @escaping () -> Date = Date.init
     ) {
         self.locationManager = locationManager
+        self.now = now
         self.applicationIsActive = applicationIsActive ?? {
 #if canImport(UIKit) && !HOST_TESTING
             MainActor.assumeIsolated {
@@ -505,6 +517,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 
     func applicationStateDidChange() {
         updateLocationTracking()
+        recoverLocationIfNeeded()
     }
 
     func applicationDidBecomeActive() {
@@ -572,6 +585,9 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             print("🌍 Starting location updates (navigating: \(isNavigating), map: \(isViewingMap), workout: \(isWorkoutActive), ride detection: \(isRideDetectionArmed), device destination request: \(isRefreshingDeviceDestinationLocation))")
             locationManager.startUpdatingLocation()
             isLocationUpdating = true
+            locationUpdatesPaused = false
+            trackingStartedAt = now()
+            startRecoveryTimerIfNeeded()
             diagnosticsRecorder?.record(
                 category: .gps,
                 event: "tracking_started",
@@ -588,6 +604,7 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
             print("🌍 Stopping location updates (not needed)")
             locationManager.stopUpdatingLocation()
             isLocationUpdating = false
+            stopRecoveryTimer()
             diagnosticsRecorder?.record(
                 category: .gps,
                 event: "tracking_stopped",
@@ -606,6 +623,8 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         if isLocationAuthorized && !isLocationUpdating {
             locationManager.startUpdatingLocation()
             isLocationUpdating = true
+            trackingStartedAt = now()
+            startRecoveryTimerIfNeeded()
         }
     }
     
@@ -613,7 +632,55 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
         if isLocationUpdating {
             locationManager.stopUpdatingLocation()
             isLocationUpdating = false
+            stopRecoveryTimer()
         }
+    }
+
+    deinit { recoveryTimer?.invalidate() }
+
+    private func startRecoveryTimerIfNeeded() {
+        guard recoveryTimer == nil else { return }
+        let timer = Timer(timeInterval: 10, repeats: true) { [weak self] _ in
+            self?.recoverLocationIfNeeded()
+        }
+        recoveryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopRecoveryTimer() {
+        recoveryTimer?.invalidate()
+        recoveryTimer = nil
+        trackingStartedAt = nil
+        lastUsableLocationAt = nil
+        lastRecoveryAt = nil
+        locationUpdatesPaused = false
+    }
+
+    // Packet delivery to BLE is not evidence that Core Location is still
+    // producing fixes. Recover from pause/error/stale streams using source
+    // timestamps, and let the ordinary demand/authorization gates own restarts.
+    func recoverLocationIfNeeded() {
+        guard isLocationUpdating else { return }
+        let date = now()
+        let baseline = max(trackingStartedAt ?? date, lastUsableLocationAt ?? .distantPast)
+        guard locationUpdatesPaused || date.timeIntervalSince(baseline) >= Self.locationStallInterval,
+              lastRecoveryAt.map({ date.timeIntervalSince($0) >= Self.locationRecoveryInterval }) ?? true else { return }
+        lastRecoveryAt = date
+        diagnosticsRecorder?.record(category: .gps, event: "tracking_restarted",
+            fields: ["reason": locationUpdatesPaused ? "paused" : "stale"])
+        updateLocationTracking(restart: true)
+    }
+
+    func locationManagerDidPauseLocationUpdates(_ manager: CLLocationManager) {
+        guard isLocationUpdating else { return }
+        locationUpdatesPaused = true
+        diagnosticsRecorder?.record(category: .gps, event: "updates_paused")
+        recoverLocationIfNeeded()
+    }
+
+    func locationManagerDidResumeLocationUpdates(_ manager: CLLocationManager) {
+        locationUpdatesPaused = false
+        diagnosticsRecorder?.record(category: .gps, event: "updates_resumed")
     }
     
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
@@ -627,8 +694,16 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
 #endif
         
         currentLocation = location
+        let receivedAt = self.now()
+        let sourceAge = receivedAt.timeIntervalSince(location.timestamp)
+        if location.horizontalAccuracy.isFinite, location.horizontalAccuracy >= 0,
+           CLLocationCoordinate2DIsValid(location.coordinate),
+           sourceAge >= -1, sourceAge < Self.locationStallInterval {
+            lastUsableLocationAt = location.timestamp
+            locationUpdatesPaused = false
+        }
 
-        let now = Date()
+        let now = receivedAt
         if now.timeIntervalSince(lastDiagnosticsLocationRecordAt) >= 30 {
             lastDiagnosticsLocationRecordAt = now
             let age = max(0, now.timeIntervalSince(location.timestamp))
@@ -727,6 +802,10 @@ class CurrentLocationManager: NSObject, ObservableObject, CLLocationManagerDeleg
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         print("Location error: \(error.localizedDescription)")
         let nsError = error as NSError
+        // Transient locationUnknown errors do not invalidate a running stream.
+        // The watchdog retries a stalled stream without an error/restart loop.
+        updateLocationTracking()
+        recoverLocationIfNeeded()
         diagnosticsRecorder?.record(
             level: .warning,
             category: .gps,

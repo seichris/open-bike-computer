@@ -371,7 +371,85 @@ enum RideDiagnosticsHostTests {
             "pre-cache receipts retain their original device and app evidence in scoped exports")
     }
 
+    static func missingWriterDirectoryRecoversWithoutRelaunch() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        let directory = root.appendingPathComponent("app/" + recorder.processId.uuidString.lowercased())
+        // Older byte-retention versions could prune the writer's sidecar and
+        // empty directory. Recover in the same process during migration.
+        try FileManager.default.removeItem(at: directory)
+        recorder.record(category: .gps, event: "after_directory_loss")
+        recorder.flush()
+        precondition(recorder.health.droppedEventCount == 0)
+        precondition(recorder.health.lastError == nil)
+        let streams = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.map { try String(contentsOf: $0, encoding: .utf8) }.joined()
+        precondition(streams.contains("after_directory_loss"))
+        precondition(FileManager.default.fileExists(atPath: directory.appendingPathComponent("manifest.json").path))
+        let bytes = try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: [.fileSizeKey]).reduce(0) {
+                $0 + ((try $1.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
+            }
+        precondition(recorder.health.retainedBytes == bytes, "directory recovery reconciles byte accounting")
+    }
+
+    static func byteRetentionAlwaysKeepsLatestChunks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let oldProcess = UUID().uuidString.lowercased()
+        let oldCapture = UUID().uuidString.lowercased()
+        let oldDirectory = root.appendingPathComponent("app/" + oldProcess)
+        try FileManager.default.createDirectory(at: oldDirectory, withIntermediateDirectories: true)
+        // Reproduce the device's single old capture occupying the whole store.
+        let line = Data("{\"schema\":1,\"source\":\"ios\",\"sequence\":0,\"level\":\"info\",\"category\":\"ble\",\"event\":\"historical\",\"processId\":\"\(oldProcess)\",\"captureId\":\"\(oldCapture)\"}\n".utf8)
+        var body = Data()
+        while body.count + line.count <= RideDiagnosticsRecorder.chunkLimit { body.append(line) }
+        let stamp = Date()
+        var oldChunks: [URL] = []
+        for number in 1...201 {
+            let url = oldDirectory.appendingPathComponent(String(format: "events-%06d.jsonl", number))
+            try body.write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: stamp.addingTimeInterval(Double(number - 202))], ofItemAtPath: url.path)
+            oldChunks.append(url)
+        }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.record(category: .gps, event: "latest_after_full_store")
+        recorder.flush()
+        precondition(recorder.health.droppedEventCount == 0, "a full historical capture must not block new recording")
+        precondition(recorder.health.retainedBytes <= RideDiagnosticsRecorder.retainedBytesLimit)
+        precondition(!FileManager.default.fileExists(atPath: oldChunks[0].path), "byte retention overwrites the oldest chunk")
+        precondition(FileManager.default.fileExists(atPath: oldChunks.last!.path), "byte retention keeps the newest historical chunk")
+        let current = root.appendingPathComponent("app/" + recorder.processId.uuidString.lowercased())
+        let latest = try FileManager.default.contentsOfDirectory(at: current, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.map { try String(contentsOf: $0, encoding: .utf8) }.joined()
+        precondition(latest.contains("latest_after_full_store"), "newest GPS evidence must reach disk")
+
+        // Continue a single active capture beyond the same byte budget.
+        let activeCapture = recorder.currentCaptureID!.uuidString.lowercased()
+        let activeBody = Data(String(decoding: body, as: UTF8.self)
+            .replacingOccurrences(of: oldProcess, with: recorder.processId.uuidString.lowercased())
+            .replacingOccurrences(of: oldCapture, with: activeCapture).utf8)
+        for number in 2...202 {
+            let url = current.appendingPathComponent(String(format: "events-%06d.jsonl", number))
+            try activeBody.write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: stamp.addingTimeInterval(Double(number))], ofItemAtPath: url.path)
+        }
+        try recorder.enforceRetention()
+        recorder.record(category: .gps, event: "latest_within_active_capture")
+        recorder.flush()
+        precondition(recorder.health.retainedBytes <= RideDiagnosticsRecorder.retainedBytesLimit)
+        precondition(recorder.health.droppedEventCount == 0, "active capture history must also roll over")
+        precondition(FileManager.default.fileExists(atPath: current.appendingPathComponent("events-000202.jsonl").path))
+        let streams = try FileManager.default.contentsOfDirectory(at: current, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.map { try String(contentsOf: $0, encoding: .utf8) }.joined()
+        precondition(streams.contains("latest_within_active_capture"))
+    }
+
     static func main() async throws {
+        try missingWriterDirectoryRecoversWithoutRelaunch()
+        try byteRetentionAlwaysKeepsLatestChunks()
         try await legacyAcquisitionExportPreservesReferencedEvidence()
         try await deletionDoesNotReuseRetainedChunkIdentity()
         try queueOverflowRetainsCriticalEvidenceAndReportsLoss()

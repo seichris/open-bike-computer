@@ -170,7 +170,12 @@ unknown unless independently established.
 
 ## Ride now, collect later
 
-Both producers record locally through a BLE disconnection. Standard retention
+Both producers record locally through a BLE disconnection. The iPhone recorder
+is a rolling 50 MiB history: byte pressure overwrites the oldest chunks, even
+within an active capture, so old evidence cannot prevent the latest events from
+being recorded. The open writer and its manifest remain intact; immutable
+acquisition snapshots use their separate cache. Retention can leave a partial
+capture, and validation must continue to report its missing history. Standard retention
 and fault capsules continue to apply; volatile tails are not guaranteed through
 power loss. Firmware checkpoints commit libc buffers and call the filesystem
 VFS fsync at a bounded five-second cadence, critical events, markers, fault

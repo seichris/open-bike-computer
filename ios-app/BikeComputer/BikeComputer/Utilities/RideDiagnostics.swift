@@ -880,8 +880,10 @@ final class RideDiagnosticsRecorder:
         }
     }
 
-    private func drainPendingRecords() {
-        while true {
+    private func drainPendingRecords(limit: Int = 32, scheduleContinuation: Bool = true) {
+        // Yield the writer queue so collection, cancellation and checkpoints
+        // remain runnable even while a producer continuously fills the mailbox.
+        for _ in 0..<limit {
             let pending: PendingRecord
             let admissionDrops: Int
             pendingLock.lock()
@@ -945,6 +947,9 @@ final class RideDiagnosticsRecorder:
                     fields: ["reason": "storage_unavailable"]
                 )
             }
+        }
+        if scheduleContinuation {
+            queue.async { [weak self] in self?.drainPendingRecords() }
         }
     }
 
@@ -1340,6 +1345,7 @@ final class RideDiagnosticsRecorder:
 
     func flush() {
         queue.sync {
+            drainPendingRecords(limit: Self.pendingRecordLimit, scheduleContinuation: false)
             _ = flushOnQueue()
         }
     }
@@ -1351,6 +1357,7 @@ final class RideDiagnosticsRecorder:
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 do {
+                    self.drainPendingRecords(limit: Self.pendingRecordLimit, scheduleContinuation: false)
                     guard self.flushOnQueue() else {
                         throw RideDiagnosticsError.unavailable("Diagnostic files could not be synchronized.")
                     }
@@ -1560,10 +1567,10 @@ final class RideDiagnosticsRecorder:
             throw RideDiagnosticsError.unavailable("Diagnostic event exceeded the record limit.")
         }
         if retainedBytesOnQueue + data.count > Self.retainedBytesLimit {
-            try pruneRetention(reserving: data.count)
+            try pruneRetention(reserving: max(data.count, Self.chunkLimit))
             guard retainedBytesOnQueue + data.count <= Self.retainedBytesLimit else {
                 throw RideDiagnosticsError.unavailable(
-                    "Diagnostic retention is full while the active capture is protected."
+                    "Diagnostic storage cannot make room for new events."
                 )
             }
         }
@@ -1574,6 +1581,12 @@ final class RideDiagnosticsRecorder:
             throw RideDiagnosticsError.unavailable("Diagnostic storage is unavailable.")
         }
         if !FileManager.default.fileExists(atPath: url.path) {
+            // Reconcile accounting if an older retention pass removed the
+            // writer directory; a recreated file starts at zero bytes.
+            currentChunkBytes = 0
+            updateRetainedBytes()
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
             guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
                 throw RideDiagnosticsError.unavailable(
                     "Unable to create the diagnostic event chunk."
@@ -1595,6 +1608,7 @@ final class RideDiagnosticsRecorder:
         } else if shouldPrune {
             try pruneRetention()
         }
+        if lastErrorOnQueue != nil { publishError(nil) }
     }
 
     @discardableResult
@@ -1718,6 +1732,8 @@ final class RideDiagnosticsRecorder:
         } else {
             previousBytes = 0
         }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
         try data.write(to: url, options: .atomic)
         applyFileProtection(to: url)
         // Routine 16-record checkpoints and flushes must not scan/sort every
@@ -2600,68 +2616,33 @@ final class RideDiagnosticsRecorder:
         removeOrphanedSidecars(reason: "capture_count")
 
         updateRetainedBytes()
-        files = allDiagnosticChunkFiles()
-        while retainedBytesOnQueue + requiredBytes > Self.retainedBytesLimit {
-            capturesByFile = snapshot(files)
-            let protectedCaptureIDs = protectedCaptures(
-                in: files,
-                capturesByFile: capturesByFile
-            )
-            var dates: [String: Date] = [:]
-            for url in files {
-                let date = (try? url.resourceValues(
-                    forKeys: [.contentModificationDateKey]
-                ).contentModificationDate) ?? .distantPast
-                for capture in capturesByFile[url] ?? [] {
-                    dates[capture] = max(dates[capture] ?? .distantPast, date)
-                }
-            }
-            let deletableComponents = captureComponents(
-                in: files,
-                capturesByFile: capturesByFile
-            ).filter {
-                !$0.isEmpty &&
-                    $0.isDisjoint(with: protectedCaptureIDs)
-            }
-            guard let oldestComponent = deletableComponents.min(by: { left, right in
-                let leftDate = left.compactMap { dates[$0] }.max() ?? .distantPast
-                let rightDate = right.compactMap { dates[$0] }.max() ?? .distantPast
-                return leftDate < rightDate
-            }) else {
-                let sidecars = allDiagnosticRetentionFiles().filter {
-                    $0.pathExtension != "jsonl" &&
-                        !protectedPaths.contains(
-                            $0.resolvingSymlinksInPath().standardizedFileURL.path
-                        )
-                }
-                guard let oldestSidecar = sidecars.min(by: { left, right in
-                    let leftDate = (try? left.resourceValues(
-                        forKeys: [.contentModificationDateKey]
-                    ).contentModificationDate) ?? .distantPast
-                    let rightDate = (try? right.resourceValues(
-                        forKeys: [.contentModificationDateKey]
-                    ).contentModificationDate) ?? .distantPast
-                    return leftDate < rightDate
-                }) else { break }
-                try removeRetainedFile(oldestSidecar, reason: "byte_limit")
-                updateRetainedBytes()
-                files = allDiagnosticChunkFiles()
-                continue
-            }
-            let candidates = files.filter {
-                let captures = capturesByFile[$0] ?? []
-                return !isProtected($0, in: capturesByFile) &&
-                    !captures.isEmpty &&
-                    captures.isSubset(of: oldestComponent)
-            }
-            guard !candidates.isEmpty else { break }
-            for candidate in candidates {
-                try removeRetainedFile(candidate, reason: "byte_limit")
-            }
-            removeOrphanedSidecars(reason: "byte_limit")
-            files = allDiagnosticChunkFiles()
-            updateRetainedBytes()
+        // Byte retention is a rolling history, even within an active capture.
+        // Acquisition snapshots live in a separate cache and are unaffected.
+        // Never pin a whole capture just because its newest chunk is current:
+        // a long ride (or a previous process filling the store) must not stop
+        // new recording. Keep the open writer and its required manifest only.
+        let currentPath = currentChunkURL?.standardizedFileURL.path
+        let currentManifest = rootURL.appendingPathComponent("app")
+            .appendingPathComponent(processId.uuidString.lowercased())
+            .appendingPathComponent("manifest.json").standardizedFileURL.path
+        let byteCandidates = allDiagnosticRetentionFiles().filter {
+            $0.standardizedFileURL.path != currentPath &&
+                $0.standardizedFileURL.path != currentManifest
         }
+        for candidate in byteCandidates {
+            guard retainedBytesOnQueue + requiredBytes > Self.retainedBytesLimit else { break }
+            let size = (try candidate.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0
+            // Keep sidecars while their streams remain exportable.
+            if candidate.pathExtension != "jsonl" {
+                let siblings = try fileManager.contentsOfDirectory(
+                    at: candidate.deletingLastPathComponent(),
+                    includingPropertiesForKeys: nil)
+                if siblings.contains(where: { $0.pathExtension == "jsonl" }) { continue }
+            }
+            try removeRetainedFile(candidate, reason: "byte_limit")
+            retainedBytesOnQueue -= size
+        }
+        removeOrphanedSidecars(reason: "byte_limit")
         updateRetainedBytes()
         if removedFiles > 0 {
             queueStorageOutcome(
@@ -2853,8 +2834,8 @@ final class RideDiagnosticsRecorder:
         }
     }
 
-    private func publishError(_ message: String) {
-        let snapshot = String(message.prefix(160))
+    private func publishError(_ message: String?) {
+        let snapshot = message.map { String($0.prefix(160)) }
         lastErrorOnQueue = snapshot
         DispatchQueue.main.async { [weak self] in
             self?.lastError = snapshot

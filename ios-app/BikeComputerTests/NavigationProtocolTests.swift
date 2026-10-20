@@ -839,6 +839,7 @@ struct NavigationProtocolTests {
         testCoordinatorReroutesAndAppliesLatestRoute()
         testCoordinatorReroutesWhenProgressRejectsFarLocation()
         testWorkoutAndNavigationLifecyclesStayIndependent()
+        testLocationStreamRecovery()
         testRideActivityRuntimeIntegration()
         testPhoneWorkoutLocationContinuation()
         testCoordinatorRejectsStaleRerouteLocations()
@@ -4948,6 +4949,62 @@ struct NavigationProtocolTests {
         coldManager.setWorkoutActive(true, phoneOwned: true)
         assertEqual(coldClient.startUpdatingLocationCallCount, 0,
                     "Cold background recovery does not pretend When-In-Use is Always")
+    }
+
+    @MainActor
+    static func testLocationStreamRecovery() {
+        var date = Date(timeIntervalSinceReferenceDate: 800_300_100)
+        var foreground = true
+        let client = TestLocationManagerClient(authorizationLevel: .always)
+        let manager = CurrentLocationManager(locationManager: client,
+            applicationIsActive: { foreground }, now: { date })
+        let native = CLLocationManager()
+        manager.setViewingMap(true)
+        manager.locationManagerDidPauseLocationUpdates(native)
+        assertEqual(client.startUpdatingLocationCallCount, 2, "a paused demanded stream restarts")
+        manager.locationManagerDidPauseLocationUpdates(native)
+        assertEqual(client.startUpdatingLocationCallCount, 2, "duplicate pause callbacks cannot cause a restart storm")
+        date.addTimeInterval(CurrentLocationManager.locationRecoveryInterval)
+        manager.recoverLocationIfNeeded()
+        assertEqual(client.startUpdatingLocationCallCount, 3, "a pause remains recoverable after the cooldown")
+
+        let fix = CLLocation(coordinate: CLLocationCoordinate2D(latitude: 31, longitude: 121),
+            altitude: 0, horizontalAccuracy: 5, verticalAccuracy: 5,
+            timestamp: date)
+        manager.locationManager(native, didUpdateLocations: [fix])
+        manager.recoverLocationIfNeeded()
+        assertEqual(client.startUpdatingLocationCallCount, 3, "fresh fixes do not restart the stream")
+        date.addTimeInterval(CurrentLocationManager.locationStallInterval)
+        // Replaying an old sample must not keep the stream looking healthy.
+        manager.locationManager(native, didUpdateLocations: [fix])
+        manager.applicationDidBecomeActive()
+        assertEqual(client.startUpdatingLocationCallCount, 4, "foreground activation recovers stale source timestamps")
+        manager.locationManager(native, didFailWithError: NSError(domain: kCLErrorDomain, code: 0))
+        assertEqual(client.startUpdatingLocationCallCount, 4, "transient errors do not immediately restart again")
+        manager.setViewingMap(false)
+        date.addTimeInterval(120)
+        manager.locationManagerDidPauseLocationUpdates(native)
+        manager.recoverLocationIfNeeded()
+        assertEqual(client.startUpdatingLocationCallCount, 4, "stopped consumers cannot be revived by late callbacks")
+
+        let restrictedClient = TestLocationManagerClient(authorizationLevel: .whenInUse)
+        let restricted = CurrentLocationManager(locationManager: restrictedClient,
+            applicationIsActive: { foreground }, now: { date })
+        restricted.setRideDetectionArmed(true)
+        foreground = false
+        restricted.locationManagerDidPauseLocationUpdates(native)
+        assertEqual(restrictedClient.startUpdatingLocationCallCount, 1,
+            "recovery cannot cold-start When-In-Use detection in the background")
+        foreground = true
+        restricted.applicationDidBecomeActive()
+        assertEqual(restrictedClient.startUpdatingLocationCallCount, 2, "foreground demand can recover after a background stop")
+        restrictedClient.authorizationLevel = .denied
+        restrictedClient.authorizationStatus = .denied
+        restricted.locationManager(native, didFailWithError: NSError(domain: kCLErrorDomain, code: 1))
+        date.addTimeInterval(120)
+        restricted.recoverLocationIfNeeded()
+        assertEqual(restrictedClient.startUpdatingLocationCallCount, 2, "permission denial stops recovery")
+        restricted.setRideDetectionArmed(false)
     }
 
     @MainActor

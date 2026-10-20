@@ -72,7 +72,7 @@ struct RideDiagnosticsSettingsView: View {
             } header: {
                 Text("Recording health")
             } footer: {
-                Text("Logs are retained on this iPhone for up to 14 days, 20 captures, or 50 MB, whichever limit is reached first. Export important evidence before it ages out.")
+                Text("Logs are retained on this iPhone for up to 14 days, 20 captures, or 50 MiB. At the size limit, the oldest chunks are overwritten to keep recording the latest events, including during a long ride. Export important evidence before it ages out.")
             }
 
             Section {
