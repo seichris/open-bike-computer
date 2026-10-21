@@ -16,6 +16,8 @@ public:
   using MemoryReader = device_transfer::NetworkMemorySnapshot (*)();
   // Allocate boot-lifetime driver/netifs before BLE fragments internal RAM.
   // Does not start the radio, advertise an AP, or install session credentials.
+  // A later start on the resident driver keeps the startup floor's total
+  // headroom net of the allocation measured here.
   device_transfer::NetworkStartResult prepare(MemoryReader memory);
   device_transfer::NetworkStartResult start(bool station, const char *ssid,
                                             const char *password, MemoryReader memory);
@@ -30,6 +32,8 @@ private:
   std::atomic<bool> initialized_{false};
   bool ramStorageReady_ = false;
   bool initializationFailed_ = false;
+  // Internal/DMA bytes the driver and netifs took at first use (owner task).
+  device_transfer::NetworkMemorySnapshot residentAllocation_{};
   std::atomic<bool> radioStarted_{false};
   std::atomic<bool> stationRequested_{false};
   std::atomic<bool> stationHasIP_{false};

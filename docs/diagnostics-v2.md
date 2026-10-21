@@ -437,9 +437,17 @@ the radio stopped, mode NULL and credentials empty in RAM. The driver/netifs are
 then reused; no Wi-Fi connection or hotspot is started until an authenticated
 transfer request. `wifi.boot_prepared` records the preparation result and internal
 free/largest-block sizes. This avoids first-use initialization after a ride has
-fragmented the heap; it does not lower the 32 KiB largest-block safety floor.
-A preparation failure does not prevent navigation/BLE boot and remains a typed
-transfer failure. Partial initialization is never retried within that boot.
+fragmented the heap. The unchanged startup floor, including its 32 KiB
+largest-block clauses, gates that driver allocation. Every later AP/STA start on
+the resident driver is refused with `wifi_memory` unless internal and DMA free
+memory, plus the allocation measured during preparation, still meet the floor's
+60 KiB/48 KiB totals; the documented softAP-start panic followed a low-memory
+initialization. Neither check qualifies a transfer. A preparation failure does
+not prevent navigation/BLE boot and remains a typed transfer failure. Partial
+initialization is never retried within that boot. After an unfinished previous
+boot, preparation is deferred (`code: deferred_unfinished_boot`) so a driver
+crash or hang cannot repeat toward safe mode; the first transfer then initializes
+under the floor as before.
 
 The 21 October 2026 walk's download failed before receiving an SD inventory,
 with `wifi_memory`, 67,923 internal bytes free and a 29,684-byte largest block.

@@ -92,12 +92,20 @@ device_transfer::NetworkStartResult DeviceWiFiRuntime::prepare(MemoryReader memo
     result.espError = ESP_ERR_NO_MEM;
     result.mode.after = result.mode.before;
   } else {
+    const bool firstUse = !initialized_;
     result.mode.attempted = true;
     const esp_err_t error = initialize();
     result.mode.after = memory();
     if (error != ESP_OK) {
       result.failedStep = NetworkStartStep::Mode;
       result.espError = error;
+    } else if (firstUse) {
+      const auto &before = result.mode.before, &after = result.mode.after;
+      residentAllocation_ = {};
+      residentAllocation_.internalFree =
+          before.internalFree > after.internalFree ? before.internalFree - after.internalFree : 0;
+      residentAllocation_.dmaFree =
+          before.dmaFree > after.dmaFree ? before.dmaFree - after.dmaFree : 0;
     }
   }
   result.before = result.mode.before;
@@ -117,11 +125,19 @@ device_transfer::NetworkStartResult DeviceWiFiRuntime::start(
     result.after = transition.after;
     return result;
   };
+  // First use is gated by the startup floor inside prepare(). Boot
+  // preparation leaves every later start resident, so check its headroom here.
+  const bool resident = initialized_.load(std::memory_order_acquire);
   result = prepare(memory);
   if (!result.ok()) return result;
   if (radioStarted_.load(std::memory_order_acquire)) {
     result.mode.after = memory();
     return fail(NetworkStartStep::Mode, ESP_ERR_INVALID_STATE, result.mode);
+  }
+  if (resident && !device_transfer::wifiRadioStartMemoryAboveObservedFailure(
+                      result.mode.after, residentAllocation_)) {
+    result.mode.attempted = false;
+    return fail(NetworkStartStep::Memory, ESP_ERR_NO_MEM, result.mode);
   }
   result.mode.attempted = true;
   esp_err_t error = esp_wifi_set_mode(station ? WIFI_MODE_STA : WIFI_MODE_AP);

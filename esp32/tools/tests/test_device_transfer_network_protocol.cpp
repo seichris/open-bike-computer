@@ -36,6 +36,26 @@ int main() {
   const device_transfer::NetworkMemorySnapshot admitted{
       60U * 1024U, 32U * 1024U, 48U * 1024U, 32U * 1024U};
   assert(device_transfer::wifiStartupMemoryAboveObservedFailure(admitted));
+  // A resident driver's radio start keeps the total headroom a floor-passing
+  // first use would have left, but not the first-use largest-block clauses.
+  const device_transfer::NetworkMemorySnapshot residentDriver{21000, 0, 21000, 0};
+  const device_transfer::NetworkMemorySnapshot residentAfterWalk{
+      46923, 29684, 39291, 29684};
+  assert(device_transfer::wifiRadioStartMemoryAboveObservedFailure(
+      residentAfterWalk, residentDriver));
+  const device_transfer::NetworkMemorySnapshot afterLowMemoryInit{
+      42811 - 21000, 14836, 35179 - 21000, 14836};
+  assert(!device_transfer::wifiRadioStartMemoryAboveObservedFailure(
+      afterLowMemoryInit, residentDriver));
+  // Without a measured allocation the full total floor applies.
+  assert(!device_transfer::wifiRadioStartMemoryAboveObservedFailure(
+      residentAfterWalk, {}));
+  assert(device_transfer::wifiRadioStartMemoryAboveObservedFailure(
+      {admitted.internalFree, 0, admitted.dmaFree, 0}, {}));
+  assert(!device_transfer::wifiRadioStartMemoryAboveObservedFailure(
+      {admitted.internalFree - 1, 0, admitted.dmaFree, 0}, {}));
+  assert(!device_transfer::wifiRadioStartMemoryAboveObservedFailure(
+      {admitted.internalFree, 0, admitted.dmaFree - 1, 0}, {}));
   assert(std::string(device_transfer::networkStartCode(
              device_transfer::NetworkStartStep::Memory)) == "wifi_memory");
 

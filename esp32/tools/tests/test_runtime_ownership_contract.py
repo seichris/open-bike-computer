@@ -17,6 +17,21 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         prepare = setup.index("operationOwner()->prepareWiFi()")
         self.assertLess(setup.index("Network.begin()"), prepare)
         self.assertLess(prepare, setup.index("bleNavServer.init("))
+        # 1.75-only and outside maintenance; 2.06 startup order is unchanged.
+        guard = setup.rindex("#if", 0, prepare)
+        self.assertTrue(setup.startswith("#if defined(WAVESHARE_AMOLED_175)\n", guard))
+        self.assertLess(setup.rindex("if (!firmware_maintenance::active()) {", 0, prepare), prepare)
+        # A crash or hang in early preparation must not repeat toward safe mode.
+        deferral = setup.index("consecutiveEarlyFailures != 0")
+        self.assertLess(deferral, prepare)
+        self.assertLess(setup.index("} else {", deferral), prepare)
+        runtime = source("lib/firmware_update/device_wifi_runtime.cpp")
+        start = runtime[runtime.index("device_transfer::NetworkStartResult DeviceWiFiRuntime::start("):
+                        runtime.index("esp_err_t DeviceWiFiRuntime::stop()")]
+        # Every post-preparation radio start keeps the floor's total headroom.
+        self.assertLess(start.index("const bool resident = initialized_"), start.index("prepare(memory)"))
+        self.assertLess(start.index("wifiRadioStartMemoryAboveObservedFailure("),
+                        start.index("esp_wifi_set_mode("))
         owner = source("lib/firmware_update/device_operation_owner.cpp")
         self.assertIn("execute(Command{Operation::PrepareWiFi}, result)", owner)
         self.assertIn("result.networkStart = wifi_.prepare(networkMemory);", owner)
