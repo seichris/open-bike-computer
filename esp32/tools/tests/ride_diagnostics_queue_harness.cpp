@@ -25,7 +25,11 @@ std::atomic<uint16_t> normalQueueCriticalCount{0}, maxQueueDepth{0};
 constexpr std::size_t kDropReasonCount = static_cast<std::size_t>(DropReason::Count);
 std::atomic<uint32_t> dropsByReason[kDropReasonCount]{};
 std::function<void()> afterNormalPeek;
-int xSemaphoreTake(int *, int timeout) { assert(timeout == 0); ++mutationLockAttempts; return mutexAvailable ? pdTRUE : pdFALSE; }
+std::function<void()> duringLockWait;
+unsigned wakes=0;
+int task=1; int *writerTaskHandle=&task;
+void xTaskNotifyGive(int *) { ++wakes; }
+int xSemaphoreTake(int *, int timeout) { assert(timeout >= 0 && timeout <= 1); ++mutationLockAttempts; if (!mutexAvailable && timeout && duringLockWait) duringLockWait(); return mutexAvailable ? pdTRUE : pdFALSE; }
 void xSemaphoreGive(int *) {}
 UBaseType_t uxQueueMessagesWaiting(QueueHandle_t q) { return q->events.size(); }
 UBaseType_t uxQueueSpacesAvailable(QueueHandle_t q) { return q->capacity - q->events.size(); }
@@ -56,11 +60,17 @@ void reset() {
   queueMutationMutex = &mutexStorage; mutexAvailable = true;
   mutationLockAttempts = 0;
   afterNormalPeek = {};
+  duringLockWait = {}; wakes=0;
   enqueued = dropped = maxQueueDepth = normalQueueCriticalCount = 0;
   for (auto &counter : dropsByReason) counter = 0;
 }
 int main() {
   QueuedEvent ordinary{1, false}, important{2, true};
+  // Release a preempted consumer inside the one-tick admission budget.
+  mutexAvailable = false;
+  duringLockWait = [] { mutexAvailable = true; };
+  assert(enqueue(ordinary) && dropped == 0 && wakes == 1);
+  reset();
   mutexAvailable = false;
   assert(!enqueue(ordinary) && !enqueue(important));
   assert(queuedDepth() == 0 && dropped == 2 && count(DropReason::QueueBusy) == 2);

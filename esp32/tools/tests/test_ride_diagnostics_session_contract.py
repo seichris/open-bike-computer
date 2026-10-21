@@ -28,6 +28,7 @@ namespace queue_policy = ride_diagnostics::queue_policy;
 using queue_policy::DropReason;
 constexpr unsigned kDropReasonCount = static_cast<unsigned>(DropReason::Count);
 std::atomic<unsigned> dropped{1}, dropsByReason[kDropReasonCount]{};
+std::atomic<unsigned> maximumWriterDelayMs{987}, maximumWriteDurationMs{123}, maxQueueDepth{24};
 unsigned lastReportedDrops[kDropReasonCount]{}, lastLossSummaryMs=0;
 unsigned depth=0, calls=0;
 bool accept=false;
@@ -36,6 +37,9 @@ unsigned queuedDepth() { return depth; }
 bool record(Level, const char *category, const char *event, const char *fields) {
   assert(std::string(category)=="logger" && std::string(event)=="loss");
   assert(ride_diagnostics::detail::validateFieldsJson(fields, std::strlen(fields)));
+  assert(std::strstr(fields, "\"writerDelayMs\":987"));
+  assert(std::strstr(fields, "\"durationMs\":123"));
+  assert(std::strstr(fields, "\"maxQueueDepth\":24"));
   ++calls; return accept;
 }
 void process(unsigned nowMs) {
@@ -83,9 +87,21 @@ int main() {
 
     def test_fault_capsule_write_failure_retries_and_preserves_rtc(self):
         update = RECORDER[RECORDER.index("void updateFaultCapsule("):RECORDER.index("bool utcNow(")]
-        flush = RECORDER[RECORDER.index("bool flushFaultCapsulesIfPossible() {"):RECORDER.index("uint16_t queuedDepth()")]
+        start = RECORDER.index("bool flushFaultCapsulesIfPossible() {")
+        flush = RECORDER[start:RECORDER.index("uint16_t queuedDepth()", start)]
         receipt = RECORDER[RECORDER.index("struct FaultCapsuleWriteReceipt {"):RECORDER.index("bool writeQueuedEvent(")]
         self.run_production_harness("ride_diagnostics_fault_retry_harness.cpp", update + receipt + flush)
+
+    def test_writer_services_reconnect_bursts_and_wakes_without_polling(self):
+        start = RECORDER.index("void noteDrop(DropReason reason) {")
+        note = RECORDER[start:RECORDER.index("std::atomic<uint32_t> storageErrors", start)]
+        start = RECORDER.index("void noteMaximum(")
+        maximum = RECORDER[start:RECORDER.index("// When the reserved critical lane", start)]
+        start = RECORDER.index("bool peekNextEvent(")
+        peek = RECORDER[start:RECORDER.index("bool completeSealIfReady()", start)]
+        start = RECORDER.index("void writerTask(void *) {")
+        writer = RECORDER[start:RECORDER.index("bool enqueueFormattedEvent", start)]
+        self.run_production_harness("ride_diagnostics_writer_harness.cpp", note + maximum + peek + writer)
 
     def test_oversized_index_cannot_claim_complete_inventory(self):
         http = (ROOT / "lib/ride_diagnostics/ride_diagnostics_http.cpp").read_text()
