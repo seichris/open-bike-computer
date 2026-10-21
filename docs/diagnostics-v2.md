@@ -431,6 +431,42 @@ artifacts are absent rather than synthesizing stack traces.
 
 ### Wi-Fi readiness evidence
 
+The 1.75 prepares the native Wi-Fi driver's resident resources before BLE starts,
+on the same internal-stack operation owner used by transfers. Preparation keeps
+the radio stopped, mode NULL and credentials empty in RAM. The driver/netifs are
+then reused; no Wi-Fi connection or hotspot is started until an authenticated
+transfer request. `wifi.boot_prepared` records the preparation result and internal
+free/largest-block sizes. This avoids first-use initialization after a ride has
+fragmented the heap. The unchanged startup floor, including its 32 KiB
+largest-block clauses, gates that driver allocation. Every later AP/STA start on
+the resident driver is refused with `wifi_memory` unless internal and DMA free
+memory, plus the allocation measured during preparation, still meet the floor's
+60 KiB/48 KiB totals; the documented softAP-start panic followed a low-memory
+initialization. Neither check qualifies a transfer. A preparation failure does
+not prevent navigation/BLE boot and remains a typed transfer failure. Partial
+initialization is never retried within that boot. After an unfinished previous
+boot, preparation is deferred (`code: deferred_unfinished_boot`) so a driver
+crash or hang cannot repeat toward safe mode; the first transfer then initializes
+under the floor as before.
+
+The 21 October 2026 walk's download failed before receiving an SD inventory,
+with `wifi_memory`, 67,923 internal bytes free and a 29,684-byte largest block.
+That is missing firmware delivery, not a complete empty card. Firmware acceptance
+for early preparation still requires the exact 1.75 image: radio-off boot, BLE
+pairing/reconnect, a ride followed by full inventoried SD collection, repeated
+transfers, and post-transfer radio/credential cleanup. Host tests do not satisfy
+those physical gates. The 2.06 startup order is unchanged.
+
+`workout.watch_launch_completed` preserves the safe user-facing `errorCode` plus
+an allowlisted platform `errorDomain`/numeric `code` and, when present, one
+underlying domain/code. Unknown domains become `other`; descriptions and arbitrary
+userInfo are never retained. A failed Watch launch remains unresolved until the
+rider checks Watch or authoritative session evidence arrives. `start_decision.phase`
+distinguishes that reservation from a confirmed active workout. The observed
+22 ms `watchUnavailable` failure predates this detail and cannot identify its
+underlying platform cause. Do not clear ownership or fall back to iPhone merely
+because the wake request failed or timed out.
+
 Accessory association and an accepted iOS configuration are distinct from IP
 routing and pinned HTTP readiness. The app keeps one proxy-free, Wi-Fi-only
 pinned session and retries transient failures through the existing 20-second

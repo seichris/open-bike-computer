@@ -2,7 +2,7 @@
 import Foundation
 nonisolated enum DiagnosticsSchema {
     static let registryVersion = 2
-    static let digest = "dba6ee7dbf06a7b1150e1be01a1fd9d0a692a681fa74331f9719da2dbd3b453b"
+    static let digest = "15a76f8386a8f064cd4d527e3a29f2396158e035edd9048b67571e48cebf3499"
     static let instrumentedMask: UInt32 = 5814230
     static let domains: [String] = [
         "audio", "ble", "boot", "display",

@@ -45,6 +45,7 @@ public:
 
   bool startStation(const std::string &ssid,
                     const std::string &password) override;
+  device_transfer::NetworkStartResult prepareWiFi();
   device_transfer::NetworkStartResult startStationDetailed(
       const std::string &ssid, const std::string &password) override;
   bool disconnectStation(bool wifiOff) override;
@@ -95,6 +96,7 @@ private:
     AcceptFirmwareOperation,
     AcknowledgeFirmwareOperation,
     StartStation,
+    PrepareWiFi,
     DisconnectStation,
     StartAccessPoint,
     StopAccessPoint,
