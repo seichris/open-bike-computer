@@ -1487,7 +1487,7 @@ final class WorkoutMirrorManager: NSObject {
     // localized descriptions, arbitrary domain strings or error userInfo.
     private static func launchFailureFields(for error: Error?) -> [String: String] {
         guard let error else { return ["errorDomain": "none"] }
-        let error = error as NSError
+        let platformError = error as NSError
         func domain(_ value: String) -> String {
             switch value {
             case HKErrorDomain: return "healthkit"
@@ -1499,8 +1499,8 @@ final class WorkoutMirrorManager: NSObject {
             default: return "other"
             }
         }
-        var fields = ["errorDomain": domain(error.domain), "code": String(error.code)]
-        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+        var fields = ["errorDomain": domain(platformError.domain), "code": String(platformError.code)]
+        if let underlying = platformError.userInfo[NSUnderlyingErrorKey] as? NSError {
             fields["underlyingErrorDomain"] = domain(underlying.domain)
             fields["underlyingErrorCode"] = String(underlying.code)
         }
