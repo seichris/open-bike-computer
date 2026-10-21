@@ -3686,12 +3686,26 @@ extension NavigationProtocolTests {
     static func testPhoneConnectionAdoptionOwnsGeneration() {
         for alreadyConnected in [false, true] {
             let manager = BLEManager()
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let recorder = RideDiagnosticsRecorder(rootURL: root)
+            manager.diagnosticsRecorder = recorder
             assert(manager.adoptConnectionForTesting(connected: alreadyConnected),
                    "fresh and restored contexts enter the authoritative lifecycle")
             assertEqual(manager.rideTransportPhase, alreadyConnected ? .authenticating : .connecting,
                         "restored phase matches platform state")
             assert(manager.rideConnectionGenerationForTesting > 0, "adoption advances the write generation")
             assert(!manager.isNavigationReady, "adoption never publishes ride readiness")
+            recorder.flush()
+            let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!.allObjects as! [URL]
+            let transitions = files.filter { $0.pathExtension == "jsonl" }.flatMap { file in
+                (try! Data(contentsOf: file)).split(separator: 0x0a).compactMap {
+                    try? JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0))
+                }
+            }.filter { $0.event == "ride_transport_transition" }
+            assert(!transitions.isEmpty, "adoption records its transport transition")
+            assert(!transitions.contains { $0.fields["transition"] == "rejectedInvalidTransition" },
+                   "resetting the old writer during connection adoption is not a transport violation")
             assert(!manager.adoptConnectionForTesting(connected: alreadyConnected),
                    "a live context cannot be silently replaced")
             manager.clearConnectionStateForTesting()

@@ -47,6 +47,94 @@ extension NavigationProtocolTests {
             manager.centralManager(central, didDiscover: peripheral,
                                    advertisementData: [:], rssi: -50)
         }
+        for (yieldingToWatch, error, reason) in [
+            (false, nil, "connection_ended"),
+            (true, nil, "watch_direct_handoff"),
+            (true, NSError(domain: "HostTransport", code: 1), "transport_error"),
+        ] as [(Bool, NSError?, String)] {
+            let (manager, driver, central, trusted, _) = fixture(.connecting)
+            restore(manager, central, [trusted])
+            powerOn(manager, driver, central)
+            trusted.state = .connected
+            manager.centralManager(central, didConnect: trusted)
+            manager.installScanDriverForTesting(driver,
+                trustedPeripheralIdentifier: trusted.identifier,
+                isExclusiveOperationActive: yieldingToWatch)
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let recorder = RideDiagnosticsRecorder(rootURL: root)
+            manager.diagnosticsRecorder = recorder
+            manager.centralManager(central, didDisconnectPeripheral: trusted, error: error)
+            recorder.flush()
+            let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!.allObjects as! [URL]
+            let records = files.filter { $0.pathExtension == "jsonl" }.flatMap { file in
+                (try! Data(contentsOf: file)).split(separator: 0x0a).compactMap {
+                    try? JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0))
+                }
+            }
+            let disconnect = records.last { $0.event == "transport_disconnected" }
+            assertEqual(disconnect?.fields["reason"], reason,
+                        "diagnostics distinguish a Watch handoff from an unattributed close or transport error")
+            assertEqual(disconnect?.level, error == nil ? .info : .warning,
+                        "a Watch handoff must not hide a real transport error")
+            manager.clearConnectionStateForTesting()
+        }
+        // Production yield: the adapter cancels a late phone link during
+        // Watch-direct preparation. The Watch release may be processed before
+        // CoreBluetooth reports that cancelled link's disconnect.
+        for releaseFirst in [false, true] {
+            let (manager, driver, central, trusted, _) = fixture(.connecting)
+            restore(manager, central, [trusted])
+            powerOn(manager, driver, central)
+            let known = KnownBikeComputerDevice(
+                deviceID: "00112233445566778899aabbfa85158d",
+                peripheralIdentifier: trusted.identifier,
+                name: "Known Bicino",
+                lastConnectedAt: Date(),
+                isLegacy: false
+            )
+            manager.installScanDriverForTesting(driver, knownDevices: [known],
+                trustedPeripheralIdentifier: trusted.identifier,
+                isExclusiveOperationActive: true)
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let recorder = RideDiagnosticsRecorder(rootURL: root)
+            manager.diagnosticsRecorder = recorder
+            func disconnectReasons() -> [String?] {
+                recorder.flush()
+                let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!.allObjects as! [URL]
+                return files.filter { $0.pathExtension == "jsonl" }.flatMap { file in
+                    (try! Data(contentsOf: file)).split(separator: 0x0a).compactMap {
+                        try? JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0))
+                    }
+                }.filter { $0.event == "transport_disconnected" }.map { $0.fields["reason"] }
+            }
+            trusted.state = .connected
+            manager.centralManager(central, didConnect: trusted)
+            assert(central.cancellations.contains(trusted.identifier),
+                   "the adapter yields a late phone link to the Watch")
+            if releaseFirst {
+                let release = try! WatchDirectRidePreparationRequestV1(
+                    preparationID: UUID(uuidString: "DDDDDDDD-EEEE-FFFF-AAAA-BBBBBBBBBBBB")!,
+                    operation: .release,
+                    deviceID: known.deviceID
+                )
+                assert(manager.handleWatchDirectRidePreparationRequest(
+                    release, phoneNavigationActive: false).accepted,
+                       "the matching Watch release ends preparation")
+            }
+            manager.centralManager(central, didDisconnectPeripheral: trusted, error: nil)
+            assertEqual(disconnectReasons(), ["watch_direct_handoff"],
+                        "the yielded link is a Watch handoff even if release was processed first")
+            if releaseFirst {
+                // The handoff attribution belongs to that one cancelled link.
+                restore(manager, central, [trusted])
+                manager.centralManager(central, didDisconnectPeripheral: trusted, error: nil)
+                assertEqual(disconnectReasons(), ["watch_direct_handoff", "connection_ended"],
+                            "a later error-free close is not attributed to an old handoff")
+            }
+            manager.clearConnectionStateForTesting()
+        }
         for state in [CBPeripheralState.connected, .connecting, .disconnected, .disconnecting] {
             let (manager, driver, central, trusted, extra) = fixture(state)
             restore(manager, central, [trusted, extra])
