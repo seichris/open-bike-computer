@@ -51,7 +51,7 @@ bool recordInternal(Level level, const char *category, const char *event,
 
 namespace {
 
-bool flushFaultCapsulesIfPossible();
+bool flushFaultCapsulesIfPossible(bool beforeSealCutoff = false);
 uint16_t queuedDepth();
 void pruneRetention();
 bool parseUnsigned(const char *value, uint32_t &out);
@@ -997,15 +997,17 @@ bool writeQueuedEvent(const QueuedEvent &event) {
   return true;
 }
 
-bool flushFaultCapsulesIfPossible() {
-  // Recovery snapshots are cumulative. Drain real traffic before publishing
-  // them, rather than turning each new drop into another critical write/sync.
-  // The retained capsule and generation stay eligible until admission succeeds.
-  // A storage transition parks ordinary draining before its explicit seal;
-  // that path must still admit capsules ahead of the seal cutoff.
-  if (queuedDepth() != 0 &&
-      !storageTransitionRequested.load(std::memory_order_acquire))
-    return false;
+bool flushFaultCapsulesIfPossible(bool beforeSealCutoff) {
+  // Current-boot snapshots are cumulative. Drain real traffic before publishing
+  // them, rather than turning each new drop into another critical write/sync;
+  // the snapshot and generation stay eligible until admission succeeds.
+  // A previous-boot capsule is one-shot evidence: until its checked write
+  // clears it, the single RTC slot cannot also retain this boot's losses, so
+  // it is admitted even under sustained load. A seal must admit both before
+  // publishing its cutoff, then waits only for a bounded drain to that cutoff.
+  // A storage transition parks ordinary draining before its explicit seal.
+  const bool coalesceCurrent = !beforeSealCutoff && queuedDepth() != 0 &&
+      !storageTransitionRequested.load(std::memory_order_acquire);
   if (storage == nullptr || !storage->getDiagnosticsSdLoaded() ||
       faultCapsuleFlushMutex == nullptr ||
       xSemaphoreTake(faultCapsuleFlushMutex, 0) != pdTRUE)
@@ -1048,7 +1050,8 @@ bool flushFaultCapsulesIfPossible() {
   if (hasPending)
     queuedAll = flush(pending, pendingFaultCapsuleQueuedChecksum) && queuedAll;
   if (hasCurrent)
-    queuedAll = flush(current, currentFaultCapsuleQueuedChecksum) && queuedAll;
+    queuedAll = !coalesceCurrent &&
+                flush(current, currentFaultCapsuleQueuedChecksum) && queuedAll;
   if (queuedAll)
     faultCapsuleQueuedGeneration.store(generation,
                                        std::memory_order_release);
@@ -1140,6 +1143,7 @@ void writerTask(void *) {
     QueueHandle_t selected = nullptr;
     bool hasNext = false;
     bool dequeued = false;
+    bool lockMissed = false;
     const bool transitionPaused =
         storageTransitionRequested.load(std::memory_order_acquire) &&
         !sealRequested.load(std::memory_order_acquire);
@@ -1159,6 +1163,11 @@ void writerTask(void *) {
         dequeued = true;
       }
       xSemaphoreGive(queueMutationMutex);
+    } else if (queueMutationMutex != nullptr) {
+      // An expired tick-bounded take proves nothing about queue depth, and a
+      // producer that then finds the queue full does not notify. Retry through
+      // the next bounded take instead of sleeping beside a backlog.
+      lockMissed = true;
     }
     if (dequeued) {
       const uint32_t startedMs = millis();
@@ -1173,7 +1182,7 @@ void writerTask(void *) {
           runtime_watchdog_diagnostics::Phase::Waiting,
           event.sequence);
 #endif
-    } else if (!hasNext || transitionPaused) {
+    } else if ((!hasNext && !lockMissed) || transitionPaused) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::heartbeat(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter);
@@ -2023,9 +2032,11 @@ sealActiveChunkForTransfer(uint32_t timeoutMs) {
   // bounded request instead of rejecting the download and requiring the user
   // to press the button again.
   while (remainingMs() > 0) {
+    // Admit capsules regardless of backlog: the cutoff below bounds the drain,
+    // whereas waiting for an idle queue can starve under sustained traffic.
     while (faultCapsuleGeneration.load(std::memory_order_acquire) !=
            faultCapsuleQueuedGeneration.load(std::memory_order_acquire)) {
-      if (flushFaultCapsulesIfPossible())
+      if (flushFaultCapsulesIfPossible(/*beforeSealCutoff=*/true))
         continue;
       if (remainingMs() == 0)
         return transfer_policy::SealPreparation::SealFailed;

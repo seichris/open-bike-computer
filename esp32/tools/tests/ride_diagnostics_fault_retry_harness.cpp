@@ -30,6 +30,7 @@ bool recordInternal(Level,const char*,const char*,const char*,bool,unsigned boot
  return accept;
 }
 struct QueuedEvent { bool clearsFaultCapsule; unsigned faultCapsuleChecksum; };
+bool flushFaultCapsulesIfPossible(bool beforeSealCutoff = false);
 // PRODUCTION_FUNCTIONS
 
 int main() {
@@ -41,14 +42,15 @@ int main() {
  assert(faultCapsuleIdentityMatches(retainedFaultCapsule,51,oldChecksum));
  assert(currentFaultCapsule.eventCount==0);
  faultCapsulesInitialized=true;
- // A backlog must drain before recovery snapshots consume reserved slots.
+ // One-shot previous-boot evidence is admitted even behind a backlog.
  depth=24;
- assert(!flushFaultCapsulesIfPossible() && admittedBoots.empty());
- assert(pendingFaultCapsuleQueuedChecksum==0);
- // New losses coalesce into the existing retained capsule while busy.
+ assert(flushFaultCapsulesIfPossible() && admittedBoots.size()==1 && admittedBoots[0]==51);
+ assert(pendingFaultCapsuleQueuedChecksum==oldChecksum);
+ // Cumulative current-boot losses coalesce while the queue drains.
  updateFaultCapsule(Level::Info,"ble","maintenance_event",false);
  updateFaultCapsule(Level::Info,"ble","maintenance_event",false);
  assert(currentFaultCapsule.eventCount==2);
+ assert(!flushFaultCapsulesIfPossible() && admittedBoots.size()==1);
  // Transition sealing must admit its capsule even while ordinary draining
  // is parked; otherwise the pre-seal flush and writer wait for one another.
  storageTransitionRequested=true;
@@ -75,5 +77,38 @@ int main() {
  assert(!flushFaultCapsulesIfPossible() && currentFaultCapsuleQueuedChecksum==0);
  accept=true;
  assert(flushFaultCapsulesIfPossible());
- printf("Old capsule retried after terminal write failure; RTC survives reversed acknowledgements\n");
+
+ // Reset safety under sustained load. Boot 53 starts with boot 52's capsule
+ // pending in RTC; while it is pending, the single RTC slot keeps it and this
+ // boot's losses live only in RAM. The queue never drains in this scenario.
+ bootSequence=53; admittedBoots.clear(); depth=24;
+ faultCapsuleGeneration=0; faultCapsuleQueuedGeneration=UINT32_MAX;
+ pendingFaultCapsuleQueuedChecksum=0; currentFaultCapsuleQueuedChecksum=0;
+ pendingFaultCapsule={}; pendingFaultCapsule.bootSequence=52; pendingFaultCapsule.eventCount=4;
+ sealFaultCapsule(pendingFaultCapsule); retainedFaultCapsule=pendingFaultCapsule;
+ pendingFaultCapsuleValid=true;
+ const auto previousBoot=pendingFaultCapsule.checksum;
+ currentFaultCapsule={}; currentFaultCapsule.bootSequence=53; sealFaultCapsule(currentFaultCapsule);
+ for (int burst=0; burst<10; ++burst) {
+   updateFaultCapsule(Level::Warning,"ble","queue_full",false);
+   assert(!flushFaultCapsulesIfPossible());
+ }
+ // The one-shot pending record was admitted once; repeated current-boot
+ // snapshots were not, so recovery evidence cannot amplify the overload.
+ assert(admittedBoots.size()==1 && admittedBoots[0]==52);
+ assert(currentFaultCapsule.eventCount==10);
+ assert(faultCapsuleIdentityMatches(retainedFaultCapsule,52,previousBoot));
+ // Its checked write hands the RTC slot to this boot while still under load,
+ // so a reset from here on preserves the current losses.
+ clearFaultCapsule(52,previousBoot);
+ assert(!pendingFaultCapsuleValid);
+ assert(faultCapsuleIdentityMatches(retainedFaultCapsule,53,currentFaultCapsule.checksum));
+ updateFaultCapsule(Level::Warning,"ble","queue_full",false);
+ assert(retainedFaultCapsule.eventCount==11 &&
+        faultCapsuleIdentityMatches(retainedFaultCapsule,53,currentFaultCapsule.checksum));
+ assert(!flushFaultCapsulesIfPossible() && admittedBoots.size()==1);
+ // A seal cutoff admits the cumulative snapshot without waiting for idle.
+ assert(flushFaultCapsulesIfPossible(/*beforeSealCutoff=*/true));
+ assert(admittedBoots.size()==2 && admittedBoots[1]==53);
+ printf("Old capsule retried after terminal write failure; RTC survives reversed acknowledgements and sustained load\n");
 }

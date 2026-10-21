@@ -368,10 +368,15 @@ of an ordinary record, and an oversized record. Counts are never reset by
 collection. Do not add repeated snapshots together or equate a `storage_gap`
 fault capsule with an SD write failure: it can also describe admission loss.
 An empty last-critical-event field is reported as `unknown`, not a fabricated
-`storage_unavailable` error. During ordinary recording, recovery capsules
-coalesce while the queue drains; an explicit storage transition can still
-admit them before publishing its seal cutoff. Only their successful checked
-write acknowledges the retained evidence.
+`storage_unavailable` error. During ordinary recording, the current boot's
+cumulative recovery capsule coalesces while the queue drains, so new losses do
+not each add a critical write. A previous boot's capsule is one-shot evidence
+and is admitted even under load: until its checked write succeeds, the single
+RTC slot keeps it and cannot also retain the current boot's losses across a
+reset. Every seal (transfer, storage transition or shutdown) admits pending
+capsules before publishing its cutoff and then waits only for the bounded
+drain to that cutoff, never for an idle queue. Only a successful checked write
+acknowledges retained evidence.
 
 Loss summaries also carry boot-local high-water timings: `writerDelayMs` is the
 maximum admission-to-dequeue delay, and `durationMs` is the maximum synchronous
@@ -400,7 +405,9 @@ The writer runs at priority 1 on CPU1, sharing preemptive time slices with the
 Arduino UI task rather than waiting for idle CPU. It stays off CPU0, whose idle
 task is watched by the production watchdog. Successful admission and seal
 publication notify the writer immediately; a 50-ms timeout still services idle
-housekeeping. This reduces scheduling pressure but cannot guarantee lossless
+housekeeping. An expired one-tick queue-mutex wait is retried rather than
+treated as an empty queue, because a producer that then finds the queue full
+does not notify. This reduces scheduling pressure but cannot guarantee lossless
 recording under sustained overload or arbitrarily slow storage. Queue loss and
 storage failures continue to be counted separately.
 Explicit storage transitions fence ordinary admission (`storage_transition`),

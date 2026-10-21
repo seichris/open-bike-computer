@@ -57,7 +57,14 @@ void updateFaultCapsule(Level,const char*,const char*,bool) { ++faults; }
 bool flushFaultCapsulesIfPossible() { return false; }
 bool completeSealIfReady() { return false; }
 unsigned millis() { return clockMs; }
-int xSemaphoreTake(int*,int timeout) { assert(timeout==1 && lockDepth==0); ++lockDepth; return pdTRUE; }
+// A tick-bounded take can expire behind a producer whose admission then fails
+// without notifying (for example QueueFull).
+unsigned lockMisses=0;
+int xSemaphoreTake(int*,int timeout) {
+ assert(timeout==1 && lockDepth==0);
+ if(lockMisses) { --lockMisses; return pdFALSE; }
+ ++lockDepth; return pdTRUE;
+}
 void xSemaphoreGive(int*) { assert(lockDepth==1); --lockDepth; }
 unsigned uxQueueMessagesWaiting(QueueHandle_t q) { return q->events.size(); }
 unsigned uxQueueSpacesAvailable(QueueHandle_t q) { return q->capacity-q->events.size(); }
@@ -82,6 +89,8 @@ void xTaskNotifyGive(TaskHandle_t handle) {
 bool enqueue(QueuedEvent&);
 unsigned ulTaskNotifyTake(int clear,unsigned timeout) {
  assert(clear==pdTRUE && timeout==50 && lockDepth==0);
+ // Outside a transition fence, never sleep for housekeeping beside a backlog.
+ assert(queuedDepth()==0 || pauseTest);
  ++waits;
  if(notifications) { notifications=0; return 1; }
  if(pauseTest) return 0;
@@ -95,6 +104,7 @@ unsigned ulTaskNotifyTake(int clear,unsigned timeout) {
  }
  assert(notifications==8);
  notifications=0;
+ if(injected%10==0) lockMisses=1;
  return 8;
 }
 void vTaskDelay(unsigned ticks) {
@@ -131,7 +141,7 @@ int main() {
  try { writerTask(nullptr); } catch(const Stop&) {}
  assert(injected==100 && persisted.size()==800 && enqueued==800 && dropped==0);
  assert(queuedDepth()==0 && maxQueueDepth==8 && maximumWriterDelayMs==21);
- assert(maximumWriteDurationMs==3 && waits>=100);
+ assert(maximumWriteDurationMs==3 && waits>=100 && lockMisses==0);
  // Unsigned elapsed time must survive the monotonic clock wrapping.
  maximumWriterDelayMs=maximumWriteDurationMs=0;
  clockMs=1;

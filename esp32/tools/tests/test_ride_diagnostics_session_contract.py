@@ -87,10 +87,15 @@ int main() {
 
     def test_fault_capsule_write_failure_retries_and_preserves_rtc(self):
         update = RECORDER[RECORDER.index("void updateFaultCapsule("):RECORDER.index("bool utcNow(")]
-        start = RECORDER.index("bool flushFaultCapsulesIfPossible() {")
+        start = RECORDER.index("bool flushFaultCapsulesIfPossible(bool beforeSealCutoff) {")
         flush = RECORDER[start:RECORDER.index("uint16_t queuedDepth()", start)]
         receipt = RECORDER[RECORDER.index("struct FaultCapsuleWriteReceipt {"):RECORDER.index("bool writeQueuedEvent(")]
         self.run_production_harness("ride_diagnostics_fault_retry_harness.cpp", update + receipt + flush)
+
+    def test_transfer_seal_admits_capsules_under_sustained_load(self):
+        start = RECORDER.index("transfer_policy::SealPreparation\nsealActiveChunkForTransfer(uint32_t timeoutMs) {")
+        seal = RECORDER[start:RECORDER.index("bool sealActiveChunk(uint32_t timeoutMs) {", start)]
+        self.run_production_harness("ride_diagnostics_seal_harness.cpp", seal)
 
     def test_writer_services_reconnect_bursts_and_wakes_without_polling(self):
         start = RECORDER.index("void noteDrop(DropReason reason) {")
@@ -110,7 +115,7 @@ int main() {
         self.run_production_harness("ride_diagnostics_index_harness.cpp", types + listing, filesystem=True)
 
     def test_checked_checkpoints_precede_fault_acknowledgement(self):
-        writer = RECORDER[RECORDER.index("struct FaultCapsuleWriteReceipt {"):RECORDER.index("bool flushFaultCapsulesIfPossible() {")]
+        writer = RECORDER[RECORDER.index("struct FaultCapsuleWriteReceipt {"):RECORDER.index("bool flushFaultCapsulesIfPossible(bool beforeSealCutoff) {")]
         self.run_production_harness("ride_diagnostics_checkpoint_harness.cpp", writer)
 
     def test_backend_transition_allocates_new_namespace(self):
