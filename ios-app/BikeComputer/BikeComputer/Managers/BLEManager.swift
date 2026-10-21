@@ -5026,8 +5026,7 @@ class BLEManager: NSObject, ObservableObject {
         }
         if pendingRideApplicationDeliveries.isEmpty,
            pendingATTWrite == nil,
-           rideTransportStateMachine.phase != .idle,
-           rideTransportStateMachine.phase != .recovering {
+           rideTransportStateMachine.acceptsWriterCallbacks {
             _ = reduceRideTransport(.writerChanged(
                 generation: rideTransportStateMachine.generation,
                 state: .idle
@@ -9122,8 +9121,7 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteResponseGeneration &+= 1
         navigationWriteWithResponseFailureHandler = nil
         navigationBackpressureStartedAt = nil
-        if rideTransportStateMachine.phase != .idle,
-           rideTransportStateMachine.phase != .recovering {
+        if rideTransportStateMachine.acceptsWriterCallbacks {
             let writerState: RideBLEWriterStateV1
             if let commandID = pending.applicationCommandID,
                let delivery = pendingRideApplicationDeliveries[commandID],
@@ -9149,8 +9147,9 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteResponseGeneration &+= 1
         navigationWriteWithResponseFailureHandler = nil
         navigationBackpressureStartedAt = nil
-        if rideTransportStateMachine.phase != .idle,
-           rideTransportStateMachine.phase != .recovering {
+        // Adoption clears the previous writer after entering .connecting.
+        // Only publish writer changes in phases that admit them.
+        if rideTransportStateMachine.acceptsWriterCallbacks {
             _ = reduceRideTransport(.writerChanged(
                 generation: rideTransportStateMachine.generation,
                 state: .idle
@@ -9971,7 +9970,11 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             event: "transport_disconnected",
             fields: [
                 "connectionState": "disconnected",
-                "reason": error == nil ? "remote" : "transport_error",
+                // A nil CoreBluetooth error does not identify the initiator.
+                // Watch-direct preparation explicitly cancels our phone link.
+                "reason": error != nil ? "transport_error"
+                    : watchDirectRidePreparedDeviceID != nil
+                        ? "watch_direct_handoff" : "connection_ended",
             ]
         )
         _ = reduceRideTransport(.disconnected(

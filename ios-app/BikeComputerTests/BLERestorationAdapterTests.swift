@@ -47,6 +47,38 @@ extension NavigationProtocolTests {
             manager.centralManager(central, didDiscover: peripheral,
                                    advertisementData: [:], rssi: -50)
         }
+        for (yieldingToWatch, error, reason) in [
+            (false, nil, "connection_ended"),
+            (true, nil, "watch_direct_handoff"),
+            (true, NSError(domain: "HostTransport", code: 1), "transport_error"),
+        ] as [(Bool, NSError?, String)] {
+            let (manager, driver, central, trusted, _) = fixture(.connecting)
+            restore(manager, central, [trusted])
+            powerOn(manager, driver, central)
+            trusted.state = .connected
+            manager.centralManager(central, didConnect: trusted)
+            manager.installScanDriverForTesting(driver,
+                trustedPeripheralIdentifier: trusted.identifier,
+                isExclusiveOperationActive: yieldingToWatch)
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let recorder = RideDiagnosticsRecorder(rootURL: root)
+            manager.diagnosticsRecorder = recorder
+            manager.centralManager(central, didDisconnectPeripheral: trusted, error: error)
+            recorder.flush()
+            let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!.allObjects as! [URL]
+            let records = files.filter { $0.pathExtension == "jsonl" }.flatMap { file in
+                (try! Data(contentsOf: file)).split(separator: 0x0a).compactMap {
+                    try? JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0))
+                }
+            }
+            let disconnect = records.last { $0.event == "transport_disconnected" }
+            assertEqual(disconnect?.fields["reason"], reason,
+                        "diagnostics distinguish a Watch handoff from an unattributed close or transport error")
+            assertEqual(disconnect?.level, error == nil ? .info : .warning,
+                        "a Watch handoff must not hide a real transport error")
+            manager.clearConnectionStateForTesting()
+        }
         for state in [CBPeripheralState.connected, .connecting, .disconnected, .disconnecting] {
             let (manager, driver, central, trusted, extra) = fixture(state)
             restore(manager, central, [trusted, extra])

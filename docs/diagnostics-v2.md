@@ -168,6 +168,16 @@ clock uncertainty: synchronization delay and oscillator drift are unbounded by
 this evidence, including at the anchor itself. Phone clock uncertainty is also
 unknown unless independently established.
 
+During a Watch-direct ride, the iPhone deliberately yields its single Bicino BLE
+connection to the Watch and reconnects after the Watch releases it. An iPhone
+`transport_disconnected` event with `reason=watch_direct_handoff` identifies that
+local handoff; it does not imply that Bicino stayed disconnected for the whole
+gap in the phone's log. Check the device's connected/authenticated events and
+workout command acknowledgments too. `reason=connection_ended` means CoreBluetooth
+reported no error and the initiator is unknown; `transport_error` preserves an
+actual error even during handoff. Older apps labelled all error-free disconnects
+`remote`, which cannot establish who closed the link.
+
 ## Ride now, collect later
 
 Both producers record locally through a BLE disconnection. The iPhone recorder
