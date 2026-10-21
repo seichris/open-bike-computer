@@ -14,6 +14,9 @@ namespace firmware_update {
 class DeviceWiFiRuntime {
 public:
   using MemoryReader = device_transfer::NetworkMemorySnapshot (*)();
+  // Allocate boot-lifetime driver/netifs before BLE fragments internal RAM.
+  // Does not start the radio, advertise an AP, or install session credentials.
+  device_transfer::NetworkStartResult prepare(MemoryReader memory);
   device_transfer::NetworkStartResult start(bool station, const char *ssid,
                                             const char *password, MemoryReader memory);
   esp_err_t stop();

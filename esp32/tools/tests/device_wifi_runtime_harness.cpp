@@ -132,6 +132,14 @@ int main() {
   assert(runtime.start(false, "test-ap", "test-password", memory).failedStep == NetworkStartStep::Memory);
   assert(initializes == 0 && runtime.stop() == ESP_OK);
   headroom = {80000, 40000, 70000, 40000};
+  // Boot preparation owns all lasting resources without enabling RF. A later
+  // BLE-fragmented heap must not need first-use driver initialization again.
+  assert(runtime.prepare(memory).ok());
+  assert(initializes == 1 && interfaces == 2 && starts == 0);
+  assertQuiescent();
+  assert(runtime.prepare(memory).ok());
+  assert(initializes == 1 && starts == 0);
+  headroom = {67923, 29684, 60291, 29684}; // observed post-walk failure
   for (int cycle = 0; cycle < 100; ++cycle) {
     assert(runtime.start(false, "test-ap", "test-password", memory).ok());
     assert(radio && mode == WIFI_MODE_AP && stored[1].ap.authmode == WIFI_AUTH_WPA2_PSK && stored[1].ap.pairwise_cipher == WIFI_CIPHER_TYPE_CCMP);
@@ -187,8 +195,9 @@ int main() {
   assert(runtime.stop() == ESP_OK); assertQuiescent();
   for (int fault = 0; fault < 3; ++fault) {
     reset(); DeviceWiFiRuntime failed;
+    headroom = {80000, 40000, 70000, 40000};
     initFailure = fault == 0; storageFailure = fault == 1; interfaceFailure = fault == 2;
-    assert(!failed.start(false, "test-ap", "test-password", memory).ok());
+    assert(!failed.prepare(memory).ok());
     initFailure = storageFailure = interfaceFailure = 0;
     assert(!failed.start(false, "test-ap", "test-password", memory).ok());
     assert(initializes == 1); // partial initialization is terminal this boot

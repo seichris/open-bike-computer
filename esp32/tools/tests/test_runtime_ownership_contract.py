@@ -11,6 +11,19 @@ def source(path):
 
 
 class RuntimeOwnershipContractTests(unittest.TestCase):
+    def test_175_prepares_wifi_through_internal_owner_before_ble(self):
+        main = source("src/main.cpp")
+        setup = main[main.index("void setup()") : main.index("void loop()")]
+        prepare = setup.index("operationOwner()->prepareWiFi()")
+        self.assertLess(setup.index("Network.begin()"), prepare)
+        self.assertLess(prepare, setup.index("bleNavServer.init("))
+        owner = source("lib/firmware_update/device_operation_owner.cpp")
+        self.assertIn("execute(Command{Operation::PrepareWiFi}, result)", owner)
+        self.assertIn("result.networkStart = wifi_.prepare(networkMemory);", owner)
+        # Cache-disabling native Wi-Fi initialization stays off the UI/PSRAM
+        # workers, including the new early preparation path.
+        self.assertNotIn("esp_wifi_init(", main)
+
     def test_actual_metadata_reads_are_cache_safe_and_owner_reentrant(self):
         header = source("lib/firmware_update/device_operation_owner.hpp")
         header = "\n".join(line for line in header.splitlines()
@@ -139,7 +152,7 @@ class RuntimeOwnershipContractTests(unittest.TestCase):
         flash = source("lib/firmware_update/device_wifi_runtime.cpp")
         http = source("lib/device_transfer/device_transfer_http.cpp")
         ble = source("lib/ble_navigation/ble_navigation.cpp")
-        ap = flash[flash.index("device_transfer::NetworkStartResult DeviceWiFiRuntime::start("):
+        ap = flash[flash.index("device_transfer::NetworkStartResult DeviceWiFiRuntime::prepare("):
                    flash.index("esp_err_t DeviceWiFiRuntime::stop()")]
         for step in ("Mode", "RamStorage", "AccessPoint"):
             self.assertIn(f"NetworkStartStep::{step}", ap)

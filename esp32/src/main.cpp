@@ -2149,8 +2149,28 @@ void setup() {
   // The default event loop and boot safety checks are complete. Allocate the
   // lasting TCP/IP and Arduino event tasks before BLE and transfer workers;
   // Network.begin() accepts the already-created default event loop.
-  if (!firmware_maintenance::active())
+  if (!firmware_maintenance::active()) {
     (void)Network.begin();
+    // First-transfer initialization after a ride can find enough total RAM but
+    // no 32 KiB contiguous internal block. Allocate the existing resident Wi-Fi
+    // resources before BLE pools/tasks fragment the heap. The native owner keeps
+    // the driver in NULL mode with empty RAM credentials until an authenticated
+    // transfer starts; this does not start the radio or an access point.
+    const auto prepared = firmwareUpdateHttp.operationOwner()->prepareWiFi();
+    char fields[256] = {};
+    snprintf(fields, sizeof(fields),
+             "{\"phase\":\"boot_prepare\",\"code\":\"%s\",\"errorCode\":%ld,"
+             "\"freeInternalBytes\":%lu,\"largestInternalBytes\":%lu}",
+             device_transfer::networkStartCode(prepared.failedStep),
+             static_cast<long>(prepared.espError),
+             static_cast<unsigned long>(prepared.after.internalFree),
+             static_cast<unsigned long>(prepared.after.internalLargest));
+    (void)ride_diagnostics::record(
+        prepared.ok() ? ride_diagnostics::Level::Info : ride_diagnostics::Level::Warning,
+        "wifi", "boot_prepared", fields);
+    // A failed preparation stays a typed transfer failure. Navigation and BLE
+    // still boot; never bypass the memory floor or retry partial driver init.
+  }
 #endif
 
   log_i("Loading Splash Screen...");

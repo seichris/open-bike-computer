@@ -128,6 +128,23 @@ bool DeviceOperationOwner::startStation(const std::string &ssid,
   return startStationDetailed(ssid, password).ok();
 }
 
+device_transfer::NetworkStartResult DeviceOperationOwner::prepareWiFi() {
+  Result result;
+  const auto before = networkMemory();
+  const esp_err_t dispatch = execute(Command{Operation::PrepareWiFi}, result);
+  if (dispatch != ESP_OK) {
+    device_transfer::NetworkStartResult failed;
+    failed.failedStep = dispatch == ESP_ERR_NO_MEM
+        ? device_transfer::NetworkStartStep::OwnerCreate
+        : device_transfer::NetworkStartStep::OwnerDispatch;
+    failed.espError = dispatch;
+    failed.before = before;
+    failed.after = networkMemory();
+    return failed;
+  }
+  return result.networkStart;
+}
+
 device_transfer::NetworkStartResult DeviceOperationOwner::startStationDetailed(
     const std::string &ssid, const std::string &password) {
   Result result;
@@ -467,6 +484,10 @@ void DeviceOperationOwner::run() {
     case Operation::AcknowledgeFirmwareOperation:
       result.error = receipt::acknowledge(command.firmwareReceipt.device,
           command.firmwareReceipt.operation, command.firmwareReceipt.image) ? ESP_OK : ESP_FAIL;
+      break;
+    case Operation::PrepareWiFi:
+      result.networkStart = wifi_.prepare(networkMemory);
+      result.error = result.networkStart.ok() ? ESP_OK : result.networkStart.espError;
       break;
     case Operation::StartStation:
     case Operation::StartAccessPoint:

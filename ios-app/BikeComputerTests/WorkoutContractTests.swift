@@ -6919,9 +6919,9 @@ private struct WorkoutContractTestSuite {
         )
         expect(
             launchContext == .workoutLaunch
-                && launchDetail.contains("workout did not start")
+                && launchDetail.contains("could not confirm the start")
                 && !launchDetail.contains("workout continues on Watch"),
-            "failed Watch launch must say the workout did not start"
+            "failed Watch launch must preserve uncertainty until the Watch is checked"
         )
 
         var fatalReducer = WorkoutMirrorStateReducer()
