@@ -1347,7 +1347,10 @@ bool enqueue(QueuedEvent &event) {
                                                static_cast<uint16_t>(depth))) {
   }
   xSemaphoreGive(queueMutationMutex);
-  if (writerTaskHandle != nullptr)
+  // Task creation publishes its handle before this release/acquire ready
+  // flag. Early producers can queue safely without racing handle publication;
+  // the new writer inspects those records on its first iteration.
+  if (recorderWriterReady.load(std::memory_order_acquire))
     xTaskNotifyGive(writerTaskHandle);
   return true;
 }

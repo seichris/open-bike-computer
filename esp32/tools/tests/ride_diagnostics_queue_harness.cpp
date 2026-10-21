@@ -21,6 +21,7 @@ unsigned mutationLockAttempts = 0;
 int mutexStorage = 1;
 int *queueMutationMutex = &mutexStorage;
 std::atomic<uint32_t> enqueued{0}, dropped{0};
+std::atomic<bool> recorderWriterReady{true};
 std::atomic<uint16_t> normalQueueCriticalCount{0}, maxQueueDepth{0};
 constexpr std::size_t kDropReasonCount = static_cast<std::size_t>(DropReason::Count);
 std::atomic<uint32_t> dropsByReason[kDropReasonCount]{};
@@ -60,12 +61,15 @@ void reset() {
   queueMutationMutex = &mutexStorage; mutexAvailable = true;
   mutationLockAttempts = 0;
   afterNormalPeek = {};
-  duringLockWait = {}; wakes=0;
+  duringLockWait = {}; wakes=0; recorderWriterReady=true;
   enqueued = dropped = maxQueueDepth = normalQueueCriticalCount = 0;
   for (auto &counter : dropsByReason) counter = 0;
 }
 int main() {
   QueuedEvent ordinary{1, false}, important{2, true};
+  recorderWriterReady=false;
+  assert(enqueue(ordinary) && wakes==0 && dropped==0);
+  reset();
   // Release a preempted consumer inside the one-tick admission budget.
   mutexAvailable = false;
   duringLockWait = [] { mutexAvailable = true; };
