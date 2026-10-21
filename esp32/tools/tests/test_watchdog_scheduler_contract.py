@@ -53,7 +53,7 @@ class WatchdogSchedulerContractTests(unittest.TestCase):
             re.DOTALL,
         )
         self.assertIsNotNone(creation)
-        self.assertRegex(creation.group(0), r",\s*0,\s*&writerTaskHandle,\s*1\);\n")
+        self.assertRegex(creation.group(0), r",\s*1,\s*&writerTaskHandle,\s*1\);\n")
 
     def test_attribution_covers_map_and_storage_blocking_phases(self):
         for phase in (

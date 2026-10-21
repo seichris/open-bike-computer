@@ -367,6 +367,24 @@ producer or queue lock contention, full queues, eviction
 of an ordinary record, and an oversized record. Counts are never reset by
 collection. Do not add repeated snapshots together or equate a `storage_gap`
 fault capsule with an SD write failure: it can also describe admission loss.
+An empty last-critical-event field is reported as `unknown`, not a fabricated
+`storage_unavailable` error. During ordinary recording, the current boot's
+cumulative recovery capsule coalesces while the queue drains, so new losses do
+not each add a critical write. A previous boot's capsule is one-shot evidence
+and is admitted even under load: until its checked write succeeds, the single
+RTC slot keeps it and cannot also retain the current boot's losses across a
+reset. Every seal (transfer, storage transition or shutdown) admits pending
+capsules before publishing its cutoff and then waits only for the bounded
+drain to that cutoff, never for an idle queue. Only a successful checked write
+acknowledges retained evidence.
+
+Loss summaries also carry boot-local high-water timings: `writerDelayMs` is the
+maximum admission-to-dequeue delay, and `durationMs` is the maximum synchronous
+write step, including its checkpoint, rotation and retention work. These are
+separate maxima, not necessarily the same event, and do not measure filesystem
+work outside that step. `maxQueueDepth` is the boot's queue high-water mark.
+A large delay with a small write duration suggests scheduling/backlog pressure;
+a long write step exposes I/O or maintenance latency without assuming a bad SD.
 Loss summaries are attempted at most once per 30 seconds after the queue
 drains; a continuously overloaded or interrupted recorder may not retain them.
 Policy filtering remains separate from dropped records.
@@ -376,10 +394,22 @@ Spilled critical records do not block normal admission into free shared slots.
 When both lanes are full, one bounded rotation evicts the oldest normal record,
 preserves every critical record and survivor sequence order, and appends the
 new critical record. Publication into either lane shares the writer's bounded
-cross-lane head-selection fence. Contended admission never waits and increments
-`queue_busy`; free space alone is not an admission guarantee. This prevents a
-new critical event overtaking an unseen older ordinary event when both lanes
-were initially empty. The zero-wait producer lock and total capacity are unchanged.
+cross-lane head-selection fence. The writer and admission can wait at most one
+RTOS tick for this short, I/O-free queue mutex. A longer conflict increments
+`queue_busy`; queue-capacity waits remain zero. This prevents a new critical
+event overtaking an unseen older ordinary event when both lanes were initially
+empty. The producer lock remains zero-wait because its scope includes formatting,
+boot-identity preparation and live-ring publication. Total capacity is unchanged.
+
+The writer runs at priority 1 on CPU1, sharing preemptive time slices with the
+Arduino UI task rather than waiting for idle CPU. It stays off CPU0, whose idle
+task is watched by the production watchdog. Successful admission and seal
+publication notify the writer immediately; a 50-ms timeout still services idle
+housekeeping. An expired one-tick queue-mutex wait is retried rather than
+treated as an empty queue, because a producer that then finds the queue full
+does not notify. This reduces scheduling pressure but cannot guarantee lossless
+recording under sustained overload or arbitrarily slow storage. Queue loss and
+storage failures continue to be counted separately.
 Explicit storage transitions fence ordinary admission (`storage_transition`),
 seal the old medium and park its writer before remount. If the old medium is
 unavailable, queued losses become a fault capsule before changing identity.

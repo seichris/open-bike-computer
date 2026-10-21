@@ -71,7 +71,11 @@
     },
     "logger.loss": {
       "level": "info",
-      "optional": [],
+      "optional": [
+        "writerDelayMs",
+        "durationMs",
+        "maxQueueDepth"
+      ],
       "required": [
         "dropReason",
         "eventCount",
