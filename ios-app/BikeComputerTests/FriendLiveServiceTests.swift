@@ -1,3 +1,4 @@
+import Combine
 import CoreLocation
 import Foundation
 
@@ -6,6 +7,8 @@ private final class FriendNetwork: SocialRideNetworking {
     var seconds = 0.0
     var consents: [String: [String: Any]] = [:]
     var publications: [[String: Any]] = []
+    var snapshotReads = 0
+    var riders: [[String: Any]] = []
     var holdSnapshot = false
     var holdConsent = false
     var held: CheckedContinuation<Void, Never>?
@@ -15,8 +18,9 @@ private final class FriendNetwork: SocialRideNetworking {
     func request(_ path: String, method: String, body: Data?, contentType: String, query: [URLQueryItem]) async throws -> Data {
         var value: [String: Any]
         if path == "friend-sharing" {
+            if method == "GET" { snapshotReads += 1 }
             if method == "DELETE" { consents = [:] }
-            value = ["outgoing": Array(consents.values.filter { $0["sharing"] as? Bool == true }), "riders": [], "serverTime": 1000.0]
+            value = ["outgoing": Array(consents.values.filter { $0["sharing"] as? Bool == true }), "riders": riders, "serverTime": 1000.0]
             if holdSnapshot {
                 holdSnapshot = false
                 await withCheckedContinuation { held = $0 }
@@ -62,6 +66,39 @@ struct FriendLiveServiceTests {
                    timestamp: Date().addingTimeInterval(offset))
     }
     static func run() async throws {
+        let idleNetwork = FriendNetwork()
+        var delays: [UInt64] = []
+        let idle = FriendLiveService(client: idleNetwork, sleep: { delay in
+            delays.append(delay)
+            try await Task.sleep(nanoseconds: 3_600_000_000_000)
+        })
+        var changes = 0
+        let subscription = idle.objectWillChange.sink { changes += 1 }
+        idle.start()
+        try await wait { delays.count == 1 }
+        check(idleNetwork.snapshotReads == 1 && delays == [60_000_000_000], "idle polling waits a minute after a single read")
+        check(changes == 0, "empty idle polls do not publish unchanged map state")
+        idle.setApplicationActive(false)
+        await Task.yield()
+        check(idle.nextPollNanoseconds == nil && idleNetwork.snapshotReads == 1, "background idle has no poll task")
+        idle.setApplicationActive(true)
+        try await wait { delays.count == 2 }
+        check(idleNetwork.snapshotReads == 2, "foreground resumes discovery immediately")
+        idleNetwork.riders = [["profile": ["id": "friend", "displayName": "Friend"],
+            "latitude": 1.0, "longitude": 2.0, "capturedAt": 1000.0, "receivedAt": 1000.0,
+            "horizontalAccuracy": 5.0, "sequence": 1, "age": 0.0]]
+        await idle.tick()
+        check(idle.nextPollNanoseconds == 3_000_000_000, "incoming riders use fast polling")
+        let previousChanges = changes
+        await idle.tick()
+        check(changes == previousChanges, "unchanged publications do not reload the map")
+        idle.setApplicationActive(false)
+        check(idle.nextPollNanoseconds == 3_000_000_000, "active incoming stream remains timely in background")
+        idleNetwork.riders = []
+        await idle.tick()
+        check(idle.nextPollNanoseconds == nil, "background receiver pauses after its last rider disappears")
+        idle.reset()
+        withExtendedLifetime(subscription) {}
         let network = FriendNetwork()
         let service = FriendLiveService(client: network, uptime: { network.seconds }, pollNanoseconds: 3_600_000_000_000)
         service.prepareLocation = { false }
@@ -70,6 +107,8 @@ struct FriendLiveServiceTests {
         check(network.consents.isEmpty && !service.isSharing, "permission denial cannot create consent")
         service.prepareLocation = { true }
         try await service.setSharing(true, with: "bob")
+        service.setApplicationActive(false)
+        check(service.nextPollNanoseconds == 3_600_000_000_000, "outgoing sharing continues in background")
         service.updateLocation(fix())
         await service.tick()
         check(service.sharingIDs == ["bob"], "only selected friends receive this phone's stream")

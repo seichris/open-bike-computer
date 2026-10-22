@@ -127,6 +127,16 @@ struct SocialRider: Decodable, Identifiable {
     }
     var coordinate: CLLocationCoordinate2D { .init(latitude: latitude, longitude: longitude) }
     func age(at now: Date) -> TimeInterval { max(0, ageSeconds + ProcessInfo.processInfo.systemUptime-observedAt) }
+
+    /// Age advances locally; an unchanged publication needs no new map render.
+    func displaysSameState(as other: SocialRider) -> Bool {
+        profile == other.profile && latitude == other.latitude && longitude == other.longitude &&
+        capturedAt == other.capturedAt && receivedAt == other.receivedAt &&
+        horizontalAccuracy == other.horizontalAccuracy && course == other.course && speed == other.speed &&
+        distanceMeters == other.distanceMeters && movingSeconds == other.movingSeconds &&
+        elapsedSeconds == other.elapsedSeconds && sequence == other.sequence &&
+        routeProgressMeters == other.routeProgressMeters && routeHash == other.routeHash
+    }
 }
 
 struct SocialGroupRide: Decodable, Identifiable {

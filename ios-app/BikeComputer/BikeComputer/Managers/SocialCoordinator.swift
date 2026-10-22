@@ -136,7 +136,15 @@ final class SocialCoordinator: ObservableObject {
         case .signedIn:
             await registerForAlertsIfAuthorized()
             // Receiving friend positions must not depend on opening the Friends screen.
-            do { try await refresh() } catch { self.error = error.localizedDescription }
+            do {
+                let expected = session.generation
+                guard try await refreshCapabilities() != nil else { return }
+                let me = try JSONDecoder().decode(SocialProfile.self, from: await client.request("me"))
+                guard expected == session.generation else { return }
+                if profile?.id != me.id || (profile?.version ?? 0) <= (me.version ?? 0) { profile = me }
+                await loadPhotos([me])
+                await bindNotifications()
+            } catch { self.error = error.localizedDescription }
         default:
             break
         }
@@ -150,15 +158,22 @@ final class SocialCoordinator: ObservableObject {
         friendLive.reset()
     }
 
-    func refresh() async throws {
+    private func refreshCapabilities() async throws -> SocialCapabilities? {
         let expected = session.generation
         let capabilities = try JSONDecoder().decode(SocialCapabilities.self, from: await client.request("capabilities"))
-        guard expected == session.generation else { return }
-        self.capabilities = capabilities
+        guard expected == session.generation else { return nil }
+        if self.capabilities != capabilities { self.capabilities = capabilities }
         if !capabilities.groups { await live.stopSharing(); live.reset() }
+        guard expected == session.generation else { return nil }
         if capabilities.friendSharing { friendLive.start() } else { await friendLive.stopAll() }
-        guard expected == session.generation else { return }
+        guard expected == session.generation else { return nil }
         if !capabilities.media { photos = [:] }
+        return capabilities
+    }
+
+    func refresh() async throws {
+        let expected = session.generation
+        guard let capabilities = try await refreshCapabilities() else { return }
         let me = try JSONDecoder().decode(SocialProfile.self, from: await client.request("me"))
         let friends: [SocialProfile] = try await pages("friends")
         let requests: [SocialFriendRequest] = try await pages("friend-requests")
