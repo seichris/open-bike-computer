@@ -376,14 +376,15 @@ Grant only avatar-prefix get/put/delete/list access. Never use a public avatar U
 
 Start PostgreSQL, run `docker compose -f map-platform/deploy/compose.social.yaml
 --profile migration run --rm social-migrate`, then start API and worker. Migration
-v3 runs under a PostgreSQL advisory lock, retires the unsafe V1 replay/room state
-and unproven V2 push bindings, and backfills route fingerprints and exposures as
+runs under a PostgreSQL advisory lock. The V4 upgrade creates the empty direct
+friend consent table; earlier upgrades also retire unsafe V1 replay/room state
+and unproven V2 push bindings, and backfill route fingerprints and exposures as
 described above. API startup verifies the
 schema and fails closed rather than migrating during a request. Use a DML-only
 runtime role after the schema is installed, and a separate migration credential.
 The application uses serializable transactions and bounded conflict retries.
-For a V1 or V2 development upgrade, stop the old social API and worker writers
-before migration, then start the V3 API and worker together. Do not run older
+For an existing development database, stop the old social API and worker writers
+before migration, then start the schema-4 API and worker together. Do not run older
 writers against schema 4 or roll back to older binaries after the migration.
 
 Route `/v1/social/*` from the configured iPhone map-service origin to the social
