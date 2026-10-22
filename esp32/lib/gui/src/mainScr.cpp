@@ -2643,10 +2643,10 @@ static void serviceNearbyScreen(uint32_t nowMs) {
     }
   }
   if (nearby.querying &&
-      static_cast<uint32_t>(nowMs - nearby.lastQueryMs) >= 15000U) {
+      !mapView.nearbySearchIsCurrent(nearby.querySequence)) {
     // Map activation can supersede a worker query without returning a result
-    // to this screen. Retire that sequence and retry after a short interval.
-    mapView.cancelNearbySearch();
+    // to this screen. Retire only that sequence; never cancel a replacement
+    // generation or discard a slow query that is still making bounded progress.
     nearby.querying = false;
     nearby.querySequence = 0;
     nearby.lastQueryMs = nowMs;

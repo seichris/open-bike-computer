@@ -59,6 +59,13 @@ MAP_WORKFLOW_PATHS = {
     ".github/workflows/map-platform-ci.yml",
     ".github/workflows/map-platform-image.yml",
 }
+# Native POI equivalence imports the backend shard producer/selector. Keep its
+# product-container gate active even when no extractor file changes.
+OSM_BACKEND_PATHS = {
+    "map-platform/backend/map_platform/__init__.py",
+    "map-platform/backend/map_platform/source_shards.py",
+    "map-platform/backend/tests/test_source_shards.py",
+}
 FIRMWARE_CONTRACT_PATHS = {
     "docs/device-ownership-test-vectors.json",
     "docs/firmware-battery-life-hardware-validation.md",
@@ -232,6 +239,9 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
 
         if path == ".dockerignore" or path.startswith("map-platform/"):
             selected["map_backend"] = True
+
+        if path in OSM_BACKEND_PATHS:
+            selected["osm"] = True
 
         if path.startswith("tools/OSM_Extract/"):
             # The production backend image copies the extractor into its image.

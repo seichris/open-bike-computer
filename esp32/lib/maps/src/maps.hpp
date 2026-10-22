@@ -720,6 +720,11 @@ public:
   uint32_t requestNearbySearch(map_nearby_query::Position rider,
                                uint32_t selectedMask, double radiusM);
   void cancelNearbySearch();
+  bool nearbySearchIsCurrent(uint32_t sequence) const {
+    return sequence != 0 && sequence ==
+        nearbySearchGeneration.load(std::memory_order_acquire) &&
+        !renderWorkerShutdown.load(std::memory_order_acquire);
+  }
   bool takeNearbySearchResult(uint32_t &sequence,
                               map_nearby_storage::SearchResult &result);
   bool projectNearbyResult(const map_nearby_query::Result &place,

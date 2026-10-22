@@ -559,6 +559,11 @@ int main() {
   assert(frontier.size() == 3);
 
   testResumableCoverageMatchesSinglePass();
+  assert(map_nearby_storage::openFailureStatus(ENOENT) ==
+         map_nearby_storage::Status::Unavailable);
+  for (int error : {EIO, EMFILE, ENFILE, EACCES, ENOMEM, ENOTDIR})
+    assert(map_nearby_storage::openFailureStatus(error) ==
+           map_nearby_storage::Status::ReadFailed);
   testHighLatitudeWindowIsEvaluatedInBoundedSteps();
   testCursorPublishesAfterResumableCoverage();
 

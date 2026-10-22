@@ -4,6 +4,7 @@
 #include "mapNearbyCoverage.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -15,6 +16,10 @@ enum class Status : uint8_t {
   Ok, Unavailable, Corrupt, ReadFailed, Cancelled, ResourceRejected
 };
 using Cancel = bool (*)(void *);
+
+inline Status openFailureStatus(int error) {
+  return error == ENOENT ? Status::Unavailable : Status::ReadFailed;
+}
 
 struct SearchResult {
   Status status = Status::Unavailable;
@@ -68,7 +73,7 @@ inline bool readCoverage(const std::string &root,
   blocks.clear();
   File file = open(root + "/.manifest.json");
   if (!file) {
-    status = Status::Unavailable;
+    status = openFailureStatus(errno);
     return false;
   }
   uint32_t size = 0;
@@ -108,7 +113,7 @@ inline bool readIndex(const std::string &root,
   entries.clear();
   File file = open(root + "/assets/nearby-pois.fpi");
   if (!file) {
-    status = Status::Unavailable;
+    status = openFailureStatus(errno);
     return false;
   }
   uint32_t size = 0;
@@ -186,7 +191,7 @@ class SearchCursor {
     if (cancelled(cancel, context)) return finish(Status::Cancelled);
     if (phase_ == Phase::Index) {
       file_ = open(root_ + "/assets/nearby-pois.fpi");
-      if (!file_) return finish(Status::Unavailable);
+      if (!file_) return finish(openFailureStatus(errno));
       if (!fileSize(file_.get(), indexRemaining_)) return finish(Status::ReadFailed);
       // Signed Nearby coverage caps installed maps below the generic FPI1
       // codec limit. Fail closed before allocating/scanning an oversized index.

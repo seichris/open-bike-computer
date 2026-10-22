@@ -186,6 +186,19 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertTrue(selected["osm"])
         self.assertTrue(selected["map_backend"])
 
+    def test_source_shard_changes_require_native_poi_equivalence(self) -> None:
+        for path in (
+            "map-platform/backend/map_platform/source_shards.py",
+            "map-platform/backend/map_platform/__init__.py",
+            "map-platform/backend/tests/test_source_shards.py",
+        ):
+            with self.subTest(path=path):
+                selected = changed_components.classify_paths([path])
+                self.assertTrue(selected["map_backend"])
+                self.assertTrue(selected["osm"])
+                self.assertFalse(selected["firmware_build"])
+                self.assertFalse(selected["ios"])
+
     def test_shared_fmb_fixture_selects_every_consumer(self) -> None:
         selected = changed_components.classify_paths(
             ["tools/tests/fixtures/fmb/golden_blocks.txt"]

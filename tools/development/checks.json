@@ -492,7 +492,7 @@
       "name": "Nearby POI query host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror tools/tests/test_map_nearby_query.cpp -o ${TMPDIR}/test_map_nearby_query\n${TMPDIR}/test_map_nearby_query",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror tools/tests/test_map_nearby_query.cpp -o ${TMPDIR}/test_map_nearby_query\n${TMPDIR}/test_map_nearby_query\npython3 -m unittest tools.tests.test_nearby_lifecycle",
       "tools": [
         "python3",
         "g++"

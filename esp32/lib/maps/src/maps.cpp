@@ -6463,21 +6463,30 @@ bool Maps::switchVectorMapFolderOnStorageOwner(const std::string &folder) {
       power_management::LockDomain::Storage);
 #if MAP_POIS_RUNTIME_ENABLED
   bool poiIndexReady = false;
+  map_nearby_storage::Status poiActivationStatus =
+      map_nearby_storage::Status::Unavailable;
   std::vector<map_nearby_coverage::Block> candidateCoverage;
   try {
     MapNearbyVector<map_poi_index::Entry> entries;
-    map_nearby_storage::Status indexStatus;
     std::string root(normalized.c_str());
     while (!root.empty() && root.back() == '/') root.pop_back();
     poiIndexReady = map_nearby_storage::readIndex(
-        root, entries, nullptr, nullptr, indexStatus);
+        root, entries, nullptr, nullptr, poiActivationStatus);
     if (poiIndexReady) {
-      map_nearby_storage::Status coverageStatus;
       poiIndexReady = map_nearby_storage::readCoverage(
-          root, candidateCoverage, coverageStatus);
+          root, candidateCoverage, poiActivationStatus);
     }
   } catch (const std::bad_alloc &) {
+    poiActivationStatus = map_nearby_storage::Status::ResourceRejected;
     ESP_LOGE(TAG, "MAP_RESOURCE_REJECTED: Nearby index activation");
+  }
+  if (poiActivationStatus == map_nearby_storage::Status::ReadFailed ||
+      poiActivationStatus == map_nearby_storage::Status::ResourceRejected ||
+      poiActivationStatus == map_nearby_storage::Status::Cancelled) {
+    // Do not commit partial metadata or label a transient storage/allocation
+    // failure as unhealthy POI data. The old active map remains intact.
+    ESP_LOGE(TAG, "Nearby metadata activation deferred; preserving active map");
+    return false;
   }
   cancelNearbySearch();
 #endif

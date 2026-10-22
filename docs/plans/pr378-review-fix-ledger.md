@@ -1,5 +1,50 @@
 # PR #378 review fixes
 
+## October 23 Claude review follow-up
+
+Mode: publish. Profile: standard. Strategy: sequential-local, zero subagents.
+Gate: P0/P1/P2. Iteration 3 freezes head
+`c6181a7065e4f8eb5a0515ff48371708e6173fc8`, base/merge-base
+`19c9787d61ff5b6526fea0ef9d73f953ecd766be`, plus only this loop's patch.
+The four generated ESP32 files remain never-stage. Claude's Mac review of
+that clean checkout completed and its 185-line report was retrieved from
+`/tmp/pr378-claude-review-c6181a70.md`; no account/session files were inspected
+to work around the locked Mac. It reported no P0/P1, one P2 routing gap and
+six P3 notes. Independent correctness, reliability, packaging and verification
+review reproduced that P2 and promoted two runtime notes after executing the
+actual production activation method and UI retry branch in native fixtures.
+
+| ID | Priority | Trigger, fix and verification | State |
+| --- | --- | --- | --- |
+| R29 | P2 | A shard-only backend change selected no OSM job. Three new routing subcases fail before the fix and pass afterward; shard producer/package initialization and shard contract tests now select both backend and mandatory native OSM equivalence | fixed+verified |
+| R30 | P2 | Activation committed replacement metadata despite transient read/allocation failure, making valid POIs unhealthy until reactivation. Native fault injection aborts the baseline on `!committed`; the fix rejects the transaction before touching the old map/cache/health, distinguishes missing files from transient open errors, and preserves legacy/corrupt-POI degradation behavior | fixed+verified |
+| R31 | P2 | The UI canceled any query at 15 seconds, including still-current bounded work, and could cancel a replacement generation. The native baseline aborts at the 15-second boundary. Retry now follows the atomic generation/shutdown state and retires only the stale UI sequence; long/wrapping-clock, supersession and shutdown cases pass | fixed+verified |
+
+The new lifecycle fixtures compile production source fragments, not copies of
+the fixed policy. Both pass on macOS and in the unchanged Ubuntu 22.04 product
+tools image with warnings-as-errors. They are registered in the shared Nearby
+host check, hence local and CI use the same test entry point. All 40 firmware
+host checks and all 12 iOS fast checks pass with `sourceUnchanged=true`.
+Development-runner and CI-routing checks pass; the pinned-LVGL preview remains
+up to date without any generated asset changes. The initial preview invocation
+without its required source argument did not run the check; the documented
+invocation with the pinned source succeeded.
+
+Iteration 4: fresh confirming review of transaction ordering, atomic query
+liveness, error classification, CI dependency routing, production gates and
+native test wiring finds no further in-gate defects. Current totals: 30
+fixed+verified, one invalidated, zero active/user-deferred code findings.
+Remaining nonblocking notes concern legacy/shadow extraction performance, a
+stale comment, already-validated decoder preconditions and the documented
+client-31/nonshipping-type-6 upgrade boundary; no speculative fixes were made.
+
+The `c6181a70` baseline now has all 18 PR checks and the 16-job branch-bound
+all-component run passing, plus verified exact-source 3 MiB evidence. Those
+results are not relabeled as evidence for this runtime follow-up. Fresh clean
+published-head checks, CI and the enabled-POI size/reserve manifest must be
+recorded in the PR. No merge, flash, install, deployment, 206 build or shipping
+POI enablement is included. Physical and rollout gates remain incomplete.
+
 ## October 23 remaining-requirements audit
 
 Mode: publish. Profile: standard. Strategy: sequential-local, zero subagents.

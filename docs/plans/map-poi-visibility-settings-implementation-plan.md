@@ -39,6 +39,33 @@ or enabled merely because it exists in the branch.
 
 ## Baseline
 
+### October 23 Claude review follow-up
+
+The clean `c6181a70` baseline passes all 18 PR checks and the branch-bound
+all-component 175 run. Its actual enabled-POI binary is 3,044,960 bytes,
+35,232 bytes beyond the unchanged 65,536-byte reserve. Claude reviewed that
+exact checkout and found one P2 CI-routing gap. Independent native fault
+reproductions also elevate two runtime suggestions to P2 correctness fixes:
+
+- Backend shard producer/package and contract-test changes must select the
+  OSM product-image gate, even without extractor changes.
+- A transient POI metadata read/allocation failure must reject map activation
+  before changing the current map, cache, coverage or health. Missing legacy
+  metadata remains unsupported; demonstrably corrupt POIs still degrade
+  without preventing the underlying map from loading.
+- The Nearby UI must not abandon a still-current query merely because fifteen
+  seconds elapsed. Detect lost generations or worker shutdown, retire only the
+  stale UI sequence, and never cancel a newer replacement query.
+
+The actual production activation/retry fragments are now exercised by native
+fault fixtures in the shared Nearby host check. Both macOS and Linux pass;
+all 40 firmware host checks and 12 iOS fast checks pass with stable source,
+as do routing/development checks and the pinned-LVGL preview. This follow-up
+changes runtime source, so the earlier artifact is only a baseline. Require
+fresh clean published-head CI and actual padded binary/reserve evidence before
+calling the new candidate build-qualified. Hardware/rollout gates below remain
+separate and the no-merge/no-flash restriction is unchanged.
+
 ### October 23 remaining-requirements audit
 
 The `9cab0b6f` baseline includes current main `19c9787d` and has all 18 PR
