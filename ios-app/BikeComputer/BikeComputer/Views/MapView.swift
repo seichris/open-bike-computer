@@ -293,7 +293,7 @@ struct MapViewContainer: UIViewRepresentable {
     var onlinePOIItems: [MKMapItem] = []
     var selectedOnlinePOI: MKMapItem? = nil
     var isOnlinePOISearchActive = false
-    var onOnlinePOISelected: ((MKMapItem) -> Void)? = nil
+    var onOnlinePOISelected: ((MKMapItem?) -> Void)? = nil
 
     private var visibleSavedRoutePreview: MapSavedRouteOverlay? {
         let content = SavedRouteMapPolicy.content(
@@ -511,11 +511,14 @@ struct MapViewContainer: UIViewRepresentable {
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         let socialLayer = SocialMapLayer()
         var isOnlinePOISearchActive = false
-        var onOnlinePOISelected: ((MKMapItem) -> Void)?
+        var onOnlinePOISelected: ((MKMapItem?) -> Void)?
         private var focusedOnlinePOI: MKMapItem?
+        private var wasOnlinePOISearchActive = false
 
         func updateOnlinePOIs(_ items: [MKMapItem], selected: MKMapItem?,
                               on mapView: MKMapView, bottomPadding: CGFloat) {
+            let didFinishSearch = wasOnlinePOISearchActive && !isOnlinePOISearchActive
+            wasOnlinePOISearchActive = isOnlinePOISearchActive
             let existing = mapView.annotations.compactMap { $0 as? OnlinePOIAnnotation }
             mapView.removeAnnotations(existing.filter { annotation in
                 !items.contains { $0 === annotation.item }
@@ -526,9 +529,23 @@ struct MapViewContainer: UIViewRepresentable {
             if isOnlinePOISearchActive {
                 mapView.setUserTrackingMode(.none, animated: false)
                 mapView.removeAnnotations(mapView.annotations.filter { $0 is DestinationAnnotation })
+            } else if didFinishSearch && !isFreePanActive(
+                mapView: mapView, isOfflineMapSelectionActive: offlineMapSelectionFrame != nil
+            ) {
+                if isSimulationMode, let simulatedPosition {
+                    updateNavigationCamera(mapView: mapView, coordinate: simulatedPosition, animated: true)
+                } else if isUserLocationAuthorized {
+                    updateUserTrackingMode(mapView: mapView, isNavigating: isNavigating,
+                                           isOfflineMapSelectionActive: false)
+                }
             }
             guard focusedOnlinePOI !== selected else { return }
             focusedOnlinePOI = selected
+            if selected == nil {
+                for annotation in mapView.selectedAnnotations where annotation is OnlinePOIAnnotation {
+                    mapView.deselectAnnotation(annotation, animated: false)
+                }
+            }
             guard let selected,
                   let annotation = mapView.annotations.compactMap({ $0 as? OnlinePOIAnnotation })
                     .first(where: { $0.item === selected }) else { return }
@@ -1223,6 +1240,19 @@ struct MapViewContainer: UIViewRepresentable {
         }
 
         func mapView(_ mapView: MKMapView, didDeselect view: MKAnnotationView) {
+            if let annotation = view.annotation as? OnlinePOIAnnotation {
+                // MapKit deselects the old pin before selecting its replacement.
+                // Wait for that transition, and never clear a newer selection.
+                DispatchQueue.main.async { [weak self, weak mapView] in
+                    guard let self, let mapView,
+                          self.focusedOnlinePOI === annotation.item,
+                          !mapView.selectedAnnotations.contains(where: { $0 is OnlinePOIAnnotation })
+                    else { return }
+                    self.focusedOnlinePOI = nil
+                    self.onOnlinePOISelected?(nil)
+                }
+                return
+            }
             guard view.annotation is DestinationAnnotation else { return }
 
             // MapKit reports the temporary deselection used to rebuild a

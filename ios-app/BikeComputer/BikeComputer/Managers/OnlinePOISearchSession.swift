@@ -39,11 +39,11 @@ enum OnlinePOICategory: String, CaseIterable, Identifiable {
 
     var searchQueries: [String] {
         switch self {
-        case .shops: return [String(localized: "shops")]
+        case .shops: return [String(localized: "store")]
         case .food: return [String(localized: "restaurant"), String(localized: "cafe")]
         case .toilets: return [String(localized: "public toilet")]
         case .fuel: return [String(localized: "gas station")]
-        case .bicycles: return [String(localized: "bicycle shop"), String(localized: "bicycle repair")]
+        case .bicycles: return [String(localized: "bike shop"), String(localized: "bicycle repair")]
         }
     }
 }
@@ -234,8 +234,9 @@ final class OnlinePOISearchSession: ObservableObject {
         }
     }
 
-    func select(_ item: MKMapItem) {
-        guard selectedItem !== item, items.contains(where: { $0 === item }) else { return }
+    func select(_ item: MKMapItem?) {
+        guard selectedItem !== item else { return }
+        if let item, !items.contains(where: { $0 === item }) { return }
         selectedItem = item
     }
 

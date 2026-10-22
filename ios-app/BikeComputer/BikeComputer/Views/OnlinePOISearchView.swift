@@ -68,6 +68,7 @@ struct OnlinePOIResultsView: View {
                             .accessibilityIdentifier("online-poi-search-area")
                         Spacer()
                         Button("Clear", action: session.clear)
+                            .accessibilityLabel("Clear nearby categories")
                             .accessibilityIdentifier("online-poi-clear")
                     }
                     .font(.subheadline)
@@ -107,6 +108,7 @@ struct OnlinePOIResultsView: View {
                                     resultRow(item)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityAddTraits(session.selectedItem === item ? .isSelected : [])
                                 Divider()
                             }
                         }

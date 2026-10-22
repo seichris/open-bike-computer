@@ -57,6 +57,11 @@ struct OnlinePOISearchTests {
         precondition(session.selectedItem == nil, "Ignore pins outside the current result set")
         session.select(farther)
         precondition(session.selectedItem === farther)
+        session.select(nil)
+        precondition(session.selectedItem == nil && session.items.count == 1,
+                     "Map deselection releases selection while retaining the result list")
+        session.select(farther)
+        precondition(session.selectedItem === farther, "A deselected result can be selected again")
         session.clear()
         precondition(!session.isActive && session.items.isEmpty && session.selectedItem == nil)
         precondition(session.center == nil && session.state == .idle)
@@ -102,6 +107,13 @@ struct OnlinePOISearchTests {
         let response = try await fallback.search(categories: [.food], center: center, radius: 1_000)
         precondition(response.usedCategoryTextFallback && calls == 3 && response.items.count == 2,
                      "Unsupported structured search falls back once to separate restaurant/cafe queries")
+        precondition(OnlinePOICategory.shops.searchQueries == ["store"])
+        precondition(OnlinePOICategory.bicycles.searchQueries == ["bike shop", "bicycle repair"])
+        calls = 0
+        let allCategories = try await fallback.search(categories: Set(OnlinePOICategory.allCases),
+                                                      center: center, radius: 1_000)
+        precondition(allCategories.usedCategoryTextFallback && calls == 8 && allCategories.items.count == 7,
+                     "All categories including bicycles stay within one structured plus seven text requests")
         calls = 0
         let failing = MapKitOnlinePOISearchProvider { _ in
             calls += 1

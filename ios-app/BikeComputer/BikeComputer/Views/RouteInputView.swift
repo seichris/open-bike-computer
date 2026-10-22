@@ -201,7 +201,7 @@ struct RouteSearchPanel: View {
                 isExpanded = false
             } label: {
                 Image(systemName: "chevron.down").foregroundStyle(.secondary)
-                    .frame(minWidth: 32, minHeight: 32)
+                    .frame(minWidth: 44, minHeight: 44)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Close destination search")
