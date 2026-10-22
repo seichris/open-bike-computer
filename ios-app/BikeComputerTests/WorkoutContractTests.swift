@@ -8440,7 +8440,7 @@ private struct WorkoutContractTestSuite {
             )
                 && compactContent.contains("else{rideRoutePlanSheet}")
                 && compactContent.contains(
-                    "Label(\"Startnavigation\",systemImage:\"location.fill\")"
+                    "Label(pendingFavoriteDestination==nil?\"Startnavigation\":\"Start&SavetoFavorites\",systemImage:\"location.fill\")"
                 )
                 && compactContent.contains("coordinator.startSelectedRoute()")
                 && compactContent.contains(
