@@ -575,15 +575,23 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
         self.assertEqual(len(watch_icons), 1)
         self.assertEqual(watch_icons[0]["size"], "1024x1024")
         self.assertTrue(watch_icons[0].get("filename"))
-        self.assertNotIn(
-            watch_icons[0]["filename"],
-            {
-                image.get("filename")
-                for image in icon_contents["images"]
-                if image.get("platform") == "ios"
-            },
-            "Watch needs its own light background for the circular launcher mask",
-        )
+        assets = IOS_PROJECT / "BikeComputer" / "Assets.xcassets"
+        family_icons = {}
+        for family in ("AppIcon", "AppIconDev"):
+            folder = assets / (family + ".appiconset")
+            images = json.loads((folder / "Contents.json").read_text())["images"]
+            phone = [image for image in images if image.get("platform") == "ios"]
+            watch = [image for image in images if image.get("platform") == "watchos"]
+            self.assertEqual(len(watch), 1)
+            self.assertEqual(len({image["filename"] for image in phone}), 1,
+                             "Each app family keeps its artwork in every iPhone appearance")
+            data = (folder / watch[0]["filename"]).read_bytes()
+            self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n", "Watch launcher artwork must be PNG")
+            self.assertEqual(int.from_bytes(data[16:20], "big"), 1024)
+            self.assertEqual(int.from_bytes(data[20:24], "big"), 1024)
+            family_icons[family] = data
+        self.assertNotEqual(family_icons["AppIcon"], family_icons["AppIconDev"],
+                            "Production and Dev must have distinct Watch launcher artwork")
 
         project = (
             IOS_PROJECT / "BikeComputer.xcodeproj" / "project.pbxproj"
@@ -609,13 +617,13 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             project.count(
                 'ASSETCATALOG_COMPILER_APPICON_NAME = "$(BICINO_APP_ICON_NAME)";'
             ),
-            2,
-            "iPhone Debug and Release must select their configured app icon",
+            4,
+            "iPhone and Watch Debug and Release must select their configured app icon",
         )
         self.assertEqual(
             project.count("ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;"),
-            2,
-            "Watch Debug and Release must both use the Watch icon asset",
+            0,
+            "Watch must inherit the app-family icon instead of hardcoding production",
         )
 
         required_files = [

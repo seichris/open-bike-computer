@@ -919,7 +919,7 @@
 		57A000082F00000100000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = "$(BICINO_APP_ICON_NAME)";
 				CODE_SIGN_ENTITLEMENTS = BikeComputerWatch/BikeComputerWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 29;
@@ -951,7 +951,7 @@
 		57A000092F00000100000001 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = "$(BICINO_APP_ICON_NAME)";
 				CODE_SIGN_ENTITLEMENTS = BikeComputerWatch/BikeComputerWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 29;

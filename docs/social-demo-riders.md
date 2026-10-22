@@ -32,7 +32,7 @@ tools/social-demo stop
 ```
 
 To give the existing test friends simple pictures, run `tools/social-demo avatars`
-on the Mac. It renders the system emoji locally (Ava 🌻, Ben 🦊, Cleo 🐢) and
+on the Mac. It renders the system emoji locally (Ava 🚴, Ben 🚴‍♂️, Cleo 🚴‍♀️) and
 uploads them through each synthetic account's ordinary profile-avatar API.
 Existing pictures are retained on repeat runs. No emoji font or image bundle is
 distributed with the app. Open Friends again to refresh the pictures.

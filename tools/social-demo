@@ -39,7 +39,7 @@ def safe_error(error):
 
 
 RIDERS = (('ava', 'Demo Ava', 5.5), ('ben', 'Demo Ben', 3.7), ('cleo', 'Demo Cleo', 0.0))
-EMOJIS = {'ava': '🌻', 'ben': '🦊', 'cleo': '🐢'}
+EMOJIS = {'ava': '🚴', 'ben': '🚴‍♂️', 'cleo': '🚴‍♀️'}
 
 
 def render_avatars():
@@ -49,9 +49,9 @@ def render_avatars():
 import AppKit
 import Foundation
 let entries: [(String, String, NSColor)] = [
-    ("ava", "🌻", NSColor(red: 1, green: 0.94, blue: 0.73, alpha: 1)),
-    ("ben", "🦊", NSColor(red: 0.87, green: 0.94, blue: 1, alpha: 1)),
-    ("cleo", "🐢", NSColor(red: 0.85, green: 0.96, blue: 0.86, alpha: 1))
+    ("ava", "🚴", NSColor(red: 1, green: 0.94, blue: 0.73, alpha: 1)),
+    ("ben", "🚴‍♂️", NSColor(red: 0.87, green: 0.94, blue: 1, alpha: 1)),
+    ("cleo", "🚴‍♀️", NSColor(red: 0.85, green: 0.96, blue: 0.86, alpha: 1))
 ]
 guard let font = NSFont(name: "AppleColorEmoji", size: 168) else { exit(1) }
 var output: [String: String] = [:]
