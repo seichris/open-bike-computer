@@ -329,6 +329,12 @@ struct RouteSearchPanel: View {
             }
         } else if shouldShowSavedDestinations {
             savedDestinationsScroll
+        } else if !hasSelectedDestination && destinationAddress.isEmpty {
+            Text("Choose nearby categories, or type a destination.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
         } else if !hasSelectedDestination {
             Spacer(minLength: 0)
         }
