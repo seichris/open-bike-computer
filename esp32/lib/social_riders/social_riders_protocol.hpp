@@ -26,12 +26,85 @@ inline bool copySnapshot(const Rider &source, Rider &destination) {
   if (copy) destination.image = source.image;
   return copy;
 }
+inline uint16_t u16(const uint8_t *p) { return p[0] | (uint16_t(p[1]) << 8); }
+inline uint32_t u32(const uint8_t *p) { return u16(p) | (uint32_t(u16(p+2)) << 16); }
+// One combined friend-marker size (map setting 39): portraits, initials,
+// distances and grouped counts scale together. Percent of the normal size.
+constexpr uint8_t MARKER_SCALE_SETTING_ID = 39;
+constexpr uint16_t MIN_MARKER_SCALE = 100, MAX_MARKER_SCALE = 300;
+constexpr int PORTRAIT_SIZE = 40, MAX_PORTRAIT_SIZE = PORTRAIT_SIZE * MAX_MARKER_SCALE / 100;
+inline uint16_t clampMarkerScale(int32_t percent) {
+  return uint16_t(std::clamp<int32_t>(percent, MIN_MARKER_SCALE, MAX_MARKER_SCALE));
+}
+inline int scaled(int normal, uint16_t percent) { return (normal * int(percent) + 50) / 100; }
+// Largest enabled Montserrat size that still fits the scaled text box.
+inline int fontPixels(int normal, uint16_t percent) {
+  constexpr int sizes[] = {12, 14, 16, 18, 24, 32, 38, 48};
+  const int target = normal * int(percent) / 100;
+  int chosen = sizes[0];
+  for (int size : sizes) if (size <= target) chosen = size;
+  return chosen;
+}
+// Normal footprint 64x62, centred on the rider: a 44 px portrait frame with a
+// 40 px image, the "+N" count at its upper right and the label below it.
+struct BadgeGeometry {
+  int width, height, frame, frameX, portrait, inset, countX, labelY;
+  int initialsFont, countFont, labelFont;
+  double halfWidth() const { return width / 2.0; }
+  double halfHeight() const { return height / 2.0; }
+};
+inline BadgeGeometry badgeGeometry(uint16_t percent) {
+  percent = clampMarkerScale(percent);
+  BadgeGeometry g{};
+  g.width = scaled(64, percent); g.height = scaled(62, percent);
+  g.frame = scaled(44, percent); g.frameX = (g.width - g.frame) / 2;
+  g.portrait = scaled(PORTRAIT_SIZE, percent); g.inset = (g.frame - g.portrait) / 2;
+  g.countX = scaled(38, percent); g.labelY = scaled(44, percent);
+  g.initialsFont = fontPixels(14, percent); g.countFont = fontPixels(14, percent);
+  g.labelFont = fontPixels(12, percent);
+  return g;
+}
+// Bilinear RGB565 (little endian) resample of the square 40x40 portrait into a
+// size x size destination. The normal size is an exact copy.
+inline void scalePortrait(const uint8_t *source, uint8_t *destination, int size) {
+  if (size == PORTRAIT_SIZE) { memcpy(destination, source, IMAGE_BYTES); return; }
+  auto pixel = [&](int x, int y) { return u16(source + 2 * (y * PORTRAIT_SIZE + x)); };
+  for (int y = 0; y < size; ++y) {
+    const double sy = std::clamp((y + 0.5) * PORTRAIT_SIZE / size - 0.5, 0.0, double(PORTRAIT_SIZE - 1));
+    const int y0 = int(sy), y1 = std::min(y0 + 1, PORTRAIT_SIZE - 1); const double fy = sy - y0;
+    for (int x = 0; x < size; ++x) {
+      const double sx = std::clamp((x + 0.5) * PORTRAIT_SIZE / size - 0.5, 0.0, double(PORTRAIT_SIZE - 1));
+      const int x0 = int(sx), x1 = std::min(x0 + 1, PORTRAIT_SIZE - 1); const double fx = sx - x0;
+      const uint16_t c[4] = {pixel(x0, y0), pixel(x1, y0), pixel(x0, y1), pixel(x1, y1)};
+      auto channel = [&](int shift, int mask) {
+        const double top = ((c[0] >> shift) & mask) * (1 - fx) + ((c[1] >> shift) & mask) * fx;
+        const double bottom = ((c[2] >> shift) & mask) * (1 - fx) + ((c[3] >> shift) & mask) * fx;
+        return uint16_t(std::lround(top * (1 - fy) + bottom * fy)) & mask;
+      };
+      const uint16_t value = uint16_t(channel(11, 31) << 11 | channel(5, 63) << 5 | channel(0, 31));
+      destination[2 * (y * size + x)] = uint8_t(value & 0xff);
+      destination[2 * (y * size + x) + 1] = uint8_t(value >> 8);
+    }
+  }
+}
+// Portraits are RGB565A8 (colour plane, then alpha plane) so the frame's circle
+// is part of the image. LVGL corner clipping would need a draw layer as large as
+// the frame, which the fixed LVGL pool cannot provide at large marker sizes.
+inline size_t portraitBytes(int size) { return size_t(size) * size * 3; }
+inline uint8_t circleCoverage(int x, int y, int size, double radius) {
+  const double centre = size / 2.0, distance = std::hypot(x + 0.5 - centre, y + 0.5 - centre);
+  return uint8_t(std::lround(std::clamp(radius - distance + 0.5, 0.0, 1.0) * 255));
+}
+inline void maskPortrait(uint8_t *alpha, int size, double radius) {
+  for (int y = 0; y < size; ++y)
+    for (int x = 0; x < size; ++x) alpha[y * size + x] = circleCoverage(x, y, size, radius);
+}
 struct BadgePresentation {
-  int x=0,y=0; bool stale=false,portrait=false;
+  int x=0,y=0; bool stale=false,portrait=false; uint16_t scale=MIN_MARKER_SCALE;
   std::array<char,24> label{}; std::array<char,5> initials{};
   std::array<uint8_t,32> hash{};
   bool operator==(const BadgePresentation &b) const {
-    return x==b.x && y==b.y && stale==b.stale && portrait==b.portrait &&
+    return x==b.x && y==b.y && stale==b.stale && portrait==b.portrait && scale==b.scale &&
            label==b.label && initials==b.initials && hash==b.hash;
   }
 };
@@ -43,8 +116,6 @@ public:
   }
   bool hide() { const bool changed=visible;visible=false;return changed; }
 };
-inline uint16_t u16(const uint8_t *p) { return p[0] | (uint16_t(p[1]) << 8); }
-inline uint32_t u32(const uint8_t *p) { return u16(p) | (uint32_t(u16(p+2)) << 16); }
 using Hash = void (*)(const uint8_t *, size_t, uint8_t *);
 class State {
 public:
@@ -121,15 +192,27 @@ public:
   }
 };
 struct Position { double x, y; };
-// Center of the complete 64x62 footprint. A binary search constrains ALL
-// corners to the circle, including the distance below the portrait.
-inline Position edge(double dx, double dy, double width, double height, bool round) {
+// Whether a footprint centred at (x, y) lies inside the screen with a 4 px
+// margin; a round panel constrains every corner to the circle.
+inline bool fits(double x, double y, double width, double height, bool round,
+                 double halfWidth, double halfHeight) {
+  if (x < halfWidth || y < halfHeight || x > width-halfWidth || y > height-halfHeight) return false;
+  if (!round) return true;
+  bool inside=true;
+  for (double cx:{-halfWidth,halfWidth}) for (double cy:{-halfHeight,halfHeight})
+    inside &= std::hypot(x-width/2+cx,y-height/2+cy)<=std::min(width,height)/2-4;
+  return inside;
+}
+// Center of the complete footprint (normal 64x62). A binary search constrains
+// ALL corners to the circle, including the distance below the portrait.
+inline Position edge(double dx, double dy, double width, double height, bool round,
+                     double halfWidth = 32, double halfHeight = 31) {
   double norm=std::hypot(dx,dy); if (!std::isfinite(norm) || norm<1e-9) return {width/2,height/2};
   dx/=norm;dy/=norm;double low=0,high=std::max(width,height);
   const double radius=std::min(width,height)/2-4;
   for (int i=0;i<24;++i) {
     const double mid=(low+high)/2; bool fits=true;
-    for (double x:{-32.0,32.0}) for (double y:{-31.0,31.0}) {
+    for (double x:{-halfWidth,halfWidth}) for (double y:{-halfHeight,halfHeight}) {
       double px=dx*mid+x,py=dy*mid+y;
       fits &= round ? px*px+py*py<=radius*radius : std::abs(px)<=width/2-4 && std::abs(py)<=height/2-4;
     }

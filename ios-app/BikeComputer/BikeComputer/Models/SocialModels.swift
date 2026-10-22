@@ -189,25 +189,18 @@ struct SocialLinkTarget {
     }
 }
 
-enum SocialMapMarkerSize: String, CaseIterable, Identifiable {
-    case small, medium, large
-    var id: String { rawValue }
-    var title: String { rawValue.capitalized }
-    var scale: CGFloat {
-        switch self { case .small: 0.8; case .medium: 1; case .large: 1.3 }
-    }
-    static func resolved(_ rawValue: String) -> Self { Self(rawValue: rawValue) ?? .medium }
-}
-
+/// Portrait, initials, distance and grouped count all follow one friend-marker size.
 struct SocialMapMarkerStyle: Equatable {
-    static let pictureDefaultsKey = "social.map.pictureSize.v1"
-    static let numberDefaultsKey = "social.map.numberSize.v1"
-    var pictureSize: SocialMapMarkerSize = .medium
-    var numberSize: SocialMapMarkerSize = .medium
-    var pictureDiameter: CGFloat { 40 * pictureSize.scale }
-    var numberHeight: CGFloat { 20 * numberSize.scale }
-    var distanceWidth: CGFloat { 96 * numberSize.scale }
-    var clusterWidth: CGFloat { 27 * numberSize.scale }
+    var scale: FriendMarkerScale = .normal
+    private var factor: CGFloat { CGFloat(scale.factor) }
+    var pictureDiameter: CGFloat { 40 * factor }
+    var numberHeight: CGFloat { 20 * factor }
+    /// Distance labels keep their normal width and grow more slowly than the
+    /// portrait, so 3× edge badges still fit a small phone.
+    var distanceWidth: CGFloat { max(96, 72 * factor) }
+    var clusterWidth: CGFloat { 27 * factor }
+    var initialsFontSize: CGFloat { 15 * factor }
+    var numberFontSize: CGFloat { 12 * factor }
     /// Edge badges carry the distance label and grouped count around the portrait.
     var badgeSize: CGSize {
         CGSize(width: max(distanceWidth, pictureDiameter + clusterWidth / 2 + 8),
@@ -215,7 +208,7 @@ struct SocialMapMarkerStyle: Equatable {
     }
     /// On-map markers show only the portrait, so their tappable area is the portrait.
     var annotationSize: CGSize { CGSize(width: pictureDiameter + 4, height: pictureDiameter + 4) }
-    /// The rider's coordinate stays at the portrait's bottom centre for every size pair.
+    /// The rider's coordinate stays at the portrait's bottom centre at every size.
     var annotationCenterOffset: CGPoint {
         CGPoint(x: 0, y: annotationSize.height / 2 - (pictureDiameter + 2))
     }

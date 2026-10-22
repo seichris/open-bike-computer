@@ -6946,6 +6946,74 @@ extension NavigationProtocolTests {
         defaults.removeObject(forKey: key)
     }
 
+    static func testBLEManagerSendsFriendMarkerScaleOnlyToSupportingFirmware() {
+        let defaults = UserDefaults.standard
+        let key = FriendMarkerScale.defaultsKey
+        let previous = defaults.object(forKey: key)
+        defaults.set(FriendMarkerScale.double.rawValue, forKey: key)
+        defer {
+            if let previous { defaults.set(previous, forKey: key) } else { defaults.removeObject(forKey: key) }
+        }
+
+        let manager = BLEManager()
+        assertEqual(manager.friendMarkerScale, .double,
+                    "the shared friend-marker size loads from the iPhone preference")
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        manager.supportsDeviceSettings = true
+        var sentPackets: [Data] = []
+        manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+        func scalePackets() -> [Data] {
+            sentPackets.filter {
+                $0.count == 9 &&
+                String(data: $0.prefix(4), encoding: .utf8) ==
+                    DeviceBLEProtocol.settingsFallbackPrefix &&
+                $0[4] == DeviceBLEProtocol.friendMarkerScaleSettingID
+            }
+        }
+        let extendedType = RideBLEGeneratedProtocolV1.extendedFeatureTLVType
+        let groupOnly = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0, 0]) + Data([extendedType, 4, 1, 0, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(groupOnly),
+               "group-rider firmware capabilities are accepted")
+        assert(manager.supportsGroupRiders && !manager.supportsFriendMarkerScale,
+               "group riders alone do not advertise device marker sizes")
+        assert(!manager.setFriendMarkerScale(.triple),
+               "firmware without the size flag receives no size packet")
+        assert(scalePackets().isEmpty, "unsupported firmware never sees setting 39")
+        assertEqual(manager.friendMarkerScale, .triple,
+                    "the iPhone map still applies the chosen size")
+        assertEqual(defaults.integer(forKey: key), 300,
+                    "the shared size is saved for the next supporting connection")
+
+        let withScale = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0, 0]) + Data([extendedType, 4, 3, 0, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(withScale),
+               "the friend-marker size flag is accepted beside group riders")
+        assert(manager.supportsFriendMarkerScale && manager.supportsGroupRiders,
+               "extended bit 1 advertises the shared size without hiding group riders")
+        assertEqual(scalePackets().count, 1,
+                    "capability negotiation sends the saved size once")
+        assertEqual(readInt32LE(scalePackets()[0], offset: 5), 300,
+                    "the device receives the size as a percent")
+        assert(manager.handleDeviceCapabilitiesNotification(withScale),
+               "duplicate capability responses are consumed")
+        assertEqual(scalePackets().count, 1,
+                    "duplicate capability responses do not resend the size")
+        assert(manager.setFriendMarkerScale(.oneAndHalf),
+               "a supporting device receives later size changes")
+        assertEqual(readInt32LE(scalePackets().last!, offset: 5), 150,
+                    "each change sends the newly chosen percent")
+        assert(manager.handleDeviceCapabilitiesNotification(groupOnly),
+               "renegotiation without the flag is accepted")
+        assert(!manager.supportsFriendMarkerScale,
+               "renegotiation without the flag hides device marker sizes")
+    }
+
     static func testBLEManagerSendsAutomaticDisplayOffAfterCapabilityNegotiation() {
         let defaults = UserDefaults.standard
         let key = "deviceSettings.automaticDisplayOffEnabled"

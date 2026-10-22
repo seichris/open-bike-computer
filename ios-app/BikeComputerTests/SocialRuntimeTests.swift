@@ -418,42 +418,76 @@ struct SocialRuntimeTests {
             require((edge.x-233)*dx>=0 && (edge.y-233)*dy>=0,"edge follows the projected point after panning or rotation")
         }
         require(abs(SocialMapGeometry.edgeCenter(projected:CGPoint(x:-100,y:100),bounds:bounds)!.x-42)<0.00001,"a panned rider stays on the projected side of the map")
-        for picture in SocialMapMarkerSize.allCases {
-            for numbers in SocialMapMarkerSize.allCases {
-                let style = SocialMapMarkerStyle(pictureSize: picture, numberSize: numbers)
-                let phoneBounds = CGRect(x: 0, y: 0, width: 320, height: 568)
-                for point in [CGPoint(x: -1000, y: -1000), CGPoint(x: 2000, y: 100), CGPoint(x: 100, y: 2000)] {
-                    let center = SocialMapGeometry.edgeCenter(projected: point, bounds: phoneBounds, badgeSize: style.badgeSize)!
-                    let rect = CGRect(x: center.x-style.badgeSize.width/2, y: center.y-style.badgeSize.height/2,
-                                      width: style.badgeSize.width, height: style.badgeSize.height)
-                    require(phoneBounds.contains(rect), "every picture/number combination fits at the map edge on a small phone")
-                }
-            }
-        }
-        require(SocialMapMarkerSize.resolved("unknown") == .medium, "invalid persisted marker settings use the default")
-        let pictureOnly = SocialMapMarkerStyle(pictureSize: .large)
-        let numbersOnly = SocialMapMarkerStyle(numberSize: .large)
-        require(pictureOnly.pictureDiameter > numbersOnly.pictureDiameter && pictureOnly.numberHeight < numbersOnly.numberHeight,
-                "portrait size and number readability can be adjusted independently")
-        require(SocialMapGeometry.edgeCenter(projected: CGPoint(x: -100, y: -100), bounds: CGRect(x: 0, y: 0, width: 50, height: 50),
-                                            badgeSize: pictureOnly.badgeSize) == nil, "tiny map areas never place oversized edge markers")
         let phone = CGRect(x: 0, y: 0, width: 320, height: 568)
-        for picture in SocialMapMarkerSize.allCases {
-            let anchors = SocialMapMarkerSize.allCases.map { numbers -> CGFloat in
-                let style = SocialMapMarkerStyle(pictureSize: picture, numberSize: numbers)
-                require(style.annotationSize.width <= style.pictureDiameter + 4 && style.annotationSize.height <= style.pictureDiameter + 4,
-                        "on-map hit areas cover only the visible portrait")
-                let anchor = style.annotationSize.height / 2 - style.annotationCenterOffset.y
-                require(abs(anchor - (style.pictureDiameter + 2)) < 0.0001, "the rider coordinate stays at the portrait's bottom centre")
-                require(style.showsOnMap(CGPoint(x: style.pictureDiameter / 2 + 12, y: 300), in: phone),
-                        "a fully visible rider near the side stays on the map")
-                require(!style.showsOnMap(CGPoint(x: 10, y: 300), in: phone), "a clipped portrait becomes an edge badge")
-                return style.annotationCenterOffset.y
+        let normal = SocialMapMarkerStyle()
+        require(normal.pictureDiameter == 40 && normal.numberHeight == 20 && normal.distanceWidth == 96 &&
+                normal.clusterWidth == 27 && normal.initialsFontSize == 15 && normal.numberFontSize == 12 &&
+                normal.badgeSize == CGSize(width: 96, height: 62), "normal (1×) keeps the shipped marker appearance")
+        var previous = normal
+        for scale in FriendMarkerScale.allCases {
+            let style = SocialMapMarkerStyle(scale: scale)
+            let factor = style.pictureDiameter / normal.pictureDiameter
+            require(abs(factor - CGFloat(scale.factor)) < 0.0001 &&
+                    abs(style.numberFontSize / normal.numberFontSize - factor) < 0.0001 &&
+                    abs(style.initialsFontSize / normal.initialsFontSize - factor) < 0.0001 &&
+                    abs(style.numberHeight / normal.numberHeight - factor) < 0.0001,
+                    "portraits, initials and numbers scale together")
+            require(style.pictureDiameter >= previous.pictureDiameter && style.badgeSize.width >= previous.badgeSize.width &&
+                    style.badgeSize.height >= previous.badgeSize.height, "a larger choice never shrinks a marker")
+            for point in [CGPoint(x: -1000, y: -1000), CGPoint(x: 2000, y: 100), CGPoint(x: 100, y: 2000)] {
+                let center = SocialMapGeometry.edgeCenter(projected: point, bounds: phone, badgeSize: style.badgeSize)!
+                let rect = CGRect(x: center.x-style.badgeSize.width/2, y: center.y-style.badgeSize.height/2,
+                                  width: style.badgeSize.width, height: style.badgeSize.height)
+                require(phone.contains(rect), "every size up to 3× fits at the map edge on a small phone")
             }
-            require(Set(anchors).count == 1, "changing number size never moves an on-map portrait")
+            require(style.annotationSize.width <= style.pictureDiameter + 4 && style.annotationSize.height <= style.pictureDiameter + 4,
+                    "on-map hit areas cover only the visible portrait")
+            let anchor = style.annotationSize.height / 2 - style.annotationCenterOffset.y
+            require(abs(anchor - (style.pictureDiameter + 2)) < 0.0001, "the rider coordinate stays at the portrait's bottom centre")
+            require(style.showsOnMap(CGPoint(x: style.pictureDiameter / 2 + 12, y: 300), in: phone),
+                    "a fully visible rider near the side stays on the map")
+            require(!style.showsOnMap(CGPoint(x: 10, y: 300), in: phone), "a clipped portrait becomes an edge badge")
+            previous = style
         }
+        let triple = SocialMapMarkerStyle(scale: .triple)
+        require(triple.pictureDiameter == 120 && triple.numberFontSize == 36, "the largest choice is three times the normal marker")
+        require(SocialMapGeometry.edgeCenter(projected: CGPoint(x: -100, y: -100), bounds: CGRect(x: 0, y: 0, width: 50, height: 50),
+                                            badgeSize: triple.badgeSize) == nil, "tiny map areas never place oversized edge markers")
+        friendMarkerScaleMigration()
         try await SocialMaintenanceTests.run()
         print("Social publisher, expiry, reconnect/revocation, notices, HTTP retry, deletion, link and projected-edge regressions passed")
+    }
+
+    /// PR 610 stored separate picture and number sizes; the combined size
+    /// replaces them exactly once and never re-reads them.
+    private static func friendMarkerScaleMigration() {
+        var suites: [String] = []
+        func defaults(_ values: [String: Any]) -> UserDefaults {
+            let suite = "bicino.friend-marker-scale.\(UUID().uuidString)"
+            suites.append(suite)
+            let defaults = UserDefaults(suiteName: suite)!
+            for (key, value) in values { defaults.set(value, forKey: key) }
+            return defaults
+        }
+        let picture = FriendMarkerScale.legacyPictureKey, number = FriendMarkerScale.legacyNumberKey
+        require(FriendMarkerScale.load(from: defaults([:])) == .normal, "a new install starts at the normal size")
+        let medium = defaults([picture: "medium", number: "medium"])
+        require(FriendMarkerScale.load(from: medium) == .normal, "the previous default keeps the normal appearance")
+        require(medium.object(forKey: picture) == nil && medium.object(forKey: number) == nil,
+                "the separate PR 610 sizes are retired after migration")
+        let enlarged = defaults([picture: "large", number: "small"])
+        require(FriendMarkerScale.load(from: enlarged) == .oneAndQuarter, "an enlarged marker stays enlarged at the nearest size")
+        require(enlarged.integer(forKey: FriendMarkerScale.defaultsKey) == 125, "the migrated size is stored once")
+        require(FriendMarkerScale.load(from: defaults([number: "large"])) == .oneAndQuarter, "enlarged numbers alone also stay enlarged")
+        require(FriendMarkerScale.load(from: defaults([picture: "small", number: "small"])) == .normal,
+                "sizes below normal are no longer offered")
+        require(FriendMarkerScale.load(from: defaults([FriendMarkerScale.defaultsKey: 300, picture: "small"])) == .triple,
+                "a stored combined size is never migrated again")
+        require(FriendMarkerScale.resolved(0) == .normal && FriendMarkerScale.resolved(999) == .triple &&
+                FriendMarkerScale.resolved(180) == .double, "unknown stored or received values use the nearest offered size")
+        require(FriendMarkerScale.allCases.first == .normal && FriendMarkerScale.allCases.last?.factor == 3,
+                "choices run from normal to three times normal")
+        for suite in suites { UserDefaults.standard.removePersistentDomain(forName: suite) }
     }
 
     private static func profileMutationSerialization() async throws {

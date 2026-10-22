@@ -4319,8 +4319,15 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
         clientVersion >= ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_MINIMUM_CLIENT_VERSION &&
         social_riders::ready();
     bleSessionSupportsGroupRiders.store(supportsGroup, std::memory_order_release);
-    const uint32_t extendedFeatureFlags = supportsGroup
-        ? ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE : 0;
+    // The persisted friend-marker size applies whenever friends can be drawn,
+    // including before this session's relay starts.
+    const bool supportsFriendMarkerScale = social_riders::ENABLED &&
+        clientVersion >= ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION &&
+        social_riders::ready();
+    const uint32_t extendedFeatureFlags =
+        (supportsGroup ? ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE : 0) |
+        (supportsFriendMarkerScale
+             ? ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE : 0);
     if (map_profile_protocol::VISIBILITY_TERRAIN != 0 && clientVersion >=
         ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_MINIMUM_CLIENT_VERSION)
       featureFlags |= ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE;
@@ -5330,6 +5337,19 @@ static void handleMapSetting(uint8_t settingId, int32_t settingValue,
     Serial.printf("BLE Settings: tapToSwitchScreens = %d (saved)\n",
                   mapRenderSettings.tapToSwitchScreens);
     break;
+  case social_riders::MARKER_SCALE_SETTING_ID: {
+    // The phone re-sends this after every capability negotiation; only a
+    // change reaches flash. The overlay picks it up on its next tick.
+    const uint16_t scale = social_riders::clampMarkerScale(settingValue);
+    if (scale != mapRenderSettings.friendMarkerScalePercent) {
+      mapRenderSettings.friendMarkerScalePercent = scale;
+      settingsPrefs.begin("mapSettings", false);
+      settingsPrefs.putUShort("friendScale", scale);
+      settingsPrefs.end();
+    }
+    Serial.printf("BLE Settings: friendMarkerScale = %u%%\n", unsigned(scale));
+    break;
+  }
   case 12:
 #ifdef USE_ARDUINO_GFX
     if (!displayPowerManager.requestUserBrightness(settingValue)) {
@@ -6957,6 +6977,8 @@ static void loadSettingsFromNVS() {
   mapRenderSettings.mapNavigationRotationMode =
       map_profile_persistence::loadNavigationRotation(prefs);
   mapRenderSettings.tapToSwitchScreens = prefs.getUChar("tapSwitch", 0);
+  mapRenderSettings.friendMarkerScalePercent = social_riders::clampMarkerScale(
+      prefs.getUShort("friendScale", social_riders::MIN_MARKER_SCALE));
   uint8_t storedScreenMask =
       prefs.getUChar("screenMask", DEVICE_SCREEN_DEFAULT_MASK);
   if (!prefs.getBool("batteryScrV1", false)) {
