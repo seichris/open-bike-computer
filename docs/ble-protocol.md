@@ -993,6 +993,7 @@ Current setting IDs:
 | `36` | Automatic display off | `0` disabled, `1` enabled; defaults to enabled and is persisted as `autoDisplayOff`. When enabled, the connected display uses the configured inactivity timeouts (15 seconds before dimming and 45 seconds before panel off by default), except for navigation, workout, transfer, or attention holds. |
 | `37` | Map + Navigation rotation | `0` North Up, `1` Course Up; defaults to Course Up and is persisted as `navRotation`. |
 | `38` | Display inactivity timeouts | Atomic `Int32LE` pair: low 16 bits are seconds before dimming and high 16 bits are seconds before panel off. Defaults are `15` and `45`. Firmware accepts dim `5...600`, off `10...3600`, and requires off to be at least five seconds later than dim. The pair is persisted as one NVS value. |
+| `39` | Friend marker size | Percent of the normal friend marker, clamped to `100...300`; defaults to `100` and is persisted as `friendScale`. One global value for every map screen (Map, Map + Navigation and terrain/topographic Map instances); portraits, initials, distances and grouped counts scale together around the rider. The iPhone offers `100`, `125`, `150`, `200`, `250` and `300`, uses the same value for its own map, and sends it only after extended capability bit `1`. |
 
 In a dense scene, firmware reserves its bounded extrusion workspace from the
 nearest eligible buildings outward, preserves global back-to-front drawing,
@@ -1346,7 +1347,9 @@ configurable display inactivity timeouts. Version `27` requests bit `29`,
 versioned workout zones. Version `28` requests bit `30`, topographic contours.
 Version `29` requests bit `31`, diagnostic terrain experiments. Version `30`
 requests the extended feature word (TLV type `3`), with bit `0` for group riders.
-The current iPhone client negotiates version `30`; older direct Watch clients
+Version `31` requests extended bit `1`, the shared friend-marker size (setting
+ID `39`).
+The current iPhone client negotiates version `31`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
@@ -1381,7 +1384,11 @@ persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
 carries the 14-byte screen-configuration limits and support masks. TLV type `3`
 carries exactly four bytes of little-endian extended feature flags, independently
-numbered from the first word. Its bit `0` is `group_riders_v1`; absent means zero.
+numbered from the first word. Its bit `0` is `group_riders_v1` and bit `1` is
+`friend_marker_scale_v1`; absent means zero. Firmware sets bit `1` whenever it
+can draw friends (`FIRMWARE_DIAGNOSTICS=1` with its portrait memory ready),
+independent of this session's group-rider relay, so a stored size can be
+changed before friends appear. Firmware without bit `1` ignores setting `39`.
 Because extended bits restart at zero, generated constants for this word carry
 their own prefix (`EXTENDED_GROUP_RIDERS_V1_FEATURE` in C++,
 `extendedGroupRidersV1Feature` in Swift) so they cannot be mistaken for the
@@ -2691,7 +2698,12 @@ Image errors leave an initials fallback and never publish partial pixels.
 Age includes server-reported capture age plus monotonic elapsed time; retries
 cannot refresh an old fix. Rider markers fade at 15 seconds and expire at 60.
 The complete portrait/distance footprint is constrained to the round screen (or
-a rectangular safe boundary for 2.06-inch). Offscreen bearing is derived from
+a rectangular safe boundary for 2.06-inch). Setting `39` scales that footprint
+(64×62 px at normal size, up to 192×186 px at 300%) together with the portrait,
+which firmware resamples bilinearly from the 40×40 transfer image into a fixed
+120×120 PSRAM buffer per slot, and with the label fonts. The fit test, edge
+placement and overlap grouping all use the scaled footprint, so the transfer
+format is unchanged. Offscreen bearing is derived from
 fresh own GPS through the same visible map projection; its distance is straight
 line distance, distinct from the phone's confident same-route progress gap.
 Overlapping footprints show a count badge. Pan/zoom gestures hide the layer until

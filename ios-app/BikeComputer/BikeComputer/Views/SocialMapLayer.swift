@@ -30,10 +30,11 @@ final class SocialRiderBadge: UIView {
         initials.textAlignment = .center; initials.textColor = .white
         distance.textAlignment = .center
         distance.textColor = .label; distance.backgroundColor = .systemBackground
-        distance.layer.cornerRadius = 5; distance.clipsToBounds = true
+        distance.clipsToBounds = true
+        distance.adjustsFontSizeToFitWidth = true; distance.minimumScaleFactor = 0.6
         cluster.backgroundColor = .systemBackground; cluster.textColor = .label
         cluster.textAlignment = .center
-        cluster.layer.cornerRadius = 8; cluster.clipsToBounds = true; cluster.isHidden = true
+        cluster.clipsToBounds = true; cluster.isHidden = true
         addSubview(cluster)
         addSubview(picture); addSubview(initials); addSubview(distance); bringSubviewToFront(cluster)
     }
@@ -54,13 +55,15 @@ final class SocialRiderBadge: UIView {
         picture.frame = CGRect(x: (bounds.width-diameter)/2, y: 2, width: diameter, height: diameter)
         picture.layer.cornerRadius = diameter/2
         initials.frame = picture.frame
-        initials.font = .boldSystemFont(ofSize: 15 * style.pictureSize.scale)
+        initials.font = .boldSystemFont(ofSize: style.initialsFontSize)
         distance.frame = CGRect(x: (bounds.width-style.distanceWidth)/2, y: diameter+2,
                                 width: style.distanceWidth, height: style.numberHeight)
-        distance.font = .monospacedDigitSystemFont(ofSize: 12 * style.numberSize.scale, weight: .semibold)
+        distance.font = .monospacedDigitSystemFont(ofSize: style.numberFontSize, weight: .semibold)
+        distance.layer.cornerRadius = style.numberHeight / 4
         cluster.frame = CGRect(x: bounds.midX+diameter/2-style.clusterWidth/2, y: 0,
                                width: style.clusterWidth, height: style.numberHeight)
-        cluster.font = .boldSystemFont(ofSize: 12 * style.numberSize.scale)
+        cluster.font = .boldSystemFont(ofSize: style.numberFontSize)
+        cluster.layer.cornerRadius = style.numberHeight * 0.4
     }
     func update(_ rider: SocialRider, photo: UIImage?, meters: Double?, stale: Bool) {
         picture.image = photo; initials.text = photo == nil ? rider.profile.initials : nil

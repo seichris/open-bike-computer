@@ -300,6 +300,7 @@ private struct DeviceScreenInstanceEditorView: View {
                         bleManager.topographicContoursAvailable,
                     supportsTerrainExperiments: bleManager.supportsTerrainExperiments
                 )
+                FriendMarkerSizeSection(bleManager: bleManager)
             }
 
             if instance.type == .rideStats,
