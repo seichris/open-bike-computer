@@ -139,7 +139,7 @@ int main() {
                 (('writeActiveMap',), 128),
                 (('persistPredecessorAnchor',), 768),
             ):
-                values = [value for name, value in frames.items() if any(marker in name for marker in names) and "clE" not in name and "lambda" not in name and "Workspace" not in name and ".cold" not in name]
+                values = [value for name, value in frames.items() if any(marker in name for marker in names) and "clE" not in name and "$_" not in name and "lambda" not in name and "Workspace" not in name and ".cold" not in name]
                 self.assertEqual(len(values), 1, names)
                 self.assertLessEqual(values[0], limit, names)
 

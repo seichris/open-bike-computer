@@ -138,6 +138,8 @@ int main(){using namespace map_transfer;
     s.installer_.active.root="/VECTMAP";s.considerAutomaticMap(0,0,false);assert(!s.libraryAction_.empty());s.executeLibraryTask();
     assert(s.installer_.selected==0&&s.installer_.scans==0&&s.libraryRevision_==0);
     for(int tick=0;tick<100;++tick){clockMs+=5000;s.considerAutomaticMap(0,0,false);assert(s.libraryAction_.empty());}
+    // The upload/renderer ACK path schedules refresh directly, without a BLE request.
+    s.libraryAction_="refresh";s.executeLibraryTask();assert(!s.libraryAutomaticBlockKnown_);
   }
   for(bool throwInBegin:{false,true}){
     reset();MapTransferHttpServer s;s.libraryMaps_={city()};s.installer_.throwAfterSelect=!throwInBegin;s.activationState_.throwBegin=throwInBegin;

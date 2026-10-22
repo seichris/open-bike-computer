@@ -487,6 +487,7 @@ void MapTransferHttpServer::executeLibraryTask() try {
     StateGuard guard(*this);
     libraryMaps_ = std::move(maps); libraryKnown_ = inventory.ok; libraryPageOffset_ = 0;
     libraryAutomatic_ = automatic;
+    if (action == "refresh") libraryAutomaticBlockKnown_ = false;
     if (!result.ok) libraryError_ = result.code;
     else if (!inventory.ok) libraryError_ = inventory.code;
     else if (!policyError.empty()) libraryError_ = policyError;
