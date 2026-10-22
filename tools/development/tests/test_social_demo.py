@@ -120,5 +120,30 @@ class SocialDemoTests(unittest.TestCase):
         self.assertEqual(demo.safe_error(demo.DemoError(sensitive)),'DemoError')
         self.assertNotIn('never-print',demo.safe_error(RuntimeError(sensitive)))
 
+    def test_emoji_avatar_uses_versioned_profile_api_and_keeps_existing_picture(self):
+        class Response:
+            status_code = 200
+            def json(self): return {'id':'demo-profile','avatarID':'new-avatar','version':8}
+        class Client:
+            def request(self, method, url, **kwargs):
+                self.sent = (method, url, kwargs)
+                return Response()
+        client = Client()
+        account = demo.DemoAccount(client, None, {'target':'chrisusername'}, 'ava', 'Demo Ava')
+        account.authenticate = lambda: None
+        account.token = 'short-lived-test-token'
+        png = b'\x89PNG\r\n\x1a\n' + b'synthetic-image-fixture'
+        with patch.object(demo.Path, 'read_bytes', return_value=png):
+            result = account.ensure_avatar({'version':7,'avatarID':None})
+        method, url, payload = client.sent
+        self.assertEqual((method,url),('PUT',demo.ORIGIN+'/me/avatar'))
+        self.assertEqual(payload['params'],{'version':7})
+        self.assertEqual(payload['content'],png)
+        self.assertNotIn('json',payload)
+        self.assertEqual(payload['headers']['Content-Type'],'image/png')
+        self.assertEqual(result['avatarID'],'new-avatar')
+        with patch.object(demo.Path,'read_bytes',side_effect=AssertionError('Do not replace an existing avatar')):
+            self.assertEqual(account.ensure_avatar(result),result)
+
 
 if __name__ == '__main__': unittest.main()

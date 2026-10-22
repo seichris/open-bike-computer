@@ -6,6 +6,7 @@ Firebase credentials and short-lived test tokens never leave that container.
 """
 from __future__ import annotations
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -16,6 +17,7 @@ import signal
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
 
 PROJECT = 'bicino-dev'
@@ -37,6 +39,46 @@ def safe_error(error):
 
 
 RIDERS = (('ava', 'Demo Ava', 5.5), ('ben', 'Demo Ben', 3.7), ('cleo', 'Demo Cleo', 0.0))
+EMOJIS = {'ava': '🌻', 'ben': '🦊', 'cleo': '🐢'}
+
+
+def render_avatars():
+    """Render system emoji on the operator's Mac; no font/image bundle is shipped."""
+    if sys.platform != 'darwin': raise DemoError('Emoji avatars require the Mac operator')
+    program = r'''
+import AppKit
+import Foundation
+let entries: [(String, String, NSColor)] = [
+    ("ava", "🌻", NSColor(red: 1, green: 0.94, blue: 0.73, alpha: 1)),
+    ("ben", "🦊", NSColor(red: 0.87, green: 0.94, blue: 1, alpha: 1)),
+    ("cleo", "🐢", NSColor(red: 0.85, green: 0.96, blue: 0.86, alpha: 1))
+]
+guard let font = NSFont(name: "AppleColorEmoji", size: 168) else { exit(1) }
+var output: [String: String] = [:]
+for (slug, emoji, background) in entries {
+    guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 256, pixelsHigh: 256,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+        let context = NSGraphicsContext(bitmapImageRep: bitmap) else { exit(1) }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    background.setFill(); NSBezierPath(rect: NSRect(x: 0, y: 0, width: 256, height: 256)).fill()
+    let text = NSAttributedString(string: emoji, attributes: [.font: font])
+    let size = text.size()
+    text.draw(at: NSPoint(x: (256-size.width)/2, y: (256-size.height)/2))
+    context.flushGraphics(); NSGraphicsContext.restoreGraphicsState()
+    guard let data = bitmap.representation(using: .png, properties: [:]) else { exit(1) }
+    output[slug] = data.base64EncodedString()
+}
+print(String(data: try JSONSerialization.data(withJSONObject: output), encoding: .utf8)!)
+'''
+    with tempfile.TemporaryDirectory(prefix='bicino-demo-emoji-') as temporary:
+        result = subprocess.run(['xcrun', 'swift', '-module-cache-path', temporary, '-'],
+                                input=program.encode(), capture_output=True)
+    if result.returncode: raise DemoError('Could not render system emoji avatars')
+    images = json.loads(result.stdout)
+    if set(images) != set(EMOJIS): raise DemoError('Invalid rendered avatars')
+    return images
 
 
 def identity(target, slug):
@@ -97,11 +139,13 @@ class DemoAccount:
         if claims.get('uid') != self.uid or claims.get('aud') != PROJECT: raise DemoError('Test identity mismatch')
         self.token = value['idToken']; self.token_deadline = time.monotonic()+min(3000, int(value['expiresIn'])-60)
 
-    def call(self, method, path, body=None):
+    def call(self, method, path, body=None, *, content=None, params=None):
         self.authenticate()
         if not path.startswith('/') or '..' in path: raise DemoError('Invalid API path')
-        response = self.client.request(method, ORIGIN+path, json=body,
-            headers={'Authorization': 'Bearer '+self.token, 'Idempotency-Key': str(uuid.uuid4())})
+        headers = {'Authorization': 'Bearer '+self.token, 'Idempotency-Key': str(uuid.uuid4())}
+        payload = {'json': body} if content is None else {'content': content}
+        if content is not None: headers['Content-Type'] = 'image/png'
+        response = self.client.request(method, ORIGIN+path, params=params, headers=headers, **payload)
         if response.status_code >= 300:
             try: code = response.json().get('code', 'request_failed')
             except ValueError: code = 'request_failed'
@@ -127,6 +171,13 @@ class DemoAccount:
                 'displayName': self.name, 'privacy': {'notifications': False, 'friendNotifications': False, 'rideNotifications': False}})
         self.profile_id = profile['id']
         return profile
+
+    def ensure_avatar(self, profile):
+        if profile.get('avatarID'): return profile
+        data = Path(f'/tmp/bicino-social-demo-avatar-{self.slug}.png').read_bytes()
+        if not data.startswith(b'\x89PNG\r\n\x1a\n') or len(data) > 512000:
+            raise DemoError('Invalid demo avatar')
+        return self.call('PUT', '/me/avatar', content=data, params={'version': profile['version']})
 
     def change_consent(self, target_id, enabled):
         path = f'/friend-sharing/{target_id}/consent'
@@ -167,6 +218,10 @@ def run_inside(args):
         target = accounts[0].call('GET', '/profiles/by-username/'+config['target'])
         if target['username'] != config['target'] or target['id'] in {p['id'] for p in profiles}:
             raise DemoError('Invalid target rider')
+        if args.action == 'avatars':
+            updated = [account.ensure_avatar(profile) for account, profile in zip(accounts, profiles)]
+            print(json.dumps({'riders': [{'displayName': account.name, 'emoji': EMOJIS[account.slug],
+                'avatarID': profile['avatarID']} for account, profile in zip(accounts, updated)]})); return
         if args.action == 'seed':
             requests = [account.call('POST', '/friend-requests', {'profileID': target['id']}) for account in accounts]
             result = {'running': False, 'targetUsername': config['target'], 'riders': [
@@ -231,6 +286,7 @@ def process_alive():
 def operate(args):
     source = Path(__file__).read_text()
     payload = {'action': args.action, 'duration': args.duration, 'program': source}
+    if args.action == 'avatars': payload['avatars'] = render_avatars()
     if args.action == 'seed':
         if not args.xcconfig or not args.target: raise DemoError('seed requires --xcconfig and --target')
         values = {}
@@ -242,7 +298,7 @@ def operate(args):
         if not re.fullmatch(r'[A-Za-z0-9_-]{20,100}', key): raise DemoError('Missing public Dev client API key')
         target = args.target.lstrip('@').lower(); identity(target, 'ava')
         payload['config'] = {'project': PROJECT, 'origin': ORIGIN, 'apiKey': key, 'target': target}
-    bootstrap = '''import json,os,pathlib,subprocess,sys
+    bootstrap = '''import base64,json,os,pathlib,subprocess,sys
 p=json.loads(sys.stdin.read())
 root=pathlib.Path("/opt/bicino-social-dev/demo-friends");root.mkdir(mode=0o700,exist_ok=True)
 def write(path,text):
@@ -254,6 +310,15 @@ if "config" in p:write(config,json.dumps(p["config"]))
 if not config.exists():raise SystemExit("Run seed first")
 for src,dst in [(program,"/tmp/bicino-social-demo.py"),(config,"/tmp/bicino-social-demo-config.json")]:
  subprocess.run(["docker","cp",str(src),"bicino-social-dev-social-api-1:"+dst],check=True,capture_output=True)
+if "avatars" in p:
+ if set(p["avatars"])!={"ava","ben","cleo"}:raise SystemExit("Invalid demo avatar set")
+ for slug,value in p["avatars"].items():
+  data=base64.b64decode(value,validate=True)
+  if len(data)>512000 or not data.startswith(b"\\x89PNG\\r\\n\\x1a\\n"):raise SystemExit("Invalid demo avatar")
+  path=root/("avatar-"+slug+".png")
+  fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+  with os.fdopen(fd,"wb") as f:f.write(data)
+  subprocess.run(["docker","cp",str(path),"bicino-social-dev-social-api-1:/tmp/bicino-social-demo-avatar-"+slug+".png"],check=True,capture_output=True)
 cmd=["docker","exec","--user","0","bicino-social-dev-social-api-1","python","/tmp/bicino-social-demo.py","--inside-container",p["action"]]
 if p["action"]=="run":
  current=json.loads(subprocess.check_output(cmd[:-1]+["status"]))
@@ -274,7 +339,7 @@ else:subprocess.run(cmd,check=True)
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inside-container', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('action', choices=['seed', 'run', 'status', 'stop'])
+    parser.add_argument('action', choices=['seed', 'avatars', 'run', 'status', 'stop'])
     parser.add_argument('--target', help='Your Dev username, for seed')
     parser.add_argument('--xcconfig', help='Bicino Dev native client configuration, for seed')
     parser.add_argument('--duration', type=int, default=3600, help='Simulation seconds, at most four hours (default: one hour)')

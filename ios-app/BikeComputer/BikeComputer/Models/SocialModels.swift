@@ -179,10 +179,36 @@ struct SocialLinkTarget {
     }
 }
 
+enum SocialMapMarkerSize: String, CaseIterable, Identifiable {
+    case small, medium, large
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+    var scale: CGFloat {
+        switch self { case .small: 0.8; case .medium: 1; case .large: 1.3 }
+    }
+    static func resolved(_ rawValue: String) -> Self { Self(rawValue: rawValue) ?? .medium }
+}
+
+struct SocialMapMarkerStyle: Equatable {
+    static let pictureDefaultsKey = "social.map.pictureSize.v1"
+    static let numberDefaultsKey = "social.map.numberSize.v1"
+    var pictureSize: SocialMapMarkerSize = .medium
+    var numberSize: SocialMapMarkerSize = .medium
+    var pictureDiameter: CGFloat { 40 * pictureSize.scale }
+    var numberHeight: CGFloat { 20 * numberSize.scale }
+    var distanceWidth: CGFloat { 96 * numberSize.scale }
+    var clusterWidth: CGFloat { 27 * numberSize.scale }
+    var badgeSize: CGSize {
+        CGSize(width: max(distanceWidth, pictureDiameter + clusterWidth / 2 + 8),
+               height: pictureDiameter + numberHeight + 2)
+    }
+}
+
 /// Projected coordinates already include camera rotation, panning and perspective.
 enum SocialMapGeometry {
-    static func edgeCenter(projected: CGPoint, bounds: CGRect) -> CGPoint? {
-        let safe = bounds.insetBy(dx: 42, dy: 70)
+    static func edgeCenter(projected: CGPoint, bounds: CGRect,
+                           badgeSize: CGSize = CGSize(width: 48, height: 60)) -> CGPoint? {
+        let safe = bounds.insetBy(dx: badgeSize.width / 2 + 18, dy: badgeSize.height / 2 + 40)
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
         let dx = projected.x-center.x, dy = projected.y-center.y
         guard dx.isFinite, dy.isFinite, safe.width > 0, safe.height > 0,

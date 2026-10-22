@@ -418,6 +418,25 @@ struct SocialRuntimeTests {
             require((edge.x-233)*dx>=0 && (edge.y-233)*dy>=0,"edge follows the projected point after panning or rotation")
         }
         require(abs(SocialMapGeometry.edgeCenter(projected:CGPoint(x:-100,y:100),bounds:bounds)!.x-42)<0.00001,"a panned rider stays on the projected side of the map")
+        for picture in SocialMapMarkerSize.allCases {
+            for numbers in SocialMapMarkerSize.allCases {
+                let style = SocialMapMarkerStyle(pictureSize: picture, numberSize: numbers)
+                let phoneBounds = CGRect(x: 0, y: 0, width: 320, height: 568)
+                for point in [CGPoint(x: -1000, y: -1000), CGPoint(x: 2000, y: 100), CGPoint(x: 100, y: 2000)] {
+                    let center = SocialMapGeometry.edgeCenter(projected: point, bounds: phoneBounds, badgeSize: style.badgeSize)!
+                    let rect = CGRect(x: center.x-style.badgeSize.width/2, y: center.y-style.badgeSize.height/2,
+                                      width: style.badgeSize.width, height: style.badgeSize.height)
+                    require(phoneBounds.contains(rect), "every picture/number combination fits at the map edge on a small phone")
+                }
+            }
+        }
+        require(SocialMapMarkerSize.resolved("unknown") == .medium, "invalid persisted marker settings use the default")
+        let pictureOnly = SocialMapMarkerStyle(pictureSize: .large)
+        let numbersOnly = SocialMapMarkerStyle(numberSize: .large)
+        require(pictureOnly.pictureDiameter > numbersOnly.pictureDiameter && pictureOnly.numberHeight < numbersOnly.numberHeight,
+                "portrait size and number readability can be adjusted independently")
+        require(SocialMapGeometry.edgeCenter(projected: CGPoint(x: -100, y: -100), bounds: CGRect(x: 0, y: 0, width: 50, height: 50),
+                                            badgeSize: pictureOnly.badgeSize) == nil, "tiny map areas never place oversized edge markers")
         try await SocialMaintenanceTests.run()
         print("Social publisher, expiry, reconnect/revocation, notices, HTTP retry, deletion, link and projected-edge regressions passed")
     }

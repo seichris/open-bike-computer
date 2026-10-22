@@ -31,6 +31,18 @@ tools/social-demo status
 tools/social-demo stop
 ```
 
+To give the existing test friends simple pictures, run `tools/social-demo avatars`
+on the Mac. It renders the system emoji locally (Ava 🌻, Ben 🦊, Cleo 🐢) and
+uploads them through each synthetic account's ordinary profile-avatar API.
+Existing pictures are retained on repeat runs. No emoji font or image bundle is
+distributed with the app. Open Friends again to refresh the pictures.
+
+On the iPhone map, open **Layers → Friends** to set **Friend Picture Size** and
+**Friend Number Size** independently. Each offers Small, Medium and Large,
+persists on this phone, and updates the map without restarting. Number size
+affects distance labels and grouped-rider counts; picture size affects both
+map portraits and portraits at the map edge.
+
 Run defaults to one hour and accepts 30 seconds through four hours. The test
 riders share **synthetic** locations with your accepted Dev account. Ava moves
 faster, Ben moves slower, and Cleo stops publishing for 90 seconds in each
