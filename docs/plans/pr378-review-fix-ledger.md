@@ -31,6 +31,13 @@ solely to record its artifact result.
 No 206 qualification, device access, flash, application installation, service
 deployment, target-5 promotion, or PR merge is included in this refresh.
 
+Main advanced during verification to `71ff5f6c4d77e5cae395589e9f6563e127e08453`.
+Merge its two changed approval/deployment files without changing their contents.
+There are no additional app/firmware/extractor source changes in that merge.
+These inherited approvals remain bound to their existing images and clients;
+they do not qualify this POI worker, new firmware, or production target 5.
+Recheck deployment contracts and start fresh final-head CI/budget evidence.
+
 ### Simulator verification follow-up
 
 Fresh run `39800725264` passed the POI qualification firmware and full app

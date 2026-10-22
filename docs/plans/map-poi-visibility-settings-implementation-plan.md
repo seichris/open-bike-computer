@@ -41,8 +41,12 @@ or enabled merely because it exists in the branch.
 
 ### October 22 current-main refresh
 
-Integrate GitHub `main` at `ff0bb8bba5af1f5845e8959b42c4916808557565`
-into the existing PR head `7a030da46c3a25cfb882d0f7318b8003348b9c0a`.
+Integrate GitHub `main` through `71ff5f6c4d77e5cae395589e9f6563e127e08453`.
+The first merge integrated `ff0bb8bba5af1f5845e8959b42c4916808557565`
+into `7a030da46c3a25cfb882d0f7318b8003348b9c0a`; the follow-up brings
+main's production worker approvals/pins into the repaired PR head `d4a17a27`.
+Those existing approvals apply to their recorded legacy images/clients, not
+to this PR's target-5 worker or firmware, and grant no new POI rollout approval.
 Main now owns extended CAP2 bit 1/client 31 for shared friend-marker sizing
 (setting 39). Preserve that released assignment and move POIs/Nearby to
 **extended bit 2/client 32**. Regenerate both BLE bindings and native preview
