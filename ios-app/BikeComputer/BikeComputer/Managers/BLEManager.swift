@@ -503,6 +503,9 @@ enum DeviceBLEProtocol {
     static let mapPlusNavigationRotationSettingID: UInt8 = 37
     static let automaticDisplayOffSettingID: UInt8 = 36
     static let displayInactivityTimeoutsSettingID: UInt8 = 38
+    /// One friend-marker size (percent, 100–300) for every device map screen.
+    static let friendMarkerScaleSettingID: UInt8 = 39
+    static let friendMarkerScaleSettingCoalescingKey = "friend-marker-scale-setting"
     static let currentScreenMaskMarker: Int32 = 1 << 30
     static let defaultMapStreetLabelsEnabled = true
     static let defaultMapPlusNavigationStreetLabelsEnabled = false
@@ -1076,6 +1079,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsMapPois: Bool = false
     @Published private(set) var supportsMapNavigationOrientation = false
     @Published private(set) var supportsGroupRiders = false
+    @Published private(set) var supportsFriendMarkerScale = false
+    /// Shared by the iPhone map and every bike-computer map screen.
+    @Published private(set) var friendMarkerScale: FriendMarkerScale = .normal
     var onSocialAcknowledgement: ((Data) -> Void)?
     @Published private(set) var supportsTerrainExperiments = false
     @Published private(set) var supportsTopographicContours = false
@@ -1604,6 +1610,7 @@ class BLEManager: NSObject, ObservableObject {
     private var hasSentScreenSettingsForConnection = false
     private var hasSentAutomaticDisplayOffForConnection = false
     private var hasSentDisplayInactivityTimeoutsForConnection = false
+    private var hasSentFriendMarkerScaleForConnection = false
     private var isSendingNegotiatedMapProfiles = false
     private var lastSentPhoneBatteryPercent: Int32?
     private var lastSentPhoneBatteryCharging: Bool?
@@ -1904,6 +1911,7 @@ class BLEManager: NSObject, ObservableObject {
             ), 1)
         }
         tapToSwitchScreens = defaults.object(forKey: SettingsKeys.tapToSwitchScreens) as? Bool ?? false
+        friendMarkerScale = FriendMarkerScale.load(from: defaults)
         var storedScreensMask = defaults.object(forKey: SettingsKeys.enabledDeviceScreensMask) as? Int
             ?? DeviceScreen.defaultScreensMask
         if !defaults.bool(forKey: SettingsKeys.batteryStatusScreenMigrated) {
@@ -2262,6 +2270,7 @@ class BLEManager: NSObject, ObservableObject {
         defaults.set(mapPlusNavigationLabelTextSize, forKey: SettingsKeys.mapPlusNavigationLabelTextSize)
         defaults.set(mapPlusNavigationLabelOrientation, forKey: SettingsKeys.mapPlusNavigationLabelOrientation)
         defaults.set(tapToSwitchScreens, forKey: SettingsKeys.tapToSwitchScreens)
+        defaults.set(friendMarkerScale.rawValue, forKey: FriendMarkerScale.defaultsKey)
         enabledDeviceScreensMask = DeviceScreen.normalizedMask(enabledDeviceScreensMask)
         defaultDeviceScreen = DeviceScreen.fallbackDefault(
             for: defaultDeviceScreen.rawValue,
@@ -5352,6 +5361,8 @@ class BLEManager: NSObject, ObservableObject {
             displayOffTimeout = off
         } else if id == DeviceBLEProtocol.mapPlusNavigationRotationSettingID {
             mapPlusNavigationRotationMode = value == 0 ? 0 : 1
+        } else if id == DeviceBLEProtocol.friendMarkerScaleSettingID {
+            friendMarkerScale = .resolved(Int(value))
         }
         if hasReceivedDeviceCapabilities,
            !supportsIndependentMapProfiles,
@@ -5374,6 +5385,11 @@ class BLEManager: NSObject, ObservableObject {
            (!hasReceivedDeviceCapabilities ||
             !supportsDisplayInactivityTimeouts) {
             log("Display inactivity timeouts not sent: connected firmware does not advertise support")
+            return false
+        }
+        if id == DeviceBLEProtocol.friendMarkerScaleSettingID,
+           (!hasReceivedDeviceCapabilities || !supportsFriendMarkerScale) {
+            log("Friend marker size saved for the iPhone map only: connected firmware does not advertise support")
             return false
         }
         if Self.isIndependentMapProfileSetting(id),
@@ -5408,6 +5424,8 @@ class BLEManager: NSObject, ObservableObject {
             deviceValue = Int32(mapPlusNavigationRotationMode)
         } else if id == DeviceBLEProtocol.automaticDisplayOffSettingID {
             deviceValue = value == 0 ? 0 : 1
+        } else if id == DeviceBLEProtocol.friendMarkerScaleSettingID {
+            deviceValue = Int32(friendMarkerScale.rawValue)
         } else if id == DeviceBLEProtocol.mapPlusNavigationBirdsEyePerspectiveSettingID {
             let maximum = supportsBirdsEyeMapNavigationStrongerPerspective
                 ? MapNavigationBirdsEyePerspective.maximum.rawValue
@@ -5428,8 +5446,20 @@ class BLEManager: NSObject, ObservableObject {
             hasSentAutomaticDisplayOffForConnection = true
         } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
             hasSentDisplayInactivityTimeoutsForConnection = true
+        } else if id == DeviceBLEProtocol.friendMarkerScaleSettingID {
+            hasSentFriendMarkerScaleForConnection = true
         }
         return true
+    }
+
+    /// Saves the shared friend-marker size, which the iPhone map uses at once,
+    /// and sends it to a connected bike computer that supports it.
+    @discardableResult
+    func setFriendMarkerScale(_ scale: FriendMarkerScale) -> Bool {
+        sendSetting(
+            id: DeviceBLEProtocol.friendMarkerScaleSettingID,
+            value: Int32(scale.rawValue)
+        )
     }
 
     func sendStreetLabelDensity(for screen: DeviceScreen) {
@@ -5475,6 +5505,8 @@ class BLEManager: NSObject, ObservableObject {
         } else if id == DeviceBLEProtocol.displayInactivityTimeoutsSettingID {
             coalescingKey = DeviceBLEProtocol
                 .displayInactivityTimeoutsSettingCoalescingKey
+        } else if id == DeviceBLEProtocol.friendMarkerScaleSettingID {
+            coalescingKey = DeviceBLEProtocol.friendMarkerScaleSettingCoalescingKey
         } else {
             coalescingKey = nil
         }
@@ -5490,6 +5522,12 @@ class BLEManager: NSObject, ObservableObject {
                 guard let self else { return }
                 self.hasSentDisplayInactivityTimeoutsForConnection = false
                 self.log("Display inactivity timeouts were dropped before transmission")
+            }
+        } else if id == DeviceBLEProtocol.friendMarkerScaleSettingID {
+            onDrop = { [weak self] in
+                guard let self else { return }
+                self.hasSentFriendMarkerScaleForConnection = false
+                self.log("Friend marker size was dropped before transmission")
             }
         } else {
             onDrop = nil
@@ -5719,6 +5757,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsTerrainExperiments = false
         supportsTopographicContours = false
         supportsGroupRiders = false
+        supportsFriendMarkerScale = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -5946,6 +5985,7 @@ class BLEManager: NSObject, ObservableObject {
     private func sendScreenSettingsAfterCapabilityNegotiation() {
         sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
         sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
+        sendFriendMarkerScaleAfterCapabilityNegotiation()
         guard supportsDeviceSettings,
               hasReceivedDeviceCapabilities,
               !hasSentScreenSettingsForConnection else {
@@ -5962,6 +6002,18 @@ class BLEManager: NSObject, ObservableObject {
         if supportsBatteryStatusScreen {
             sendPhoneBatteryStatus(force: true)
         }
+    }
+
+    /// The device keeps the size in NVS; re-sending once per connection applies
+    /// a change made on the iPhone while disconnected.
+    private func sendFriendMarkerScaleAfterCapabilityNegotiation() {
+        guard supportsDeviceSettings,
+              hasReceivedDeviceCapabilities,
+              supportsFriendMarkerScale,
+              !hasSentFriendMarkerScaleForConnection else {
+            return
+        }
+        setFriendMarkerScale(friendMarkerScale)
     }
 
     private func sendAutomaticDisplayOffSettingAfterCapabilityNegotiation() {
@@ -7177,6 +7229,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsTerrainExperiments = false
         supportsTopographicContours = false
         supportsGroupRiders = false
+        supportsFriendMarkerScale = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -7214,6 +7267,7 @@ class BLEManager: NSObject, ObservableObject {
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
         hasSentDisplayInactivityTimeoutsForConnection = false
+        hasSentFriendMarkerScaleForConnection = false
         isSendingNegotiatedMapProfiles = false
         clearPendingPowerButtonHonkConfiguration()
     }
@@ -8974,10 +9028,13 @@ class BLEManager: NSObject, ObservableObject {
            (supportsAutomaticDisplayOff &&
                 !hasSentAutomaticDisplayOffForConnection ||
             supportsDisplayInactivityTimeouts &&
-                !hasSentDisplayInactivityTimeoutsForConnection) {
+                !hasSentDisplayInactivityTimeoutsForConnection ||
+            supportsFriendMarkerScale &&
+                !hasSentFriendMarkerScaleForConnection) {
             DispatchQueue.main.async { [weak self] in
                 self?.sendAutomaticDisplayOffSettingAfterCapabilityNegotiation()
                 self?.sendDisplayInactivityTimeoutsAfterCapabilityNegotiation()
+                self?.sendFriendMarkerScaleAfterCapabilityNegotiation()
             }
         }
     }
@@ -10667,6 +10724,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsTerrainExperiments = false
         supportsTopographicContours = false
         supportsGroupRiders = false
+        supportsFriendMarkerScale = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -10697,6 +10755,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         hasSentScreenSettingsForConnection = false
         hasSentAutomaticDisplayOffForConnection = false
         hasSentDisplayInactivityTimeoutsForConnection = false
+        hasSentFriendMarkerScaleForConnection = false
         hasSentMapProfileForConnection = false
         hasSentMapNavigationProfileForConnection = false
         clearPendingPowerButtonHonkConfiguration()
@@ -10841,6 +10900,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let hasExplicitInvalidGPSHeading =
             flags & DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask != 0
         supportsGroupRiders = extendedFeatureFlags & RideBLEGeneratedProtocolV1.extendedGroupRidersV1Feature != 0
+        let hasFriendMarkerScale = extendedFeatureFlags &
+            RideBLEGeneratedProtocolV1.extendedFriendMarkerScaleV1Feature != 0
+        if supportsFriendMarkerScale != hasFriendMarkerScale {
+            hasSentFriendMarkerScaleForConnection = false
+        }
+        supportsFriendMarkerScale = hasFriendMarkerScale
         let hasScopedWatchController =
             flags & DeviceBLEProtocol.scopedWatchControllerCapabilityMask != 0
         let hasRemoteDeviceDebug =

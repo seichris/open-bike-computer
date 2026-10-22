@@ -72,10 +72,14 @@ int main(int argc, char **argv) {
   uint32_t baseline = 0;
   uint32_t smallestFreeBlock = UINT32_MAX;
   lv_mem_monitor_t memory{};
+  constexpr uint16_t scales[] = {100, 125, 150, 200, 250, 300};
   for (unsigned frame = 0; frame < 600; ++frame) {
     social_riders::beginFrame();
     // Pan across the viewport; alternate portraits/initials, stale/fresh,
-    // clusters, rim distance labels, covered map and no-map orientation.
+    // clusters, rim distance labels, covered map and no-map orientation, and
+    // resize every badge in place through each friend-marker size twice.
+    const uint16_t scale = scales[(frame / 50) % 6];
+    const auto badge = social_riders::badgeGeometry(scale);
     for (size_t i = 0; i < social_riders::CAPACITY; ++i) {
       rider.imageReady = (i + frame / 30) % 2 == 0;
       rider.imageHash[0] = static_cast<uint8_t>(i + 1);
@@ -83,9 +87,10 @@ int main(int argc, char **argv) {
       rider.age = frame % 60 < 30 ? 0 : 20;
       const auto point = social_riders::edge(
           std::sin(i * 0.785398 + frame * 0.02),
-          std::cos(i * 0.785398 + frame * 0.02), width, height, round);
+          std::cos(i * 0.785398 + frame * 0.02), width, height, round,
+          badge.halfWidth(), badge.halfHeight());
       social_riders::draw(i, lv_screen_active(), point.x, point.y, rider,
-                          frame % 3 != 0, 800 + frame % 50, 0);
+                          frame % 3 != 0, 800 + frame % 50, 0, scale);
       if (frame % 10 == 0) social_riders::addClusterMember(i);
     }
     if (frame % 2) social_riders::showFallbackOrientation(lv_screen_active(), frame % 4 == 1);

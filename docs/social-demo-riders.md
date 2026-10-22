@@ -39,13 +39,20 @@ emoji set over an older synthetic picture, use `tools/social-demo avatars --repl
 Only successful uploads report the applied emoji. No emoji font or image bundle is
 distributed with the app. Open Friends again to refresh the pictures.
 
-On the iPhone map, open **Layers → Friends** to set **Friend Picture Size** and
-**Friend Number Size** independently. Each offers Small, Medium and Large,
-persists on this phone, and updates the map without restarting. Number size
-affects distance labels and grouped-rider counts; picture size affects both
-map portraits and portraits at the map edge. A rider's position stays at the
-bottom of its map portrait whatever number size is chosen, and only clipped or
-off-screen riders move to the map edge.
+On the iPhone map, open **Layers → Friends → Friend Marker Size** and choose
+Normal (1×), 1.25×, 1.5×, 2×, 2.5× or 3×. One size scales friend pictures
+together with their distances and grouped-rider counts, persists on this phone,
+and updates the map without restarting. A rider's position stays at the bottom
+of its map portrait at every size, and only clipped or off-screen riders move
+to the map edge. The previous default (Medium) keeps the normal size; an earlier
+Large picture or number choice becomes 1.25×.
+
+The connected bike computer uses the same size on Map, Map + Navigation and
+terrain/topographic Map screens. Its map-screen settings in Bicino (each Map or
+Map + Navigation screen, or the gear beside it on older screen lists) show the
+same **Friends → Friend Marker Size** control. Changing it anywhere changes it
+everywhere, and the device keeps the size after a restart. It appears only for
+developer firmware that can draw friends.
 
 Run defaults to one hour and accepts 30 seconds through four hours. The test
 riders share **synthetic** locations with your accepted Dev account. Ava moves

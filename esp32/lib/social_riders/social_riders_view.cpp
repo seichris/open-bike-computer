@@ -2,8 +2,44 @@
 #include <esp_heap_caps.h>
 #include <cstdio>
 namespace social_riders {
-struct Badge { lv_obj_t *root=nullptr,*portrait=nullptr,*initials=nullptr,*label=nullptr,*countLabel=nullptr; unsigned count=0,nextCount=0; bool seen=false; PresentationCache cache; uint8_t *pixels=nullptr; std::array<uint8_t,32> hash{}; };
+struct Badge { lv_obj_t *root=nullptr,*frame=nullptr,*portrait=nullptr,*initials=nullptr,*label=nullptr,*countLabel=nullptr; unsigned count=0,nextCount=0; bool seen=false,canvasReady=false; PresentationCache cache; uint8_t *pixels=nullptr; size_t capacity=0; std::array<uint8_t,32> hash{}; uint16_t scale=0; };
 static Badge badges[CAPACITY];
+static const lv_font_t *font(int pixels) {
+  switch(pixels) {
+  case 14: return &lv_font_montserrat_14;
+  case 16: return &lv_font_montserrat_16;
+  case 18: return &lv_font_montserrat_18;
+  case 24: return &lv_font_montserrat_24;
+  case 32: return &lv_font_montserrat_32;
+  case 38: return &lv_font_montserrat_38;
+  case 48: return &lv_font_montserrat_48;
+  default: return &lv_font_montserrat_12;
+  }
+}
+// Resizes every part together; the badge stays centred on its rider.
+static void applyScale(Badge &b,uint16_t scale) {
+  const auto g=badgeGeometry(scale);
+  lv_obj_set_size(b.root,g.width,g.height);
+  lv_obj_set_size(b.frame,g.frame,g.frame);lv_obj_set_pos(b.frame,g.frameX,0);
+  lv_obj_set_style_radius(b.frame,g.frame/2,0);
+  lv_obj_set_pos(b.portrait,g.inset,g.inset);
+  // The PSRAM buffer only grows, and only when a larger size is first chosen;
+  // a failed allocation keeps the initials fallback.
+  const size_t needed=portraitBytes(g.portrait);
+  if(needed>b.capacity) {
+    auto *grown=static_cast<uint8_t *>(heap_caps_malloc(needed,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+    if(grown) {if(b.pixels)heap_caps_free(b.pixels);b.pixels=grown;b.capacity=needed;}
+  }
+  b.canvasReady=b.pixels && b.capacity>=needed;
+  if(b.canvasReady) {
+    maskPortrait(b.pixels+size_t(g.portrait)*g.portrait*2,g.portrait,g.frame/2.0);
+    lv_canvas_set_buffer(b.portrait,b.pixels,g.portrait,g.portrait,LV_COLOR_FORMAT_RGB565A8);
+  }
+  lv_obj_set_style_text_font(b.initials,font(g.initialsFont),0);lv_obj_center(b.initials);
+  lv_obj_set_pos(b.countLabel,g.countX,0);lv_obj_set_style_text_font(b.countLabel,font(g.countFont),0);
+  lv_obj_set_style_text_font(b.label,font(g.labelFont),0);lv_obj_set_width(b.label,g.width);lv_obj_set_pos(b.label,0,g.labelY);
+  b.scale=scale;b.hash.fill(0); // Resample the portrait at the new size.
+}
 static lv_obj_t *orientation=nullptr;
 static bool orientationSeen=false;
 static bool orientationCourseUp=false;
@@ -40,12 +76,15 @@ void showFallbackOrientation(lv_obj_t *parent,bool courseUp) {
   if(created || wasHidden)lv_obj_move_foreground(orientation);
 }
 void addClusterMember(size_t slot) { if(slot<CAPACITY)++badges[slot].nextCount; }
-void draw(size_t slot,lv_obj_t *parent,double x,double y,const Rider &r,bool isEdge,double meters,uint32_t now) {
+void draw(size_t slot,lv_obj_t *parent,double x,double y,const Rider &r,bool isEdge,double meters,uint32_t now,uint16_t scale) {
   if(slot>=CAPACITY||!parent)return;
   auto &b=badges[slot];
   b.seen=true;
+  scale=clampMarkerScale(scale);
+  const auto geometry=badgeGeometry(scale);
   BadgePresentation next;
-  next.x=int(std::lround(x))-32;next.y=int(std::lround(y))-31;
+  next.x=int(std::lround(x))-geometry.width/2;next.y=int(std::lround(y))-geometry.height/2;
+  next.scale=scale;
   next.stale=r.ageMs(now)>=STALE_MS;next.portrait=r.imageReady;
   next.hash=r.imageHash;memcpy(next.initials.data(),r.initials,5);
   if(isEdge) {
@@ -57,27 +96,25 @@ void draw(size_t slot,lv_obj_t *parent,double x,double y,const Rider &r,bool isE
   const bool created=b.root==nullptr;
   const bool wasHidden=b.root && lv_obj_has_flag(b.root,LV_OBJ_FLAG_HIDDEN);
   if(!b.root) {
-    b.root=lv_obj_create(parent);lv_obj_remove_style_all(b.root);lv_obj_set_size(b.root,64,62);
+    b.root=lv_obj_create(parent);lv_obj_remove_style_all(b.root);
     lv_obj_remove_flag(b.root,static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE|LV_OBJ_FLAG_SCROLLABLE));
-    lv_obj_add_event_cb(b.root,[](lv_event_t *e){auto *b=static_cast<Badge *>(lv_event_get_user_data(e));b->root=nullptr;b->hash.fill(0);b->cache.hide();},LV_EVENT_DELETE,&b);
-    auto *frame=lv_obj_create(b.root);lv_obj_remove_style_all(frame);lv_obj_set_size(frame,44,44);lv_obj_set_pos(frame,10,0);
-    lv_obj_set_style_radius(frame,22,0);lv_obj_set_style_clip_corner(frame,true,0);
-    lv_obj_set_style_bg_color(frame,lv_color_hex(0x223344),0);lv_obj_set_style_bg_opa(frame,LV_OPA_COVER,0);
-    lv_obj_remove_flag(frame,static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE|LV_OBJ_FLAG_SCROLLABLE));
-    b.portrait=lv_canvas_create(frame);lv_obj_set_pos(b.portrait,2,2);
-    if(!b.pixels)b.pixels=static_cast<uint8_t *>(heap_caps_malloc(IMAGE_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
-    if(b.pixels)lv_canvas_set_buffer(b.portrait,b.pixels,40,40,LV_COLOR_FORMAT_RGB565);
-    b.initials=lv_label_create(frame);lv_obj_set_style_text_color(b.initials,lv_color_white(),0);lv_obj_center(b.initials);
-    b.countLabel=lv_label_create(b.root);lv_obj_set_pos(b.countLabel,38,0);
+    lv_obj_add_event_cb(b.root,[](lv_event_t *e){auto *b=static_cast<Badge *>(lv_event_get_user_data(e));b->root=nullptr;b->frame=nullptr;b->scale=0;b->hash.fill(0);b->cache.hide();},LV_EVENT_DELETE,&b);
+    b.frame=lv_obj_create(b.root);lv_obj_remove_style_all(b.frame);
+    lv_obj_set_style_bg_color(b.frame,lv_color_hex(0x223344),0);lv_obj_set_style_bg_opa(b.frame,LV_OPA_COVER,0);
+    lv_obj_remove_flag(b.frame,static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE|LV_OBJ_FLAG_SCROLLABLE));
+    b.portrait=lv_canvas_create(b.frame);
+    b.initials=lv_label_create(b.frame);lv_obj_set_style_text_color(b.initials,lv_color_white(),0);
+    b.countLabel=lv_label_create(b.root);
     lv_label_set_text(b.countLabel,"");
     lv_obj_set_style_bg_color(b.countLabel,lv_color_black(),0);lv_obj_set_style_bg_opa(b.countLabel,LV_OPA_COVER,0);
     lv_obj_set_style_text_color(b.countLabel,lv_color_white(),0);
-    b.label=lv_label_create(b.root);lv_obj_set_style_text_font(b.label,&lv_font_montserrat_12,0);lv_obj_set_width(b.label,64);lv_obj_set_pos(b.label,0,44);
+    b.label=lv_label_create(b.root);
     lv_obj_set_style_text_align(b.label,LV_TEXT_ALIGN_CENTER,0);lv_obj_set_style_text_color(b.label,lv_color_white(),0);
     lv_obj_set_style_bg_color(b.label,lv_color_black(),0);lv_obj_set_style_bg_opa(b.label,LV_OPA_80,0);
   }
-  if(r.imageReady && b.pixels) {
-    if(b.hash!=r.imageHash) {memcpy(b.pixels,r.image.data(),IMAGE_BYTES);b.hash=r.imageHash;lv_obj_invalidate(b.portrait);}
+  if(b.scale!=scale)applyScale(b,scale);
+  if(r.imageReady && b.canvasReady) {
+    if(b.hash!=r.imageHash) {scalePortrait(r.image.data(),b.pixels,geometry.portrait);b.hash=r.imageHash;lv_obj_invalidate(b.portrait);}
     lv_obj_clear_flag(b.portrait,LV_OBJ_FLAG_HIDDEN);lv_obj_add_flag(b.initials,LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_obj_add_flag(b.portrait,LV_OBJ_FLAG_HIDDEN);lv_obj_clear_flag(b.initials,LV_OBJ_FLAG_HIDDEN);

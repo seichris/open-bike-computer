@@ -309,6 +309,7 @@ private struct DeviceScreenInstanceEditorView: View {
                         bleManager.activeMapPoiDataHealthy &&
                         bleManager.activeMapPoiIndexHealthy
                 )
+                FriendMarkerSizeSection(bleManager: bleManager)
             }
 
             if instance.type == .rideStats,

@@ -31,7 +31,7 @@
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 31,
+    "current_client_version": 32,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -69,7 +69,8 @@
     "extended_feature_tlv_type": 3,
     "extended_features": {
       "group_riders_v1": {"bit": 0, "minimum_client_version": 30},
-      "map_pois": {"bit": 1, "minimum_client_version": 31}
+      "friend_marker_scale_v1": {"bit": 1, "minimum_client_version": 31},
+      "map_pois": {"bit": 2, "minimum_client_version": 32}
     }
   },
   "screen_types": {

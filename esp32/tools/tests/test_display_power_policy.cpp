@@ -253,9 +253,10 @@ int main() {
                      uint8_t{34}}) {
     assert(map_setting_redraw_policy::invalidatesMap(id));
   }
+  // 39, the friend-marker size, only changes the overlay drawn every tick.
   for (uint8_t id : {uint8_t{4}, uint8_t{5}, uint8_t{11}, uint8_t{12},
                      uint8_t{13}, uint8_t{14}, uint8_t{15}, uint8_t{23},
-                     uint8_t{24}, uint8_t{255}}) {
+                     uint8_t{24}, uint8_t{39}, uint8_t{255}}) {
     assert(!map_setting_redraw_policy::invalidatesMap(id));
   }
   assert(map_setting_redraw_policy::changesZoom(7));

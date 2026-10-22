@@ -74,13 +74,17 @@ int main() {
                 28);
   static_assert(device_capabilities_protocol::TOPOGRAPHIC_CONTOURS_FEATURE ==
                 (1UL << 30));
-  static_assert(device_capabilities_protocol::MAP_POIS_CLIENT_VERSION == 31);
+  static_assert(device_capabilities_protocol::MAP_POIS_CLIENT_VERSION == 32);
   static_assert(device_capabilities_protocol::MAP_POIS_FEATURE ==
-                (1UL << 1));
+                (1UL << 2));
   assert(!device_capabilities_protocol::supportsMapPois(30, true, true));
-  assert(!device_capabilities_protocol::supportsMapPois(31, false, true));
-  assert(!device_capabilities_protocol::supportsMapPois(31, true, false));
-  assert(device_capabilities_protocol::supportsMapPois(31, true, true));
+  assert(!device_capabilities_protocol::supportsMapPois(31, true, true));
+  assert(!device_capabilities_protocol::supportsMapPois(32, false, true));
+  assert(!device_capabilities_protocol::supportsMapPois(32, true, false));
+  assert(device_capabilities_protocol::supportsMapPois(32, true, true));
+  static_assert((device_capabilities_protocol::MAP_POIS_FEATURE &
+                 (ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE |
+                  ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE)) == 0);
   static_assert((device_capabilities_protocol::WORLD_RADIO_FEATURE &
                  (device_capabilities_protocol::RENDERER_BENCHMARK_SAMPLE_FEATURE |
                   device_capabilities_protocol::MAP_NAVIGATION_ORIENTATION_FEATURE |
@@ -129,6 +133,17 @@ int main() {
     assert(output[30 + index] == extendedGolden[index]);
   assert(device_capabilities_protocol::encodeCap2(
       0, extendedPower, true, output, extendedSize - 1, screens, sizeof(screens), 1) == 0);
+  static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE == 2);
+  static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION == 31);
+  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 32);
+  // The friend-marker size flag shares the extended word with group riders.
+  assert(device_capabilities_protocol::encodeCap2(
+      0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),
+      ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE |
+          ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE) == extendedSize);
+  const uint8_t friendScaleGolden[] = {3, 4, 3, 0, 0, 0};
+  for (size_t index = 0; index < sizeof(friendScaleGolden); ++index)
+    assert(output[30 + index] == friendScaleGolden[index]);
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
       0x00003fff, power, true, output, sizeof(output));
@@ -217,7 +232,7 @@ int main() {
       device_capabilities_protocol::MAP_POIS_FEATURE);
   const uint8_t expectedMapPois[] = {
       'C', 'A', 'P', '2', 1, 0x00, 0x00, 0x00, 0x00,
-      3, 4, 0x02, 0x00, 0x00, 0x00};
+      3, 4, 0x04, 0x00, 0x00, 0x00};
   assert(mapPoisSize == sizeof(expectedMapPois));
   for (size_t index = 0; index < mapPoisSize; ++index)
     assert(output[index] == expectedMapPois[index]);

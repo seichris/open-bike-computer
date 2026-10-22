@@ -141,10 +141,9 @@ struct ContentView: View {
     @AppStorage(IPhoneMapAppearance.realisticElevationDefaultsKey)
     private var usesRealisticMapElevation =
         IPhoneMapAppearance.defaultValue.usesRealisticElevation
-    @AppStorage(SocialMapMarkerStyle.pictureDefaultsKey)
-    private var friendPictureSize = SocialMapMarkerSize.medium.rawValue
-    @AppStorage(SocialMapMarkerStyle.numberDefaultsKey)
-    private var friendNumberSize = SocialMapMarkerSize.medium.rawValue
+    // Shared with the bike computer's map screens; BLEManager migrates and sends it.
+    @AppStorage(FriendMarkerScale.defaultsKey)
+    private var friendMarkerScale = FriendMarkerScale.normal.rawValue
     @State private var offlineMapSelectionWidth: CGFloat?
     @State private var offlineMapSelectionHeight: CGFloat?
     @State private var offlineMapSelectionCenterY: CGFloat?
@@ -1765,6 +1764,13 @@ struct ContentView: View {
             .padding(.horizontal, 11)
     }
 
+    private var friendMarkerScaleBinding: Binding<FriendMarkerScale> {
+        Binding(
+            get: { FriendMarkerScale.resolved(friendMarkerScale) },
+            set: { coordinator.bleManager.setFriendMarkerScale($0) }
+        )
+    }
+
     private var mapLayersMenu: some View {
         Menu {
             if let overlay = offlineMapManager.topographyOverlay as? BicinoTopographyTileOverlay, overlay.hasTerrainFeatures {
@@ -1800,17 +1806,25 @@ struct ContentView: View {
             }
             if social.session.state != .unavailable {
                 Section("Friends") {
-                    Picker("Friend Picture Size", selection: $friendPictureSize) {
-                        ForEach(SocialMapMarkerSize.allCases) { size in
-                            Text(size.title).tag(size.rawValue)
+                    // A named submenu: an inline Picker here flattens into
+                    // unlabeled options inside the Layers menu.
+                    Menu {
+                        Picker("Friend Marker Size", selection: friendMarkerScaleBinding) {
+                            ForEach(FriendMarkerScale.allCases) { scale in
+                                Text(scale.title).tag(scale)
+                            }
+                        }
+                        .pickerStyle(.inline)
+                        .labelsHidden()
+                    } label: {
+                        Label {
+                            Text("Friend Marker Size")
+                            Text(FriendMarkerScale.resolved(friendMarkerScale).title)
+                        } icon: {
+                            Image(systemName: "person.crop.circle")
                         }
                     }
-                    Picker("Friend Number Size", selection: $friendNumberSize) {
-                        ForEach(SocialMapMarkerSize.allCases) { size in
-                            Text(size.title).tag(size.rawValue)
-                        }
-                    }
-                    .accessibilityHint("Changes friend distance labels and grouped rider counts on this map.")
+                    .accessibilityHint("Scales friend pictures with their distances and group counts on this map and on Bicino.")
                 }
             }
         } label: {
@@ -2290,8 +2304,7 @@ struct ContentView: View {
             socialRiders: social.visibleRiders.filter { $0.id != social.profile?.id },
             socialPhotos: social.photos,
             socialMarkerStyle: SocialMapMarkerStyle(
-                pictureSize: .resolved(friendPictureSize),
-                numberSize: .resolved(friendNumberSize)
+                scale: .resolved(friendMarkerScale)
             )
         )
     }

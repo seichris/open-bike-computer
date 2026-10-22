@@ -1,5 +1,38 @@
 # PR #378 review fixes
 
+## October 22 integration refresh
+
+Integrating main `ff0bb8bba5af1f5845e8959b42c4916808557565` into PR head
+`7a030da46c3a25cfb882d0f7318b8003348b9c0a`. The historical review and table
+below are retained as evidence, not a current pending-CI summary. All 18 checks
+on `7a030da4` passed in run `39778840737` and the workout-zone workflow,
+including the enabled 175 POI lifecycle build. R10/R18's earlier build gates
+were closed by the exact `08d6a2ce` evidence recorded in the PR; physical
+timing and acceptance remain separate and are not closed by compilation.
+
+New integration finding: main assigns extended CAP2 bit 1/client 31 to
+friend-marker sizing, colliding with this branch's earlier POI assignment.
+Preserve main's released bit and setting 39, allocate POIs bit 2/client 32,
+and regenerate both bindings and the native preview. Regression tests cover
+old client rejection, independent flags with full POI prerequisites, combined
+flags, exact C++ bytes, and preservation of friend-size delivery.
+There is no alias for the old unpublished POI bit: earlier development apps
+and firmware must be upgraded together before further POI qualification.
+
+Local stable-source integration verification passed: all 40 firmware host
+checks, all 12 iOS fast checks (including Swift navigation/BLE and Watch,
+workout, diagnostics and social contracts), backend 998 tests (three skips),
+and deployment 58 tests. Both generated BLE bindings and the pinned-LVGL
+native preview check pass. These are uncommitted-source integration results,
+not clean-head artifact attestations. Only documentation is edited afterward.
+Fresh exact-head CI and 3 MiB/65,536-byte reserve evidence are maintained in
+the PR description after publication, without changing the attested source
+solely to record its artifact result.
+No 206 qualification, device access, flash, application installation, service
+deployment, target-5 promotion, or PR merge is included in this refresh.
+
+## Historical October 19 review
+
 Mode: publish. Profile: standard. Strategy: sequential-local, zero subagents.
 Blocking gate: P0/P1/P2. Iteration 1: complete initial review of Claude's
 report, surrounding firmware/app/extractor/backend contracts and CI evidence.

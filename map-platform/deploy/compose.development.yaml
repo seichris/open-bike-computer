@@ -1,5 +1,5 @@
-# control-plane-source-commit: 36708d787dc26092692a9771df3209c0b4cfd6bd
-# worker-source-commit: 36708d787dc26092692a9771df3209c0b4cfd6bd
+# control-plane-source-commit: aecd91e635e5001fe82f17959c3792b941344619
+# worker-source-commit: aecd91e635e5001fe82f17959c3792b941344619
 
 # These digest-pinned images are the development deployment manifest. The
 # development promotion advances the API, maintenance, and worker together,
@@ -10,8 +10,8 @@
 # and `/app/config`. New images retain aliases at those paths so control-plane
 # and worker pins can advance independently without a coordinated outage.
 x-map-platform-images:
-  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:237e1d2dee53a91b3f73a651cbb9c9b457d8d880e9524a3e28248e7bf87547f0
-  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:237e1d2dee53a91b3f73a651cbb9c9b457d8d880e9524a3e28248e7bf87547f0
+  control-plane: &map-platform-control-plane-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:afe2d5cadeb7566c59d8ee6169b3fe6a7e8601f662872dd4a6f18f46b3726928
+  worker: &map-platform-worker-image ghcr.io/seichris/open-bike-computer-map-platform@sha256:afe2d5cadeb7566c59d8ee6169b3fe6a7e8601f662872dd4a6f18f46b3726928
 
 services:
   map-platform-api:

@@ -39,6 +39,35 @@ or enabled merely because it exists in the branch.
 
 ## Baseline
 
+### October 22 current-main refresh
+
+Integrate GitHub `main` at `ff0bb8bba5af1f5845e8959b42c4916808557565`
+into the existing PR head `7a030da46c3a25cfb882d0f7318b8003348b9c0a`.
+Main now owns extended CAP2 bit 1/client 31 for shared friend-marker sizing
+(setting 39). Preserve that released assignment and move POIs/Nearby to
+**extended bit 2/client 32**. Regenerate both BLE bindings and native preview
+metadata; retain tests for each independent capability and their combination.
+The older allocations below describe historical checkpoints only; the current
+normative allocation is bit 2/client 32 throughout this plan.
+
+The prior head's October 22 CI completed all 18 checks successfully, including
+all five 175 firmware profiles, iOS Debug/Release builds, simulator/fast tests,
+firmware host checks and map suites. These results do not attest the new merge.
+Record fresh exact-head results and actual padded binary sizes in the PR after
+verification; do not reuse the October 19 size as a current result.
+
+OSM remains the offline POI source. Online MapKit search is a separate design
+discussion, not an input to offline packs or an expansion of this PR.
+
+Keep dual 3 MiB slots and the 65,536-byte reserve unchanged. Ordinary/production
+POIs remain disabled; the enabled nonshipping lifecycle qualification profile
+must pass the same size/reserve gate. Do not merge, flash, install, deploy, or
+promote target 5 in this refresh. Development Compose still selects policy v2.
+Remaining delivery gates are 206 builds and independent board acceptance,
+physical Nearby timing/rendering/persistence/downgrade and iPhone transfer,
+full-source/prepared-shard OGR equivalence, corrected-worker signed real-area
+packs, older-client qualification, and separately approved digest-pinned rollout.
+
 ### October 19 review and integration follow-up
 
 The review-fix pass integrates `main` through
@@ -171,8 +200,8 @@ reaches undownloaded geography rather than reporting a false empty search.
 The feature remains **off by default** with
 `MAP_POIS_RUNTIME_ENABLED=0` in ordinary and production profiles. Both
 `*_REMOTE_DEBUG` development profiles opt in for hardware qualification and
-advertise CAP2 extended bit 1 only when the configurable-screen subsystem is ready
-for client version 31 or newer. Prior exact-head iOS qualification and 1.75-inch
+advertise CAP2 extended bit 2 only when the configurable-screen subsystem is ready
+for client version 32 or newer. Prior exact-head iOS qualification and 1.75-inch
 CI builds passed; the coverage change requires new exact-head checks, and
 physical acceptance on both board families is still required. The user
 identified the connected board as Waveshare 1.75-inch for build-only validation.
@@ -180,7 +209,7 @@ This does not authorize a flash or qualify a physical device, and no 2.06-inch
 build is authorized for this review run.
 
 The integrated allocation is target 5/FMB v6, visibility bits 18-22,
-and CAP2 extended bit 1/client 31. Current main's terrain sidecar and
+and CAP2 extended bit 2/client 32. Current main's terrain sidecar and
 visibility assignments remain intact; they are not POI format reservations.
 
 At the recorded `main` baseline, the missing pieces were point extraction,
@@ -198,7 +227,7 @@ visibility bit 13, and CAP2 bit 26 to POIs. Current main assigns those
 identifiers to topographic contours and configurable screens. The integrated
 branch has migrated the golden vectors, generated BLE files, manifests,
 readers, policies, and tests to target 5 / FMB v6 section 6, visibility bits
-18-22, and CAP2 extended bit 1. Never accept both meanings behind the same version:
+18-22, and CAP2 extended bit 2. Never accept both meanings behind the same version:
 already-created target-4 artifacts and old clients would become ambiguous.
 
 ### 3 MiB production application budget
@@ -465,7 +494,7 @@ business details without requiring them for offline category discovery.
 5. Use 32-bit visibility bits 18-22 in each configurable screen's map profile.
    Reuse setting IDs `8` and `20` for the legacy profile path. Do not allocate
    five new setting IDs or maintain a second authoritative per-instance store.
-6. Reserve CAP2 extended bit 1 / minimum client version 31 for the complete target-5
+6. Reserve CAP2 extended bit 2 / minimum client version 32 for the complete target-5
    reader/render/settings/Nearby contract. Capability presence means the firmware
    can validate and render both defined target-5 variants, query its POI index,
    and understands visibility bits 18-22. Nearby screen type 6 is additionally
@@ -1114,7 +1143,7 @@ or every source POI.
 
 ### Capability
 
-Add `map_pois` at CAP2 extended bit 1 with minimum client version 31 in
+Add `map_pois` at CAP2 extended bit 2 with minimum client version 32 in
 `protocol/ride-ble-contract-v1.json`, then regenerate the Swift and C++ protocol
 files. Update capability golden vectors and Watch/iPhone compatibility tests.
 Encode this bit only in the extended feature TLV (type 3), alongside but
@@ -1292,7 +1321,7 @@ plan. It is not completed by this documentation refresh.
    golden artifacts. Keep current main's FMB v5 contour contract, schema-v2
    generation policy, generated BLE mappings, and target-4 companion path.
 3. Migrate the existing POI extractor, writer, backend, firmware, iPhone, and
-   tests to target 5/FMB v6/section 6, bits 18-22, CAP2 extended bit 1/client 31.
+   tests to target 5/FMB v6/section 6, bits 18-22, CAP2 extended bit 2/client 32.
    Audit every numeric `>= 4` or `== 4` format check for feature meaning,
    every configurable-screen allowed/render mask, and all early reuse paths.
    Implement the combined/no-elevation discriminated contract, FPI1 index,
@@ -1345,7 +1374,7 @@ limit fixtures fail with typed errors.
 1. Add signed target-5/FMB v6 install validation and runtime decode.
 2. Add bounded POI selection, collision, icons, street-label reservations, and
    diagnostics.
-3. Add visibility bits, NVS defaults, render invalidation, and CAP2 extended bit 1
+3. Add visibility bits, NVS defaults, render invalidation, and CAP2 extended bit 2
    without changing contour bit 13 or configurable-screen bit 26.
    Include the screen-document allowed mask and runtime render mask.
 4. Add Nearby picker/result state, worker-owned nearest search, edge indicators,

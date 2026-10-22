@@ -993,6 +993,7 @@ Current setting IDs:
 | `36` | Automatic display off | `0` disabled, `1` enabled; defaults to enabled and is persisted as `autoDisplayOff`. When enabled, the connected display uses the configured inactivity timeouts (15 seconds before dimming and 45 seconds before panel off by default), except for navigation, workout, transfer, or attention holds. |
 | `37` | Map + Navigation rotation | `0` North Up, `1` Course Up; defaults to Course Up and is persisted as `navRotation`. |
 | `38` | Display inactivity timeouts | Atomic `Int32LE` pair: low 16 bits are seconds before dimming and high 16 bits are seconds before panel off. Defaults are `15` and `45`. Firmware accepts dim `5...600`, off `10...3600`, and requires off to be at least five seconds later than dim. The pair is persisted as one NVS value. |
+| `39` | Friend marker size | Percent of the normal friend marker, clamped to `100...300`; defaults to `100` and is persisted as `friendScale`. One global value for every map screen (Map, Map + Navigation and terrain/topographic Map instances); portraits, initials, distances and grouped counts scale together around the rider. The iPhone offers `100`, `125`, `150`, `200`, `250` and `300`, uses the same value for its own map, and sends it only after extended capability bit `1`. |
 
 In a dense scene, firmware reserves its bounded extrusion workspace from the
 nearest eligible buildings outward, preserves global back-to-front drawing,
@@ -1045,7 +1046,7 @@ local and service roads and bit `2` to both paths and tracks.
 Legacy v1 map blocks do not contain feature type IDs, so the renderer also
 combines Local with Service and Paths with Tracks for those blocks. Downloading
 a current v2 map is required for independent road-class visibility.
-POI bits `14...18` are sent only after authenticated CAP2 bit `31`
+POI visibility bits `18...22` are sent only after authenticated CAP2 extended bit `2`
 negotiation. Fresh Map profiles enable all five; fresh Map + Navigation profiles
 disable all five. Older firmware receives no POI bits and saved choices remain
 available for a later capable connection. Nearby uses an independent transient
@@ -1335,8 +1336,9 @@ path described above. Bit `27` reports World Radio. Bit `28` reports the
 atomic configurable display-inactivity timeout pair (setting ID `38`). Bit
 `29` reports versioned workout zones. Bit `30` reports the complete renderer
 format 4/FMB5 contour decode, installation, status, and visibility path. Bit
-`31` reports the target-5/FMB6 POI reader, independent visibility controls,
-and indexed Nearby screen. Client version `11` requests
+`31` reports diagnostic terrain experiments. Extended bit `2` reports the
+target-5/FMB6 POI reader, independent visibility controls and indexed Nearby
+screen; it is not part of this primary word. Client version `11` requests
 bit `13`, version `12` requests
 bit `14`, version `13` requests bit `15`, and version `14` requests bit `16`;
 version `15` requests bit `17`. Version `10` remains a valid CAP2 client
@@ -1356,11 +1358,14 @@ configurable display inactivity timeouts. Version `27` requests bit `29`,
 versioned workout zones. Version `28` requests bit `30`, topographic contours.
 Version `29` requests bit `31`, diagnostic terrain experiments. Version `30`
 requests the extended feature word (TLV type `3`), with bit `0` for group riders.
-Version `31` requests extended bit `1`, map POIs and Nearby.
-The current iPhone client negotiates version `31`; older direct Watch clients
+Version `31` requests extended bit `1`, the shared friend-marker size (setting
+ID `39`).
+Version `32` requests extended bit `2`, map POIs and Nearby. Version `31`
+retains its released friend-marker sizing meaning and cannot negotiate POIs.
+The current iPhone client negotiates version `32`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
-Firmware sets extended bit `1` only when `MAP_POIS_RUNTIME_ENABLED=1` and the
+Firmware sets extended bit `2` only when `MAP_POIS_RUNTIME_ENABLED=1` and the
 configurable-screen store and characteristic are ready. The opt-in
 `*_REMOTE_DEBUG` profiles currently enable it for physical qualification;
 ordinary and production profiles keep it clear.
@@ -1396,7 +1401,12 @@ persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
 carries the 14-byte screen-configuration limits and support masks. TLV type `3`
 carries exactly four bytes of little-endian extended feature flags, independently
-numbered from the first word. Its bit `0` is `group_riders_v1`; absent means zero.
+numbered from the first word. Its bit `0` is `group_riders_v1`, bit `1` is
+`friend_marker_scale_v1`, and bit `2` is `map_pois`; absent means zero.
+Firmware sets bit `1` whenever it
+can draw friends (`FIRMWARE_DIAGNOSTICS=1` with its portrait memory ready),
+independent of this session's group-rider relay, so a stored size can be
+changed before friends appear. Firmware without bit `1` ignores setting `39`.
 Because extended bits restart at zero, generated constants for this word carry
 their own prefix (`EXTENDED_GROUP_RIDERS_V1_FEATURE` in C++,
 `extendedGroupRidersV1Feature` in Swift) so they cannot be mistaken for the
@@ -1464,8 +1474,15 @@ Display inactivity timeouts, CAP2 schema 1, only feature bit 28:
 Topographic contours, CAP2 schema 1, only feature bit 30:
 43 41 50 32 01 00 00 00 40
 
-Map POIs and Nearby, CAP2 schema 1, only feature bit 31:
+Diagnostic terrain experiments, CAP2 schema 1, only primary feature bit 31:
 43 41 50 32 01 00 00 00 80
+
+Friend-marker sizing, CAP2 schema 1, extended feature bit 1 (TLV type 3):
+43 41 50 32 01 00 00 00 00 03 04 02 00 00 00
+
+Map POIs and Nearby, CAP2 schema 1, extended feature bit 2 (TLV type 3):
+43 41 50 32 01 00 00 00 00 03 04 04 00 00 00
+This isolates the feature bit; usable POIs also require the map prerequisites.
 ```
 
 Bit `14` (`0x00004000`) reports the complete scoped Watch-controller and
@@ -2709,7 +2726,12 @@ Image errors leave an initials fallback and never publish partial pixels.
 Age includes server-reported capture age plus monotonic elapsed time; retries
 cannot refresh an old fix. Rider markers fade at 15 seconds and expire at 60.
 The complete portrait/distance footprint is constrained to the round screen (or
-a rectangular safe boundary for 2.06-inch). Offscreen bearing is derived from
+a rectangular safe boundary for 2.06-inch). Setting `39` scales that footprint
+(64×62 px at normal size, up to 192×186 px at 300%) together with the portrait,
+which firmware resamples bilinearly from the 40×40 transfer image into a fixed
+120×120 PSRAM buffer per slot, and with the label fonts. The fit test, edge
+placement and overlap grouping all use the scaled footprint, so the transfer
+format is unchanged. Offscreen bearing is derived from
 fresh own GPS through the same visible map projection; its distance is straight
 line distance, distinct from the phone's confident same-route progress gap.
 Overlapping footprints show a count badge. Pan/zoom gestures hide the layer until

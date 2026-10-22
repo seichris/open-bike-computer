@@ -164,6 +164,8 @@ struct MapRenderSettings {
   uint8_t mapRotationMode = 0; // 0=North Up, 1=Course Up
   uint8_t mapNavigationRotationMode = 1;
   uint8_t tapToSwitchScreens = 0; // 0=off, 1=short tap cycles main screens
+  // Setting 39: one friend-marker size for every map screen, percent 100-300.
+  uint16_t friendMarkerScalePercent = 100;
   uint8_t enabledScreensMask =
       DEVICE_SCREEN_DEFAULT_MASK; // Bits follow DeviceScreenSetting
   uint8_t defaultScreen =

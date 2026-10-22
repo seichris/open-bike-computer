@@ -8635,6 +8635,10 @@ void Maps::updateSocialOverlay() {
 #else
   const bool round=false;
 #endif
+  // One persisted size for every map screen; footprint, edge placement and
+  // grouping all use the same scaled badge.
+  const uint16_t scale=social_riders::clampMarkerScale(mapRenderSettings.friendMarkerScalePercent);
+  const auto badge=social_riders::badgeGeometry(scale);
   const int ox=gui_layout::centeredViewportOrigin(w,visibleRenderResult.viewportWidth);
   const int oy=gui_layout::centeredViewportOrigin(h,visibleRenderResult.viewportHeight);
   // Shared scratch lives off the small UI task stack, reused under UI ownership.
@@ -8662,8 +8666,7 @@ void Maps::updateSocialOverlay() {
       const auto p=social_riders::projectRider(visibleProjection,world,
           w/2-ox+visibleRenderResult.overscanPixels,h/2-oy+visibleRenderResult.overscanPixels);
       x=ox+p.x-visibleRenderResult.overscanPixels;y=oy+p.y-visibleRenderResult.overscanPixels;
-      fits=p.valid && x>=32 && y>=31 && x<=w-32 && y<=h-31;
-      if(round)for(double dx:{-32.0,32.0})for(double dy:{-31.0,31.0})fits &= std::hypot(x-w/2+dx,y-h/2+dy)<=std::min(w,h)/2-4;
+      fits=p.valid && social_riders::fits(x,y,w,h,round,badge.halfWidth(),badge.halfHeight());
       if(!p.valid)continue;
     }
     double meters=0;
@@ -8678,12 +8681,12 @@ void Maps::updateSocialOverlay() {
             ordered[at].relative,courseUp?presentedPose.headingDegrees:0);
         dx=direction.x;dy=direction.y;
       }
-      auto edge=social_riders::edge(dx,dy,w,h,round);x=edge.x;y=edge.y;
+      auto edge=social_riders::edge(dx,dy,w,h,round,badge.halfWidth(),badge.halfHeight());x=edge.x;y=edge.y;
     }
     // Nearest-first order retains the closest rider when footprints overlap.
-    bool overlaps=false;for(size_t j=0;j<count;++j)if(std::abs(used[j].x-x)<64&&std::abs(used[j].y-y)<62){social_riders::addClusterMember(usedSlots[j]);overlaps=true;break;}
+    bool overlaps=false;for(size_t j=0;j<count;++j)if(std::abs(used[j].x-x)<badge.width&&std::abs(used[j].y-y)<badge.height){social_riders::addClusterMember(usedSlots[j]);overlaps=true;break;}
     if(overlaps)continue;
-    usedSlots[count]=i;used[count++]={x,y};social_riders::draw(i,mapTile,x,y,*r,!fits,meters,now);
+    usedSlots[count]=i;used[count++]={x,y};social_riders::draw(i,mapTile,x,y,*r,!fits,meters,now,scale);
   }
   if(!mapAvailable && count) social_riders::showFallbackOrientation(mapTile,courseUp);
   social_riders::endFrame();
