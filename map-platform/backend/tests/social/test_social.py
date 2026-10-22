@@ -271,6 +271,41 @@ class SocialTest(unittest.TestCase):
         self.call('alice', 'POST', '/me/deletion', {'expectedProfileID': self.ids['alice']})
         self.assertEqual(self.call('carol', 'GET', '/friend-sharing').json()['riders'], [])
 
+    def test_friend_sharing_maintenance_is_idempotent_and_clears_expired_metadata(self):
+        from sqlalchemy import event
+        from map_platform.social.database import friend_shares
+        self.friend(); self.client.app.state.features = SocialFeatures(friendSharing=True)
+        consent = self.enable_friend_sharing().json()
+        state = self.friend_state({self.ids['bob']: consent['epoch']})
+        self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', state).status_code, 200)
+        updates = []
+        def record(connection, cursor, statement, parameters, context, executemany):
+            if statement.startswith('UPDATE social_friend_shares'):
+                updates.append(cursor.rowcount)
+        event.listen(self.db.engine, 'after_cursor_execute', record)
+        def maintain(at):
+            updates.clear()
+            run_once(self.db, Identity(), self.media, Notifications(), now=at)
+            return sum(updates)
+        try:
+            self.assertEqual(maintain(self.clock+61), 1)
+            self.assertEqual(maintain(self.clock+71), 0, 'cleared stale rows are not rewritten')
+            with self.db.transaction() as c:
+                row = c.execute(select(friend_shares)).mappings().one()
+                self.assertIsNone(row['live'])
+                self.assertEqual(row['received'], self.clock)
+                self.assertEqual(row['sequence'], state['sequence'], 'stale cleanup preserves replay fencing')
+                self.assertIsNotNone(row['lease'], 'coverage loss does not revoke consent')
+            self.assertEqual(maintain(consent['sharingExpiresAt']+1), 1)
+            self.assertEqual(maintain(consent['sharingExpiresAt']+11), 0)
+            with self.db.transaction() as c:
+                row = c.execute(select(friend_shares)).mappings().one()
+                self.assertIsNone(row['received']); self.assertIsNone(row['lease'])
+                self.assertIsNone(row['live']); self.assertFalse(row['stats'])
+                self.assertEqual(row['sequence'], -1)
+        finally:
+            event.remove(self.db.engine, 'after_cursor_execute', record)
+
     def test_friend_sharing_schema_upgrade_creates_no_implicit_consents(self):
         from map_platform.social.database import versions, friend_shares
         from sqlalchemy import update

@@ -141,6 +141,10 @@ struct ContentView: View {
     @AppStorage(IPhoneMapAppearance.realisticElevationDefaultsKey)
     private var usesRealisticMapElevation =
         IPhoneMapAppearance.defaultValue.usesRealisticElevation
+    @AppStorage(SocialMapMarkerStyle.pictureDefaultsKey)
+    private var friendPictureSize = SocialMapMarkerSize.medium.rawValue
+    @AppStorage(SocialMapMarkerStyle.numberDefaultsKey)
+    private var friendNumberSize = SocialMapMarkerSize.medium.rawValue
     @State private var offlineMapSelectionWidth: CGFloat?
     @State private var offlineMapSelectionHeight: CGFloat?
     @State private var offlineMapSelectionCenterY: CGFloat?
@@ -474,6 +478,7 @@ struct ContentView: View {
         .onAppear {
             reconcileIPhoneOnlyPreference()
             onApplicationActiveChange(scenePhase == .active)
+            social.friendLive.setApplicationActive(scenePhase == .active)
             migrateExistingInstallOnboardingIfNeeded()
             isOfflineMapOnboardingStatePrepared = true
             watchAvailability.activate()
@@ -545,6 +550,7 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { newValue in
             onApplicationActiveChange(newValue == .active)
+            social.friendLive.setApplicationActive(newValue == .active)
             coordinator.setViewingMap(newValue == .active)
             updateIdleTimer(for: newValue)
             guard newValue == .active else { return }
@@ -1792,6 +1798,21 @@ struct ContentView: View {
                 }
                 .accessibilityHint(offlineMapManager.topographyOverlayStatus)
             }
+            if social.session.state != .unavailable {
+                Section("Friends") {
+                    Picker("Friend Picture Size", selection: $friendPictureSize) {
+                        ForEach(SocialMapMarkerSize.allCases) { size in
+                            Text(size.title).tag(size.rawValue)
+                        }
+                    }
+                    Picker("Friend Number Size", selection: $friendNumberSize) {
+                        ForEach(SocialMapMarkerSize.allCases) { size in
+                            Text(size.title).tag(size.rawValue)
+                        }
+                    }
+                    .accessibilityHint("Changes friend distance labels and grouped rider counts on this map.")
+                }
+            }
         } label: {
             mapControlIcon("map.fill")
         }
@@ -2267,7 +2288,11 @@ struct ContentView: View {
             topographyOverlay: offlineMapManager.topographyOverlay,
             offlineNavigationPolyline: coordinator.offlineRoutePolyline,
             socialRiders: social.visibleRiders.filter { $0.id != social.profile?.id },
-            socialPhotos: social.photos
+            socialPhotos: social.photos,
+            socialMarkerStyle: SocialMapMarkerStyle(
+                pictureSize: .resolved(friendPictureSize),
+                numberSize: .resolved(friendNumberSize)
+            )
         )
     }
 

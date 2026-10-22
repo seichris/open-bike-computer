@@ -19,27 +19,49 @@ final class SocialRiderBadge: UIView {
     let initials = UILabel()
     let distance = UILabel()
     let cluster = UILabel()
+    private var style = SocialMapMarkerStyle()
+    private var isEdge: Bool?
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
-        picture.frame = CGRect(x: 4, y: 0, width: 40, height: 40)
-        picture.layer.cornerRadius = 20; picture.clipsToBounds = true
+        picture.clipsToBounds = true
         picture.layer.borderWidth = 2; picture.layer.borderColor = UIColor.white.cgColor
         picture.backgroundColor = .systemBlue; picture.contentMode = .scaleAspectFill
-        initials.frame = picture.frame; initials.textAlignment = .center; initials.textColor = .white
-        initials.font = .boldSystemFont(ofSize: 15)
-        distance.frame = CGRect(x: -12, y: 40, width: 72, height: 20)
-        distance.textAlignment = .center; distance.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        initials.textAlignment = .center; initials.textColor = .white
+        distance.textAlignment = .center
         distance.textColor = .label; distance.backgroundColor = .systemBackground
         distance.layer.cornerRadius = 5; distance.clipsToBounds = true
-        cluster.frame = CGRect(x: 29, y: -2, width: 27, height: 20)
         cluster.backgroundColor = .systemBackground; cluster.textColor = .label
-        cluster.font = .boldSystemFont(ofSize: 12); cluster.textAlignment = .center
+        cluster.textAlignment = .center
         cluster.layer.cornerRadius = 8; cluster.clipsToBounds = true; cluster.isHidden = true
         addSubview(cluster)
         addSubview(picture); addSubview(initials); addSubview(distance); bringSubviewToFront(cluster)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    /// Edge badges reserve room for distance and grouped counts; map markers are
+    /// only as large as the portrait they show.
+    func configure(style: SocialMapMarkerStyle, edge: Bool) {
+        let size = edge ? style.badgeSize : style.annotationSize
+        guard style != self.style || edge != isEdge || frame.size != size else { return }
+        self.style = style; isEdge = edge
+        frame.size = size
+        setNeedsLayout()
+        layoutIfNeeded()
+    }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let diameter = style.pictureDiameter
+        picture.frame = CGRect(x: (bounds.width-diameter)/2, y: 2, width: diameter, height: diameter)
+        picture.layer.cornerRadius = diameter/2
+        initials.frame = picture.frame
+        initials.font = .boldSystemFont(ofSize: 15 * style.pictureSize.scale)
+        distance.frame = CGRect(x: (bounds.width-style.distanceWidth)/2, y: diameter+2,
+                                width: style.distanceWidth, height: style.numberHeight)
+        distance.font = .monospacedDigitSystemFont(ofSize: 12 * style.numberSize.scale, weight: .semibold)
+        cluster.frame = CGRect(x: bounds.midX+diameter/2-style.clusterWidth/2, y: 0,
+                               width: style.clusterWidth, height: style.numberHeight)
+        cluster.font = .boldSystemFont(ofSize: 12 * style.numberSize.scale)
+    }
     func update(_ rider: SocialRider, photo: UIImage?, meters: Double?, stale: Bool) {
         picture.image = photo; initials.text = photo == nil ? rider.profile.initials : nil
         distance.isHidden = meters == nil
@@ -60,9 +82,12 @@ final class SocialMapLayer {
     private var edges: [String: SocialRiderBadge] = [:]
     private var ownLocation: CLLocation?
     private var timer: Timer?
+    private var style = SocialMapMarkerStyle()
 
-    func update(on map: MKMapView, riders: [SocialRider], photos: [String: UIImage], location: CLLocation?) {
+    func update(on map: MKMapView, riders: [SocialRider], photos: [String: UIImage], location: CLLocation?,
+                style: SocialMapMarkerStyle = SocialMapMarkerStyle()) {
         self.map = map; self.photos = photos; ownLocation = location
+        self.style = style
         self.riders = Dictionary(riders.prefix(25).map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
         if timer == nil {
             timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] timer in
@@ -78,11 +103,11 @@ final class SocialMapLayer {
     func annotationView(_ annotation: SocialRiderAnnotation, map: MKMapView) -> MKAnnotationView {
         let view = map.dequeueReusableAnnotationView(withIdentifier: "social-rider")
             ?? MKAnnotationView(annotation: annotation, reuseIdentifier: "social-rider")
-        view.annotation = annotation; view.frame.size = CGSize(width: 48, height: 60)
-        view.centerOffset = CGPoint(x: 0, y: -10); view.canShowCallout = true
+        view.annotation = annotation; applyMarkerGeometry(to: view); view.canShowCallout = true
         let badge = (view.subviews.first { $0 is SocialRiderBadge } as? SocialRiderBadge)
             ?? SocialRiderBadge(frame: view.bounds)
         if badge.superview == nil { view.addSubview(badge) }
+        badge.configure(style: style, edge: false)
         badge.update(annotation.rider, photo: annotation.rider.profile.avatarID.flatMap { photos[$0] },
                      meters: nil, stale: annotation.rider.age(at: Date()) >= 15)
         let detail = UILabel()
@@ -92,6 +117,11 @@ final class SocialMapLayer {
         view.detailCalloutAccessoryView = detail
         view.accessibilityLabel = badge.accessibilityLabel
         return view
+    }
+
+    private func applyMarkerGeometry(to view: MKAnnotationView) {
+        if view.bounds.size != style.annotationSize { view.bounds.size = style.annotationSize }
+        if view.centerOffset != style.annotationCenterOffset { view.centerOffset = style.annotationCenterOffset }
     }
 
     func layout() {
@@ -114,11 +144,13 @@ final class SocialMapLayer {
             if let old = annotations[id] { annotation = old; old.rider = rider; old.coordinate = CoordinateConverter.wgs84ToGCJ02(coordinate: rider.coordinate) }
             else { annotation = SocialRiderAnnotation(rider); annotations[id] = annotation; map.addAnnotation(annotation) }
             let point = map.convert(annotation.coordinate, toPointTo: map)
-            let onMap = map.bounds.insetBy(dx: 35, dy: 45).contains(point)
+            let onMap = style.showsOnMap(point, in: map.bounds)
             map.view(for: annotation)?.isHidden = !onMap
             if onMap {
                 edges.removeValue(forKey: id)?.removeFromSuperview()
                 if let view = map.view(for: annotation), let badge = view.subviews.first(where: { $0 is SocialRiderBadge }) as? SocialRiderBadge {
+                    applyMarkerGeometry(to: view)
+                    badge.configure(style: style, edge: false)
                     badge.update(rider, photo: rider.profile.avatarID.flatMap { photos[$0] }, meters: nil, stale: rider.age(at: now) >= 15)
                 }
                 continue
@@ -130,11 +162,14 @@ final class SocialMapLayer {
             let target = CLLocation(latitude: rider.latitude, longitude: rider.longitude)
             let meters = ownLocation.distance(from: target)
             guard meters >= 3 else { edges.removeValue(forKey: id)?.removeFromSuperview(); continue }
-            guard let center = SocialMapGeometry.edgeCenter(projected: point, bounds: map.bounds) else { continue }
-            var origin = CGPoint(x: center.x-24, y: center.y-30)
+            guard let center = SocialMapGeometry.edgeCenter(projected: point, bounds: map.bounds,
+                                                           badgeSize: style.badgeSize) else {
+                edges.removeValue(forKey: id)?.removeFromSuperview(); continue
+            }
+            var origin = CGPoint(x: center.x-style.badgeSize.width/2, y: center.y-style.badgeSize.height/2)
             // Preserve bearing within a small arc; overlapping extras remain
             // available through the rider list instead of inventing a direction.
-            let rect = CGRect(origin: origin, size: CGSize(width: 48, height: 60))
+            let rect = CGRect(origin: origin, size: style.badgeSize)
             if let overlap = occupied.first(where: { $0.0.intersects(rect) }), let retained = edges[overlap.1] {
                 let previous = Int(retained.cluster.text?.dropFirst() ?? "0") ?? 0
                 retained.cluster.text = "+\(previous + 1)"; retained.cluster.isHidden = false
@@ -143,6 +178,7 @@ final class SocialMapLayer {
             occupied.append((rect,id))
             origin.x = origin.x.rounded(); origin.y = origin.y.rounded()
             let badge = edges[id] ?? SocialRiderBadge(frame: CGRect(origin: origin, size: rect.size))
+            badge.configure(style: style, edge: true)
             badge.frame.origin = origin
             badge.update(rider, photo: rider.profile.avatarID.flatMap { photos[$0] }, meters: meters, stale: rider.age(at: now) >= 15)
             if badge.superview == nil { map.addSubview(badge) }

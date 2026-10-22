@@ -138,8 +138,10 @@ def run_once(database, identity, media_store, notifications, now=None, features=
         if not database.run(process_event):
             break
     def maintain(c):
-        c.execute(update(friend_shares).where(friend_shares.c.received < now-60).values(live=None))
-        c.execute(update(friend_shares).where(friend_shares.c.lease <= now).values(live=None, lease=None, stats=False))
+        c.execute(update(friend_shares).where(and_(friend_shares.c.live.is_not(None),
+            friend_shares.c.received < now-60)).values(live=None))
+        c.execute(update(friend_shares).where(friend_shares.c.lease <= now)
+                  .values(live=None, lease=None, stats=False, received=None, sequence=-1))
         # Coverage gaps hide positions, without silently revoking bounded consent.
         c.execute(update(members).where(and_(members.c.live.is_not(None),
             members.c.received < now-60)).values(live=None))
