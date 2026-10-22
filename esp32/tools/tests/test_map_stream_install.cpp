@@ -994,7 +994,9 @@ void testConsumedReadyRootsAreNotReactivatedAndRemainInLibrary() {
   // Discard only the newly prepared stream, never completed library entries.
   assert(installer.discardAllUnselectedStreamMaps().ok);
   assert(installer.readMapLibrary(maps).ok && maps.size() == 5);
-  const auto &old = maps.front();
+  const auto old = maps.front();
+  assert(installer.discardUnselectedStreamMap(old.sessionId).ok);
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 5);
   assert(installer.selectInstalledMap(old.sessionId, old.manifestReceipt).ok);
   assert(installer.readActiveMap(selected).ok && selected.sessionId == old.sessionId);
   assert(installer.recoverPendingStreamActivation().code == "stream_pending_none");
@@ -1701,6 +1703,21 @@ void testPreparedReinstallCannotInheritLegacyAuthorityOrDeletePriorMap() {
   map_transfer::MapOperationStorage cancelledDisk(cancelledRoot); op::Store cancelled(cancelledDisk,device);
   assert(cancelled.restore()==op::Result::Ok && cancelled.cancel(identity)==op::Result::Ok);
   MapTransferInstaller cancelledInstaller(cancelledRoot); cancelledInstaller.setOperationDeviceID(device);
+  // The same cancelled retransmission must also preserve a completed map
+  // after it has aged out of the active/rollback/anchor selections.
+  const auto retainedRoot = tempRoot();
+  std::filesystem::copy(cancelledRoot, retainedRoot, std::filesystem::copy_options::recursive |
+      std::filesystem::copy_options::overwrite_existing);
+  MapTransferInstaller retainedInstaller(retainedRoot); retainedInstaller.setOperationDeviceID(device);
+  for (int i = 0; i < 6; ++i) {
+    const auto other = "library-other-" + std::to_string(i);
+    prepareReadyRoot(retainedRoot, other);
+    assert(retainedInstaller.activateReadyStreamMap(other).ok);
+  }
+  assert(retainedInstaller.cancelOperationStaging(session, operation).ok);
+  map_transfer::InstalledMap retained;
+  assert(retainedInstaller.readInstalledMap(session, retained).ok);
+  assert(!exists(retainedRoot + original.root + "/.operation-prepared"));
   assert(cancelledInstaller.cancelOperationStaging(session,operation).ok);
   assert(cancelledInstaller.readActiveMap(stillOriginal).ok && stillOriginal.root==original.root);
   assert(exists(cancelledRoot+original.root+(priorOperation ? "/.operation-ready" : "/.ready")));

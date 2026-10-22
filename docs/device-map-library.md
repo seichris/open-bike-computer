@@ -31,14 +31,18 @@ automatically switch maps. There is no network request or download when no map
 covers a location.
 
 **Use** pins a manual map and persists automatic selection off. Re-enabling the
-toggle returns to location-based selection. Automatic failures are excluded from
-repeated selection until an explicit library command/refresh or a reboot.
+toggle returns to location-based selection. Invalid automatic candidates are excluded
+from repeated selection until an explicit library command/refresh or a reboot.
+Temporary upload/storage-busy conditions remain eligible for a later retry.
 
 ## Storage and recovery
 
 Inventory admits only completed signed streams with matching consumed markers,
 manifest receipts, and file sizes, or existing verified archive installations.
-Prepared, incomplete, truncated, or uncommitted roots are excluded. Selection
+Prepared, incomplete, truncated, or uncommitted roots are excluded. Cancelled
+retransmissions preserve a previously completed version even after it has aged
+out of the active/rollback selections, and a mismatched stream cannot overwrite
+a completed slot in place. Selection
 additionally rehashes payloads and validates the renderer/label contract. Reuse
 switches the recoverable canonical pointer and clears/reloads the renderer's
 existing cache through its established activation mailbox. It copies no map
@@ -49,7 +53,8 @@ transactions remain protected. Explicit removal refuses protected maps. Complete
 versions persist until explicitly removed; an update does not destroy its older
 version. Invalid/staging state still uses the existing bounded recovery rules.
 
-The authenticated BLE snapshot supports **32 completed maps**. Installation
+The authenticated inventory supports **32 completed maps**, delivered in four-map
+BLE pages and assembled within one connection and snapshot revision. Installation
 refuses a 33rd map before receiving its payload and asks for an explicit removal;
 it never silently evicts a city. Payload sizes exclude filesystem allocation,
 metadata and archive overhead. Space availability remains enforced by the
@@ -66,7 +71,8 @@ renames or deletes those files.
 Host coverage includes retained-map cleanup, exact version matching, selection
 without file moves, checksum rejection, failed pointer writes, restart recovery,
 protected removal, pending-stream exclusion, deterministic overlap selection,
-and malformed/duplicate/future-schema inventory.
+and malformed/duplicate/future-schema inventory, paginated snapshot fencing,
+and cancellation of retransmissions to retained versions.
 
 Physical acceptance remains required separately for the 1.75 and 2.06 boards:
 

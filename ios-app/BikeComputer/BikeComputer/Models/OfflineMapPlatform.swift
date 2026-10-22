@@ -1558,14 +1558,25 @@ nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
     let revision: UInt32
     let error: String
     let selectedSessionID: String
-    let maps: [DeviceInstalledMap]
+    var maps: [DeviceInstalledMap]
+    var offset: Int? = nil
+    var total: Int? = nil
+    var isComplete: Bool { known && !busy && isValid && (offset ?? 0) == 0 && maps.count == (total ?? maps.count) }
     var isValid: Bool {
-        schemaVersion == 1 && maps.count <= 32 && maps.allSatisfy(\.isValid) &&
+        let count = total ?? maps.count, start = offset ?? 0
+        // Bound untrusted integers before subtraction or addition.
+        guard (0...32).contains(count), (0...32).contains(start), maps.count <= 32 else { return false }
+        let shape = (start == 0 && maps.count == count) ||
+            (start.isMultiple(of: 4) && start < count && maps.count == min(4, count - start))
+        return shape && schemaVersion == 1 && maps.count <= 32 && maps.allSatisfy(\.isValid) &&
             Set(maps.map(\.sessionID)).count == maps.count &&
+            (0...32).contains(total ?? maps.count) && (0...32).contains(offset ?? 0) &&
+            (offset ?? 0) + maps.count <= (total ?? maps.count) &&
+            (!(known && !busy) || maps.count > 0 || (total ?? 0) == 0) &&
             (selectedSessionID.isEmpty || DeviceInstalledMap.safeSession(selectedSessionID))
     }
     func installed(mapID: String, manifestReceipt: String, signedManifestReceipt: String) -> DeviceInstalledMap? {
-        guard known, isValid, !busy, !manifestReceipt.isEmpty else { return nil }
+        guard isComplete, !manifestReceipt.isEmpty else { return nil }
         return maps.first { $0.mapID == mapID && $0.manifestReceipt == manifestReceipt &&
             $0.signedManifestReceipt == signedManifestReceipt }
     }
@@ -1576,6 +1587,42 @@ nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
                 manifestReceipt: map.manifestReceipt)
         }
         return MapLibraryControlPacket.make(action: action)
+    }
+}
+
+// Connection-scoped snapshot assembly. A page is never reuse/removal authority
+// until every entry belongs to the same revision and selection snapshot.
+nonisolated struct DeviceMapLibraryPages {
+    private var first: DeviceMapLibrary?
+    private var entries: [DeviceInstalledMap] = []
+    private var complete: DeviceMapLibrary?
+
+    mutating func ingest(_ page: DeviceMapLibrary) -> (library: DeviceMapLibrary?, nextOffset: Int?) {
+        guard page.isValid else { self = Self(); return (nil, nil) }
+        guard page.known, !page.busy else { self = Self(); return (page, nil) }
+        let same: (DeviceMapLibrary, DeviceMapLibrary) -> Bool = { a, b in
+            a.revision == b.revision && a.total == b.total && a.automatic == b.automatic &&
+                a.error == b.error && a.selectedSessionID == b.selectedSessionID
+        }
+        if let complete, same(complete, page) { return (complete, nil) }
+        if page.isComplete { self = Self(); complete = page; return (page, nil) }
+        let offset = page.offset ?? 0
+        if offset == 0 { first = page; entries = [] }
+        guard let first, same(first, page), offset == entries.count else {
+            self = Self(); return (nil, 0)
+        }
+        entries += page.maps
+        guard Set(entries.map(\.sessionID)).count == entries.count else {
+            self = Self(); return (nil, 0)
+        }
+        if entries.count == (page.total ?? page.maps.count) {
+            var result = page; result.maps = entries; result.offset = 0
+            complete = result; self.first = nil; entries = []
+            return (result, nil)
+        }
+        let loading = DeviceMapLibrary(schemaVersion: 1, known: false, automatic: page.automatic,
+            busy: true, revision: page.revision, error: page.error, selectedSessionID: "", maps: [])
+        return (loading, entries.count)
     }
 }
 

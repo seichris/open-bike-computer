@@ -887,6 +887,20 @@ bool MapStreamInstallSession::prepareRoot(
   if (status_.state == MapStreamInstallState::Failed)
     return false;
   if (!resumed) {
+    uint64_t completedBytes = 0;
+    for (const char *name : {".activation-consumed", ".activation-consumed.bak"}) {
+      if (storage_->regularFileSize(joinPath(inactiveRoot(), name), completedBytes))
+        return fail("stream_session_conflict", "completed map versions cannot be replaced in place");
+    }
+    // A legacy archive receipt is installation evidence. Signed streams also
+    // write this file before activation, so their unconsumed staging is repairable.
+    uint64_t ignored = 0;
+    const bool signedStaging = storage_->regularFileSize(joinPath(inactiveRoot(), kReadyFile), ignored) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), std::string(kReadyFile) + ".bak"), ignored) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), kCheckpointFile), ignored) ||
+        storage_->regularFileSize(joinPath(inactiveRoot(), ".operation-prepared"), ignored);
+    if (!signedStaging && storage_->regularFileSize(joinPath(inactiveRoot(), kManifestReceiptFile), ignored))
+      return fail("stream_session_conflict", "completed archive versions cannot be replaced in place");
     std::string active;
     const std::string activePath =
         joinPath(storageRoot_, "/VECTMAP/active-map.json");

@@ -78,7 +78,8 @@ public:
   bool requestMapLibrary(const std::string &action,
                          const std::string &session = "",
                          const std::string &receipt = "");
-  std::string mapLibraryJson() const;
+  std::string mapLibraryJson(bool paged = false) const;
+  bool requestMapLibraryPage(size_t offset);
   void considerAutomaticMap(int32_t latitudeE7, int32_t longitudeE7, bool currentMapFound);
   void submitPendingMapLibrary() { submitLibraryTask(); }
 
@@ -113,8 +114,9 @@ private:
   std::string libraryAction_ = "refresh", librarySession_, libraryReceipt_;
   std::string libraryError_;
   std::vector<std::string> libraryRejectedSessions_;
-  bool libraryKnown_ = false, libraryAutomatic_ = true, librarySubmitted_ = false;
+  bool libraryKnown_ = false, libraryAutomatic_ = true, librarySubmitted_ = false, librarySelectionStarted_ = false;
   uint32_t libraryRevision_ = 0;
+  size_t libraryPageOffset_ = 0;
   int32_t libraryLatitudeE7_ = 0, libraryLongitudeE7_ = 0;
   void submitLibraryTask();
   static void libraryTask(void *context);

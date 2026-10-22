@@ -3136,12 +3136,13 @@ extension NavigationProtocolTests {
             source.contains("if item.isActiveOnDevice {") &&
                 source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
                 source.contains("? \"arrow.clockwise.circle\"") &&
-                source.contains(": \"arrow.up.circle\"") &&
+                source.contains("\"arrow.up.circle\"") &&
+                source.contains("\"arrow.triangle.swap\"") &&
                 !source.contains("IPhoneDownloadStatusIcon") &&
                 !source.contains("Image(systemName: \"iphone\")") &&
                 !source.contains("BikeComputerMapStatusIcon") &&
                 !source.contains("Text(\"b\")"),
-            "saved maps use the same active check and inactive upload icons regardless of origin"
+            "saved maps distinguish active maps, retained SD selections, uploads and retries"
         )
         assert(
             source.contains("Text(\"No offline maps yet\")"),
@@ -3150,7 +3151,8 @@ extension NavigationProtocolTests {
         assert(
             source.contains("This map is not saved on this iPhone") &&
                 source.contains("is active on the Bike Computer") &&
-                source.contains("Transfer \\(displayName) to device"),
+                source.contains("Install \\(displayName) on the Bike Computer") &&
+                source.contains("already installed on the SD card"),
             "saved-map presence indicators expose accessible state labels"
         )
         assert(
@@ -9938,6 +9940,39 @@ extension NavigationProtocolTests {
         assert(MapLibraryControlPacket.make(action: "remove", sessionID: "map", manifestReceipt: "short") == nil,
                "reject truncated identity")
         assert(DeviceMapLibrary.command("unknown") == nil, "reject unknown library actions")
+        assertEqual(String(data: MapLibraryControlPacket.page(offset: 4)!, encoding: .utf8), "MTRNlibrary-page|4",
+                    "small BLE pages use a bounded read-only command")
+        assert(MapLibraryControlPacket.page(offset: 3) == nil && MapLibraryControlPacket.page(offset: 32) == nil,
+               "reject invalid page offsets")
+        let pagedMaps = (0..<6).map { index in
+            DeviceInstalledMap(sessionID: "page-\(index)", mapID: "map-\(index)",
+                manifestReceipt: receipt, signedManifestReceipt: signed, displayName: "Map \(index)",
+                payloadBytes: 100, boundsE7: nil)
+        }
+        var firstPage = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 9, error: "", selectedSessionID: "", maps: Array(pagedMaps.prefix(4)))
+        firstPage.offset = 0; firstPage.total = 6
+        var lastPage = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 9, error: "", selectedSessionID: "", maps: Array(pagedMaps.suffix(2)))
+        lastPage.offset = 4; lastPage.total = 6
+        var malformed = firstPage; malformed.offset = Int.min; malformed.total = Int.max
+        assert(!malformed.isValid, "untrusted pagination integers cannot overflow validation")
+        var pages = DeviceMapLibraryPages()
+        let partial = pages.ingest(firstPage)
+        assert(partial.library?.isComplete == false && partial.nextOffset == 4,
+               "partial inventories never authorize reuse")
+        var stale = lastPage; stale = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 8, error: "", selectedSessionID: "", maps: stale.maps, offset: 4, total: 6)
+        assertEqual(pages.ingest(stale).nextOffset, 0, "mixed revisions restart from page zero")
+        _ = pages.ingest(firstPage)
+        let assembled = pages.ingest(lastPage)
+        assertEqual(assembled.library?.maps.count, 6, "all maps assemble from one snapshot")
+        assert(assembled.library?.isComplete == true && assembled.nextOffset == nil,
+               "only a complete snapshot enables commands")
+        assertEqual(pages.ingest(firstPage).library?.maps.count, 6, "late duplicate pages cannot replace a complete snapshot")
+        pages = DeviceMapLibraryPages()
+        assertEqual(pages.ingest(lastPage).nextOffset, 0, "a new connection cannot inherit old partial pages")
+
         let encoded = try! JSONEncoder().encode(library)
         assertEqual(try! JSONDecoder().decode(DeviceMapLibrary.self, from: encoded), library, "inventory wire round trip")
         let duplicate = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,

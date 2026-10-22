@@ -2850,7 +2850,7 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
 static std::string mapTransferStatusJson() {
   auto body = composeMapTransferStatusJson(readActiveMapStatusSnapshot());
   body.pop_back();
-  body += ",\"mapLibrary\":" + mapTransferHttp.mapLibraryJson() + "}";
+  body += ",\"mapLibrary\":" + mapTransferHttp.mapLibraryJson(true) + "}";
   return body;
 }
 
@@ -4654,6 +4654,15 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
     queueTransferControl(ble_transfer::Action::DisableMap,
                          ble_transfer::NotifyMap);
     Serial.println("BLE Map Transfer: exit queued");
+    return;
+  }
+
+  if (command.compare(0, 13, "library-page|") == 0) {
+    const auto offset = command.substr(13);
+    if (!offset.empty() && offset.size() <= 2 &&
+        std::all_of(offset.begin(), offset.end(), [](char c) { return c >= '0' && c <= '9'; }))
+      (void)mapTransferHttp.requestMapLibraryPage(static_cast<size_t>(std::atoi(offset.c_str())));
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
     return;
   }
 

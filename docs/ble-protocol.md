@@ -1791,6 +1791,7 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `MTRN` | iOS -> ESP32 | `enter` | Enable short-lived map-transfer mode. |
 | `MTRN` | iOS -> ESP32 | `exit` | Disable map-transfer mode. |
 | `MTRN` | iOS -> ESP32 | `library` | Refresh the completed SD-map inventory without enabling Wi-Fi. |
+| `MTRN` | iOS -> ESP32 | `library-page\|offset` | Read four cached entries at offsets 0, 4, 8, ... without filesystem access. |
 | `MTRN` | iOS -> ESP32 | `library-auto` / `library-manual` | Persist automatic/manual map selection. |
 | `MTRN` | iOS -> ESP32 | `library-select\|sessionID\|manifestReceipt` | Verify and select an exact completed installation; disables automatic selection. |
 | `MTRN` | iOS -> ESP32 | `library-remove\|sessionID\|manifestReceipt` | Remove an exact unselected installation, subject to recovery protection. |
@@ -2731,6 +2732,8 @@ Authenticated `MSTS` and `GET /map-transfer/status` include `mapLibrary`:
   "revision": 1,
   "error": "",
   "selectedSessionID": "installed-session",
+  "offset": 0,
+  "total": 1,
   "maps": [{
     "sessionID": "installed-session",
     "mapID": "shanghai-map",
@@ -2759,3 +2762,13 @@ pointer/readback/recovery mechanism. The renderer must acknowledge the new root
 before `selectedSessionID` identifies it as in use. Selection does not issue or
 rewrite an upload operation's Installed receipt. Removal cannot delete selected,
 rollback, transaction, or selection-anchor roots.
+
+
+BLE library inventory is paginated in four-map pages inside the existing MSTS
+chunk stream. `offset` and `total` describe the immutable cached inventory at
+`revision`; HTTPS returns the complete inventory at offset zero. The app requests
+subsequent cached pages only after assembling the current one, and restarts at
+zero if a revision, selection, policy, count, or ordering changes. Duplicate
+sessions or malformed pages are rejected. A partial or connection-stale inventory
+cannot drive reuse or removal. This keeps a full SD library from exceeding the
+255-chunk status limit at reduced ATT MTUs.

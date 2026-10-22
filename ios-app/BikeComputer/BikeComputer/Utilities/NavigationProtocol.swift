@@ -90,6 +90,10 @@ nonisolated struct MapSelectionHealthProjection {
 
 // Durable operation queries are deliberately bounded and cannot carry delimiters.
 nonisolated enum MapLibraryControlPacket {
+    static func page(offset: Int) -> Data? {
+        guard (0..<32).contains(offset), offset.isMultiple(of: 4) else { return nil }
+        return Data("MTRNlibrary-page|\(offset)".utf8)
+    }
     static func validSession(_ value: String) -> Bool {
         !value.isEmpty && value.utf8.count <= 80 && !value.hasPrefix(".") && !value.contains("..") &&
             value.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) ||

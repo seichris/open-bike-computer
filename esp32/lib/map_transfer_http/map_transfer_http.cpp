@@ -304,7 +304,16 @@ bool MapTransferHttpServer::requestMapLibrary(const std::string &action,
   return true;
 }
 
-std::string MapTransferHttpServer::mapLibraryJson() const {
+bool MapTransferHttpServer::requestMapLibraryPage(size_t offset) {
+  StateGuard guard(*this);
+  if (!libraryKnown_ || librarySubmitted_ || offset % 4 != 0 ||
+      (offset != 0 && offset >= libraryMaps_.size())) return false;
+  libraryPageOffset_ = offset;
+  operationStatusNotification_ = true;
+  return true;
+}
+
+std::string MapTransferHttpServer::mapLibraryJson(bool paged) const {
   StateGuard guard(*this);
   std::string json;
   json.reserve(8192);
@@ -313,9 +322,16 @@ std::string MapTransferHttpServer::mapLibraryJson() const {
       ",\"busy\":" + (librarySubmitted_ || !libraryAction_.empty() || pendingRendererAcknowledgement_ ? "true" : "false") +
       ",\"revision\":" + std::to_string(libraryRevision_) +
       ",\"error\":\"" + jsonEscape(libraryError_) + "\",\"selectedSessionID\":\"" +
-      jsonEscape(selectionHealth_.state == "ready" ? selectionHealth_.sessionID : "") + "\",\"maps\":[";
+      jsonEscape(selectionHealth_.state == "ready" ? selectionHealth_.sessionID : "") + "\",";
+  const size_t offset = paged && libraryPageOffset_ < libraryMaps_.size() ? libraryPageOffset_ : 0;
+  const size_t end = paged ? std::min(offset + 4, libraryMaps_.size()) : libraryMaps_.size();
+  // Four-map BLE pages leave headroom for ordinary status even at a reduced
+  // ATT MTU. HTTPS consumers receive the complete bounded inventory.
+  json += "\"offset\":" + std::to_string(offset) + ",\"total\":" +
+      std::to_string(libraryMaps_.size()) + ",\"maps\":[";
   bool comma = false;
-  for (const auto &map : libraryMaps_) {
+  for (size_t index = offset; index < end; ++index) {
+    const auto &map = libraryMaps_[index];
     if (comma) json += ',';
     comma = true;
     json += "{\"sessionID\":\"" + jsonEscape(map.sessionId) + "\",\"mapID\":\"" +
@@ -391,17 +407,15 @@ void MapTransferHttpServer::executeLibraryTask() try {
     const auto restored = store.restore();
     if (restored != operation::Result::Ok)
       result = {false, "library_operation_storage", ""};
-    if (result.ok) for (const auto &record : store.records()) {
-      if (record.phase == operation::Phase::Receiving || record.phase == operation::Phase::Prepared ||
-          record.phase == operation::Phase::Accepted) result = {false, "library_operation_pending", ""};
-    }
+    if (result.ok && store.hasUnresolvedOperation())
+      result = {false, "library_operation_pending", ""};
   }
   if (result.ok && (action == "auto" || action == "manual" || action == "select")) {
     automatic = action == "auto";
     if (!installer_.setAutomaticMapSelection(automatic)) result = {false, "library_policy_write", ""};
   }
   bool selecting = action == "select" || action == "automatic-select";
-  if (result.ok && action == "automatic-select") {
+  if (result.ok && action == "automatic-select" && !librarySelectionStarted_) {
     std::vector<InstalledMap> candidates;
     const auto scanned = installer_.readMapLibrary(candidates);
     if (!scanned.ok) result = scanned;
@@ -416,7 +430,15 @@ void MapTransferHttpServer::executeLibraryTask() try {
     if (candidate) { session = candidate->sessionId; receipt = candidate->manifestReceipt; }
     else selecting = false;
   }
-  if (result.ok && selecting) result = installer_.selectInstalledMap(session, receipt);
+  if (result.ok && selecting) {
+    // Persist the chosen identity in RAM before any pointer write. A retry
+    // after allocation failure must hand this exact map to the renderer,
+    // even if automatic selection now sees its already-updated pointer.
+    { StateGuard guard(*this);
+      librarySession_ = session; libraryReceipt_ = receipt; librarySelectionStarted_ = true;
+    }
+    result = installer_.selectInstalledMap(session, receipt);
+  }
   if (result.ok && action == "remove") result = installer_.removeInstalledMap(session, receipt);
   std::vector<InstalledMap> maps;
   const auto inventory = installer_.readMapLibrary(maps);
@@ -424,12 +446,14 @@ void MapTransferHttpServer::executeLibraryTask() try {
   const bool changed = result.ok && selecting && installer_.readActiveMap(selected).ok;
   {
     StateGuard guard(*this);
-    libraryMaps_ = std::move(maps); libraryKnown_ = inventory.ok;
+    libraryMaps_ = std::move(maps); libraryKnown_ = inventory.ok; libraryPageOffset_ = 0;
     libraryAutomatic_ = automatic;
     if (!result.ok) libraryError_ = result.code;
     else if (!inventory.ok) libraryError_ = inventory.code;
     else if (action != "refresh") libraryError_.clear();
-    if (!result.ok && action == "automatic-select" && libraryRejectedSessions_.size() < kMaximumLibraryMaps)
+    if (!result.ok && action == "automatic-select" &&
+        result.code != "library_operation_pending" && result.code != "library_operation_storage" &&
+        result.code != "library_busy" && libraryRejectedSessions_.size() < kMaximumLibraryMaps)
       libraryRejectedSessions_.push_back(session);
     if (changed) {
       // Renderer acknowledgement is live selection evidence. Reusing a map
@@ -441,7 +465,7 @@ void MapTransferHttpServer::executeLibraryTask() try {
       pendingMapRootTaken_ = false; pendingRendererAcknowledgement_ = true;
       pendingRendererAutomaticExit_ = false;
     }
-    libraryAction_.clear(); librarySession_.clear(); libraryReceipt_.clear();
+    libraryAction_.clear(); librarySession_.clear(); libraryReceipt_.clear(); librarySelectionStarted_ = false;
     librarySubmitted_ = false; ++libraryRevision_;
     operationStatusNotification_ = true;
   }
@@ -449,6 +473,14 @@ void MapTransferHttpServer::executeLibraryTask() try {
 } catch (const std::bad_alloc &) {
   StateGuard guard(*this);
   libraryKnown_ = false; libraryError_ = "library_memory";
+  if (librarySelectionStarted_) {
+    // begin()/mailbox string copies can fail partway through. Release only
+    // this incomplete live handoff so the retained request can retry.
+    activationState_.finish("idle", "", "", "");
+    pendingMapRoot_.clear(); pendingMapSessionId_.clear(); pendingMapId_.clear();
+    pendingMapOperationID_.clear(); pendingMapRootTaken_ = false;
+    pendingRendererAcknowledgement_ = false;
+  }
   // Selection may already have reached durable storage. Retain its identity
   // and retry the handoff after memory recovers instead of stranding a pointer
   // that the renderer has never been asked to load.

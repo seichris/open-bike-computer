@@ -18,7 +18,6 @@
 #include <fcntl.h>
 #include <fstream>
 #include <limits>
-#include <cmath>
 #include <memory>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -2031,7 +2030,9 @@ InstallStatus MapTransferInstaller::cancelOperationStaging(
     return fail("operation_cleanup_conflict","prepared metadata belongs to another attempt");
   ActiveMapSelection active; const auto selected=readActiveMap(active);
   const auto relative=std::string("/VECTMAP/.maps/")+sessionId;
-  if (selected.ok && (active.root==relative || active.previousRoot==relative)) {
+  const bool completedLibraryMap = fileExists(joinPath(root, kStreamConsumedFile)) ||
+      fileExists(joinPath(root, kStreamConsumedFile) + ".bak");
+  if (completedLibraryMap || (selected.ok && (active.root==relative || active.previousRoot==relative))) {
     // Preparing/retransmitting identical bytes does not own the pre-existing
     // selected or rollback map. Cancel only this attempt's separate envelope.
     if (!marker || (removeTree(joinPath(root,".operation-prepared")) &&
@@ -3021,6 +3022,13 @@ InstallStatus MapTransferInstaller::discardUnselectedStreamMap(
                   "another streamed map owns the pending activation marker");
     }
   }
+  const auto completedRoot = joinPath(storageRoot_, relativeRoot);
+  if (fileExists(joinPath(completedRoot, kStreamConsumedFile)) ||
+      fileExists(joinPath(completedRoot, kStreamConsumedFile) + ".bak")) {
+    return clearPendingStreamActivation(sessionId)
+        ? InstallStatus{true, "library_kept", ""}
+        : fail("stream_discard_cleanup", "could not clear abandoned activation metadata");
+  }
   if (!removeTree(joinPath(storageRoot_, relativeRoot)) ||
       !removeTree(pendingPath) || !removeTree(pendingPath + ".bak") ||
       !removeTree(pendingPath + ".tmp")) {
@@ -3323,7 +3331,13 @@ InstallStatus MapTransferInstaller::readInstalledMap(
   const auto root = std::string("/VECTMAP/.maps/") + sessionId;
   const auto path = joinPath(storageRoot_, root);
   struct stat entry{};
-  if (::lstat(path.c_str(), &entry) != 0 || !S_ISDIR(entry.st_mode))
+#if defined(ARDUINO)
+  // ESP-IDF's FAT VFS has no symlinks and does not provide lstat.
+  const int inspected = ::stat(path.c_str(), &entry);
+#else
+  const int inspected = ::lstat(path.c_str(), &entry);
+#endif
+  if (inspected != 0 || !S_ISDIR(entry.st_mode))
     return fail("library_missing", "installed map is missing");
   // Prepared/uncommitted content must never become selectable through the
   // library, even if it shares a session with a previously consumed stream.
@@ -3381,21 +3395,20 @@ InstallStatus MapTransferInstaller::readInstalledMap(
 InstallStatus MapTransferInstaller::readMapLibrary(std::vector<InstalledMap> &maps) const {
   maps.clear();
   const auto root = joinPath(storageRoot_, "/VECTMAP/.maps");
-  DIR *dir = ::opendir(root.c_str());
+  const std::unique_ptr<DIR, decltype(&::closedir)> dir(::opendir(root.c_str()), &::closedir);
   if (!dir) return errno == ENOENT ? InstallStatus{true, "ok", ""}
                                  : fail("library_read", "could not read map library");
-  while (const auto *entry = ::readdir(dir)) {
+  while (const auto *entry = ::readdir(dir.get())) {
     InstalledMap map;
     if (safeId(entry->d_name) && readInstalledMap(entry->d_name, map).ok) {
       if (maps.size() == kMaximumLibraryMaps) {
-        ::closedir(dir); maps.clear();
+        maps.clear();
         return fail("library_capacity", "map library exceeds supported inventory size");
       }
       maps.push_back(std::move(map));
     }
     if (storageProgressCallback_) storageProgressCallback_(storageProgressContext_);
   }
-  ::closedir(dir);
   std::sort(maps.begin(), maps.end(), [](const InstalledMap &a, const InstalledMap &b) {
     return a.sessionId < b.sessionId;
   });
