@@ -1,4 +1,4 @@
-"""Strict native route archive validation; imported GPX is the only social provider."""
+"""Strict validation of imported GPX and explicitly saved Apple Maps archives."""
 import hashlib
 import json
 import math
@@ -7,6 +7,14 @@ import uuid
 from .models import Point
 
 FINGERPRINT_DOMAIN = b"bicino-route-geometry-v1"
+
+# Exact metadata, not a self-declared durable scope. Ordinary active-only MapKit
+# responses, Strava and relabelled provider combinations remain ineligible.
+# Maintainer-requested product policy, not an attestation of Apple permission.
+SOCIAL_PROVIDERS = (
+    {'providerID': 'user.imported-gpx', 'attribution': 'User-provided GPX', 'storageScope': 'durable'},
+    {'providerID': 'apple.mapkit', 'attribution': 'Apple Maps', 'storageScope': 'phoneOnly'},
+)
 
 
 def _scaled(value):
@@ -50,7 +58,7 @@ def validate_archive(archive):
     allowed={'id','revision','provider','sourceReference','localeIdentifier','transportType','source','destination','bounds','distanceMeters','expectedTravelTimeSeconds','name','points','steps','normalizationVersion'}
     if set(route)-allowed or not uuid.UUID(route['id']).int:
         raise ValueError('route_fields')
-    if (route['provider'] != {'providerID':'user.imported-gpx','attribution':'User-provided GPX','storageScope':'durable'}
+    if (route['provider'] not in SOCIAL_PROVIDERS
             or route.get('sourceReference') is not None or route['transportType'] != 'cycling'
             or not type(route['revision']) is int or not 1 <= route['revision'] <= 2**32-1
             or not type(route['normalizationVersion']) is int or not 1 <= route['normalizationVersion'] <= 65535

@@ -9,7 +9,8 @@ struct SocialCapabilities: Codable, Equatable {
     var groups = false
     var hardware = false
     var invitePreviews = false
-    enum CodingKeys: String, CodingKey { case media, routes, activities, groups, hardware, invitePreviews }
+    var savedMapKitRoutes = false
+    enum CodingKeys: String, CodingKey { case media, routes, activities, groups, hardware, invitePreviews, savedMapKitRoutes }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -19,6 +20,7 @@ struct SocialCapabilities: Codable, Equatable {
         groups = try c.decodeIfPresent(Bool.self, forKey: .groups) ?? false
         hardware = try c.decodeIfPresent(Bool.self, forKey: .hardware) ?? false
         invitePreviews = try c.decodeIfPresent(Bool.self, forKey: .invitePreviews) ?? false
+        savedMapKitRoutes = try c.decodeIfPresent(Bool.self, forKey: .savedMapKitRoutes) ?? false
     }
 }
 

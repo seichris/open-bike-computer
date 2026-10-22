@@ -87,11 +87,23 @@ to a server content ID, so later starts and visibility edits reuse the snapshot.
 Changing back to Only Me uses the server's existing share-link revocation.
 Link visibility offers a Share route link action. Live location remains opt-in.
 
-The deployed server accepts only owned, redistributable imported GPX archives.
-MapKit remains phone-only; Strava and another rider's saved route cannot be
-republished. Those previews retain private navigation and explain why sharing
-and group creation are disabled. This UI change does not change provider policy,
-route archive hashes, backend schemas, or the deployment contract.
+The server accepts owned imported GPX archives and explicitly saved Apple Maps
+archives. The 22 October 2026 maintainer request extends the saved Apple Maps
+product policy to the same publishing, exact-snapshot group delivery and recipient
+save flow as GPX. It does not establish Apple permission; see
+`reviews/mapkit-route-storage-2026-09-15.md`. Apple archives retain
+`apple.mapkit` / `Apple Maps` / `phoneOnly`, including their original geometry,
+instructions, timestamps and content hash. No directions request replaces the
+selected alternative. `phoneOnly` still excludes Watch transfer, including for
+received copies. Active-only MapKit responses, Strava and another rider's saved
+route cannot be republished. These restrictions are enforced by both app and server.
+
+The additive `savedMapKitRoutes` capability follows the server's routes feature.
+Older servers omit it, so updated clients disable Apple Maps sharing with a
+server-update explanation rather than attempting an unsupported upload. Deploy
+the backend through its normal immutable image-lock promotions before delivering
+the app. This change adds no database migration and does not waive the existing
+deployment, provider-permission or physical acceptance gates.
 
 ## Upgrade and lifecycle contracts
 

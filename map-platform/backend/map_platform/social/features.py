@@ -29,6 +29,8 @@ class SocialFeatures:
         values = asdict(self)
         # Every group includes an immutable route; hardware is a group consumer.
         values["groups"] = self.groups and self.routes
+        # Protocol support, so updated clients stay disabled on older servers.
+        values["savedMapKitRoutes"] = self.routes
         values["hardware"] = self.hardware and values["groups"]
         values["invitePreviews"] = self.invitePreviews and values["groups"] and self.media
         return values

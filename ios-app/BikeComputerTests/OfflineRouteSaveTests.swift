@@ -240,6 +240,7 @@ struct OfflineRouteSaveTests {
         try unavailableWatchDeletionAndFenceRenewal()
         try sourceAndValidation()
         try socialCopyKeepsProviderAndProvenance()
+        try socialMapKitCopyKeepsExactRoute()
         try saveIdentityRestartAndDuplicates()
         try interactionCancellationAndStorageFailure()
         try corruptionDeletionAndReplacement()
@@ -327,6 +328,35 @@ struct OfflineRouteSaveTests {
         failure { _ = try f.library.importSocialArchive(strava.encoded(purpose: .offlineNavigation, now: f.now),
             source: SocialRouteSource(kind: .content, socialID: "restricted", owner: "rider", revision: 1), duplicate: true) }
         print("Social route provenance and publishing restrictions: \(checks - before) checks passed")
+    }
+
+    static func socialMapKitCopyKeepsExactRoute() throws {
+        let f = Fixture(); defer { f.cleanup() }
+        let planned = changedProvider(try draft(f).archive.route, RouteProviderPolicyV1.mapKit)
+        let saved = try f.library.saveOffline(.plannedMapKit(planned, createdAt: f.now), name: "Selected Apple Maps route")
+        let original = try f.library.offlineArchive(for: saved.summary)
+        check(RouteProviderPolicyV1.allowsSocialSharing(original.route.provider), "Explicitly saved Apple Maps routes support social sharing")
+        check(!RouteProviderPolicyV1.allowsSocialSharing(RouteProviderPolicyV1.mapKit), "Active MapKit responses remain private")
+        check(!RouteProviderPolicyV1.allowsSocialSharing(RouteProviderPolicyV1.strava), "Strava sharing stays disabled")
+        let data = try original.encoded(purpose: .offlineNavigation, now: f.now)
+        let recipient = Fixture(); defer { recipient.cleanup() }
+        let source = SocialRouteSource(kind: .ride, socialID: "apple-maps-group", owner: "organizer", revision: nil)
+        let received = try recipient.library.importSocialArchive(data, source: source, duplicate: false)
+        let restored = try recipient.library.offlineArchive(for: received)
+        check(restored == original, "Joining and saving preserves the exact archive, provider, geometry, steps and content hash")
+        check(restored.route.provider == RouteProviderPolicyV1.mapKitSavedOnPhone, "Received Apple Maps routes retain attribution and phone-only scope")
+        check(recipient.library.socialPublication(for: received, currentProfileID: "member") == .restricted(owner: "organizer"),
+              "Received Apple Maps routes remain the organizer's to share")
+        let duplicate = try recipient.library.importSocialArchive(data, source: source, duplicate: true)
+        let copied = try recipient.library.offlineArchive(for: duplicate)
+        check(copied.route.points == original.route.points && copied.route.steps == original.route.steps && copied.route.provider == original.route.provider,
+              "An explicit duplicate preserves Apple Maps geometry, instructions and attribution")
+        check(recipient.library.socialPublication(for: duplicate, currentProfileID: "member") == .restricted(owner: "organizer"),
+              "Duplicating an Apple Maps route does not grant publishing rights")
+        check(recipient.watch.transferredRouteIDs.isEmpty, "Saving a received Apple Maps route does not transfer it to Watch")
+        failure { _ = try restored.encoded(purpose: .watchTransfer, now: f.now) }
+        let relaunched = recipient.makeLibrary()
+        check(try relaunched.offlineArchive(for: received) == original, "Exact group route survives recipient app relaunch")
     }
 
     static func operationReceiptAndCrashRecovery() throws {

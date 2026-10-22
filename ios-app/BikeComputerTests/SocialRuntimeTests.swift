@@ -182,6 +182,9 @@ struct SocialRuntimeTests {
         require(store.read(owner: "another-owner", ride: "ride") == nil, "invites never cross accounts")
         let capability = try JSONDecoder().decode(SocialCapabilities.self, from: Data("{\"media\":true}".utf8))
         require(capability.media && !capability.invitePreviews, "old servers safely omit preview capability")
+        require(!capability.savedMapKitRoutes, "old servers keep Apple Maps sharing disabled until the backend supports it")
+        let current = try JSONDecoder().decode(SocialCapabilities.self, from: Data("{\"routes\":true,\"savedMapKitRoutes\":true}".utf8))
+        require(current.savedMapKitRoutes, "updated servers advertise saved Apple Maps route support")
         require(SocialLinkTarget(url: URL(string: "https://bicino.com/social/ride/00000000-0000-4000-8000-000000000001#capability-secret-123456789")!)?.kind == "ride", "preview links preserve native joining")
     }
 

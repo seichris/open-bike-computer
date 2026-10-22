@@ -129,10 +129,10 @@ class SocialTest(unittest.TestCase):
         self.assertEqual(r.status_code,200,r.text)
         r=self.call('bob','POST',f"/friend-requests/{r.json()['id']}/accept")
         self.assertEqual(r.status_code,200,r.text)
-    def route(self, visibility='friends'):
+    def route(self, visibility='friends', provider=None):
         archive={'schemaVersion':1,'createdAt':1000000000,'route':{
             'id':'00000000-0000-4000-8000-000000000001','revision':1,
-            'provider':{'providerID':'user.imported-gpx','attribution':'User-provided GPX','storageScope':'durable'},
+            'provider':provider or {'providerID':'user.imported-gpx','attribution':'User-provided GPX','storageScope':'durable'},
             'localeIdentifier':'en_US','transportType':'cycling','normalizationVersion':1,
             'source':{'coordinate':{'latitude':0,'longitude':0},'label':'Start'},
             'destination':{'coordinate':{'latitude':0,'longitude':0.05},'label':'End'},
@@ -179,7 +179,7 @@ class SocialTest(unittest.TestCase):
         from unittest.mock import patch
         with patch.dict(os.environ, {}, clear=True):
             features = SocialFeatures.from_environment()
-        self.assertEqual(features.document(), dict(media=False, routes=False, activities=False, groups=False, hardware=False, invitePreviews=False))
+        self.assertEqual(features.document(), dict(media=False, routes=False, activities=False, groups=False, hardware=False, invitePreviews=False, savedMapKitRoutes=False))
         self.client.app.state.features = features
         self.assertEqual(self.call('alice', 'GET', '/capabilities').json(), features.document())
         self.assertEqual(self.call('alice', 'GET', '/me').status_code, 200)
@@ -243,6 +243,55 @@ class SocialTest(unittest.TestCase):
         raw=self.route();archive=json.loads(raw['archive']);archive['route']['provider']['providerID']='apple.mapkit'
         raw['archive']=json.dumps(archive)
         self.assertEqual(self.call('alice','POST','/routes',raw).status_code,400)
+
+    def test_saved_mapkit_exact_route_delivered_to_invited_and_code_joined_riders(self):
+        provider = {'providerID': 'apple.mapkit', 'attribution': 'Apple Maps', 'storageScope': 'phoneOnly'}
+        self.assertTrue(self.call('alice', 'GET', '/capabilities').json()['savedMapKitRoutes'])
+        raw = self.route('private', provider=provider)
+        response = self.call('alice', 'POST', '/routes', raw)
+        self.assertEqual(response.status_code, 200, response.text)
+        item = response.json()
+        self.assertEqual(item['body']['archive'], raw['archive'])
+        self.assertEqual(item['body']['sha256'], hashlib.sha256(raw['archive'].encode()).hexdigest())
+        self.assertEqual(self.call('bob', 'GET', '/routes/' + item['id']).status_code, 404)
+        self.friend()
+        response = self.call('alice', 'POST', '/group-rides', {'routeID': item['id'], 'title': 'Saved Apple Maps ride'})
+        self.assertEqual(response.status_code, 200, response.text)
+        room = response.json()
+        invite = self.call('alice', 'POST', '/ride-invites', {'rideID': room['id'], 'profileID': self.ids['bob']}).json()
+        self.assertEqual(self.call('bob', 'GET', '/ride-invites/' + invite['id']).json()['route']['archive'], raw['archive'])
+        joined = self.call('bob', 'POST', '/ride-invites/' + invite['id'] + '/accept')
+        code_joined = self.call('carol', 'POST', '/group-rides/join', {'code': room['joinCode']})
+        for response in (joined, code_joined):
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()['route']['archive'], raw['archive'])
+            self.assertEqual(response.json()['route']['sha256'], item['body']['sha256'])
+        # Group delivery does not grant permission to republish the organizer's copy.
+        response = self.call('bob', 'POST', '/routes', raw)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()['code'], 'route_redistribution_not_permitted')
+        self.assertEqual(self.call('bob', 'POST', '/group-rides', {'routeID': item['id'], 'title': 'Copy'}).status_code, 404)
+        # Live progress uses the exact saved geometry, without recalculating a route.
+        epoch = self.call('bob', 'POST', f"/group-rides/{room['id']}/consent", {'location': True, 'stats': True}).json()['epoch']
+        state = {'epoch': epoch, 'sequence': 1, 'capturedAt': self.clock, 'latitude': 0, 'longitude': 0.01, 'horizontalAccuracy': 5}
+        response = self.call('bob', 'POST', f"/group-rides/{room['id']}/state", state)
+        self.assertEqual(response.status_code, 200, response.text)
+        snapshot = self.call('alice', 'GET', '/group-rides/' + room['id']).json()
+        self.assertEqual(snapshot['route']['archive'], raw['archive'])
+        self.assertEqual(snapshot['riders'][0]['routeHash'], item['body']['sha256'])
+
+    def test_saved_mapkit_policy_rejects_active_forged_and_other_provider_metadata(self):
+        for provider in (
+            {'providerID': 'apple.mapkit', 'attribution': 'Apple Maps', 'storageScope': 'activeOnly'},
+            {'providerID': 'apple.mapkit', 'attribution': 'Apple Maps', 'storageScope': 'durable'},
+            {'providerID': 'apple.mapkit', 'attribution': 'User-provided GPX', 'storageScope': 'phoneOnly'},
+            {'providerID': 'strava.route', 'attribution': 'Strava', 'storageScope': 'durable'},
+        ):
+            with self.subTest(provider=provider):
+                response = self.call('alice', 'POST', '/routes', self.route(provider=provider))
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()['code'], 'route_not_redistributable')
+
     def test_links_revoke_and_replays_do_not_resurrect(self):
         item=self.call('alice','POST','/routes',self.route('link')).json()
         link=self.call('alice','POST','/share-links',{'contentID':item['id']},key='share-create').json()
