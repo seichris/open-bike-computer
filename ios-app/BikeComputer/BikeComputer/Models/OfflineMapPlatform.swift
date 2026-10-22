@@ -1319,6 +1319,9 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             if body.contains("\"library_full\"") || body.contains("\"stream_sd_full\"") {
                 return "The SD card needs space. Remove a map in Settings → Maps on this Bike Computer, then try again."
             }
+            if body.contains("\"stream_storage_unavailable\"") {
+                return "The SD card is busy or unavailable. Try again shortly."
+            }
             if body.contains("\"library_busy\"") {
                 return "The Bike Computer is finishing a map switch. Try again shortly."
             }

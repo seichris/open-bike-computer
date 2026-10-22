@@ -9987,6 +9987,8 @@ extension NavigationProtocolTests {
             revision: 10, error: "", selectedSessionID: "", maps: [damagedMap])
         assert(damagedLibrary.installed(mapID: map.mapID, manifestReceipt: receipt, signedManifestReceipt: signed) == nil,
                "damaged payloads remain removable but never authorize reuse")
+        assert(OfflineMapPlatformError.serverStatus(503, "{\"code\":\"stream_storage_unavailable\"}").localizedDescription.contains("busy or unavailable"),
+               "temporary SD unavailability is distinct from a full card")
         let encoded = try! JSONEncoder().encode(library)
         assertEqual(try! JSONDecoder().decode(DeviceMapLibrary.self, from: encoded), library, "inventory wire round trip")
         let duplicate = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,

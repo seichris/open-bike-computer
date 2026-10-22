@@ -41,7 +41,7 @@ public:
   void setStreamTrustStore(MapStreamTrustStore trustStore);
   void setStreamStorageAvailable(bool available);
   void setStreamStorageProbe(std::function<bool()> probe);
-  void setStreamStorageSpaceProbe(std::function<uint64_t()> probe) { streamStorageSpaceProbe_ = std::move(probe); }
+  void setStreamStorageSpaceProbe(MapStreamFreeSpaceProbe probe) { streamStorageSpaceProbe_ = std::move(probe); }
   bool refreshStreamStorageCapability(bool requireWritable = true);
   bool streamInstallSupported() const;
   bool setEnabled(bool enabled);
@@ -114,6 +114,7 @@ private:
   std::vector<InstalledMap> libraryMaps_;
   std::string libraryAction_ = "refresh", librarySession_, libraryReceipt_;
   std::string libraryError_, libraryRequestID_, libraryCommandID_, libraryCommandError_;
+  std::string pendingMapLibraryCommandID_;
   std::vector<std::string> libraryRejectedSessions_;
   bool libraryKnown_ = false, libraryAutomatic_ = true, librarySubmitted_ = false, librarySelectionStarted_ = false;
   uint32_t libraryRevision_ = 0;
@@ -126,6 +127,7 @@ private:
   static void libraryTask(void *context);
   static void ownedLibraryTask(void *context, const char *, bool);
   void executeLibraryTask();
+  void recoverLibraryTask(const char *code);
   std::string selectionOperationID(const ActiveMapSelection &selected) const;
   mutable operation::AdmissionFence operationAdmission_;
   bool observeOperationRevision(uint64_t revision) const;
@@ -176,7 +178,7 @@ private:
   bool streamStatusActive_ = false;
   bool streamStorageAvailable_ = false;
   std::function<bool()> streamStorageProbe_;
-  std::function<uint64_t()> streamStorageSpaceProbe_;
+  MapStreamFreeSpaceProbe streamStorageSpaceProbe_;
   std::string pendingMapRoot_;
   std::string pendingMapSessionId_;
   std::string pendingMapId_;

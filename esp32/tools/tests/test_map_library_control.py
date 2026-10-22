@@ -25,6 +25,7 @@ class MapLibraryControlTests(unittest.TestCase):
 #include <string>
 #include <vector>
 #include "map_transfer.hpp"
+#include "map_activation_workspace.hpp"
 #include "durable_operation.hpp"
 #include "map_selection_health.hpp"
 constexpr int ESP_OK=0,ESP_ERR_TIMEOUT=1;
@@ -42,7 +43,7 @@ struct MapOperationStorage:operation::Storage {
 std::vector<uint8_t> MapOperationStorage::slots[2];
 struct Installer {
   bool automatic=true,currentCovers=false,candidateCovers=true,throwAfterSelect=false,policyWrite=true;
-  int selected=0,scans=0;std::string selectionError;
+  int selected=0,scans=0,selectAttempts=0;bool throwRefresh=false;std::string selectionError;
   ActiveMapSelection active;
   bool automaticMapSelection(){return automatic;}
   bool setAutomaticMapSelection(bool value){if(policyWrite)automatic=value;return policyWrite;}
@@ -53,13 +54,14 @@ struct Installer {
   bool mapRootHasBlock(const std::string&,int32_t,int32_t){return currentCovers;}
   bool installedMapCovers(const InstalledMap&,int32_t,int32_t){return candidateCovers;}
   InstallStatus selectInstalledMap(const std::string&s,const std::string&){
+    ++selectAttempts;
     if(!selectionError.empty())return {false,selectionError,""};
     ++selected;active.root="/VECTMAP/.maps/"+s;active.sessionId=s;active.mapId="city";
     return {true,"selected",""};
   }
   InstallStatus removeInstalledMap(const std::string&,const std::string&){return {true,"ok",""};}
   bool pruneObsoleteInstalledMaps(){return true;}
-  InstallStatus readMapLibrary(std::vector<InstalledMap>&){++scans;return {true,"ok",""};}
+  InstallStatus readMapLibrary(std::vector<InstalledMap>&){++scans;if(throwRefresh){throwRefresh=false;throw std::bad_alloc();}return {true,"ok",""};}
 };
 struct Activation {
   bool running=false,throwBegin=false;
@@ -89,12 +91,19 @@ public:
   bool libraryAutomaticBlockKnown_=false;
   size_t libraryPageOffset_=0;
   int32_t libraryLatitudeE7_=0,libraryLongitudeE7_=0;
-  std::string pendingMapRoot_,pendingMapSessionId_,pendingMapId_,pendingMapOperationID_;
+  std::string pendingMapRoot_,pendingMapSessionId_,pendingMapId_,pendingMapOperationID_,pendingMapLibraryCommandID_;
+  std::string terminalOperationID_,terminalSessionID_,terminalMapID_,rollbackOperationID_,rollbackSession_;
+  bool terminalAutomaticExit_=false,terminalFailed_=false,rollbackAutomaticExit_=false,rollbackSubmitted_=false;
   bool pendingMapRootTaken_=false,pendingRendererAcknowledgement_=false,pendingRendererAutomaticExit_=false,operationStatusNotification_=false;
   RollbackKind rollbackKind_=RollbackKind::None;
   bool requestMapLibrary(const std::string&,const std::string&="",const std::string&="",const std::string&="");
   void considerAutomaticMap(int32_t,int32_t,bool);
+  void lockState(){} void unlockState(){}
+  void finishActivation(std::string a,std::string b,std::string c,std::string d){activationState_.finish(a,b,c,d);}
+  void releaseCommitGrant(){} void requestAutomaticExit(){}
+  void acknowledgeActivatedMapRoot(const std::string&,bool);
   void executeLibraryTask();
+  void recoverLibraryTask(const char*);
   static void libraryTask(void*);
   static void ownedLibraryTask(void*,const char*,bool);
   std::string mapLibraryJson(bool paged) const;
@@ -109,6 +118,7 @@ public:
         fixture += between(source, 'void MapTransferHttpServer::considerAutomaticMap(', 'void MapTransferHttpServer::submitLibraryTask(')
         fixture += between(source, 'void MapTransferHttpServer::libraryTask(', 'void MapTransferHttpServer::executeLibraryTask()')
         fixture += between(source, 'void MapTransferHttpServer::executeLibraryTask()', 'void MapTransferHttpServer::releaseCommitGrant(')
+        fixture += between(source, 'void MapTransferHttpServer::acknowledgeActivatedMapRoot(', 'std::string MapTransferHttpServer::selectionOperationID(')
         fixture += r'''
 InstalledMap city(){InstalledMap m;m.sessionId="city";m.mapId="city";m.root="/VECTMAP/.maps/city";m.manifestReceipt=std::string(64,'b');m.presentation.hasBoundsE7=true;m.presentation.boundsE7={-1000000,-1000000,1000000,1000000};return m;}
 void reset(){for(auto&s:MapOperationStorage::slots)s.clear();clockMs=100;}
@@ -131,6 +141,12 @@ int main(){using namespace map_transfer;
     assert(s.installer_.automatic==pending);
     assert(s.libraryCommandID_==std::string(32,'f'));
     assert((s.libraryCommandError_=="library_operation_pending")==pending);
+    if(pending){
+      MapTransferHttpServer covered;covered.libraryMaps_={city()};covered.installer_.currentCovers=true;
+      covered.considerAutomaticMap(0,0,false);covered.executeLibraryTask();
+      assert(covered.libraryAutomaticBlockKnown_&&covered.libraryError_.empty());
+      clockMs+=30000;covered.considerAutomaticMap(0,0,false);assert(covered.libraryAction_.empty());
+    }
   }
   reset();
   for(bool covers:{false,true}){
@@ -148,6 +164,31 @@ int main(){using namespace map_transfer;
     assert(s.libraryRetryAfterMs_>clockMs);clockMs+=5000;s.executeLibraryTask();
     assert(s.pendingRendererAcknowledgement_&&s.pendingMapRoot_==city().root&&s.libraryAction_.empty());
   }
+  reset();
+  for(const std::string error:{"label_block_contract","label_font_missing","label_languages"}) {
+    MapTransferHttpServer bad;bad.libraryMaps_={city()};bad.installer_.selectionError=error;
+    bad.considerAutomaticMap(0,0,false);bad.executeLibraryTask();
+    assert(bad.libraryRejectedSessions_.size()==1);
+    for(int tick=0;tick<10;++tick){clockMs+=30000;bad.considerAutomaticMap(0,0,false);assert(bad.libraryAction_.empty());}
+    assert(bad.installer_.selectAttempts==1);
+  }
+  MapTransferHttpServer fallback;auto second=city();second.sessionId="city-2";second.root+="-2";
+  fallback.libraryMaps_={city(),second};fallback.libraryCommandID_=std::string(32,'a');
+  fallback.considerAutomaticMap(0,0,false);fallback.executeLibraryTask();
+  assert(fallback.libraryAutomaticBlockKnown_);
+  fallback.pendingMapRootTaken_=true;fallback.acknowledgeActivatedMapRoot(city().root,false);
+  assert(!fallback.libraryAutomaticBlockKnown_&&fallback.libraryCommandError_.empty());
+  assert(fallback.libraryCommandID_==std::string(32,'a')); // Automatic failure cannot rewrite a client result.
+  fallback.installer_.active={};fallback.rollbackKind_=MapTransferHttpServer::RollbackKind::None;fallback.activationState_.running=false;
+  fallback.considerAutomaticMap(0,0,false);assert(fallback.librarySession_=="city-2");fallback.executeLibraryTask();
+  assert(fallback.pendingRendererAcknowledgement_&&fallback.pendingMapRoot_==second.root);
+  MapTransferHttpServer refresh;refresh.libraryAction_="remove";refresh.libraryRequestID_=std::string(32,'b');refresh.installer_.throwRefresh=true;
+  refresh.executeLibraryTask();assert(!refresh.libraryKnown_&&refresh.libraryAction_=="refresh"&&refresh.libraryRequestID_.empty());
+  assert(refresh.libraryCommandError_=="library_memory");clockMs+=5000;refresh.executeLibraryTask();assert(refresh.libraryKnown_);
+  MapTransferHttpServer expired;expired.libraryMaps_={city()};expired.libraryRetryAfterMs_=clockMs-1;
+  expired.considerAutomaticMap(0,0,false);assert(expired.libraryRetryAfterMs_==0);
+  expired.libraryAction_.clear();expired.libraryRetryAfterMs_=100;clockMs=0x80000100U;
+  expired.considerAutomaticMap(0,0,false);assert(expired.libraryRetryAfterMs_==0);
   reset();MapTransferHttpServer s;s.libraryMaps_={city()};s.installer_.selectionError="library_integrity";
   assert(s.requestMapLibrary("select","city",std::string(64,'b'),std::string(32,'e')));s.executeLibraryTask();
   assert(s.installer_.automatic&&!s.pendingRendererAcknowledgement_);
@@ -174,10 +215,18 @@ int main(){using namespace map_transfer;
             path = Path(directory) / 'test.cpp'
             path.write_text(fixture)
             binary = Path(directory) / 'test'
-            subprocess.run([shutil.which('g++'), '-std=c++17', '-Wall', '-Wextra', '-Werror',
+            subprocess.run([shutil.which('g++'), '-std=c++17', '-O2', '-fstack-usage', '-Wall', '-Wextra', '-Werror',
                             '-I'+str(ROOT/'lib/map_transfer'), '-I'+str(ROOT/'lib/device_transfer'),
-                            str(path), str(ROOT/'lib/device_transfer/durable_operation.cpp'),
-                            '-o', str(binary)], check=True)
+                            '-c', str(path), '-o', str(Path(directory) / 'controller.o')], check=True)
+            subprocess.run([shutil.which('g++'), '-std=c++17', str(Path(directory) / 'controller.o'),
+                            str(ROOT/'lib/device_transfer/durable_operation.cpp'), '-o', str(binary)], check=True)
+            frames = []
+            for usage in Path(directory).glob('*.su'):
+                for line in usage.read_text().splitlines():
+                    if 'executeLibraryTask' in line and all(marker not in line for marker in ('$_', 'lambda', 'clE', 'Workspace', '.cold')):
+                        frames.append(int(line.split('\t')[-2]))
+            self.assertEqual(len(frames), 1)
+            self.assertLessEqual(frames[0], 2048)
             subprocess.run([str(binary)], check=True)
 
 

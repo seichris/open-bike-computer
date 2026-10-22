@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -69,6 +70,7 @@ readRecoverableMapStreamInstall(const std::string &storageRoot,
                                 MapStreamInstallSnapshot &snapshot);
 
 using MapStreamNowCallback = std::function<uint64_t()>;
+using MapStreamFreeSpaceProbe = std::function<std::optional<uint64_t>()>;
 using MapStreamStatusCallback =
     std::function<void(const MapStreamInstallSnapshot &)>;
 
@@ -116,7 +118,7 @@ public:
                           MapStreamStatusCallback onStatus = {},
                           std::string operationID = {});
   ~MapStreamInstallSession() override;
-  void setFreeSpaceProbe(std::function<uint64_t()> probe) { freeSpaceProbe_ = std::move(probe); }
+  void setFreeSpaceProbe(MapStreamFreeSpaceProbe probe) { freeSpaceProbe_ = std::move(probe); }
 
   bool onManifest(const VerifiedMapStreamManifest &manifest,
                   std::string_view canonicalManifest) override;
@@ -140,7 +142,7 @@ private:
   MapStreamNowCallback now_;
   std::shared_ptr<MapStreamStorage> storage_;
   MapStreamStatusCallback onStatus_;
-  std::function<uint64_t()> freeSpaceProbe_;
+  MapStreamFreeSpaceProbe freeSpaceProbe_;
   MapStreamInstallSnapshot status_;
   std::string_view canonicalManifest_;
   int currentFd_ = -1;

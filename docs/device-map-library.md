@@ -37,6 +37,9 @@ There is no network request or download when no map covers a location.
 toggle returns to location-based selection. Invalid automatic candidates are excluded
 from repeated selection until an explicit library command/refresh or a reboot.
 Temporary upload/storage-busy conditions remain eligible for a later retry.
+Label/font contract failures are candidate verdicts and do not trigger repeated
+full-map hashing. Renderer acknowledgements and rollback invalidate the position
+cache so another covering version can be tried after a failed switch.
 
 ## Storage and recovery
 
@@ -91,7 +94,9 @@ and malformed/duplicate/future-schema inventory, paginated snapshot fencing,
 cancellation of retransmissions to retained versions, production controller
 execution with empty/partial/pending operation ledgers, automatic negative coverage
 caching, allocation-failure handoff recovery, owner dispatch rejection, SD-space
-preflight, interrupted removal and maximal BLE inventory page size.
+preflight, interrupted removal, failed-renderer fallback in the same block,
+label-contract rejection caching, paused-upload/current-coverage behavior,
+allocation recovery and maximal BLE inventory page size.
 
 Physical acceptance remains required separately for the 1.75 and 2.06 boards:
 

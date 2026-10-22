@@ -2080,7 +2080,11 @@ void setup() {
   mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
   mapTransferHttp.setStreamStorageProbe(
       [] { return storage.getSdLoaded(); });
-  mapTransferHttp.setStreamStorageSpaceProbe([] { return storage.removableSdFreeBytes(); });
+  mapTransferHttp.setStreamStorageSpaceProbe([]() -> std::optional<uint64_t> {
+    uint64_t bytes = 0;
+    if (!storage.tryRemovableSdFreeBytes(bytes)) return std::nullopt;
+    return bytes;
+  });
   mapTransferHttp.setStreamStorageAvailable(sdResult == ESP_OK &&
                                             storage.getSdLoaded());
   mapTransferHttp.setStorageControlSubmit([](void (*work)(void *), void *context) {

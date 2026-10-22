@@ -673,7 +673,9 @@ bool MapStreamInstallSession::onManifest(
     const uint64_t remainingFiles = status_.totalFiles - status_.durableFilePrefix;
     const uint64_t required = status_.totalPayloadBytes - status_.completedPayloadBytes +
         remainingFiles * 65536ULL + (remainingFiles ? 1048576ULL : 65536ULL);
-    if (freeSpaceProbe_() < required)
+    const auto available = freeSpaceProbe_();
+    if (!available) return fail("stream_storage_unavailable", "SD storage is busy or unavailable; try again shortly");
+    if (*available < required)
       return fail("stream_sd_full", "remove a map from Maps on this Bike Computer before installing another");
   }
   publishStatus();

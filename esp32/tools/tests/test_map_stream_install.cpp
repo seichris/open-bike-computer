@@ -361,6 +361,10 @@ void testFreeSpacePreflightBeforePayload() {
   full.setFreeSpaceProbe([] { return uint64_t(0); });
   assert(!full.onManifest(manifest, kManifest));
   assert(full.snapshot().errorCode == "stream_sd_full" && full.snapshot().bytesWritten == 0);
+  MapStreamInstallSession busy(tempRoot(), "busy-card", {1, 10000});
+  busy.setFreeSpaceProbe([] { return std::optional<uint64_t>(); });
+  assert(!busy.onManifest(manifest, kManifest));
+  assert(busy.snapshot().errorCode == "stream_storage_unavailable" && busy.snapshot().bytesWritten == 0);
   MapStreamInstallSession enough(tempRoot(), "room-on-card", {1, 10000});
   enough.setFreeSpaceProbe([] { return uint64_t(16 * 1024 * 1024); });
   assert(enough.onManifest(manifest, kManifest));

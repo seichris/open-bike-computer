@@ -62,9 +62,9 @@ MapStreamReceiveResult MapStreamReceiver::result() const {
   if (!state.errorCode.empty() &&
       (parser_.error() == MapStreamParserError::ConsumerRejected ||
        parser_.error() == MapStreamParserError::ResourceUnavailable)) {
-    return {false, parser_.error() == MapStreamParserError::ResourceUnavailable
-                       ? 503
-                       : 500,
+    return {false, state.errorCode == "stream_sd_full" ? 507 :
+                       (state.errorCode == "stream_storage_unavailable" ||
+                        parser_.error() == MapStreamParserError::ResourceUnavailable ? 503 : 500),
             state.errorCode, state.errorMessage};
   }
   const std::string code = parser_.errorCode();

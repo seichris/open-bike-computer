@@ -135,6 +135,8 @@ int main() {
                 (('selectInstalledMap',), 1024),
                 (('removeInstalledMap',), 1536),
                 (('installedMapCovers',), 512),
+                (('mapRootHasBlock',), 512),
+                (('pruneObsoleteInstalledMaps',), 2048),
                 (('fileSha256Hex',), 256),
                 (('writeActiveMap',), 128),
                 (('persistPredecessorAnchor',), 768),

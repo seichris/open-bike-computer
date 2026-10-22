@@ -50,6 +50,8 @@ public:
   std::string rollbackOperationID_, terminalOperationID_, terminalSessionID_, terminalMapID_;
   bool terminalAutomaticExit_ = false, terminalFailed_ = false;
   bool operationStatusNotification_ = false;
+  bool libraryAutomaticBlockKnown_ = true;
+  uint32_t libraryRetryAfterMs_ = 123;
   bool rollbackAutomaticExit_ = false;
   bool rollbackSucceeded_ = false;
   bool rollbackComplete_ = false;
@@ -72,6 +74,7 @@ int main() {
   server.selectionHealth_.degrade("/maps/new");
   server.selectionHealth_.beginRollback();
   server.executeRollback();
+  if (server.libraryAutomaticBlockKnown_ || server.libraryRetryAfterMs_) return 5;
   if (!server.rollbackComplete_ || server.rollbackSucceeded_ ||
       server.selectionHealth_.state != "rollback_failed" ||
       server.selectionHealth_.affectedOperationID != "installed-operation") return 1;
