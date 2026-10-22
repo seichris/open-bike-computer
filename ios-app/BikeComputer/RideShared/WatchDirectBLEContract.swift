@@ -677,6 +677,32 @@ struct RideBLEMotionDispatch: Equatable, Sendable {
         self.enqueuedUptime = enqueuedUptime
     }
 
+    /// Compare producer identity, not changing flags or the age at dispatch.
+    /// Use the same wrapping serial order as the firmware motion reducer.
+    func isNewer(than previous: Self?) -> Bool {
+        guard let incoming = identity else { return false }
+        guard let current = previous?.identity,
+              incoming.token == current.token else { return true }
+        if incoming.epoch != current.epoch {
+            let delta = incoming.epoch &- current.epoch
+            return delta < 0x8000
+        }
+        let delta = incoming.sequence &- current.sequence
+        return delta != 0 && delta < 0x8000_0000
+    }
+
+    private var identity: (token: UInt16, epoch: UInt16, sequence: UInt32)? {
+        guard frame.count == 16, frame.first == 4 else { return nil }
+        let bytes = [UInt8](frame)
+        let token = UInt16(bytes[2]) | UInt16(bytes[3]) << 8
+        let epoch = UInt16(bytes[14]) | UInt16(bytes[15]) << 8
+        let sequence = (0..<4).reduce(UInt32(0)) {
+            $0 | UInt32(bytes[4 + $1]) << ($1 * 8)
+        }
+        guard token != 0, epoch != 0, sequence != 0 else { return nil }
+        return (token, epoch, sequence)
+    }
+
     func payload(at uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Data? {
         guard frame.count == 16, frame.first == 4,
               uptime.isFinite, enqueuedUptime.isFinite, uptime >= enqueuedUptime else { return nil }
