@@ -20,6 +20,7 @@ final class SocialRiderBadge: UIView {
     let distance = UILabel()
     let cluster = UILabel()
     private var style = SocialMapMarkerStyle()
+    private var isEdge: Bool?
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
@@ -37,9 +38,13 @@ final class SocialRiderBadge: UIView {
         addSubview(picture); addSubview(initials); addSubview(distance); bringSubviewToFront(cluster)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    func configure(style: SocialMapMarkerStyle) {
-        self.style = style
-        frame.size = style.badgeSize
+    /// Edge badges reserve room for distance and grouped counts; map markers are
+    /// only as large as the portrait they show.
+    func configure(style: SocialMapMarkerStyle, edge: Bool) {
+        let size = edge ? style.badgeSize : style.annotationSize
+        guard style != self.style || edge != isEdge || frame.size != size else { return }
+        self.style = style; isEdge = edge
+        frame.size = size
         setNeedsLayout()
         layoutIfNeeded()
     }
@@ -98,12 +103,11 @@ final class SocialMapLayer {
     func annotationView(_ annotation: SocialRiderAnnotation, map: MKMapView) -> MKAnnotationView {
         let view = map.dequeueReusableAnnotationView(withIdentifier: "social-rider")
             ?? MKAnnotationView(annotation: annotation, reuseIdentifier: "social-rider")
-        view.annotation = annotation; view.bounds.size = style.badgeSize
-        view.centerOffset = CGPoint(x: 0, y: -10 * style.pictureSize.scale); view.canShowCallout = true
+        view.annotation = annotation; applyMarkerGeometry(to: view); view.canShowCallout = true
         let badge = (view.subviews.first { $0 is SocialRiderBadge } as? SocialRiderBadge)
             ?? SocialRiderBadge(frame: view.bounds)
         if badge.superview == nil { view.addSubview(badge) }
-        badge.configure(style: style)
+        badge.configure(style: style, edge: false)
         badge.update(annotation.rider, photo: annotation.rider.profile.avatarID.flatMap { photos[$0] },
                      meters: nil, stale: annotation.rider.age(at: Date()) >= 15)
         let detail = UILabel()
@@ -113,6 +117,11 @@ final class SocialMapLayer {
         view.detailCalloutAccessoryView = detail
         view.accessibilityLabel = badge.accessibilityLabel
         return view
+    }
+
+    private func applyMarkerGeometry(to view: MKAnnotationView) {
+        if view.bounds.size != style.annotationSize { view.bounds.size = style.annotationSize }
+        if view.centerOffset != style.annotationCenterOffset { view.centerOffset = style.annotationCenterOffset }
     }
 
     func layout() {
@@ -135,15 +144,13 @@ final class SocialMapLayer {
             if let old = annotations[id] { annotation = old; old.rider = rider; old.coordinate = CoordinateConverter.wgs84ToGCJ02(coordinate: rider.coordinate) }
             else { annotation = SocialRiderAnnotation(rider); annotations[id] = annotation; map.addAnnotation(annotation) }
             let point = map.convert(annotation.coordinate, toPointTo: map)
-            let onMap = map.bounds.insetBy(dx: style.badgeSize.width/2+11,
-                                          dy: style.badgeSize.height/2+15).contains(point)
+            let onMap = style.showsOnMap(point, in: map.bounds)
             map.view(for: annotation)?.isHidden = !onMap
             if onMap {
                 edges.removeValue(forKey: id)?.removeFromSuperview()
                 if let view = map.view(for: annotation), let badge = view.subviews.first(where: { $0 is SocialRiderBadge }) as? SocialRiderBadge {
-                    view.bounds.size = style.badgeSize
-                    view.centerOffset = CGPoint(x: 0, y: -10 * style.pictureSize.scale)
-                    badge.configure(style: style)
+                    applyMarkerGeometry(to: view)
+                    badge.configure(style: style, edge: false)
                     badge.update(rider, photo: rider.profile.avatarID.flatMap { photos[$0] }, meters: nil, stale: rider.age(at: now) >= 15)
                 }
                 continue
@@ -171,7 +178,7 @@ final class SocialMapLayer {
             occupied.append((rect,id))
             origin.x = origin.x.rounded(); origin.y = origin.y.rounded()
             let badge = edges[id] ?? SocialRiderBadge(frame: CGRect(origin: origin, size: rect.size))
-            badge.configure(style: style)
+            badge.configure(style: style, edge: true)
             badge.frame.origin = origin
             badge.update(rider, photo: rider.profile.avatarID.flatMap { photos[$0] }, meters: meters, stale: rider.age(at: now) >= 15)
             if badge.superview == nil { map.addSubview(badge) }

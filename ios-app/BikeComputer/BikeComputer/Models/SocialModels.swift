@@ -208,9 +208,24 @@ struct SocialMapMarkerStyle: Equatable {
     var numberHeight: CGFloat { 20 * numberSize.scale }
     var distanceWidth: CGFloat { 96 * numberSize.scale }
     var clusterWidth: CGFloat { 27 * numberSize.scale }
+    /// Edge badges carry the distance label and grouped count around the portrait.
     var badgeSize: CGSize {
         CGSize(width: max(distanceWidth, pictureDiameter + clusterWidth / 2 + 8),
                height: pictureDiameter + numberHeight + 2)
+    }
+    /// On-map markers show only the portrait, so their tappable area is the portrait.
+    var annotationSize: CGSize { CGSize(width: pictureDiameter + 4, height: pictureDiameter + 4) }
+    /// The rider's coordinate stays at the portrait's bottom centre for every size pair.
+    var annotationCenterOffset: CGPoint {
+        CGPoint(x: 0, y: annotationSize.height / 2 - (pictureDiameter + 2))
+    }
+
+    /// A rider stays on the map while its whole portrait is visible; only clipped
+    /// or off-screen riders become edge badges.
+    func showsOnMap(_ point: CGPoint, in bounds: CGRect) -> Bool {
+        let radius = pictureDiameter / 2
+        return point.x - radius >= bounds.minX + 11 && point.x + radius <= bounds.maxX - 11
+            && point.y - pictureDiameter >= bounds.minY + 15 && point.y <= bounds.maxY - 15
     }
 }
 

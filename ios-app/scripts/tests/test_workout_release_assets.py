@@ -589,6 +589,10 @@ class WorkoutReleaseAssetsTests(unittest.TestCase):
             self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n", "Watch launcher artwork must be PNG")
             self.assertEqual(int.from_bytes(data[16:20], "big"), 1024)
             self.assertEqual(int.from_bytes(data[20:24], "big"), 1024)
+            stored = {path.name for path in folder.iterdir()
+                      if path.name != "Contents.json" and not path.name.startswith(".")}
+            self.assertEqual(stored, {image["filename"] for image in images},
+                             "Icon sets contain only artwork they assign")
             family_icons[family] = data
         self.assertNotEqual(family_icons["AppIcon"], family_icons["AppIconDev"],
                             "Production and Dev must have distinct Watch launcher artwork")

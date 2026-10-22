@@ -437,6 +437,21 @@ struct SocialRuntimeTests {
                 "portrait size and number readability can be adjusted independently")
         require(SocialMapGeometry.edgeCenter(projected: CGPoint(x: -100, y: -100), bounds: CGRect(x: 0, y: 0, width: 50, height: 50),
                                             badgeSize: pictureOnly.badgeSize) == nil, "tiny map areas never place oversized edge markers")
+        let phone = CGRect(x: 0, y: 0, width: 320, height: 568)
+        for picture in SocialMapMarkerSize.allCases {
+            let anchors = SocialMapMarkerSize.allCases.map { numbers -> CGFloat in
+                let style = SocialMapMarkerStyle(pictureSize: picture, numberSize: numbers)
+                require(style.annotationSize.width <= style.pictureDiameter + 4 && style.annotationSize.height <= style.pictureDiameter + 4,
+                        "on-map hit areas cover only the visible portrait")
+                let anchor = style.annotationSize.height / 2 - style.annotationCenterOffset.y
+                require(abs(anchor - (style.pictureDiameter + 2)) < 0.0001, "the rider coordinate stays at the portrait's bottom centre")
+                require(style.showsOnMap(CGPoint(x: style.pictureDiameter / 2 + 12, y: 300), in: phone),
+                        "a fully visible rider near the side stays on the map")
+                require(!style.showsOnMap(CGPoint(x: 10, y: 300), in: phone), "a clipped portrait becomes an edge badge")
+                return style.annotationCenterOffset.y
+            }
+            require(Set(anchors).count == 1, "changing number size never moves an on-map portrait")
+        }
         try await SocialMaintenanceTests.run()
         print("Social publisher, expiry, reconnect/revocation, notices, HTTP retry, deletion, link and projected-edge regressions passed")
     }

@@ -11,6 +11,8 @@ private final class FriendNetwork: SocialRideNetworking {
     var riders: [[String: Any]] = []
     var holdSnapshot = false
     var holdConsent = false
+    var holdPublication = false
+    var publicationFailure: Error?
     var held: CheckedContinuation<Void, Never>?
     func consent(_ id: String) -> [String: Any] {
         consents[id] ?? ["profileID": id, "epoch": UUID().uuidString, "sharing": false, "serverTime": 1000.0]
@@ -26,6 +28,13 @@ private final class FriendNetwork: SocialRideNetworking {
                 await withCheckedContinuation { held = $0 }
             }
         } else if path == "friend-sharing/state" {
+            if holdPublication {
+                holdPublication = false
+                await withCheckedContinuation { held = $0 }
+                // URLSession abandons a cancelled task's request.
+                if Task.isCancelled { throw CancellationError() }
+            }
+            if let failure = publicationFailure { publicationFailure = nil; throw failure }
             let state = try JSONSerialization.jsonObject(with: body!) as! [String: Any]
             publications.append(state)
             let epochs = state["epochs"] as! [String: String]
@@ -126,6 +135,7 @@ struct FriendLiveServiceTests {
         let stop = Task { try await service.setSharing(false, with: "bob") }
         try await wait { network.held != nil }
         check(service.sharingIDs == ["carol"], "a pending offline stop already removes its GPS recipient")
+        network.seconds = 3  // Outside the server's two-second publication window.
         service.updateLocation(fix(0.01))
         await service.tick()
         let epochs = network.publications.last?["epochs"] as? [String: String]
@@ -149,6 +159,52 @@ struct FriendLiveServiceTests {
         catch SocialFailure.cancelled { }
         check(!service.isSharing && service.riders.isEmpty, "account changes retire pending GPS publication")
         reopened.reset(); service.reset()
-        print("Direct friend sharing permission, audience, expiry, relaunch and consent race regressions passed")
+        try await publicationPacing()
+        print("Direct friend sharing permission, audience, expiry, relaunch, consent race and publication pacing regressions passed")
+    }
+
+    /// Wakes cancel an in-flight poll and restart immediately; neither may report a
+    /// false failure, drop the audience, or republish inside the server's rate window.
+    static func publicationPacing() async throws {
+        let network = FriendNetwork()
+        let service = FriendLiveService(client: network, uptime: { network.seconds }, pollNanoseconds: 3_600_000_000_000)
+        service.prepareLocation = { true }
+        service.updateLocation(fix())
+        network.holdPublication = true
+        try await service.setSharing(true, with: "dana")
+        try await wait { network.held != nil }
+        let reads = network.snapshotReads
+        service.setApplicationActive(false)
+        try await wait { network.snapshotReads > reads }
+        for _ in 0..<5 { await Task.yield() }
+        network.held?.resume(); network.held = nil
+        for _ in 0..<5 { await Task.yield() }
+        check(network.publications.isEmpty, "a wake never sends a second fix while the first is in flight")
+        check(service.error == nil && service.sharingIDs == ["dana"], "a superseded publication is neither a failure nor a revocation")
+        network.seconds = 3
+        network.publicationFailure = SocialFailure.server("publish_rate")
+        service.updateLocation(fix(0.02))
+        await service.tick()
+        check(service.error == nil && service.sharingIDs == ["dana"], "the server's rate window is not a sharing failure")
+        network.seconds = 6
+        network.publicationFailure = URLError(.notConnectedToInternet)
+        service.updateLocation(fix(0.03))
+        await service.tick()
+        check(service.error != nil, "a real publication failure is still reported")
+        network.seconds = 9
+        service.updateLocation(fix(0.04))
+        await service.tick()
+        check(network.publications.count == 1 && service.error == nil, "the next accepted fix clears the failure")
+        network.seconds = 10
+        service.updateLocation(fix(0.05))
+        let wakeReads = network.snapshotReads
+        service.setApplicationActive(true)
+        try await wait { network.snapshotReads > wakeReads }
+        for _ in 0..<5 { await Task.yield() }
+        check(network.publications.count == 1, "an immediate wake inside the rate window waits for the next poll")
+        network.seconds = 11.5
+        await service.tick()
+        check(network.publications.count == 2 && service.error == nil, "publication resumes once the window has passed")
+        service.reset()
     }
 }

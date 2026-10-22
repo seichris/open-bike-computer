@@ -29,6 +29,10 @@ final class FriendLiveService: ObservableObject {
     private var startedAt = 0.0
     private var sequence = 0
     private var lastPublished: Date?
+    /// Monotonic start/end of the latest publication attempt. The server rejects a
+    /// whole batch when any recipient received a fix less than two seconds earlier.
+    private var lastPublicationAttempt: TimeInterval?
+    static let minimumPublicationInterval: TimeInterval = 2.2
 
     init(client: any SocialRideNetworking,
          uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
@@ -154,6 +158,10 @@ final class FriendLiveService: ObservableObject {
               location.horizontalAccuracy >= 0, location.horizontalAccuracy <= 100,
               abs(location.timestamp.timeIntervalSinceNow) < 30,
               location.timestamp != lastPublished else { return }
+        // An immediate foreground or consent wake waits for the next poll instead
+        // of tripping the server's per-recipient publication rate.
+        if let lastPublicationAttempt, uptime() - lastPublicationAttempt < Self.minimumPublicationInterval { return }
+        lastPublicationAttempt = uptime()
         let epochs = leases.mapValues(\.epoch)
         var state: [String: Any] = ["epochs": epochs, "sequence": sequence,
             "latitude": location.coordinate.latitude, "longitude": location.coordinate.longitude,
@@ -167,15 +175,28 @@ final class FriendLiveService: ObservableObject {
         do {
             let result = try await client.json("friend-sharing/state", method: "POST", body: state)
             guard expected == generation else { return }
+            // The server committed before replying, so the interval restarts here.
+            lastPublicationAttempt = uptime()
+            lastPublished = location.timestamp
+            // A poll superseded by a wake or consent change leaves the audience to its successor.
+            guard !Task.isCancelled else { return }
             let accepted = Set(result["accepted"] as? [String] ?? [])
             for (id, epoch) in epochs where leases[id]?.epoch == epoch && !accepted.contains(id) { leases[id] = nil }
             updateSharing()
-            lastPublished = location.timestamp
-            error = nil
+            if error != nil { error = nil }
         } catch {
             guard expected == generation else { return }
+            // A cancelled or lost request may still have been committed.
+            lastPublicationAttempt = uptime()
+            guard !Task.isCancelled, !Self.isCancellation(error) else { return }
+            // A fresher fix from this phone was just accepted; nothing was lost.
+            if case SocialFailure.server(let code) = error, code == "publish_rate" { return }
             self.error = "Your last friend location update could not be shared."
         }
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        error is CancellationError || (error as? URLError)?.code == .cancelled
     }
 
     func stopAll() async {
@@ -196,6 +217,7 @@ final class FriendLiveService: ObservableObject {
         enabled = false; pollingGeneration = UUID()
         leases = [:]; sharingIDs = []; busyIDs = []; isSharing = false
         riders = []; latestLocation = nil; error = nil; lastPublished = nil
+        lastPublicationAttempt = nil
         progress = SharedRideProgress(); sequence = 0
     }
 }

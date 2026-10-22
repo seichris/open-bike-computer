@@ -43,7 +43,9 @@ On the iPhone map, open **Layers → Friends** to set **Friend Picture Size** an
 **Friend Number Size** independently. Each offers Small, Medium and Large,
 persists on this phone, and updates the map without restarting. Number size
 affects distance labels and grouped-rider counts; picture size affects both
-map portraits and portraits at the map edge.
+map portraits and portraits at the map edge. A rider's position stays at the
+bottom of its map portrait whatever number size is chosen, and only clipped or
+off-screen riders move to the map edge.
 
 Run defaults to one hour and accepts 30 seconds through four hours. The test
 riders share **synthetic** locations with your accepted Dev account. Ava moves
@@ -51,7 +53,10 @@ faster, Ben moves slower, and Cleo stops publishing for 90 seconds in each
 150-second cycle. The small loop is fixed in Shanghai; it does not read or send
 your device's location. Cleo should fade after 15 seconds and disappear after 60
 seconds, then return when publication resumes. Their friend details show their
-usernames and live GPS stats; the map uses the ordinary rider markers.
+usernames and live GPS stats; the map uses the ordinary rider markers. With no
+friend position on screen, Bicino checks for new sharing once a minute in the
+foreground and not at all in the background, so keep Bicino open, or bring it
+back to the foreground, after `run` starts.
 
 Your app's outgoing toggles start off. Turn on one demo friend's toggle to test
 sending your phone's actual live data back to that test account. `status` should
