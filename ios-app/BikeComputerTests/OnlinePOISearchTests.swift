@@ -4,11 +4,11 @@ import MapKit
 @MainActor
 private final class ControlledPOIProvider: OnlinePOISearchProviding {
     var requests: [Set<OnlinePOICategory>] = []
-    var pending: [CheckedContinuation<[MKMapItem], any Error>] = []
+    var pending: [CheckedContinuation<OnlinePOISearchResponse, any Error>] = []
     var cancellations = 0
 
     func search(categories: Set<OnlinePOICategory>, center: CLLocationCoordinate2D,
-                radius: CLLocationDistance) async throws -> [MKMapItem] {
+                radius: CLLocationDistance) async throws -> OnlinePOISearchResponse {
         requests.append(categories)
         return try await withCheckedThrowingContinuation { pending.append($0) }
     }
@@ -47,9 +47,9 @@ struct OnlinePOISearchTests {
         session.toggle(.shops, region: region)
         try await wait { provider.pending.count == 2 }
         precondition(provider.requests[1] == [.food, .shops], "Selections combine with OR semantics")
-        provider.pending[1].resume(returning: [farther])
+        provider.pending[1].resume(returning: OnlinePOISearchResponse(items: [farther]))
         try await wait { session.state == .loaded }
-        provider.pending[0].resume(returning: [near])
+        provider.pending[0].resume(returning: OnlinePOISearchResponse(items: [near]))
         try await Task.sleep(nanoseconds: 10_000_000)
         precondition(session.items.count == 1 && session.items[0] === farther,
                      "An older completion cannot replace the current category batch")
@@ -64,7 +64,7 @@ struct OnlinePOISearchTests {
         session.toggle(.toilets, region: region)
         try await wait { provider.pending.count == 3 }
         session.clear()
-        provider.pending[2].resume(returning: [near])
+        provider.pending[2].resume(returning: OnlinePOISearchResponse(items: [near]))
         try await Task.sleep(nanoseconds: 10_000_000)
         precondition(session.items.isEmpty && session.state == .idle,
                      "Dismissal releases data and fences in-flight callbacks")
@@ -90,6 +90,33 @@ struct OnlinePOISearchTests {
         try await Task.sleep(nanoseconds: 70_000_000)
         precondition(delayedProvider.requests.isEmpty, "Cancel while debouncing without starting a network request")
         precondition(provider.cancellations >= 6)
+
+        var calls = 0
+        let fallback = MapKitOnlinePOISearchProvider { _ in
+            calls += 1
+            if calls == 1 {
+                throw NSError(domain: MKErrorDomain, code: Int(MKError.Code.directionsNotFound.rawValue))
+            }
+            return [near]
+        }
+        let response = try await fallback.search(categories: [.food], center: center, radius: 1_000)
+        precondition(response.usedCategoryTextFallback && calls == 3 && response.items.count == 2,
+                     "Unsupported structured search falls back once to separate restaurant/cafe queries")
+        calls = 0
+        let failing = MapKitOnlinePOISearchProvider { _ in
+            calls += 1
+            throw NSError(domain: MKErrorDomain, code: Int(MKError.Code.serverFailure.rawValue))
+        }
+        do {
+            _ = try await failing.search(categories: [.food, .shops], center: center, radius: 1_000)
+            preconditionFailure("Network/server failures must propagate")
+        } catch { precondition(calls == 1, "Never fan out on server/network failures") }
+        let empty = MapKitOnlinePOISearchProvider { _ in
+            throw NSError(domain: MKErrorDomain, code: Int(MKError.Code.placemarkNotFound.rawValue))
+        }
+        let emptyResponse = try await empty.search(categories: [.food], center: center, radius: 1_000)
+        precondition(emptyResponse.items.isEmpty && !emptyResponse.usedCategoryTextFallback,
+                     "No-results is distinct from unavailable service")
         print("Online POI search: radius, deduplication, multi-selection, stale-response, dismissal, selection and throttle checks passed")
     }
 

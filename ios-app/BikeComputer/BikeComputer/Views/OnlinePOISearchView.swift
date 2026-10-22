@@ -80,6 +80,11 @@ struct OnlinePOIResultsView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
 
+                    if session.usedCategoryTextFallback {
+                        Text("Approximate category matches in this area.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+
                     switch session.state {
                     case .idle:
                         EmptyView()
