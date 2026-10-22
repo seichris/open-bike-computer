@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <limits>
+#include <cmath>
 #include <memory>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -3059,6 +3060,8 @@ InstallStatus MapTransferInstaller::discardAllUnselectedStreamMaps() const {
         continue;
       }
       const std::string root = joinPath(mapsRoot, sessionId);
+      if (fileExists(joinPath(root, kStreamConsumedFile)) ||
+          fileExists(joinPath(root, kStreamConsumedFile) + ".bak")) continue;
       const bool streamState =
           fileExists(joinPath(root, kStreamReadyFile)) ||
           fileExists(joinPath(root, kStreamReadyFile) + ".bak") ||
@@ -3289,6 +3292,210 @@ bool MapTransferInstaller::pruneStagingSessions(
   return ok;
 }
 
+bool InstalledMap::contains(int32_t latitudeE7, int32_t longitudeE7) const {
+  const auto &b = presentation.boundsE7;
+  return presentation.hasBoundsE7 && longitudeE7 >= b[0] &&
+      latitudeE7 >= b[1] && longitudeE7 <= b[2] && latitudeE7 <= b[3];
+}
+
+const InstalledMap *coveringLibraryMap(const std::vector<InstalledMap> &maps,
+    const std::string &currentRoot, int32_t latitudeE7, int32_t longitudeE7,
+    const std::vector<std::string> &rejectedSessions) {
+  const InstalledMap *best = nullptr;
+  int64_t bestArea = INT64_MAX;
+  for (const auto &map : maps) {
+    if (!map.contains(latitudeE7, longitudeE7)) continue;
+    if (map.root == currentRoot) return nullptr;
+    if (std::find(rejectedSessions.begin(), rejectedSessions.end(), map.sessionId) != rejectedSessions.end()) continue;
+    const auto &b = map.presentation.boundsE7;
+    const int64_t area = (int64_t(b[2]) - b[0]) * (int64_t(b[3]) - b[1]);
+    if (area < bestArea || (area == bestArea && best && map.sessionId < best->sessionId)) {
+      bestArea = area; best = &map;
+    }
+  }
+  return best;
+}
+
+InstallStatus MapTransferInstaller::readInstalledMap(
+    const std::string &sessionId, InstalledMap &map) const {
+  map = {};
+  if (!safeId(sessionId)) return fail("library_identity", "invalid map session");
+  const auto root = std::string("/VECTMAP/.maps/") + sessionId;
+  const auto path = joinPath(storageRoot_, root);
+  struct stat entry{};
+  if (::lstat(path.c_str(), &entry) != 0 || !S_ISDIR(entry.st_mode))
+    return fail("library_missing", "installed map is missing");
+  // Prepared/uncommitted content must never become selectable through the
+  // library, even if it shares a session with a previously consumed stream.
+  if (fileExists(joinPath(path, ".operation-prepared")) ||
+      fileExists(joinPath(path, ".operation-prepared.bak")))
+    return fail("library_uncommitted", "map installation is not complete");
+  struct Workspace { MapManifest manifest; ReadyStreamMap ready; };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  auto &manifest = workspace->manifest;
+  if (!readInstalledManifest(root, manifest).ok)
+    return fail("library_manifest", "installed map metadata is invalid");
+  const bool stream = fileExists(joinPath(path, kStreamReadyFile)) ||
+      fileExists(joinPath(path, ".operation-ready")) ||
+      fileExists(joinPath(path, kStreamReadyFile) + ".bak") ||
+      fileExists(joinPath(path, ".operation-ready.bak"));
+  std::string receipt, signedReceipt;
+  if (stream) {
+    auto &ready = workspace->ready;
+    if (!readReadyStreamMap(sessionId, ready).ok || ready.mapId != manifest.mapId)
+      return fail("library_receipt", "installed stream receipt is invalid");
+    bool consumed = false;
+    for (const auto &suffix : {"", ".bak"}) {
+      std::string marker;
+      if (readTextFile(joinPath(path, kStreamConsumedFile) + suffix, marker, 2048) &&
+          jsonStringValue(marker, "sessionId") == sessionId &&
+          jsonStringValue(marker, "mapId") == ready.mapId &&
+          jsonStringValue(marker, "manifestReceipt") == ready.manifestReceipt &&
+          jsonStringValue(marker, "signedManifestReceipt") == ready.signedManifestReceipt &&
+          jsonStringValue(marker, "operationID") == ready.operationID) consumed = true;
+    }
+    if (!consumed) return fail("library_uncommitted", "map has no completed installation");
+    receipt = ready.manifestReceipt;
+    signedReceipt = ready.signedManifestReceipt;
+  } else {
+    // Existing verified archive installations migrate in place, without a copy.
+    receipt = manifestReceipt(manifest);
+    std::string stored;
+    if (!readTextFile(joinPath(path, kInstalledReceiptFile), stored, 64) || stored != receipt)
+      return fail("library_receipt", "installed archive receipt is invalid");
+  }
+  for (const auto &file : manifest.files) {
+    uint64_t bytes = 0;
+    if (!startsWith(file.publishPath, kVectMapPrefix) ||
+        !fileSize(joinPath(path, file.publishPath.substr(std::strlen(kVectMapPrefix))), bytes) ||
+        bytes != file.bytes)
+      return fail("library_file", "installed map file is missing or truncated");
+    map.payloadBytes += file.bytes;
+  }
+  map.sessionId = sessionId; map.root = root; map.mapId = manifest.mapId;
+  map.manifestReceipt = receipt; map.signedManifestReceipt = signedReceipt;
+  map.presentation = {manifest.displayName, manifest.boundsE7, manifest.hasBoundsE7};
+  return {true, "library_installed", ""};
+}
+
+InstallStatus MapTransferInstaller::readMapLibrary(std::vector<InstalledMap> &maps) const {
+  maps.clear();
+  const auto root = joinPath(storageRoot_, "/VECTMAP/.maps");
+  DIR *dir = ::opendir(root.c_str());
+  if (!dir) return errno == ENOENT ? InstallStatus{true, "ok", ""}
+                                 : fail("library_read", "could not read map library");
+  while (const auto *entry = ::readdir(dir)) {
+    InstalledMap map;
+    if (safeId(entry->d_name) && readInstalledMap(entry->d_name, map).ok) {
+      if (maps.size() == kMaximumLibraryMaps) {
+        ::closedir(dir); maps.clear();
+        return fail("library_capacity", "map library exceeds supported inventory size");
+      }
+      maps.push_back(std::move(map));
+    }
+    if (storageProgressCallback_) storageProgressCallback_(storageProgressContext_);
+  }
+  ::closedir(dir);
+  std::sort(maps.begin(), maps.end(), [](const InstalledMap &a, const InstalledMap &b) {
+    return a.sessionId < b.sessionId;
+  });
+  return {true, "ok", ""};
+}
+
+bool MapTransferInstaller::installedMapCovers(const InstalledMap &map,
+    int32_t latitudeE7, int32_t longitudeE7) const {
+  if (!map.contains(latitudeE7, longitudeE7) || !safeActiveRoot(map.root) ||
+      latitudeE7 < -850511287 || latitudeE7 > 850511287) return false;
+  // Match the renderer's Web Mercator / 4096-meter block / 16-block folder
+  // addressing. Bounds alone overstate coverage for route corridors and holes.
+  constexpr double radius = 6378137.0, radians = 0.017453292519943295;
+  const auto x = static_cast<int32_t>((longitudeE7 / 10000000.0) * radians * radius);
+  const auto y = static_cast<int32_t>(std::log(std::tan(
+      (latitudeE7 / 10000000.0) * radians / 2.0 + 0.7853981633974483)) * radius);
+  char relative[64]{};
+  std::snprintf(relative, sizeof(relative), "/%+04d%+04d/%d_%d",
+      int(x >> 16), int(y >> 16), int((x >> 12) & 15), int((y >> 12) & 15));
+  const auto base = joinPath(storageRoot_, map.root) + relative;
+  return fileExists(base + ".fmb") || fileExists(base + ".fmp");
+}
+
+InstallStatus MapTransferInstaller::selectInstalledMap(
+    const std::string &sessionId, const std::string &receipt) const {
+  if (hasInterruptedActivation()) return fail("library_busy", "map activation needs recovery");
+  struct Workspace { InstalledMap map; ActiveMapSelection previous, next; MapManifest manifest; };
+  const auto w = makeActivationWorkspace<Workspace>();
+  auto status = readInstalledMap(sessionId, w->map);
+  if (!status.ok) return status;
+  if (receipt != w->map.manifestReceipt) return fail("library_identity", "map version changed");
+  status = readActiveMap(w->previous);
+  if (!status.ok && status.code != "active_missing") return status;
+  if (w->previous.root == w->map.root) return {true, "selected", ""};
+  status = readInstalledManifest(w->map.root, w->manifest);
+  if (!status.ok) return status;
+  // Size-only upload resume checks are not integrity evidence for reuse.
+  for (const auto &file : w->manifest.files) {
+    std::string actual;
+    const auto path = joinPath(joinPath(storageRoot_, w->map.root),
+        file.publishPath.substr(std::strlen(kVectMapPrefix)));
+    if (!fileSha256Hex(path, actual) || actual != file.sha256)
+      return fail("library_integrity", "installed map checksum does not match");
+    if (storageProgressCallback_) storageProgressCallback_(storageProgressContext_);
+  }
+  status = validateLabelContracts(joinPath(storageRoot_, w->map.root), w->manifest, false);
+  if (!status.ok) return status;
+  auto &next = w->next;
+  next.mapId = w->map.mapId; next.sessionId = sessionId; next.root = w->map.root;
+  next.target = targetMetadata(w->manifest);
+  if (!w->map.signedManifestReceipt.empty()) {
+    next.manifestReceipt = receipt; next.signedManifestReceipt = w->map.signedManifestReceipt;
+  }
+  if (status.ok && !w->previous.root.empty()) {
+    next.previousMapId = w->previous.mapId; next.previousSessionId = w->previous.sessionId;
+    next.previousRoot = w->previous.root; next.previousTarget = w->previous.target;
+    next.previousManifestReceipt = w->previous.manifestReceipt;
+    next.previousSignedManifestReceipt = w->previous.signedManifestReceipt;
+  }
+  // Reuse the canonical selection's readback, atomic backup and predecessor
+  // anchors. There is no file move and no new upload/installation receipt.
+  if (writeActiveMap(next)) return {true, "selected", ""};
+  // A failed readback is ambiguous: reconcile the canonical pointer before
+  // reporting failure, so a completed write cannot strand the old renderer.
+  const auto recovered = recoverActiveSelection();
+  if (!recovered.ok) return recovered;
+  ActiveMapSelection actual;
+  if (readActiveMap(actual).ok && actual.root == next.root && actual.mapId == next.mapId &&
+      actual.manifestReceipt == next.manifestReceipt && actual.signedManifestReceipt == next.signedManifestReceipt)
+    return {true, "selected", ""};
+  return fail("library_selection", "map selection did not complete");
+}
+
+InstallStatus MapTransferInstaller::removeInstalledMap(
+    const std::string &sessionId, const std::string &receipt) const {
+  if (hasInterruptedActivation()) return fail("library_busy", "map activation needs recovery");
+  InstalledMap map; auto status = readInstalledMap(sessionId, map);
+  if (!status.ok) return status;
+  if (receipt != map.manifestReceipt) return fail("library_identity", "map version changed");
+  ActiveMapSelection selected; status = readActiveMap(selected);
+  if (!status.ok && status.code != "active_missing") return status;
+  if (map.root == selected.root || map.root == selected.previousRoot || selectionAnchorProtectsRoot(map.root))
+    return fail("library_in_use", "map is selected or retained for recovery");
+  return removeTree(joinPath(storageRoot_, map.root)) ? InstallStatus{true, "library_removed", ""}
+      : fail("library_remove", "could not remove installed map");
+}
+
+bool MapTransferInstaller::automaticMapSelection() const {
+  std::string value;
+  const auto path = joinPath(storageRoot_, "/VECTMAP/.library-automatic");
+  if (!fileExists(path) && !fileExists(path + ".bak")) return true;
+  return (readTextFile(path, value, 8) || readTextFile(path + ".bak", value, 8)) && value == "auto\n";
+}
+
+bool MapTransferInstaller::setAutomaticMapSelection(bool enabled) const {
+  return mkdirs(joinPath(storageRoot_, "/VECTMAP")) &&
+      writeTextFileAtomic(joinPath(storageRoot_, "/VECTMAP/.library-automatic"),
+                             enabled ? "auto\n" : "manual\n");
+}
+
 bool MapTransferInstaller::pruneObsoleteInstalledMaps(
     const std::string &keepInstallingSessionId) const {
   if (!keepInstallingSessionId.empty() && !safeId(keepInstallingSessionId))
@@ -3347,6 +3554,10 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps(
         candidate == pendingRoot || candidate == transactionRoot ||
         candidate == transactionPreviousRoot || selectionAnchorProtectsRoot(candidate) ||
         freshReady ||
+        // Completed maps form the persistent SD library. Cleanup may reclaim
+        // abandoned staging, never another city that the rider installed.
+        consumed ||
+        fileExists(joinPath(candidatePath, kInstalledReceiptFile)) ||
         ((keepInstallingSessionId.empty() ||
           name == keepInstallingSessionId) &&
          (fileExists(joinPath(candidatePath, kStreamInstallingFile)) ||
@@ -3362,22 +3573,8 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps(
       ok = false;
   }
   ::closedir(dir);
-  if (selected.root != "/VECTMAP" && selected.previousRoot == "/VECTMAP") {
-    const std::string vectmapRoot = joinPath(storageRoot_, "VECTMAP");
-    DIR *legacy = ::opendir(vectmapRoot.c_str());
-    if (!legacy)
-      return false;
-    while ((entry = ::readdir(legacy)) != nullptr) {
-      const std::string name = entry->d_name;
-      if (name == "." || name == ".." || name[0] == '.' ||
-          startsWith(name, "active-map.json")) {
-        continue;
-      }
-      if (!removeTree(joinPath(vectmapRoot, name)))
-        ok = false;
-    }
-    ::closedir(legacy);
-  }
+  // The original inline /VECTMAP layout is migration evidence, not staging.
+  // Preserve it; library installation must never erase an older SD layout.
   return ok;
 }
 

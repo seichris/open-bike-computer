@@ -89,6 +89,29 @@ nonisolated struct MapSelectionHealthProjection {
 }
 
 // Durable operation queries are deliberately bounded and cannot carry delimiters.
+nonisolated enum MapLibraryControlPacket {
+    static func validSession(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 80 && !value.hasPrefix(".") && !value.contains("..") &&
+            value.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) ||
+                (97...122).contains($0) || [45, 46, 95].contains($0) }
+    }
+    static func validReceipt(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+    static func make(action: String, sessionID: String = "", manifestReceipt: String = "") -> Data? {
+        let command: String
+        switch action {
+        case "refresh": command = "library"
+        case "auto", "manual": command = "library-\(action)"
+        case "select", "remove":
+            guard validSession(sessionID), validReceipt(manifestReceipt) else { return nil }
+            command = "library-\(action)|\(sessionID)|\(manifestReceipt)"
+        default: return nil
+        }
+        return Data(("MTRN" + command).utf8)
+    }
+}
+
 nonisolated enum MapOperationQueryPacket {
     static func make(operationID: String) -> Data? {
         guard operationID.utf8.count == 32,

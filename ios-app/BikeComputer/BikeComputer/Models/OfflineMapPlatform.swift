@@ -1524,6 +1524,61 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     }
 }
 
+nonisolated struct DeviceInstalledMap: Codable, Equatable, Identifiable, Sendable {
+    let sessionID: String
+    let mapID: String
+    let manifestReceipt: String
+    let signedManifestReceipt: String
+    let displayName: String
+    let payloadBytes: UInt64
+    let boundsE7: [Int]?
+    var id: String { sessionID }
+    var name: String { displayName.isEmpty ? mapID : displayName }
+
+    var isValid: Bool {
+        Self.safeSession(sessionID) && !mapID.isEmpty && mapID.utf8.count <= 160 &&
+            Self.receipt(manifestReceipt) &&
+            (signedManifestReceipt.isEmpty || Self.receipt(signedManifestReceipt)) &&
+            displayName.utf8.count <= 240 && payloadBytes > 0 && payloadBytes <= 512 * 1024 * 1024 &&
+            (boundsE7 == nil || Self.validBounds(boundsE7!))
+    }
+    static func safeSession(_ value: String) -> Bool { MapLibraryControlPacket.validSession(value) }
+    static func receipt(_ value: String) -> Bool { MapLibraryControlPacket.validReceipt(value) }
+    private static func validBounds(_ b: [Int]) -> Bool {
+        b.count == 4 && b[0] >= -1_800_000_000 && b[2] <= 1_800_000_000 &&
+            b[1] >= -900_000_000 && b[3] <= 900_000_000 && b[0] < b[2] && b[1] < b[3]
+    }
+}
+
+nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let known: Bool
+    let automatic: Bool
+    let busy: Bool
+    let revision: UInt32
+    let error: String
+    let selectedSessionID: String
+    let maps: [DeviceInstalledMap]
+    var isValid: Bool {
+        schemaVersion == 1 && maps.count <= 32 && maps.allSatisfy(\.isValid) &&
+            Set(maps.map(\.sessionID)).count == maps.count &&
+            (selectedSessionID.isEmpty || DeviceInstalledMap.safeSession(selectedSessionID))
+    }
+    func installed(mapID: String, manifestReceipt: String, signedManifestReceipt: String) -> DeviceInstalledMap? {
+        guard known, isValid, !busy, !manifestReceipt.isEmpty else { return nil }
+        return maps.first { $0.mapID == mapID && $0.manifestReceipt == manifestReceipt &&
+            $0.signedManifestReceipt == signedManifestReceipt }
+    }
+    static func command(_ action: String, map: DeviceInstalledMap? = nil) -> Data? {
+        if action == "select" || action == "remove" {
+            guard let map, map.isValid else { return nil }
+            return MapLibraryControlPacket.make(action: action, sessionID: map.sessionID,
+                manifestReceipt: map.manifestReceipt)
+        }
+        return MapLibraryControlPacket.make(action: action)
+    }
+}
+
 nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     struct TransferError: Decodable, Equatable {
         let code: String?
@@ -1544,6 +1599,7 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     }
 
     var selectionHealth: MapSelectionHealth? = nil
+    var mapLibrary: DeviceMapLibrary? = nil
     var activeRoot: String? = nil
     var mapOperationsV1: Bool? = nil
     let enabled: Bool?

@@ -1790,6 +1790,10 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | --- | --- | --- | --- |
 | `MTRN` | iOS -> ESP32 | `enter` | Enable short-lived map-transfer mode. |
 | `MTRN` | iOS -> ESP32 | `exit` | Disable map-transfer mode. |
+| `MTRN` | iOS -> ESP32 | `library` | Refresh the completed SD-map inventory without enabling Wi-Fi. |
+| `MTRN` | iOS -> ESP32 | `library-auto` / `library-manual` | Persist automatic/manual map selection. |
+| `MTRN` | iOS -> ESP32 | `library-select\|sessionID\|manifestReceipt` | Verify and select an exact completed installation; disables automatic selection. |
+| `MTRN` | iOS -> ESP32 | `library-remove\|sessionID\|manifestReceipt` | Remove an exact unselected installation, subject to recovery protection. |
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
 | `MSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Current map-transfer status notification. |
 | `DTRN` | iOS -> ESP32 | `enter\|map` | Preferred atomic map-mode entry; publishes both map status and generic device-transfer status. |
@@ -2709,3 +2713,49 @@ line distance, distinct from the phone's confident same-route progress gap.
 Overlapping footprints show a count badge. Pan/zoom gestures hide the layer until
 the published projection is stable. The existing full-buffer/full-refresh display
 strategy is unchanged.
+
+
+## Persistent SD map library
+
+See [Device map library](device-map-library.md) for lifecycle, limits, migration,
+and physical qualification. No BLE characteristic or UUID changes.
+
+Authenticated `MSTS` and `GET /map-transfer/status` include `mapLibrary`:
+
+```json
+{
+  "schemaVersion": 1,
+  "known": true,
+  "automatic": true,
+  "busy": false,
+  "revision": 1,
+  "error": "",
+  "selectedSessionID": "installed-session",
+  "maps": [{
+    "sessionID": "installed-session",
+    "mapID": "shanghai-map",
+    "manifestReceipt": "<64 lowercase hex characters>",
+    "signedManifestReceipt": "<64 lowercase hex characters, or empty for a legacy archive>",
+    "displayName": "Shanghai",
+    "payloadBytes": 1350000,
+    "boundsE7": [1210000000, 310000000, 1220000000, 320000000]
+  }]
+}
+```
+
+`boundsE7` is optional. `payloadBytes` sums installed manifest payloads, excluding
+archive framing and filesystem allocation overhead. Inventory is boot/connection
+scoped, bounded to 32 maps, and not persistent evidence of a completed new upload.
+Unknown, busy, malformed, duplicate-session, or future-schema inventory cannot
+authorize app-side reuse. Exact signed reuse matches map ID, manifest receipt,
+and signed manifest receipt. Version changes require installation.
+
+Library commands require the existing owner-authenticated BLE envelope. Callbacks
+only enqueue bounded work; the storage worker dispatches filesystem work through
+the internal operation owner. Commands wait for map/firmware transfer mode to
+exit and reject unresolved durable map operations. Selection retains the prior
+map, rechecks file checksums and reader contracts, and uses the existing canonical
+pointer/readback/recovery mechanism. The renderer must acknowledge the new root
+before `selectedSessionID` identifies it as in use. Selection does not issue or
+rewrite an upload operation's Installed receipt. Removal cannot delete selected,
+rollback, transaction, or selection-anchor roots.

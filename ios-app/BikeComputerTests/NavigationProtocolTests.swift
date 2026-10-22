@@ -1111,6 +1111,7 @@ struct NavigationProtocolTests {
         testMapTransferSessionIdentityUsesManifestContent()
         testMapActivationReconciliationMatrix()
         await testMapActivationConfirmationOrchestration()
+        testDeviceMapLibrary()
         testMapTransferDeviceStatusDecodesActivationFailure()
         testFirmwareManifestDecodingAndHash()
         testFirmwareUpdateManagerRestoresPendingStatus()

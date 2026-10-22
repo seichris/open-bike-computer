@@ -2848,7 +2848,10 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
 }
 
 static std::string mapTransferStatusJson() {
-  return composeMapTransferStatusJson(readActiveMapStatusSnapshot());
+  auto body = composeMapTransferStatusJson(readActiveMapStatusSnapshot());
+  body.pop_back();
+  body += ",\"mapLibrary\":" + mapTransferHttp.mapLibraryJson() + "}";
+  return body;
 }
 
 static std::atomic<bool> diagnosticsLiveRequested{false};
@@ -4651,6 +4654,26 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
     queueTransferControl(ble_transfer::Action::DisableMap,
                          ble_transfer::NotifyMap);
     Serial.println("BLE Map Transfer: exit queued");
+    return;
+  }
+
+  if (command == "library" || command == "library-auto" || command == "library-manual") {
+    const auto action = command == "library" ? "refresh" :
+        (command == "library-auto" ? "auto" : "manual");
+    if (!mapTransferHttp.requestMapLibrary(action))
+      mapTransferHttp.setLastError("library_busy", "map library is busy");
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
+    return;
+  }
+  const auto first = command.find('|');
+  const auto second = first == std::string::npos ? std::string::npos : command.find('|', first + 1);
+  if (second != std::string::npos && command.find('|', second + 1) == std::string::npos &&
+      (command.substr(0, first) == "library-select" || command.substr(0, first) == "library-remove")) {
+    const auto action = command.substr(0, first) == "library-select" ? "select" : "remove";
+    if (!mapTransferHttp.requestMapLibrary(action,
+        command.substr(first + 1, second - first - 1), command.substr(second + 1)))
+      mapTransferHttp.setLastError("library_busy", "map library command was not accepted");
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
     return;
   }
 

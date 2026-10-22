@@ -984,7 +984,7 @@ static void testPruningPreservesLiveDurableStreamReferences() {
   assert(!exists(maps + "/obsolete"));
 }
 
-static void testPrunesLegacyRollbackAfterVersionedMapIsActive() {
+static void testPreservesLegacyLayoutAfterVersionedMapIsActive() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string vectmap = root + "/VECTMAP";
@@ -1004,7 +1004,7 @@ static void testPrunesLegacyRollbackAfterVersionedMapIsActive() {
 
   assert(installer.pruneObsoleteInstalledMaps());
   assert(exists(vectmap + "/.maps/current/+0032+0008/new.fmb"));
-  assert(!exists(vectmap + "/+9999+9999"));
+  assert(exists(vectmap + "/+9999+9999/old.fmb"));
   assert(exists(vectmap + "/active-map.json"));
 }
 
@@ -1490,7 +1490,77 @@ static void testPendingArchiveActivationSurvivesRestart() {
   assert(!afterRestart.readPendingArchiveActivation(recoveredSession));
 }
 
+static void testPersistentMapLibrary() {
+  const auto root = tempRoot();
+  MapTransferInstaller installer(root);
+  const auto data = validFmb();
+  for (int i = 0; i < 6; ++i) {
+    const auto session = "city-" + std::to_string(i);
+    const auto mapID = "map-" + std::to_string(i);
+    const auto stage = installer.stagingRoot(session);
+    assert(::system(("mkdir -p " + stage + "/VECTMAP/" + mapID + "/+0000+0000").c_str()) == 0);
+    writeFile(stage + "/VECTMAP/" + mapID + "/+0000+0000/0.fmb", data);
+    writeFile(stage + "/manifest.json", "{\"schemaVersion\":1,\"mapId\":\"" + mapID +
+        "\",\"displayName\":\"City " + std::to_string(i) +
+        "\",\"boundsE7\":[1200000000,300000000,1220000000,320000000],\"files\":[{\"path\":\"VECTMAP/" +
+        mapID + "/+0000+0000/0.fmb\",\"bytes\":" + std::to_string(data.size()) +
+        ",\"sha256\":\"" + sha(data) + "\"}]}");
+    MapManifest manifest;
+    assert(installer.validateStagedMap(session, manifest).ok);
+    assert(installer.activateStagedMap(session, manifest).ok);
+    assert(installer.pruneObsoleteInstalledMaps());
+  }
+  std::vector<map_transfer::InstalledMap> maps;
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 6);
+  assert(maps[0].presentation.displayName == "City 0");
+  assert(maps[0].payloadBytes == data.size());
+  assert(maps[0].contains(310000000, 1210000000));
+  assert(!maps[0].contains(310000000, 1030000000));
+  assert(!installer.installedMapCovers(maps[0], 310000000, 1210000000));
+
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1210000000)->sessionId == "city-0");
+  assert(map_transfer::coveringLibraryMap(maps, maps[5].root, 310000000, 1210000000) == nullptr);
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1030000000) == nullptr);
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1210000000, {"city-0"})->sessionId == "city-1");
+  auto smaller = maps[0]; smaller.sessionId = "smaller"; smaller.root += "-smaller";
+  smaller.presentation.boundsE7 = {1205000000, 305000000, 1215000000, 315000000};
+  maps.push_back(smaller);
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1210000000)->sessionId == "smaller");
+  maps.pop_back();
+  const auto path = root + maps[0].root + "/+0000+0000/0.fmb";
+  struct stat before{}, after{};
+  assert(::stat(path.c_str(), &before) == 0);
+  assert(!installer.selectInstalledMap(maps[0].sessionId, std::string(64, '0')).ok);
+  assert(installer.selectInstalledMap(maps[0].sessionId, maps[0].manifestReceipt).ok);
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  assert(selected.previousSessionId == "city-5");
+  assert(::stat(path.c_str(), &after) == 0 && before.st_ino == after.st_ino);
+  assert(installer.recoverInterruptedActivation().ok);
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  assert(!installer.removeInstalledMap(maps[0].sessionId, maps[0].manifestReceipt).ok);
+  assert(!installer.removeInstalledMap(maps[5].sessionId, maps[5].manifestReceipt).ok);
+  assert(installer.removeInstalledMap(maps[2].sessionId, maps[2].manifestReceipt).ok);
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 5);
+  // Same-size corruption is deliberately invisible to cheap inventory, but
+  // must be rejected before selecting/reusing the installed payload.
+  const auto corrupt = root + maps[1].root + "/+0000+0000/0.fmb";
+  writeFile(corrupt, std::string(data.size(), 'x'));
+  assert(installer.selectInstalledMap(maps[1].sessionId, maps[1].manifestReceipt).code == "library_integrity");
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  MetadataWriteFailingInstaller failing(root);
+  assert(!failing.selectInstalledMap(maps[3].sessionId, maps[3].manifestReceipt).ok);
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  assert(!installer.selectInstalledMap("../city-1", maps[1].manifestReceipt).ok);
+  assert(installer.automaticMapSelection());
+  assert(installer.setAutomaticMapSelection(false));
+  assert(!MapTransferInstaller(root).automaticMapSelection());
+  assert(installer.setAutomaticMapSelection(true));
+  assert(MapTransferInstaller(root).automaticMapSelection());
+}
+
 int main() {
+  testPersistentMapLibrary();
   testSha256KnownVector();
   testTargetTwoLabelContractValidation();
   testTargetThreeBuildingContractValidation();
@@ -1510,7 +1580,7 @@ int main() {
   testPruningPreservesForeignFilesystemEntries();
   testPreservesPreviousAndPrunesObsoleteVersions();
   testPruningPreservesLiveDurableStreamReferences();
-  testPrunesLegacyRollbackAfterVersionedMapIsActive();
+  testPreservesLegacyLayoutAfterVersionedMapIsActive();
   testRollsBackInterruptedVersionPublish();
   testRollbackPreservesPendingArchiveForBootResume();
   testCompletesPointerSwitchInterruptedBeforeJournalCommit();

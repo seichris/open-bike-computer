@@ -73,6 +73,14 @@ public:
   void submitPendingRollback();
   void submitPendingOperationTask();
   bool takeRuntimeRollback(ActiveMapSelection &restored, bool &succeeded);
+  // Authenticated BLE commands only enqueue bounded work. Filesystem access
+  // executes on the storage worker through the internal operation owner.
+  bool requestMapLibrary(const std::string &action,
+                         const std::string &session = "",
+                         const std::string &receipt = "");
+  std::string mapLibraryJson() const;
+  void considerAutomaticMap(int32_t latitudeE7, int32_t longitudeE7, bool currentMapFound);
+  void submitPendingMapLibrary() { submitLibraryTask(); }
 
 private:
   class OperationStoreGuard {
@@ -101,6 +109,17 @@ private:
   std::atomic<uint32_t> storageProgressSequence_{0};
   std::string operationDeviceID_;
   MapSelectionHealth selectionHealth_;
+  std::vector<InstalledMap> libraryMaps_;
+  std::string libraryAction_ = "refresh", librarySession_, libraryReceipt_;
+  std::string libraryError_;
+  std::vector<std::string> libraryRejectedSessions_;
+  bool libraryKnown_ = false, libraryAutomatic_ = true, librarySubmitted_ = false;
+  uint32_t libraryRevision_ = 0;
+  int32_t libraryLatitudeE7_ = 0, libraryLongitudeE7_ = 0;
+  void submitLibraryTask();
+  static void libraryTask(void *context);
+  static void ownedLibraryTask(void *context, const char *, bool);
+  void executeLibraryTask();
   std::string selectionOperationID(const ActiveMapSelection &selected) const;
   mutable operation::AdmissionFence operationAdmission_;
   bool observeOperationRevision(uint64_t revision) const;

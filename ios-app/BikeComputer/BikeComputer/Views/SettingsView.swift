@@ -220,6 +220,7 @@ struct SettingsView: View {
                     manager: offlineMapManager,
                     focusedPackFilename: $focusedSavedMapFilename
                 )
+                DeviceMapLibrarySettingsSection()
 
                 SavedRoutesSettingsSection(
                     routeLibrary: routeLibrary,
@@ -1134,6 +1135,90 @@ private struct MapLibrarySettingsView: View {
     }
 }
 
+private struct DeviceMapLibrarySettingsSection: View {
+    @EnvironmentObject private var bleManager: BLEManager
+    @State private var mapToRemove: DeviceInstalledMap?
+    @State private var removalDeviceID: String?
+    @State private var removalEpoch: UInt64?
+
+    var body: some View {
+        if let library = bleManager.deviceMapLibrary {
+            Section {
+                Toggle("Choose map automatically", isOn: Binding(
+                    get: { bleManager.deviceMapLibrary?.automatic ?? true },
+                    set: { _ = bleManager.requestDeviceMapLibrary($0 ? "auto" : "manual") }
+                ))
+                .disabled(!library.known || library.busy || !bleManager.isNavigationReady)
+                if library.busy {
+                    ProgressView("Updating device maps…")
+                }
+                ForEach(library.maps) { map in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(map.name)
+                            Text(ByteCountFormatter.string(fromByteCount: Int64(map.payloadBytes), countStyle: .file))
+                                .font(.caption).foregroundColor(.secondary)
+                            Text(library.selectedSessionID == map.sessionID ? "In use" : "Available offline")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        if library.selectedSessionID == map.sessionID {
+                            Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                                .accessibilityLabel("\(map.name) is in use")
+                        } else {
+                            Button("Use") { _ = bleManager.requestDeviceMapLibrary("select", map: map) }
+                                .buttonStyle(.borderless)
+                                .disabled(library.busy || !library.known || !bleManager.isNavigationReady)
+                                .accessibilityLabel("Use \(map.name) from the SD card")
+                        }
+                    }
+                    .swipeActions {
+                        if library.selectedSessionID != map.sessionID {
+                            Button("Remove", role: .destructive) {
+                                mapToRemove = map
+                                removalDeviceID = bleManager.activeDeviceID
+                                removalEpoch = bleManager.transferConnectionEpoch
+                            }
+                                .disabled(library.busy || !library.known)
+                        }
+                    }
+                }
+                if library.known && library.maps.isEmpty {
+                    Text("Install a map to keep it available offline here.").foregroundColor(.secondary)
+                }
+                if !library.error.isEmpty {
+                    Text(library.error == "library_in_use"
+                        ? "That map is retained for recovery and cannot be removed yet."
+                        : "Could not update the device maps. Refresh and try again.")
+                        .foregroundColor(.secondary)
+                }
+                Button("Refresh Device Maps") { _ = bleManager.requestDeviceMapLibrary() }
+                    .disabled(library.busy || !bleManager.isNavigationReady)
+            } header: {
+                Text("Maps on this Bike Computer")
+            } footer: {
+                Text("Installed maps stay on the SD card. Automatic selection uses your location while following GPS. Choosing Use selects a map manually and turns automatic selection off.")
+            }
+            .confirmationDialog("Remove Map from SD Card?", isPresented: Binding(
+                get: { mapToRemove != nil }, set: { if !$0 { mapToRemove = nil } }
+            ), titleVisibility: .visible) {
+                if let map = mapToRemove {
+                    Button("Remove \(map.name)", role: .destructive) {
+                        if removalDeviceID == bleManager.activeDeviceID && removalEpoch == bleManager.transferConnectionEpoch {
+                            _ = bleManager.requestDeviceMapLibrary("remove", map: map)
+                        }
+                        mapToRemove = nil
+                    }
+                }
+                Button("Cancel", role: .cancel) { mapToRemove = nil }
+            } message: {
+                Text("The copy on this SD card will be removed. Copies on your iPhone and in your Map Library remain available.")
+            }
+            .onChange(of: bleManager.transferConnectionEpoch) { _ in mapToRemove = nil }
+        }
+    }
+}
+
 private struct SavedMapsSettingsSection: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var bleManager: BLEManager
@@ -1521,6 +1606,9 @@ private struct SavedMapRow: View {
         let displayName = item.displayName
         let packURL = item.packURL
         let isPausedUpload = packURL.map(manager.isPausedMapUpload) ?? false
+        let installedDeviceMap = packURL.flatMap {
+            manager.installedDeviceMap(for: $0, library: bleManager.deviceMapLibrary)
+        }
         let isAwaitingActivation = packURL.map(
             manager.isAwaitingMapActivationConfirmation
         ) ?? false
@@ -1673,7 +1761,7 @@ private struct SavedMapRow: View {
                         Image(
                             systemName: isPausedUpload
                                 ? "arrow.clockwise.circle"
-                                : "arrow.up.circle"
+                                : (installedDeviceMap == nil ? "arrow.up.circle" : "arrow.triangle.swap")
                         )
                             .frame(width: 32, height: 32)
                     }
@@ -1689,7 +1777,8 @@ private struct SavedMapRow: View {
                     .accessibilityLabel(
                         isPausedUpload
                             ? "Resume transferring \(displayName) to device"
-                            : "Transfer \(displayName) to device"
+                            : (installedDeviceMap == nil ? "Install \(displayName) on the Bike Computer"
+                                : "Use \(displayName) already installed on the SD card")
                     )
                 } else if let catalogMap = item.catalogMap {
                     Button {

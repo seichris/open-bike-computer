@@ -9913,4 +9913,43 @@ extension NavigationProtocolTests {
                "ending freshness loss uses the priority lane")
     }
 
+    static func testDeviceMapLibrary() {
+        let receipt = String(repeating: "a", count: 64)
+        let signed = String(repeating: "b", count: 64)
+        let map = DeviceInstalledMap(sessionID: "shanghai-1", mapID: "shanghai",
+            manifestReceipt: receipt, signedManifestReceipt: signed, displayName: "Shanghai",
+            payloadBytes: 1_354_311, boundsE7: [1_210_000_000, 310_000_000, 1_220_000_000, 320_000_000])
+        let library = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 7, error: "", selectedSessionID: "", maps: [map])
+        assert(library.isValid, "valid installed map inventory")
+        assertEqual(library.installed(mapID: "shanghai", manifestReceipt: receipt, signedManifestReceipt: signed), map,
+                    "exact verified version can be reused")
+        assert(library.installed(mapID: "shanghai", manifestReceipt: String(repeating: "c", count: 64),
+            signedManifestReceipt: signed) == nil, "same name with different content must upload")
+        assert(library.installed(mapID: "shanghai", manifestReceipt: receipt,
+            signedManifestReceipt: String(repeating: "c", count: 64)) == nil, "different signed version must upload")
+        let packet = DeviceMapLibrary.command("select", map: map)!
+        assertEqual(String(data: packet, encoding: .utf8), "MTRNlibrary-select|shanghai-1|" + receipt,
+                    "library selection binds the installed session and receipt")
+        assert(MapLibraryControlPacket.make(action: "select", sessionID: "../map", manifestReceipt: receipt) == nil,
+               "reject unsafe session")
+        assert(MapLibraryControlPacket.make(action: "remove", sessionID: "map|injected", manifestReceipt: receipt) == nil,
+               "reject command delimiter injection")
+        assert(MapLibraryControlPacket.make(action: "remove", sessionID: "map", manifestReceipt: "short") == nil,
+               "reject truncated identity")
+        assert(DeviceMapLibrary.command("unknown") == nil, "reject unknown library actions")
+        let encoded = try! JSONEncoder().encode(library)
+        assertEqual(try! JSONDecoder().decode(DeviceMapLibrary.self, from: encoded), library, "inventory wire round trip")
+        let duplicate = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 8, error: "", selectedSessionID: "", maps: [map, map])
+        assert(!duplicate.isValid, "duplicate installed identities cannot drive actions")
+        let future = DeviceMapLibrary(schemaVersion: 2, known: true, automatic: true, busy: false,
+            revision: 8, error: "", selectedSessionID: "", maps: [map])
+        assert(!future.isValid, "future inventory schemas fail closed")
+        let busy = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: true,
+            revision: 8, error: "", selectedSessionID: "", maps: [map])
+        assert(busy.installed(mapID: "shanghai", manifestReceipt: receipt, signedManifestReceipt: signed) == nil,
+               "busy inventory is not reuse authority")
+    }
+
 }

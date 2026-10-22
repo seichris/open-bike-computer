@@ -957,7 +957,7 @@ void testRollbackRejectsMismatchedPreviousIdentity() {
   assert(previous.signedManifestReceipt != wrongReceipt);
 }
 
-void testConsumedReadyRootsAreNotReactivatedAndArePruned() {
+void testConsumedReadyRootsAreNotReactivatedAndRemainInLibrary() {
   const std::string root = tempRoot();
   MapTransferInstaller installer(root);
   for (const char *session : {"history-a", "history-b", "history-c"}) {
@@ -974,17 +974,29 @@ void testConsumedReadyRootsAreNotReactivatedAndArePruned() {
   assert(selected.sessionId == "history-c");
   assert(selected.previousSessionId == "history-b");
   assert(installer.pruneObsoleteInstalledMaps());
-  // Both independent anchors retain the complete predecessor selection,
-  // including its rollback root. History is bounded at four roots, not two.
+  // Completed installations outlive the predecessor anchors as SD library maps.
   assert(exists(root + "/VECTMAP/.maps/history-a"));
   for (const char *session : {"history-d", "history-e"}) {
     prepareReadyRoot(root, session);
     assert(installer.activateReadyStreamMap(session).ok);
     assert(installer.pruneObsoleteInstalledMaps());
   }
-  assert(!exists(root + "/VECTMAP/.maps/history-a"));
+  assert(exists(root + "/VECTMAP/.maps/history-a"));
   for (const char *session : {"history-b", "history-c", "history-d", "history-e"})
     assert(exists(root + "/VECTMAP/.maps/" + session));
+  assert(installer.recoverPendingStreamActivation().code == "stream_pending_none");
+  std::vector<map_transfer::InstalledMap> maps;
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 5);
+  prepareReadyRoot(root, "uncommitted-library-map");
+  map_transfer::InstalledMap uncommitted;
+  assert(!installer.readInstalledMap("uncommitted-library-map", uncommitted).ok);
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 5);
+  // Discard only the newly prepared stream, never completed library entries.
+  assert(installer.discardAllUnselectedStreamMaps().ok);
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 5);
+  const auto &old = maps.front();
+  assert(installer.selectInstalledMap(old.sessionId, old.manifestReceipt).ok);
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == old.sessionId);
   assert(installer.recoverPendingStreamActivation().code == "stream_pending_none");
 }
 
@@ -1757,7 +1769,7 @@ int main() {
   testSemanticBackupRecovery();
   testPreviousRootIdentityIsProtected();
   testRollbackRejectsMismatchedPreviousIdentity();
-  testConsumedReadyRootsAreNotReactivatedAndArePruned();
+  testConsumedReadyRootsAreNotReactivatedAndRemainInLibrary();
   testFrozenMapIdEdgesInstallAndActivate();
   testCrashBoundariesRemainRetryableWithMonotonicFinalization();
   testEveryInstallerMutationAndInterruptedRecovery();
