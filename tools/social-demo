@@ -172,12 +172,12 @@ class DemoAccount:
         self.profile_id = profile['id']
         return profile
 
-    def ensure_avatar(self, profile):
-        if profile.get('avatarID'): return profile
+    def ensure_avatar(self, profile, replace=False):
+        if profile.get('avatarID') and not replace: return profile, 'retained'
         data = Path(f'/tmp/bicino-social-demo-avatar-{self.slug}.png').read_bytes()
         if not data.startswith(b'\x89PNG\r\n\x1a\n') or len(data) > 512000:
             raise DemoError('Invalid demo avatar')
-        return self.call('PUT', '/me/avatar', content=data, params={'version': profile['version']})
+        return self.call('PUT', '/me/avatar', content=data, params={'version': profile['version']}), 'uploaded'
 
     def change_consent(self, target_id, enabled):
         path = f'/friend-sharing/{target_id}/consent'
@@ -219,9 +219,13 @@ def run_inside(args):
         if target['username'] != config['target'] or target['id'] in {p['id'] for p in profiles}:
             raise DemoError('Invalid target rider')
         if args.action == 'avatars':
-            updated = [account.ensure_avatar(profile) for account, profile in zip(accounts, profiles)]
-            print(json.dumps({'riders': [{'displayName': account.name, 'emoji': EMOJIS[account.slug],
-                'avatarID': profile['avatarID']} for account, profile in zip(accounts, updated)]})); return
+            results = []
+            for account, profile in zip(accounts, profiles):
+                profile, outcome = account.ensure_avatar(profile, replace=args.replace)
+                result = {'displayName': account.name, 'avatarStatus': outcome, 'avatarID': profile['avatarID']}
+                if outcome == 'uploaded': result['emoji'] = EMOJIS[account.slug]
+                results.append(result)
+            print(json.dumps({'riders': results})); return
         if args.action == 'seed':
             requests = [account.call('POST', '/friend-requests', {'profileID': target['id']}) for account in accounts]
             result = {'running': False, 'targetUsername': config['target'], 'riders': [
@@ -285,7 +289,7 @@ def process_alive():
 
 def operate(args):
     source = Path(__file__).read_text()
-    payload = {'action': args.action, 'duration': args.duration, 'program': source}
+    payload = {'action': args.action, 'duration': args.duration, 'program': source, 'replace': args.replace}
     if args.action == 'avatars': payload['avatars'] = render_avatars()
     if args.action == 'seed':
         if not args.xcconfig or not args.target: raise DemoError('seed requires --xcconfig and --target')
@@ -320,6 +324,9 @@ if "avatars" in p:
   with os.fdopen(fd,"wb") as f:f.write(data)
   subprocess.run(["docker","cp",str(path),"bicino-social-dev-social-api-1:/tmp/bicino-social-demo-avatar-"+slug+".png"],check=True,capture_output=True)
 cmd=["docker","exec","--user","0","bicino-social-dev-social-api-1","python","/tmp/bicino-social-demo.py","--inside-container",p["action"]]
+if p.get("replace") is True:
+ if p["action"]!="avatars":raise SystemExit("Replacement requires avatars")
+ cmd.append("--replace")
 if p["action"]=="run":
  current=json.loads(subprocess.check_output(cmd[:-1]+["status"]))
  if current.get("processAlive"):
@@ -340,11 +347,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inside-container', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('action', choices=['seed', 'avatars', 'run', 'status', 'stop'])
+    parser.add_argument('--replace', action='store_true', help='Replace existing synthetic rider pictures with the current emoji set (avatars only)')
     parser.add_argument('--target', help='Your Dev username, for seed')
     parser.add_argument('--xcconfig', help='Bicino Dev native client configuration, for seed')
     parser.add_argument('--duration', type=int, default=3600, help='Simulation seconds, at most four hours (default: one hour)')
     parser.add_argument('--ssh-host', default='cool-ts', help='Existing development server SSH alias')
     args = parser.parse_args()
+    if args.replace and args.action != 'avatars': parser.error('--replace requires avatars')
     if not 30 <= args.duration <= 4*3600: parser.error('duration must be between 30 and 14400 seconds')
     try:
         run_inside(args) if args.inside_container else operate(args)

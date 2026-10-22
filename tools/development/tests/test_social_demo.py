@@ -134,7 +134,7 @@ class SocialDemoTests(unittest.TestCase):
         account.token = 'short-lived-test-token'
         png = b'\x89PNG\r\n\x1a\n' + b'synthetic-image-fixture'
         with patch.object(demo.Path, 'read_bytes', return_value=png):
-            result = account.ensure_avatar({'version':7,'avatarID':None})
+            result, outcome = account.ensure_avatar({'version':7,'avatarID':None})
         method, url, payload = client.sent
         self.assertEqual((method,url),('PUT',demo.ORIGIN+'/me/avatar'))
         self.assertEqual(payload['params'],{'version':7})
@@ -142,8 +142,14 @@ class SocialDemoTests(unittest.TestCase):
         self.assertNotIn('json',payload)
         self.assertEqual(payload['headers']['Content-Type'],'image/png')
         self.assertEqual(result['avatarID'],'new-avatar')
+        self.assertEqual(outcome, 'uploaded')
         with patch.object(demo.Path,'read_bytes',side_effect=AssertionError('Do not replace an existing avatar')):
-            self.assertEqual(account.ensure_avatar(result),result)
+            self.assertEqual(account.ensure_avatar(result),(result, 'retained'))
+        with patch.object(demo.Path, 'read_bytes', return_value=png):
+            replaced, outcome = account.ensure_avatar(result, replace=True)
+        self.assertEqual(client.sent[2]['params'], {'version':8}, 'replacement uses the current profile version')
+        self.assertEqual(replaced['avatarID'], 'new-avatar')
+        self.assertEqual(outcome, 'uploaded')
 
 
 if __name__ == '__main__': unittest.main()

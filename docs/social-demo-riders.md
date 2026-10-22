@@ -34,7 +34,9 @@ tools/social-demo stop
 To give the existing test friends simple pictures, run `tools/social-demo avatars`
 on the Mac. It renders the system emoji locally (Ava 🚴, Ben 🚴‍♂️, Cleo 🚴‍♀️) and
 uploads them through each synthetic account's ordinary profile-avatar API.
-Existing pictures are retained on repeat runs. No emoji font or image bundle is
+Existing pictures are reported as `retained` on repeat runs. To apply the current
+emoji set over an older synthetic picture, use `tools/social-demo avatars --replace`.
+Only successful uploads report the applied emoji. No emoji font or image bundle is
 distributed with the app. Open Friends again to refresh the pictures.
 
 On the iPhone map, open **Layers → Friends** to set **Friend Picture Size** and
