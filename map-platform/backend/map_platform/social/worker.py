@@ -4,12 +4,13 @@ from __future__ import annotations
 import argparse
 import os
 import time
+import uuid
 from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import OperationalError
 from ..user_auth import FirebaseIdentity
 from .features import SocialFeatures
 from .database import (Database, accounts, blocks, content, deletion_receipts, devices, exposures,
-                       friendships, invites, limits, links, media, members, messages, outbox,
+                       friendships, friend_shares, invites, limits, links, media, members, messages, outbox,
                        replays, rides)
 from .media import S3Media, reconcile_orphans
 
@@ -67,6 +68,7 @@ def cleanup_account(c, actor, identity, media_store):
     c.execute(delete(media).where(media.c.owner == actor))
     c.execute(delete(links).where(links.c.owner == actor))
     c.execute(delete(content).where(content.c.owner == actor))
+    c.execute(delete(friend_shares).where(or_(friend_shares.c.owner == actor, friend_shares.c.recipient == actor)))
     c.execute(delete(friendships).where(or_(friendships.c.a == actor, friendships.c.b == actor)))
     c.execute(delete(blocks).where(or_(blocks.c.owner == actor, blocks.c.target == actor)))
     c.execute(delete(invites).where(or_(invites.c.sender == actor, invites.c.recipient == actor)))
@@ -136,6 +138,10 @@ def run_once(database, identity, media_store, notifications, now=None, features=
         if not database.run(process_event):
             break
     def maintain(c):
+        c.execute(update(friend_shares).where(and_(friend_shares.c.live.is_not(None),
+            friend_shares.c.received < now-60)).values(live=None))
+        c.execute(update(friend_shares).where(friend_shares.c.lease <= now)
+                  .values(live=None, lease=None, stats=False, received=None, sequence=-1))
         # Coverage gaps hide positions, without silently revoking bounded consent.
         c.execute(update(members).where(and_(members.c.live.is_not(None),
             members.c.received < now-60)).values(live=None))
@@ -143,6 +149,10 @@ def run_once(database, identity, media_store, notifications, now=None, features=
         c.execute(update(members).where(and_(active, members.c.lease <= now))
                   .values(live=None, sharing=False, stats=False))
         expired = select(rides.c.id).where(and_(rides.c.expires <= now, rides.c.status != "expired"))
+        for expired_ride in c.execute(select(rides).where(rides.c.id.in_(expired)).with_for_update()).mappings():
+            if asset := expired_ride["route"].get("invitePreviewAssetID"):
+                c.execute(outbox.insert().values(id=str(uuid.uuid4()), owner=expired_ride["owner"],
+                    kind="delete_media", body={"assetID": asset}, created=now, attempts=0, next_attempt=now))
         c.execute(update(members).where(and_(active, members.c.ride.in_(expired)))
                   .values(live=None, sharing=False, stats=False))
         c.execute(update(rides).where(and_(rides.c.expires <= now, rides.c.status != "expired"))
@@ -216,6 +226,7 @@ def _apply_reconciliation(database, identity, service, checked):
             if status == "deleted":
                 service.begin_deletion(c, account["id"])
             elif status == "disabled":
+                c.execute(delete(friend_shares).where(or_(friend_shares.c.owner == account["id"], friend_shares.c.recipient == account["id"])))
                 c.execute(update(accounts).where(accounts.c.id == account["id"]).values(state="disabled"))
                 c.execute(update(members).where(members.c.account == account["id"]).values(live=None, sharing=False, stats=False))
                 c.execute(update(invites).where(and_(invites.c.status == "pending", or_(

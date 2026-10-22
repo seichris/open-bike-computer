@@ -1830,13 +1830,13 @@ extension NavigationProtocolTests {
         )
         assertEqual(
             BikeComputersMenuPolicy.title(knownDeviceCount: 1),
-            "My Bike Computer",
-            "one registered device uses the singular menu title"
+            "Bicino & Bike Sensors",
+            "one registered device includes sensor management in the menu title"
         )
         assertEqual(
             BikeComputersMenuPolicy.title(knownDeviceCount: 2),
-            "My Bike Computers",
-            "multiple registered devices use the plural menu title"
+            "Bicino & Bike Sensors",
+            "multiple registered devices include sensor management in the menu title"
         )
         assert(BikeComputersMenuPolicy.shouldStartDiscoveryOnEntry(
             knownDeviceCount: 0
@@ -1931,8 +1931,8 @@ extension NavigationProtocolTests {
             BikeComputerSettingsPresentationPolicy.settingsLinkTitle(
                 knownDeviceCount: 1
             ),
-            "My Bike Computer",
-            "registered settings keeps the existing singular title"
+            "Bicino & Bike Sensors",
+            "registered settings names Bicino and sensor management"
         )
         assert(
             BikeComputerSettingsPresentationPolicy.shouldPromoteSettingsLink(
@@ -3712,12 +3712,26 @@ extension NavigationProtocolTests {
     static func testPhoneConnectionAdoptionOwnsGeneration() {
         for alreadyConnected in [false, true] {
             let manager = BLEManager()
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let recorder = RideDiagnosticsRecorder(rootURL: root)
+            manager.diagnosticsRecorder = recorder
             assert(manager.adoptConnectionForTesting(connected: alreadyConnected),
                    "fresh and restored contexts enter the authoritative lifecycle")
             assertEqual(manager.rideTransportPhase, alreadyConnected ? .authenticating : .connecting,
                         "restored phase matches platform state")
             assert(manager.rideConnectionGenerationForTesting > 0, "adoption advances the write generation")
             assert(!manager.isNavigationReady, "adoption never publishes ride readiness")
+            recorder.flush()
+            let files = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)!.allObjects as! [URL]
+            let transitions = files.filter { $0.pathExtension == "jsonl" }.flatMap { file in
+                (try! Data(contentsOf: file)).split(separator: 0x0a).compactMap {
+                    try? JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0))
+                }
+            }.filter { $0.event == "ride_transport_transition" }
+            assert(!transitions.isEmpty, "adoption records its transport transition")
+            assert(!transitions.contains { $0.fields["transition"] == "rejectedInvalidTransition" },
+                   "resetting the old writer during connection adoption is not a transport violation")
             assert(!manager.adoptConnectionForTesting(connected: alreadyConnected),
                    "a live context cannot be silently replaced")
             manager.clearConnectionStateForTesting()
@@ -7976,6 +7990,54 @@ extension NavigationProtocolTests {
         )
         let fields = manager.sentPackets.last?.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false)
         assertEqual(String(fields?[1] ?? ""), "\(expectedDistance)", "fallback distance is sent to the BLE device")
+    }
+
+    /// The phone stream has no Core Location distance filter, so a stop now
+    /// delivers 1 Hz jittered fixes. They must not inflate ride distance.
+    static func testNavigationRideDistanceIgnoresStationaryJitter() {
+        let start = CLLocation(latitude: 37.0000, longitude: -122.0000)
+        let route = TestRoute(instructions: "Head north", coordinates: [
+            start.coordinate,
+            CLLocationCoordinate2D(latitude: 37.0100, longitude: -122.0000),
+        ])
+        let base = Date()
+        func fix(northMeters: Double, second: Int) -> CLLocation {
+            CLLocation(
+                coordinate: CLLocationCoordinate2D(
+                    latitude: start.coordinate.latitude + northMeters / 111_000,
+                    longitude: start.coordinate.longitude),
+                altitude: 0, horizontalAccuracy: 5, verticalAccuracy: -1,
+                course: 0, speed: -1,
+                timestamp: base.addingTimeInterval(Double(second) - 600))
+        }
+        let manager = TestBLEManager()
+        manager.isConnected = true
+        manager.isNavigationReady = true
+        let engine = NavigationEngine()
+        engine.setBLEManager(manager)
+        engine.startNavigation(with: route, initialLocation: start)
+        let jitter = [0.0, 2.5, -1.5, 3.0, -2.0, 4.0, -3.5]
+        for second in 0..<300 {
+            engine.processExternalLocation(fix(northMeters: jitter[second % jitter.count], second: second))
+        }
+        assert(engine.isNavigating, "the stationary rider is still navigating")
+        assertEqual(engine.rideDistanceMeters, 0, "five minutes of stop jitter add no ride distance")
+
+        var last = start
+        for step in 1...50 {
+            last = fix(northMeters: Double(step) * 6, second: 300 + step)
+            engine.processExternalLocation(last)
+        }
+        assert(abs(engine.rideDistanceMeters - last.distance(from: start)) < 1,
+               "every riding fix beyond the 5 m threshold counts in full")
+        let ridden = engine.rideDistanceMeters
+        for step in 1...30 {
+            last = fix(northMeters: 300 + Double(step) * 2, second: 350 + step)
+            engine.processExternalLocation(last)
+        }
+        assert(engine.rideDistanceMeters - ridden > 60 - NavigationEngine.minimumRideDistanceIncrementMeters,
+               "slow riding still accumulates from the last counted point")
+        engine.stopNavigation()
     }
 
     static func testNavigationEngineKeepsProgressAtRouteCrossing() {

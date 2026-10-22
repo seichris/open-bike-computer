@@ -8,7 +8,7 @@ from sqlalchemy import (BigInteger, Boolean, Column, Float, ForeignKey, Integer,
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 RETRYABLE_SQLSTATES = frozenset({"40001", "40P01"})
 
 metadata = MetaData()
@@ -89,6 +89,18 @@ members = Table("social_members", metadata,
     Column("received", Float),
     Column("lease", Float),
     Column("epoch", String(36), nullable=False))
+
+# Directional, bounded consent: Alice enabling Bob never enables Bob -> Alice.
+# Epochs fence stale publishers and every consent change clears the last fix.
+friend_shares = Table("social_friend_shares", metadata,
+    Column("owner", String(36), ForeignKey(accounts.c.id), primary_key=True),
+    Column("recipient", String(36), ForeignKey(accounts.c.id), primary_key=True, index=True),
+    Column("epoch", String(36), nullable=False),
+    Column("lease", Float),
+    Column("stats", Boolean, nullable=False, default=False),
+    Column("sequence", BigInteger, nullable=False, default=-1),
+    Column("live", JSON(none_as_null=True)),
+    Column("received", Float))
 
 invites = Table("social_invites", metadata,
     Column("id", String(36), primary_key=True),
@@ -185,6 +197,10 @@ class Database:
             if current == 2:
                 _upgrade_v2(connection, time.time())
                 current = 3
+            if current == 3:
+                # create_all above adds the empty table. Never infer consent from
+                # existing friendships or Group Ride membership.
+                current = 4
             if current != SCHEMA_VERSION:
                 raise ValueError("Unsupported social schema")
             connection.execute(update(versions).values(version=SCHEMA_VERSION))

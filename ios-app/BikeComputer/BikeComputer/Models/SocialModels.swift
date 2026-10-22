@@ -8,6 +8,22 @@ struct SocialCapabilities: Codable, Equatable {
     var activities = false
     var groups = false
     var hardware = false
+    var invitePreviews = false
+    var savedMapKitRoutes = false
+    var friendSharing = false
+    enum CodingKeys: String, CodingKey { case media, routes, activities, groups, hardware, invitePreviews, savedMapKitRoutes, friendSharing }
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        media = try c.decodeIfPresent(Bool.self, forKey: .media) ?? false
+        routes = try c.decodeIfPresent(Bool.self, forKey: .routes) ?? false
+        activities = try c.decodeIfPresent(Bool.self, forKey: .activities) ?? false
+        groups = try c.decodeIfPresent(Bool.self, forKey: .groups) ?? false
+        hardware = try c.decodeIfPresent(Bool.self, forKey: .hardware) ?? false
+        invitePreviews = try c.decodeIfPresent(Bool.self, forKey: .invitePreviews) ?? false
+        friendSharing = try c.decodeIfPresent(Bool.self, forKey: .friendSharing) ?? false
+        savedMapKitRoutes = try c.decodeIfPresent(Bool.self, forKey: .savedMapKitRoutes) ?? false
+    }
 }
 
 struct SocialProfile: Codable, Identifiable, Equatable {
@@ -98,17 +114,29 @@ struct SocialRider: Decodable, Identifiable {
     let course: Double?
     let speed: Double?
     let distanceMeters: Double?
+    let movingSeconds: Double?
+    let elapsedSeconds: Double?
     let sequence: Int
     let routeProgressMeters: Double?
     let routeHash: String?
     let ageSeconds: Double
     private let observedAt = ProcessInfo.processInfo.systemUptime
     enum CodingKeys: String, CodingKey {
-        case profile, latitude, longitude, capturedAt, receivedAt, horizontalAccuracy, course, speed, distanceMeters, sequence, routeProgressMeters, routeHash
+        case profile, latitude, longitude, capturedAt, receivedAt, horizontalAccuracy, course, speed, distanceMeters, movingSeconds, elapsedSeconds, sequence, routeProgressMeters, routeHash
         case ageSeconds = "age"
     }
     var coordinate: CLLocationCoordinate2D { .init(latitude: latitude, longitude: longitude) }
     func age(at now: Date) -> TimeInterval { max(0, ageSeconds + ProcessInfo.processInfo.systemUptime-observedAt) }
+
+    /// Age advances locally; an unchanged publication needs no new map render.
+    func displaysSameState(as other: SocialRider) -> Bool {
+        profile == other.profile && latitude == other.latitude && longitude == other.longitude &&
+        capturedAt == other.capturedAt && receivedAt == other.receivedAt &&
+        horizontalAccuracy == other.horizontalAccuracy && course == other.course && speed == other.speed &&
+        distanceMeters == other.distanceMeters && movingSeconds == other.movingSeconds &&
+        elapsedSeconds == other.elapsedSeconds && sequence == other.sequence &&
+        routeProgressMeters == other.routeProgressMeters && routeHash == other.routeHash
+    }
 }
 
 struct SocialGroupRide: Decodable, Identifiable {
@@ -154,17 +182,58 @@ struct SocialLinkTarget {
         guard path.count >= 3, path[1] == "social" else { return nil }
         kind = path[2]
         if kind == "profile", path.count == 4, parts.fragment == nil { id = path[3] }
-        else if ["ride", "shared"].contains(kind), path.count == 3, let secret = parts.fragment { id = secret }
+        else if ["ride", "shared"].contains(kind), (path.count == 3 || (kind == "ride" && path.count == 4 && UUID(uuidString: path[3]) != nil)), let secret = parts.fragment { id = secret }
         else { return nil }
         guard id.range(of: "^[A-Za-z0-9_-]{20,100}$", options: .regularExpression) != nil else { return nil }
         canonicalURL = canonical
     }
 }
 
+enum SocialMapMarkerSize: String, CaseIterable, Identifiable {
+    case small, medium, large
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+    var scale: CGFloat {
+        switch self { case .small: 0.8; case .medium: 1; case .large: 1.3 }
+    }
+    static func resolved(_ rawValue: String) -> Self { Self(rawValue: rawValue) ?? .medium }
+}
+
+struct SocialMapMarkerStyle: Equatable {
+    static let pictureDefaultsKey = "social.map.pictureSize.v1"
+    static let numberDefaultsKey = "social.map.numberSize.v1"
+    var pictureSize: SocialMapMarkerSize = .medium
+    var numberSize: SocialMapMarkerSize = .medium
+    var pictureDiameter: CGFloat { 40 * pictureSize.scale }
+    var numberHeight: CGFloat { 20 * numberSize.scale }
+    var distanceWidth: CGFloat { 96 * numberSize.scale }
+    var clusterWidth: CGFloat { 27 * numberSize.scale }
+    /// Edge badges carry the distance label and grouped count around the portrait.
+    var badgeSize: CGSize {
+        CGSize(width: max(distanceWidth, pictureDiameter + clusterWidth / 2 + 8),
+               height: pictureDiameter + numberHeight + 2)
+    }
+    /// On-map markers show only the portrait, so their tappable area is the portrait.
+    var annotationSize: CGSize { CGSize(width: pictureDiameter + 4, height: pictureDiameter + 4) }
+    /// The rider's coordinate stays at the portrait's bottom centre for every size pair.
+    var annotationCenterOffset: CGPoint {
+        CGPoint(x: 0, y: annotationSize.height / 2 - (pictureDiameter + 2))
+    }
+
+    /// A rider stays on the map while its whole portrait is visible; only clipped
+    /// or off-screen riders become edge badges.
+    func showsOnMap(_ point: CGPoint, in bounds: CGRect) -> Bool {
+        let radius = pictureDiameter / 2
+        return point.x - radius >= bounds.minX + 11 && point.x + radius <= bounds.maxX - 11
+            && point.y - pictureDiameter >= bounds.minY + 15 && point.y <= bounds.maxY - 15
+    }
+}
+
 /// Projected coordinates already include camera rotation, panning and perspective.
 enum SocialMapGeometry {
-    static func edgeCenter(projected: CGPoint, bounds: CGRect) -> CGPoint? {
-        let safe = bounds.insetBy(dx: 42, dy: 70)
+    static func edgeCenter(projected: CGPoint, bounds: CGRect,
+                           badgeSize: CGSize = CGSize(width: 48, height: 60)) -> CGPoint? {
+        let safe = bounds.insetBy(dx: badgeSize.width / 2 + 18, dy: badgeSize.height / 2 + 40)
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
         let dx = projected.x-center.x, dy = projected.y-center.y
         guard dx.isFinite, dy.isFinite, safe.width > 0, safe.height > 0,
@@ -174,4 +243,18 @@ enum SocialMapGeometry {
         let scale = min(tx, ty)
         return CGPoint(x: center.x+scale*dx, y: center.y+scale*dy)
     }
+}
+
+struct SocialFriendConsent: Decodable {
+    let profileID: String
+    let epoch: String
+    let sharing: Bool
+    let sharingExpiresAt: Double?
+    let serverTime: Double
+}
+
+struct SocialFriendSnapshot: Decodable {
+    let outgoing: [SocialFriendConsent]
+    let riders: [SocialRider]
+    let serverTime: Double
 }

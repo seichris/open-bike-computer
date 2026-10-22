@@ -250,7 +250,7 @@ nonisolated enum WorkoutErrorCopyV1 {
             case .activeWorkout:
                 return "Keep your paired Apple Watch nearby, unlocked, and wearing Bicino. A current workout continues on Watch."
             case .workoutLaunch:
-                return "Bicino could not reach Apple Watch, so the workout did not start. Open Bicino on Watch and try again."
+                return "Bicino could not confirm the start on Apple Watch. Open Bicino on Watch and check whether a workout is running before retrying or choosing iPhone."
             case .general:
                 return "Bicino could not communicate with Apple Watch. Check Bicino on Watch and verify the workout state."
             }

@@ -46,7 +46,7 @@ int main() {
   assert(std::strstr(output, "\"lastCriticalCategory\":\"unknown\"") !=
          nullptr);
   assert(std::strstr(
-             output, "\"lastCriticalEvent\":\"storage_unavailable\"") !=
+             output, "\"lastCriticalEvent\":\"unknown\"") !=
          nullptr);
 
   capsule.magic = 0;

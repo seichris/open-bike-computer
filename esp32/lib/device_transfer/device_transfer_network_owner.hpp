@@ -26,12 +26,30 @@ enum class NetworkStartStep : uint8_t {
 // 14,836-byte largest internal/DMA block, and another attempt panicked in the
 // Wi-Fi AP task. This is a conservative rejection floor for known unsafe
 // headroom, not a qualification threshold for a successful transfer.
+inline constexpr uint32_t kWifiStartupInternalFree = 60U * 1024U;
+inline constexpr uint32_t kWifiStartupInternalLargest = 32U * 1024U;
+inline constexpr uint32_t kWifiStartupDmaFree = 48U * 1024U;
+inline constexpr uint32_t kWifiStartupDmaLargest = 32U * 1024U;
+
 inline bool wifiStartupMemoryAboveObservedFailure(
     const NetworkMemorySnapshot &memory) {
-  return memory.internalFree >= 60U * 1024U &&
-         memory.internalLargest >= 32U * 1024U &&
-         memory.dmaFree >= 48U * 1024U &&
-         memory.dmaLargest >= 32U * 1024U;
+  return memory.internalFree >= kWifiStartupInternalFree &&
+         memory.internalLargest >= kWifiStartupInternalLargest &&
+         memory.dmaFree >= kWifiStartupDmaFree &&
+         memory.dmaLargest >= kWifiStartupDmaLargest;
+}
+
+// A resident driver already owns the blocks that first-use initialization
+// allocated under the floor above, so its radio start does not repeat the
+// largest-block clauses. The start still needs headroom: the panic in
+// ieee80211_hostap_attach/wifi_softap_start followed a low-memory
+// initialization. Require the total internal and DMA headroom that a
+// floor-passing first use would have left after allocating the driver;
+// `resident` is the allocation measured when the driver was prepared.
+inline bool wifiRadioStartMemoryAboveObservedFailure(
+    const NetworkMemorySnapshot &memory, const NetworkMemorySnapshot &resident) {
+  return uint64_t{memory.internalFree} + resident.internalFree >= kWifiStartupInternalFree &&
+         uint64_t{memory.dmaFree} + resident.dmaFree >= kWifiStartupDmaFree;
 }
 
 struct NetworkStartResult {

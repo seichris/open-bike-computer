@@ -435,7 +435,7 @@ inline bool formatFaultCapsuleFields(const FaultCapsuleState &capsule,
       capsule.lastCriticalCategory[0] == '\0' ? "unknown"
                                               : capsule.lastCriticalCategory,
       static_cast<int>(sizeof(capsule.lastCriticalEvent) - 1),
-      capsule.lastCriticalEvent[0] == '\0' ? "storage_unavailable"
+      capsule.lastCriticalEvent[0] == '\0' ? "unknown"
                                            : capsule.lastCriticalEvent);
   return length > 0 && static_cast<std::size_t>(length) < capacity;
 }

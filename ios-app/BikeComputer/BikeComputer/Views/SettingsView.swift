@@ -77,6 +77,7 @@ struct SettingsView: View {
     @FocusState private var focusedSavedMapFilename: String?
     @State private var presentedSheet: SettingsSheetDestination?
     @State private var routeImportFeedback: String?
+    @State private var showsAccount = false
     let locationAuthorizationStatus: CLAuthorizationStatus
     let locationAccuracyAuthorization: CLAccuracyAuthorization
     let currentLocation: CLLocation?
@@ -149,16 +150,32 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             Form {
                 if social.session.state != .unavailable {
                     Section {
-                    NavigationLink("Friends & Riding") {
-                        SocialHubView(store: social, routeLibrary: routeLibrary)
+                        Button { showsAccount = true } label: {
+                            SettingsProfileHeader(
+                                profile: social.profile,
+                                image: social.profile?.avatarID.flatMap { social.photos[$0] },
+                                isSignedIn: social.session.state == .signedIn,
+                                isRestoring: social.session.state == .restoring,
+                                friends: social.friends, photos: social.photos
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Opens your profile, friends and group rides")
+                        .accessibilityIdentifier("settings.profile")
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
                     }
                 }
-                }
+
                 if shouldPromoteBikeComputerSettings {
+                    Section {
+                        BicinoOneStoreHero()
+                            .listRowInsets(EdgeInsets())
+                    }
                     Section {
                         bikeComputerSettingsLink
                     }
@@ -272,13 +289,16 @@ struct SettingsView: View {
                     .listRowBackground(Color.clear)
                 }
             }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if shouldPromoteBikeComputerSettings {
-                    BicinoOneStoreHero()
-                }
-            }
-            .navigationTitle("Settings")
+            .navigationTitle(social.session.state == .unavailable ? "Settings" : "")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(isPresented: $showsAccount) {
+                SocialHubView(store: social, routeLibrary: routeLibrary)
+            }
+            .task(id: social.session.generation) {
+                guard social.session.state == .signedIn else { return }
+                do { try await social.refresh() }
+                catch { social.error = error.localizedDescription }
+            }
         }
         .sheet(
             item: settingsSheetPresentation,
@@ -2143,10 +2163,7 @@ private struct DeviceScreensSettingsSection: View {
     let offlineMapManager: OfflineMapManager
 
     var body: some View {
-        Section(
-            header: Text("Bicino Screens"),
-            footer: Text(mapStyleFooter)
-        ) {
+        Section {
             ForEach(bleManager.availableDeviceScreens) { screen in
                 HStack(spacing: 4) {
                     Text(screen.title)
@@ -2205,15 +2222,18 @@ private struct DeviceScreensSettingsSection: View {
                     Text(screen.title).tag(screen)
                 }
             }
+        } header: {
+            Text("Bicino Screens")
+        } footer: {
+            if bleManager.hasReceivedDeviceCapabilities {
+                Text(mapStyleFooter)
+            }
         }
         .disabled(!bleManager.supportsDeviceSettings ||
                   !bleManager.hasReceivedDeviceCapabilities)
     }
 
     private var mapStyleFooter: String {
-        if !bleManager.hasReceivedDeviceCapabilities {
-            return "Checking whether the connected firmware supports independent map styles."
-        }
         if bleManager.supportsIndependentMapProfiles {
             return "Use the gear buttons to configure Map and Map + Navigation independently."
         }

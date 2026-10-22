@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import HealthKit
 import UIKit
+import WatchConnectivity
 
 @available(iOS 17.0, *)
 @MainActor
@@ -364,6 +365,11 @@ final class WorkoutMirrorManager: NSObject {
                 ]
                 if let safeError {
                     diagnosticFields["errorCode"] = safeError.rawValue
+                }
+                if !success {
+                    diagnosticFields.merge(Self.launchFailureFields(for: error)) {
+                        _, value in value
+                    }
                 }
                 manager.diagnosticsRecorder?.record(
                     level: success ? .info : .warning,
@@ -1475,6 +1481,30 @@ final class WorkoutMirrorManager: NSObject {
         default:
             return .sessionFailed
         }
+    }
+
+    // Keep only platform domain identifiers and numeric codes. Never retain
+    // localized descriptions, arbitrary domain strings or error userInfo.
+    private static func launchFailureFields(for error: Error?) -> [String: String] {
+        guard let error else { return ["errorDomain": "none"] }
+        let platformError = error as NSError
+        func domain(_ value: String) -> String {
+            switch value {
+            case HKErrorDomain: return "healthkit"
+            case WCErrorDomain: return "watch_connectivity"
+            case NSCocoaErrorDomain: return "cocoa"
+            case NSOSStatusErrorDomain: return "os_status"
+            case NSPOSIXErrorDomain: return "posix"
+            case NSURLErrorDomain: return "url"
+            default: return "other"
+            }
+        }
+        var fields = ["errorDomain": domain(platformError.domain), "code": String(platformError.code)]
+        if let underlying = platformError.userInfo[NSUnderlyingErrorKey] as? NSError {
+            fields["underlyingErrorDomain"] = domain(underlying.domain)
+            fields["underlyingErrorCode"] = String(underlying.code)
+        }
+        return fields
     }
 
     private static func safeLaunchErrorCode(

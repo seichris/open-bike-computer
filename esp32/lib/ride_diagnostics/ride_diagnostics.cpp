@@ -51,12 +51,14 @@ bool recordInternal(Level level, const char *category, const char *event,
 
 namespace {
 
-bool flushFaultCapsulesIfPossible();
+bool flushFaultCapsulesIfPossible(bool beforeSealCutoff = false);
+uint16_t queuedDepth();
 void pruneRetention();
 bool parseUnsigned(const char *value, uint32_t &out);
 
 struct QueuedEvent {
   uint32_t sequence;
+  uint32_t enqueuedAtMs;
   uint16_t length;
   bool critical;
   bool rotateBeforeWrite;
@@ -168,6 +170,17 @@ std::atomic<uint32_t> faultCapsuleQueuedGeneration{0};
 std::atomic<uint32_t> pendingFaultCapsuleQueuedChecksum{0};
 std::atomic<uint32_t> currentFaultCapsuleQueuedChecksum{0};
 std::atomic<uint16_t> maxQueueDepth{0};
+// Boot-local high-water timings: backlog/scheduling versus the writer's full
+// synchronous I/O step (including checkpoint, rotation and retention work).
+std::atomic<uint32_t> maximumWriterDelayMs{0};
+std::atomic<uint32_t> maximumWriteDurationMs{0};
+
+void noteMaximum(std::atomic<uint32_t> &maximum, uint32_t value) {
+  uint32_t previous = maximum.load(std::memory_order_relaxed);
+  while (value > previous && !maximum.compare_exchange_weak(
+             previous, value, std::memory_order_relaxed)) {
+  }
+}
 // When the reserved critical lane overflows, critical records may spill into
 // the normal queue. Count protected entries so a full mixed queue can evict
 // its oldest normal entry without sacrificing a spilled critical record.
@@ -984,7 +997,17 @@ bool writeQueuedEvent(const QueuedEvent &event) {
   return true;
 }
 
-bool flushFaultCapsulesIfPossible() {
+bool flushFaultCapsulesIfPossible(bool beforeSealCutoff) {
+  // Current-boot snapshots are cumulative. Drain real traffic before publishing
+  // them, rather than turning each new drop into another critical write/sync;
+  // the snapshot and generation stay eligible until admission succeeds.
+  // A previous-boot capsule is one-shot evidence: until its checked write
+  // clears it, the single RTC slot cannot also retain this boot's losses, so
+  // it is admitted even under sustained load. A seal must admit both before
+  // publishing its cutoff, then waits only for a bounded drain to that cutoff.
+  // A storage transition parks ordinary draining before its explicit seal.
+  const bool coalesceCurrent = !beforeSealCutoff && queuedDepth() != 0 &&
+      !storageTransitionRequested.load(std::memory_order_acquire);
   if (storage == nullptr || !storage->getDiagnosticsSdLoaded() ||
       faultCapsuleFlushMutex == nullptr ||
       xSemaphoreTake(faultCapsuleFlushMutex, 0) != pdTRUE)
@@ -1027,7 +1050,8 @@ bool flushFaultCapsulesIfPossible() {
   if (hasPending)
     queuedAll = flush(pending, pendingFaultCapsuleQueuedChecksum) && queuedAll;
   if (hasCurrent)
-    queuedAll = flush(current, currentFaultCapsuleQueuedChecksum) && queuedAll;
+    queuedAll = !coalesceCurrent &&
+                flush(current, currentFaultCapsuleQueuedChecksum) && queuedAll;
   if (queuedAll)
     faultCapsuleQueuedGeneration.store(generation,
                                        std::memory_order_release);
@@ -1119,11 +1143,12 @@ void writerTask(void *) {
     QueueHandle_t selected = nullptr;
     bool hasNext = false;
     bool dequeued = false;
+    bool lockMissed = false;
     const bool transitionPaused =
         storageTransitionRequested.load(std::memory_order_acquire) &&
         !sealRequested.load(std::memory_order_acquire);
     if (queueMutationMutex != nullptr &&
-        xSemaphoreTake(queueMutationMutex, 0) == pdTRUE) {
+        xSemaphoreTake(queueMutationMutex, 1) == pdTRUE) {
       hasNext = peekNextEvent(event, selected);
       if (hasNext && !transitionPaused &&
           xQueueReceive(selected, &event, 0) == pdTRUE) {
@@ -1138,21 +1163,33 @@ void writerTask(void *) {
         dequeued = true;
       }
       xSemaphoreGive(queueMutationMutex);
+    } else if (queueMutationMutex != nullptr) {
+      // An expired tick-bounded take proves nothing about queue depth, and a
+      // producer that then finds the queue full does not notify. Retry through
+      // the next bounded take instead of sleeping beside a backlog.
+      lockMissed = true;
     }
     if (dequeued) {
+      const uint32_t startedMs = millis();
+      noteMaximum(maximumWriterDelayMs,
+                  static_cast<uint32_t>(startedMs - event.enqueuedAtMs));
       writeQueuedEvent(event);
+      noteMaximum(maximumWriteDurationMs,
+                  static_cast<uint32_t>(millis() - startedMs));
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::notePhase(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter,
           runtime_watchdog_diagnostics::Phase::Waiting,
           event.sequence);
 #endif
-    } else if (!hasNext || transitionPaused) {
+    } else if ((!hasNext && !lockMissed) || transitionPaused) {
 #if defined(WAVESHARE_AMOLED_175) || defined(WAVESHARE_AMOLED_206)
       runtime_watchdog_diagnostics::heartbeat(
           runtime_watchdog_diagnostics::Role::RideDiagnosticsWriter);
 #endif
-      vTaskDelay(pdMS_TO_TICKS(50));
+      // A notification is latched even if admission races this wait. Retain a
+      // bounded timeout for checkpoint/recovery/heartbeat housekeeping.
+      (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
     }
 
     if (storage == nullptr)
@@ -1227,11 +1264,14 @@ void startWriterTask() {
   if (recorderResourcesReady.load(std::memory_order_acquire) &&
       writerTaskHandle == nullptr) {
     // Arduino's SPI FatFs backend can busy-wait for up to its card-response
-    // timeout inside fopen()/fflush(). Keep that lowest-priority I/O task off
-    // CPU0, whose idle task is covered by the production task watchdog, and
-    // let the UI/setup task preempt it on CPU1 while a card is recovering.
+    // timeout inside fopen()/fflush(). Stay off watchdog-covered CPU0, but
+    // share CPU1 with the priority-1 Arduino UI task through time slicing.
+    // Idle priority can starve the writer whenever reconnect/UI work stays
+    // runnable, filling even an otherwise healthy bounded queue.
+    static_assert(configUSE_PREEMPTION == 1 && configUSE_TIME_SLICING == 1,
+                  "diagnostics writer fairness requires preemptive time slicing");
     const BaseType_t created = xTaskCreatePinnedToCore(
-        writerTask, "ride_diag_writer", 6144, nullptr, 0, &writerTaskHandle, 1);
+        writerTask, "ride_diag_writer", 6144, nullptr, 1, &writerTaskHandle, 1);
     recorderWriterReady.store(created == pdPASS, std::memory_order_release);
     if (created != pdPASS) {
       writerTaskHandle = nullptr;
@@ -1250,8 +1290,9 @@ bool enqueue(QueuedEvent &event) {
   }
   // Publishing either lane and selecting both heads must be one coherent
   // snapshot. RTOS per-queue locks alone cannot protect an initially empty lane.
-  // Keep admission zero-wait and account contention explicitly.
-  if (xSemaphoreTake(queueMutationMutex, 0) != pdTRUE) {
+  // One RTOS tick lets a preempted owner finish this short, I/O-free fence.
+  // Never wait for queue capacity or a storage operation in a callback.
+  if (xSemaphoreTake(queueMutationMutex, 1) != pdTRUE) {
     noteDrop(DropReason::QueueBusy);
     return false;
   }
@@ -1315,6 +1356,11 @@ bool enqueue(QueuedEvent &event) {
                                                static_cast<uint16_t>(depth))) {
   }
   xSemaphoreGive(queueMutationMutex);
+  // Task creation publishes its handle before this release/acquire ready
+  // flag. Early producers can queue safely without racing handle publication;
+  // the new writer inspects those records on its first iteration.
+  if (recorderWriterReady.load(std::memory_order_acquire))
+    xTaskNotifyGive(writerTaskHandle);
   return true;
 }
 
@@ -1326,6 +1372,7 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
                            bool rotateBeforeWrite = false,
                            bool rotateAfterWrite = false,
                            uint32_t faultChecksum = 0) {
+  const uint32_t admittedAtMs = millis();
   const uint32_t sequence = nextSequence.fetch_add(1);
   char detail[320] = {};
   strncpy(detail, fieldsJson + 1, sizeof(detail) - 1);
@@ -1351,6 +1398,7 @@ bool enqueueFormattedEvent(Level level, const char *category, const char *event,
     return false;
   }
   queued.sequence = sequence;
+  queued.enqueuedAtMs = admittedAtMs;
   queued.length = static_cast<uint16_t>(length);
   queued.critical = level >= Level::Warning ||
                     strcmp(category, "user") == 0 ||
@@ -1384,6 +1432,8 @@ void begin(Storage &storageRef, uint32_t bootSequenceRef,
   portEXIT_CRITICAL(&captureMux);
   activePath[0] = '\0';
   nextSequence.store(0);
+  maximumWriterDelayMs.store(0);
+  maximumWriteDurationMs.store(0);
   retentionPrunedThisBoot.store(false, std::memory_order_release);
   normalQueueCriticalCount.store(0, std::memory_order_release);
   clockAnchorEmitted.store(false);
@@ -1483,12 +1533,16 @@ void process(uint32_t nowMs) {
     for (std::size_t index = 0; index < kDropReasonCount; ++index) {
       const uint32_t count = dropsByReason[index].load(std::memory_order_relaxed);
       if (count == lastReportedDrops[index]) continue;
-      char fields[160] = {};
+      char fields[288] = {};
       snprintf(fields, sizeof(fields),
-          "{\"dropReason\":\"%s\",\"eventCount\":%lu,\"droppedCount\":%lu}",
+          "{\"dropReason\":\"%s\",\"eventCount\":%lu,\"droppedCount\":%lu,"
+          "\"writerDelayMs\":%lu,\"durationMs\":%lu,\"maxQueueDepth\":%u}",
           queue_policy::dropReasonName(static_cast<DropReason>(index)),
           static_cast<unsigned long>(count),
-          static_cast<unsigned long>(dropped.load(std::memory_order_relaxed)));
+          static_cast<unsigned long>(dropped.load(std::memory_order_relaxed)),
+          static_cast<unsigned long>(maximumWriterDelayMs.load(std::memory_order_relaxed)),
+          static_cast<unsigned long>(maximumWriteDurationMs.load(std::memory_order_relaxed)),
+          static_cast<unsigned>(maxQueueDepth.load(std::memory_order_relaxed)));
       if (record(Level::Info, "logger", "loss", fields))
         lastReportedDrops[index] = count;
     }
@@ -1973,14 +2027,16 @@ sealActiveChunkForTransfer(uint32_t timeoutMs) {
   if (!storage->getDiagnosticsSdLoaded())
     return transfer_policy::SealPreparation::StorageUnavailable;
 
-  // Producers deliberately use a non-blocking mutex and record a retained gap
-  // when they race the seal. Converge those transient races inside this one
+  // Producers use a non-blocking producer mutex and retain a gap when they
+  // race the seal. Converge those transient races inside this one
   // bounded request instead of rejecting the download and requiring the user
   // to press the button again.
   while (remainingMs() > 0) {
+    // Admit capsules regardless of backlog: the cutoff below bounds the drain,
+    // whereas waiting for an idle queue can starve under sustained traffic.
     while (faultCapsuleGeneration.load(std::memory_order_acquire) !=
            faultCapsuleQueuedGeneration.load(std::memory_order_acquire)) {
-      if (flushFaultCapsulesIfPossible())
+      if (flushFaultCapsulesIfPossible(/*beforeSealCutoff=*/true))
         continue;
       if (remainingMs() == 0)
         return transfer_policy::SealPreparation::SealFailed;
@@ -2022,6 +2078,7 @@ sealActiveChunkForTransfer(uint32_t timeoutMs) {
     // exact request. The writer re-peeks both priority queues afterward.
     sealRequested.store(true, std::memory_order_release);
     xSemaphoreGive(producerMutex);
+    xTaskNotifyGive(writerTaskHandle);
 
     const uint32_t completionWaitMs = remainingMs();
     if (completionWaitMs == 0 ||

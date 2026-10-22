@@ -71,7 +71,11 @@
     },
     "logger.loss": {
       "level": "info",
-      "optional": [],
+      "optional": [
+        "writerDelayMs",
+        "durationMs",
+        "maxQueueDepth"
+      ],
       "required": [
         "dropReason",
         "eventCount",
@@ -172,6 +176,17 @@
       ],
       "required": [
         "code"
+      ]
+    },
+    "wifi.boot_prepared": {
+      "level": "info",
+      "optional": [],
+      "required": [
+        "phase",
+        "code",
+        "errorCode",
+        "freeInternalBytes",
+        "largestInternalBytes"
       ]
     },
     "wifi.events": {

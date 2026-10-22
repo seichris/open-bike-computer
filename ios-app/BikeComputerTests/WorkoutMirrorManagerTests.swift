@@ -2004,7 +2004,7 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
             manager.store.presentation.errorCode,
             context: copyContext
         )
-        XCTAssertTrue(detail.contains("workout did not start"))
+        XCTAssertTrue(detail.contains("could not confirm the start"))
         XCTAssertFalse(detail.contains("workout continues on Watch"))
         XCTAssertEqual(
             diagnostics.events.first(where: {
@@ -2019,6 +2019,76 @@ final class WorkoutMirrorManagerProductionTests: XCTestCase {
         XCTAssertEqual(completion?.fields["outcome"], "failure")
         XCTAssertEqual(completion?.fields["result"], "applied")
         XCTAssertEqual(completion?.fields["errorCode"], "watchUnavailable")
+        XCTAssertEqual(completion?.fields["errorDomain"], "none")
+    }
+
+    func testWatchLaunchFailureRetainsOnlyBoundedPlatformErrorIdentity() async throws {
+        for domain in [HKErrorDomain, WCErrorDomain, "private-user-domain"] {
+            let probe = WatchLaunchProbe()
+            let diagnostics = WorkoutLaunchDiagnosticsProbe()
+            let manager = WorkoutMirrorManager(launchWatchApp: probe.launch)
+            manager.diagnosticsRecorder = diagnostics
+            XCTAssertTrue(manager.startOutdoorCyclingOnWatch())
+            probe.completeNext(succeeded: false, error: NSError(
+                domain: domain, code: 42, userInfo: [
+                    NSLocalizedDescriptionKey: "private-user-description",
+                    NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: 57)
+                ]
+            ))
+            try await waitUntil { manager.store.presentation.connectionState == .failed }
+            let fields = try XCTUnwrap(diagnostics.events.last {
+                $0.name == "watch_launch_completed"
+            }?.fields)
+            XCTAssertEqual(fields["errorDomain"], domain == HKErrorDomain ? "healthkit"
+                : domain == WCErrorDomain ? "watch_connectivity" : "other")
+            XCTAssertEqual(fields["code"], "42")
+            XCTAssertEqual(fields["underlyingErrorDomain"], "posix")
+            XCTAssertEqual(fields["underlyingErrorCode"], "57")
+            XCTAssertFalse(fields.values.contains { $0.contains("private-user") })
+            XCTAssertEqual(manager.store.presentation.errorCode, .watchUnavailable)
+        }
+    }
+
+    /// The probe above sees fields before the recorder's privacy allowlist.
+    /// Persist through the production recorder so a dropped key cannot pass.
+    func testWatchLaunchFailureIdentitySurvivesProductionRecorder() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("watch-launch-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaultsSuite = "watch-launch-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root, userDefaults: defaults)
+        let probe = WatchLaunchProbe()
+        let manager = WorkoutMirrorManager(launchWatchApp: probe.launch)
+        manager.diagnosticsRecorder = recorder
+        XCTAssertTrue(manager.startOutdoorCyclingOnWatch())
+        probe.completeNext(succeeded: false, error: NSError(
+            domain: WCErrorDomain, code: 7, userInfo: [
+                NSLocalizedDescriptionKey: "private-user-description",
+                NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: 57)
+            ]
+        ))
+        try await waitUntil { manager.store.presentation.connectionState == .failed }
+        recorder.flush()
+        let streams = try (FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL } ?? [])
+            .filter { $0.pathExtension == "jsonl" }
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n")
+        let events = try streams.split(separator: "\n").map {
+            try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+        }
+        let completion = try XCTUnwrap(events.last { $0.event == "watch_launch_completed" })
+        XCTAssertEqual(completion.level, .warning)
+        XCTAssertEqual(completion.fields["outcome"], "failure")
+        XCTAssertEqual(completion.fields["errorCode"],
+                       manager.store.presentation.errorCode?.rawValue)
+        XCTAssertEqual(completion.fields["errorDomain"], "watch_connectivity")
+        XCTAssertEqual(completion.fields["code"], "7")
+        XCTAssertEqual(completion.fields["underlyingErrorDomain"], "posix")
+        XCTAssertEqual(completion.fields["underlyingErrorCode"], "57")
+        XCTAssertFalse(streams.contains("private-user"))
     }
 
     func testStaleLaunchFailureCannotCancelRetryTimeout() async throws {
@@ -4487,11 +4557,11 @@ private final class WatchLaunchProbe: @unchecked Sendable {
         completeNext(succeeded: succeeded)
     }
 
-    func completeNext(succeeded: Bool) {
+    func completeNext(succeeded: Bool, error: Error? = nil) {
         let completion = lock.withLock {
             storedCompletions.isEmpty ? nil : storedCompletions.removeFirst()
         }
-        completion?(succeeded, nil)
+        completion?(succeeded, error)
     }
 }
 

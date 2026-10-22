@@ -1475,6 +1475,9 @@ class BLEManager: NSObject, ObservableObject {
     private var watchDirectRidePreparedDeviceID: String?
     private var watchDirectRidePreparationID: UUID?
     private var watchDirectRidePreviousAutoReconnect: Bool?
+    // Preparation cancels every phone link. A release can be processed before
+    // CoreBluetooth reports that cancelled link, so keep its attribution.
+    private var watchDirectHandoffDisconnectPeripheralID: UUID?
     private var watchDirectRidePreparationExpiryTimer: Timer?
     private var watchDirectRideReconciliationTimeoutTimer: Timer?
     private var watchDirectRideReleaseTombstones:
@@ -2967,6 +2970,8 @@ class BLEManager: NSObject, ObservableObject {
     ) {
         guard watchDirectRidePreparedDeviceID == deviceID,
               watchDirectRidePreparationID == preparationID else { return }
+        // Any phone link that still exists here was cancelled by preparation.
+        watchDirectHandoffDisconnectPeripheralID = connectedPeripheral?.identifier
         let shouldReconnect = watchDirectRidePreviousAutoReconnect ?? true
         clearWatchDirectRidePreparationPersistence()
         watchDirectRideReconciliationTimeoutTimer?.invalidate()
@@ -5110,8 +5115,7 @@ class BLEManager: NSObject, ObservableObject {
         }
         if pendingRideApplicationDeliveries.isEmpty,
            pendingATTWrite == nil,
-           rideTransportStateMachine.phase != .idle,
-           rideTransportStateMachine.phase != .recovering {
+           rideTransportStateMachine.acceptsWriterCallbacks {
             _ = reduceRideTransport(.writerChanged(
                 generation: rideTransportStateMachine.generation,
                 state: .idle
@@ -6986,6 +6990,8 @@ class BLEManager: NSObject, ObservableObject {
             pendingBluetoothRestoration = nil
             pendingRestoredPeripheralIdentifiers.removeAll()
         }
+        // The cancelled link's callback can no longer be delivered to it.
+        watchDirectHandoffDisconnectPeripheralID = nil
         deviceScreenConfigurationController.disconnect(
             deviceID: connectedDeviceID,
             generation: rideDeliveryConnectionGeneration
@@ -9245,8 +9251,7 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteResponseGeneration &+= 1
         navigationWriteWithResponseFailureHandler = nil
         navigationBackpressureStartedAt = nil
-        if rideTransportStateMachine.phase != .idle,
-           rideTransportStateMachine.phase != .recovering {
+        if rideTransportStateMachine.acceptsWriterCallbacks {
             let writerState: RideBLEWriterStateV1
             if let commandID = pending.applicationCommandID,
                let delivery = pendingRideApplicationDeliveries[commandID],
@@ -9272,8 +9277,9 @@ class BLEManager: NSObject, ObservableObject {
         navigationWriteResponseGeneration &+= 1
         navigationWriteWithResponseFailureHandler = nil
         navigationBackpressureStartedAt = nil
-        if rideTransportStateMachine.phase != .idle,
-           rideTransportStateMachine.phase != .recovering {
+        // Adoption clears the previous writer after entering .connecting.
+        // Only publish writer changes in phases that admit them.
+        if rideTransportStateMachine.acceptsWriterCallbacks {
             _ = reduceRideTransport(.writerChanged(
                 generation: rideTransportStateMachine.generation,
                 state: .idle
@@ -10088,13 +10094,20 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         if let error = error {
             log("Disconnect error: \(error.localizedDescription)")
         }
+        // Consume the release-race attribution on this link's one callback.
+        let yieldedToWatch = watchDirectRidePreparedDeviceID != nil ||
+            watchDirectHandoffDisconnectPeripheralID == peripheral.identifier
+        watchDirectHandoffDisconnectPeripheralID = nil
         diagnosticsRecorder?.record(
             level: error == nil ? .info : .warning,
             category: .ble,
             event: "transport_disconnected",
             fields: [
                 "connectionState": "disconnected",
-                "reason": error == nil ? "remote" : "transport_error",
+                // A nil CoreBluetooth error does not identify the initiator.
+                // Watch-direct preparation explicitly cancels our phone link.
+                "reason": error != nil ? "transport_error"
+                    : yieldedToWatch ? "watch_direct_handoff" : "connection_ended",
             ]
         )
         _ = reduceRideTransport(.disconnected(

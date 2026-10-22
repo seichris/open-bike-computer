@@ -59,6 +59,8 @@ int connectFailure = 0, startFailure = 0, interfaceFailure = 0;
 wifi_config_t stored[2]{};
 esp_netif_t nets[2]{{0x0100000a}, {0x0104a8c0}};
 device_transfer::NetworkMemorySnapshot headroom{80000, 40000, 70000, 40000};
+// Internal/DMA bytes a successful fake driver initialization consumes.
+device_transfer::NetworkMemorySnapshot initAllocation{};
 device_transfer::NetworkMemorySnapshot memory() { return headroom; }
 esp_err_t esp_wifi_get_mode(wifi_mode_t *out) { *out = mode; return initialized ? ESP_OK : ESP_ERR_WIFI_NOT_INIT; }
 esp_err_t esp_netif_init() { return ESP_OK; }
@@ -70,6 +72,8 @@ esp_err_t esp_wifi_init(wifi_init_config_t *config) {
   assert(config->tx_buf_type == 1 && config->cache_tx_buf_num == 4);
   if (initFailure) return ESP_ERR_NO_MEM;
   initialized = true;
+  headroom.internalFree -= initAllocation.internalFree;
+  headroom.dmaFree -= initAllocation.dmaFree;
   return ESP_OK;
 }
 esp_err_t esp_wifi_set_storage(int storage) { assert(storage == WIFI_STORAGE_RAM); if (storageFailure) return ESP_FAIL; ram = true; return ESP_OK; }
@@ -112,6 +116,7 @@ void reset() {
   connectFailure = startFailure = interfaceFailure = 0;
   stored[0] = {}; stored[1] = {};
   headroom = {80000, 40000, 70000, 40000};
+  initAllocation = {};
   nets[0].up = nets[1].up = false;
   dhcpStatus = 1; dhcpError = 0;
 }
@@ -132,6 +137,14 @@ int main() {
   assert(runtime.start(false, "test-ap", "test-password", memory).failedStep == NetworkStartStep::Memory);
   assert(initializes == 0 && runtime.stop() == ESP_OK);
   headroom = {80000, 40000, 70000, 40000};
+  // Boot preparation owns all lasting resources without enabling RF. A later
+  // BLE-fragmented heap must not need first-use driver initialization again.
+  assert(runtime.prepare(memory).ok());
+  assert(initializes == 1 && interfaces == 2 && starts == 0);
+  assertQuiescent();
+  assert(runtime.prepare(memory).ok());
+  assert(initializes == 1 && starts == 0);
+  headroom = {67923, 29684, 60291, 29684}; // observed post-walk failure
   for (int cycle = 0; cycle < 100; ++cycle) {
     assert(runtime.start(false, "test-ap", "test-password", memory).ok());
     assert(radio && mode == WIFI_MODE_AP && stored[1].ap.authmode == WIFI_AUTH_WPA2_PSK && stored[1].ap.pairwise_cipher == WIFI_CIPHER_TYPE_CCMP);
@@ -187,8 +200,9 @@ int main() {
   assert(runtime.stop() == ESP_OK); assertQuiescent();
   for (int fault = 0; fault < 3; ++fault) {
     reset(); DeviceWiFiRuntime failed;
+    headroom = {80000, 40000, 70000, 40000};
     initFailure = fault == 0; storageFailure = fault == 1; interfaceFailure = fault == 2;
-    assert(!failed.start(false, "test-ap", "test-password", memory).ok());
+    assert(!failed.prepare(memory).ok());
     initFailure = storageFailure = interfaceFailure = 0;
     assert(!failed.start(false, "test-ap", "test-password", memory).ok());
     assert(initializes == 1); // partial initialization is terminal this boot
@@ -203,6 +217,33 @@ int main() {
     configFailure = startFailure = connectFailure = 0;
     assert(failed.stop() == ESP_OK); assertQuiescent();
     assert(initializes == 1);
+  }
+  {
+    // Boot preparation makes every later radio start resident. Starts keep the
+    // floor's total headroom net of the measured driver allocation, without
+    // repeating the first-use largest-block clauses.
+    reset(); DeviceWiFiRuntime resident;
+    initAllocation = {21000, 0, 21000, 0};
+    assert(resident.prepare(memory).ok());
+    assert(initializes == 1 && starts == 0 && headroom.internalFree == 59000);
+    headroom = {46923, 29684, 39291, 29684}; // observed post-walk heap, driver resident
+    assert(resident.start(false, "test-ap", "test-password", memory).ok());
+    assert(resident.stop() == ESP_OK); assertQuiescent();
+    // Headroom left after the documented low-memory initialization
+    // (42,811 free less ~21 KiB) preceded the softAP-start panic.
+    headroom = {21811, 14836, 14179, 14836};
+    for (bool station : {false, true}) {
+      const auto refused = resident.start(station, "test-net", "test-password", memory);
+      assert(refused.failedStep == NetworkStartStep::Memory && refused.espError == ESP_ERR_NO_MEM);
+      assert(!refused.mode.attempted && refused.after.internalFree == 21811);
+      assert(starts == 1 && !radio); assertQuiescent();
+    }
+    headroom = {61440 - 21000, 1024, 49152 - 21000, 1024}; // exact credited floor
+    assert(resident.start(true, "test-lan", "test-password", memory).ok());
+    assert(resident.stop() == ESP_OK); assertQuiescent();
+    headroom.dmaFree -= 1;
+    assert(resident.start(false, "test-ap", "test-password", memory).failedStep == NetworkStartStep::Memory);
+    assert(initializes == 1 && starts == 2); assertQuiescent();
   }
   reset(); initialized = true; DeviceWiFiRuntime foreign;
   assert(!foreign.start(false, "test-ap", "test-password", memory).ok());

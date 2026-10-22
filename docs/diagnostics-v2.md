@@ -168,9 +168,30 @@ clock uncertainty: synchronization delay and oscillator drift are unbounded by
 this evidence, including at the anchor itself. Phone clock uncertainty is also
 unknown unless independently established.
 
+During a Watch-direct ride, the iPhone deliberately yields its single Bicino BLE
+connection to the Watch and reconnects after the Watch releases it. An iPhone
+`transport_disconnected` event with `reason=watch_direct_handoff` identifies that
+local handoff; it does not imply that Bicino stayed disconnected for the whole
+gap in the phone's log. Check the device's connected/authenticated events and
+workout command acknowledgments too. `reason=connection_ended` means CoreBluetooth
+reported no error and the initiator is unknown; `transport_error` preserves an
+actual error even during handoff. Older apps labelled all error-free disconnects
+`remote`, which cannot establish who closed the link.
+
 ## Ride now, collect later
 
-Both producers record locally through a BLE disconnection. Standard retention
+Both producers record locally through a BLE disconnection. The iPhone recorder
+is a rolling 50 MiB history: byte pressure overwrites the oldest chunks, even
+within an active capture, so old evidence cannot prevent the latest events from
+being recorded. The open writer and its manifest remain intact; immutable
+acquisition snapshots use their separate cache. Retention can leave a partial
+capture. Every iPhone process stream starts at sequence 0, so `tools/bicino diag
+verify` reports `unretainedLeadingSequences` and `iosProcessHistory:
+leading_history_unretained` when a bundle lacks a process's earliest events
+(rolling retention, deletion or an acquisition's capture scope). This is
+missing history, separate from `sequenceGaps` and recording loss. Exports,
+issue markers, capture transitions and deletion first persist every event
+already admitted to the bounded writer mailbox. Standard retention
 and fault capsules continue to apply; volatile tails are not guaranteed through
 power loss. Firmware checkpoints commit libc buffers and call the filesystem
 VFS fsync at a bounded five-second cadence, critical events, markers, fault
@@ -356,6 +377,24 @@ producer or queue lock contention, full queues, eviction
 of an ordinary record, and an oversized record. Counts are never reset by
 collection. Do not add repeated snapshots together or equate a `storage_gap`
 fault capsule with an SD write failure: it can also describe admission loss.
+An empty last-critical-event field is reported as `unknown`, not a fabricated
+`storage_unavailable` error. During ordinary recording, the current boot's
+cumulative recovery capsule coalesces while the queue drains, so new losses do
+not each add a critical write. A previous boot's capsule is one-shot evidence
+and is admitted even under load: until its checked write succeeds, the single
+RTC slot keeps it and cannot also retain the current boot's losses across a
+reset. Every seal (transfer, storage transition or shutdown) admits pending
+capsules before publishing its cutoff and then waits only for the bounded
+drain to that cutoff, never for an idle queue. Only a successful checked write
+acknowledges retained evidence.
+
+Loss summaries also carry boot-local high-water timings: `writerDelayMs` is the
+maximum admission-to-dequeue delay, and `durationMs` is the maximum synchronous
+write step, including its checkpoint, rotation and retention work. These are
+separate maxima, not necessarily the same event, and do not measure filesystem
+work outside that step. `maxQueueDepth` is the boot's queue high-water mark.
+A large delay with a small write duration suggests scheduling/backlog pressure;
+a long write step exposes I/O or maintenance latency without assuming a bad SD.
 Loss summaries are attempted at most once per 30 seconds after the queue
 drains; a continuously overloaded or interrupted recorder may not retain them.
 Policy filtering remains separate from dropped records.
@@ -365,10 +404,22 @@ Spilled critical records do not block normal admission into free shared slots.
 When both lanes are full, one bounded rotation evicts the oldest normal record,
 preserves every critical record and survivor sequence order, and appends the
 new critical record. Publication into either lane shares the writer's bounded
-cross-lane head-selection fence. Contended admission never waits and increments
-`queue_busy`; free space alone is not an admission guarantee. This prevents a
-new critical event overtaking an unseen older ordinary event when both lanes
-were initially empty. The zero-wait producer lock and total capacity are unchanged.
+cross-lane head-selection fence. The writer and admission can wait at most one
+RTOS tick for this short, I/O-free queue mutex. A longer conflict increments
+`queue_busy`; queue-capacity waits remain zero. This prevents a new critical
+event overtaking an unseen older ordinary event when both lanes were initially
+empty. The producer lock remains zero-wait because its scope includes formatting,
+boot-identity preparation and live-ring publication. Total capacity is unchanged.
+
+The writer runs at priority 1 on CPU1, sharing preemptive time slices with the
+Arduino UI task rather than waiting for idle CPU. It stays off CPU0, whose idle
+task is watched by the production watchdog. Successful admission and seal
+publication notify the writer immediately; a 50-ms timeout still services idle
+housekeeping. An expired one-tick queue-mutex wait is retried rather than
+treated as an empty queue, because a producer that then finds the queue full
+does not notify. This reduces scheduling pressure but cannot guarantee lossless
+recording under sustained overload or arbitrarily slow storage. Queue loss and
+storage failures continue to be counted separately.
 Explicit storage transitions fence ordinary admission (`storage_transition`),
 seal the old medium and park its writer before remount. If the old medium is
 unavailable, queued losses become a fault capsule before changing identity.
@@ -419,6 +470,42 @@ partition or this registry. Current standard bundles report that native crash
 artifacts are absent rather than synthesizing stack traces.
 
 ### Wi-Fi readiness evidence
+
+The 1.75 prepares the native Wi-Fi driver's resident resources before BLE starts,
+on the same internal-stack operation owner used by transfers. Preparation keeps
+the radio stopped, mode NULL and credentials empty in RAM. The driver/netifs are
+then reused; no Wi-Fi connection or hotspot is started until an authenticated
+transfer request. `wifi.boot_prepared` records the preparation result and internal
+free/largest-block sizes. This avoids first-use initialization after a ride has
+fragmented the heap. The unchanged startup floor, including its 32 KiB
+largest-block clauses, gates that driver allocation. Every later AP/STA start on
+the resident driver is refused with `wifi_memory` unless internal and DMA free
+memory, plus the allocation measured during preparation, still meet the floor's
+60 KiB/48 KiB totals; the documented softAP-start panic followed a low-memory
+initialization. Neither check qualifies a transfer. A preparation failure does
+not prevent navigation/BLE boot and remains a typed transfer failure. Partial
+initialization is never retried within that boot. After an unfinished previous
+boot, preparation is deferred (`code: deferred_unfinished_boot`) so a driver
+crash or hang cannot repeat toward safe mode; the first transfer then initializes
+under the floor as before.
+
+The 21 October 2026 walk's download failed before receiving an SD inventory,
+with `wifi_memory`, 67,923 internal bytes free and a 29,684-byte largest block.
+That is missing firmware delivery, not a complete empty card. Firmware acceptance
+for early preparation still requires the exact 1.75 image: radio-off boot, BLE
+pairing/reconnect, a ride followed by full inventoried SD collection, repeated
+transfers, and post-transfer radio/credential cleanup. Host tests do not satisfy
+those physical gates. The 2.06 startup order is unchanged.
+
+`workout.watch_launch_completed` preserves the safe user-facing `errorCode` plus
+an allowlisted platform `errorDomain`/numeric `code` and, when present, one
+underlying domain/code. Unknown domains become `other`; descriptions and arbitrary
+userInfo are never retained. A failed Watch launch remains unresolved until the
+rider checks Watch or authoritative session evidence arrives. `start_decision.phase`
+distinguishes that reservation from a confirmed active workout. The observed
+22 ms `watchUnavailable` failure predates this detail and cannot identify its
+underlying platform cause. Do not clear ownership or fall back to iPhone merely
+because the wake request failed or timed out.
 
 Accessory association and an accepted iOS configuration are distinct from IP
 routing and pinned HTTP readiness. The app keeps one proxy-free, Wi-Fi-only

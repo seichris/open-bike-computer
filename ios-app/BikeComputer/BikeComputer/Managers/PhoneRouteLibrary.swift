@@ -211,7 +211,7 @@ final class PhoneRouteLibrary: ObservableObject {
     @discardableResult
     func importSocialArchive(_ data: Data, source: SocialRouteSource, duplicate: Bool) throws -> PlannedRouteSummaryV1 {
         let original = try NavigationRouteArchiveV1.decode(data, purpose: .offlineNavigation, now: now())
-        guard original.route.provider == RouteProviderPolicyV1.importedGPX else {
+        guard RouteProviderPolicyV1.allowsSocialSharing(original.route.provider) else {
             throw NavigationRouteArchiveError.durableStorageNotAllowed(providerID: original.providerID)
         }
         let r = original.route

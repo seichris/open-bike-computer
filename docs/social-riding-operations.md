@@ -19,7 +19,7 @@ Set build settings `BICINO_FIREBASE_APP_ID`, `BICINO_FIREBASE_SENDER_ID`,
 `BICINO_FIREBASE_API_KEY`, `BICINO_FIREBASE_PROJECT_ID`, `BICINO_GOOGLE_CLIENT_ID`,
 and `BICINO_GOOGLE_REVERSED_CLIENT_ID`, then `BICINO_SOCIAL_ENABLED = YES`.
 Their committed defaults are empty / NO, except for a valid inactive Google
-callback scheme. The disabled build hides Friends & Riding. Social startup
+callback scheme. The disabled build hides Friends & Group Rides. Social startup
 requires a configured Google reversed client ID. Firebase explicitly selects the
 app-private `BicinoSocialKeychainGroup`; the existing map-library group remains
 first in the enabled entitlement array, preserving all pre-existing unscoped credential
@@ -32,12 +32,91 @@ sign the native app in. Test separate web/native Apple and Google sessions for
 matching UID, conflict handling, explicit linking, cancellation, expiry, logout,
 and recent-auth deletion before enabling either production surface.
 
+## Settings and profile setup
+
+When social riding is configured, Settings opens with a centered account header.
+The header opens the unified Profile, Friends & Group Rides screen with profile
+editing, friends, requests, invitations, existing rides, join-by-code and account
+controls. There is no duplicate social entry at the bottom of Settings. The
+header shows up to five overlapping friend portraits beside the rider's portrait,
+with a count for additional friends. Native provider-linking controls are removed;
+account deletion still supports recent-authentication with the original provider.
+Dismissing Apple or Google sign-in is treated as cancellation, not a profile error.
+
+Sign-in is optional. After sign-in, an incomplete profile is offered a short
+name/username/photo setup, including sign-ins opened from a shared link. The
+offer is recorded per profile on this installation, so Not now or dismissing it
+does not cause repeated prompts after relaunch or later sign-ins. The header
+and account row keep a Complete your profile reminder. Photos are optional;
+a name and username complete setup. Existing complete profiles are not prompted.
+The same public profile is used on bicino.com; setup does not change privacy
+preferences or begin live-location sharing.
+
+Profile sharing and the QR-code action share one row. Rider lookup accepts an
+exact username with or without a leading @. Native completed-ride publishing
+has been removed. Shared-route publishing is no longer a separate native screen.
+Private Health workout recording and group rides do not depend on publishing.
+
+Privacy and notifications appears at the bottom of the unified profile screen.
+Private-area editing is removed from the native UI; existing server settings are
+preserved. Profile fields save when focus leaves a field or the editor closes;
+choosing/removing a photo and preference toggles save immediately. Profile and avatar writes are serialized against the server's
+profile version. Failed changes are reported; preferences roll back to the
+confirmed server state. An account switch rejects queued edits from the old
+account. The deployed profile-write contract requires a completed name and
+username before account preferences can be changed.
+
+The request/invitation alerts toggle includes the iPhone notification permission
+step. Denied system permission keeps alerts off and offers an iPhone Settings
+link. The account's notification preference still controls server delivery.
+
+## Saved routes and group creation
+
+Saved Routes uses Create a Route for online planning. A favorite destination's
+map icon opens the selected-destination controls (From/To, transport, favorite
+state and Go), preserving its saved coordinate rather than performing a new
+address search. An archived route's map icon continues to preview that archive.
+The passive Watch-ready checkmark is hidden; transfer failures retain retry.
+
+The saved-route preview offers Start Offline Navigation and Start Group Ride,
+followed by a Share with picker (Friends, Only Me, Anyone with the link). A local
+route starts as Only Me and opening it never uploads it. Selecting a nonprivate
+visibility or starting a group prepares a server snapshot automatically; no
+separate Publish step is required. Account plus exact archive content hash map
+to a server content ID, so later starts and visibility edits reuse the snapshot.
+Changing back to Only Me uses the server's existing share-link revocation.
+Link visibility offers a Share route link action. Live location remains opt-in.
+
+The server accepts owned imported GPX archives and explicitly saved Apple Maps
+archives. The 22 October 2026 maintainer request extends the saved Apple Maps
+product policy to the same publishing, exact-snapshot group delivery and recipient
+save flow as GPX. It does not establish Apple permission; see
+`reviews/mapkit-route-storage-2026-09-15.md`. Apple archives retain
+`apple.mapkit` / `Apple Maps` / `phoneOnly`, including their original geometry,
+instructions, timestamps and content hash. No directions request replaces the
+selected alternative. `phoneOnly` still excludes Watch transfer, including for
+received copies. Active-only MapKit responses, Strava and another rider's saved
+route cannot be republished. These restrictions are enforced by both app and server.
+
+The additive `savedMapKitRoutes` capability follows the server's routes feature.
+Older servers omit it, so updated clients disable Apple Maps sharing with a
+server-update explanation rather than attempting an unsupported upload. Deploy
+the backend through its normal immutable image-lock promotions before delivering
+the app. This change adds no database migration and does not waive the existing
+deployment, provider-permission or physical acceptance gates.
+
 ## Upgrade and lifecycle contracts
 
-Schema **3** requires the explicit migration job before API/worker startup. Stop
-all old social replicas first; a V2 binary refuses a schema-3 database and a V3
-binary refuses an unmigrated one. The V2 upgrade, in one transaction under the
-migration advisory lock:
+Schema **4** requires the explicit migration job before API/worker startup.
+Stop all old social replicas first; schema-3 binaries reject schema 4, and current
+binaries reject an unmigrated database. The V3-to-V4 migration creates an empty
+`social_friend_shares` table. It preserves existing Group Rides and never infers
+sharing consent from friendships or room membership. Deploy API and worker from
+the same approved image after migration. Roll back application behavior by
+turning off `BICINO_SOCIAL_FEATURE_FRIEND_SHARING`, keeping schema-4 binaries
+running; do not restart schema-3 binaries against schema 4.
+
+The earlier V2 upgrade, in one transaction under the migration advisory lock:
 
 - adds `secret_digest` to push bindings and **retires every V2 binding**. V2 rows
   never proved possession of an installation secret, so they cannot be handed
@@ -62,7 +141,7 @@ HTTP client retries one ambiguous timeout/disconnect with the same operation key
 live state instead uses its publisher's monotonic sequence. Invite replacement
 hides the old code while pending and serializes native rotation requests.
 
-Group Ride creation requires ownership of the published route. Route
+The group-ride API requires ownership of its stored route snapshot. Route
 redistribution follows what Bicino actually handed to a rider: viewing a
 friends-visible route, resolving a link while signed in, previewing a room code,
 opening an invitation or joining a room records an exposure of that geometry.
@@ -230,7 +309,7 @@ An exactly antipodal friend has no unique bearing and is omitted.
 The global `BICINO_SOCIAL_ENABLED` switch mounts social in the existing map API;
 the isolated social server is controlled by its deployment. Once the service is
 reachable, accounts, profiles, friends, blocking and account deletion are always
-available. All five additional features default to **false**. Set these exact
+available. All seven additional features default to **false**. Set these exact
 environment variables to `true` in the shared API/worker runtime environment:
 
 | Variable | Enables |
@@ -240,6 +319,8 @@ environment variables to `true` in the shared API/worker runtime environment:
 | `BICINO_SOCIAL_FEATURE_ACTIVITIES` | Completed-ride publication, lists, detail and links |
 | `BICINO_SOCIAL_FEATURE_GROUPS` | Invitations, sessions, consent and live positions; also requires routes |
 | `BICINO_SOCIAL_FEATURE_HARDWARE` | Phone-to-device rider relay; also requires groups and routes |
+| `BICINO_SOCIAL_FEATURE_FRIEND_SHARING` | One-way, per-friend live location and GPS ride stats; independent of routes/groups |
+| `BICINO_SOCIAL_FEATURE_INVITE_PREVIEWS` | Public view-only invite cards; requires media, groups and routes, plus the website preview release |
 
 Use lowercase `true`/`false`; invalid values fail startup. The authenticated
 `GET /v1/social/capabilities` response drives native feature availability. Live
@@ -249,7 +330,8 @@ advertise the diagnostic Group Riders capability; this flag cannot qualify a
 production board by itself.
 
 Enable media with profiles, then routes, activities, groups and finally hardware.
-For a fully enabled **development test environment**, set all five to `true`;
+For a fully enabled **development test environment**, enable the applicable
+flags, including `FRIEND_SHARING` for direct sharing;
 retain the separate native build and firmware diagnostic gates. Provider, S3 and
 database configuration must still be supplied; disabling media does not remove
 its cleanup configuration. Restart every API replica and worker together when
@@ -294,15 +376,16 @@ Grant only avatar-prefix get/put/delete/list access. Never use a public avatar U
 
 Start PostgreSQL, run `docker compose -f map-platform/deploy/compose.social.yaml
 --profile migration run --rm social-migrate`, then start API and worker. Migration
-v3 runs under a PostgreSQL advisory lock, retires the unsafe V1 replay/room state
-and unproven V2 push bindings, and backfills route fingerprints and exposures as
+runs under a PostgreSQL advisory lock. The V4 upgrade creates the empty direct
+friend consent table; earlier upgrades also retire unsafe V1 replay/room state
+and unproven V2 push bindings, and backfill route fingerprints and exposures as
 described above. API startup verifies the
 schema and fails closed rather than migrating during a request. Use a DML-only
 runtime role after the schema is installed, and a separate migration credential.
 The application uses serializable transactions and bounded conflict retries.
-For a V1 or V2 development upgrade, stop the old social API and worker writers
-before migration, then start the V3 API and worker together. Do not run older
-writers against schema 3 or roll back to older binaries after the migration.
+For an existing development database, stop the old social API and worker writers
+before migration, then start the schema-4 API and worker together. Do not run older
+writers against schema 4 or roll back to older binaries after the migration.
 
 Route `/v1/social/*` from the configured iPhone map-service origin to the social
 API, including WebSocket upgrades. Alternatively opt in to the mounted router in
@@ -387,3 +470,98 @@ validated image and record device ID, image hash, portrait screenshots and logs:
 
 Record a 2.06-inch rectangular-screen qualification independently. Promote the
 firmware feature gate only with physical evidence for the enabled target families.
+
+
+### Group ride invitation cards
+
+Deploy the bicino.com website preview release before enabling
+`BICINO_SOCIAL_FEATURE_INVITE_PREVIEWS=true`. The website uses its existing
+`BICINO_SOCIAL_ENABLED=true` and HTTPS-origin-only `BICINO_SOCIAL_ORIGIN`
+configuration; no new credential is required. Ship the backend through the normal
+main/digest-pinned promotion workflow. Enable the preview flag consistently on API
+replicas and workers only after both releases are ready.
+
+The native app checks the advertised `invitePreviews` capability before uploading
+a real 1200×630 MapKit snapshot with the route drawn, title, distance and
+“Join the group ride.” Older backends and failed snapshots keep a working standard
+invitation link. Existing links remain supported and do not acquire a map preview
+retroactively. The snapshot retains MapKit attribution.
+
+Owner-only `PUT /v1/social/group-rides/{rideID}/invite-preview` sanitizes the image
+and attaches a new random preview asset ID to the immutable ride route snapshot.
+`GET /v1/social/ride-previews/{previewID}` returns only title, distance, image hash
+and expiration; `/image` returns the bounded sanitized PNG. Neither endpoint
+returns the join code, route archive/coordinates, roster, account IDs or live
+positions. The image itself intentionally reveals the route map to recipients.
+The website validates/proxies the image and renders Open Graph/Twitter metadata
+on the server. Both services use `no-store` responses.
+
+Invitation URLs are `/social/ride/{previewID}#join-code`. The preview ID permits
+viewing the card only. Joining still requires the separate secret in the URL
+fragment and an explicit Join action in the app. Native join/create actions
+start sharing location, speed, distance and moving/elapsed times by default,
+after any OS location prompt. Merely opening a link or reopening the profile
+screen does not start sharing. Stop sharing, Leave and End remain available;
+the existing four-hour sharing bound still applies. Permission denial preserves
+successful membership and starts sharing automatically when the rider grants location access and returns.
+
+The original invite is retained in the account-scoped, app-private device-only
+Keychain. A legacy ride or another device without the original secret offers
+Create invite link; a known invitation is never replaced automatically. Owner
+ending, account deletion, card replacement and ride expiration revoke preview
+reads. Worker jobs delete their private media objects, and the existing orphan
+reconciler also covers `ride-previews/`. External messaging clients can retain
+previously downloaded image previews in their own caches.
+
+
+## Direct friend live sharing
+
+Each Friends row offers a separate outgoing sharing toggle. The footer names
+location, GPS speed, session distance, moving time and elapsed time, explains
+that sharing is one-way and expires after four hours, and that removing or
+blocking the friend stops direct sharing. This does not grant access to HealthKit
+workouts, heart rate, routes, or private account data. Friend details show the
+username when set, plus currently received live ride stats. Incoming positions
+also use the existing map marker and authenticated BLE relay projection.
+
+`GET /friend-sharing/{profileID}/consent` returns the current directional epoch;
+`POST` to that path conditionally changes consent using the existing location /
+stats / epoch body. Every change rotates the epoch, clears the prior fix and
+sequence, and starts at most a four-hour server lease. At most 100 recipients
+can be active. `POST /friend-sharing/state` sends one bounded fix with an
+explicit profile-to-epoch audience map. It cannot enable consent or extend a
+lease. Sequence, freshness, accuracy, per-recipient stats permission, friendship,
+account state and blocks are checked in the same transaction. Stale epochs are
+ignored; the reply names accepted recipients. No route or group membership is
+created or shared. Idempotent consent replays read current state rather than
+replaying an obsolete permission payload.
+
+`GET /friend-sharing` returns current outgoing consents and incoming riders for
+accepted friends only. Received positions disappear at 60 seconds; the worker
+clears stale fixes and expired leases. Unfriend/block deletes both directions;
+account deletion/disable also clears them. Re-adding/unblocking never restores
+consent. Outgoing consent is volatile and never silently resumed after
+relaunch, sign-out or account switch. Local Stop removes the recipient before any
+network await. `DELETE /friend-sharing` revokes all outgoing friend consents in
+one request for sign-out, while preserving incoming consents. Group and friend
+sharing share one GPS lifecycle so stopping either does not stop the other.
+Turning off the rollout flag rejects snapshots/publications/start requests while
+retaining consent reads and explicit stops.
+
+The app polls `GET /friend-sharing` every three seconds only while this phone
+shares with a friend or shows a friend position younger than 60 seconds. With
+neither, it checks once a minute while the app is in the foreground, and not at
+all in the background. Returning to the foreground or changing a consent checks
+immediately. It publishes only new, accurate fixes, uses monotonic local
+deadlines, and leaves at least 2.2 seconds after its previous publication attempt
+so an immediate check never trips the server's two-second per-recipient rate.
+A request superseded by such a check is neither a sharing failure nor a
+revocation, and the server's own rate rejection is not reported as one either.
+
+This is a deliberate battery and server-load trade-off. While the phone is in
+the background and neither condition applies, a friend who starts sharing is not
+discovered until Bicino returns to the foreground or the rider starts sharing.
+That includes the map and the authenticated bike-computer relay. Positions
+already being received, and this phone's own outgoing sharing, continue in the
+background within the existing location permission. Bicino does not request
+additional background location access for discovery.

@@ -14,6 +14,8 @@ sys.path.insert(0,str(ROOT/'tools'))
 from bicino_diagnostics import cli
 from bicino_diagnostics.bundle import open_evidence, EvidenceError
 from diagnostics_test_support import v1_fixture,v2_fixture,write_zip
+from test_ride_diagnostics import (event, firmware_event, bundle_manifest, required_sidecars,
+    APP_STREAM_PATH, DEVICE_DIGEST)
 
 
 class DiagnosticsCLITests(unittest.TestCase):
@@ -39,6 +41,31 @@ class DiagnosticsCLITests(unittest.TestCase):
         self.assertIsNone(result['unwrittenTailEventCount'])
         self.assertEqual(len(result['unsealedFirmwareBoots']), 1)
         self.assertEqual(result['sources'],['firmware','ios'])
+    def test_verify_reports_rolled_ios_history_separately_from_loss(self):
+        status,result=self.invoke('verify',self.inner,'--require','ios')
+        self.assertEqual(status,0,result)
+        self.assertEqual((result['unretainedLeadingSequences'],result['iosProcessHistory']),
+                         (0,'retained_from_process_start'))
+        def write(path, source):
+            manifest=bundle_manifest(source)
+            write_zip(path,{'manifest.json':json.dumps(manifest).encode(),**source,**required_sidecars(manifest)})
+        rolled=self.root/'rolled.zip'
+        stream=APP_STREAM_PATH.replace('events-000001','events-000007')
+        write(rolled,{stream:b''.join((json.dumps(event(value))+'\n').encode() for value in (900,901,902))})
+        status,result=self.invoke('verify',rolled,'--require','ios')
+        self.assertEqual(status,0,result)
+        self.assertEqual(result['unretainedLeadingSequences'],900)
+        self.assertEqual(result['iosProcessHistory'],'leading_history_unretained')
+        self.assertEqual(result['sequenceGaps'],0)
+        self.assertEqual(result['recordingCoverage'],'no_detected_loss')
+        device_only=self.root/'device-only.zip'
+        raw=(json.dumps(firmware_event())+'\n').encode()
+        sha=hashlib.sha256(raw).hexdigest()
+        write(device_only,{f'device/{DEVICE_DIGEST}/7/events-000001-{sha[:16]}.jsonl':raw})
+        status,result=self.invoke('verify',device_only,'--require','firmware')
+        self.assertEqual(status,0,result)
+        self.assertEqual((result['unretainedLeadingSequences'],result['iosProcessHistory']),(0,'no_ios_streams'))
+
     def test_unknown_scope_cannot_borrow_another_rides_evidence(self):
         unknown='00000000-0000-0000-0000-000000000123'
         for selector in ('--capture', '--acquisition'):

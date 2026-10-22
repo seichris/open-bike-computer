@@ -2,6 +2,52 @@ import Combine
 import CoreLocation
 import Foundation
 
+/// Shared distance and moving time. The phone stream now reports every
+/// stationary fix for its stall watchdog, so jitter at a stop must not become
+/// progress: distance counts from the last counted point, like the former 5 m
+/// Core Location filter, and moving time prefers Core Location's speed.
+nonisolated struct SharedRideProgress {
+    static let minimumDisplacementMeters: CLLocationDistance = 5
+    static let continuityInterval: TimeInterval = 30
+    static let movingSpeed: CLLocationSpeed = 0.5
+    private(set) var distanceMeters = 0.0
+    private(set) var movingSeconds = 0.0
+    private var anchor: CLLocation?
+    private var previousFixAt: Date?
+
+    mutating func add(_ location: CLLocation) {
+        guard let anchor, let previousFixAt else {
+            self.anchor = location
+            previousFixAt = location.timestamp
+            return
+        }
+        let interval = location.timestamp.timeIntervalSince(previousFixAt)
+        guard interval > 0 else { return }
+        self.previousFixAt = location.timestamp
+        // A silent interval cannot be credited; restart from this fix.
+        guard interval <= Self.continuityInterval else {
+            self.anchor = location
+            return
+        }
+        let meters = anchor.distance(from: location)
+        var countedSpeed: CLLocationSpeed?
+        if meters >= Self.minimumDisplacementMeters {
+            let speed = meters / location.timestamp.timeIntervalSince(anchor.timestamp)
+            if speed <= 60 {
+                distanceMeters += meters
+                countedSpeed = speed
+            }
+            self.anchor = location
+        }
+        // Doppler speed is not inflated by stationary position jitter. Without
+        // it, only an interval that left the last counted point is moving.
+        let moving = location.speed >= 0
+            ? location.speed > Self.movingSpeed
+            : (countedSpeed ?? 0) > Self.movingSpeed
+        if moving { movingSeconds += interval }
+    }
+}
+
 @MainActor
 final class LiveRideService: ObservableObject {
     @Published private(set) var ride: SocialGroupRide?
@@ -17,7 +63,14 @@ final class LiveRideService: ObservableObject {
         static func < (a: Notice, b: Notice) -> Bool { a.rawValue < b.rawValue }
     }
     private(set) var notice: Notice?
-    var prepareLocation: (() -> Bool)?
+    var prepareLocation: (() async -> Bool)?
+    var loadInvitation: ((String) -> SocialRideInvitation?)?
+    var saveInvitation: ((String, SocialRideInvitation?) -> Void)?
+    @Published private(set) var previewID: String?
+    var invitationURL: URL? {
+        guard let invitationCode else { return nil }
+        return URL(string: "https://bicino.com/social/ride" + (previewID.map { "/\($0)" } ?? "") + "#\(invitationCode)")
+    }
     var onRidersChanged: (([SocialRider]) -> Void)?
     var onCapabilitiesChanged: ((SocialCapabilities) -> Void)?
     private let client: any SocialRideNetworking
@@ -34,13 +87,12 @@ final class LiveRideService: ObservableObject {
     private var publisher: Task<Void, Never>?
     private var socket: (any SocialSocket)?
     private(set) var latestLocation: CLLocation?
-    private var previousSharedLocation: CLLocation?
-    private var sharedDistance = 0.0
-    private var sharedMovingSeconds = 0.0
+    private var sharedProgress = SharedRideProgress()
     private var sharingStartedAt = 0.0
     private var lastPublished: Date?
     private var sequence = 0
     private var localEpoch = UUID()
+    private var awaitingLocationAuthorization = false
 
     init(client: any SocialRideNetworking, uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          pollNanoseconds: UInt64 = 3_000_000_000, reconnectNanoseconds: UInt64 = 3_000_000_000) {
@@ -70,19 +122,10 @@ final class LiveRideService: ObservableObject {
         latestLocation = location
         guard isSharing, let location, location.horizontalAccuracy >= 0,
               location.horizontalAccuracy <= 100, abs(location.timestamp.timeIntervalSinceNow) < 30 else { return }
-        if let previous = previousSharedLocation {
-            let seconds = location.timestamp.timeIntervalSince(previous.timestamp)
-            guard seconds > 0 else { return }
-            let meters = previous.distance(from: location)
-            if seconds <= 30 && meters / seconds <= 60 {
-                sharedDistance += meters
-                if meters / seconds > 0.5 { sharedMovingSeconds += seconds }
-            }
-        }
-        previousSharedLocation = location
+        sharedProgress.add(location)
     }
 
-    func select(_ selected: SocialGroupRide) async throws {
+    func select(_ selected: SocialGroupRide, shareOnJoin: Bool = false) async throws {
         let previousEpoch = localEpoch
         let ride = try JSONDecoder().decode(SocialGroupRide.self,
             from: await client.request("group-rides/\(selected.id)", method: "GET", body: nil, contentType: "application/json", query: []))
@@ -91,7 +134,11 @@ final class LiveRideService: ObservableObject {
         guard previousEpoch == localEpoch else { return }
         reset()
         self.ride = ride
-        invitationCode = selected.joinCode
+        let stored = loadInvitation?(ride.id)
+        invitationCode = selected.joinCode ?? stored?.code
+        previewID = stored?.previewID
+        rememberInvitation()
+        onRidersChanged?(ride.riders)
         // Reopening a server session never silently restarts this phone's GPS publication.
         isSharing = false
         let epoch = localEpoch
@@ -155,6 +202,43 @@ final class LiveRideService: ObservableObject {
                 }
             }
         }
+        if shareOnJoin { await beginSharingOnJoin() }
+    }
+
+    private func beginSharingOnJoin() async {
+        let selection = localEpoch
+        do { try await startSharing(stats: true) }
+        catch SocialFailure.cancelled { }
+        catch {
+            guard selection == localEpoch else { return }
+            if case SocialFailure.server("location_access_required") = error {
+                awaitingLocationAuthorization = true
+                show(.sharingEnded, "You joined the ride. Allow location access in iPhone Settings, then return to Bicino to share your live ride.")
+            } else {
+                show(.sharingEnded, "You joined the ride, but live sharing could not start. \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func locationAuthorizationChanged(authorized: Bool) {
+        guard authorized, awaitingLocationAuthorization, ride != nil else { return }
+        awaitingLocationAuthorization = false
+        let selection = localEpoch
+        Task {
+            guard selection == localEpoch else { return }
+            await beginSharingOnJoin()
+        }
+    }
+
+    private func rememberInvitation() {
+        guard let ride, let invitationCode else { return }
+        saveInvitation?(ride.id, SocialRideInvitation(code: invitationCode, previewID: previewID))
+    }
+
+    func setPreview(_ id: String, for rideID: String) {
+        guard ride?.id == rideID, UUID(uuidString: id) != nil else { return }
+        previewID = id
+        rememberInvitation()
     }
 
     private func changeConsent(ride: SocialGroupRide, location: Bool, stats: Bool, revision: UUID) async throws -> SocialGroupRide {
@@ -182,9 +266,11 @@ final class LiveRideService: ObservableObject {
     }
 
     func startSharing(stats: Bool) async throws {
-        guard prepareLocation?() == true else { throw SocialFailure.server("allow_precise_location_in_settings_then_start_sharing") }
-        guard let ride else { throw SocialFailure.unavailable }
         let selectionEpoch = localEpoch
+        let initialRevision = sharingRevision
+        guard await prepareLocation?() == true else { throw SocialFailure.server("location_access_required") }
+        guard selectionEpoch == localEpoch, initialRevision == sharingRevision else { throw SocialFailure.cancelled }
+        guard let ride else { throw SocialFailure.unavailable }
         sharingRevision = UUID()
         let revision = sharingRevision
         let requestedAt = uptime()
@@ -193,8 +279,7 @@ final class LiveRideService: ObservableObject {
         guard selectionEpoch == localEpoch, revision == sharingRevision else { throw SocialFailure.cancelled }
         guard updated.sharing else { throw SocialFailure.server("sharing_disabled") }
         self.ride = updated
-        previousSharedLocation = nil
-        sharedDistance = 0; sharedMovingSeconds = 0
+        sharedProgress = SharedRideProgress()
         sharingStartedAt = uptime()
         sharingDeadline = requestedAt + min(4 * 3600, max(0, (updated.sharingExpiresAt ?? (updated.serverTime + 60)) - updated.serverTime))
         clearNotice()
@@ -208,7 +293,7 @@ final class LiveRideService: ObservableObject {
             while !Task.isCancelled && epoch == self.localEpoch && revision == self.sharingRevision && self.isSharing {
                 if self.uptime() >= self.sharingDeadline {
                     await self.stopSharing()
-                    self.show(.sharingEnded, "Location sharing ended. Start it again to continue.")
+                    self.show(.sharingEnded, "Location sharing ended.")
                     return
                 }
                 if let location = self.latestLocation,
@@ -223,8 +308,8 @@ final class LiveRideService: ObservableObject {
                     if location.course >= 0 { state["course"] = location.course }
                     if stats && location.speed >= 0 { state["speed"] = min(60, location.speed) }
                     if stats {
-                        state["distanceMeters"] = self.sharedDistance
-                        state["movingSeconds"] = self.sharedMovingSeconds
+                        state["distanceMeters"] = self.sharedProgress.distanceMeters
+                        state["movingSeconds"] = self.sharedProgress.movingSeconds
                         state["elapsedSeconds"] = max(0, self.uptime()-self.sharingStartedAt)
                     }
                     // An accepted request can lose its response. Never reuse its sequence.
@@ -238,7 +323,7 @@ final class LiveRideService: ObservableObject {
                         guard revision == self.sharingRevision, epoch == self.localEpoch else { return }
                         if case SocialFailure.server(let code) = error, ["sharing_disabled", "ride_ended", "membership_required", "account_unavailable", "account_deleting"].contains(code) {
                             await self.stopSharing()
-                            self.show(.sharingEnded, "Location sharing ended. Start it again to continue.")
+                            self.show(.sharingEnded, "Location sharing ended.")
                             return
                         }
                         self.show(.publishFailed, "Your last location update could not be shared.")
@@ -250,6 +335,7 @@ final class LiveRideService: ObservableObject {
     }
 
     func stopSharing() async {
+        awaitingLocationAuthorization = false
         sharingRevision = UUID()
         let revision = sharingRevision
         isSharing = false
@@ -271,11 +357,13 @@ final class LiveRideService: ObservableObject {
         let value = try await client.json("group-rides/\(ride.id)/rotate-code", method: "POST")
         guard revision == localEpoch else { throw SocialFailure.cancelled }
         invitationCode = value["joinCode"] as? String
+        rememberInvitation()
     }
 
     func leave(end: Bool = false) async throws {
         guard let ride else { return }
         await stopSharing()
+        if end { saveInvitation?(ride.id, nil) }
         reset()
         _ = try await client.json("group-rides/\(ride.id)/\(end ? "end" : "leave")", method: "POST")
     }
@@ -293,13 +381,14 @@ final class LiveRideService: ObservableObject {
     }
 
     func reset() {
+        awaitingLocationAuthorization = false
         sharingRevision = UUID()
         localEpoch = UUID()
         retiredEpochs = []
         stream?.cancel(); stream = nil
         publisher?.cancel(); publisher = nil
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
-        isSharing = false; ride = nil; riders = []; messages = []; invitationCode = nil; isRotatingInvitation = false
+        isSharing = false; ride = nil; riders = []; messages = []; invitationCode = nil; isRotatingInvitation = false; previewID = nil
         clearNotice()  // Notices describe the room being left, never the next one.
         onRidersChanged?([])
     }

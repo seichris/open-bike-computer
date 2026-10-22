@@ -348,6 +348,7 @@ final class WorkoutSessionCoordinator: ObservableObject {
         var fields = Self.diagnosticFields(for: availability)
         fields["outcome"] = outcome
         fields["role"] = owner?.rawValue ?? "none"
+        fields["phase"] = record?.phase.rawValue ?? "none"
         store.diagnosticsRecorder?.record(
             category: .workout,
             event: "start_decision",

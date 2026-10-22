@@ -1,6 +1,6 @@
 # Bicino Privacy Policy
 
-Effective date: September 16, 2026
+Effective date: October 20, 2026
 
 Bicino is a cycling navigation and workout companion. This policy
 explains what information the iPhone app, Apple Watch app, compatible bike
@@ -72,7 +72,8 @@ an online route request.
 
 Saved offline routes and coordinate-backed favorite names and coordinates are
 transferred between your paired iPhone and Watch using Apple's WatchConnectivity
-service. They remain within the paired app workflow and are not sent to the
+service. Unless you explicitly share a route or start a Group Ride as described
+below, they remain within the paired app workflow and are not sent to the
 Bicino backend. Offline route files enforce their provider retention metadata
 and are removed when they expire. You can delete a saved route from the iPhone;
 if it is currently active on Watch, deletion finishes when navigation stops.
@@ -213,17 +214,38 @@ name, username, sanitized profile photo, friendships, invitations, and content y
 explicitly publish. These use the same Firebase account as bicino.com. Social
 photos and routes are stored in private object storage and the social database.
 
-A completed workout is uploaded only after you select it and consent. The server
-removes the start/finish areas and configured private zones before others can
-receive its geometry. Raw tracks are not retained. Full-ride basic times may be
-shared; heart rate, calories, power, cadence, and other Health data are excluded.
-Privacy trimming reduces exposure and cannot guarantee location anonymity.
+Starting a Group Ride from your saved GPX or Apple Maps route uploads that saved
+route to Bicino, including its coordinates, navigation instructions and labels.
+Accepted riders receive the exact route and can save a copy on their iPhones.
+The route's sharing preference also controls access outside the group. Opening a
+saved route alone does not upload it. Apple Maps routes keep their Apple Maps
+attribution and are not transferred to Watch.
 
-Joining a Group Ride does not start sharing. Live location and optional basic
-statistics require explicit consent for each ride. Samples expire after 60
-seconds without an update. Stopping sharing, leaving, blocking, and deletion
-revoke access. Sessions expire within 24 hours of their scheduled start. Generic
-push notifications are optional. Social and Health data are not used for ads.
+When you explicitly create, join, or accept an invitation to a Group Ride,
+Bicino starts sharing your live location and GPS-derived speed, distance, moving
+time, and elapsed time with the other accepted riders in that ride. Opening an
+invitation link or viewing your profile alone does not start sharing. Samples
+expire after 60 seconds without an update. Stopping sharing, leaving, blocking,
+and deletion revoke access. Sessions expire within 24 hours of their scheduled
+start. Heart rate, calories, power, cadence, and other HealthKit measurements are
+not shared with the group. Generic push notifications are optional. Social and
+Health data are not used for ads.
+
+You can also turn on live sharing separately for an accepted friend using their
+Friends-row toggle. That shares your location and the same GPS-derived speed,
+session distance, moving time and elapsed time with that friend for up to four
+hours, without creating a Group Ride or sharing a route. It is one-way: your
+friend chooses whether to share back. Turning off their toggle, removing or
+blocking them, or deleting your account stops direct sharing. Sign-out stops
+this phone's publication; opening the app again does not restart it. Old
+positions expire after 60 seconds. These toggles do not share HealthKit data.
+
+A group invitation can include a public preview showing a map snapshot of the
+route, its name, and distance. Anyone with that preview URL, including messaging
+services that fetch link previews, can view it without joining the ride. It does
+not contain live positions or the rider list. Ending the ride or revoking the
+preview stops new reads from Bicino; copies already cached by recipients or
+third-party messaging services cannot be recalled.
 
 To keep routes with their owners, the service records a one-way fingerprint of a
 route's geometry when another rider's route is shared with you, and the app notes

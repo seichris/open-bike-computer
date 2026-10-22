@@ -44,7 +44,11 @@ tools/OSM_Extract/pbf
 tools/OSM_Extract/__pycache__
 tools/OSM_Extract/conf/test*
 
+# Per-worktree environments from tools/dev-setup (--recreate keeps the old one).
+/.venv/
+/.venv.previous-*/
 map-platform/backend/.venv/
+map-platform/backend/.venv.previous-*/
 .venv-topography/
 *.egg-info/
 map-platform/backend/data/*
@@ -61,3 +65,7 @@ waveshare_demo//IceNav-v3/
 # Private diagnostics evidence and local broker state; never commit pairing files.
 artifacts/diagnostics/
 .bicino-diagnostics/
+
+# Claude Code machine-local preferences.
+.claude/settings.local.json
+CLAUDE.local.md

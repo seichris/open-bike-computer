@@ -52,7 +52,7 @@ nonisolated struct SocialRouteProvenance: Codable, Equatable, Sendable {
 
 /// Whether a saved route may be published by the signed-in rider.
 nonisolated enum SocialRoutePublication: Equatable, Sendable {
-    /// No social source is known: the rider's own imported GPX.
+    /// No social source is known: the rider's own imported GPX or saved Apple Maps route.
     case independent
     /// A copy of the rider's own published route or Group Ride snapshot.
     case ownCopy

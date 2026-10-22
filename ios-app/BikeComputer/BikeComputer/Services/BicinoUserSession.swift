@@ -89,21 +89,25 @@ final class BicinoUserSession: NSObject, ObservableObject, SocialAuthenticating 
         }
     }
 
-    func signInWithGoogle(reauthenticate: Bool = false, link: Bool = false) async throws {
+    func signInWithGoogle(reauthenticate: Bool = false) async throws {
         guard let auth, let clientID = FirebaseApp.app()?.options.clientID,
               let presenter = Self.presenter else { throw SocialFailure.unavailable }
         let generation = generation
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID)
-        let result = try await GIDSignIn.sharedInstance.signIn(withPresenting: presenter)
+        let result: GIDSignInResult
+        do { result = try await GIDSignIn.sharedInstance.signIn(withPresenting: presenter) }
+        catch {
+            let failure = error as NSError
+            if failure.domain == kGIDSignInErrorDomain,
+               failure.code == GIDSignInError.canceled.rawValue { throw SocialFailure.cancelled }
+            throw error
+        }
         guard generation == self.generation, let idToken = result.user.idToken?.tokenString else {
             throw SocialFailure.accountChanged
         }
         let credential = GoogleAuthProvider.credential(withIDToken: idToken,
                                                         accessToken: result.user.accessToken.tokenString)
-        if link {
-            guard let user = auth.currentUser else { throw SocialFailure.signedOut }
-            _ = try await user.link(with: credential)
-        } else if reauthenticate {
+        if reauthenticate {
             guard let user = auth.currentUser else { throw SocialFailure.signedOut }
             _ = try await user.reauthenticate(with: credential)
         } else {
@@ -113,7 +117,7 @@ final class BicinoUserSession: NSObject, ObservableObject, SocialAuthenticating 
     }
 
     @discardableResult
-    func signInWithApple(reauthenticate: Bool = false, link: Bool = false) async throws -> String? {
+    func signInWithApple(reauthenticate: Bool = false) async throws -> String? {
         guard let auth, appleFlow == nil else { throw SocialFailure.unavailable }
         let flow = AppleSignInFlow()
         appleFlow = flow
@@ -123,10 +127,7 @@ final class BicinoUserSession: NSObject, ObservableObject, SocialAuthenticating 
         guard expected == generation else { throw SocialFailure.accountChanged }
         let credential = OAuthProvider.appleCredential(withIDToken: result.token,
                                                         rawNonce: result.nonce, fullName: result.name)
-        if link {
-            guard let user = auth.currentUser else { throw SocialFailure.signedOut }
-            _ = try await user.link(with: credential)
-        } else if reauthenticate {
+        if reauthenticate {
             guard let user = auth.currentUser else { throw SocialFailure.signedOut }
             _ = try await user.reauthenticate(with: credential)
         } else {
@@ -204,7 +205,9 @@ private final class AppleSignInFlow: NSObject, ASAuthorizationControllerDelegate
     }
 
     func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-        continuation?.resume(throwing: error)
+        let failure = error as NSError
+        continuation?.resume(throwing: failure.domain == ASAuthorizationError.errorDomain
+            && failure.code == ASAuthorizationError.canceled.rawValue ? SocialFailure.cancelled : error)
         continuation = nil
         self.controller = nil
     }

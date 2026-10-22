@@ -3407,7 +3407,7 @@ extension NavigationProtocolTests {
                 !screensSource.contains("Button(\"Save to Bicino\")") &&
                 !screensSource.contains("Button(\"Cancel Changes\"") &&
                 screensSource.contains("Text(\"Bicino Screens\")") &&
-                settingsSource.contains("header: Text(\"Bicino Screens\")") &&
+                settingsSource.contains("Text(\"Bicino Screens\")") &&
                 !screensSource.contains("Changes save automatically.") &&
                 !screensSource.contains("Changes will save automatically.") &&
                 !screensSource.contains("Saving changes to Bicino…") &&
@@ -3880,14 +3880,14 @@ extension NavigationProtocolTests {
         assert(
             source.contains("Text(\"Saved Routes\")") &&
                 source.contains(
-                    "Choose an online route to save or preview a saved route. Watch-supported routes are queued automatically."
+                    "Create a route or preview a saved route. Watch-supported routes are queued automatically."
                 ),
             "Saved Routes uses the requested title and explanatory copy"
         )
         assert(
             source.contains("favoriteButton(for: route") &&
                 source.contains("Image(systemName: favorite == nil ? \"star\" : \"star.fill\")") &&
-                source.contains("Label(\"Save an Online Route\"") &&
+                source.contains("Label(\"Create a Route\"") &&
                 !source.contains("Navigate on iPhone") &&
                 !source.contains("Available offline") &&
                 !source.contains("Apple Maps · Saved on this iPhone"),
@@ -3905,10 +3905,9 @@ extension NavigationProtocolTests {
             "saved route names are editable inline"
         )
         assert(
-            source.contains("case .ready:") &&
-                source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
+            !source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
                 !source.contains("Ready on Watch"),
-            "Watch-ready routes use an inline green status icon without a second-row label"
+            "Watch-ready routes avoid passive green checkmarks"
         )
         assert(
             !source.contains("Powered by Strava") &&

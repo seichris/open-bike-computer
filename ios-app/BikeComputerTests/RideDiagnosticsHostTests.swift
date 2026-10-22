@@ -371,7 +371,241 @@ enum RideDiagnosticsHostTests {
             "pre-cache receipts retain their original device and app evidence in scoped exports")
     }
 
+    static func missingWriterDirectoryRecoversWithoutRelaunch() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        let directory = root.appendingPathComponent("app/" + recorder.processId.uuidString.lowercased())
+        // Older byte-retention versions could prune the writer's sidecar and
+        // empty directory. Recover in the same process during migration.
+        try FileManager.default.removeItem(at: directory)
+        recorder.record(category: .gps, event: "after_directory_loss")
+        recorder.flush()
+        precondition(recorder.health.droppedEventCount == 0)
+        precondition(recorder.health.lastError == nil)
+        let streams = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.map { try String(contentsOf: $0, encoding: .utf8) }.joined()
+        precondition(streams.contains("after_directory_loss"))
+        precondition(FileManager.default.fileExists(atPath: directory.appendingPathComponent("manifest.json").path))
+        let bytes = try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: [.fileSizeKey]).reduce(0) {
+                $0 + ((try $1.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
+            }
+        precondition(recorder.health.retainedBytes == bytes, "directory recovery reconciles byte accounting")
+    }
+
+    static func byteRetentionAlwaysKeepsLatestChunks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let oldProcess = UUID().uuidString.lowercased()
+        let oldCapture = UUID().uuidString.lowercased()
+        let oldDirectory = root.appendingPathComponent("app/" + oldProcess)
+        try FileManager.default.createDirectory(at: oldDirectory, withIntermediateDirectories: true)
+        // Reproduce the device's single old capture occupying the whole store.
+        let line = Data("{\"schema\":1,\"source\":\"ios\",\"sequence\":0,\"level\":\"info\",\"category\":\"ble\",\"event\":\"historical\",\"processId\":\"\(oldProcess)\",\"captureId\":\"\(oldCapture)\"}\n".utf8)
+        var body = Data()
+        while body.count + line.count <= RideDiagnosticsRecorder.chunkLimit { body.append(line) }
+        let stamp = Date()
+        var oldChunks: [URL] = []
+        for number in 1...201 {
+            let url = oldDirectory.appendingPathComponent(String(format: "events-%06d.jsonl", number))
+            try body.write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: stamp.addingTimeInterval(Double(number - 202))], ofItemAtPath: url.path)
+            oldChunks.append(url)
+        }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.record(category: .gps, event: "latest_after_full_store")
+        recorder.flush()
+        precondition(recorder.health.droppedEventCount == 0, "a full historical capture must not block new recording")
+        precondition(recorder.health.retainedBytes <= RideDiagnosticsRecorder.retainedBytesLimit)
+        precondition(!FileManager.default.fileExists(atPath: oldChunks[0].path), "byte retention overwrites the oldest chunk")
+        precondition(FileManager.default.fileExists(atPath: oldChunks.last!.path), "byte retention keeps the newest historical chunk")
+        let current = root.appendingPathComponent("app/" + recorder.processId.uuidString.lowercased())
+        let latest = try FileManager.default.contentsOfDirectory(at: current, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }.map { try String(contentsOf: $0, encoding: .utf8) }.joined()
+        precondition(latest.contains("latest_after_full_store"), "newest GPS evidence must reach disk")
+    }
+
+    private static func appEvents(under root: URL) throws -> [RideDiagnosticEvent] {
+        try (FileManager.default.enumerator(at: root.appendingPathComponent("app"),
+            includingPropertiesForKeys: nil)?.compactMap { $0 as? URL } ?? [])
+            .filter { $0.pathExtension == "jsonl" }
+            .flatMap { url in
+                try String(contentsOf: url, encoding: .utf8).split(separator: "\n").map {
+                    try JSONDecoder().decode(RideDiagnosticEvent.self, from: Data($0.utf8))
+                }
+            }
+            .sorted { $0.sequence < $1.sequence }
+    }
+
+    /// Drive one active capture through several byte budgets with the real
+    /// writer, rotation and pruning, then verify the export with the host CLI.
+    static func activeCaptureRollsOverThroughRealRotation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let limit = 4 * RideDiagnosticsRecorder.chunkLimit
+        let recorder = RideDiagnosticsRecorder(rootURL: root, retainedBytesLimit: limit)
+        let capture = try require(recorder.currentCaptureID).uuidString.lowercased()
+        let padding = String(repeating: "p", count: 200)
+        for number in 0..<6_000 {
+            recorder.record(category: .gps, event: "rollover_sample",
+                fields: ["reason": padding, "chunk": String(number)])
+            // Stay inside the bounded mailbox; this test is about retention.
+            if number % 128 == 127 { recorder.flush() }
+        }
+        recorder.record(category: .gps, event: "rollover_latest")
+        recorder.flush()
+        let health = recorder.health
+        precondition(health.droppedEventCount == 0 && health.lastError == nil,
+            "rolling retention never blocks or drops new events")
+        precondition(health.retainedBytes <= limit, "retention honours the byte budget")
+        let directory = root.appendingPathComponent("app/" + recorder.processId.uuidString.lowercased())
+        let chunks = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "jsonl" }
+        precondition(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("events-000001.jsonl").path),
+            "the oldest chunk of the active capture rolled off")
+        precondition((3...5).contains(chunks.count), "only the newest budget of chunks remains")
+        precondition(FileManager.default.fileExists(atPath: directory.appendingPathComponent("manifest.json").path),
+            "the current writer manifest survives rollover")
+        let events = try appEvents(under: root)
+        precondition(events.allSatisfy { $0.captureId == capture }, "rollover happened inside one active capture")
+        precondition(events.contains { $0.event == "rollover_latest" }, "the newest event reached disk")
+        precondition(events.contains { $0.event == "retention_pruned" && $0.fields["reason"] == "byte_limit" },
+            "byte rollover is recorded as durable storage evidence")
+        let sequences = events.map(\.sequence)
+        let firstRetained = try require(sequences.first)
+        precondition(firstRetained > 0, "the process prefix was overwritten")
+        precondition(zip(sequences, sequences.dropFirst()).allSatisfy { $1 == $0 + 1 },
+            "rollover removes the oldest history, never interior history")
+
+        let bundle = try recorder.exportBundle()
+        defer { try? FileManager.default.removeItem(at: bundle) }
+        // The export checkpoint may append outcomes and prune once more; the
+        // snapshot is the store as it stands after export.
+        let exportedFirst = try require(appEvents(under: root).first).sequence
+        let verify = Process()
+        verify.executableURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("tools/bicino")
+        verify.arguments = ["diag", "verify", bundle.path, "--require", "ios", "--json"]
+        let output = Pipe()
+        verify.standardOutput = output
+        try verify.run()
+        let result = output.fileHandleForReading.readDataToEndOfFile()
+        verify.waitUntilExit()
+        guard verify.terminationStatus == 0 else {
+            throw RideDiagnosticsError.unavailable("Rolled export failed host verification: \(String(decoding: result, as: UTF8.self))")
+        }
+        let report = try JSONSerialization.jsonObject(with: result) as! [String: Any]
+        precondition(report["integrity"] as? String == "verified")
+        precondition(report["sequenceGaps"] as? Int == 0, "a rolled prefix is not an interior sequence gap")
+        precondition(report["unretainedLeadingSequences"] as? Int == exportedFirst &&
+            report["iosProcessHistory"] as? String == "leading_history_unretained",
+            "the host reports the overwritten process history")
+        precondition(report["recordingCoverage"] as? String == "no_detected_loss",
+            "rolling retention is missing history, not recording loss")
+    }
+
+    /// Batch yielding must not let a checkpoint overtake events that were
+    /// already admitted to the writer mailbox.
+    static func checkpointsPersistTheAdmittedBacklog() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        func admit(_ name: String, count: Int = 200) {
+            for number in 0..<count {
+                recorder.record(category: .ble, event: "\(name)_\(number)")
+            }
+        }
+        func precede(_ prefix: String, _ checkpoint: String, count: Int = 200) throws {
+            let events = try appEvents(under: root)
+            let marker = try require(events.last { $0.event == checkpoint }).sequence
+            let admitted = events.filter { $0.event.hasPrefix(prefix + "_") }
+            precondition(admitted.count == count && admitted.allSatisfy { $0.sequence < marker },
+                "\(checkpoint) must follow every event admitted before it")
+        }
+
+        // Asynchronous transitions queue behind the first drain batch.
+        recorder.suspendWriterForTesting()
+        admit("before_ride_end")
+        recorder.endRideCapture()
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        try precede("before_ride_end", "ride_capture_ended")
+        recorder.suspendWriterForTesting()
+        admit("before_trace")
+        recorder.beginDetailedTrace()
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        try precede("before_trace", "detailed_trace_started")
+        recorder.suspendWriterForTesting()
+        admit("before_trace_end")
+        recorder.endDetailedTrace()
+        recorder.resumeWriterForTesting()
+        recorder.flush()
+        try precede("before_trace_end", "detailed_trace_ended")
+
+        // Synchronous checkpoints race the first drain batch after resume.
+        recorder.suspendWriterForTesting()
+        admit("before_issue", count: 250)
+        recorder.resumeWriterForTesting()
+        precondition(recorder.markIssue(.other), "the issue marker is durable")
+        try precede("before_issue", "issue_marker", count: 250)
+
+        recorder.suspendWriterForTesting()
+        admit("before_export", count: 250)
+        recorder.resumeWriterForTesting()
+        let bundle = try recorder.exportBundle()
+        defer { try? FileManager.default.removeItem(at: bundle) }
+        let exported = try Data(contentsOf: bundle)
+        precondition((0..<250).allSatisfy { exported.range(of: Data("\"before_export_\($0)\"".utf8)) != nil },
+            "an export contains every event admitted before it")
+
+        recorder.suspendWriterForTesting()
+        admit("before_delete", count: 250)
+        recorder.resumeWriterForTesting()
+        try recorder.deleteLocalLogs()
+        recorder.flush()
+        let remaining = try appEvents(under: root)
+        precondition(remaining.contains { $0.event == "logs_deleted" })
+        precondition(!remaining.contains { $0.event.hasPrefix("before_delete_") },
+            "events admitted before deletion are deleted with the store")
+        precondition(recorder.health.droppedEventCount == 0)
+    }
+
+    /// An fsync or manifest failure stays visible until a complete checkpoint
+    /// succeeds; the write_failed outcome appended after it is not recovery.
+    static func failedCheckpointStaysVisibleUntilRecovered() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = RideDiagnosticsRecorder(rootURL: root)
+        recorder.flush()
+        precondition(recorder.health.lastError == nil)
+        let manifest = root.appendingPathComponent("app/\(recorder.processId.uuidString.lowercased())/manifest.json")
+        try FileManager.default.removeItem(at: manifest)
+        try FileManager.default.createDirectory(at: manifest.appendingPathComponent("obstruction"),
+            withIntermediateDirectories: true)
+        recorder.flush()
+        precondition(recorder.health.lastError != nil, "a failed manifest checkpoint is reported")
+        try FileManager.default.removeItem(at: manifest)
+        recorder.record(category: .gps, event: "after_checkpoint_failure")
+        precondition(recorder.health.lastError != nil,
+            "an ordinary append does not prove the failed checkpoint recovered")
+        recorder.flush()
+        precondition(recorder.health.lastError == nil, "a complete checkpoint clears the failure")
+        let events = try appEvents(under: root)
+        precondition(events.contains { $0.event == "after_checkpoint_failure" })
+        precondition(events.contains { $0.event == "write_failed" && $0.fields["reason"] == "manifest_failed" },
+            "the failed checkpoint remains durable evidence")
+    }
+
     static func main() async throws {
+        try missingWriterDirectoryRecoversWithoutRelaunch()
+        try byteRetentionAlwaysKeepsLatestChunks()
+        try activeCaptureRollsOverThroughRealRotation()
+        try checkpointsPersistTheAdmittedBacklog()
+        try failedCheckpointStaysVisibleUntilRecovered()
         try await legacyAcquisitionExportPreservesReferencedEvidence()
         try await deletionDoesNotReuseRetainedChunkIdentity()
         try queueOverflowRetainsCriticalEvidenceAndReportsLoss()

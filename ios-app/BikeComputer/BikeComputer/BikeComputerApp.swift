@@ -162,14 +162,19 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         super.init()
         social.live.prepareLocation = { [weak locationManager] in
             guard let locationManager else { return false }
-            if !locationManager.isLocationAuthorized { locationManager.requestWhenInUseAuthorization(); return false }
-            return true
+            return await locationManager.prepareSocialRideLocation()
         }
-        social.live.$isSharing.removeDuplicates().sink { [weak locationManager] sharing in
+        social.friendLive.prepareLocation = social.live.prepareLocation
+        locationManager.$authorizationStatus.removeDuplicates().sink { [weak social] status in
+            social?.live.locationAuthorizationChanged(authorized: status == .authorizedAlways || status == .authorizedWhenInUse)
+        }.store(in: &cancellables)
+        social.live.$isSharing.combineLatest(social.friendLive.$isSharing)
+            .map { $0 || $1 }.removeDuplicates().sink { [weak locationManager] sharing in
             locationManager?.setSocialRideSharing(sharing)
         }.store(in: &cancellables)
         locationManager.$currentLocation.sink { [weak social] location in
             social?.live.updateLocation(location)
+            social?.friendLive.updateLocation(location)
         }.store(in: &cancellables)
         destinationStore.$favoriteDestinations
             .map { destinations in

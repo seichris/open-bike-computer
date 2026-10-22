@@ -1,8 +1,9 @@
 # Watch workout companion release notes
 
-Release candidate: **1.9 (25)**. App Store version 1.8 is already distributed,
-and App Store Connect already contains build 24. Build 25 includes the current
-map-download recovery changes and ships with its embedded Watch companion.
+Release candidate: **1.10 (29)**. App Store version 1.9 is already distributed.
+Build 29 addresses the October 20 App Review findings: the Watch uses a dedicated
+app-family icon (dark for production, light for Dev), and production no longer declares background audio for
+the development-firmware-only World Radio feature. Debug keeps background audio.
 
 ## App Store What's New
 

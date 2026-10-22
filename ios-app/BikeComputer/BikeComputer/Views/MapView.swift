@@ -59,10 +59,23 @@ extension MKMapView: MapAppearanceConfigurationTarget {}
 @MainActor
 final class MapViewControlState: ObservableObject {
     static let pitchedThreshold: CLLocationDegrees = 5
-    static let defaultPitchedAngle: CLLocationDegrees = 45
+    nonisolated static let defaultPitchedAngle: CLLocationDegrees = 45
 
     @Published private(set) var mapView: MKMapView?
     @Published private(set) var isPitched = false
+    private(set) var preferredInitialPitch = defaultPitchedAngle
+
+    static func initialCamera(
+        from camera: MKMapCamera,
+        pitch: CLLocationDegrees = defaultPitchedAngle
+    ) -> MKMapCamera {
+        MKMapCamera(
+            lookingAtCenter: camera.centerCoordinate,
+            fromDistance: camera.centerCoordinateDistance,
+            pitch: pitch,
+            heading: camera.heading
+        )
+    }
 
     static func isPitched(_ pitch: CLLocationDegrees) -> Bool {
         pitch > pitchedThreshold
@@ -97,10 +110,11 @@ final class MapViewControlState: ObservableObject {
         guard let mapView else { return }
 
         let currentCamera = mapView.camera
+        preferredInitialPitch = Self.targetPitch(isCurrentlyPitched: isPitched)
         let camera = MKMapCamera(
             lookingAtCenter: currentCamera.centerCoordinate,
             fromDistance: currentCamera.centerCoordinateDistance,
-            pitch: Self.targetPitch(isCurrentlyPitched: isPitched),
+            pitch: preferredInitialPitch,
             heading: currentCamera.heading
         )
         mapView.setCamera(camera, animated: true)
@@ -263,6 +277,7 @@ struct MapViewContainer: UIViewRepresentable {
     var offlineNavigationPolyline: MKPolyline? = nil
     var socialRiders: [SocialRider] = []
     var socialPhotos: [String: UIImage] = [:]
+    var socialMarkerStyle = SocialMapMarkerStyle()
 
     private var visibleSavedRoutePreview: MapSavedRouteOverlay? {
         let content = SavedRouteMapPolicy.content(
@@ -286,6 +301,9 @@ struct MapViewContainer: UIViewRepresentable {
             appearance,
             to: mapView
         )
+        mapView.setCamera(MapViewControlState.initialCamera(
+            from: mapView.camera, pitch: controlState.preferredInitialPitch
+        ), animated: false)
         mapView.delegate = context.coordinator
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: mapView)
         mapView.showsUserLocation = isUserLocationAuthorized
@@ -333,7 +351,8 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
-        context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos, location: location)
+        context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos,
+                                              location: location, style: socialMarkerStyle)
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: uiView)
         context.coordinator.applyAppearanceIfNeeded(
             appearance,
@@ -673,6 +692,14 @@ struct MapViewContainer: UIViewRepresentable {
                 span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
             )
             mapView.setRegion(region, animated: false)
+            // World-scale views can clamp pitch. Apply the initial preference
+            // again after the first location establishes a useful local scale.
+            // Later GPS updates never reset the rider's chosen camera.
+            mapView.setCamera(MapViewControlState.initialCamera(
+                from: mapView.camera,
+                pitch: controlState?.preferredInitialPitch
+                    ?? MapViewControlState.defaultPitchedAngle
+            ), animated: false)
             hasSetInitialRegion = true
         }
 
