@@ -139,6 +139,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var lastDispatchedRouteWindow: Data?
     private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
     private var latestWorkoutMotion: WorkoutDeviceMotionUpdate?
+    private var lastDispatchedWorkoutMotion: RideBLEMotionDispatch?
     private var workoutPairGeneration: UInt8 = 0
     private var latestLocation: NavigationLocationSampleV1?
     private var latestNavigationSnapshot: NavigationSnapshotV1?
@@ -1022,6 +1023,7 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         capabilities = nil
         lastDispatchedNavigationSnapshot = nil
         lastDispatchedRouteWindow = nil
+        lastDispatchedWorkoutMotion = nil
         workoutZoneSequence = 0
         authCharacteristic = nil
         navigationCharacteristic = nil
@@ -1600,7 +1602,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             }
             var payload = write.gpsDispatch?.payload() ?? write.payload
             if let motion = write.motionDispatch {
-                guard let freshPayload = motion.payload() else {
+                guard motion.isNewer(than: lastDispatchedWorkoutMotion),
+                      let freshPayload = motion.payload() else {
                     activeWriteIndex += 1
                     continue
                 }
@@ -1660,6 +1663,11 @@ final class WatchDeviceLink: NSObject, ObservableObject {
                 lastDispatchedNavigationSnapshot = snapshot
             }
             if write.target == .route { lastDispatchedRouteWindow = write.payload }
+            if let motion = write.motionDispatch {
+                // Queue admission/eviction and expiry must not consume a sample.
+                // Reconnect clears this baseline after an ATT failure or reset.
+                lastDispatchedWorkoutMotion = motion
+            }
             peripheral.writeValue(
                 frame,
                 for: characteristic,

@@ -753,6 +753,14 @@ and `12.5 m` maximum horizontal uncertainty; candidate time comes from distinct
 sample capture times, with a three-second maximum gap. No coordinates are
 included.
 
+The direct Watch writer compares the token, producer epoch and sample sequence
+against its last submitted motion frame before each ATT write. Repeated workout
+heartbeats cannot resend the same sample just because its flags or age changed;
+older sequences and epochs are also skipped using the firmware's wrapping serial
+order. Queue admission, replacement and expiry do not advance this baseline.
+Resetting the connection clears it so an authenticated reconnect can resynchronize
+the latest retained sample, subject to the normal freshness check.
+
 iOS coalesces numeric changes to at most one update per second and sends
 state/token and fresh-to-stale transitions immediately. Every new-contract
 publication contains a core and extended frame stamped with the same cycling
