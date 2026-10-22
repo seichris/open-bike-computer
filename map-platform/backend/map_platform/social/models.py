@@ -94,7 +94,7 @@ class Consent(Input):
     stats: bool
 
 
-class LiveState(Point):
+class LocationState(Point):
     sequence: int = Field(ge=0, le=2**53-1)
     capturedAt: float
     horizontalAccuracy: float = Field(ge=0, le=100)
@@ -104,7 +104,23 @@ class LiveState(Point):
     movingSeconds: float | None = Field(default=None, ge=0, le=604800)
     elapsedSeconds: float | None = Field(default=None, ge=0, le=604800)
     elevationGainMeters: float | None = Field(default=None, ge=0, le=100000)
+
+
+class LiveState(LocationState):
     epoch: str = Field(min_length=36, max_length=36)
+
+
+class FriendLiveState(LocationState):
+    # A single GPS publication fans out only to explicitly named current epochs.
+    epochs: dict[str, str] = Field(min_length=1, max_length=100)
+
+    @field_validator("epochs")
+    @classmethod
+    def valid_epochs(cls, value):
+        from uuid import UUID
+        for profile, epoch in value.items():
+            UUID(profile); UUID(epoch)
+        return value
 
 
 class QuickMessage(Input):

@@ -11,7 +11,7 @@ from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from .database import (Database, accounts, blocks, content, devices, exposures, friendships,
+from .database import (Database, accounts, blocks, content, devices, exposures, friendships, friend_shares,
                        insert_ignore, invites, limits, links, media, members, messages, outbox,
                        deletion_receipts, rides)
 from .geometry import distance, route_progress, sanitize_track
@@ -224,6 +224,9 @@ class SocialService:
         self.active(c, actor)
         self.active(c, target)
         a, b = sorted((actor, target))
+        c.execute(delete(friend_shares).where(or_(
+            and_(friend_shares.c.owner == actor, friend_shares.c.recipient == target),
+            and_(friend_shares.c.owner == target, friend_shares.c.recipient == actor))))
         # Neither removing nor blocking can erase the recipient's refusal.
         c.execute(update(friendships).where(and_(friendships.c.a == a, friendships.c.b == b,
                                                  friendships.c.status != "declined"))
@@ -287,6 +290,8 @@ class SocialService:
         return item
 
     def replay_receipt(self, result):
+        if "profileID" in result and "sharing" in result:
+            return {"receipt": "friend_consent", "id": result["profileID"]}
         # Store references, never route bodies, capability secrets or profiles.
         if "members" in result and "riders" in result:
             return {"receipt": "ride", "id": result["id"], "minted": "joinCode" in result}
@@ -304,6 +309,8 @@ class SocialService:
 
     def replay(self, c, actor, result):
         kind = result.get("receipt")
+        if kind == "friend_consent":
+            return self.friend_consent_read(c, actor, result["id"])
         if kind == "ride":
             value = self.ride_read(c, actor, result["id"])
             if result.get("minted"):
@@ -541,6 +548,89 @@ class SocialService:
                                              invites.c.status == "pending")).values(status="accepted"))
         return self.ride_read(c, actor, ride_id)
 
+    def friend_consent_read(self, c, actor, target):
+        self.db.lock(c, actor, target)
+        self.pair_allowed(c, actor, target)
+        if actor == target or not self.friends(c, actor, target):
+            raise SocialError("friendship_required", 403)
+        insert_ignore(c, friend_shares, [{"owner": actor, "recipient": target,
+            "epoch": identifier(), "stats": False, "sequence": -1}], ["owner", "recipient"])
+        share = row(c, friend_shares, and_(friend_shares.c.owner == actor, friend_shares.c.recipient == target))
+        return {"profileID": target, "epoch": share["epoch"],
+                "sharing": bool(share["lease"] and share["lease"] > self.now()),
+                "sharingExpiresAt": share["lease"], "serverTime": self.now()}
+
+    def friend_consent(self, c, actor, target, data):
+        current = self.friend_consent_read(c, actor, target)
+        if data.epoch != current["epoch"]:
+            raise SocialError("consent_changed", 409)
+        if data.location:
+            count = c.scalar(select(func.count()).select_from(friend_shares).where(and_(
+                friend_shares.c.owner == actor, friend_shares.c.recipient != target,
+                friend_shares.c.lease > self.now())))
+            if count >= 100:
+                raise SocialError("sharing_limit", 409)
+        c.execute(update(friend_shares).where(and_(friend_shares.c.owner == actor, friend_shares.c.recipient == target))
+                  .values(epoch=identifier(), lease=self.now()+self.MAX_SHARING_SECONDS if data.location else None,
+                          stats=data.location and data.stats, sequence=-1, live=None, received=None))
+        return self.friend_consent_read(c, actor, target)
+
+    def stop_friend_sharing(self, c, actor):
+        self.db.lock(c, actor)
+        c.execute(delete(friend_shares).where(friend_shares.c.owner == actor))
+        return {"status": "stopped"}
+
+    def friend_snapshot(self, c, actor):
+        self.active(c, actor)
+        outgoing, riders = [], []
+        for share in c.execute(select(friend_shares).where(and_(
+                or_(friend_shares.c.owner == actor, friend_shares.c.recipient == actor),
+                friend_shares.c.lease > self.now()))).mappings():
+            other = share["recipient"] if share["owner"] == actor else share["owner"]
+            person = row(c, accounts, accounts.c.id == other)
+            if person["state"] != "active" or self.blocked(c, actor, other) or not self.friends(c, actor, other):
+                continue
+            if share["owner"] == actor:
+                outgoing.append({"profileID": other, "epoch": share["epoch"], "sharing": True,
+                                 "sharingExpiresAt": share["lease"], "serverTime": self.now()})
+            elif share["live"] and share["received"] is not None and self.now()-share["received"] < 60:
+                state = dict(share["live"])
+                state.update(profile=self.profile(c, actor, other), receivedAt=share["received"],
+                             age=max(0, self.now()-state["capturedAt"]))
+                if state["age"] < 60:
+                    riders.append(state)
+        return {"outgoing": outgoing, "riders": riders, "serverTime": self.now()}
+
+    def publish_friends(self, c, actor, data):
+        # Same canonical account locks as block/unfriend/consent: those operations
+        # cannot race a publication into resurrecting revoked visibility.
+        self.db.lock(c, actor, *data.epochs)
+        self.active(c, actor)
+        payload = data.model_dump(exclude_none=True, exclude={"epochs"})
+        if not self.now()-30 <= data.capturedAt <= self.now()+5:
+            raise SocialError("stale_state", 409)
+        accepted = []
+        for target, epoch in data.epochs.items():
+            share = c.execute(select(friend_shares).where(and_(friend_shares.c.owner == actor,
+                friend_shares.c.recipient == target))).mappings().first()
+            if not share or share["epoch"] != epoch or not share["lease"] or share["lease"] <= self.now():
+                continue
+            person = row(c, accounts, accounts.c.id == target)
+            if person["state"] != "active" or self.blocked(c, actor, target) or not self.friends(c, actor, target):
+                continue
+            if data.sequence <= share["sequence"]:
+                continue
+            if share["received"] is not None and self.now()-share["received"] < 2:
+                raise SocialError("publish_rate", 429)
+            state = dict(payload)
+            if not share["stats"]:
+                for key in ("speed", "distanceMeters", "movingSeconds", "elapsedSeconds", "elevationGainMeters"):
+                    state.pop(key, None)
+            c.execute(update(friend_shares).where(and_(friend_shares.c.owner == actor, friend_shares.c.recipient == target))
+                      .values(sequence=data.sequence, live=state, received=self.now()))
+            accepted.append(target)
+        return {"accepted": accepted}
+
     def consent(self, c, actor, ride_id, data):
         self.db.lock(c, actor)
         ride, member = self.require_member(c, actor, ride_id)
@@ -606,6 +696,7 @@ class SocialService:
             # Committed atomically with the deletion: only an accepted request has
             # a receipt, and only the client holding its secret can resolve it.
             c.execute(deletion_receipts.insert().values(digest=receipt_digest, account=actor, created=self.now()))
+        c.execute(delete(friend_shares).where(or_(friend_shares.c.owner == actor, friend_shares.c.recipient == actor)))
         c.execute(update(accounts).where(accounts.c.id == actor).values(state="deleting", avatar=None,
                   username=None, name="Deleted rider", privacy={}, version=accounts.c.version+1))
         c.execute(update(members).where(members.c.account == actor).values(status="left", live=None, sharing=False))

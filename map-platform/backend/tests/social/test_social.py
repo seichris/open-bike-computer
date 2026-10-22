@@ -168,6 +168,121 @@ class SocialTest(unittest.TestCase):
         self.assertEqual(joined.status_code,200,joined.text)
         self.assertFalse(joined.json()['sharing'])
         return room
+    def enable_friend_sharing(self, who='alice', target='bob', enabled=True, stats=True, key=None):
+        path = f'/friend-sharing/{self.ids[target]}/consent'
+        current = self.call(who, 'GET', path)
+        self.assertEqual(current.status_code, 200, current.text)
+        return self.call(who, 'POST', path, {'epoch': current.json()['epoch'],
+                         'location': enabled, 'stats': enabled and stats}, key=key)
+
+    def friend_state(self, epochs, sequence=0):
+        return {'epochs': epochs, 'sequence': sequence, 'latitude': 1, 'longitude': 2,
+                'capturedAt': self.clock, 'horizontalAccuracy': 5, 'speed': 6,
+                'distanceMeters': 1234, 'movingSeconds': 60, 'elapsedSeconds': 90}
+
+    def test_friend_sharing_is_directional_route_independent_and_bounded(self):
+        self.friend(); self.client.app.state.features = SocialFeatures(friendSharing=True)
+        consent = self.enable_friend_sharing().json()
+        self.assertTrue(consent['sharing'])
+        self.assertEqual(consent['sharingExpiresAt']-self.clock, 4*3600)
+        state = self.friend_state({self.ids['bob']: consent['epoch']})
+        self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', state).json()['accepted'], [self.ids['bob']])
+        bob = self.call('bob', 'GET', '/friend-sharing').json()
+        self.assertEqual(bob['outgoing'], [])
+        rider = bob['riders'][0]
+        self.assertEqual(rider['profile']['id'], self.ids['alice'])
+        self.assertEqual(rider['speed'], 6)
+        self.assertNotIn('epochs', rider); self.assertNotIn('routeHash', rider)
+        self.assertEqual(self.call('alice', 'GET', '/friend-sharing').json()['riders'], [])
+        self.assertEqual(self.call('carol', 'GET', '/friend-sharing').json()['riders'], [])
+        self.clock += 61
+        self.assertEqual(self.call('bob', 'GET', '/friend-sharing').json()['riders'], [])
+        self.clock += 4*3600
+        state.update(capturedAt=self.clock, sequence=1)
+        self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', state).json()['accepted'], [])
+        self.assertEqual(self.call('alice', 'GET', '/friend-sharing').json()['outgoing'], [])
+
+    def test_friend_sharing_stop_epochs_replays_and_rollout(self):
+        self.friend(); self.client.app.state.features = SocialFeatures(friendSharing=True)
+        path = f"/friend-sharing/{self.ids['bob']}/consent"
+        initial = self.call('alice', 'GET', path).json()
+        request = {'epoch': initial['epoch'], 'location': True, 'stats': True}
+        start = self.call('alice', 'POST', path, request, key='friend-share-start').json()
+        old = self.friend_state({self.ids['bob']: start['epoch']})
+        self.call('alice', 'POST', '/friend-sharing/state', old)
+        self.enable_friend_sharing(enabled=False)
+        self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', old).json()['accepted'], [])
+        replay = self.call('alice', 'POST', path, request, key='friend-share-start').json()
+        self.assertFalse(replay['sharing']); self.assertNotEqual(replay['epoch'], start['epoch'])
+        self.enable_friend_sharing()
+        self.enable_friend_sharing('bob', 'alice')
+        self.assertEqual(self.call('alice', 'DELETE', '/friend-sharing').status_code, 200)
+        self.assertEqual(self.call('alice', 'GET', '/friend-sharing').json()['outgoing'], [])
+        self.assertEqual(len(self.call('bob', 'GET', '/friend-sharing').json()['outgoing']), 1)
+        self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', old).json()['accepted'], [])
+        self.enable_friend_sharing()
+        self.client.app.state.features = SocialFeatures()
+        self.assertEqual(self.call('alice', 'GET', '/friend-sharing').status_code, 503)
+        self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', old).status_code, 503)
+        stopped = self.enable_friend_sharing(enabled=False)
+        self.assertEqual(stopped.status_code, 200, stopped.text)
+        self.assertFalse(stopped.json()['sharing'])
+
+    def test_friend_sharing_unfriend_block_and_readd_never_resumes(self):
+        self.friend(); self.client.app.state.features = SocialFeatures(friendSharing=True)
+        a = self.enable_friend_sharing().json()
+        self.enable_friend_sharing('bob', 'alice')
+        state = self.friend_state({self.ids['bob']: a['epoch']})
+        self.call('alice', 'POST', '/friend-sharing/state', state)
+        self.call('alice', 'DELETE', f"/friends/{self.ids['bob']}")
+        self.assertEqual(self.call('bob', 'GET', '/friend-sharing').json()['riders'], [])
+        from map_platform.social.database import friend_shares
+        with self.db.transaction() as c:
+            self.assertEqual(c.execute(select(friend_shares)).all(), [])
+        self.clock += 86401
+        state['capturedAt'] = self.clock
+        self.friend()
+        self.assertFalse(self.call('alice', 'GET', f"/friend-sharing/{self.ids['bob']}/consent").json()['sharing'])
+        self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', state).json()['accepted'], [])
+        self.enable_friend_sharing()
+        self.call('bob', 'PUT', f"/blocks/{self.ids['alice']}")
+        self.assertEqual(self.call('alice', 'GET', '/friend-sharing').json()['outgoing'], [])
+        self.assertEqual(self.call('bob', 'GET', '/friend-sharing').json()['riders'], [])
+        self.assertEqual(self.call('alice', 'GET', f"/friend-sharing/{self.ids['carol']}/consent").status_code, 403)
+
+    def test_friend_sharing_batch_isolates_stats_and_rejects_stale_fixes(self):
+        self.friend()
+        request = self.call('alice', 'POST', '/friend-requests', {'profileID': self.ids['carol']}).json()
+        self.call('carol', 'POST', f"/friend-requests/{request['id']}/accept")
+        self.client.app.state.features = SocialFeatures(friendSharing=True)
+        a = self.enable_friend_sharing().json()
+        c = self.enable_friend_sharing(target='carol', stats=False).json()
+        state = self.friend_state({self.ids['bob']: a['epoch'], self.ids['carol']: c['epoch']})
+        self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', dict(state, capturedAt=self.clock-31)).status_code, 409)
+        self.assertEqual(len(self.call('alice', 'POST', '/friend-sharing/state', state).json()['accepted']), 2)
+        bob = self.call('bob', 'GET', '/friend-sharing').json()['riders'][0]
+        carol = self.call('carol', 'GET', '/friend-sharing').json()['riders'][0]
+        self.assertIn('speed', bob); self.assertNotIn('speed', carol); self.assertNotIn('distanceMeters', carol)
+        state['sequence'] = 1
+        self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', state).status_code, 429)
+        self.clock += 3; state['capturedAt'] = self.clock
+        state['epochs'][self.ids['bob']] = str(uuid.uuid4())
+        self.assertEqual(self.call('alice', 'POST', '/friend-sharing/state', state).json()['accepted'], [self.ids['carol']])
+        self.call('alice', 'POST', '/me/deletion', {'expectedProfileID': self.ids['alice']})
+        self.assertEqual(self.call('carol', 'GET', '/friend-sharing').json()['riders'], [])
+
+    def test_friend_sharing_schema_upgrade_creates_no_implicit_consents(self):
+        from map_platform.social.database import versions, friend_shares
+        from sqlalchemy import update
+        self.friend()
+        with self.db.transaction() as c: c.execute(update(versions).values(version=3))
+        friend_shares.drop(self.db.engine)
+        with self.assertRaises(ValueError): self.db.check_schema()
+        self.db.migrate(); self.db.check_schema()
+        self.client.app.state.features = SocialFeatures(friendSharing=True)
+        self.assertEqual(self.call('alice', 'GET', '/friend-sharing').json()['outgoing'], [])
+        self.assertEqual(self.call('bob', 'GET', '/friend-sharing').json()['riders'], [])
+
     def test_identity_and_no_personal_identifiers(self):
         self.assertEqual(self.client.get('/me').status_code,401)
         profile=self.call('alice','GET','/me').json()
@@ -179,7 +294,7 @@ class SocialTest(unittest.TestCase):
         from unittest.mock import patch
         with patch.dict(os.environ, {}, clear=True):
             features = SocialFeatures.from_environment()
-        self.assertEqual(features.document(), dict(media=False, routes=False, activities=False, groups=False, hardware=False, invitePreviews=False, savedMapKitRoutes=False))
+        self.assertEqual(features.document(), dict(media=False, routes=False, activities=False, groups=False, hardware=False, invitePreviews=False, savedMapKitRoutes=False, friendSharing=False))
         self.client.app.state.features = features
         self.assertEqual(self.call('alice', 'GET', '/capabilities').json(), features.document())
         self.assertEqual(self.call('alice', 'GET', '/me').status_code, 200)

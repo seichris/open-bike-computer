@@ -182,6 +182,7 @@ struct SocialRuntimeTests {
         require(store.read(owner: "another-owner", ride: "ride") == nil, "invites never cross accounts")
         let capability = try JSONDecoder().decode(SocialCapabilities.self, from: Data("{\"media\":true}".utf8))
         require(capability.media && !capability.invitePreviews, "old servers safely omit preview capability")
+        require(!capability.friendSharing, "old servers keep direct friend sharing disabled")
         require(!capability.savedMapKitRoutes, "old servers keep Apple Maps sharing disabled until the backend supports it")
         let current = try JSONDecoder().decode(SocialCapabilities.self, from: Data("{\"routes\":true,\"savedMapKitRoutes\":true}".utf8))
         require(current.savedMapKitRoutes, "updated servers advertise saved Apple Maps route support")
@@ -222,6 +223,7 @@ struct SocialRuntimeTests {
     }
 
     static func main() async throws {
+        try await FriendLiveServiceTests.run()
         profileSetupPresentation()
         sharedRideProgressIgnoresStationaryJitter()
         try await automaticJoinSharing()

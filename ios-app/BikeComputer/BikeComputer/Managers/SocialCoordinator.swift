@@ -9,6 +9,14 @@ final class SocialCoordinator: ObservableObject {
     let session: BicinoUserSession
     let client: BicinoSocialClient
     let live: LiveRideService
+    let friendLive: FriendLiveService
+    var visibleRiders: [SocialRider] {
+        var seen = Set<String>()
+        return (live.riders + friendLive.riders)
+            .filter { $0.age(at: Date()) < 60 }
+            .sorted { $0.age(at: Date()) < $1.age(at: Date()) }
+            .filter { seen.insert($0.id).inserted }
+    }
     let savedRouteSharing: SocialSavedRouteSharing
     @Published private(set) var profile: SocialProfile?
     @Published private(set) var capabilities = SocialCapabilities()
@@ -73,6 +81,7 @@ final class SocialCoordinator: ObservableObject {
         let client = BicinoSocialClient(session: session, baseURL: URL(string: OfflineMapServiceConfig.defaultServerURLString)?.appendingPathComponent("v1/social"))
         self.client = client
         live = LiveRideService(client: client)
+        friendLive = FriendLiveService(client: client)
         savedRouteSharing = SocialSavedRouteSharing(client: client, currentGeneration: { session.generation })
         // The existing explicit app-private group; no shared group is introduced.
         let store: any SocialSecureStore = session.keychainGroup.map { SocialKeychainStore(accessGroup: $0) } ?? SocialMemoryStore()
@@ -85,6 +94,10 @@ final class SocialCoordinator: ObservableObject {
         deletion = SocialAccountDeletion(store: store, client: client, anonymous: client)
         notifications.onStatusChange = { [weak self] in self?.notificationStatus = $0 }
         session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observers)
+        friendLive.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observers)
+        friendLive.onRidersChanged = { [weak self] riders in
+            Task { @MainActor [weak self] in await self?.loadPhotos(riders.map(\.profile)) }
+        }
         live.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observers)
         session.$generation.dropFirst().sink { [weak self] _ in self?.clear() }.store(in: &observers)
         let invitationStore = SocialRideInvitationStore(store: store)
@@ -122,6 +135,8 @@ final class SocialCoordinator: ObservableObject {
             await recoverDeletion()
         case .signedIn:
             await registerForAlertsIfAuthorized()
+            // Receiving friend positions must not depend on opening the Friends screen.
+            do { try await refresh() } catch { self.error = error.localizedDescription }
         default:
             break
         }
@@ -132,6 +147,7 @@ final class SocialCoordinator: ObservableObject {
         profile = nil; friends = []; requests = []; invitations = []; sentInvitations = []
         routes = []; activities = []; photos = [:]; rides = []; blocked = []
         live.reset()
+        friendLive.reset()
     }
 
     func refresh() async throws {
@@ -140,6 +156,8 @@ final class SocialCoordinator: ObservableObject {
         guard expected == session.generation else { return }
         self.capabilities = capabilities
         if !capabilities.groups { await live.stopSharing(); live.reset() }
+        if capabilities.friendSharing { friendLive.start() } else { await friendLive.stopAll() }
+        guard expected == session.generation else { return }
         if !capabilities.media { photos = [:] }
         let me = try JSONDecoder().decode(SocialProfile.self, from: await client.request("me"))
         let friends: [SocialProfile] = try await pages("friends")
@@ -291,6 +309,7 @@ final class SocialCoordinator: ObservableObject {
 
     func removeFriend(_ id: String, block: Bool) async throws {
         _ = try await client.json("\(block ? "blocks" : "friends")/\(id)", method: block ? "PUT" : "DELETE")
+        friendLive.forget(id)
         photos = [:]
         if block { await live.stopSharing(); live.reset() }
         try await refresh()
@@ -395,8 +414,15 @@ final class SocialCoordinator: ObservableObject {
         try await live.select(try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value)), shareOnJoin: true)
     }
 
-    func signOut() async throws {
+    private func stopLiveSharing() async {
+        // Both publishers stop locally before waiting for either revocation.
+        async let friends: Void = friendLive.stopAll()
         await live.stopSharing()
+        await friends
+    }
+
+    func signOut() async throws {
+        await stopLiveSharing()
         live.reset()
         UIApplication.shared.unregisterForRemoteNotifications()
         pushToken = nil
@@ -408,14 +434,14 @@ final class SocialCoordinator: ObservableObject {
 
     func deleteAccount() async throws {
         guard let profile else { throw SocialFailure.signedOut }
-        let session = session, live = live
+        let session = session
         let completed = try await deletion.delete(profileID: profile.id, accountUID: session.currentUID,
             reauthenticate: {
                 if session.usesApple { return try await session.signInWithApple(reauthenticate: true) }
                 try await session.signInWithGoogle(reauthenticate: true)
                 return nil
             },
-            beforeSending: { await live.stopSharing() })
+            beforeSending: { await self.stopLiveSharing() })
         await finishDeletion(completed)
     }
 

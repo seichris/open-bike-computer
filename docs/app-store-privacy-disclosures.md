@@ -35,7 +35,7 @@ ID and token bundle linked to that installation.
 
 | Data type | Collected | Purpose | Linked to identity | Tracking | Reason |
 | --- | --- | --- | --- | --- | --- |
-| Precise Location | Yes | App Functionality | Yes | No | Group rides share fresh location with accepted riders, and optional route sharing and invitation previews contain route geometry. An offline-map bounds, polygon, or route-corridor request contains precise coordinates and is stored with the requesting app installation ID so the service can build, recover, and deliver the map. |
+| Precise Location | Yes | App Functionality | Yes | No | Group rides and explicit per-friend toggles share fresh location with their selected audience, and optional route sharing and invitation previews contain route geometry. An offline-map bounds, polygon, or route-corridor request contains precise coordinates and is stored with the requesting app installation ID so the service can build, recover, and deliver the map. |
 | Device ID | Yes | App Functionality | Yes | No | The app creates a random installation ID used to authenticate and scope map jobs. It is not an advertising ID or hardware identifier. |
 | User ID | Yes | App Functionality | Yes | No | Optional social features use a stable Firebase account ID, username, friendships and invitations. When the rider optionally connects Strava, Bicino stores the Strava athlete ID and OAuth token bundle encrypted at rest and bound to the random app-installation ID so it can import that rider's routes. |
 | Other User Content | Yes | App Functionality | Yes | No | A custom saved-map display name is free-form text that can be synced to the map job so the rider sees the same name when the app recovers that job. |
@@ -45,7 +45,7 @@ ID and token bundle linked to that installation.
 | Photos or Videos | Yes | App Functionality | Yes | No | The optional profile photo is sanitized and stored privately; group invitations can expose route-map preview images through an unguessable public preview URL. |
 | Contacts | Yes | App Functionality | Yes | No | The optional friends feature stores the rider’s accepted friendships, which form the account’s social graph. The app does not read the phone address book. |
 | Health | No | — | — | — | HealthKit values and workout routes remain within HealthKit and the rider's paired Watch/iPhone workflow. They are not uploaded to a developer or third-party server. |
-| Fitness | Yes | App Functionality | Yes | No | Creating or joining a group ride shares GPS-derived speed, distance, moving time, and elapsed time with accepted riders. HealthKit measurements remain excluded. |
+| Fitness | Yes | App Functionality | Yes | No | Creating or joining a group ride, or enabling a friend’s live sharing toggle, shares GPS-derived speed, distance, moving time, and elapsed time with that audience. HealthKit measurements remain excluded. |
 | Crash Data / Performance Data | No | — | — | — | The app contains no developer or third-party crash-reporting or performance SDK. Apple-operated diagnostics are not developer collection unless exported to the developer. |
 
 For all ten selected types, choose **App Functionality**, **Data Linked to the
@@ -57,7 +57,7 @@ other identifier as linked even when the app has no account or real-world name.
 - Confirm the release build still has no analytics, advertising, crash-report,
   or diagnostic-upload SDK.
 - Confirm HealthKit measurements and raw workout tracks are absent from backend
-  requests and logs. Social group rides send only the disclosed live GPS and
+  requests and logs. Social Group Rides and direct friend sharing send only the disclosed live GPS and
   basic statistics; user-owned shared routes and invite images follow their
   explicit sharing actions.
 - Confirm Watch online-routing origin/destination and returned MapKit route are

@@ -61,12 +61,12 @@ final class SocialBLERelay: SocialRelayLink {
     }
 
     private func tick() async {
-        guard let social, social.capabilities.hardware, social.live.ride != nil, social.session.state == .signedIn else {
+        guard let social, social.capabilities.hardware, social.session.state == .signedIn else {
             await engine.clearAll()
             return
         }
         let me = social.profile?.id
-        let riders = social.live.riders.filter { $0.id != me }.map { rider in
+        let riders = social.visibleRiders.filter { $0.id != me }.map { rider in
             SocialRelayRider(id: rider.id, latitude: rider.latitude, longitude: rider.longitude,
                              ageSeconds: rider.age(at: Date()), accuracy: rider.horizontalAccuracy,
                              course: rider.course, initials: rider.profile.initials,

@@ -10,7 +10,8 @@ struct SocialCapabilities: Codable, Equatable {
     var hardware = false
     var invitePreviews = false
     var savedMapKitRoutes = false
-    enum CodingKeys: String, CodingKey { case media, routes, activities, groups, hardware, invitePreviews, savedMapKitRoutes }
+    var friendSharing = false
+    enum CodingKeys: String, CodingKey { case media, routes, activities, groups, hardware, invitePreviews, savedMapKitRoutes, friendSharing }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -20,6 +21,7 @@ struct SocialCapabilities: Codable, Equatable {
         groups = try c.decodeIfPresent(Bool.self, forKey: .groups) ?? false
         hardware = try c.decodeIfPresent(Bool.self, forKey: .hardware) ?? false
         invitePreviews = try c.decodeIfPresent(Bool.self, forKey: .invitePreviews) ?? false
+        friendSharing = try c.decodeIfPresent(Bool.self, forKey: .friendSharing) ?? false
         savedMapKitRoutes = try c.decodeIfPresent(Bool.self, forKey: .savedMapKitRoutes) ?? false
     }
 }
@@ -190,4 +192,18 @@ enum SocialMapGeometry {
         let scale = min(tx, ty)
         return CGPoint(x: center.x+scale*dx, y: center.y+scale*dy)
     }
+}
+
+struct SocialFriendConsent: Decodable {
+    let profileID: String
+    let epoch: String
+    let sharing: Bool
+    let sharingExpiresAt: Double?
+    let serverTime: Double
+}
+
+struct SocialFriendSnapshot: Decodable {
+    let outgoing: [SocialFriendConsent]
+    let riders: [SocialRider]
+    let serverTime: Double
 }
