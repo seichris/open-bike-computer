@@ -38,6 +38,17 @@ These inherited approvals remain bound to their existing images and clients;
 they do not qualify this POI worker, new firmware, or production target 5.
 Recheck deployment contracts and start fresh final-head CI/budget evidence.
 
+At `d24c863a`, all 18 PR checks and branch-bound run `39804697231` passed.
+Its verified POI-enabled binary is 3,044,960 bytes, leaving 100,768 bytes in
+the unchanged 3 MiB slot (35,232 above the unchanged reserve). The retained
+manifest identifies exactly `d24c863a`, binary SHA-256
+`30f6fd27e454f5b29ebceb71dccdcff6ee7f87a965774ce3b7a872779aff15f3`.
+The final main check found development pin promotion #616 at
+`19c9787d61ff5b6526fea0ef9d73f953ecd766be`: only eight Compose-lock lines,
+no app/firmware/extractor or generation-policy code. Merge those unchanged
+main pins and repeat deployment/CI/budget checks. The `d24c863a` results remain
+explicit baselines rather than attestations of that last merge.
+
 ### Simulator verification follow-up
 
 Fresh run `39800725264` passed the POI qualification firmware and full app
