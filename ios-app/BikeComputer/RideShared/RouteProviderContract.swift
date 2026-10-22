@@ -47,6 +47,13 @@ nonisolated enum RouteProviderPolicyV1 {
         storageScope: .durable
     )
 
+    /// Explicit saved-route sharing policy requested by the maintainer, 2026-10-22.
+    /// Preserve Apple attribution and phoneOnly scope; active MapKit responses and
+    /// Strava archives remain ineligible. This is not an Apple license attestation.
+    static func allowsSocialSharing(_ metadata: RouteProviderMetadataV1) -> Bool {
+        metadata == importedGPX || metadata == mapKitSavedOnPhone
+    }
+
     static func hasConsistentKnownPolicy(
         _ metadata: RouteProviderMetadataV1
     ) -> Bool {

@@ -340,7 +340,6 @@ class SocialService:
             points = route["points"]
             from .models import Point
             if (archive["schemaVersion"] != 1 or len(points) < 2 or len(points) > 20000
-                    or route["provider"] != {"providerID": "user.imported-gpx", "attribution": "User-provided GPX", "storageScope": "durable"}
                     or route.get("sourceReference") or archive.get("deleteAfter") is not None
                     or not isinstance(archive["contentHash"], str) or len(archive["contentHash"]) != 64):
                 raise ValueError()

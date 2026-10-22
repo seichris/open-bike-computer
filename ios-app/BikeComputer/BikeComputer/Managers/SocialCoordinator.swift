@@ -305,8 +305,14 @@ final class SocialCoordinator: ObservableObject {
     func sharingUnavailableReason(for summary: PlannedRouteSummaryV1, in library: PhoneRouteLibrary) -> String? {
         guard session.state == .signedIn else { return "Sign in from your profile to start a group ride or share this route." }
         guard capabilities.routes, capabilities.groups else { return "Group rides and route sharing are unavailable right now." }
-        guard summary.providerID == RouteProviderPolicyV1.importedGPX.providerID else {
-            return "This provider’s routes can be navigated privately. Group rides and sharing are available for your own GPX routes."
+        guard let archive = try? library.offlineArchive(for: summary) else {
+            return "This saved route is unavailable. Open it again from Saved Routes."
+        }
+        guard RouteProviderPolicyV1.allowsSocialSharing(archive.route.provider) else {
+            return "Group rides and sharing are available for your own GPX and saved Apple Maps routes."
+        }
+        if archive.route.provider == RouteProviderPolicyV1.mapKitSavedOnPhone, !capabilities.savedMapKitRoutes {
+            return "Apple Maps route sharing is not available on this server yet."
         }
         guard publication(for: summary, in: library).mayPublish else { return "Only this route’s owner can share it or start a group ride with it." }
         return nil
@@ -317,7 +323,7 @@ final class SocialCoordinator: ObservableObject {
         if let reason = sharingUnavailableReason(for: summary, in: library) { throw SocialFailure.server(reason) }
         guard let owner = profile?.id else { throw SocialFailure.signedOut }
         let archive = try library.offlineArchive(for: summary)
-        guard archive.route.provider == RouteProviderPolicyV1.importedGPX else {
+        guard RouteProviderPolicyV1.allowsSocialSharing(archive.route.provider) else {
             throw SocialFailure.server("this_route_provider_does_not_allow_social_sharing")
         }
         let encoded = try archive.encoded(purpose: .offlineNavigation)

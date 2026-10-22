@@ -72,7 +72,8 @@ an online route request.
 
 Saved offline routes and coordinate-backed favorite names and coordinates are
 transferred between your paired iPhone and Watch using Apple's WatchConnectivity
-service. They remain within the paired app workflow and are not sent to the
+service. Unless you explicitly share a route or start a Group Ride as described
+below, they remain within the paired app workflow and are not sent to the
 Bicino backend. Offline route files enforce their provider retention metadata
 and are removed when they expire. You can delete a saved route from the iPhone;
 if it is currently active on Watch, deletion finishes when navigation stops.
@@ -212,6 +213,13 @@ If you sign in and enable social features, we process your Bicino user ID, chose
 name, username, sanitized profile photo, friendships, invitations, and content you
 explicitly publish. These use the same Firebase account as bicino.com. Social
 photos and routes are stored in private object storage and the social database.
+
+Starting a Group Ride from your saved GPX or Apple Maps route uploads that saved
+route to Bicino, including its coordinates, navigation instructions and labels.
+Accepted riders receive the exact route and can save a copy on their iPhones.
+The route's sharing preference also controls access outside the group. Opening a
+saved route alone does not upload it. Apple Maps routes keep their Apple Maps
+attribution and are not transferred to Watch.
 
 When you explicitly create, join, or accept an invitation to a Group Ride,
 Bicino starts sharing your live location and GPS-derived speed, distance, moving
