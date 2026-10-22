@@ -25,6 +25,10 @@ class AddressSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleter
     }
     
     func search(query: String) {
+        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            completer.cancel()
+            suggestions = []
+        }
         completer.queryFragment = query
     }
     
@@ -34,7 +38,7 @@ class AddressSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleter
     }
     
     func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
-        suggestions = completer.results
+        suggestions = completer.queryFragment.isEmpty ? [] : completer.results
     }
     
     func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
@@ -59,6 +63,8 @@ struct RouteSearchPanel: View {
     let currentAddress: String
     let currentLocation: CLLocation?
     let maxExpandedHeight: CGFloat
+    @ObservedObject var onlinePlaces: OnlinePOISearchSession
+    var nearbySearchRegion: () -> MKCoordinateRegion?
     var initialDestination: SavedDestination? = nil
     var onStartNavigation: (RouteEndpoint, SavedDestination, MKDirectionsTransportType) -> Void
     var onSaveToFavorites:
@@ -97,11 +103,6 @@ struct RouteSearchPanel: View {
             if expanded {
                 if let initialDestination {
                     selectInitialDestination(initialDestination)
-                } else {
-                    DispatchQueue.main.async {
-                        guard isExpanded, !hasSelectedDestination else { return }
-                        focusedField = .destination
-                    }
                 }
             } else {
                 focusedField = nil
@@ -111,6 +112,7 @@ struct RouteSearchPanel: View {
         .onChange(of: initialDestination) { destination in
             if isExpanded, let destination { selectInitialDestination(destination) }
         }
+        .onDisappear { onlinePlaces.clear() }
     }
 
     private var collapsedSearchButton: some View {
@@ -138,6 +140,13 @@ struct RouteSearchPanel: View {
         VStack(spacing: 12) {
             destinationSearchField
 
+            if !hasSelectedDestination && !isEditingSource && destinationAddress.isEmpty {
+                OnlinePOICategoryRow(session: onlinePlaces) { category in
+                    focusedField = nil
+                    onlinePlaces.toggle(category, region: nearbySearchRegion())
+                }
+            }
+
             if hasSelectedDestination {
                 sourcePicker
                 transportControls
@@ -163,7 +172,7 @@ struct RouteSearchPanel: View {
                 .textContentType(.fullStreetAddress)
                 .focused($focusedField, equals: .destination)
                 .onTapGesture {
-                    expandForDestinationSearch()
+                    focusedField = .destination
                 }
                 .onChange(of: destinationAddress) { newValue in
                     if isSelectingFromSuggestion {
@@ -172,6 +181,7 @@ struct RouteSearchPanel: View {
                     }
 
                     destinationCompleter.search(query: newValue)
+                    if !newValue.isEmpty { onlinePlaces.clear() }
                     selectedDestination = nil
                     if hasSelectedDestination {
                         hasSelectedDestination = false
@@ -186,6 +196,15 @@ struct RouteSearchPanel: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Clear destination")
             }
+
+            Button {
+                isExpanded = false
+            } label: {
+                Image(systemName: "chevron.down").foregroundStyle(.secondary)
+                    .frame(minWidth: 32, minHeight: 32)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close destination search")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -299,7 +318,11 @@ struct RouteSearchPanel: View {
             } else {
                 Spacer(minLength: 0)
             }
-        } else if !hasSelectedDestination && !destinationCompleter.suggestions.isEmpty {
+        } else if onlinePlaces.isActive {
+            OnlinePOIResultsView(session: onlinePlaces) {
+                onlinePlaces.search(region: nearbySearchRegion())
+            }
+        } else if !hasSelectedDestination && !destinationAddress.isEmpty && !destinationCompleter.suggestions.isEmpty {
             suggestionsScroll(for: destinationCompleter.suggestions) { suggestion in
                 let fullAddress = formattedAddress(for: suggestion)
                 selectDestination(SavedDestination(name: fullAddress))
@@ -442,7 +465,7 @@ struct RouteSearchPanel: View {
 
     private func expandForDestinationSearch() {
         isExpanded = true
-        focusedField = .destination
+        focusedField = nil
     }
 
     private func clearDestination() {
@@ -470,6 +493,7 @@ struct RouteSearchPanel: View {
     }
 
     private func resetTransientState() {
+        onlinePlaces.clear()
         isEditingSource = false
         hasSelectedSource = false
         hasSelectedDestination = false
@@ -495,6 +519,7 @@ struct RouteSearchPanel: View {
     }
 
     private func selectDestination(_ destination: SavedDestination) {
+        onlinePlaces.clear()
         isSelectingFromSuggestion = destinationAddress != destination.name
         selectedDestination = destination
         destinationAddress = destination.name

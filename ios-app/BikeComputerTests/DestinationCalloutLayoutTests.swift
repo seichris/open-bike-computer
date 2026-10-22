@@ -146,6 +146,7 @@ private final class RecordingPolylineRoute: MKRoute {
 struct DestinationCalloutLayoutTests {
     @MainActor
     static func main() async {
+        testOnlinePOIReadOnlySelection()
         testLabelExpansion()
         testRouteAlternativeMapSelection()
         await testDestinationSelectionTrackingIntegration()
@@ -154,6 +155,35 @@ struct DestinationCalloutLayoutTests {
         await testStaleResolutionCancellation()
 
         print("DestinationCalloutLayoutTests passed")
+    }
+
+    @MainActor
+    private static func testOnlinePOIReadOnlySelection() {
+        let item = MKMapItem(placemark: MKPlacemark(coordinate:
+            CLLocationCoordinate2D(latitude: 1.3, longitude: 103.85)))
+        item.name = "Fixture cafe"
+        let map = RecordingMapView(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let coordinator = MapViewContainer.Coordinator()
+        coordinator.isOnlinePOISearchActive = true
+        var selected: MKMapItem?
+        var navigationCallbacks = 0
+        coordinator.onOnlinePOISelected = { selected = $0 }
+        coordinator.onDestinationSelected = { _, _ in navigationCallbacks += 1 }
+        coordinator.updateOnlinePOIs([item], selected: nil, on: map, bottomPadding: 280)
+        let annotation = map.annotations.compactMap { $0 as? OnlinePOIAnnotation }.first!
+        let view = coordinator.mapView(map, viewFor: annotation)!
+        precondition(view.rightCalloutAccessoryView == nil && view.leftCalloutAccessoryView == nil,
+                     "Online pins have no route/favorite accessory action")
+        coordinator.mapView(map, didSelect: view)
+        coordinator.mapView(map, annotationView: view,
+                            calloutAccessoryControlTapped: UIControl())
+        precondition(selected === item && navigationCallbacks == 0,
+                     "Selecting an online pin cannot enter the destination callback")
+        precondition(coordinator.isFreePanActive(mapView: map, isOfflineMapSelectionActive: false),
+                     "Search stays on the chosen map area instead of following GPS")
+        coordinator.updateOnlinePOIs([], selected: nil, on: map, bottomPadding: 280)
+        precondition(!map.annotations.contains { $0 is OnlinePOIAnnotation },
+                     "Clearing search removes all online map annotations")
     }
 
     @MainActor

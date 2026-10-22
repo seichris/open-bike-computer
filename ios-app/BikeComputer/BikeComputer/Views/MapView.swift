@@ -17,6 +17,18 @@ final class DestinationAnnotation: MKPointAnnotation {
     var calloutAddress = ""
 }
 
+/// A read-only online result, deliberately unrelated to DestinationAnnotation.
+final class OnlinePOIAnnotation: MKPointAnnotation {
+    let item: MKMapItem
+
+    init(item: MKMapItem) {
+        self.item = item
+        super.init()
+        coordinate = item.placemark.coordinate
+        title = item.name
+    }
+}
+
 @MainActor
 enum DestinationCalloutLabel {
     static let preferredWidth: CGFloat = 240
@@ -278,6 +290,10 @@ struct MapViewContainer: UIViewRepresentable {
     var socialRiders: [SocialRider] = []
     var socialPhotos: [String: UIImage] = [:]
     var socialMarkerStyle = SocialMapMarkerStyle()
+    var onlinePOIItems: [MKMapItem] = []
+    var selectedOnlinePOI: MKMapItem? = nil
+    var isOnlinePOISearchActive = false
+    var onOnlinePOISelected: ((MKMapItem) -> Void)? = nil
 
     private var visibleSavedRoutePreview: MapSavedRouteOverlay? {
         let content = SavedRouteMapPolicy.content(
@@ -342,6 +358,8 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.isSimulationMode = isSimulationMode
         context.coordinator.isUserLocationAuthorized = isUserLocationAuthorized
         context.coordinator.simulatedPosition = simulatedPosition
+        context.coordinator.isOnlinePOISearchActive = isOnlinePOISearchActive
+        context.coordinator.onOnlinePOISelected = onOnlinePOISelected
 
         DispatchQueue.main.async {
             controlState.connect(to: mapView)
@@ -351,6 +369,8 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
+        context.coordinator.isOnlinePOISearchActive = isOnlinePOISearchActive
+        context.coordinator.onOnlinePOISelected = onOnlinePOISelected
         context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos,
                                               location: location, style: socialMarkerStyle)
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: uiView)
@@ -469,6 +489,10 @@ struct MapViewContainer: UIViewRepresentable {
             }
         }
         context.coordinator.refreshContourLabels(on: uiView)
+        context.coordinator.updateOnlinePOIs(
+            onlinePOIItems, selected: selectedOnlinePOI, on: uiView,
+            bottomPadding: routePlanningBottomPadding
+        )
     }
     
     func makeCoordinator() -> Coordinator {
@@ -486,6 +510,39 @@ struct MapViewContainer: UIViewRepresentable {
     
     class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         let socialLayer = SocialMapLayer()
+        var isOnlinePOISearchActive = false
+        var onOnlinePOISelected: ((MKMapItem) -> Void)?
+        private var focusedOnlinePOI: MKMapItem?
+
+        func updateOnlinePOIs(_ items: [MKMapItem], selected: MKMapItem?,
+                              on mapView: MKMapView, bottomPadding: CGFloat) {
+            let existing = mapView.annotations.compactMap { $0 as? OnlinePOIAnnotation }
+            mapView.removeAnnotations(existing.filter { annotation in
+                !items.contains { $0 === annotation.item }
+            })
+            for item in items where !existing.contains(where: { $0.item === item }) {
+                mapView.addAnnotation(OnlinePOIAnnotation(item: item))
+            }
+            if isOnlinePOISearchActive {
+                mapView.setUserTrackingMode(.none, animated: false)
+                mapView.removeAnnotations(mapView.annotations.filter { $0 is DestinationAnnotation })
+            }
+            guard focusedOnlinePOI !== selected else { return }
+            focusedOnlinePOI = selected
+            guard let selected,
+                  let annotation = mapView.annotations.compactMap({ $0 as? OnlinePOIAnnotation })
+                    .first(where: { $0.item === selected }) else { return }
+            mapView.selectAnnotation(annotation, animated: true)
+            let point = MKMapPoint(annotation.coordinate)
+            let meters = MKMapPointsPerMeterAtLatitude(annotation.coordinate.latitude) * 150
+            mapView.setVisibleMapRect(
+                MKMapRect(x: point.x - meters, y: point.y - meters, width: meters * 2, height: meters * 2),
+                edgePadding: UIEdgeInsets(top: 70, left: 40,
+                    bottom: min(max(bottomPadding, mapView.bounds.height * 0.68),
+                                max(0, mapView.bounds.height - 120)), right: 40),
+                animated: true
+            )
+        }
 
         private let contourLabels = BicinoContourLabels()
         private var displayedTopographyOverlay: MKTileOverlay?
@@ -602,7 +659,7 @@ struct MapViewContainer: UIViewRepresentable {
             let desiredTrackingBehavior = MapTrackingPolicy.desiredMode(
                 isNavigating: isNavigating,
                 isOfflineMapSelectionActive: isOfflineMapSelectionActive ||
-                    displayedSavedRouteOverlay != nil,
+                    displayedSavedRouteOverlay != nil || isOnlinePOISearchActive,
                 isDestinationSelectionActive: isDestinationSelectionActive
             )
 
@@ -642,7 +699,8 @@ struct MapViewContainer: UIViewRepresentable {
             isOfflineMapSelectionActive: Bool,
             includesSavedRoutePreview: Bool = true
         ) -> Bool {
-            (includesSavedRoutePreview && displayedSavedRouteOverlay != nil) ||
+            isOnlinePOISearchActive ||
+                (includesSavedRoutePreview && displayedSavedRouteOverlay != nil) ||
                 isOfflineMapSelectionActive || mapView.selectedAnnotations.contains {
                     $0 is DestinationAnnotation
                 }
@@ -1193,6 +1251,12 @@ struct MapViewContainer: UIViewRepresentable {
             }
         }
 
+        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            if let annotation = view.annotation as? OnlinePOIAnnotation {
+                onOnlinePOISelected?(annotation.item)
+            }
+        }
+
         @objc func handleTap(_ gestureRecognizer: UITapGestureRecognizer) {
             guard gestureRecognizer.state == .ended else { return }
             if let mapView,
@@ -1215,6 +1279,7 @@ struct MapViewContainer: UIViewRepresentable {
         
         @objc func handleLongPress(_ gestureRecognizer: UILongPressGestureRecognizer) {
             guard gestureRecognizer.state == .began,
+                  !isOnlinePOISearchActive,
                   let mapView = mapView,
                   onDestinationSelected != nil else { return }
             
@@ -1416,6 +1481,17 @@ struct MapViewContainer: UIViewRepresentable {
 
         
         func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
+            if let place = annotation as? OnlinePOIAnnotation {
+                let identifier = "OnlinePOI"
+                let view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
+                    as? MKMarkerAnnotationView ?? MKMarkerAnnotationView(annotation: place, reuseIdentifier: identifier)
+                view.annotation = place
+                view.canShowCallout = true
+                view.markerTintColor = .systemOrange
+                view.glyphImage = UIImage(systemName: "mappin")
+                view.accessibilityLabel = place.item.name ?? "Nearby place"
+                return view
+            }
             if let rider = annotation as? SocialRiderAnnotation {
                 return socialLayer.annotationView(rider, map: mapView)
             }
