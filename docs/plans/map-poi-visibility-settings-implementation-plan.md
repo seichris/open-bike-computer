@@ -59,6 +59,14 @@ verification; do not reuse the October 19 size as a current result.
 OSM remains the offline POI source. Online MapKit search is a separate design
 discussion, not an input to offline packs or an expansion of this PR.
 
+Fresh integration CI also exposed a scheduler-dependent Live Activity test:
+the retracted-terminal-lease scenario asserted after eight yields rather than
+waiting for duplicate cleanup and lease release. Its test-only repair uses the
+existing bounded condition helper and preserves every assertion; production
+Live Activity behavior is unchanged. Record native repeated-run and complete
+simulator verification, followed by fresh published-head CI, in the review
+ledger and PR instead of rerunning the unchanged flaky assertion.
+
 Keep dual 3 MiB slots and the 65,536-byte reserve unchanged. Ordinary/production
 POIs remain disabled; the enabled nonshipping lifecycle qualification profile
 must pass the same size/reserve gate. Do not merge, flash, install, deploy, or

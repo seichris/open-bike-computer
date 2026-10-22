@@ -31,6 +31,30 @@ solely to record its artifact result.
 No 206 qualification, device access, flash, application installation, service
 deployment, target-5 promotion, or PR merge is included in this refresh.
 
+### Simulator verification follow-up
+
+Fresh run `39800725264` passed the POI qualification firmware and full app
+builds, but the simulator job exposed a pre-existing scheduler-dependent test:
+`testInitialReconciliationReleasesRetractedTerminalLease`. Retained xcresult
+evidence shows duplicate endings still empty, the lease still active and its
+end count still zero when assertions run. Eight `Task.yield()` calls do not
+guarantee completion of the asynchronous reconciliation chain.
+
+Replace only that test's two fixed-yield waits with the existing bounded
+`waitUntil` helper: first wait for the duplicate end to suspend, then wait for
+that duplicate's completed end and lease release. All original assertions
+remain; no production Live Activity code or timeout policy changes. Retain a
+20-iteration native regression run and rerun the complete simulator contracts
+before publishing the test repair. Fresh CI results supersede the initial
+failed run rather than treating it as an environment failure or waiving it.
+
+Verification: retained native xcresult reports all 20 iterations passed. The
+registered complete iOS/Watch simulator check also passed in 177.2 seconds,
+with `sourceUnchanged=true` (local uncommitted-source report
+`/tmp/obc-pr378-refresh.nPGKSv/simulator-full.json`). Exact final-head CI remains
+a separate gate recorded in the PR; prior firmware/app results are identified
+as component baselines when source identity differs.
+
 ## Historical October 19 review
 
 Mode: publish. Profile: standard. Strategy: sequential-local, zero subagents.
