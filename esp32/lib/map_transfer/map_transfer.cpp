@@ -27,6 +27,7 @@ namespace map_transfer {
 namespace {
 
 struct FileCloser { void operator()(FILE *file) const { std::fclose(file); } };
+struct DirectoryCloser { void operator()(DIR *dir) const noexcept { ::closedir(dir); } };
 using FileHandle = std::unique_ptr<FILE, FileCloser>;
 
 struct ActivationOperationWorkspace {
@@ -3326,11 +3327,21 @@ const InstalledMap *coveringLibraryMap(const std::vector<InstalledMap> &maps,
 
 InstallStatus MapTransferInstaller::readInstalledMap(
     const std::string &sessionId, InstalledMap &map, bool requirePayload) const {
-  map = {};
+  // Reset in place: an aggregate temporary consumes hundreds of stack bytes
+  // with libstdc++ even when the metadata workspace itself lives in PSRAM.
+  map.sessionId.clear(); map.mapId.clear(); map.root.clear();
+  map.manifestReceipt.clear(); map.signedManifestReceipt.clear();
+  map.presentation.displayName.clear(); map.presentation.boundsE7.fill(0);
+  map.presentation.hasBoundsE7 = false; map.payloadBytes = 0; map.available = true;
   if (!safeId(sessionId)) return fail("library_identity", "invalid map session");
   const auto root = std::string("/VECTMAP/.maps/") + sessionId;
   const auto path = joinPath(storageRoot_, root);
-  struct stat entry{};
+  struct Workspace {
+    struct stat entry{}; MapManifest manifest; ReadyStreamMap ready;
+    std::string receipt, signedReceipt, marker;
+  };
+  const auto workspace = makeActivationWorkspace<Workspace>();
+  auto &entry = workspace->entry;
 #if defined(ARDUINO)
   // ESP-IDF's FAT VFS has no symlinks and does not provide lstat.
   const int inspected = ::stat(path.c_str(), &entry);
@@ -3344,8 +3355,6 @@ InstallStatus MapTransferInstaller::readInstalledMap(
   if (fileExists(joinPath(path, ".operation-prepared")) ||
       fileExists(joinPath(path, ".operation-prepared.bak")))
     return fail("library_uncommitted", "map installation is not complete");
-  struct Workspace { MapManifest manifest; ReadyStreamMap ready; };
-  const auto workspace = makeActivationWorkspace<Workspace>();
   auto &manifest = workspace->manifest;
   if (!readInstalledManifest(root, manifest).ok)
     return fail("library_manifest", "installed map metadata is invalid");
@@ -3353,14 +3362,14 @@ InstallStatus MapTransferInstaller::readInstalledMap(
       fileExists(joinPath(path, ".operation-ready")) ||
       fileExists(joinPath(path, kStreamReadyFile) + ".bak") ||
       fileExists(joinPath(path, ".operation-ready.bak"));
-  std::string receipt, signedReceipt;
+  auto &receipt = workspace->receipt; auto &signedReceipt = workspace->signedReceipt;
   if (stream) {
     auto &ready = workspace->ready;
     if (!readReadyStreamMap(sessionId, ready).ok || ready.mapId != manifest.mapId)
       return fail("library_receipt", "installed stream receipt is invalid");
     bool consumed = false;
     for (const auto &suffix : {"", ".bak"}) {
-      std::string marker;
+      auto &marker = workspace->marker; marker.clear();
       if (readTextFile(joinPath(path, kStreamConsumedFile) + suffix, marker, 2048) &&
           jsonStringValue(marker, "sessionId") == sessionId &&
           jsonStringValue(marker, "mapId") == ready.mapId &&
@@ -3374,7 +3383,7 @@ InstallStatus MapTransferInstaller::readInstalledMap(
   } else {
     // Existing verified archive installations migrate in place, without a copy.
     receipt = manifestReceipt(manifest);
-    std::string stored;
+    auto &stored = workspace->marker;
     if (!readTextFile(joinPath(path, kInstalledReceiptFile), stored, 64) || stored != receipt)
       return fail("library_receipt", "installed archive receipt is invalid");
   }
@@ -3387,7 +3396,9 @@ InstallStatus MapTransferInstaller::readInstalledMap(
   }
   map.sessionId = sessionId; map.root = root; map.mapId = manifest.mapId;
   map.manifestReceipt = receipt; map.signedManifestReceipt = signedReceipt;
-  map.presentation = {manifest.displayName, manifest.boundsE7, manifest.hasBoundsE7};
+  map.presentation.displayName = manifest.displayName;
+  map.presentation.boundsE7 = manifest.boundsE7;
+  map.presentation.hasBoundsE7 = manifest.hasBoundsE7;
   if (requirePayload && !map.available) return fail("library_file", "installed map file is missing or truncated");
   return {true, "library_installed", ""};
 }
@@ -3395,7 +3406,7 @@ InstallStatus MapTransferInstaller::readInstalledMap(
 InstallStatus MapTransferInstaller::readMapLibrary(std::vector<InstalledMap> &maps) const {
   maps.clear();
   const auto root = joinPath(storageRoot_, "/VECTMAP/.maps");
-  const std::unique_ptr<DIR, decltype(&::closedir)> dir(::opendir(root.c_str()), &::closedir);
+  const std::unique_ptr<DIR, DirectoryCloser> dir(::opendir(root.c_str()));
   if (!dir) return errno == ENOENT ? InstallStatus{true, "ok", ""}
                                  : fail("library_read", "could not read map library");
   while (const auto *entry = ::readdir(dir.get())) {
@@ -3450,7 +3461,7 @@ bool MapTransferInstaller::mapRootHasBlock(const std::string &root,
 InstallStatus MapTransferInstaller::selectInstalledMap(
     const std::string &sessionId, const std::string &receipt) const {
   if (hasInterruptedActivation()) return fail("library_busy", "map activation needs recovery");
-  struct Workspace { InstalledMap map; ActiveMapSelection previous, next; MapManifest manifest; };
+  struct Workspace { InstalledMap map; ActiveMapSelection previous, next, actual; MapManifest manifest; };
   const auto w = makeActivationWorkspace<Workspace>();
   auto status = readInstalledMap(sessionId, w->map);
   if (!status.ok) return status;
@@ -3490,7 +3501,7 @@ InstallStatus MapTransferInstaller::selectInstalledMap(
   // reporting failure, so a completed write cannot strand the old renderer.
   const auto recovered = recoverActiveSelection();
   if (!recovered.ok) return recovered;
-  ActiveMapSelection actual;
+  auto &actual = w->actual;
   if (readActiveMap(actual).ok && actual.root == next.root && actual.mapId == next.mapId &&
       actual.manifestReceipt == next.manifestReceipt && actual.signedManifestReceipt == next.signedManifestReceipt)
     return {true, "selected", ""};
