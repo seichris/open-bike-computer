@@ -12,6 +12,7 @@ struct SocialHubView: View {
     @State private var busy = false
     @State private var deleting = false
     @State private var showsQRCode = false
+    @State private var sharingError: String?
 
     var body: some View {
         List {
@@ -64,15 +65,28 @@ struct SocialHubView: View {
                         }
                     }
                 }
-                Section("Friends") {
+                Section {
                     ForEach(store.friends) { friend in
-                        NavigationLink {
-                            SocialFriendView(store: store, friend: friend, routeLibrary: routeLibrary)
-                        } label: {
-                            HStack {
-                                SocialAvatar(profile: friend, image: friend.avatarID.flatMap { store.photos[$0] })
-                                Text(friend.displayName)
+                        HStack {
+                            NavigationLink {
+                                SocialFriendView(store: store, friend: friend, routeLibrary: routeLibrary)
+                            } label: {
+                                HStack {
+                                    SocialAvatar(profile: friend, image: friend.avatarID.flatMap { store.photos[$0] })
+                                    VStack(alignment: .leading) {
+                                        Text(friend.displayName)
+                                        if let username = friend.username, !username.isEmpty {
+                                            Text("@\(username)").font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
                             }
+                            Toggle("Share live data with \(friend.displayName)", isOn: Binding(
+                                get: { store.friendLive.sharingIDs.contains(friend.id) },
+                                set: { enabled in setFriendSharing(enabled, with: friend.id) }
+                            ))
+                            .labelsHidden()
+                            .disabled(!store.capabilities.friendSharing || store.friendLive.busyIDs.contains(friend.id))
                         }
                     }
                     SocialRiderSearchRow(username: $username, search: searchForRider)
@@ -80,6 +94,13 @@ struct SocialHubView: View {
                         Text(found.displayName)
                         Button("Send friend request") { perform { try await store.mutate("friend-requests", body: ["profileID": found.id]); self.found = nil } }
                     }
+                } header: {
+                    Text("Friends")
+                } footer: {
+                    Text(store.capabilities.friendSharing
+                         ? "Each toggle shares your live location, speed, distance and ride times with that friend for up to 4 hours, including outside Group Rides. They choose whether to share back. Turn off, remove or block to stop."
+                         : "Live sharing with individual friends is not available on this server yet.")
+                    if let error = store.friendLive.error { Text(error).foregroundStyle(.red) }
                 }
                 if !store.requests.isEmpty {
                     Section("Friend requests") {
@@ -153,6 +174,11 @@ struct SocialHubView: View {
         }
         .modifier(SocialProfileSetupPresentation(store: store, enabled: offersProfileSetup))
         .refreshable { do { try await store.refresh() } catch { store.error = error.localizedDescription } }
+        .alert("Live sharing", isPresented: Binding(
+            get: { sharingError != nil }, set: { if !$0 { sharingError = nil } }
+        )) {
+            Button("OK", role: .cancel) { sharingError = nil }
+        } message: { Text(sharingError ?? "") }
         .confirmationDialog("Delete your Bicino account and shared data?", isPresented: $deleting) {
             Button("Delete account", role: .destructive) { perform { try await store.deleteAccount() } }
         }
@@ -163,6 +189,14 @@ struct SocialHubView: View {
         Task { @MainActor in
             defer { busy = false }
             do { try await work() } catch SocialFailure.cancelled { } catch { store.error = error.localizedDescription }
+        }
+    }
+
+    private func setFriendSharing(_ enabled: Bool, with id: String) {
+        Task { @MainActor in
+            do { try await store.friendLive.setSharing(enabled, with: id) }
+            catch SocialFailure.cancelled { }
+            catch { sharingError = error.localizedDescription }
         }
     }
 
@@ -206,7 +240,15 @@ private struct SocialFriendView: View {
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         List {
-            Section { SocialAvatar(profile: friend, image: friend.avatarID.flatMap { store.photos[$0] }) }
+            Section {
+                SocialAvatar(profile: friend, image: friend.avatarID.flatMap { store.photos[$0] })
+                if let username = friend.username, !username.isEmpty {
+                    Text("@\(username)").textSelection(.enabled)
+                }
+            }
+            if store.visibleRiders.contains(where: { $0.id == friend.id }) {
+                Section("Live ride data") { SocialRideMemberRow(profile: friend, store: store) }
+            }
             Section("Routes") {
                 ForEach(routes) { route in NavigationLink(route.title) { SocialContentDetail(store: store, item: route, routeLibrary: routeLibrary) } }
             }

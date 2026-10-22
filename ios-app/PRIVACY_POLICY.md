@@ -231,6 +231,15 @@ start. Heart rate, calories, power, cadence, and other HealthKit measurements ar
 not shared with the group. Generic push notifications are optional. Social and
 Health data are not used for ads.
 
+You can also turn on live sharing separately for an accepted friend using their
+Friends-row toggle. That shares your location and the same GPS-derived speed,
+session distance, moving time and elapsed time with that friend for up to four
+hours, without creating a Group Ride or sharing a route. It is one-way: your
+friend chooses whether to share back. Turning off their toggle, removing or
+blocking them, or deleting your account stops direct sharing. Sign-out stops
+this phone's publication; opening the app again does not restart it. Old
+positions expire after 60 seconds. These toggles do not share HealthKit data.
+
 A group invitation can include a public preview showing a map snapshot of the
 route, its name, and distance. Anyone with that preview URL, including messaging
 services that fetch link previews, can view it without joining the ride. It does

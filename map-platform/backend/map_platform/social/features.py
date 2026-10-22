@@ -13,12 +13,13 @@ class SocialFeatures:
     groups: bool = False
     hardware: bool = False
     invitePreviews: bool = False
+    friendSharing: bool = False
 
     @classmethod
     def from_environment(cls):
         values = {}
         for name in cls.__dataclass_fields__:
-            env_name = "INVITE_PREVIEWS" if name == "invitePreviews" else name.upper()
+            env_name = {"invitePreviews": "INVITE_PREVIEWS", "friendSharing": "FRIEND_SHARING"}.get(name, name.upper())
             raw = os.environ.get("BICINO_SOCIAL_FEATURE_" + env_name, "false").lower()
             if raw not in {"true", "false"}:
                 raise ValueError("Social feature flags must be true or false")

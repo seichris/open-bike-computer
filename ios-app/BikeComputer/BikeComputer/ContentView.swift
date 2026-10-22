@@ -1928,7 +1928,7 @@ struct ContentView: View {
                 Button {
                     startSelectedRoute()
                 } label: {
-                    Label("Start navigation", systemImage: "location.fill")
+                    Label(pendingFavoriteDestination == nil ? "Start navigation" : "Start & Save to Favorites", systemImage: "location.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -2039,7 +2039,7 @@ struct ContentView: View {
                 Button {
                     startSelectedRoute()
                 } label: {
-                    Label("Start", systemImage: "location.fill")
+                    Label(pendingFavoriteDestination == nil ? "Start" : "Start & Save to Favorites", systemImage: "location.fill")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -2266,7 +2266,7 @@ struct ContentView: View {
             isRouteCalculationActive: coordinator.routeCalculation.isCalculating,
             topographyOverlay: offlineMapManager.topographyOverlay,
             offlineNavigationPolyline: coordinator.offlineRoutePolyline,
-            socialRiders: social.live.riders.filter { $0.id != social.profile?.id },
+            socialRiders: social.visibleRiders.filter { $0.id != social.profile?.id },
             socialPhotos: social.photos
         )
     }

@@ -22,7 +22,7 @@ from .media import S3Media
 from .features import SocialFeatures
 from .invite_preview import InvitePreviews
 from .models import (ActivityUpload, Consent, ContentEdit, Deletion, DeletionReceipt, DeviceBinding,
-                     DeviceRelease, Join, LiveState, ProfileEdit, QuickMessage, RideCreate,
+                     DeviceRelease, FriendLiveState, Join, LiveState, ProfileEdit, QuickMessage, RideCreate,
                      RideInvitation, RouteUpload, ShareInput, Target, WebsiteDeletion)
 from .service import SocialError, SocialService, digest, identifier, public_content, row
 
@@ -79,6 +79,17 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
                 if isinstance(body, dict) and body.get("location") is False and body.get("stats", False) is False:
                     return
             app.state.features.require("groups")
+        elif parts[0] == "friend-sharing":
+            if request.method == "GET" and parts[-1] == "consent":
+                return
+            if request.method == "POST" and parts[-1] == "consent":
+                try:
+                    body = await request.json()
+                except (ValueError, UnicodeError):
+                    raise SocialError("invalid_json", 422) from None
+                if isinstance(body, dict) and body.get("location") is False and body.get("stats", False) is False:
+                    return
+            app.state.features.require("friendSharing")
         elif parts[0] == "ride-previews":
             app.state.features.require("invitePreviews")
         elif parts[0] in {"routes", "activities", "media"}:
@@ -337,6 +348,22 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
                     continue
             return {"items": result, "cursor": records[-1]["id"] if len(records) == 50 else None}
         return read(perform)
+
+    @app.get("/friend-sharing")
+    def friend_sharing(auth=Depends(authenticate)):
+        return read(lambda c: service.friend_snapshot(c, auth[0]))
+
+    @app.get("/friend-sharing/{profile_id}/consent")
+    def friend_consent_status(profile_id: str, auth=Depends(authenticate)):
+        return read(lambda c: service.friend_consent_read(c, auth[0], profile_id))
+
+    @app.post("/friend-sharing/{profile_id}/consent")
+    async def friend_consent(profile_id: str, data: Consent, request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.friend_consent(c, a, profile_id, data))
+
+    @app.post("/friend-sharing/state")
+    def friend_publish(data: FriendLiveState, auth=Depends(authenticate)):
+        return service.db.run(lambda c: service.publish_friends(c, auth[0], data))
 
     @app.get("/friend-requests")
     def requests(after: str = "", auth=Depends(authenticate)):

@@ -164,14 +164,17 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             guard let locationManager else { return false }
             return await locationManager.prepareSocialRideLocation()
         }
+        social.friendLive.prepareLocation = social.live.prepareLocation
         locationManager.$authorizationStatus.removeDuplicates().sink { [weak social] status in
             social?.live.locationAuthorizationChanged(authorized: status == .authorizedAlways || status == .authorizedWhenInUse)
         }.store(in: &cancellables)
-        social.live.$isSharing.removeDuplicates().sink { [weak locationManager] sharing in
+        social.live.$isSharing.combineLatest(social.friendLive.$isSharing)
+            .map { $0 || $1 }.removeDuplicates().sink { [weak locationManager] sharing in
             locationManager?.setSocialRideSharing(sharing)
         }.store(in: &cancellables)
         locationManager.$currentLocation.sink { [weak social] location in
             social?.live.updateLocation(location)
+            social?.friendLive.updateLocation(location)
         }.store(in: &cancellables)
         destinationStore.$favoriteDestinations
             .map { destinations in

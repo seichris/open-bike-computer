@@ -107,10 +107,16 @@ deployment, provider-permission or physical acceptance gates.
 
 ## Upgrade and lifecycle contracts
 
-Schema **3** requires the explicit migration job before API/worker startup. Stop
-all old social replicas first; a V2 binary refuses a schema-3 database and a V3
-binary refuses an unmigrated one. The V2 upgrade, in one transaction under the
-migration advisory lock:
+Schema **4** requires the explicit migration job before API/worker startup.
+Stop all old social replicas first; schema-3 binaries reject schema 4, and current
+binaries reject an unmigrated database. The V3-to-V4 migration creates an empty
+`social_friend_shares` table. It preserves existing Group Rides and never infers
+sharing consent from friendships or room membership. Deploy API and worker from
+the same approved image after migration. Roll back application behavior by
+turning off `BICINO_SOCIAL_FEATURE_FRIEND_SHARING`, keeping schema-4 binaries
+running; do not restart schema-3 binaries against schema 4.
+
+The earlier V2 upgrade, in one transaction under the migration advisory lock:
 
 - adds `secret_digest` to push bindings and **retires every V2 binding**. V2 rows
   never proved possession of an installation secret, so they cannot be handed
@@ -303,7 +309,7 @@ An exactly antipodal friend has no unique bearing and is omitted.
 The global `BICINO_SOCIAL_ENABLED` switch mounts social in the existing map API;
 the isolated social server is controlled by its deployment. Once the service is
 reachable, accounts, profiles, friends, blocking and account deletion are always
-available. All six additional features default to **false**. Set these exact
+available. All seven additional features default to **false**. Set these exact
 environment variables to `true` in the shared API/worker runtime environment:
 
 | Variable | Enables |
@@ -313,6 +319,7 @@ environment variables to `true` in the shared API/worker runtime environment:
 | `BICINO_SOCIAL_FEATURE_ACTIVITIES` | Completed-ride publication, lists, detail and links |
 | `BICINO_SOCIAL_FEATURE_GROUPS` | Invitations, sessions, consent and live positions; also requires routes |
 | `BICINO_SOCIAL_FEATURE_HARDWARE` | Phone-to-device rider relay; also requires groups and routes |
+| `BICINO_SOCIAL_FEATURE_FRIEND_SHARING` | One-way, per-friend live location and GPS ride stats; independent of routes/groups |
 | `BICINO_SOCIAL_FEATURE_INVITE_PREVIEWS` | Public view-only invite cards; requires media, groups and routes, plus the website preview release |
 
 Use lowercase `true`/`false`; invalid values fail startup. The authenticated
@@ -323,7 +330,8 @@ advertise the diagnostic Group Riders capability; this flag cannot qualify a
 production board by itself.
 
 Enable media with profiles, then routes, activities, groups and finally hardware.
-For a fully enabled **development test environment**, set all five to `true`;
+For a fully enabled **development test environment**, enable the applicable
+flags, including `FRIEND_SHARING` for direct sharing;
 retain the separate native build and firmware diagnostic gates. Provider, S3 and
 database configuration must still be supplied; disabling media does not remove
 its cleanup configuration. Restart every API replica and worker together when
@@ -376,7 +384,7 @@ runtime role after the schema is installed, and a separate migration credential.
 The application uses serializable transactions and bounded conflict retries.
 For a V1 or V2 development upgrade, stop the old social API and worker writers
 before migration, then start the V3 API and worker together. Do not run older
-writers against schema 3 or roll back to older binaries after the migration.
+writers against schema 4 or roll back to older binaries after the migration.
 
 Route `/v1/social/*` from the configured iPhone map-service origin to the social
 API, including WebSocket upgrades. Alternatively opt in to the mounted router in
@@ -503,3 +511,38 @@ ending, account deletion, card replacement and ride expiration revoke preview
 reads. Worker jobs delete their private media objects, and the existing orphan
 reconciler also covers `ride-previews/`. External messaging clients can retain
 previously downloaded image previews in their own caches.
+
+
+## Direct friend live sharing
+
+Each Friends row offers a separate outgoing sharing toggle. The footer names
+location, GPS speed, session distance, moving time and elapsed time, explains
+that sharing is one-way and expires after four hours, and that removing or
+blocking the friend stops direct sharing. This does not grant access to HealthKit
+workouts, heart rate, routes, or private account data. Friend details show the
+username when set, plus currently received live ride stats. Incoming positions
+also use the existing map marker and authenticated BLE relay projection.
+
+`GET /friend-sharing/{profileID}/consent` returns the current directional epoch;
+`POST` to that path conditionally changes consent using the existing location /
+stats / epoch body. Every change rotates the epoch, clears the prior fix and
+sequence, and starts at most a four-hour server lease. At most 100 recipients
+can be active. `POST /friend-sharing/state` sends one bounded fix with an
+explicit profile-to-epoch audience map. It cannot enable consent or extend a
+lease. Sequence, freshness, accuracy, per-recipient stats permission, friendship,
+account state and blocks are checked in the same transaction. Stale epochs are
+ignored; the reply names accepted recipients. No route or group membership is
+created or shared. Idempotent consent replays read current state rather than
+replaying an obsolete permission payload.
+
+`GET /friend-sharing` returns current outgoing consents and incoming riders for
+accepted friends only. Received positions disappear at 60 seconds; the worker
+clears stale fixes and expired leases. Unfriend/block deletes both directions;
+account deletion/disable also clears them. Re-adding/unblocking never restores
+consent. The app polls every three seconds, publishes only new, accurate fixes,
+and uses monotonic local deadlines. Local Stop removes the recipient before any
+network await. Outgoing consent is volatile and never silently resumed after
+relaunch, sign-out or account switch. Group and friend sharing share one GPS
+lifecycle so stopping either does not stop the other. Turning off the rollout
+flag rejects snapshots/publications/start requests while retaining consent reads
+and explicit stops.
