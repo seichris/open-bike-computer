@@ -414,9 +414,15 @@ final class SocialCoordinator: ObservableObject {
         try await live.select(try JSONDecoder().decode(SocialGroupRide.self, from: JSONSerialization.data(withJSONObject: value)), shareOnJoin: true)
     }
 
-    func signOut() async throws {
-        await friendLive.stopAll()
+    private func stopLiveSharing() async {
+        // Both publishers stop locally before waiting for either revocation.
+        async let friends: Void = friendLive.stopAll()
         await live.stopSharing()
+        await friends
+    }
+
+    func signOut() async throws {
+        await stopLiveSharing()
         live.reset()
         UIApplication.shared.unregisterForRemoteNotifications()
         pushToken = nil
@@ -428,14 +434,14 @@ final class SocialCoordinator: ObservableObject {
 
     func deleteAccount() async throws {
         guard let profile else { throw SocialFailure.signedOut }
-        let session = session, live = live
+        let session = session
         let completed = try await deletion.delete(profileID: profile.id, accountUID: session.currentUID,
             reauthenticate: {
                 if session.usesApple { return try await session.signInWithApple(reauthenticate: true) }
                 try await session.signInWithGoogle(reauthenticate: true)
                 return nil
             },
-            beforeSending: { [friendLive] in await friendLive.stopAll(); await live.stopSharing() })
+            beforeSending: { await self.stopLiveSharing() })
         await finishDeletion(completed)
     }
 
