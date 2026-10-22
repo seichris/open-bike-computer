@@ -41,6 +41,7 @@ public:
   void setStreamTrustStore(MapStreamTrustStore trustStore);
   void setStreamStorageAvailable(bool available);
   void setStreamStorageProbe(std::function<bool()> probe);
+  void setStreamStorageSpaceProbe(std::function<uint64_t()> probe) { streamStorageSpaceProbe_ = std::move(probe); }
   bool refreshStreamStorageCapability(bool requireWritable = true);
   bool streamInstallSupported() const;
   bool setEnabled(bool enabled);
@@ -77,7 +78,7 @@ public:
   // executes on the storage worker through the internal operation owner.
   bool requestMapLibrary(const std::string &action,
                          const std::string &session = "",
-                         const std::string &receipt = "");
+                         const std::string &receipt = "", const std::string &requestID = "");
   std::string mapLibraryJson(bool paged = false) const;
   bool requestMapLibraryPage(size_t offset);
   void considerAutomaticMap(int32_t latitudeE7, int32_t longitudeE7, bool currentMapFound);
@@ -112,10 +113,13 @@ private:
   MapSelectionHealth selectionHealth_;
   std::vector<InstalledMap> libraryMaps_;
   std::string libraryAction_ = "refresh", librarySession_, libraryReceipt_;
-  std::string libraryError_;
+  std::string libraryError_, libraryRequestID_, libraryCommandID_, libraryCommandError_;
   std::vector<std::string> libraryRejectedSessions_;
   bool libraryKnown_ = false, libraryAutomatic_ = true, librarySubmitted_ = false, librarySelectionStarted_ = false;
   uint32_t libraryRevision_ = 0;
+  uint32_t libraryRetryAfterMs_ = 0;
+  uint64_t libraryAutomaticBlock_ = 0;
+  bool libraryAutomaticBlockKnown_ = false;
   size_t libraryPageOffset_ = 0;
   int32_t libraryLatitudeE7_ = 0, libraryLongitudeE7_ = 0;
   void submitLibraryTask();
@@ -172,6 +176,7 @@ private:
   bool streamStatusActive_ = false;
   bool streamStorageAvailable_ = false;
   std::function<bool()> streamStorageProbe_;
+  std::function<uint64_t()> streamStorageSpaceProbe_;
   std::string pendingMapRoot_;
   std::string pendingMapSessionId_;
   std::string pendingMapId_;

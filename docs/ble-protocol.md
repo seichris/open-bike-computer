@@ -2772,3 +2772,12 @@ zero if a revision, selection, policy, count, or ordering changes. Duplicate
 sessions or malformed pages are rejected. A partial or connection-stale inventory
 cannot drive reuse or removal. This keeps a full SD library from exceeding the
 255-chunk status limit at reduced ATT MTUs.
+
+Library follow-up semantics: `library-select|session|receipt|requestID` and
+`library-remove|session|receipt|requestID` accept an optional 32-lowercase-hex client
+request ID. `mapLibrary.commandID` / `commandError` echo only explicit command
+results; automatic probes do not overwrite them. Pages must also agree on these
+fields. `available:false` keeps a completed version with damaged payload files
+visible for removal while disabling reuse. Busy rejections and owner failures
+publish a revision and the exact request result. BLE status requests received
+while a chunk stream is active schedule a fresh snapshot after it finishes.

@@ -1517,6 +1517,14 @@ static void testPersistentMapLibrary() {
   assert(maps[0].contains(310000000, 1210000000));
   assert(!maps[0].contains(310000000, 1030000000));
   assert(!installer.installedMapCovers(maps[0], 310000000, 1210000000));
+  auto origin = maps[0]; origin.presentation.boundsE7 = {-1000000, -1000000, 1000000, 1000000};
+  assert(::system(("mkdir -p " + root + origin.root + "/+000+000").c_str()) == 0);
+  writeFile(root + origin.root + "/+000+000/0_0.fmb", data);
+  assert(installer.installedMapCovers(origin, 0, 0));
+  assert(installer.mapRootHasBlock(origin.root, 0, 0));
+  assert(!installer.mapRootHasBlock(origin.root, 900000000, 0));
+  assert(map_transfer::libraryPositionBlockKey(0, 0) == map_transfer::libraryPositionBlockKey(1, 1));
+
 
   assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1210000000)->sessionId == "city-0");
   assert(map_transfer::coveringLibraryMap(maps, maps[5].root, 310000000, 1210000000) == nullptr);
@@ -1557,6 +1565,36 @@ static void testPersistentMapLibrary() {
   assert(!MapTransferInstaller(root).automaticMapSelection());
   assert(installer.setAutomaticMapSelection(true));
   assert(MapTransferInstaller(root).automaticMapSelection());
+  // A truncated completed root remains visible and removable; a cut after
+  // rename can no longer hide an undeletable half-removed installation.
+  auto damaged = maps[1];
+  writeFile(root + damaged.root + "/+0000+0000/0.fmb", "");
+  assert(installer.readMapLibrary(maps).ok);
+  const auto unavailable = std::find_if(maps.begin(), maps.end(), [&](const auto &m) { return m.sessionId == damaged.sessionId; });
+  assert(unavailable != maps.end() && !unavailable->available);
+  class RemovalCut : public MapTransferInstaller {
+  public: using MapTransferInstaller::MapTransferInstaller;
+  protected:
+    void storageMutationBoundary(const char *op, const std::string &path, bool after) const override {
+      if (after && std::string(op) == "rename" && path.find("/.removing-") != std::string::npos) throw 42;
+    }
+  } removal(root);
+  bool interrupted = false;
+  try { removal.removeInstalledMap(damaged.sessionId, damaged.manifestReceipt); } catch (int) { interrupted = true; }
+  assert(interrupted);
+  const auto tombstone = root + "/VECTMAP/.maps/.removing-" + damaged.sessionId;
+  assert(exists(tombstone));
+  assert(installer.pruneObsoleteInstalledMaps());
+  assert(!exists(tombstone));
+  const auto overflowRoot = tempRoot();
+  for (int i = 0; i < 33; ++i) {
+    const auto slot = overflowRoot + "/VECTMAP/.maps/external-" + std::to_string(i);
+    assert(::system(("mkdir -p " + slot + " && cp -R " + root + "/VECTMAP/.maps/city-0/. " + slot).c_str()) == 0);
+  }
+  MapTransferInstaller overflow(overflowRoot);
+  assert(overflow.readMapLibrary(maps).ok && maps.size() == 32);
+  assert(overflow.removeInstalledMap(maps.front().sessionId, maps.front().manifestReceipt).ok);
+  assert(overflow.readMapLibrary(maps).ok && maps.size() == 32);
 }
 
 int main() {

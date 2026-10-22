@@ -178,6 +178,7 @@ static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static map_transfer_status_protocol::ChunkTransmission
     pendingMapTransferStatusChunks;
 static std::atomic<bool> pendingMapTransferStatusContinuation{false};
+static bool pendingMapTransferStatusRefresh = false;
 static std::atomic<bool> pendingMapAvailabilityStatus{false};
 static map_transfer_status_protocol::ChunkTransmission
     pendingDeviceTransferStatusChunks;
@@ -3185,6 +3186,7 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
   if (pendingMapTransferStatusChunks.active()) {
+    pendingMapTransferStatusRefresh = true;
     pumpPendingMapTransferStatusChunks();
     return;
   }
@@ -3235,6 +3237,7 @@ static void pumpPendingMapTransferStatusChunks() {
   if (!bleSessionAuthenticated ||
       activeConnHandle == BLE_HS_CONN_HANDLE_NONE ||
       mapTransferStatusCharacteristic == nullptr) {
+    pendingMapTransferStatusRefresh = false;
     pendingMapTransferStatusChunks.reset();
     pendingMapTransferStatusContinuation.store(false,
                                                std::memory_order_release);
@@ -3258,6 +3261,10 @@ static void pumpPendingMapTransferStatusChunks() {
     pendingMapTransferStatusChunks.reset();
     pendingMapTransferStatusContinuation.store(false,
                                                std::memory_order_release);
+    if (pendingMapTransferStatusRefresh) {
+      pendingMapTransferStatusRefresh = false;
+      queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
+    }
   }
 }
 
@@ -4676,11 +4683,14 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
   }
   const auto first = command.find('|');
   const auto second = first == std::string::npos ? std::string::npos : command.find('|', first + 1);
-  if (second != std::string::npos && command.find('|', second + 1) == std::string::npos &&
+  const auto third = second == std::string::npos ? std::string::npos : command.find('|', second + 1);
+  if (second != std::string::npos && (third == std::string::npos || command.find('|', third + 1) == std::string::npos) &&
       (command.substr(0, first) == "library-select" || command.substr(0, first) == "library-remove")) {
     const auto action = command.substr(0, first) == "library-select" ? "select" : "remove";
     if (!mapTransferHttp.requestMapLibrary(action,
-        command.substr(first + 1, second - first - 1), command.substr(second + 1)))
+        command.substr(first + 1, second - first - 1),
+        command.substr(second + 1, third == std::string::npos ? std::string::npos : third - second - 1),
+        third == std::string::npos ? "" : command.substr(third + 1)))
       mapTransferHttp.setLastError("library_busy", "map library command was not accepted");
     queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
     return;

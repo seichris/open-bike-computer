@@ -116,6 +116,7 @@ public:
                           MapStreamStatusCallback onStatus = {},
                           std::string operationID = {});
   ~MapStreamInstallSession() override;
+  void setFreeSpaceProbe(std::function<uint64_t()> probe) { freeSpaceProbe_ = std::move(probe); }
 
   bool onManifest(const VerifiedMapStreamManifest &manifest,
                   std::string_view canonicalManifest) override;
@@ -139,6 +140,7 @@ private:
   MapStreamNowCallback now_;
   std::shared_ptr<MapStreamStorage> storage_;
   MapStreamStatusCallback onStatus_;
+  std::function<uint64_t()> freeSpaceProbe_;
   MapStreamInstallSnapshot status_;
   std::string_view canonicalManifest_;
   int currentFd_ = -1;

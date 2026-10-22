@@ -3325,7 +3325,7 @@ const InstalledMap *coveringLibraryMap(const std::vector<InstalledMap> &maps,
 }
 
 InstallStatus MapTransferInstaller::readInstalledMap(
-    const std::string &sessionId, InstalledMap &map) const {
+    const std::string &sessionId, InstalledMap &map, bool requirePayload) const {
   map = {};
   if (!safeId(sessionId)) return fail("library_identity", "invalid map session");
   const auto root = std::string("/VECTMAP/.maps/") + sessionId;
@@ -3382,13 +3382,13 @@ InstallStatus MapTransferInstaller::readInstalledMap(
     uint64_t bytes = 0;
     if (!startsWith(file.publishPath, kVectMapPrefix) ||
         !fileSize(joinPath(path, file.publishPath.substr(std::strlen(kVectMapPrefix))), bytes) ||
-        bytes != file.bytes)
-      return fail("library_file", "installed map file is missing or truncated");
+        bytes != file.bytes) map.available = false;
     map.payloadBytes += file.bytes;
   }
   map.sessionId = sessionId; map.root = root; map.mapId = manifest.mapId;
   map.manifestReceipt = receipt; map.signedManifestReceipt = signedReceipt;
   map.presentation = {manifest.displayName, manifest.boundsE7, manifest.hasBoundsE7};
+  if (requirePayload && !map.available) return fail("library_file", "installed map file is missing or truncated");
   return {true, "library_installed", ""};
 }
 
@@ -3400,10 +3400,10 @@ InstallStatus MapTransferInstaller::readMapLibrary(std::vector<InstalledMap> &ma
                                  : fail("library_read", "could not read map library");
   while (const auto *entry = ::readdir(dir.get())) {
     InstalledMap map;
-    if (safeId(entry->d_name) && readInstalledMap(entry->d_name, map).ok) {
+    if (safeId(entry->d_name) && readInstalledMap(entry->d_name, map, false).ok) {
       if (maps.size() == kMaximumLibraryMaps) {
-        maps.clear();
-        return fail("library_capacity", "map library exceeds supported inventory size");
+        // Keep a bounded, removable page even after external SD changes.
+        break;
       }
       maps.push_back(std::move(map));
     }
@@ -3417,8 +3417,23 @@ InstallStatus MapTransferInstaller::readMapLibrary(std::vector<InstalledMap> &ma
 
 bool MapTransferInstaller::installedMapCovers(const InstalledMap &map,
     int32_t latitudeE7, int32_t longitudeE7) const {
-  if (!map.contains(latitudeE7, longitudeE7) || !safeActiveRoot(map.root) ||
-      latitudeE7 < -850511287 || latitudeE7 > 850511287) return false;
+  return map.available && map.contains(latitudeE7, longitudeE7) && mapRootHasBlock(map.root, latitudeE7, longitudeE7);
+}
+
+uint64_t libraryPositionBlockKey(int32_t latitudeE7, int32_t longitudeE7) {
+  latitudeE7 = std::max<int32_t>(-850511287, std::min<int32_t>(850511287, latitudeE7));
+  longitudeE7 = std::max<int32_t>(-1800000000, std::min<int32_t>(1800000000, longitudeE7));
+  constexpr double radius = 6378137.0, radians = 0.017453292519943295;
+  const auto x = static_cast<int32_t>((longitudeE7 / 10000000.0) * radians * radius);
+  const auto y = static_cast<int32_t>(std::log(std::tan(
+      (latitudeE7 / 10000000.0) * radians / 2.0 + 0.7853981633974483)) * radius);
+  return (uint64_t(uint32_t(x >> 12)) << 32) | uint32_t(y >> 12);
+}
+
+bool MapTransferInstaller::mapRootHasBlock(const std::string &root,
+    int32_t latitudeE7, int32_t longitudeE7) const {
+  if (!safeActiveRoot(root) || latitudeE7 < -850511287 || latitudeE7 > 850511287 ||
+      longitudeE7 < -1800000000 || longitudeE7 > 1800000000) return false;
   // Match the renderer's Web Mercator / 4096-meter block / 16-block folder
   // addressing. Bounds alone overstate coverage for route corridors and holes.
   constexpr double radius = 6378137.0, radians = 0.017453292519943295;
@@ -3428,7 +3443,7 @@ bool MapTransferInstaller::installedMapCovers(const InstalledMap &map,
   char relative[64]{};
   std::snprintf(relative, sizeof(relative), "/%+04d%+04d/%d_%d",
       int(x >> 16), int(y >> 16), int((x >> 12) & 15), int((y >> 12) & 15));
-  const auto base = joinPath(storageRoot_, map.root) + relative;
+  const auto base = joinPath(storageRoot_, root) + relative;
   return fileExists(base + ".fmb") || fileExists(base + ".fmp");
 }
 
@@ -3485,15 +3500,21 @@ InstallStatus MapTransferInstaller::selectInstalledMap(
 InstallStatus MapTransferInstaller::removeInstalledMap(
     const std::string &sessionId, const std::string &receipt) const {
   if (hasInterruptedActivation()) return fail("library_busy", "map activation needs recovery");
-  InstalledMap map; auto status = readInstalledMap(sessionId, map);
+  InstalledMap map; auto status = readInstalledMap(sessionId, map, false);
   if (!status.ok) return status;
   if (receipt != map.manifestReceipt) return fail("library_identity", "map version changed");
   ActiveMapSelection selected; status = readActiveMap(selected);
   if (!status.ok && status.code != "active_missing") return status;
   if (map.root == selected.root || map.root == selected.previousRoot || selectionAnchorProtectsRoot(map.root))
     return fail("library_in_use", "map is selected or retained for recovery");
-  return removeTree(joinPath(storageRoot_, map.root)) ? InstallStatus{true, "library_removed", ""}
-      : fail("library_remove", "could not remove installed map");
+  const auto source = joinPath(storageRoot_, map.root);
+  const auto tombstone = joinPath(storageRoot_, "/VECTMAP/.maps/.removing-" + sessionId);
+  if (!removeTree(tombstone) || renameStoragePath(source.c_str(), tombstone.c_str()) != 0)
+    return fail("library_remove", "could not stage installed map removal");
+  // A power cut during recursive deletion leaves only a recognizable tombstone.
+  // Boot/refresh pruning reclaims it, even after the manifest has been deleted.
+  removeTree(tombstone);
+  return {true, "library_removed", ""};
 }
 
 bool MapTransferInstaller::automaticMapSelection() const {
@@ -3550,6 +3571,10 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps(
     const std::string name = entry->d_name;
     if (name == "." || name == "..")
       continue;
+    if (startsWith(name, ".removing-") && safeId(name.substr(10))) {
+      if (!removeTree(joinPath(root, name))) ok = false;
+      continue;
+    }
     const std::string candidate = std::string("/VECTMAP/.maps/") + name;
     const std::string candidatePath = joinPath(root, name);
     const bool consumed =

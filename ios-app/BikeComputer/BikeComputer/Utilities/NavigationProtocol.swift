@@ -102,8 +102,9 @@ nonisolated enum MapLibraryControlPacket {
     static func validReceipt(_ value: String) -> Bool {
         value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
-    static func make(action: String, sessionID: String = "", manifestReceipt: String = "") -> Data? {
-        let command: String
+    static func make(action: String, sessionID: String = "", manifestReceipt: String = "", requestID: String? = nil) -> Data? {
+        if let requestID, requestID.utf8.count != 32 || !requestID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) { return nil }
+        var command: String
         switch action {
         case "refresh": command = "library"
         case "auto", "manual": command = "library-\(action)"
@@ -112,6 +113,7 @@ nonisolated enum MapLibraryControlPacket {
             command = "library-\(action)|\(sessionID)|\(manifestReceipt)"
         default: return nil
         }
+        if let requestID, action == "select" || action == "remove" { command += "|" + requestID }
         return Data(("MTRN" + command).utf8)
     }
 }

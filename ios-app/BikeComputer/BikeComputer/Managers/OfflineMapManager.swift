@@ -6071,10 +6071,7 @@ final class OfflineMapManager: ObservableObject {
         }
 
         if !resumePausedUpload, bleManager.hasFreshMapTransferStatus,
-           let library = bleManager.deviceMapLibrary {
-            guard library.known, library.isValid, !library.busy else {
-                throw OfflineMapPlatformError.invalidPack("Wait for the Bike Computer's map library to finish loading.")
-            }
+           let library = bleManager.deviceMapLibrary, library.isComplete {
             if let installed = library.installed(mapID: prepared.mapID,
                 manifestReceipt: prepared.artifact.manifestReceipt,
                 signedManifestReceipt: prepared.artifact.signedManifestReceipt) {
@@ -6089,16 +6086,17 @@ final class OfflineMapManager: ObservableObject {
                 guard bleManager.requestDeviceMapLibrary("select", map: installed) else {
                     throw OfflineMapPlatformError.invalidPack("The Bike Computer is busy. Try selecting the map again.")
                 }
+                let requestID = bleManager.lastMapLibraryRequestID
                 statusMessage = "selecting installed map"
-                for attempt in 0..<240 {
+                for attempt in 0..<1200 {
                     try await Task.sleep(nanoseconds: 500_000_000)
                     guard transferDeviceID == bleManager.activeDeviceID,
                           transferEpoch == bleManager.transferConnectionEpoch else { throw CancellationError() }
-                    if let current = bleManager.deviceMapLibrary, current.revision != library.revision {
-                        if !current.error.isEmpty {
-                            throw OfflineMapPlatformError.mapActivationFailed(current.error)
+                    if let current = bleManager.deviceMapLibrary, current.commandID == requestID {
+                        if let error = current.commandError, !error.isEmpty {
+                            throw OfflineMapPlatformError.mapActivationFailed(error)
                         }
-                        if !current.busy && current.selectedSessionID == installed.sessionID {
+                        if current.isComplete && current.selectedSessionID == installed.sessionID {
                             statusMessage = "map selected"; transferProgress = 1; return
                         }
                     }

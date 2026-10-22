@@ -1150,6 +1150,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var activeDeviceMap: DeviceActiveMapDescriptor?
     @Published private(set) var deviceMapLibrary: DeviceMapLibrary?
     private var deviceMapLibraryPages = DeviceMapLibraryPages()
+    private(set) var lastMapLibraryRequestID = ""
     @Published private(set) var mapSelectionHealth: MapSelectionHealth?
     private var mapSelectionHealthProjection = MapSelectionHealthProjection()
     private var mapSelectionHealthDeviceID: String?
@@ -6132,13 +6133,16 @@ class BLEManager: NSObject, ObservableObject {
 
     @discardableResult
     func requestDeviceMapLibrary(_ action: String = "refresh", map: DeviceInstalledMap? = nil) -> Bool {
+        let requestID = (action == "select" || action == "remove") ? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() : nil
         guard isNavigationReady, !firmwareMaintenanceReconnectExpected,
               authenticatedWriteSession != nil,
               !mapTransferModeEnabled, deviceTransferMode.isEmpty,
               action == "refresh" || (hasFreshMapTransferStatus && deviceMapLibrary?.known == true && deviceMapLibrary?.busy == false),
-              let packet = DeviceMapLibrary.command(action, map: map) else { return false }
-        return sendTransferControlPacket(packet, label: "device map library \(action)",
-            coalescingKey: "transfer.map.library")
+              let packet = DeviceMapLibrary.command(action, map: map, requestID: requestID) else { return false }
+        let queued = sendTransferControlPacket(packet, label: "device map library \(action)",
+            coalescingKey: "transfer.map.library.\(action)")
+        if queued { lastMapLibraryRequestID = requestID ?? "" }
+        return queued
     }
 
     @discardableResult

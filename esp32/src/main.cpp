@@ -2080,6 +2080,7 @@ void setup() {
   mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
   mapTransferHttp.setStreamStorageProbe(
       [] { return storage.getSdLoaded(); });
+  mapTransferHttp.setStreamStorageSpaceProbe([] { return storage.removableSdFreeBytes(); });
   mapTransferHttp.setStreamStorageAvailable(sdResult == ESP_OK &&
                                             storage.getSdLoaded());
   mapTransferHttp.setStorageControlSubmit([](void (*work)(void *), void *context) {

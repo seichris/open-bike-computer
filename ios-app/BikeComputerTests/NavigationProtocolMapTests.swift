@@ -9973,6 +9973,20 @@ extension NavigationProtocolTests {
         pages = DeviceMapLibraryPages()
         assertEqual(pages.ingest(lastPage).nextOffset, 0, "a new connection cannot inherit old partial pages")
 
+        let nonce = String(repeating: "a", count: 32)
+        assertEqual(String(data: MapLibraryControlPacket.make(action: "select", sessionID: "city", manifestReceipt: receipt, requestID: nonce)!, encoding: .utf8),
+                    "MTRNlibrary-select|city|\(receipt)|\(nonce)", "selection results match an exact request nonce")
+        assert(MapLibraryControlPacket.make(action: "select", sessionID: "city", manifestReceipt: receipt, requestID: "bad") == nil,
+               "reject malformed selection request identity")
+        let futureStatus = try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+            from: Data("{\"enabled\":false,\"mapLibrary\":{\"schemaVersion\":2}}".utf8))
+        assert(futureStatus.mapLibrary == nil && futureStatus.enabled == false,
+               "a future optional inventory cannot break ordinary HTTP transfer status")
+        var damagedMap = map; damagedMap.available = false
+        let damagedLibrary = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 10, error: "", selectedSessionID: "", maps: [damagedMap])
+        assert(damagedLibrary.installed(mapID: map.mapID, manifestReceipt: receipt, signedManifestReceipt: signed) == nil,
+               "damaged payloads remain removable but never authorize reuse")
         let encoded = try! JSONEncoder().encode(library)
         assertEqual(try! JSONDecoder().decode(DeviceMapLibrary.self, from: encoded), library, "inventory wire round trip")
         let duplicate = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,

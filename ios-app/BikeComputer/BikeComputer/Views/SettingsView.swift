@@ -1158,7 +1158,7 @@ private struct DeviceMapLibrarySettingsSection: View {
                             Text(map.name)
                             Text(ByteCountFormatter.string(fromByteCount: Int64(map.payloadBytes), countStyle: .file))
                                 .font(.caption).foregroundColor(.secondary)
-                            Text(library.selectedSessionID == map.sessionID ? "In use" : "Available offline")
+                            Text(!map.isAvailable ? "Files need repair" : (library.selectedSessionID == map.sessionID ? "In use" : "Available offline"))
                                 .font(.caption).foregroundColor(.secondary)
                         }
                         Spacer()
@@ -1168,7 +1168,7 @@ private struct DeviceMapLibrarySettingsSection: View {
                         } else {
                             Button("Use") { _ = bleManager.requestDeviceMapLibrary("select", map: map) }
                                 .buttonStyle(.borderless)
-                                .disabled(library.busy || !library.known || !bleManager.isNavigationReady)
+                                .disabled(!map.isAvailable || library.busy || !library.known || !bleManager.isNavigationReady)
                                 .accessibilityLabel("Use \(map.name) from the SD card")
                         }
                     }
@@ -1193,7 +1193,7 @@ private struct DeviceMapLibrarySettingsSection: View {
                         .foregroundColor(.secondary)
                 }
                 Button("Refresh Device Maps") { _ = bleManager.requestDeviceMapLibrary() }
-                    .disabled(library.busy || !bleManager.isNavigationReady)
+                    .disabled(!bleManager.isNavigationReady)
             } header: {
                 Text("Maps on this Bike Computer")
             } footer: {

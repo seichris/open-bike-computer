@@ -121,8 +121,10 @@ struct InstalledMap {
   std::string sessionId, mapId, root, manifestReceipt, signedManifestReceipt;
   MapPresentationMetadata presentation;
   uint64_t payloadBytes = 0;
+  bool available = true;
   bool contains(int32_t latitudeE7, int32_t longitudeE7) const;
 };
+uint64_t libraryPositionBlockKey(int32_t latitudeE7, int32_t longitudeE7);
 const InstalledMap *coveringLibraryMap(const std::vector<InstalledMap> &maps,
     const std::string &currentRoot, int32_t latitudeE7, int32_t longitudeE7,
     const std::vector<std::string> &rejectedSessions = {});
@@ -249,8 +251,9 @@ public:
       const ActiveMapSelection &selection,
       MapPresentationRevision &revision) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
-  InstallStatus readInstalledMap(const std::string &sessionId, InstalledMap &map) const;
+  InstallStatus readInstalledMap(const std::string &sessionId, InstalledMap &map, bool requirePayload = true) const;
   InstallStatus readMapLibrary(std::vector<InstalledMap> &maps) const;
+  bool mapRootHasBlock(const std::string &root, int32_t latitudeE7, int32_t longitudeE7) const;
   bool installedMapCovers(const InstalledMap &map, int32_t latitudeE7, int32_t longitudeE7) const;
   InstallStatus selectInstalledMap(const std::string &sessionId,
                                    const std::string &receipt) const;

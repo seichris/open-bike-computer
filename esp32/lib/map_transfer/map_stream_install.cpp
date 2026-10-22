@@ -667,6 +667,15 @@ bool MapStreamInstallSession::onManifest(
   canonicalManifest_ = canonicalManifest;
   checkpointAtMilliseconds_ = now_();
   const bool prepared = prepareRoot(manifest, canonicalManifest);
+  if (prepared && freeSpaceProbe_) {
+    // FAT allocation slack plus metadata/checkpoints. Verified resumed files
+    // need no second payload allocation. This runs before the first file callback.
+    const uint64_t remainingFiles = status_.totalFiles - status_.durableFilePrefix;
+    const uint64_t required = status_.totalPayloadBytes - status_.completedPayloadBytes +
+        remainingFiles * 65536ULL + (remainingFiles ? 1048576ULL : 65536ULL);
+    if (freeSpaceProbe_() < required)
+      return fail("stream_sd_full", "remove a map from Maps on this Bike Computer before installing another");
+  }
   publishStatus();
   return prepared;
 }

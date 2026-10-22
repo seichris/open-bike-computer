@@ -258,8 +258,10 @@ bool MapTransferHttpServer::setEnabled(bool enabled) {
   const bool rollbackBusy = rollbackKind_ != RollbackKind::None || librarySubmitted_ ||
       pendingRendererAcknowledgement_ || (!libraryAction_.empty() && libraryAction_ != "refresh");
   unlockState();
-  if (enabled && rollbackBusy)
+  if (enabled && rollbackBusy) {
+    setLastError("library_busy", "device map selection is still finishing; try again shortly");
     return false;
+  }
   return transferServer_->setEnabled(enabled, enabled ? "map" : "");
 }
 
@@ -289,18 +291,26 @@ bool MapTransferHttpServer::shutdownQuiescent() const {
 }
 
 bool MapTransferHttpServer::requestMapLibrary(const std::string &action,
-    const std::string &session, const std::string &receipt) {
+    const std::string &session, const std::string &receipt, const std::string &requestID) {
+  if (!requestID.empty() && (requestID.size() != 32 || !std::all_of(requestID.begin(), requestID.end(),
+      [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }))) return false;
   if (action != "refresh" && action != "select" && action != "remove" &&
       action != "auto" && action != "manual") return false;
   if ((action == "select" || action == "remove") &&
       (session.empty() || session.size() > 80 || receipt.size() != 64)) return false;
-  if (transferServer_->status().enabled) return false;
+  const bool transferEnabled = transferServer_->status().enabled;
   StateGuard guard(*this);
-  if (librarySubmitted_ || (!libraryAction_.empty() && libraryAction_ != "refresh") ||
+  if (transferEnabled || librarySubmitted_ || (!libraryAction_.empty() && libraryAction_ != "refresh") ||
       pendingCommitGrant_ != 0 || !activationState_.acceptsUploads() ||
-      pendingRendererAcknowledgement_ || rollbackKind_ != RollbackKind::None) return false;
-  libraryAction_ = action; librarySession_ = session; libraryReceipt_ = receipt;
-  libraryError_.clear(); libraryRejectedSessions_.clear();
+      pendingRendererAcknowledgement_ || rollbackKind_ != RollbackKind::None) {
+    if (!requestID.empty()) {
+      libraryCommandID_ = requestID; libraryCommandError_ = "library_busy";
+      ++libraryRevision_; operationStatusNotification_ = true;
+    }
+    return false;
+  }
+  libraryAction_ = action; librarySession_ = session; libraryReceipt_ = receipt; libraryRequestID_ = requestID;
+  libraryError_.clear(); libraryRejectedSessions_.clear(); libraryAutomaticBlockKnown_ = false; libraryRetryAfterMs_ = 0;
   return true;
 }
 
@@ -327,7 +337,8 @@ std::string MapTransferHttpServer::mapLibraryJson(bool paged) const {
   const size_t end = paged ? std::min(offset + 4, libraryMaps_.size()) : libraryMaps_.size();
   // Four-map BLE pages leave headroom for ordinary status even at a reduced
   // ATT MTU. HTTPS consumers receive the complete bounded inventory.
-  json += "\"offset\":" + std::to_string(offset) + ",\"total\":" +
+  json += "\"commandID\":\"" + jsonEscape(libraryCommandID_) + "\",\"commandError\":\"" +
+      jsonEscape(libraryCommandError_) + "\",\"offset\":" + std::to_string(offset) + ",\"total\":" +
       std::to_string(libraryMaps_.size()) + ",\"maps\":[";
   bool comma = false;
   for (size_t index = offset; index < end; ++index) {
@@ -338,7 +349,8 @@ std::string MapTransferHttpServer::mapLibraryJson(bool paged) const {
         jsonEscape(map.mapId) + "\",\"manifestReceipt\":\"" + map.manifestReceipt +
         "\",\"signedManifestReceipt\":\"" + map.signedManifestReceipt +
         "\",\"displayName\":\"" + jsonEscape(map.presentation.displayName) +
-        "\",\"payloadBytes\":" + std::to_string(map.payloadBytes);
+        "\",\"payloadBytes\":" + std::to_string(map.payloadBytes) +
+        ",\"available\":" + (map.available ? "true" : "false");
     if (map.presentation.hasBoundsE7) {
       json += ",\"boundsE7\":[";
       for (size_t i = 0; i < 4; ++i) {
@@ -352,14 +364,17 @@ std::string MapTransferHttpServer::mapLibraryJson(bool paged) const {
   return json + "]}";
 }
 
-void MapTransferHttpServer::considerAutomaticMap(int32_t latitudeE7, int32_t longitudeE7, bool currentMapFound) {
+void MapTransferHttpServer::considerAutomaticMap(int32_t latitudeE7, int32_t longitudeE7, bool) {
+  if (latitudeE7 < -850511287 || latitudeE7 > 850511287 ||
+      longitudeE7 < -1800000000 || longitudeE7 > 1800000000) return;
   StateGuard guard(*this);
   if (!libraryKnown_ || !libraryAutomatic_ || librarySubmitted_ ||
       !libraryAction_.empty() || pendingRendererAcknowledgement_ ||
       !activationState_.acceptsUploads() || rollbackKind_ != RollbackKind::None) return;
-  const auto *best = coveringLibraryMap(libraryMaps_,
-      currentMapFound && selectionHealth_.state == "ready" ? selectionHealth_.root : "",
-      latitudeE7, longitudeE7, libraryRejectedSessions_);
+  const auto block = libraryPositionBlockKey(latitudeE7, longitudeE7);
+  if ((libraryAutomaticBlockKnown_ && libraryAutomaticBlock_ == block) ||
+      (libraryRetryAfterMs_ && int32_t(millis() - libraryRetryAfterMs_) < 0)) return;
+  const auto *best = coveringLibraryMap(libraryMaps_, "", latitudeE7, longitudeE7, libraryRejectedSessions_);
   if (best) {
     libraryLatitudeE7_ = latitudeE7; libraryLongitudeE7_ = longitudeE7;
     libraryAction_ = "automatic-select";
@@ -371,6 +386,7 @@ void MapTransferHttpServer::submitLibraryTask() {
   if (transferServer_->status().enabled || !streamStorageAvailable_) return;
   StateGuard guard(*this);
   if (!libraryAction_.empty() && !librarySubmitted_ &&
+      (!libraryRetryAfterMs_ || int32_t(millis() - libraryRetryAfterMs_) >= 0) &&
       pendingCommitGrant_ == 0 && !operationTaskSubmitted_ && operationQuery_.empty() &&
       terminalOperationID_.empty() && !commitRecovery_.pending() &&
       !pendingRendererAcknowledgement_ && pendingMapRoot_.empty() &&
@@ -381,12 +397,17 @@ void MapTransferHttpServer::submitLibraryTask() {
 
 void MapTransferHttpServer::libraryTask(void *context) {
   auto *server = static_cast<MapTransferHttpServer *>(context);
-  const auto result = server->operationOwner_->runMapActivation(ownedLibraryTask, context, "library", false);
-  if (result != ESP_OK && result != ESP_ERR_TIMEOUT) {
+  bool issued = false;
+  const auto result = server->operationOwner_->runMapActivation(ownedLibraryTask, context, "library", false, &issued);
+  if (result != ESP_OK && (result != ESP_ERR_TIMEOUT || !issued)) {
     StateGuard guard(*server);
     server->libraryError_ = "library_owner";
     server->librarySubmitted_ = false;
     server->libraryAction_.clear();
+    if (!server->libraryRequestID_.empty()) {
+      server->libraryCommandID_ = server->libraryRequestID_; server->libraryCommandError_ = "library_owner";
+    }
+    server->libraryRequestID_.clear(); ++server->libraryRevision_;
     server->operationStatusNotification_ = true;
   }
   // A timeout retains ownership until the internal callback actually returns.
@@ -397,8 +418,8 @@ void MapTransferHttpServer::ownedLibraryTask(void *context, const char *, bool) 
 }
 
 void MapTransferHttpServer::executeLibraryTask() try {
-  std::string action, session, receipt;
-  { StateGuard guard(*this); action = libraryAction_; session = librarySession_; receipt = libraryReceipt_; }
+  std::string action, session, receipt, requestID;
+  { StateGuard guard(*this); action = libraryAction_; session = librarySession_; receipt = libraryReceipt_; requestID = libraryRequestID_; }
   InstallStatus result{true, "ok", ""};
   bool automatic = installer_.automaticMapSelection();
   if (action != "refresh") {
@@ -410,25 +431,28 @@ void MapTransferHttpServer::executeLibraryTask() try {
     if (result.ok && store.hasUnresolvedOperation())
       result = {false, "library_operation_pending", ""};
   }
-  if (result.ok && (action == "auto" || action == "manual" || action == "select")) {
+  if (result.ok && (action == "auto" || action == "manual")) {
     automatic = action == "auto";
     if (!installer_.setAutomaticMapSelection(automatic)) result = {false, "library_policy_write", ""};
   }
   bool selecting = action == "select" || action == "automatic-select";
   if (result.ok && action == "automatic-select" && !librarySelectionStarted_) {
-    std::vector<InstalledMap> candidates;
-    const auto scanned = installer_.readMapLibrary(candidates);
-    if (!scanned.ok) result = scanned;
-    candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](const InstalledMap &map) {
-      return std::find(libraryRejectedSessions_.begin(), libraryRejectedSessions_.end(), map.sessionId) != libraryRejectedSessions_.end() ||
-          !installer_.installedMapCovers(map, libraryLatitudeE7_, libraryLongitudeE7_);
-    }), candidates.end());
     ActiveMapSelection current;
     const auto active = installer_.readActiveMap(current);
     if (!active.ok && active.code != "active_missing") result = active;
-    const auto *candidate = coveringLibraryMap(candidates, current.root, libraryLatitudeE7_, libraryLongitudeE7_);
-    if (candidate) { session = candidate->sessionId; receipt = candidate->manifestReceipt; }
-    else selecting = false;
+    if (result.ok && active.ok && installer_.mapRootHasBlock(current.root, libraryLatitudeE7_, libraryLongitudeE7_)) {
+      selecting = false; // Also preserves working flat legacy and unbounded maps.
+    } else if (result.ok) {
+      std::vector<InstalledMap> candidates;
+      { StateGuard guard(*this); candidates = libraryMaps_; }
+      candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](const InstalledMap &map) {
+        return std::find(libraryRejectedSessions_.begin(), libraryRejectedSessions_.end(), map.sessionId) != libraryRejectedSessions_.end() ||
+            !installer_.installedMapCovers(map, libraryLatitudeE7_, libraryLongitudeE7_);
+      }), candidates.end());
+      const auto *candidate = coveringLibraryMap(candidates, "", libraryLatitudeE7_, libraryLongitudeE7_);
+      if (candidate) { session = candidate->sessionId; receipt = candidate->manifestReceipt; }
+      else selecting = false;
+    }
   }
   if (result.ok && selecting) {
     // Persist the chosen identity in RAM before any pointer write. A retry
@@ -439,9 +463,24 @@ void MapTransferHttpServer::executeLibraryTask() try {
     }
     result = installer_.selectInstalledMap(session, receipt);
   }
-  if (result.ok && action == "remove") result = installer_.removeInstalledMap(session, receipt);
+  std::string policyError;
+  if (result.ok && action == "select") {
+    if (installer_.setAutomaticMapSelection(false)) automatic = false;
+    else policyError = "library_policy_write"; // The successful pointer still needs its renderer ACK.
+  }
+  if (result.ok && action == "remove") {
+    { StateGuard guard(*this);
+      if (selectionHealth_.root == "/VECTMAP/.maps/" + session)
+        result = {false, "library_in_use", "live renderer still uses this map"};
+    }
+    if (result.ok) result = installer_.removeInstalledMap(session, receipt);
+  }
   std::vector<InstalledMap> maps;
-  const auto inventory = installer_.readMapLibrary(maps);
+  InstallStatus inventory{true, "ok", ""};
+  if (action == "refresh" || action == "remove") {
+    if (action == "refresh") installer_.pruneObsoleteInstalledMaps();
+    inventory = installer_.readMapLibrary(maps);
+  } else { StateGuard guard(*this); maps = libraryMaps_; }
   ActiveMapSelection selected;
   const bool changed = result.ok && selecting && installer_.readActiveMap(selected).ok;
   {
@@ -450,11 +489,18 @@ void MapTransferHttpServer::executeLibraryTask() try {
     libraryAutomatic_ = automatic;
     if (!result.ok) libraryError_ = result.code;
     else if (!inventory.ok) libraryError_ = inventory.code;
+    else if (!policyError.empty()) libraryError_ = policyError;
     else if (action != "refresh") libraryError_.clear();
-    if (!result.ok && action == "automatic-select" &&
-        result.code != "library_operation_pending" && result.code != "library_operation_storage" &&
-        result.code != "library_busy" && libraryRejectedSessions_.size() < kMaximumLibraryMaps)
-      libraryRejectedSessions_.push_back(session);
+    const bool invalidCandidate = result.code == "library_integrity" || result.code == "library_file" ||
+        result.code == "library_manifest" || result.code == "library_receipt";
+    if (!result.ok && action == "automatic-select" && librarySelectionStarted_ && invalidCandidate &&
+        libraryRejectedSessions_.size() < kMaximumLibraryMaps) libraryRejectedSessions_.push_back(session);
+    if (action == "automatic-select") {
+      if (result.ok) {
+        libraryAutomaticBlock_ = libraryPositionBlockKey(libraryLatitudeE7_, libraryLongitudeE7_);
+        libraryAutomaticBlockKnown_ = true;
+      } else if (!invalidCandidate) libraryRetryAfterMs_ = millis() + 30000;
+    }
     if (changed) {
       // Renderer acknowledgement is live selection evidence. Reusing a map
       // never manufactures a new durable upload/installation result.
@@ -465,9 +511,16 @@ void MapTransferHttpServer::executeLibraryTask() try {
       pendingMapRootTaken_ = false; pendingRendererAcknowledgement_ = true;
       pendingRendererAutomaticExit_ = false;
     }
-    libraryAction_.clear(); librarySession_.clear(); libraryReceipt_.clear(); librarySelectionStarted_ = false;
-    librarySubmitted_ = false; ++libraryRevision_;
-    operationStatusNotification_ = true;
+    if (!requestID.empty()) {
+      libraryCommandID_ = std::move(requestID);
+      libraryCommandError_ = !result.ok ? result.code : policyError;
+    }
+    libraryAction_.clear(); librarySession_.clear(); libraryReceipt_.clear(); libraryRequestID_.clear(); librarySelectionStarted_ = false;
+    librarySubmitted_ = false;
+    if (action != "automatic-select" || changed || !result.ok) {
+      ++libraryRevision_;
+    }
+    operationStatusNotification_ = true; // Close any busy snapshot observed during this block's one probe.
   }
   ui_scheduler::notify(ui_scheduler::WakeReason::Transfer);
 } catch (const std::bad_alloc &) {
@@ -485,8 +538,8 @@ void MapTransferHttpServer::executeLibraryTask() try {
   // and retry the handoff after memory recovers instead of stranding a pointer
   // that the renderer has never been asked to load.
   if (libraryAction_ != "select" && libraryAction_ != "automatic-select") libraryAction_.clear();
-  librarySubmitted_ = false;
-  operationStatusNotification_ = true;
+  librarySubmitted_ = false; libraryRetryAfterMs_ = millis() + 5000;
+  ++libraryRevision_; operationStatusNotification_ = true;
 }
 
 void MapTransferHttpServer::releaseCommitGrant() {
@@ -1204,11 +1257,14 @@ bool MapTransferHttpServer::handleInstallStream(
   }
   std::vector<InstalledMap> library;
   const auto libraryStatus = installer_.readMapLibrary(library);
-  if (!libraryStatus.ok ||
-      (library.size() >= kMaximumLibraryMaps &&
+  if (!libraryStatus.ok) {
+    sendError(client, 503, "library_unavailable", "could not read the SD map inventory; refresh device maps and retry");
+    return true;
+  }
+  if (library.size() >= kMaximumLibraryMaps &&
        std::none_of(library.begin(), library.end(), [&](const InstalledMap &map) {
          return map.sessionId == sessionId;
-       }))) {
+       })) {
     sendError(client, 409, "library_full", "remove a map from the SD library before installing another");
     return true;
   }
@@ -1250,6 +1306,7 @@ bool MapTransferHttpServer::handleInstallStream(
               "could not allocate map stream receiver");
     return true;
   }
+  receiver->setFreeSpaceProbe(streamStorageSpaceProbe_);
   updateStreamInstallState(receiver->snapshot(), true);
   std::array<uint8_t, 1024> buffer = {};
   Sha256Hasher operationHasher;
@@ -1586,6 +1643,7 @@ void MapTransferHttpServer::acknowledgeActivatedMapRoot(
   if (loaded && libraryAction_.empty()) libraryAction_ = "refresh";
   if (!loaded) {
     libraryError_ = "library_renderer";
+    libraryCommandError_ = "library_renderer"; ++libraryRevision_;
     if (libraryRejectedSessions_.size() < kMaximumLibraryMaps) libraryRejectedSessions_.push_back(sessionId);
   }
   unlockState();

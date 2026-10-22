@@ -355,6 +355,19 @@ VerifiedMapStreamManifest prepareReadyRoot(const std::string &root,
   return manifest;
 }
 
+void testFreeSpacePreflightBeforePayload() {
+  const auto manifest = verified();
+  MapStreamInstallSession full(tempRoot(), "full-card", {1, 10000});
+  full.setFreeSpaceProbe([] { return uint64_t(0); });
+  assert(!full.onManifest(manifest, kManifest));
+  assert(full.snapshot().errorCode == "stream_sd_full" && full.snapshot().bytesWritten == 0);
+  MapStreamInstallSession enough(tempRoot(), "room-on-card", {1, 10000});
+  enough.setFreeSpaceProbe([] { return uint64_t(16 * 1024 * 1024); });
+  assert(enough.onManifest(manifest, kManifest));
+  assert(consumeAll(enough, manifest));
+  assert(enough.onComplete(manifest));
+}
+
 void testDirectWriteCheckpointAndReady() {
   const std::string root = tempRoot();
   uint64_t now = 100;
@@ -1760,6 +1773,7 @@ void testStartingNewStreamPrunesAbandonedPausedSessions() {
 } // namespace
 
 int main() {
+  testFreeSpacePreflightBeforePayload();
   testDeviceBoundOperationActivationAndReceipt();
   testExplicitOperationPromotionAndTerminalCrashBoundaries();
   testPreparedReinstallCannotInheritLegacyAuthorityOrDeletePriorMap();
