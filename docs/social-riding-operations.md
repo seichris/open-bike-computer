@@ -542,7 +542,8 @@ clears stale fixes and expired leases. Unfriend/block deletes both directions;
 account deletion/disable also clears them. Re-adding/unblocking never restores
 consent. The app polls every three seconds, publishes only new, accurate fixes,
 and uses monotonic local deadlines. Local Stop removes the recipient before any
-network await. Outgoing consent is volatile and never silently resumed after
+network await. `DELETE /friend-sharing` revokes all outgoing friend consents in
+one request for sign-out, while preserving incoming consents. Outgoing consent is volatile and never silently resumed after
 relaunch, sign-out or account switch. Group and friend sharing share one GPS
 lifecycle so stopping either does not stop the other. Turning off the rollout
 flag rejects snapshots/publications/start requests while retaining consent reads

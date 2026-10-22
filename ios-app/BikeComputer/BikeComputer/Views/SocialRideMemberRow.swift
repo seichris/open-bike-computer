@@ -3,10 +3,11 @@ import SwiftUI
 struct SocialRideMemberRow: View {
     let profile: SocialProfile
     @ObservedObject var store: SocialCoordinator
+    var includesFriendSharing = false
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 5)) { context in
-            let rider = store.visibleRiders.first { $0.id == profile.id && $0.age(at: context.date) < 60 }
+            let rider = (includesFriendSharing ? store.visibleRiders : store.live.riders).first { $0.id == profile.id && $0.age(at: context.date) < 60 }
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     SocialAvatar(profile: profile, image: profile.avatarID.flatMap { store.photos[$0] })

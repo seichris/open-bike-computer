@@ -142,18 +142,11 @@ final class FriendLiveService: ObservableObject {
     }
 
     func stopAll() async {
-        let ids = Set(leases.keys).union(busyIDs)
-        // Fence pending starts before the first await; a sign-out must not let
-        // an earlier permission request restart GPS while revocations run.
+        let hadConsent = !leases.isEmpty || !busyIDs.isEmpty
+        // Fence pending starts before the first await. One batched revocation
+        // keeps sign-out bounded even when many friends were selected.
         reset()
-        let expected = generation
-        for id in ids {
-            guard expected == generation else { return }
-            let path = "friend-sharing/\(id)/consent"
-            guard let current = try? await client.json(path), expected == generation,
-                  let epoch = current["epoch"] as? String else { continue }
-            _ = try? await client.json(path, method: "POST", body: ["epoch": epoch, "location": false, "stats": false])
-        }
+        if hadConsent { _ = try? await client.json("friend-sharing", method: "DELETE") }
     }
 
     func forget(_ id: String) {

@@ -575,6 +575,11 @@ class SocialService:
                           stats=data.location and data.stats, sequence=-1, live=None, received=None))
         return self.friend_consent_read(c, actor, target)
 
+    def stop_friend_sharing(self, c, actor):
+        self.db.lock(c, actor)
+        c.execute(delete(friend_shares).where(friend_shares.c.owner == actor))
+        return {"status": "stopped"}
+
     def friend_snapshot(self, c, actor):
         self.active(c, actor)
         outgoing, riders = [], []

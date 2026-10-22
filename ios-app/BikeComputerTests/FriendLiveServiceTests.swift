@@ -15,6 +15,7 @@ private final class FriendNetwork: SocialRideNetworking {
     func request(_ path: String, method: String, body: Data?, contentType: String, query: [URLQueryItem]) async throws -> Data {
         var value: [String: Any]
         if path == "friend-sharing" {
+            if method == "DELETE" { consents = [:] }
             value = ["outgoing": Array(consents.values.filter { $0["sharing"] as? Bool == true }), "riders": [], "serverTime": 1000.0]
             if holdSnapshot {
                 holdSnapshot = false

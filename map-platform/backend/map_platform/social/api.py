@@ -353,6 +353,10 @@ def create_app(*, service=None, identity=None, features=None, client_addresses=N
     def friend_sharing(auth=Depends(authenticate)):
         return read(lambda c: service.friend_snapshot(c, auth[0]))
 
+    @app.delete("/friend-sharing")
+    async def stop_friend_sharing(request: Request, auth=Depends(authenticate)):
+        return await operation(request, auth, lambda c, a: service.stop_friend_sharing(c, a))
+
     @app.get("/friend-sharing/{profile_id}/consent")
     def friend_consent_status(profile_id: str, auth=Depends(authenticate)):
         return read(lambda c: service.friend_consent_read(c, auth[0], profile_id))

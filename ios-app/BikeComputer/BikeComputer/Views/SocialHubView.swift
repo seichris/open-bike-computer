@@ -247,7 +247,7 @@ private struct SocialFriendView: View {
                 }
             }
             if store.visibleRiders.contains(where: { $0.id == friend.id }) {
-                Section("Live ride data") { SocialRideMemberRow(profile: friend, store: store) }
+                Section("Live ride data") { SocialRideMemberRow(profile: friend, store: store, includesFriendSharing: true) }
             }
             Section("Routes") {
                 ForEach(routes) { route in NavigationLink(route.title) { SocialContentDetail(store: store, item: route, routeLibrary: routeLibrary) } }
