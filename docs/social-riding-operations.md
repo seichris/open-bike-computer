@@ -540,11 +540,28 @@ replaying an obsolete permission payload.
 accepted friends only. Received positions disappear at 60 seconds; the worker
 clears stale fixes and expired leases. Unfriend/block deletes both directions;
 account deletion/disable also clears them. Re-adding/unblocking never restores
-consent. The app polls every three seconds, publishes only new, accurate fixes,
-and uses monotonic local deadlines. Local Stop removes the recipient before any
+consent. Outgoing consent is volatile and never silently resumed after
+relaunch, sign-out or account switch. Local Stop removes the recipient before any
 network await. `DELETE /friend-sharing` revokes all outgoing friend consents in
-one request for sign-out, while preserving incoming consents. Outgoing consent is volatile and never silently resumed after
-relaunch, sign-out or account switch. Group and friend sharing share one GPS
-lifecycle so stopping either does not stop the other. Turning off the rollout
-flag rejects snapshots/publications/start requests while retaining consent reads
-and explicit stops.
+one request for sign-out, while preserving incoming consents. Group and friend
+sharing share one GPS lifecycle so stopping either does not stop the other.
+Turning off the rollout flag rejects snapshots/publications/start requests while
+retaining consent reads and explicit stops.
+
+The app polls `GET /friend-sharing` every three seconds only while this phone
+shares with a friend or shows a friend position younger than 60 seconds. With
+neither, it checks once a minute while the app is in the foreground, and not at
+all in the background. Returning to the foreground or changing a consent checks
+immediately. It publishes only new, accurate fixes, uses monotonic local
+deadlines, and leaves at least 2.2 seconds after its previous publication attempt
+so an immediate check never trips the server's two-second per-recipient rate.
+A request superseded by such a check is neither a sharing failure nor a
+revocation, and the server's own rate rejection is not reported as one either.
+
+This is a deliberate battery and server-load trade-off. While the phone is in
+the background and neither condition applies, a friend who starts sharing is not
+discovered until Bicino returns to the foreground or the rider starts sharing.
+That includes the map and the authenticated bike-computer relay. Positions
+already being received, and this phone's own outgoing sharing, continue in the
+background within the existing location permission. Bicino does not request
+additional background location access for discovery.

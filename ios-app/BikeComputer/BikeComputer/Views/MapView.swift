@@ -277,6 +277,7 @@ struct MapViewContainer: UIViewRepresentable {
     var offlineNavigationPolyline: MKPolyline? = nil
     var socialRiders: [SocialRider] = []
     var socialPhotos: [String: UIImage] = [:]
+    var socialMarkerStyle = SocialMapMarkerStyle()
 
     private var visibleSavedRoutePreview: MapSavedRouteOverlay? {
         let content = SavedRouteMapPolicy.content(
@@ -350,7 +351,8 @@ struct MapViewContainer: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: MKMapView, context: Context) {
-        context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos, location: location)
+        context.coordinator.socialLayer.update(on: uiView, riders: socialRiders, photos: socialPhotos,
+                                              location: location, style: socialMarkerStyle)
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: uiView)
         context.coordinator.applyAppearanceIfNeeded(
             appearance,
