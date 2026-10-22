@@ -141,6 +141,49 @@ enum Tests {
             expect(motionWrites(f.peer).count == 2,
                    "a new connection resynchronizes even the last submitted sample")
         }
+        // Firmware treats Starting after a finished session as a new session even
+        // when its random 16-bit token collides; the new random epoch may then be
+        // serially older. Navigation keeps the same connection across workouts.
+        await run("finished workout does not suppress a colliding next session") {
+            let f = Fixture(); defer { f.close() }
+            f.link.setWorkoutDemand(true)
+            f.link.testEnqueueMotion(motion(50, epoch: 0x9000, token: 7))
+            f.link.testDrainATT(on: f.peer)
+            f.link.endWorkoutDemandAfterSending(.init(identity: .init(state: .ended)))
+            if let terminal = f.link.testActiveGroup {
+                f.link.testDrainATT(on: f.peer)
+                f.link.testAcknowledge(terminal, on: f.peer)
+            }
+            expect(f.link.state.isReady, "navigation keeps the connection across workouts")
+            f.link.setWorkoutDemand(true)
+            f.link.testEnqueueMotion(motion(1, epoch: 0x1000, token: 7))
+            f.link.testDrainATT(on: f.peer)
+            expect(motionWrites(f.peer).map { $0.uint32LE(at: 4) } == [50, 1],
+                   "the next session's first sample reaches ATT despite the colliding token")
+        }
+        await run("finished workout discards active and queued motion behind backpressure") {
+            let f = Fixture(); defer { f.close() }
+            let characteristic = f.peer.services![0].characteristics!.first {
+                $0.uuid.uuidString == WatchDirectBLEProtocolV1.workoutUUID
+            }!
+            characteristic.properties = .writeWithoutResponse
+            f.link.setWorkoutDemand(true)
+            f.peer.canSendWriteWithoutResponse = false
+            f.link.testEnqueueMotion(motion(60, epoch: 0x9000, token: 7))
+            f.link.testEnqueueMotion(motion(61, epoch: 0x9000, token: 7))
+            f.link.endWorkoutDemandAfterSending(.init(identity: .init(state: .ended)))
+            f.peer.canSendWriteWithoutResponse = true
+            f.link.peripheralIsReady(toSendWriteWithoutResponse: f.peer)
+            if let terminal = f.link.testPendingACK {
+                f.link.testAcknowledge(terminal, on: f.peer)
+            }
+            expect(motionWrites(f.peer).isEmpty,
+                   "a finished workout's motion is not submitted after its terminal state")
+            f.link.setWorkoutDemand(true)
+            f.link.testEnqueueMotion(motion(1, epoch: 0x1000, token: 7))
+            expect(motionWrites(f.peer).map { $0.uint32LE(at: 4) } == [1],
+                   "an old blocked write cannot seed the next session's baseline")
+        }
         await run("rejected preparation waits for a real cancellation boundary") {
             for finishBeforeRetry in [false, true] {
                 let f = Fixture(); defer { f.close() }

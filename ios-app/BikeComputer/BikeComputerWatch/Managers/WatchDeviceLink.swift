@@ -140,6 +140,10 @@ final class WatchDeviceLink: NSObject, ObservableObject {
     private var latestWorkoutGPS: WorkoutDeviceGPSUpdate?
     private var latestWorkoutMotion: WorkoutDeviceMotionUpdate?
     private var lastDispatchedWorkoutMotion: RideBLEMotionDispatch?
+    // Firmware treats Starting after a finished session as a new session even
+    // when the random token collides. Motion enqueued before a finished workout
+    // was cleared belongs to that session and must not seed the next baseline.
+    private var workoutMotionClearedUptime: TimeInterval = -.infinity
     private var workoutPairGeneration: UInt8 = 0
     private var latestLocation: NavigationLocationSampleV1?
     private var latestNavigationSnapshot: NavigationSnapshotV1?
@@ -527,6 +531,9 @@ final class WatchDeviceLink: NSObject, ObservableObject {
         latestWorkoutFrames = frames
         latestWorkoutGPS = nil
         latestWorkoutMotion = nil
+        lastDispatchedWorkoutMotion = nil
+        workoutMotionClearedUptime = ProcessInfo.processInfo.systemUptime
+        queue.removeReplaceableGroups(coalescingKeys: ["workout-motion"])
         guard transportStateMachine.isReady else { return }
         enqueueWorkoutFrames(frames)
         drainQueue()
@@ -1602,7 +1609,8 @@ final class WatchDeviceLink: NSObject, ObservableObject {
             }
             var payload = write.gpsDispatch?.payload() ?? write.payload
             if let motion = write.motionDispatch {
-                guard motion.isNewer(than: lastDispatchedWorkoutMotion),
+                guard motion.enqueuedUptime > workoutMotionClearedUptime,
+                      motion.isNewer(than: lastDispatchedWorkoutMotion),
                       let freshPayload = motion.payload() else {
                     activeWriteIndex += 1
                     continue
