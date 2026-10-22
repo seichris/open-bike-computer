@@ -32,6 +32,7 @@ extern unsigned bicino_host_psram_pool_allocations;
 }
 #endif
 static inline void *heap_caps_malloc(size_t size, unsigned caps) { (void)caps; return malloc(size); }
+static inline void heap_caps_free(void *memory) { free(memory); }
 static inline void *heap_caps_aligned_alloc(size_t alignment, size_t size, unsigned caps) {
     (void)caps;
     void *memory = malloc(size);

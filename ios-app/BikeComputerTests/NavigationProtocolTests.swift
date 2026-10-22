@@ -953,6 +953,7 @@ struct NavigationProtocolTests {
         testBLEManagerResendsBrightnessAfterAuthentication()
         testBLEManagerGatesAutomaticDisplayOffForLegacyFirmware()
         testBLEManagerSendsAutomaticDisplayOffAfterCapabilityNegotiation()
+        testBLEManagerSendsFriendMarkerScaleOnlyToSupportingFirmware()
         testBLEManagerSendsAutomaticDisplayOffSetting()
         testBLEManagerRetriesAutomaticDisplayOffAfterQueuePressure()
         testBLEManagerSendsDisplayInactivityTimeouts()

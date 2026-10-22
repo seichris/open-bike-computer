@@ -111,5 +111,58 @@ int main() {
     assert(rectangle.x>=36&&rectangle.x<=374&&rectangle.y>=35&&rectangle.y<=467);
   }
   auto p=edge(0,0,466,466,true);assert(p.x==233&&p.y==233);
-  std::cout << "Social rider packet, retry, reset, age, image, global bearing/distance, and safe-boundary tests passed\n";
+  // One combined friend-marker size: normal keeps the shipped 64x62 badge.
+  assert(clampMarkerScale(-5)==100&&clampMarkerScale(0)==100&&clampMarkerScale(301)==300&&clampMarkerScale(250)==250);
+  const auto normal=badgeGeometry(100);
+  assert(normal.width==64&&normal.height==62&&normal.frame==44&&normal.frameX==10&&normal.portrait==40&&
+         normal.inset==2&&normal.countX==38&&normal.labelY==44&&normal.initialsFont==14&&normal.countFont==14&&normal.labelFont==12);
+  assert(badgeGeometry(50).width==64&&badgeGeometry(900).portrait==MAX_PORTRAIT_SIZE);
+  BadgeGeometry previous=normal;
+  for(uint16_t scale:{uint16_t(100),uint16_t(125),uint16_t(150),uint16_t(200),uint16_t(250),uint16_t(300)}) {
+    const auto g=badgeGeometry(scale);
+    // Portrait, frame, count and label grow together and stay inside the badge.
+    assert(g.width>=previous.width&&g.portrait>=previous.portrait&&g.labelFont>=previous.labelFont&&g.initialsFont>=previous.initialsFont);
+    assert(g.portrait<=MAX_PORTRAIT_SIZE&&g.inset>=0&&g.frameX>=0&&g.frameX+g.frame<=g.width&&g.labelY+g.labelFont<=g.height);
+    assert(g.labelFont<=12*scale/100&&g.initialsFont<=g.frame);
+    for(int angle=0;angle<360;angle+=3) {
+      const double s=sin(angle*M_PI/180),c=-cos(angle*M_PI/180);
+      auto round=edge(s,c,466,466,true,g.halfWidth(),g.halfHeight());
+      for(double x:{-g.halfWidth(),g.halfWidth()})for(double y:{-g.halfHeight(),g.halfHeight()})
+        assert(hypot(round.x-233+x,round.y-233+y)<=229.00001);
+      assert(fits(round.x,round.y,466,466,true,g.halfWidth()-0.01,g.halfHeight()-0.01));
+      assert(hypot(round.x-233,round.y-233)>1); // Edges keep their bearing even at 3x.
+      auto rectangle=edge(s,c,410,502,false,g.halfWidth(),g.halfHeight());
+      assert(rectangle.x-g.halfWidth()>=3.999&&rectangle.x+g.halfWidth()<=406.001&&
+             rectangle.y-g.halfHeight()>=3.999&&rectangle.y+g.halfHeight()<=498.001);
+    }
+    assert(fits(233,233,466,466,true,g.halfWidth(),g.halfHeight()));
+    assert(!fits(20,233,466,466,true,g.halfWidth(),g.halfHeight()));
+    previous=g;
+  }
+  assert(badgeGeometry(300).portrait==3*normal.portrait&&badgeGeometry(300).width==3*normal.width);
+  std::vector<uint8_t> portrait(IMAGE_BYTES),scaledPortrait(size_t(MAX_PORTRAIT_SIZE)*MAX_PORTRAIT_SIZE*2,0xee);
+  for(size_t i=0;i<IMAGE_BYTES;i+=2){portrait[i]=uint8_t(i*7);portrait[i+1]=uint8_t(i>>3);}
+  scalePortrait(portrait.data(),scaledPortrait.data(),PORTRAIT_SIZE);
+  assert(!memcmp(portrait.data(),scaledPortrait.data(),IMAGE_BYTES)); // Normal size is an exact copy.
+  std::vector<uint8_t> flat(IMAGE_BYTES);for(size_t i=0;i<IMAGE_BYTES;i+=2){flat[i]=0x34;flat[i+1]=0x12;}
+  for(int size:{50,60,80,100,120}) {
+    scalePortrait(flat.data(),scaledPortrait.data(),size);
+    for(int i=0;i<size*size;++i)assert(scaledPortrait[2*i]==0x34&&scaledPortrait[2*i+1]==0x12);
+  }
+  scalePortrait(portrait.data(),scaledPortrait.data(),120);
+  assert(scaledPortrait[0]==portrait[0]&&scaledPortrait[1]==portrait[1]); // Corners keep the source pixel.
+  // The frame circle lives in the portrait's alpha plane: no LVGL clip layer.
+  assert(portraitBytes(40)==4800&&portraitBytes(MAX_PORTRAIT_SIZE)==43200);
+  for(uint16_t scale:{uint16_t(100),uint16_t(200),uint16_t(300)}) {
+    const auto g=badgeGeometry(scale);std::vector<uint8_t> alpha(size_t(g.portrait)*g.portrait);
+    maskPortrait(alpha.data(),g.portrait,g.frame/2.0);
+    const int c=g.portrait/2;
+    assert(alpha[c*g.portrait+c]==255&&alpha[0]==0); // Opaque centre, transparent corner.
+    assert(alpha[0]==alpha[g.portrait-1]&&alpha[0]==alpha.back()); // Symmetric circle.
+    assert(alpha[c*g.portrait]==255&&alpha[c]==255); // Edge midpoints lie inside the frame circle.
+  }
+  // Normal size keeps the shipped look: the 22 px frame circle trims only the
+  // corners of the 40 px portrait, with an anti-aliased edge.
+  assert(circleCoverage(4,4,40,22.0)>0&&circleCoverage(4,4,40,22.0)<255&&circleCoverage(1,20,40,22.0)==255);
+  std::cout << "Social rider packet, retry, reset, age, image, global bearing/distance, safe-boundary and marker-size tests passed\n";
 }

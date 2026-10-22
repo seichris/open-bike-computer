@@ -55,6 +55,7 @@
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift",
         "ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift",
@@ -211,6 +212,7 @@
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift",
         "ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift",
         "ios-app/BikeComputer/BikeComputer/Models/WorldRadioProtocol.swift",
         "ios-app/BikeComputer/BikeComputer/Services/WorldRadioService.swift",
@@ -287,6 +289,7 @@
         "ios-app/BikeComputer/BikeComputer/Models/DeviceScreenConfiguration.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/BikeComputerCoordinator.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/CurrentLocationManager.swift",
@@ -478,6 +481,7 @@
     },
     "common-1": {
       "sources": [
+        "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/BLEManager.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceOwnership.swift",
         "ios-app/BikeComputer/BikeComputer/Managers/DeviceScreenConfigurationController.swift",
@@ -561,6 +565,7 @@
         "ios-app/BikeComputer/BikeComputer/Views/BicinoTopographyTileOverlay.swift",
         "ios-app/BikeComputer/BikeComputer/Views/MapView.swift",
         "ios-app/BikeComputer/BikeComputer/Views/SocialMapLayer.swift",
+        "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
         "ios-app/BikeComputer/BikeComputer/Models/SocialModels.swift",
         "ios-app/BikeComputer/BikeComputer/Models/TerrainMapStyle.swift",
         "ios-app/BikeComputer/BikeComputer/Utilities/ContourLabelLayout.swift"
@@ -688,6 +693,7 @@
     },
     "social-runtime": {
       "sources": [
+        "ios-app/BikeComputer/BikeComputer/Models/FriendMarkerScale.swift",
         "ios-app/BikeComputer/BikeComputer/Models/SocialModels.swift",
         "ios-app/BikeComputer/BikeComputer/Models/SocialProfilePresentation.swift",
         "ios-app/BikeComputer/BikeComputer/Services/SocialProfileMutationQueue.swift",

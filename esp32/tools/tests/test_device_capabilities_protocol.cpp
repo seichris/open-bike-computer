@@ -122,6 +122,17 @@ int main() {
     assert(output[30 + index] == extendedGolden[index]);
   assert(device_capabilities_protocol::encodeCap2(
       0, extendedPower, true, output, extendedSize - 1, screens, sizeof(screens), 1) == 0);
+  static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE == 2);
+  static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION == 31);
+  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 31);
+  // The friend-marker size flag shares the extended word with group riders.
+  assert(device_capabilities_protocol::encodeCap2(
+      0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),
+      ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE |
+          ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE) == extendedSize);
+  const uint8_t friendScaleGolden[] = {3, 4, 3, 0, 0, 0};
+  for (size_t index = 0; index < sizeof(friendScaleGolden); ++index)
+    assert(output[30 + index] == friendScaleGolden[index]);
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
       0x00003fff, power, true, output, sizeof(output));

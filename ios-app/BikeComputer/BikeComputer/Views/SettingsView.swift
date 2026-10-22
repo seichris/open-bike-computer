@@ -2805,6 +2805,8 @@ private struct MapStyleSettingsView: View {
                     sendSetting(mapID: 7, mapPlusNavigationID: DeviceBLEProtocol.mapPlusNavigationZoomLevelSettingID, value: Int32(newValue))
                 }
             }
+
+            FriendMarkerSizeSection(bleManager: bleManager)
         }
         .disabled(!bleManager.supportsDeviceSettings ||
                   !bleManager.hasReceivedDeviceCapabilities ||

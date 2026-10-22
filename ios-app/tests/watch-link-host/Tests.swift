@@ -52,7 +52,138 @@ enum Tests {
         var result = NavigationSnapshotV1(); result.routeWindow = Data([marker]); result.instruction = "new-\(marker)"; return result
     }
     static var location: NavigationLocationSampleV1 { .init(coordinate: .init(latitude: 1, longitude: 2), horizontalAccuracyMeters: 3, courseDegrees: 4, speedMetersPerSecond: 5, altitudeMeters: 6, timestamp: Date(timeIntervalSince1970: 0)) }
+    static func motion(_ sequence: UInt32, epoch: UInt16 = 1, token: UInt16 = 1) -> Data {
+        // Valid kind-4 wire fixture; age and phase flags are not sample identity.
+        var frame = Data([4, 15, UInt8(truncatingIfNeeded: token), UInt8(token >> 8)])
+        frame.appendUInt32LE(sequence)
+        frame.append(contentsOf: [100, 0, 50, 0, 0, 0,
+                                  UInt8(truncatingIfNeeded: epoch), UInt8(epoch >> 8)])
+        return frame
+    }
+    static func motionWrites(_ peer: CBPeripheral) -> [Data] {
+        peer.writes.filter {
+            $0.characteristic.uuid.uuidString == WatchDirectBLEProtocolV1.workoutUUID &&
+                $0.data.count == 16 && $0.data.first == 4
+        }.map(\.data)
+    }
     static func main() async {
+        await run("motion heartbeats submit each sample once and reject regressions") {
+            let f = Fixture(); defer { f.close() }
+            for _ in 0..<20 {
+                f.link.testEnqueueMotion(motion(10))
+                f.link.testDrainATT(on: f.peer)
+            }
+            var sameSample = motion(10)
+            sameSample[1] |= 16
+            sameSample[12] = 100
+            for frame in [sameSample, motion(9), motion(11), motion(1, epoch: 2),
+                          motion(12), motion(1, epoch: 2, token: 2)] {
+                f.link.testEnqueueMotion(frame)
+                f.link.testDrainATT(on: f.peer)
+            }
+            expect(motionWrites(f.peer).map { $0.uint32LE(at: 4) } == [10, 11, 1, 1],
+                   "only new sequences, new epochs and new session tokens reach ATT")
+        }
+        await run("motion eviction and expiry do not consume unsent sample identity") {
+            let f = Fixture(); defer { f.close() }
+            f.link.updateNavigation(location: location, snapshot: snapshot(77))
+            f.link.testEnqueueMotion(motion(1))
+            f.link.testEvictQueuedMotion()
+            f.link.testDrainATT(on: f.peer)
+            expect(motionWrites(f.peer).isEmpty, "evicted motion never reached the writer")
+            f.link.testEnqueueMotion(motion(1))
+            f.link.testDrainATT(on: f.peer)
+            f.link.testEnqueueMotion(motion(2), enqueuedUptime: ProcessInfo.processInfo.systemUptime - 4)
+            f.link.testDrainATT(on: f.peer)
+            expect(motionWrites(f.peer).count == 1, "expired queued motion is dropped")
+            f.link.testEnqueueMotion(motion(2))
+            f.link.testDrainATT(on: f.peer)
+            expect(motionWrites(f.peer).map { $0.uint32LE(at: 4) } == [1, 2],
+                   "a sample discarded before ATT remains eligible")
+        }
+        await run("motion serial order matches firmware at wrapping boundaries") {
+            let f = Fixture(); defer { f.close() }
+            for frame in [motion(.max - 1, epoch: .max), motion(.max, epoch: .max),
+                          motion(1, epoch: .max), motion(0, epoch: .max),
+                          motion(0x8000_0001, epoch: .max), motion(2, epoch: .max - 1),
+                          motion(1), motion(2, epoch: .max), motion(2, epoch: 0x8001),
+                          motion(2, epoch: 0), motion(2, token: 0)] {
+                f.link.testEnqueueMotion(frame)
+                f.link.testDrainATT(on: f.peer)
+            }
+            expect(motionWrites(f.peer).map { $0.uint32LE(at: 4) } == [.max - 1, .max, 1, 1],
+                   "forward wrap is accepted; zero, older and half-range identities are rejected")
+        }
+        await run("motion backpressure filters both active and queued duplicates") {
+            let f = Fixture(); defer { f.close() }
+            let characteristic = f.peer.services![0].characteristics!.first {
+                $0.uuid.uuidString == WatchDirectBLEProtocolV1.workoutUUID
+            }!
+            characteristic.properties = .writeWithoutResponse
+            f.peer.canSendWriteWithoutResponse = false
+            f.link.testEnqueueMotion(motion(1))
+            f.link.testEnqueueMotion(motion(1))
+            expect(motionWrites(f.peer).isEmpty, "blocked writer does not submit")
+            f.peer.canSendWriteWithoutResponse = true
+            f.link.peripheralIsReady(toSendWriteWithoutResponse: f.peer)
+            expect(motionWrites(f.peer).count == 1,
+                   "active and queued copies collapse when the writer resumes")
+        }
+        await run("motion identity resets after failed ATT and reconnect") {
+            let f = Fixture(); defer { f.close() }
+            f.link.testEnqueueMotion(motion(1))
+            f.link.testATT(on: f.peer, error: NSError(domain: "test", code: 1))
+            f.link.testDrop(f.peer); await settle()
+            f.clock.advance(by: .seconds(1)); await settle()
+            f.link.testFinishReconnect(f.peer)
+            f.link.testEnqueueMotion(motion(1))
+            f.link.testDrainATT(on: f.peer)
+            expect(motionWrites(f.peer).count == 2,
+                   "a new connection resynchronizes even the last submitted sample")
+        }
+        // Firmware treats Starting after a finished session as a new session even
+        // when its random 16-bit token collides; the new random epoch may then be
+        // serially older. Navigation keeps the same connection across workouts.
+        await run("finished workout does not suppress a colliding next session") {
+            let f = Fixture(); defer { f.close() }
+            f.link.setWorkoutDemand(true)
+            f.link.testEnqueueMotion(motion(50, epoch: 0x9000, token: 7))
+            f.link.testDrainATT(on: f.peer)
+            f.link.endWorkoutDemandAfterSending(.init(identity: .init(state: .ended)))
+            if let terminal = f.link.testActiveGroup {
+                f.link.testDrainATT(on: f.peer)
+                f.link.testAcknowledge(terminal, on: f.peer)
+            }
+            expect(f.link.state.isReady, "navigation keeps the connection across workouts")
+            f.link.setWorkoutDemand(true)
+            f.link.testEnqueueMotion(motion(1, epoch: 0x1000, token: 7))
+            f.link.testDrainATT(on: f.peer)
+            expect(motionWrites(f.peer).map { $0.uint32LE(at: 4) } == [50, 1],
+                   "the next session's first sample reaches ATT despite the colliding token")
+        }
+        await run("finished workout discards active and queued motion behind backpressure") {
+            let f = Fixture(); defer { f.close() }
+            let characteristic = f.peer.services![0].characteristics!.first {
+                $0.uuid.uuidString == WatchDirectBLEProtocolV1.workoutUUID
+            }!
+            characteristic.properties = .writeWithoutResponse
+            f.link.setWorkoutDemand(true)
+            f.peer.canSendWriteWithoutResponse = false
+            f.link.testEnqueueMotion(motion(60, epoch: 0x9000, token: 7))
+            f.link.testEnqueueMotion(motion(61, epoch: 0x9000, token: 7))
+            f.link.endWorkoutDemandAfterSending(.init(identity: .init(state: .ended)))
+            f.peer.canSendWriteWithoutResponse = true
+            f.link.peripheralIsReady(toSendWriteWithoutResponse: f.peer)
+            if let terminal = f.link.testPendingACK {
+                f.link.testAcknowledge(terminal, on: f.peer)
+            }
+            expect(motionWrites(f.peer).isEmpty,
+                   "a finished workout's motion is not submitted after its terminal state")
+            f.link.setWorkoutDemand(true)
+            f.link.testEnqueueMotion(motion(1, epoch: 0x1000, token: 7))
+            expect(motionWrites(f.peer).map { $0.uint32LE(at: 4) } == [1],
+                   "an old blocked write cannot seed the next session's baseline")
+        }
         await run("rejected preparation waits for a real cancellation boundary") {
             for finishBeforeRetry in [false, true] {
                 let f = Fixture(); defer { f.close() }

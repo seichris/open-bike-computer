@@ -102,6 +102,19 @@ extension WatchDeviceLink {
         }
         preconditionFailure("Unbounded ATT drain in test")
     }
+    func testEnqueueMotion(_ frame: Data, enqueuedUptime: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        _ = enqueueGroup(
+            priority: .liveWorkout,
+            disposition: .replaceable,
+            coalescingKey: "workout-motion",
+            writes: [.init(target: .workout, payload: frame,
+                           motionDispatch: .init(frame: frame, enqueuedUptime: enqueuedUptime))]
+        )
+        drainQueue()
+    }
+    func testEvictQueuedMotion() {
+        queue.removeReplaceableGroups(coalescingKeys: ["workout-motion"])
+    }
     func testDrop(_ peer: CBPeripheral) {
         centralManager(central, didDisconnectPeripheral: peer, timestamp: 0, isReconnecting: false, error: nil)
     }
