@@ -1,5 +1,52 @@
 # PR #378 review fixes
 
+## October 23 remaining-requirements audit
+
+Mode: publish. Profile: standard. Strategy: sequential-local, zero subagents.
+Gate: P0/P1/P2. Initial target: PR #378 head
+`9cab0b6fb59b878deca994f4449abf3479fcfd92`, base/merge-base
+`19c9787d61ff5b6526fea0ef9d73f953ecd766be`. Tracked source is clean;
+the four pre-existing ESP32 generated SDK/bootstrap files remain never-stage.
+Iteration 1 audits correctness, reliability/security fences, packaging and
+changed-path verification against the remaining implementation/qualification
+requirements. Existing live review threads are empty; Claude's GitHub review
+was skipped for usage limits, not approved.
+
+| ID | Priority | Finding / current evidence | State |
+| --- | --- | --- | --- |
+| R26 | P1 | Main's released friend-size flag collided with the prior POI flag; bit 2/client 32 separation and independent/combined wire regressions pass at the initial target | fixed+verified |
+| R27 | P2 | Retained simulator xcresult proved fixed-yield assertions preceded reconciliation; bounded condition waits pass 20 native repeats, full local contracts and final-head simulator CI | fixed+verified |
+| R28 | P2 | Real Osmium/OGR full-source/prepared POI equivalence was not executable in CI; the new native fixtures pass in the actual product tools image and CI now requires them without dependency skips | fixed+verified |
+
+R28 adds cold/warm sealed-shard and default/selected conversion fixtures,
+all five categories, inactive/out-of-bounds exclusions, nonbuilding concave
+areas, holes and multi-outer relations crossing shard and render-block
+boundaries. CI must execute them inside the actual tools image and fail on
+missing native dependencies rather than accept a skipped test.
+
+Verification: both new tests pass in the unmodified Ubuntu 22.04 product tools
+image (`sha256:b4e042942394ae2917b062cd0a35436002f1c6bd9673ae3daed717b30a5ff6d8`,
+local arm64). The full Ubuntu 24.04 native-tool suite passes 183 tests with
+eight existing font-fixture skips; a clean `9cab0b6f` baseline passes 181 tests
+with the same eight skips. Neither new test skips. Backend tests pass 998
+(three skips), deployment 58, and development/CI-routing checks pass, with
+`sourceUnchanged=true` in both registered reports. Initial BuildKit registry
+TLS failures preceded the build; pulling the unchanged official base through
+OrbStack and rebuilding with that cached base succeeded. No image definition,
+dependency requirement or test gate was relaxed.
+
+Iteration 2: fresh correctness, security/reliability, packaging and verification
+review of the five-file batch finds no further in-gate defects. Current ledger
+totals are 27 fixed+verified, one invalidated and zero active/user-deferred;
+R10/R18's historical active labels below describe their October 19 snapshot,
+not their current state. Clean published-head checks and fresh GitHub results
+are recorded in the PR after publication, not inferred from this dirty-source
+run or the earlier head's successful CI.
+
+Physical board/iPhone acceptance and digest-pinned deployment/rollout still
+need separate authority under the user's no-flash/no-merge instruction. They
+remain incomplete delivery gates, not code defects or inferred successes.
+
 ## October 22 integration refresh
 
 Integrating main `ff0bb8bba5af1f5845e8959b42c4916808557565` into PR head

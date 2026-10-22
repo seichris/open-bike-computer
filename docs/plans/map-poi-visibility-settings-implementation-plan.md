@@ -39,6 +39,31 @@ or enabled merely because it exists in the branch.
 
 ## Baseline
 
+### October 23 remaining-requirements audit
+
+The `9cab0b6f` baseline includes current main `19c9787d` and has all 18 PR
+checks plus the branch-bound 175 matrix passing. Source equivalence still
+needed an executable native gate: the previous shard test retained raw tags,
+but did not compare their normalized records and section bytes after OGR.
+
+`test_poi_source_equivalence.py` now compares the full source with cold/warm
+sealed shards under both production OGR profiles, including all five groups,
+inactive/out-of-bounds points, nonbuilding concavity/holes and multi-outer
+relations across source-shard and render-block boundaries. OSM CI runs it in
+the product tools image with native prerequisites mandatory. Both tests pass
+in the unmodified Ubuntu 22.04 product image. The full native-tool suite passes
+183 tests with eight pre-existing font-fixture skips (clean baseline: 181,
+same skips). Backend 998 tests (three skips), deployment 58 and CI-routing
+checks pass. Clean published-head checks and fresh GitHub results remain
+separate evidence recorded in the PR; a skipped host test is not this gate
+passing, nor does a synthetic fixture qualify a signed real-area pack.
+
+Physical Nearby timing/rendering/persistence/downgrade, iPhone/device transfer,
+206 qualification, corrected-worker signed real-area packs and separately
+approved digest-pinned rollout remain distinct evidence gates. The user's
+no-flash/no-merge restriction remains in force. Do not bypass it by enabling
+shipping POIs or treating build/fixture results as physical acceptance.
+
 ### October 22 current-main refresh
 
 Integrate GitHub `main` through `19c9787d61ff5b6526fea0ef9d73f953ecd766be`.
