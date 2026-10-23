@@ -93,7 +93,10 @@ required 65536-byte application reserve"), and therefore CI Gate. The
 branch-bound firmware run
 [39933173298](https://github.com/seichris/open-bike-computer/actions/runs/39933173298)
 passed the same four 175 profiles and host tests; its POI job stopped on a
-transient `tool-mklittlefs` download reset before any size result.
+transient `tool-mklittlefs` download reset before any size result. PR CI
+[39939860119](https://github.com/seichris/open-bike-computer/actions/runs/39939860119)
+at `13afed20` (after main `d2b10c00`; merge ref `8251396`) reproduced every
+size byte-for-byte and the same single failure.
 
 | Image (175) | Source | Total image | `firmware.bin` | Beyond 65,536-byte reserve |
 | --- | --- | ---: | ---: | ---: |
@@ -113,11 +116,12 @@ runtime itself (Nearby screen, query cursor and layout, map icon layer,
 manifest checks) costs about 40.2 KB at the same head. Main's own lifecycle
 image is therefore within 2.3 KB of the gate.
 
-A per-translation-unit size study with the pinned Xtensa toolchain found
-about 7-8 KB of PR-local, behavior-preserving savings (Nearby view state
-moved from `.data` to `.bss`, compact JSON and manifest field builders, a
-table-driven icon painter, one sort instead of two instantiations). That is
-roughly half the shortfall; closing it also needs main-owned code changes,
+A per-translation-unit size study with the pinned Xtensa toolchain
+estimates about 7-8 KB of PR-local, behavior-preserving savings (Nearby view
+state moved from `.data` to `.bss`, compact JSON and manifest field
+builders, a table-driven icon painter, one sort instead of two
+instantiations). Only the 1,584-byte `.data` move is exact; none of it is
+implemented or CI-measured. That is roughly half the shortfall; closing it also needs main-owned code changes,
 deeper Nearby algorithm rewrites, the separate partition migration (#461) or
 a narrower POI scope. Those are owner decisions and none was taken. A local
 exact-head firmware build was abandoned when this Mac ran out of disk space;
