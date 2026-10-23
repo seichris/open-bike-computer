@@ -78,24 +78,26 @@ unchanged. The normative POI allocation in this plan is now extended bit
 3/client 33 and screen type 7; older sections record historical checkpoints.
 
 The owner later merged main `d2b10c00d09a722f95baf9042f22e0b4e6a78714`
-(iOS, docs and backend only) through GitHub as `404e6ae6`.
+(iOS, docs and backend only) through GitHub as `404e6ae6`. Main's
+development image pin `483c8c5ab11715e08a4d84e29dbd1aef666d4810` was merged
+as `1d58708b`, and the owner merged main
+`58b3b297eed423496c25baa5aab0c8c239fa78bb` (#628, diagnostics-only Elevation
+text) as `b8d22c1c`.
 
-**Open budget blocker (R33).** Exact-head CI at `99c8032d` passes every
-check except the enabled-POI 175 qualification image. That image's total
-size is 3,094,427 bytes, about 14.4 KB over the 3,080,192-byte `firmware.bin`
-maximum for the unchanged 3 MiB slot and 65,536-byte reserve. The POI runtime
-still costs about 40.2 KB; the margin disappeared because main's
-production-behavior image grew by about 49.5 KB since the previous
-integration. Main's own POI-off lifecycle image is 3,077,952 bytes, 2,240
-bytes beyond the reserve; this branch's POI-off image is 3,054,336 bytes
-because it removes main's remaining libstdc++ file-stream/locale linkage.
-PR-local, behavior-preserving trimming is estimated at 7-8 KB, about half of
-the shortfall. Closing the rest needs an owner decision: main-owned size
-work, deeper Nearby rewrites, partition migration #461 or a narrower POI
-scope. Until then the budget, partitions and shipping profiles stay
-unchanged and this PR must not merge. Details and evidence are in the review
-ledger. No 206 build, flash, installation, deployment or merge is part of
-this integration.
+**Budget restored (R33).** After integration the enabled-POI 175
+qualification image was about 14.4 KB over the 3,080,192-byte `firmware.bin`
+maximum for the unchanged 3 MiB slot and 65,536-byte reserve, because main's
+production-behavior image grew by about 49.5 KB. `20294f17` recovers the
+space without changing any output or the budget: large, mostly-zero
+file-local state moves from `.data` to `.bss` through `StartupConstructed`
+(same values, initialized before `setup()`), and the target-metadata JSON,
+manifest receipt and renderer layer-status serializers append in place.
+Differential runs proved the serializers byte-identical, and golden receipt
+and active-map metadata assertions guard them. At `b8d22c1c` all 16 CI jobs
+pass; the enabled-POI binary is **3,072,864 bytes, 7,328 bytes beyond the
+reserve** (POI-off lifecycle 3,033,664; production 3,013,392). Details are in
+the review ledger. No 206 build, flash, installation, deployment or merge is
+part of this integration.
 
 ### October 23 Claude review follow-up
 
@@ -359,9 +361,9 @@ already-created target-4 artifacts and old clients would become ambiguous.
 
 ### 3 MiB production application budget
 
-Current status: the integrated head fails this gate for the enabled-POI 175
-qualification image (R33, October 23 main integration above). The results
-below are historical.
+Current status: after the October 23 main integration the enabled-POI 175
+qualification binary is 3,072,864 bytes, 7,328 bytes beyond the reserve (R33,
+CI at `b8d22c1c`). The results below are historical.
 
 PR #378 must pass with the existing dual 3 MiB OTA layout before the separate
 partition migration in issue #461. Keep the 65,536-byte application reserve

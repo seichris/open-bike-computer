@@ -19,12 +19,16 @@ enablement. The four generated ESP32 SDK/bootstrap files remain never-stage.
 - The owner then merged main `d2b10c00d09a722f95baf9042f22e0b4e6a78714`
   (#624 map tracking controls, #625 Apple Maps route elevation: iOS, docs and
   backend only, no firmware) through GitHub as
-  `404e6ae6c398a11c083beb708f97eaee63439c7d`.
+  `404e6ae6c398a11c083beb708f97eaee63439c7d`. Main's development image pin
+  `483c8c5ab11715e08a4d84e29dbd1aef666d4810` merged as `1d58708b`; the owner
+  merged main `58b3b297eed423496c25baa5aab0c8c239fa78bb` (#628,
+  diagnostics-only Elevation text) as
+  `b8d22c1c539dc5823a1d1c539a20bf7608345ab5`.
 
 | ID | Priority | Trigger, fix and verification | State |
 | --- | --- | --- | --- |
 | R32 | P1 | Main's released route elevation owns CAP2 extended bit 2/client 32 and screen type 6, the same values as the unpublished POI/Nearby allocation; a merged build would have read route-elevation firmware as POI-capable and mapped Nearby onto Elevation. POIs move to extended bit 3/client 33 and Nearby to screen type 7 (tile 9); the client version is 33; both bindings and the pinned-LVGL preview metadata are regenerated. Firmware and iOS tests cover bit/client separation, combined words, route-elevation-only firmware receiving no POI bits, and the 175 diagnostics+POI matrix where Elevation and Nearby coexist | fixed; firmware host, iOS fast and exact-head CI verified at `99c8032d` |
-| R33 | P1 | After integration the enabled-POI `WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION` image no longer fits the dual 3 MiB slot with the 65,536-byte reserve: total image 3,094,427 bytes, about 14.4 KB over the 3,080,192-byte `firmware.bin` maximum. Main's production-behavior growth since the previous integration (about 49.5 KB) exceeds the former 35,232-byte margin; the POI runtime cost itself is unchanged. No budget, partition or profile change was made | open; blocks merge |
+| R33 | P1 | After integration the enabled-POI `WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION` image no longer fit the dual 3 MiB slot with the 65,536-byte reserve: total image 3,094,427 bytes, about 14.4 KB over the 3,080,192-byte `firmware.bin` maximum, because main's production-behavior image grew about 49.5 KB. `20294f17` recovers the space without changing any output: large mostly-zero state moves from `.data` to `.bss` and three serializers use in-place appends. No budget, partition or profile change | fixed; CI-verified at `b8d22c1c`: 3,072,864-byte binary, 7,328 bytes beyond the reserve |
 
 Conflict resolutions (23 files):
 
@@ -126,6 +130,56 @@ deeper Nearby algorithm rewrites, the separate partition migration (#461) or
 a narrower POI scope. Those are owner decisions and none was taken. A local
 exact-head firmware build was abandoned when this Mac ran out of disk space;
 no local firmware artifact exists for this head.
+
+### R33 resolution: behavior-preserving size recovery
+
+The owner chose to trim to fit, including main-owned code with byte-identical
+behavior. `20294f17` keeps the 3 MiB slots, the 65,536-byte reserve and every
+profile unchanged:
+
+- **`.data` to `.bss`.** File-local state whose defaults hold a few non-zero
+  sentinels stored its whole, mostly zero, initializer image in the flash
+  slot. `StartupConstructed<T>` (`lib/utils/src/startup_constructed.hpp`)
+  value-initializes the same object during C++ static initialization, before
+  `setup()`, in zero-filled `.bss`; the old name binds to it by reference, so
+  no caller changes. Moved: the screen-configuration control (4,136 bytes),
+  deferred BLE notifications (2,112), the workout reducer (1,688), the Nearby
+  view (1,584), rider badges (1,280), the active screen snapshot (972), the
+  destination catalog (556), ride-stats slots (420) and the ride delivery
+  tracker (272). The pinned Xtensa compiler places each in `.bss` with one
+  small startup initializer per file and identical accessor code.
+- **In-place appends.** `targetMetadataJson`, `manifestReceipt` and
+  `appendRendererLayerStatus` built their output from `operator+` chains, one
+  string temporary and exception cleanup per operand. They now append in
+  place. The old and new bodies, extracted verbatim, matched on 800,000
+  randomized comparisons (empty targets, every format version, contour
+  states, three key prefixes, escape-heavy text, `UINT32_MAX`, `UINT64_MAX`
+  and `INT32_MIN` coordinates); a one-key mutation was caught immediately.
+  The status helper matched an exhaustive 1,600-case sweep.
+  `test_map_transfer.cpp` now pins golden bytes recorded from the old
+  implementation: the v1 library receipt, the target-5 installed receipt and
+  the target-5 `active-map.json`.
+
+Measured per-object with the pinned toolchain, the moves saved 12,212 bytes
+and the serializers about 11.9 KB before link deduplication. Local
+`tools/dev-check --suite firmware` at `b8d22c1c`: 41/41 passed with
+`sourceUnchanged=true`.
+
+PR CI [39946703308](https://github.com/seichris/open-bike-computer/actions/runs/39946703308)
+at `b8d22c1c` (after the owner merged main `58b3b297`; merge ref `420be6d4`):
+**all 16 jobs passed, CI Gate green**. Exact binaries from the build
+evidence:
+
+| Image (175) | Total image | `firmware.bin` | Beyond 65,536-byte reserve |
+| --- | ---: | ---: | ---: |
+| Lifecycle, POIs on | 3,072,703 | 3,072,864 | **+7,328** |
+| Lifecycle, POIs off | 3,033,499 | 3,033,664 | +46,528 |
+| Production | 3,013,231 | 3,013,392 | +66,800 |
+
+Ordinary 175 (3,210,087) and remote-debug (3,295,347) use the larger
+development layout. The 206 POI image was not built (no 206 permission);
+the changes are board-independent C++. Physical qualification of the new
+image remains a separate gate.
 
 ## October 23 Claude review follow-up
 
