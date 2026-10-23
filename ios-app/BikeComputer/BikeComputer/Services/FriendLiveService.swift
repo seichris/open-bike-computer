@@ -49,12 +49,12 @@ final class FriendLiveService: ObservableObject {
     static let minimumPublicationInterval: TimeInterval = 2.2
 
     init(client: any SocialRideNetworking,
-         store: any SocialSecureStore = SocialMemoryStore(),
+         store: (any SocialSecureStore)? = nil,
          uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          pollNanoseconds: UInt64 = 3_000_000_000,
          idlePollNanoseconds: UInt64 = 60_000_000_000,
          sleep: @escaping (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }) {
-        self.client = client; self.store = store; self.uptime = uptime; self.pollNanoseconds = pollNanoseconds
+        self.client = client; self.store = store ?? SocialMemoryStore(); self.uptime = uptime; self.pollNanoseconds = pollNanoseconds
         self.idlePollNanoseconds = idlePollNanoseconds; self.sleep = sleep
     }
 
