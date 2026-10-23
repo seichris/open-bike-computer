@@ -4797,6 +4797,13 @@ bool Maps::startRenderWorker() {
   // Wi-Fi driver before it has a chance to report an allocation failure. The
   // AMOLED boards have PSRAM and their SDK configuration explicitly permits
   // external task stacks, so reserve internal RAM for radio/driver work.
+  // FFat is the exception: even opening a missing map block reaches the
+  // internal flash driver, which disables caches and requires an internal
+  // caller stack (ESP-IDF spi_flash/cache_utils.c). Keep removable-SD rendering
+  // in PSRAM, but allocate this worker internally while FFat owns /sdcard.
+  const uint32_t stackCaps = storage.hasInternalFallbackMounted()
+                                ? MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+                                : MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
   // IDLE0 is the only production TWDT subscriber. The renderer runs one level
   // above idle for deterministic progress, while its cooperative checkpoints
   // block every 10 ms to give IDLE0 a bounded watchdog-feeding window. FatFs
@@ -4804,7 +4811,7 @@ bool Maps::startRenderWorker() {
   BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
       renderWorkerTaskThunk, "map_render", MAP_RENDER_WORKER_STACK_BYTES, this,
       tskIDLE_PRIORITY + 1, &renderWorkerTaskHandle, 0,
-      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+      stackCaps);
   if (created != pdPASS) {
     renderWorkerTaskHandle = nullptr;
     renderWorkerExited.store(true, std::memory_order_release);
