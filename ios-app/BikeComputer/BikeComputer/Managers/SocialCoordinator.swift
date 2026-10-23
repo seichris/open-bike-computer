@@ -84,7 +84,10 @@ final class SocialCoordinator: ObservableObject {
         savedRouteSharing = SocialSavedRouteSharing(client: client, currentGeneration: { session.generation })
         // The existing explicit app-private group; no shared group is introduced.
         let store: any SocialSecureStore = session.keychainGroup.map { SocialKeychainStore(accessGroup: $0) } ?? SocialMemoryStore()
-        friendLive = FriendLiveService(client: client, store: store)
+        // Remembered sharing survives relaunch but not a reinstall, which keeps Keychain items.
+        let installation: any SocialInstallationMarker = session.keychainGroup == nil
+            ? SocialMemoryInstallation() : SocialInstallationFile()
+        friendLive = FriendLiveService(client: client, store: store, installation: installation)
         #if DEBUG
         let environment = "development"
         #else

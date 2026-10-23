@@ -96,7 +96,7 @@ struct SocialHubView: View {
                     if !store.friendLive.pendingIDs.isEmpty {
                         Text("Waiting to resume sharing").foregroundStyle(.secondary)
                         Button("Stop all friend sharing") {
-                            perform { await store.friendLive.stopAll(); try await store.refresh() }
+                            perform { try await store.friendLive.stopSharingWithAll() }
                         }
                     }
                     SocialRiderSearchRow(username: $username, search: searchForRider)
