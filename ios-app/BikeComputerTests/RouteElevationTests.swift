@@ -386,10 +386,19 @@ private func makeRoute(provider: RouteProviderMetadataV1, count: Int = 60,
 private func testPolicy() {
     expect(RouteProviderPolicyV1.allowsRouteElevationService(RouteProviderPolicyV1.importedGPX),
            "imported GPX geometry may use the service")
-    for metadata in [RouteProviderPolicyV1.mapKit, RouteProviderPolicyV1.mapKitSavedOnPhone,
-                     RouteProviderPolicyV1.strava] {
-        expect(!RouteProviderPolicyV1.allowsRouteElevationService(metadata),
-               "\(metadata.providerID) geometry never leaves the phone for elevation")
+    expect(RouteProviderPolicyV1.routeElevationServiceSource(RouteProviderPolicyV1.importedGPX) == "gpx",
+           "imported GPX retains its provenance")
+    for metadata in [RouteProviderPolicyV1.mapKit, RouteProviderPolicyV1.mapKitSavedOnPhone] {
+        expect(RouteProviderPolicyV1.allowsRouteElevationService(metadata) &&
+               RouteProviderPolicyV1.routeElevationServiceSource(metadata) == "mapkit",
+               "active and saved Apple Maps routes may request terrain heights")
+    }
+    for metadata in [RouteProviderPolicyV1.strava,
+                     RouteProviderMetadataV1(providerID: "unknown", attribution: "Unknown", storageScope: .durable),
+                     RouteProviderMetadataV1(providerID: "apple.mapkit", attribution: "Unknown", storageScope: .durable)] {
+        expect(!RouteProviderPolicyV1.allowsRouteElevationService(metadata) &&
+               RouteProviderPolicyV1.routeElevationServiceSource(metadata) == nil,
+               "unapproved or inconsistent providers cannot request terrain heights")
     }
 }
 
@@ -480,7 +489,7 @@ private func testRequestUsesWGS84GeoJSONOrder() {
     // Shanghai: the map shows GCJ-02, but routes and requests stay WGS-84.
     let route = makeRoute(provider: RouteProviderPolicyV1.importedGPX, count: 8, latitude: 31.23, longitude: 121.47)
     let geometry = try! RouteElevationProcessorV1.geometry(points: route.points)
-    let request = RouteElevationPreparationV1.request(for: geometry, requestID: UUID())
+    let request = RouteElevationPreparationV1.request(for: geometry, requestID: UUID(), routeSource: "gpx")
     expect(request.geometry.coordinatesE6.first == [RouteElevationProcessorV1.scaled(route.points[0].longitude),
                                                     RouteElevationProcessorV1.scaled(route.points[0].latitude)],
            "coordinates are [lonE6, latE6] of the unshifted WGS-84 route")
@@ -532,14 +541,41 @@ private final class FakeSidecars: RouteElevationSidecarProviding {
 }
 
 @MainActor
+private func testMapKitService() async {
+    for provider in [RouteProviderPolicyV1.mapKit, RouteProviderPolicyV1.mapKitSavedOnPhone] {
+        let fetcher = FakeFetcher()
+        let sidecars = FakeSidecars()
+        let service = RouteElevationService(fetcher: fetcher, sidecars: sidecars)
+        let route = makeRoute(provider: provider)
+        let binding = RouteElevationArchiveBindingV1(routeID: route.id, revision: route.revision, contentHash: "mapkit")
+        let subject = RouteElevationSubjectV1(
+            route: route, binding: provider == RouteProviderPolicyV1.mapKitSavedOnPhone ? binding : nil
+        )
+        guard case .ready(let profile) = await service.resolve(subject) else {
+            fatalError("FAILED: an Apple Maps route without GPX heights resolves through the service")
+        }
+        expect(fetcher.requests.count == 1 && fetcher.requests[0].routeSource == "mapkit",
+               "Apple Maps geometry reaches the service with its original provenance")
+        let geometry = try! RouteElevationProcessorV1.geometry(points: route.points)
+        expect(profile.geometry.digest == geometry.digest && fetcher.requests[0].geometry.digest == geometry.digest,
+               "the profile is bound to the selected Apple Maps geometry")
+        if provider == RouteProviderPolicyV1.mapKitSavedOnPhone {
+            expect(sidecars.stored == [binding], "a saved Apple Maps route keeps its elevation profile")
+            let offline = RouteElevationService(fetcher: nil, sidecars: sidecars)
+            expect(await offline.resolve(subject) == .ready(profile), "saved Apple Maps elevation works offline")
+        } else {
+            expect(sidecars.stored.isEmpty, "active-only Apple Maps routes do not create a sidecar")
+        }
+    }
+}
+
+@MainActor
 private func testService() async {
     var clock = Date(timeIntervalSince1970: 1_000_000)
     let fetcher = FakeFetcher()
     let sidecars = FakeSidecars()
     let service = RouteElevationService(fetcher: fetcher, sidecars: sidecars, now: { clock })
 
-    let mapKit = RouteElevationSubjectV1(route: makeRoute(provider: RouteProviderPolicyV1.mapKit))
-    expect(await service.resolve(mapKit) == .unavailable(.sourceNotPermitted), "Apple Maps stays on the phone")
     let strava = RouteElevationSubjectV1(route: makeRoute(provider: RouteProviderPolicyV1.strava))
     expect(await service.resolve(strava) == .unavailable(.sourceNotPermitted), "Strava without heights stays local")
     expect(fetcher.requests.isEmpty, "ineligible sources never reach the service")
@@ -751,6 +787,7 @@ enum RouteElevationTestRunner {
         testSidecarStore()
         testResponseDecoder(fixture)
         testRequestUsesWGS84GeoJSONOrder()
+        await testMapKitService()
         await testService()
         let hill = fixtureProfile(fixture.cases.first { $0.name == "ordinary-hill" }!)
         testPlannerHappyPath(hill)
