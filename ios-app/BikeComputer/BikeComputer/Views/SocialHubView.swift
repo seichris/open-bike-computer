@@ -78,6 +78,9 @@ struct SocialHubView: View {
                                         if let username = friend.username, !username.isEmpty {
                                             Text("@\(username)").font(.caption).foregroundStyle(.secondary)
                                         }
+                                        if store.friendLive.pendingIDs.contains(friend.id) {
+                                            Text("Waiting to resume sharing").font(.caption).foregroundStyle(.secondary)
+                                        }
                                     }
                                 }
                             }
@@ -86,7 +89,14 @@ struct SocialHubView: View {
                                 set: { enabled in setFriendSharing(enabled, with: friend.id) }
                             ))
                             .labelsHidden()
-                            .disabled(!store.capabilities.friendSharing || store.friendLive.busyIDs.contains(friend.id))
+                            .disabled((!store.capabilities.friendSharing && !store.friendLive.sharingIDs.contains(friend.id))
+                                      || store.friendLive.busyIDs.contains(friend.id))
+                        }
+                    }
+                    if !store.friendLive.pendingIDs.isEmpty {
+                        Text("Waiting to resume sharing").foregroundStyle(.secondary)
+                        Button("Stop all friend sharing") {
+                            perform { await store.friendLive.stopAll(); try await store.refresh() }
                         }
                     }
                     SocialRiderSearchRow(username: $username, search: searchForRider)
@@ -97,8 +107,8 @@ struct SocialHubView: View {
                 } header: {
                     Text("Friends")
                 } footer: {
-                    Text(store.capabilities.friendSharing
-                         ? "Each toggle shares your live location, speed, distance and ride times with that friend for up to 4 hours, including outside Group Rides. They choose whether to share back. Turn off, remove or block to stop."
+                    Text((store.capabilities.friendSharing || !store.friendLive.sharingIDs.isEmpty)
+                         ? "Each toggle shares your live location, speed, distance and ride times with that friend for up to 4 hours, including outside Group Rides. Sharing resumes when you reopen this app, for the time remaining. They choose whether to share back. Turn off, remove or block to stop."
                          : "Live sharing with individual friends is not available on this server yet.")
                     if let error = store.friendLive.error { Text(error).foregroundStyle(.red) }
                 }
