@@ -536,10 +536,14 @@ assert not raw_write_offenders, (
 release_candidate_workflow = (
     repo_root / ".github/workflows/firmware-release-candidate.yml"
 ).read_text()
-assert (
-    "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py"
-    in release_candidate_workflow
-)
+# Production is built once in the required CI workflow. The candidate consumes
+# its checked bytes only after that workflow has completed successfully.
+canonical_ci = (repo_root / ".github/workflows/ci.yml").read_text()
+assert "env -u LD_LIBRARY_PATH python3 tools/build_firmware.py" in canonical_ci
+assert "name: verified-production-${{ matrix.target }}" in canonical_ci
+assert "needs: validate" in release_candidate_workflow
+assert "name: verified-production-${{ matrix.environment }}" in release_candidate_workflow
+assert "firmware_release_candidate.py record" in release_candidate_workflow
 for environment in remote_debug_profiles:
     assert environment.removeprefix("env:") not in release_candidate_workflow
 for environment in personal_profiles:

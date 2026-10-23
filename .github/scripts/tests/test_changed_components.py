@@ -127,7 +127,7 @@ class ChangedComponentsTests(unittest.TestCase):
                 ), redirect_stdout(output):
                     self.assertEqual(0, changed_components.main())
                 selected = dict(line.split("=", 1) for line in output.getvalue().splitlines())
-                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets", "ios_native"}, set(selected))
+                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets", "ios_native", "ios_checks", "ios_simulator", "ios_release", *changed_components.ci_scopes.MAP_SCOPES}, set(selected))
                 self.assertEqual("true" if native_ios else "false", selected["ios_native"])
 
     def test_docs_only_change_skips_product_jobs(self) -> None:

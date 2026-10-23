@@ -2,11 +2,17 @@ name: Firmware Diagnostic Builds
 
 on:
   workflow_call:
+    inputs:
+      include_remote_debug:
+        description: Build remote-debug when it is not already qualified by the caller
+        type: boolean
+        default: true
   workflow_dispatch:
   schedule:
     - cron: "17 3 * * 1"
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -14,12 +20,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.selection.outputs.run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - id: selection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous=""
+          if test "$GITHUB_EVENT_NAME" = schedule; then
+            previous="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/firmware-diagnostics.yml/runs?status=success&per_page=30" \
+              --jq '[.workflow_runs[] | select(.event == "schedule" or .event == "workflow_dispatch")][0].head_sha // empty' || true)"
+            python3 .github/scripts/diagnostic_changes.py "$previous" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   esp32-diagnostics:
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     name: ESP32 Diagnostic (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
+        exclude: ${{ fromJSON(inputs.include_remote_debug == false && github.event_name == 'push' && '[{"target":"WAVESHARE_AMOLED_175_REMOTE_DEBUG"},{"target":"WAVESHARE_AMOLED_206_REMOTE_DEBUG"}]' || '[]') }}
         target:
           - WAVESHARE_AMOLED_175_REMOTE_DEBUG
           - WAVESHARE_AMOLED_175_MAPIO_DIAGNOSTICS

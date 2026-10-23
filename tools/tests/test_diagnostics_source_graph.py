@@ -107,19 +107,17 @@ class DiagnosticsSourceGraphTests(unittest.TestCase):
         job = workflow["jobs"]["ios-fast"]
         checks = {c["id"]: c for c in json.loads(
             (ROOT / "tools/development/checks.json").read_text())["checks"]}
-        default = job.get("defaults", {}).get("run", {}).get("working-directory", ".")
+        # The workflow now passes the selected registry IDs as structured JSON.
+        # Inspect the full selectable inventory, including each check's own cwd.
+        self.assertTrue(any("IOS_CHECKS" in step.get("env", {}) for step in job["steps"]))
         checked = 0
-        for step in job["steps"]:
-            command = step.get("run", "")
-            directory = step.get("working-directory", default)
-            registered = re.search(r"--check ([a-z0-9-]+)", command)
-            if registered:
-                check = checks[registered[1]]
-                command = check["command"]
-                directory = check.get("cwd", ".")
-            for script in re.findall(r"(?:^|\s)(\./scripts/[A-Za-z0-9_-]+\.sh)", command):
+        for check in checks.values():
+            if check["component"] != "ios":
+                continue
+            directory = check.get("cwd", ".")
+            for script in re.findall(r"(?:^|\s)(\./scripts/[A-Za-z0-9_-]+\.sh)", check["command"]):
                 self.assertTrue((ROOT / directory / script).is_file(),
-                                f"{step['name']}: {script} does not exist from {directory}")
+                                f"{check['id']}: {script} does not exist from {directory}")
                 checked += 1
         self.assertGreaterEqual(checked, 8)
 

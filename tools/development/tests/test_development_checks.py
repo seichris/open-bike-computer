@@ -126,7 +126,7 @@ class DevelopmentChecksTests(unittest.TestCase):
              patch.object(runner,'run_checks',return_value=0) as run:
             self.assertEqual(runner.main(['--level','full','--report','/private/tmp/scenario-plan-not-written.json']),0)
         ids={c['id'] for c in run.call_args.args[0]}
-        self.assertIn('ios-fast-run-swift-helper-tests',ids)
+        self.assertTrue({'ios-navigation-map','ios-navigation-sensors','ios-navigation-workout','ios-navigation-radio'} <= ids)
         self.assertNotIn('ios-build-containers',ids)
         self.assertNotIn('ios-simulator',ids)
 

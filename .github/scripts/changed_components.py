@@ -7,9 +7,13 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 from collections.abc import Iterable, Sequence
 
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ci_scopes
 
 COMPONENTS = ("firmware_build", "firmware_host", "ios", "map_backend", "osm")
 FIRMWARE_TARGETS = {
@@ -28,6 +32,7 @@ FIRMWARE_TARGETS = {
 }
 FULL_CI_PATHS = {
     ".github/scripts/changed_components.py",
+    ".github/scripts/ci_scopes.py",
     ".github/workflows/ci.yml",
 }
 FIRMWARE_HOST_ONLY_PATH_PREFIXES = ("esp32/tools/tests/",)
@@ -45,6 +50,8 @@ FIRMWARE_HOST_PATH_PREFIXES = (
 )
 FIRMWARE_WORKFLOW_PATHS = {
     ".github/workflows/firmware-diagnostics.yml",
+    ".github/scripts/diagnostic_changes.py",
+    ".github/workflows/workout-zone-contracts.yml",
     ".github/workflows/firmware-cache-qualification.yml",
     ".github/workflows/firmware-release-candidate.yml",
     ".github/workflows/firmware-release.yml",
@@ -55,6 +62,7 @@ FIRMWARE_WORKFLOW_PATHS = {
 }
 MAP_WORKFLOW_PATHS = {
     ".github/workflows/map-platform-ci.yml",
+    ".github/scripts/dispatch_promotion_ci.py",
     ".github/workflows/map-platform-image.yml",
 }
 FIRMWARE_CONTRACT_PATHS = {
@@ -403,13 +411,14 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
+        paths = None
         selected = select_scope(args.scope)
         native_ios = selected["ios"] if selected is not None else False
         if selected is None:
             paths = changed_paths(args.event, args.base, args.head)
             affected = registry_changed_components(args.base, args.head) if paths and CHECK_REGISTRY in paths else None
-            selected = classify_paths(paths or (), run_all=paths is None, registry_components=affected)
-            native_ios = native_ios_required(paths or (), run_all=paths is None, registry_components=affected)
+            selected = classify_paths(paths or (), run_all=not paths, registry_components=affected)
+            native_ios = native_ios_required(paths or (), run_all=not paths, registry_components=affected)
     except (subprocess.CalledProcessError, ValueError) as error:
         parser.error(str(error))
 
@@ -417,11 +426,15 @@ def main() -> int:
         value = "true" if selected[component] else "false"
         print(f"{component}={value}")
     firmware_targets = json.dumps(
-        select_firmware_targets(args.firmware_hardware),
+        ci_scopes.firmware_targets(paths, select_firmware_targets(args.firmware_hardware)),
         separators=(",", ":"),
     )
     print(f"firmware_targets={firmware_targets}")
     print(f"ios_native={'true' if native_ios else 'false'}")
+    details = {**ci_scopes.map_scopes(paths, selected=selected["map_backend"]),
+               **ci_scopes.ios_scopes(paths, native=native_ios, selected=selected["ios"])}
+    for key, value in details.items():
+        print(f"{key}={json.dumps(value, separators=(',', ':'))}")
     return 0
 
 
