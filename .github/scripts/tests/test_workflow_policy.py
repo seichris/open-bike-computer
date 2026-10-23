@@ -430,7 +430,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {
             **os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "true",
-            "FIRMWARE_HOST_CHANGED": "true", "HEAVY_CI": "true", "IOS_CHANGED": "false", "IOS_NATIVE_CHANGED": "false",
+            "FIRMWARE_HOST_CHANGED": "true", "HEAVY_CI": "true", "IOS_CHANGED": "false", "IOS_NATIVE_CHANGED": "false", "IOS_SIMULATOR_CHANGED": "false", "ZONE_RESULT": "success",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
             "ESP32_RESULT": "success", "HOST_RESULT": "success",
             **{name: "skipped" for name in ("IOS_FAST_RESULT", "IOS_RESULT", "IOS_PLATFORM_RESULT", "MAP_RESULT")},
@@ -452,7 +452,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("- ios-platform", gate)
         script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
         environment = {**os.environ, "CHANGES_RESULT": "success", "FIRMWARE_BUILD_CHANGED": "false",
-            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "true", "IOS_CHANGED": "true", "IOS_NATIVE_CHANGED": "true",
+            "FIRMWARE_HOST_CHANGED": "false", "HEAVY_CI": "true", "IOS_CHANGED": "true", "IOS_NATIVE_CHANGED": "true", "IOS_SIMULATOR_CHANGED": "true", "ZONE_RESULT": "success",
             "MAP_BACKEND_CHANGED": "false", "OSM_CHANGED": "false",
             "ESP32_RESULT": "skipped", "HOST_RESULT": "skipped",
             "MAP_RESULT": "skipped", "IOS_FAST_RESULT": "success", "IOS_RESULT": "success", "IOS_PLATFORM_RESULT": "success"}
@@ -462,7 +462,7 @@ class WorkflowPolicyTests(unittest.TestCase):
                 with self.subTest(key=key, value=value):
                     self.assertNotEqual(subprocess.run(["bash", "-c", script],
                         env={**environment, key: value}, capture_output=True).returncode, 0)
-        fast_only = {**environment, "IOS_NATIVE_CHANGED":"false", "IOS_RESULT":"skipped", "IOS_PLATFORM_RESULT":"skipped"}
+        fast_only = {**environment, "IOS_NATIVE_CHANGED":"false", "IOS_SIMULATOR_CHANGED":"false", "IOS_RESULT":"skipped", "IOS_PLATFORM_RESULT":"skipped"}
         self.assertEqual(subprocess.run(["bash", "-c", script],env=fast_only,capture_output=True).returncode,0)
         for key in ("IOS_RESULT","IOS_PLATFORM_RESULT"):
             self.assertNotEqual(subprocess.run(["bash", "-c", script],env={**fast_only,key:"success"},capture_output=True).returncode,0)
@@ -473,7 +473,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         simulator = mapping_block(ci,"ios-platform",indent=2)
         self.assertIn("--fresh --evidence",app)
         self.assertIn('BICINO_REQUIRE_BUILD_EVIDENCE: "1"',app)
-        for job in (app,simulator): self.assertIn("needs.changes.outputs.ios_native == 'true'",job)
+        self.assertIn("needs.changes.outputs.ios_native == 'true'", app)
+        self.assertIn("needs.changes.outputs.ios_simulator == 'true'", simulator)
 
     def test_draft_prs_keep_fast_checks_and_skip_heavy_jobs(self) -> None:
         general_ci = workflow_source("ci.yml")
@@ -634,7 +635,9 @@ class WorkflowPolicyTests(unittest.TestCase):
             / "action.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("--factory-output-dir dist", candidate)
+        self.assertIn("name: verified-production-${{ matrix.environment }}", candidate)
+        self.assertNotIn("tools/build_firmware.py", candidate)
+        self.assertIn("--factory-output-dir", workflow_source("ci.yml"))
         self.assertIn("firmware_release_candidate.py record", candidate)
         self.assertNotIn("tools/package_factory_firmware.py", candidate)
         self.assertNotIn("FIRMWARE_MANIFEST_SIGNING_PRIVATE_KEY", candidate)

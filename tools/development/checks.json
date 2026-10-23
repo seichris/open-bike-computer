@@ -12,11 +12,11 @@
       ]
     },
     {
-      "id": "ios-fast-run-swift-helper-tests",
-      "name": "Run Swift helper tests",
+      "id": "ios-navigation-map",
+      "name": "Swift navigation: map",
       "component": "ios",
       "cwd": "ios-app",
-      "command": "./scripts/run-navigation-tests.sh",
+      "command": "./scripts/run-navigation-tests.sh map",
       "tools": [
         "python3",
         "xcrun"
@@ -32,7 +32,134 @@
             "swiftc"
           ]
         }
-      ]
+      ],
+      "ciInputs": {
+        "swiftGroups": [
+          "online-poi",
+          "navigation-1",
+          "navigation-2",
+          "navigation-3",
+          "navigation-4",
+          "navigation-5",
+          "navigation-7",
+          "navigation-8",
+          "navigation-9",
+          "navigation-10",
+          "offline-route-1",
+          "saved-route-map-1",
+          "saved-route-map-2",
+          "route-elevation-1",
+          "bluetooth-restoration-corebluetooth-double"
+        ],
+        "inputPrefixes": [
+          "ios-app/tests/durable-download-host/",
+          "ios-app/tests/map-upload-binding-host/"
+        ],
+        "inputs": [
+          "ios-app/BikeComputerTests/DeviceMapOperationTests.swift",
+          "ios-app/BikeComputerTests/DeviceOperationCoordinatorTests.swift"
+        ]
+      }
+    },
+    {
+      "id": "ios-navigation-sensors",
+      "name": "Swift navigation: sensors",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-navigation-tests.sh sensors",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ],
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        }
+      ],
+      "ciInputs": {
+        "swiftGroups": [
+          "navigation-6"
+        ],
+        "inputPrefixes": [
+          "protocol/scenarios/",
+          "ios-app/tests/scenario-replay/"
+        ],
+        "inputs": [
+          "ios-app/BikeComputer/WorkoutShared/WatchCyclingSensorObservationPublisher.swift",
+          "ios-app/BikeComputerTests/WatchCyclingSensorObservationTests.swift",
+          "ios-app/BikeComputerTests/CyclingSensorTests.swift",
+          "ios-app/BikeComputerTests/CyclingSensorObservationIntegrationTests.swift",
+          "tools/replay_scenario.py"
+        ]
+      }
+    },
+    {
+      "id": "ios-navigation-workout",
+      "name": "Swift navigation: workout",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-navigation-tests.sh workout",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ],
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        }
+      ],
+      "ciInputs": {
+        "swiftGroups": [
+          "native-workout-zone-1"
+        ],
+        "inputPrefixes": [
+          "ios-app/BikeComputer/WorkoutShared/",
+          "ios-app/BikeComputer/RideShared/",
+          "protocol/fixtures/"
+        ]
+      }
+    },
+    {
+      "id": "ios-navigation-radio",
+      "name": "Swift navigation: radio",
+      "component": "ios",
+      "cwd": "ios-app",
+      "command": "./scripts/run-navigation-tests.sh radio",
+      "tools": [
+        "python3",
+        "xcrun"
+      ],
+      "host": [
+        "Darwin"
+      ],
+      "probes": [
+        {
+          "command": [
+            "xcrun",
+            "--find",
+            "swiftc"
+          ]
+        }
+      ],
+      "ciInputs": {
+        "swiftGroups": [
+          "world-radio-1"
+        ]
+      }
     },
     {
       "id": "ios-fast-run-ride-diagnostics-recorder-tests",

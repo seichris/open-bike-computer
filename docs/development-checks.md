@@ -131,3 +131,38 @@ verified downloads and core transport use
 stays below each worktree's `esp32/.pio/open-bike-build/`; never share or link
 those directories, DerivedData, manifests or upload plans between worktrees.
 `tools/dev-env` refuses to run when its environment is missing, broken or stale.
+
+
+## CI scope policy
+
+The required `CI Gate` validates selections and rejects missing, failed or cancelled
+selected jobs. Full manual scopes remain available; no branch protection changes are
+needed. Empty diffs run full coverage. Deletions and renames retain old/new paths.
+
+| Changed inputs | Selected qualification |
+| --- | --- |
+| Only production/development Compose locks | Deployment policy, all compatibility images, Compose and referenced-image digest/provenance checks; no backend rebuild, catalog, PostgreSQL or native readers |
+| Only catalog | Catalog typecheck/tests and both environment dry-runs |
+| Other map source/shared config | Full map consumers, plus OSM when its inputs change |
+| Known Swift helper sources | Matching navigation map/sensor/workout/radio groups using the shared source registry; other host contracts remain |
+| Unknown Swift source or script/registry/config | Full helper suite |
+| iOS application source | Fresh Debug app/container evidence; dedicated simulators only for their production/test/shared dependencies |
+| iOS build/distribution/project/identity inputs or full manual/release | Debug and Release containers plus relevant simulator contracts |
+| Production firmware libraries | Production and lifecycle, with extra ordinary/debug profiles for their conditional features |
+| Board/runtime/build/shared configuration | Every regular profile for both boards |
+
+Ordinary source-only PRs no longer prove Release compilation. Before release, use
+full CI; the release candidate always requests all components and both board families.
+Local `--suite ios --level full` still builds both configurations by default. Explicit
+`BICINO_IOS_CONFIGURATIONS=Debug` is a Debug-only result, never Release evidence.
+The navigation umbrella script without arguments still runs every assertion; its
+`map`, `sensors`, `workout`, and `radio` arguments select the same registry-backed groups.
+
+Promotion dispatch first checks for an eligible existing CI run at the current head;
+branch movement aborts selection. The protected partial gate still requires the exact
+promotion branch and its sole allowed lock file. No deployment or rollout policy is
+relaxed. New sources that do not fit a known group use the broad fallback.
+
+Observe the next 5–10 natural PR runs by scope/cache state and tighten routing if a
+full/manual/release lane finds an omitted relevant failure. Revert the selector and
+workflow changes to restore the broad policy; do not raise runner resource limits.
