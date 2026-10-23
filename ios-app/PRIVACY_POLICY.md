@@ -151,7 +151,7 @@ not used to analyze how people use the app.
 Bicino shows an elevation profile for a route when it can. If an imported GPX
 route contains trustworthy elevation values, the app computes the profile on
 your iPhone from those values and sends nothing. Otherwise, for an imported GPX
-route only, the app sends that route's coordinates and a random request
+route or an Apple Maps route you select or navigate, the app sends that route's coordinates and a random request
 identifier to the Bicino service with your installation credential. The service
 samples points along the route and looks up their terrain heights with its
 terrain provider, Geoapify, or with elevation data hosted by the service.
@@ -163,8 +163,8 @@ not repeat the lookup. To enforce daily limits it keeps a usage count keyed by a
 pseudonym of your installation identifier, deleted no later than 48 hours after
 the day it counts.
 
-Apple Maps routes and Strava routes are never sent for elevation. A Strava
-route's own GPX elevation values may be used on your iPhone. A saved route keeps
+Strava routes are never sent for elevation. A Strava route's own GPX elevation
+values may be used on your iPhone. A saved route keeps
 its profile and any GPX elevation values in a companion file on your iPhone,
 excluded from backups and deleted with the route. The phone sends a compact
 copy of the profile and your progress along the route to a connected bike

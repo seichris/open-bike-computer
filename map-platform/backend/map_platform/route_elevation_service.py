@@ -48,10 +48,10 @@ REQUEST_SCHEMA = "bicino-route-elevation-request-v1"
 RESPONSE_SCHEMA = "bicino-route-elevation-response-v1"
 REQUEST_FIELDS = frozenset({"schema", "requestId", "geometry", "travelMode", "routeSource"})
 GEOMETRY_FIELDS = frozenset({"crs", "coordinatesE6", "digest"})
-# Sources whose geometry the app may send. Apple Maps and Strava API routes are
-# excluded by the app's provider policy; the server rejects them as well.
-PERMITTED_ROUTE_SOURCES = frozenset({"gpx", "saved", "other"})
-REJECTED_ROUTE_SOURCES = frozenset({"mapkit", "strava"})
+# Apple Maps routes use the same transient processing as imported GPX routes.
+# Strava API routes remain excluded by the app's provider policy.
+PERMITTED_ROUTE_SOURCES = frozenset({"gpx", "mapkit", "saved", "other"})
+REJECTED_ROUTE_SOURCES = frozenset({"strava"})
 DEFAULT_PROVIDER_ORDER = (PROVIDER_GEOAPIFY, PROVIDER_COPERNICUS)
 DEFAULT_DEADLINE_SECONDS = 25.0
 DEFAULT_MAXIMUM_CONCURRENT = 2

@@ -157,6 +157,19 @@ class RouteElevationEndpointTests(RouteElevationAPITests):
         self.assertEqual(self.post(retry).json()["status"], "ready")
         self.assertEqual(len(self.transport.requests), 1)
 
+    def test_mapkit_route_without_heights_uses_the_terrain_provider(self):
+        payload = route_payload(source="mapkit")
+        response = self.post(payload)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["status"], "ready")
+        self.assertEqual(body["profile"]["geometry"]["digest"], payload["geometry"]["digest"])
+        self.assertGreater(body["profile"]["statistics"]["totalAscentM"], 0)
+        self.assertEqual(body["attempts"][0]["provider"], "geoapify")
+        self.assertEqual(len(self.transport.requests), 1)
+        self.assertNotIn("coordinatesE6", response.text)
+        self.assertIn("no-store", response.headers["cache-control"])
+
     def test_credentials_attestation_and_validation_are_checked_before_work(self):
         unauthenticated = self.client.post("/v1/route-elevation-profiles",
                                            params={"clientInstallationId": self.credential["clientInstallationId"]},
@@ -168,8 +181,8 @@ class RouteElevationEndpointTests(RouteElevationAPITests):
         self.assertEqual(unenrolled.status_code, 401)
         self.assertEqual(unenrolled.json()["detail"]["code"], "installation_attestation_required")
         invalid = [
-            route_payload(source="mapkit"),
             route_payload(source="strava"),
+            route_payload(source="unknown"),
             route_payload(schema="v0"),
             route_payload(requestId="not-a-uuid"),
             route_payload(travelMode="car"),

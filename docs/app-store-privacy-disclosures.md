@@ -91,8 +91,10 @@ other identifier as linked even when the app has no account or real-world name.
   flow with the encrypted refresh token and does not regress to the legacy
   deauthorization endpoint before its announced retirement.
 - Reconfirm that the approved route provider permits every shipped persistence,
-  attribution, and non-Apple accessory-display use; do not ship a MapKit export
-  path without explicit approval under the current Apple terms.
+  attribution, and non-Apple accessory-display use. The maintainer explicitly
+  enabled transient Apple Maps route elevation lookup on 23 October 2026; see
+  `docs/reviews/mapkit-route-storage-2026-09-15.md` for the implementation-policy
+  record and the separate licensing-review status.
 - Confirm `maps.8o.vc` stores map geometry only for requested map jobs and does
   not repurpose it for analytics, advertising, or tracking.
 - Confirm route elevation requests (`POST /v1/route-elevation-profiles`) are
@@ -100,8 +102,11 @@ other identifier as linked even when the app has no account or real-world name.
   in-memory replay cache holds no coordinates and expires within 10 minutes, the
   Geoapify request carries only sample coordinates from the server, and the
   credit ledger keeps only installation pseudonyms with day-scoped counts that
-  expire within 48 hours. Apple Maps and Strava geometry must never reach this
-  endpoint. If any of these change, revisit the Precise Location answer.
+  expire within 48 hours. Imported GPX and selected active or saved Apple Maps
+  routes may reach this endpoint; Strava geometry remains excluded. This adds
+  Apple Maps route coordinates to the same real-time-only elevation processing
+  described above; recheck these retention guarantees against the Precise
+  Location answer before publishing.
 - Confirm custom map names, job/status timestamps, and download receipts remain
   limited to installation-scoped map listing, recovery, and delivery.
 - Confirm reverse-proxy and infrastructure access-log retention. The app
