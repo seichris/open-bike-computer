@@ -248,8 +248,9 @@ struct FriendLiveServiceTests {
         let (offlineNetwork, offlineStore, _) = try await seed()
         offlineNetwork.snapshotFailure = URLError(.notConnectedToInternet)
         let offline = make(offlineNetwork, offlineStore)
-        offline.start(owner: "alice"); await settle()
+        offline.start(owner: "alice", restoringOnly: true); await settle()
         check(!offline.isSharing, "offline relaunch cannot send before server revalidation")
+        check(offlineNetwork.snapshotReads > 1, "remembered sharing retries independently of unavailable capability discovery")
         offlineNetwork.snapshotFailure = nil
         await offline.tick()
         check(offline.sharingIDs == ["bob"], "pending restoration retries when the server is reachable")
@@ -259,6 +260,13 @@ struct FriendLiveServiceTests {
         let stopped = make(offlineNetwork, offlineStore)
         stopped.start(owner: "alice"); await settle()
         check(!stopped.isSharing && offlineStore.values.isEmpty, "offline Stop is durable despite a still-active server lease")
+
+        let emptyNetwork = FriendNetwork(), emptyStore = FriendPersistence()
+        let empty = make(emptyNetwork, emptyStore)
+        empty.start(owner: "alice", restoringOnly: true); await settle()
+        check(emptyNetwork.snapshotReads == 0, "an account without remembered sharing waits for capability discovery")
+        empty.start(owner: "alice"); await settle()
+        check(emptyNetwork.snapshotReads == 1, "capability discovery can enable normal receiving after an empty restoration")
 
         let (revokedNetwork, revokedStore, _) = try await seed()
         revokedNetwork.consents["bob"]?["epoch"] = UUID().uuidString

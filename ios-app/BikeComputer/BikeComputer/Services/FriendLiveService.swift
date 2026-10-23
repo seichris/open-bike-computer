@@ -65,7 +65,7 @@ final class FriendLiveService: ObservableObject {
         progress.add(location)
     }
 
-    func start(owner: String? = nil) {
+    func start(owner: String? = nil, restoringOnly: Bool = false) {
         if self.owner != owner {
             reset()
             self.owner = owner
@@ -87,6 +87,10 @@ final class FriendLiveService: ObservableObject {
                 self.error = "Your previous friend sharing could not be restored. Turn sharing on again."
             }
         }
+        // Authentication can recover while capability discovery is offline.
+        // Only this phone's earlier explicit consents may start retrying then;
+        // a successful snapshot still gates all GPS restoration/publication.
+        guard !restoringOnly || !remembered.isEmpty else { return }
         enabled = true
         guard task == nil else { return }
         resumePolling()

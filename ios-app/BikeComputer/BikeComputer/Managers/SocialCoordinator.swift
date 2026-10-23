@@ -134,6 +134,10 @@ final class SocialCoordinator: ObservableObject {
             await notifications.accountEnded()
             await recoverDeletion()
         case .signedIn:
+            if let owner = session.currentUID {
+                friendLive.setApplicationActive(UIApplication.shared.applicationState == .active)
+                friendLive.start(owner: owner, restoringOnly: true)
+            }
             await registerForAlertsIfAuthorized()
             // Receiving friend positions must not depend on opening the Friends screen.
             do {
