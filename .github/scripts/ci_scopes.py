@@ -81,6 +81,6 @@ def ios_scopes(paths, *, native, selected):
     simulator = native and (not paths or any(not p.endswith('.swift') or p.startswith(shared) or Path(p).name in simulator_names for p in paths))
     release = native and (not paths or any(not p.endswith('.swift') or '/BuildIdentity' in p or '/AppIdentity' in p for p in paths))
     watch_check = 'ios-fast-type-check-the-complete-watch-source-graph'
-    if paths and all(p.endswith('.swift') and not p.startswith(shared) for p in paths):
+    if not full and paths and all(p.endswith('.swift') and not p.startswith(shared) for p in paths):
         selected_checks.remove(watch_check)
     return {'ios_checks': selected_checks, 'ios_simulator': simulator, 'ios_release': release}

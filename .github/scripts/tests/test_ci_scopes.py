@@ -50,6 +50,8 @@ class ScopeTests(unittest.TestCase):
             self.assertTrue(select(paths)['ios_release']);self.assertTrue(select(paths)['ios_simulator'])
         unknown=select(['ios-app/BikeComputer/Unknown.swift'])
         self.assertTrue(all('ios-navigation-'+g in unknown['ios_checks'] for g in ('map','sensors','workout','radio')))
+        self.assertIn('ios-fast-type-check-the-complete-watch-source-graph', unknown['ios_checks'])
+        self.assertNotIn('ios-fast-type-check-the-complete-watch-source-graph', radio['ios_checks'])
         # Deleted/renamed inputs select both consumers, even when the source no longer exists.
         mixed=select(['ios-app/BikeComputerTests/WorldRadioTests.swift','ios-app/BikeComputerTests/CyclingSensorTests.swift'])
         self.assertIn('ios-navigation-radio',mixed['ios_checks']);self.assertIn('ios-navigation-sensors',mixed['ios_checks'])
