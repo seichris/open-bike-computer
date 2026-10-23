@@ -1790,6 +1790,11 @@ struct ContentView: View {
             mapControlDivider
 
             mapLayersMenu
+
+            mapControlDivider
+
+            MapUserTrackingControl(controlState: mapViewControlState)
+                .frame(width: 52, height: 50)
         }
         .frame(width: 52)
         .accessibilityElement(children: .contain)
