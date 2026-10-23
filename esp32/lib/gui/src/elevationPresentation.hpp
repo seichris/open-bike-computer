@@ -225,16 +225,6 @@ inline Status status(bool phoneConnected, bool sessionSupportsProfiles, const re
   return {ScreenState::NoRoute, "No route", "Start navigation to see elevation"};
 }
 
-inline const char *sourceLabel(uint8_t source) {
-  switch (static_cast<rep::Source>(source)) {
-  case rep::Source::Gpx: return "GPX elevation";
-  case rep::Source::HostedTerrain: return "Geoapify terrain";
-  case rep::Source::InternalDem: return "Copernicus DEM";
-  case rep::Source::Unknown: break;
-  }
-  return "Route elevation";
-}
-
 // ASCII only: the built-in fonts have no approximately-equal or >= glyphs.
 // "~" marks estimated values; "+" marks a total that is only a lower bound.
 inline void formatMeters(char *buffer, std::size_t size, int32_t value, bool estimated, bool lowerBound) {
@@ -250,13 +240,13 @@ inline void formatGrade(char *buffer, std::size_t size, int16_t deciPercent, boo
 inline void footerText(char *buffer, std::size_t size, const rep::Profile &profile) {
   const char *quality = "";
   if ((profile.flags & rep::BODY_FLAG_AMBIGUOUS_STRUCTURES) != 0) {
-    quality = " - uncertain bridges";
+    quality = "Uncertain bridges";
   } else if ((profile.flags & rep::BODY_FLAG_PARTIAL) != 0) {
-    quality = " - partial";
+    quality = "Partial elevation";
   } else if ((profile.flags & rep::BODY_FLAG_INCLUDES_ESTIMATED) != 0) {
-    quality = " - some estimated";
+    quality = "Some estimated";
   }
-  std::snprintf(buffer, size, "%s%s", sourceLabel(profile.source), quality);
+  std::snprintf(buffer, size, "%s", quality);
 }
 
 } // namespace elevation_presentation

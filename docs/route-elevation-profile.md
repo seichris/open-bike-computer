@@ -190,7 +190,11 @@ configured, never the key.
 A default-off screen after Ride Stats: the simplified profile with estimated
 and structure-uncertain stretches marked, the progress marker, route elevation
 and grade at the rider's position, total ascent and ascent still to climb, and
-the source. It explains each state: connect the app, update the app, no route,
+quality notes. Provider details and attribution remain in the iPhone profile.
+Total ascent is available as soon as the profile arrives. The other values
+require the phone's on-route position; a stationary rider with a valid position
+can see them, while missing progress or an off-route position leaves them blank.
+It explains each state: connect the app, update the app, no route,
 loading, and unavailable with the reason. It is compiled only into 1.75-inch
 development (`FIRMWARE_DIAGNOSTICS=1`) builds until physically qualified;
 production and 2.06-inch builds omit the screen and the capability.
