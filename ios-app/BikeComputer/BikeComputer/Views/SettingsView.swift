@@ -1165,6 +1165,16 @@ private struct DeviceMapLibrarySettingsSection: View {
                         if library.selectedSessionID == map.sessionID {
                             Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
                                 .accessibilityLabel("\(map.name) is in use")
+                        } else if !map.isAvailable {
+                            // A damaged copy is repaired by explicit removal, then a fresh install.
+                            Button("Remove", role: .destructive) {
+                                mapToRemove = map
+                                removalDeviceID = bleManager.activeDeviceID
+                                removalEpoch = bleManager.transferConnectionEpoch
+                            }
+                                .buttonStyle(.borderless)
+                                .disabled(library.busy || !library.known || !bleManager.isNavigationReady)
+                                .accessibilityLabel("Remove the damaged copy of \(map.name) from the SD card")
                         } else {
                             Button("Use") { _ = bleManager.requestDeviceMapLibrary("select", map: map) }
                                 .buttonStyle(.borderless)
@@ -1186,10 +1196,12 @@ private struct DeviceMapLibrarySettingsSection: View {
                 if library.known && library.maps.isEmpty {
                     Text("Install a map to keep it available offline here.").foregroundColor(.secondary)
                 }
+                if library.maps.contains(where: { !$0.isAvailable }) {
+                    Text("Files need repair: remove the damaged copy, then install the map again from Saved Maps.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
                 if !library.error.isEmpty {
-                    Text(library.error == "library_in_use"
-                        ? "That map is retained for recovery and cannot be removed yet."
-                        : "Could not update the device maps. Refresh and try again.")
+                    Text(DeviceMapLibrary.errorDescription(library.error))
                         .foregroundColor(.secondary)
                 }
                 Button("Refresh Device Maps") { _ = bleManager.requestDeviceMapLibrary() }
@@ -1212,7 +1224,9 @@ private struct DeviceMapLibrarySettingsSection: View {
                 }
                 Button("Cancel", role: .cancel) { mapToRemove = nil }
             } message: {
-                Text("The copy on this SD card will be removed. Copies on your iPhone and in your Map Library remain available.")
+                Text(mapToRemove?.isAvailable == false
+                    ? "The damaged copy on this SD card will be removed. Install the map again from Saved Maps afterwards; copies on your iPhone and in your Map Library remain available."
+                    : "The copy on this SD card will be removed. Copies on your iPhone and in your Map Library remain available.")
             }
             .onChange(of: bleManager.transferConnectionEpoch) { _ in mapToRemove = nil }
         }

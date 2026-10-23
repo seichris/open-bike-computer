@@ -52,6 +52,8 @@ public:
   bool operationStatusNotification_ = false;
   bool libraryAutomaticBlockKnown_ = true;
   uint32_t libraryRetryAfterMs_ = 123;
+  bool rollbackFromLibrary_ = false;
+  std::string libraryAction_;
   bool rollbackAutomaticExit_ = false;
   bool rollbackSucceeded_ = false;
   bool rollbackComplete_ = false;

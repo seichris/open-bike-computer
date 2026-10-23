@@ -9989,6 +9989,22 @@ extension NavigationProtocolTests {
                "damaged payloads remain removable but never authorize reuse")
         assert(OfflineMapPlatformError.serverStatus(503, "{\"code\":\"stream_storage_unavailable\"}").localizedDescription.contains("busy or unavailable"),
                "temporary SD unavailability is distinct from a full card")
+        let fullCard = OfflineMapPlatformError.serverStatus(507,
+            "{\"ok\":false,\"error\":{\"code\":\"stream_sd_full\",\"message\":\"remove a map\"},\"operation\":{\"phase\":\"failed\"}}")
+        assert(DeviceMapLibrary.requiresLibraryAction(fullCard) && fullCard.localizedDescription.contains("needs space"),
+               "a full-card refusal names the SD-library remedy even when an upload pauses")
+        assert(OfflineMapPlatformError.serverStatus(409, "{\"error\":{\"code\":\"stream_repair_requires_removal\"}}")
+                .localizedDescription.contains("damaged"), "a damaged SD copy is repaired by removal, then reinstall")
+        assert(OfflineMapPlatformError.serverStatus(409, "{\"error\":{\"code\":\"stream_session_conflict\"}}")
+                .localizedDescription.contains("Another copy"), "a protected or different copy needs an explicit choice")
+        assert(DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(409,
+            "{\"error\":{\"code\":\"stream_repair_requires_removal\"}}")), "repair refusals are not resumable")
+        assert(!DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(500, "{}")) &&
+               !DeviceMapLibrary.requiresLibraryAction(CancellationError()), "ordinary interruptions still resume")
+        assert(DeviceMapLibrary.errorDescription("library_operation_pending").contains("cancel"),
+               "a pending installation prerequisite is actionable")
+        assert(DeviceMapLibrary.errorDescription("library_in_use").contains("in use"),
+               "protected removal explains why it is refused")
         let encoded = try! JSONEncoder().encode(library)
         assertEqual(try! JSONDecoder().decode(DeviceMapLibrary.self, from: encoded), library, "inventory wire round trip")
         let duplicate = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,

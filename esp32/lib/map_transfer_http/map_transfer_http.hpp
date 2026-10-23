@@ -117,8 +117,15 @@ private:
   std::string pendingMapLibraryCommandID_;
   std::vector<std::string> libraryRejectedSessions_;
   bool libraryKnown_ = false, libraryAutomatic_ = true, librarySubmitted_ = false, librarySelectionStarted_ = false;
+  // A journaled manual Use pins selection until reconciliation settles it.
+  bool libraryManualPending_ = false;
+  // Library switches leave the renderer on its previous root when loading fails.
+  bool pendingMapFromLibrary_ = false, rollbackFromLibrary_ = false;
   uint32_t libraryRevision_ = 0;
   uint32_t libraryRetryAfterMs_ = 0;
+  uint8_t libraryRetryStreak_ = 0;
+  void scheduleLibraryRetry(uint32_t baseMs);
+  bool libraryRetryPending();
   uint64_t libraryAutomaticBlock_ = 0;
   bool libraryAutomaticBlockKnown_ = false;
   size_t libraryPageOffset_ = 0;
@@ -158,6 +165,8 @@ private:
   std::string readOperationStatus(const std::string &operationID) const;
   bool admitReceivingOperation(const device_transfer::HttpRequest &request,
                                const MapStreamInstallSnapshot &snapshot);
+  std::string resolveRejectedStreamOperation(const device_transfer::HttpRequest &request,
+                                             const MapStreamInstallSnapshot &snapshot);
   bool handleOperationControl(const device_transfer::HttpRequest &request,
                               device_transfer::TransferClient &client);
   bool recordPreparedOperation(const device_transfer::HttpRequest &request,

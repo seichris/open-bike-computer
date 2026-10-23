@@ -1322,6 +1322,12 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             if body.contains("\"stream_storage_unavailable\"") {
                 return "The SD card is busy or unavailable. Try again shortly."
             }
+            if body.contains("\"stream_repair_requires_removal\"") {
+                return "This map's copy on the Bike Computer is damaged. Remove it in Settings → Maps on this Bike Computer, then install it again."
+            }
+            if body.contains("\"stream_session_conflict\"") {
+                return "Another copy of this map is on the Bike Computer. Remove it in Settings → Maps on this Bike Computer (choose another map first if it is in use), then try again."
+            }
             if body.contains("\"library_busy\"") {
                 return "The Bike Computer is finishing a map switch. Try again shortly."
             }
@@ -1600,6 +1606,27 @@ nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
                 manifestReceipt: map.manifestReceipt, requestID: requestID)
         }
         return MapLibraryControlPacket.make(action: action)
+    }
+    /// Actionable text for a device library error code.
+    static func errorDescription(_ code: String) -> String {
+        switch code {
+        case "library_in_use":
+            return "That map is in use or retained for recovery and cannot be removed yet."
+        case "library_operation_pending":
+            return "A map installation on the Bike Computer is still pending. Resume it, or cancel the map installation, then try again."
+        case "library_policy_write":
+            return "The Bike Computer could not save the map choice yet. It keeps the choice and retries; refresh to check."
+        default:
+            return "Could not update the device maps. Refresh and try again."
+        }
+    }
+    /// Device upload refusals that need an SD-library action rather than a resume.
+    static func requiresLibraryAction(_ error: Error) -> Bool {
+        guard let platformError = error as? OfflineMapPlatformError,
+              case .serverStatus(_, let body) = platformError else { return false }
+        return ["library_full", "stream_sd_full", "stream_storage_unavailable",
+                "stream_repair_requires_removal", "stream_session_conflict"]
+            .contains { body.contains("\"\($0)\"") }
     }
 }
 

@@ -5,6 +5,7 @@
 #include "../../lib/map_transfer/map_transfer.hpp"
 #include "../../lib/map_transfer/map_operation_journal.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstdlib>
@@ -357,10 +358,21 @@ VerifiedMapStreamManifest prepareReadyRoot(const std::string &root,
 
 void testFreeSpacePreflightBeforePayload() {
   const auto manifest = verified();
-  MapStreamInstallSession full(tempRoot(), "full-card", {1, 10000});
+  // The single status published for a full card is the Failed snapshot that
+  // carries the signed identity the HTTP admission uses, with no payload or
+  // durable progress: MapTransferHttpServer::resolveRejectedStreamOperation
+  // resolves exactly that operation (see test_map_library_control.py).
+  std::vector<MapStreamInstallSnapshot> published;
+  MapStreamInstallSession full(tempRoot(), "full-card", {1, 10000}, {}, {},
+      [&](const MapStreamInstallSnapshot &snapshot) { published.push_back(snapshot); },
+      std::string(32, 'a'));
   full.setFreeSpaceProbe([] { return uint64_t(0); });
   assert(!full.onManifest(manifest, kManifest));
   assert(full.snapshot().errorCode == "stream_sd_full" && full.snapshot().bytesWritten == 0);
+  assert(published.size() == 1 && published[0].state == MapStreamInstallState::Failed);
+  assert(published[0].manifestReceipt.size() == 64 && published[0].signedManifestReceipt.size() == 64 &&
+         !published[0].mapId.empty() && published[0].completedPayloadBytes == 0 &&
+         published[0].durableFilePrefix == 0 && published[0].bytesWritten == 0);
   MapStreamInstallSession busy(tempRoot(), "busy-card", {1, 10000});
   busy.setFreeSpaceProbe([] { return std::optional<uint64_t>(); });
   assert(!busy.onManifest(manifest, kManifest));
@@ -1667,6 +1679,155 @@ void testExplicitOperationPromotionAndTerminalCrashBoundaries() {
   std::cout << "operation promotion cuts=" << promotionCuts << " terminal cleanup cuts=" << terminalCuts << "\n";
 }
 
+// N2: an identical signed re-upload of a completed version that has aged out of
+// selection/rollback/anchor protection must survive a failed re-activation,
+// including a discard after reboot. A never-completed upload stays discardable.
+void testFailedReactivationKeepsAgedOutLibraryVersion() {
+  namespace op = map_transfer::operation;
+  const auto fixture = readGoldenFixture();
+  const auto stream = decodeHex(fixture.at("stream_hex"));
+  const auto publicKey = decodeHex(fixture.at("public_key_x963_hex"));
+  map_transfer::MapStreamTrustStore trust;
+  assert(trust.add("map-test-2026-01", publicKey.data(), publicKey.size()));
+  map_transfer::Sha256Hasher streamHash; streamHash.update(stream.data(), stream.size());
+  const auto digest = streamHash.finalHex();
+  const std::string device(32, 'a');
+  const auto installAndConfirm = [&](const std::string &root, const std::string &session,
+                                     const std::string &operation, op::Store &store) {
+    MapStreamReceiver receiver(trust, root, session, stream.size(), "9.0.0", 1024 * 1024, {}, {}, {}, {}, operation);
+    assert(receiver.feed(stream.data(), stream.size()) && receiver.finish().ok);
+    op::Identity identity{device, operation, receiver.snapshot().manifestReceipt,
+                          receiver.snapshot().signedManifestReceipt, digest, stream.size(), session,
+                          receiver.snapshot().mapId};
+    assert(store.restore() == op::Result::Ok);
+    assert(store.admit(identity, store.admissionRevision()) == op::Result::Ok);
+    assert(store.prepare(identity) == op::Result::Ok && store.accept(identity) == op::Result::Ok);
+    return identity;
+  };
+  for (const bool rebootBeforeFailure : {false, true}) {
+    const auto root = tempRoot();
+    const std::string session = "same-content";
+    MapTransferInstaller installer(root); installer.setOperationDeviceID(device);
+    map_transfer::MapOperationStorage disk(root); op::Store store(disk, device);
+    assert(store.restore() == op::Result::Ok && store.initializeAdmission(100) == op::Result::Ok);
+    const auto first = installAndConfirm(root, session, std::string(32, '4'), store);
+    assert(installer.promotePreparedOperation(session, first.operation).ok);
+    assert(installer.activateReadyStreamMap(session).ok);
+    assert(store.rendererAcknowledged(first, first.manifest, first.signedManifest) == op::Result::Ok);
+    assert(installer.finalizeOperation(session, first.operation).ok);
+    for (int i = 0; i < 6; ++i) {
+      const auto other = "library-other-" + std::to_string(i);
+      prepareReadyRoot(root, other);
+      assert(installer.activateReadyStreamMap(other).ok);
+    }
+    map_transfer::InstalledMap before;
+    assert(installer.readInstalledMap(session, before).ok && before.available);
+    const auto payload = root + before.root + "/+0000+0000";
+    // Identical signed bytes are re-uploaded, committed and promoted.
+    const auto again = installAndConfirm(root, session, std::string(32, '3'), store);
+    assert(installer.promotePreparedOperation(session, again.operation).ok);
+    assert(exists(root + before.root + "/.library-retained"));
+    if (rebootBeforeFailure) {
+      // Recovery/cancellation discard after a restart must not delete it either.
+      MapTransferInstaller rebooted(root); rebooted.setOperationDeviceID(device);
+      assert(rebooted.discardUnselectedStreamMap(session).code == "library_kept");
+    } else {
+      assert(installer.activateReadyStreamMap(session).ok);
+      assert(installer.rollbackActiveMap(session).ok); // renderer rejected the reload
+      assert(store.fail(again) == op::Result::Ok);
+      assert(installer.finalizeOperation(session, again.operation).ok);
+    }
+    map_transfer::InstalledMap after;
+    assert(installer.readInstalledMap(session, after).ok && after.available);
+    assert(after.manifestReceipt == before.manifestReceipt && exists(payload));
+    assert(!exists(root + before.root + "/.library-retained"));
+    assert(!exists(root + before.root + "/.operation-prepared"));
+    std::vector<map_transfer::InstalledMap> maps;
+    assert(installer.readMapLibrary(maps).ok);
+    assert(std::any_of(maps.begin(), maps.end(), [&](const auto &m) { return m.sessionId == session && m.available; }));
+  }
+  // A never-completed upload that fails after acceptance stays discardable.
+  {
+    const auto root = tempRoot();
+    MapTransferInstaller installer(root); installer.setOperationDeviceID(device);
+    map_transfer::MapOperationStorage disk(root); op::Store store(disk, device);
+    assert(store.restore() == op::Result::Ok && store.initializeAdmission(100) == op::Result::Ok);
+    prepareReadyRoot(root, "current-map");
+    assert(installer.activateReadyStreamMap("current-map").ok);
+    const auto fresh = installAndConfirm(root, "fresh-city", std::string(32, '5'), store);
+    assert(installer.promotePreparedOperation("fresh-city", fresh.operation).ok);
+    assert(!exists(root + "/VECTMAP/.maps/fresh-city/.library-retained"));
+    assert(installer.activateReadyStreamMap("fresh-city").ok);
+    assert(installer.rollbackActiveMap("fresh-city").ok);
+    assert(store.fail(fresh) == op::Result::Ok);
+    assert(installer.finalizeOperation("fresh-city", fresh.operation).ok);
+    assert(!exists(root + "/VECTMAP/.maps/fresh-city"));
+  }
+}
+
+// N3: an upload never overwrites a damaged completed copy. The same signed
+// version is refused with an actionable 409, the damaged files are left for an
+// explicit removal, and removal followed by reinstall repairs it. A protected
+// (selected) damaged copy is refused as a session conflict and cannot be removed.
+void testDamagedLibraryVersionRepairRequiresRemoval() {
+  const auto fixture = readGoldenFixture();
+  const auto stream = decodeHex(fixture.at("stream_hex"));
+  const auto publicKey = decodeHex(fixture.at("public_key_x963_hex"));
+  map_transfer::MapStreamTrustStore trust;
+  assert(trust.add("map-test-2026-01", publicKey.data(), publicKey.size()));
+  const auto installCompleted = [&](const std::string &root, const std::string &session) {
+    MapStreamReceiver receiver(trust, root, session, stream.size(), "9.0.0", 1024 * 1024);
+    assert(receiver.feed(stream.data(), stream.size()) && receiver.finish().ok);
+    MapTransferInstaller installer(root);
+    assert(installer.activateReadyStreamMap(session).ok);
+  };
+  const auto payloadFile = [](const std::string &root, const std::string &session) {
+    for (const auto &entry : std::filesystem::recursive_directory_iterator(root + "/VECTMAP/.maps/" + session))
+      if (entry.is_regular_file() && (entry.path().extension() == ".fmb" || entry.path().extension() == ".fmp"))
+        return entry.path().string();
+    assert(false);
+    return std::string();
+  };
+  for (const bool missing : {false, true}) {
+    const auto root = tempRoot();
+    const std::string session = "damaged-city";
+    installCompleted(root, session);
+    for (int i = 0; i < 6; ++i) {
+      const auto other = "other-" + std::to_string(i);
+      prepareReadyRoot(root, other);
+      assert(MapTransferInstaller(root).activateReadyStreamMap(other).ok);
+    }
+    const auto victim = payloadFile(root, session);
+    if (missing) std::filesystem::remove(victim); else std::filesystem::resize_file(victim, 1);
+    MapTransferInstaller installer(root);
+    map_transfer::InstalledMap damaged;
+    assert(installer.readInstalledMap(session, damaged, false).ok && !damaged.available);
+    MapStreamReceiver repair(trust, root, session, stream.size(), "9.0.0", 1024 * 1024);
+    assert(!repair.feed(stream.data(), stream.size()));
+    const auto refused = repair.abort();
+    assert(!refused.ok && refused.httpStatus == 409 && refused.code == "stream_repair_requires_removal");
+    assert(exists(root + "/VECTMAP/.maps/" + session + "/.activation-consumed") && exists(root + damaged.root));
+    assert(installer.removeInstalledMap(session, damaged.manifestReceipt).ok);
+    installCompleted(root, session);
+    map_transfer::InstalledMap repaired;
+    assert(installer.readInstalledMap(session, repaired).ok && repaired.available);
+  }
+  {
+    const auto root = tempRoot();
+    const std::string session = "selected-city";
+    installCompleted(root, session);
+    std::filesystem::resize_file(payloadFile(root, session), 1);
+    MapStreamReceiver repair(trust, root, session, stream.size(), "9.0.0", 1024 * 1024);
+    assert(!repair.feed(stream.data(), stream.size()));
+    const auto refused = repair.abort();
+    assert(!refused.ok && refused.httpStatus == 409 && refused.code == "stream_session_conflict");
+    MapTransferInstaller installer(root);
+    map_transfer::InstalledMap selected;
+    assert(installer.readInstalledMap(session, selected, false).ok);
+    assert(installer.removeInstalledMap(session, selected.manifestReceipt).code == "library_in_use");
+  }
+}
+
 void testPreparedReinstallCannotInheritLegacyAuthorityOrDeletePriorMap() {
   namespace op=map_transfer::operation;
   const auto fixture=readGoldenFixture();
@@ -1778,6 +1939,8 @@ void testStartingNewStreamPrunesAbandonedPausedSessions() {
 
 int main() {
   testFreeSpacePreflightBeforePayload();
+  testFailedReactivationKeepsAgedOutLibraryVersion();
+  testDamagedLibraryVersionRepairRequiresRemoval();
   testDeviceBoundOperationActivationAndReceipt();
   testExplicitOperationPromotionAndTerminalCrashBoundaries();
   testPreparedReinstallCannotInheritLegacyAuthorityOrDeletePriorMap();

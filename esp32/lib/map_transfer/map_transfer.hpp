@@ -261,6 +261,16 @@ public:
                                    const std::string &receipt) const;
   bool automaticMapSelection() const;
   bool setAutomaticMapSelection(bool enabled) const;
+  // A manual Use journals its exact target before the canonical pointer moves.
+  // Reconciliation pins manual selection only when that pointer survived
+  // (renderer rollback/recovery included); otherwise the journal is dropped and
+  // the previous automatic/manual policy remains untouched.
+  bool writeManualSelectionIntent(const std::string &sessionId,
+                                  const std::string &root,
+                                  const std::string &receipt) const;
+  bool manualSelectionIntentPending() const;
+  bool discardManualSelectionIntent() const;
+  InstallStatus reconcileManualSelectionIntent() const;
   InstallStatus rollbackActiveMap(const std::string &sessionId) const;
   InstallStatus discardIncompleteStreamMap(
       const std::string &sessionId) const;
@@ -353,6 +363,7 @@ private:
       const std::string &transaction) const;
   bool clearPendingStreamActivation(const std::string &sessionId) const;
   bool markStreamActivationConsumed(const ReadyStreamMap &ready) const;
+  bool restoreRetainedLibraryVersion(const std::string &sessionId) const;
   bool rollbackRootMatches(const std::string &root, const std::string &mapId,
                            const std::string &manifestReceipt,
                            const std::string &signedManifestReceipt) const;

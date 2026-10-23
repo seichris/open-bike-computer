@@ -2732,6 +2732,8 @@ Authenticated `MSTS` and `GET /map-transfer/status` include `mapLibrary`:
   "revision": 1,
   "error": "",
   "selectedSessionID": "installed-session",
+  "commandID": "<32 lowercase hex characters of the last explicit command, or empty>",
+  "commandError": "",
   "offset": 0,
   "total": 1,
   "maps": [{
@@ -2741,10 +2743,16 @@ Authenticated `MSTS` and `GET /map-transfer/status` include `mapLibrary`:
     "signedManifestReceipt": "<64 lowercase hex characters, or empty for a legacy archive>",
     "displayName": "Shanghai",
     "payloadBytes": 1350000,
+    "available": true,
     "boundsE7": [1210000000, 310000000, 1220000000, 320000000]
   }]
 }
 ```
+
+`automatic` is false while a manual **Use** journal is unsettled, because that
+journal already pins the manual choice. `selectedSessionID` names only the root
+the renderer acknowledged; after a failed library switch it keeps naming the
+renderer's previous live map.
 
 `boundsE7` is optional. `payloadBytes` sums installed manifest payloads, excluding
 archive framing and filesystem allocation overhead. Inventory is boot/connection
@@ -2756,12 +2764,25 @@ and signed manifest receipt. Version changes require installation.
 Library commands require the existing owner-authenticated BLE envelope. Callbacks
 only enqueue bounded work; the storage worker dispatches filesystem work through
 the internal operation owner. Commands wait for map/firmware transfer mode to
-exit and reject unresolved durable map operations. Selection retains the prior
+exit and reject unresolved durable map operations with `library_operation_pending`,
+except that removal may proceed while a *different* map's upload is Receiving or
+Prepared (removal frees space for it); that upload's own map and any Accepted
+activation still block it. Selection retains the prior
 map, rechecks file checksums and reader contracts, and uses the existing canonical
 pointer/readback/recovery mechanism. The renderer must acknowledge the new root
 before `selectedSessionID` identifies it as in use. Selection does not issue or
 rewrite an upload operation's Installed receipt. Removal cannot delete selected,
-rollback, transaction, or selection-anchor roots.
+rollback, transaction, selection-anchor or live-renderer roots.
+
+A durable `PUT /map-transfer/sessions/<session>/install-stream` refused before it writes payload, such
+as `stream_sd_full` (507) or `stream_storage_unavailable` (503) for a fresh
+attempt, resolves its own Receiving operation as `failed` and returns that receipt
+beside the error: `{"ok":false,"error":{"code":"stream_sd_full","message":"..."},
+"operation":{...,"phase":"failed",...}}`. Interrupted uploads with durable progress
+stay resumable, except for a full card. Reinstalling a damaged copy of the same
+signed version returns 409 `stream_repair_requires_removal`; a protected root or a
+different version in the same slot returns 409 `stream_session_conflict`. Neither
+overwrites the existing copy.
 
 
 BLE library inventory is paginated in four-map pages inside the existing MSTS

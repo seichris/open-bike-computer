@@ -1597,7 +1597,150 @@ static void testPersistentMapLibrary() {
   assert(overflow.readMapLibrary(maps).ok && maps.size() == 32);
 }
 
+// Simulates a power cut at an exact atomic-write boundary (before or after the
+// write lands), or a write that fails without crashing.
+struct WriteCut {};
+class CuttingInstaller : public MapTransferInstaller {
+public:
+  enum class Mode { BeforeWrite, AfterWrite, FailWrite };
+  CuttingInstaller(const std::string &root, std::string suffix, Mode mode)
+      : MapTransferInstaller(root), suffix_(std::move(suffix)), mode_(mode) {}
+
+protected:
+  bool writeTextFileAtomic(const std::string &path, const std::string &text) const override {
+    const bool target = path.size() >= suffix_.size() &&
+        path.compare(path.size() - suffix_.size(), suffix_.size(), suffix_) == 0;
+    if (target && mode_ == Mode::BeforeWrite) throw WriteCut{};
+    if (target && mode_ == Mode::FailWrite) return false;
+    const bool written = MapTransferInstaller::writeTextFileAtomic(path, text);
+    if (target && mode_ == Mode::AfterWrite) throw WriteCut{};
+    return written;
+  }
+
+private:
+  std::string suffix_;
+  Mode mode_;
+};
+
+static std::vector<map_transfer::InstalledMap> buildLibrary(const std::string &root, int count) {
+  MapTransferInstaller installer(root);
+  const auto data = validFmb();
+  for (int i = 0; i < count; ++i) {
+    const auto session = "town-" + std::to_string(i);
+    const auto mapID = "town-map-" + std::to_string(i);
+    const auto stage = installer.stagingRoot(session);
+    assert(::system(("mkdir -p " + stage + "/VECTMAP/" + mapID + "/+0000+0000").c_str()) == 0);
+    writeFile(stage + "/VECTMAP/" + mapID + "/+0000+0000/0.fmb", data);
+    writeFile(stage + "/manifest.json", "{\"schemaVersion\":1,\"mapId\":\"" + mapID +
+        "\",\"files\":[{\"path\":\"VECTMAP/" + mapID + "/+0000+0000/0.fmb\",\"bytes\":" +
+        std::to_string(data.size()) + ",\"sha256\":\"" + sha(data) + "\"}]}");
+    MapManifest manifest;
+    assert(installer.validateStagedMap(session, manifest).ok);
+    assert(installer.activateStagedMap(session, manifest).ok);
+  }
+  std::vector<map_transfer::InstalledMap> maps;
+  assert(installer.readMapLibrary(maps).ok && maps.size() == size_t(count));
+  return maps;
+}
+
+// N6: a manual Use journals its exact target before the pointer moves. Every
+// pointer/policy boundary reconciles to the durable pointer: pinned manual if
+// it moved, otherwise the earlier policy is untouched.
+static void testManualSelectionJournalRecovery() {
+  using Mode = CuttingInstaller::Mode;
+  const auto useTarget = [](MapTransferInstaller &installer, const map_transfer::InstalledMap &map) {
+    assert(installer.writeManualSelectionIntent(map.sessionId, map.root, map.manifestReceipt));
+    return installer.selectInstalledMap(map.sessionId, map.manifestReceipt);
+  };
+  for (const bool earlierAutomatic : {true, false}) {
+    // Cut after the journal, before the pointer: Use never happened.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      CuttingInstaller cut(root, "/.library-selection-intent.json", Mode::AfterWrite);
+      bool interrupted = false;
+      try { (void)useTarget(cut, maps[0]); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted);
+      MapTransferInstaller rebooted(root);
+      assert(rebooted.manualSelectionIntentPending());
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_discarded");
+      assert(rebooted.automaticMapSelection() == earlierAutomatic && !rebooted.manualSelectionIntentPending());
+    }
+    // Cut before the canonical pointer write lands: Use never happened.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      CuttingInstaller cut(root, "/VECTMAP/active-map.json", Mode::BeforeWrite);
+      bool interrupted = false;
+      try { (void)useTarget(cut, maps[0]); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted);
+      MapTransferInstaller rebooted(root);
+      ActiveMapSelection active; assert(rebooted.readActiveMap(active).ok && active.root != maps[0].root);
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_discarded");
+      assert(rebooted.automaticMapSelection() == earlierAutomatic);
+    }
+    // Cut after the pointer, before the policy: the reboot pins manual.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      CuttingInstaller cut(root, "/VECTMAP/active-map.json", Mode::AfterWrite);
+      bool interrupted = false;
+      try { (void)useTarget(cut, maps[0]); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted);
+      MapTransferInstaller rebooted(root);
+      ActiveMapSelection active; assert(rebooted.readActiveMap(active).ok && active.root == maps[0].root);
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_manual");
+      assert(!rebooted.automaticMapSelection() && !rebooted.manualSelectionIntentPending());
+    }
+    // Cut after the policy, before the journal cleanup: settles idempotently.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      MapTransferInstaller installer(root);
+      assert(useTarget(installer, maps[0]).ok);
+      CuttingInstaller cut(root, "/VECTMAP/.library-automatic", Mode::AfterWrite);
+      bool interrupted = false;
+      try { (void)cut.reconcileManualSelectionIntent(); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted && installer.manualSelectionIntentPending() && !installer.automaticMapSelection());
+      MapTransferInstaller rebooted(root);
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_manual");
+      assert(!rebooted.automaticMapSelection() && !rebooted.manualSelectionIntentPending());
+    }
+    // Renderer rollback after a durable pointer write: the journal is dropped
+    // and the earlier policy stays exactly as it was.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      MapTransferInstaller installer(root);
+      assert(useTarget(installer, maps[0]).ok);
+      assert(installer.rollbackActiveMap(maps[0].sessionId).ok);
+      assert(installer.reconcileManualSelectionIntent().code == "library_intent_discarded");
+      assert(installer.automaticMapSelection() == earlierAutomatic);
+    }
+  }
+  // A policy write failure keeps the journal as the durable manual pin and is
+  // retried until it lands; a failed journal write performs no selection.
+  {
+    const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+    MapTransferInstaller installer(root);
+    assert(useTarget(installer, maps[1]).ok);
+    CuttingInstaller failing(root, "/VECTMAP/.library-automatic", Mode::FailWrite);
+    assert(failing.reconcileManualSelectionIntent().code == "library_policy_write");
+    assert(failing.manualSelectionIntentPending() && failing.automaticMapSelection());
+    assert(installer.reconcileManualSelectionIntent().code == "library_intent_manual");
+    assert(!installer.automaticMapSelection() && !installer.manualSelectionIntentPending());
+    CuttingInstaller noJournal(root, "/.library-selection-intent.json", Mode::FailWrite);
+    assert(!noJournal.writeManualSelectionIntent(maps[2].sessionId, maps[2].root, maps[2].manifestReceipt));
+    assert(!noJournal.manualSelectionIntentPending());
+    // An explicit automatic choice discards an unsettled journal.
+    assert(installer.writeManualSelectionIntent(maps[2].sessionId, maps[2].root, maps[2].manifestReceipt));
+    assert(installer.setAutomaticMapSelection(true) && installer.discardManualSelectionIntent());
+    assert(installer.reconcileManualSelectionIntent().code == "library_intent_none" && installer.automaticMapSelection());
+  }
+}
+
 int main() {
+  testManualSelectionJournalRecovery();
   testPersistentMapLibrary();
   testSha256KnownVector();
   testTargetTwoLabelContractValidation();

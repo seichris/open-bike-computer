@@ -6476,6 +6476,10 @@ final class OfflineMapManager: ObservableObject {
                        : "Map upload paused. Tap Upload to resume.")
                 if case OfflineMapPlatformError.mapStreamCompatibilityRejected = error {
                     errorMessage = diagnosticMessage(for: error)
+                } else if DeviceMapLibrary.requiresLibraryAction(error) {
+                    // A paused upload refused for SD space/content still needs
+                    // the rider's library action before Resume can succeed.
+                    errorMessage = error.localizedDescription
                 } else {
                     errorMessage = nil
                 }
