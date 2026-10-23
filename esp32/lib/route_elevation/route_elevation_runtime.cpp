@@ -1,5 +1,7 @@
 #include "route_elevation_runtime.hpp"
 
+#if ROUTE_ELEVATION_SCREEN_ENABLED
+
 #include "../utils/src/runtime_mutex.hpp"
 
 #include <esp_heap_caps.h>
@@ -128,3 +130,5 @@ void reset() {
 }
 
 } // namespace route_elevation_runtime
+
+#endif // ROUTE_ELEVATION_SCREEN_ENABLED

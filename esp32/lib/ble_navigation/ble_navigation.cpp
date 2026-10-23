@@ -6366,18 +6366,22 @@ public:
 
     if (route_elevation_protocol::hasFrameMagic(
             reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
-      // Owner-only: scoped Watch sessions are default-denied above and
-      // never relay elevation profiles.
-      if (scopedWatchSession || !requireAuthenticated("route elevation") ||
-          !bleSessionSupportsRouteElevation.load(std::memory_order_acquire)) return;
-      power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
-      route_elevation_runtime::ingest(reinterpret_cast<const uint8_t *>(value.data()),
-                                      value.size(), millis());
-      std::array<uint8_t, route_elevation_protocol::ACK_BYTES> acknowledgement{};
-      while (route_elevation_runtime::takeAcknowledgement(acknowledgement)) {
-        notifyAuthenticatedNavigation(pChar, acknowledgement.data(), acknowledgement.size());
+      // Builds without the Elevation screen never advertise the capability
+      // and drop ELV1 frames here, before any other parser sees them.
+      if constexpr (route_elevation_config::ENABLED) {
+        // Owner-only: scoped Watch sessions are default-denied above and
+        // never relay elevation profiles.
+        if (scopedWatchSession || !requireAuthenticated("route elevation") ||
+            !bleSessionSupportsRouteElevation.load(std::memory_order_acquire)) return;
+        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+        route_elevation_runtime::ingest(reinterpret_cast<const uint8_t *>(value.data()),
+                                        value.size(), millis());
+        std::array<uint8_t, route_elevation_protocol::ACK_BYTES> acknowledgement{};
+        while (route_elevation_runtime::takeAcknowledgement(acknowledgement)) {
+          notifyAuthenticatedNavigation(pChar, acknowledgement.data(), acknowledgement.size());
+        }
+        ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
       }
-      ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
       return;
     }
 
