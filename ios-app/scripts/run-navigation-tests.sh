@@ -3,15 +3,12 @@ set -euo pipefail
 
 DEV_SWIFT_COMPILER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/development/swift_compile.py"
 
-bash "$(dirname "${BASH_SOURCE[0]}")/run-online-poi-tests.sh"
 
 RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/bicino-swift-check.XXXXXX")"
 trap 'rm -rf "$RUN_TMP"' EXIT
 export TMPDIR="${RUN_TMP}/"
 
-"$(dirname "${BASH_SOURCE[0]}")/run-device-map-operation-tests.sh"
 
-"$(dirname "${BASH_SOURCE[0]}")/run-native-workout-zone-tests.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IOS_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -20,6 +17,11 @@ OUT="${TMPDIR:-/tmp}/open-bike-navigation-tests"
 
 cd "${REPO_DIR}"
 
+group="${1:-all}"
+case "$group" in all|map|sensors|workout|radio) ;; *) echo "Unknown navigation group: $group" >&2; exit 64 ;; esac
+if [[ "$group" == all || "$group" == map ]]; then
+  bash "$SCRIPT_DIR/run-online-poi-tests.sh"
+  bash "$SCRIPT_DIR/run-device-map-operation-tests.sh"
 python3 "${SCRIPT_DIR}/run-durable-map-attempt-tests.py"
 python3 "${SCRIPT_DIR}/run-map-upload-binding-tests.py"
 
@@ -30,7 +32,6 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-1 -- \
 "${TOPOGRAPHY_ALIGNMENT_OUT}"
 
 "${SCRIPT_DIR}/run-device-operation-tests.sh"
-"${SCRIPT_DIR}/run-cycling-sensor-observation-tests.sh"
 bash "${SCRIPT_DIR}/run-saved-route-map-tests.sh"
 bash "${SCRIPT_DIR}/run-offline-route-tests.sh"
 
@@ -60,21 +61,8 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-5 -- \
 
 bash "${SCRIPT_DIR}/run-bluetooth-restoration-tests.sh"
 
-bash "${SCRIPT_DIR}/run-world-radio-tests.sh"
 
 bash "${SCRIPT_DIR}/run-route-elevation-tests.sh"
-
-CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
-
-for CYCLING_SENSOR_TEST in CyclingSensorTests CyclingSensorObservationIntegrationTests; do
-python3 "${DEV_SWIFT_COMPILER}" navigation-6 -- \
-  -parse-as-library \
-  -default-isolation MainActor \
-  -o "${CYCLING_SENSOR_OUT}" \
-  "ios-app/BikeComputerTests/${CYCLING_SENSOR_TEST}.swift"
-
-"${CYCLING_SENSOR_OUT}"
-done
 
 CATALYST_OUT="${TMPDIR:-/tmp}/open-bike-destination-callout-tests"
 MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"
@@ -130,3 +118,25 @@ python3 "${DEV_SWIFT_COMPILER}" navigation-10 -- \
   -L "${IOS_SUPPORT}/usr/lib/swift" \
   -o "${CONTOUR_LABEL_OUT}"
 "${CONTOUR_LABEL_OUT}"
+fi
+if [[ "$group" == all || "$group" == sensors ]]; then
+  bash "$SCRIPT_DIR/run-cycling-sensor-observation-tests.sh"
+CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
+
+for CYCLING_SENSOR_TEST in CyclingSensorTests CyclingSensorObservationIntegrationTests; do
+python3 "${DEV_SWIFT_COMPILER}" navigation-6 -- \
+  -parse-as-library \
+  -default-isolation MainActor \
+  -o "${CYCLING_SENSOR_OUT}" \
+  "ios-app/BikeComputerTests/${CYCLING_SENSOR_TEST}.swift"
+
+"${CYCLING_SENSOR_OUT}"
+done
+
+fi
+if [[ "$group" == all || "$group" == workout ]]; then
+  bash "$SCRIPT_DIR/run-native-workout-zone-tests.sh"
+fi
+if [[ "$group" == all || "$group" == radio ]]; then
+  bash "$SCRIPT_DIR/run-world-radio-tests.sh"
+fi

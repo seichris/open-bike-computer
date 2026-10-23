@@ -463,10 +463,8 @@ jobs:
           # GITHUB_TOKEN-authored pushes and pull requests do not trigger new
           # workflow runs. Dispatch the map-only aggregate CI gate explicitly
           # for the promotion commit.
-          gh workflow run ci.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref "$PROMOTION_BRANCH" \
-            -f scope=map
+          python3 .github/scripts/dispatch_promotion_ci.py \
+            --repository "$GITHUB_REPOSITORY" --branch "$PROMOTION_BRANCH"
 
   propose-development:
     name: Propose development image
@@ -675,7 +673,5 @@ jobs:
 
           # The automation token does not start workflows for its own pushes.
           # Dispatch the protected map-only gate for this exact development lock.
-          gh workflow run ci.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref "$PROMOTION_BRANCH" \
-            -f scope=map
+          python3 .github/scripts/dispatch_promotion_ci.py \
+            --repository "$GITHUB_REPOSITORY" --branch "$PROMOTION_BRANCH"

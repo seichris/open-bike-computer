@@ -67,6 +67,14 @@ jobs:
       ios_native: ${{ steps.components.outputs.ios_native }}
       map_backend: ${{ steps.components.outputs.map_backend }}
       osm: ${{ steps.components.outputs.osm }}
+      map_source: ${{ steps.components.outputs.map_source }}
+      map_catalog: ${{ steps.components.outputs.map_catalog }}
+      map_social: ${{ steps.components.outputs.map_social }}
+      map_readers: ${{ steps.components.outputs.map_readers }}
+      map_deploy: ${{ steps.components.outputs.map_deploy }}
+      ios_checks: ${{ steps.components.outputs.ios_checks }}
+      ios_simulator: ${{ steps.components.outputs.ios_simulator }}
+      ios_release: ${{ steps.components.outputs.ios_release }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -130,17 +138,25 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before || '0000000000000000000000000000000000000000' }}
           CI_SCOPE: ${{ github.ref_type == 'tag' && 'all' || inputs.scope || 'auto' }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           EVENT_NAME: ${{ github.event_name }}
           FIRMWARE_HARDWARE: ${{ inputs.firmware_hardware || '175' }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-        run: >-
-          python3 .github/scripts/changed_components.py
-          --event "$EVENT_NAME"
-          --base "$BASE_SHA"
-          --head "$HEAD_SHA"
-          --scope "$CI_SCOPE"
-          --firmware-hardware "$FIRMWARE_HARDWARE"
-          >> "$GITHUB_OUTPUT"
+        run: |
+          if test "$EVENT_NAME" = workflow_dispatch && test "$CI_SCOPE" = map; then
+            case "$GITHUB_REF" in
+              refs/heads/deploy/map-platform-production|refs/heads/deploy/map-platform-development)
+                # The exact branch/file restriction above must pass first.
+                EVENT_NAME=pull_request
+                BASE_SHA="$(git rev-parse "origin/$DEFAULT_BRANCH")"
+                CI_SCOPE=auto
+                ;;
+            esac
+          fi
+          python3 .github/scripts/changed_components.py \
+            --event "$EVENT_NAME" --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --scope "$CI_SCOPE" --firmware-hardware "$FIRMWARE_HARDWARE" >> "$GITHUB_OUTPUT"
+
 
   esp32:
     name: ESP32 (${{ matrix.target }})
@@ -148,7 +164,7 @@ jobs:
     if: >-
       needs.changes.outputs.firmware_build == 'true' &&
       needs.changes.outputs.heavy_ci == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -315,6 +331,11 @@ jobs:
           if missing:
               raise SystemExit("Missing lifecycle qualification markers: " + ", ".join(missing))
           PYTHON
+      - name: Verify remote-debug browser service
+        if: contains(matrix.target, '_REMOTE_DEBUG')
+        run: |
+          grep -aFq "/device-debug/" ".pio/build/${{ matrix.target }}/firmware.elf"
+          grep -aFq "Bicino real-device debugger" ".pio/build/${{ matrix.target }}/firmware.elf"
       - name: Verify remote-debug artifacts include renderer metrics routes
         if: contains(matrix.target, '_REMOTE_DEBUG')
         run: |
@@ -336,6 +357,25 @@ jobs:
           if b"map-dev-2026-08\0" not in firmware:
               raise SystemExit("Missing remote-debug development map signer")
           PY
+      - id: release_bytes
+        name: Retain verified production bytes for this release candidate
+        if: github.ref_type == 'tag' && endsWith(matrix.target, '_PRODUCTION')
+        env:
+          BUILD_ENVIRONMENT: ${{ matrix.target }}
+        run: |
+          factory_target="${BUILD_ENVIRONMENT%_PRODUCTION}"
+          echo "directory=${RUNNER_TEMP}/factory-${factory_target}" >> "$GITHUB_OUTPUT"
+          cp ".pio/build/${BUILD_ENVIRONMENT}/firmware.bin" "${RUNNER_TEMP}/factory-${factory_target}/${factory_target}.bin"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.ref_type == 'tag' && endsWith(matrix.target, '_PRODUCTION')
+        with:
+          name: verified-production-${{ matrix.target }}
+          path: |
+            ${{ steps.release_bytes.outputs.directory }}/*.bin
+            ${{ steps.release_bytes.outputs.directory }}/*.factory-bundle.json
+            ${{ steps.release_bytes.outputs.directory }}/*.factory.tar.gz
+          if-no-files-found: error
+          retention-days: 14
 
   ios-fast:
     name: iOS Fast Tests
@@ -344,41 +384,23 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - name: Test generated app build identity
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-test-generated-app-build-identity --report "$RUNNER_TEMP/dev-checks/ios-fast-test-generated-app-build-identity/results.json"
-        working-directory: ios-app
-      - name: Run Swift helper tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-swift-helper-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-swift-helper-tests/results.json"
-        working-directory: ios-app
-      - name: Run social publisher, reconnect and link contracts
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check social-runtime-tests --report "$RUNNER_TEMP/dev-checks/social-runtime-tests/results.json"
-      - name: Run ride diagnostics recorder tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-ride-diagnostics-recorder-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-ride-diagnostics-recorder-tests/results.json"
-        working-directory: ios-app
-      - name: Durable diagnostics acquisition contracts
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-durable-diagnostics-acquisition-contracts --report "$RUNNER_TEMP/dev-checks/ios-fast-durable-diagnostics-acquisition-contracts/results.json"
-      - name: Bounded diagnostics capture policy contracts
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-bounded-diagnostics-capture-policy-contracts --report "$RUNNER_TEMP/dev-checks/ios-fast-bounded-diagnostics-capture-policy-contracts/results.json"
-      - name: Paired diagnostics broker contracts
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-paired-diagnostics-broker-contracts --report "$RUNNER_TEMP/dev-checks/ios-fast-paired-diagnostics-broker-contracts/results.json"
-        working-directory: ios-app
-      - name: Run shared route and Watch BLE contract tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-shared-route-and-watch-ble-contract-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-shared-route-and-watch-ble-contract-tests/results.json"
-        working-directory: ios-app
-      - name: Type-check the complete Watch source graph
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-type-check-the-complete-watch-source-graph --report "$RUNNER_TEMP/dev-checks/ios-fast-type-check-the-complete-watch-source-graph/results.json"
-        working-directory: ios-app
-      - name: Run Watch offline navigation persistence tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-watch-offline-navigation-persistence-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-watch-offline-navigation-persistence-tests/results.json"
-        working-directory: ios-app
-      - name: Run Watch online navigation policy tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-watch-online-navigation-policy-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-watch-online-navigation-policy-tests/results.json"
-        working-directory: ios-app
-      - name: Fetch immutable pre-388 workout decoder
-        run: git fetch --no-tags --depth=1 origin fe73e43431ed76c39159de7624c4cd9ede509434
-      - name: Run workout contracts and firmware-to-Swift legacy compatibility tests
-        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check ios-fast-run-workout-contracts-and-firmware-to-swift-legacy-compatibility-tests --report "$RUNNER_TEMP/dev-checks/ios-fast-run-workout-contracts-and-firmware-to-swift-legacy-compatibility-tests/results.json"
-        working-directory: ios-app
+      - name: Run selected Swift and host contracts
+        env:
+          IOS_CHECKS: ${{ needs.changes.outputs.ios_checks }}
+          GH_TOKEN: ${{ github.token }}
+          LOCAL_RESULTS_ALLOWED: ${{ github.event_name == 'pull_request' && !inputs.scope }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          checks = json.loads(os.environ['IOS_CHECKS'])
+          if not isinstance(checks, list) or not checks:
+              raise SystemExit('iOS scope must select at least one check')
+          command = ['python3', 'tools/dev_check.py', '--reuse-local']
+          for check in checks:
+              command.extend(['--check', check])
+          command.extend(['--report', os.environ['RUNNER_TEMP']+'/dev-checks/ios-fast/results.json'])
+          subprocess.run(command, check=True)
+          PYTHON
       - name: Retain check evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -391,7 +413,7 @@ jobs:
     name: iOS Simulator Tests
     needs: changes
     if: >-
-      needs.changes.outputs.ios_native == 'true' &&
+      needs.changes.outputs.ios_simulator == 'true' &&
       needs.changes.outputs.heavy_ci == 'true'
     runs-on: macos-latest
     steps:
@@ -399,7 +421,10 @@ jobs:
       - name: Configure job-scoped Xcode DerivedData
         run: echo "CI_DERIVED_DATA_PATH=$RUNNER_TEMP/BikeComputerDerivedData" >> "$GITHUB_ENV"
       - name: Run iOS and Watch simulator contracts
-        run: python3 tools/dev_check.py --check ios-simulator --report "$RUNNER_TEMP/dev-checks/ios-simulator/results.json"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCAL_RESULTS_ALLOWED: ${{ github.event_name == 'pull_request' && !inputs.scope }}
+        run: python3 tools/dev_check.py --reuse-local --check ios-simulator --report "$RUNNER_TEMP/dev-checks/ios-simulator/results.json"
       - name: Retain check evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -417,11 +442,12 @@ jobs:
     runs-on: macos-latest
     env:
       BICINO_REQUIRE_BUILD_EVIDENCE: "1"
+      BICINO_IOS_CONFIGURATIONS: ${{ needs.changes.outputs.ios_release == 'true' && 'Debug,Release' || 'Debug' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Configure exact-build symbol retention
         run: echo "BICINO_BUILD_EVIDENCE_DIR=$RUNNER_TEMP/bicino-build-symbols" >> "$GITHUB_ENV"
-      - name: Build and validate Debug and Release app containers
+      - name: Build and validate selected app containers
         run: python3 tools/dev_check.py --check ios-build-containers --fresh --evidence --report "$RUNNER_TEMP/dev-checks/ios-build-containers/results.json"
       - name: Retain check evidence
         if: always()
@@ -545,6 +571,11 @@ jobs:
           path: ${{ runner.temp }}/dev-checks/
           if-no-files-found: error
 
+  zone-contracts:
+    needs: changes
+    if: needs.changes.outputs.ios == 'true' || needs.changes.outputs.firmware_host == 'true'
+    uses: ./.github/workflows/workout-zone-contracts.yml
+
   map-platform:
     name: Map Platform
     needs: changes
@@ -559,6 +590,11 @@ jobs:
     with:
       run_backend: ${{ needs.changes.outputs.map_backend == 'true' }}
       run_osm: ${{ needs.changes.outputs.osm == 'true' }}
+      run_source: ${{ needs.changes.outputs.map_source == 'true' }}
+      run_catalog: ${{ needs.changes.outputs.map_catalog == 'true' }}
+      run_social: ${{ needs.changes.outputs.map_social == 'true' }}
+      run_readers: ${{ needs.changes.outputs.map_readers == 'true' }}
+      run_deploy: ${{ needs.changes.outputs.map_deploy == 'true' }}
 
   gate:
     name: >-
@@ -575,11 +611,13 @@ jobs:
       - ios
       - ios-platform
       - map-platform
+      - zone-contracts
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Require every selected component
         env:
+          ZONE_RESULT: ${{ needs.zone-contracts.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           ESP32_RESULT: ${{ needs.esp32.result }}
           FIRMWARE_BUILD_CHANGED: ${{ needs.changes.outputs.firmware_build }}
@@ -587,6 +625,7 @@ jobs:
           HOST_RESULT: ${{ needs.esp32-host.result }}
           HEAVY_CI: ${{ needs.changes.outputs.heavy_ci }}
           IOS_CHANGED: ${{ needs.changes.outputs.ios }}
+          IOS_SIMULATOR_CHANGED: ${{ needs.changes.outputs.ios_simulator }}
           IOS_NATIVE_CHANGED: ${{ needs.changes.outputs.ios_native }}
           IOS_FAST_RESULT: ${{ needs.ios-fast.result }}
           IOS_RESULT: ${{ needs.ios.result }}
@@ -606,6 +645,15 @@ jobs:
           }
 
           require_result "CI component selection" "$CHANGES_RESULT" success
+
+          for selection in "$FIRMWARE_BUILD_CHANGED" "$FIRMWARE_HOST_CHANGED" "$HEAVY_CI" "$IOS_CHANGED" "$IOS_NATIVE_CHANGED" "$IOS_SIMULATOR_CHANGED" "$MAP_BACKEND_CHANGED" "$OSM_CHANGED"; do
+            case "$selection" in true|false) ;; *) echo "::error::Invalid CI selection"; exit 1 ;; esac
+          done
+          if test "$IOS_CHANGED" = true || test "$FIRMWARE_HOST_CHANGED" = true; then
+            require_result "Zone contracts" "$ZONE_RESULT" success
+          else
+            require_result "Zone contracts" "$ZONE_RESULT" skipped
+          fi
 
           if test "$FIRMWARE_BUILD_CHANGED" = true && test "$HEAVY_CI" = true; then
             require_result "ESP32 builds" "$ESP32_RESULT" success
@@ -627,9 +675,13 @@ jobs:
 
           if test "$IOS_NATIVE_CHANGED" = true && test "$HEAVY_CI" = true; then
             require_result "iOS app builds" "$IOS_RESULT" success
-            require_result "iOS simulator tests" "$IOS_PLATFORM_RESULT" success
           else
             require_result "iOS app builds" "$IOS_RESULT" skipped
+          fi
+
+          if test "$IOS_SIMULATOR_CHANGED" = true && test "$HEAVY_CI" = true; then
+            require_result "iOS simulator tests" "$IOS_PLATFORM_RESULT" success
+          else
             require_result "iOS simulator tests" "$IOS_PLATFORM_RESULT" skipped
           fi
 

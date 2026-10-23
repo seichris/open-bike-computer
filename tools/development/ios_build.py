@@ -36,11 +36,18 @@ def build_state(root):
         os.close(descriptor)
 
 
+def configurations(value):
+    choices = tuple(value.split(","))
+    if not choices or len(set(choices)) != len(choices) or any(c not in ("Debug", "Release") for c in choices):
+        raise ValueError("BICINO_IOS_CONFIGURATIONS must contain Debug, Release, or both")
+    return choices
+
+
 def build_containers(root):
     ios = ROOT / "ios-app"
     with build_state(root):
         print(f"IOS_BUILD_STATE derivedRoot={root}", flush=True)
-        for configuration in ("Debug", "Release"):
+        for configuration in configurations(os.environ.get("BICINO_IOS_CONFIGURATIONS", "Debug,Release")):
             derived = root / configuration
             if derived.is_symlink():
                 raise RuntimeError("configuration build state must not be a symlink")
@@ -63,7 +70,7 @@ def main():
         else:
             build_containers(ROOT / "ios-app/DerivedData/development-checks")
         return 0
-    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
         print(f"iOS container validation failed: {error}")
         return 1
 

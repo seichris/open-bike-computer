@@ -43,6 +43,14 @@ DerivedData. Use `--fresh --evidence` for clean-source app qualification;
 `--evidence` explicitly retains exact-build symbols. CI keeps strict evidence
 requirements. Never describe a dirty local build as clean-commit validation.
 
+On the configured trusted Mac, clean successful `tools/dev-check` runs automatically
+publish signed iOS helper/simulator results for PR CI. Run checks after the final
+commit and before pushing to make them available to CI. Dirty runs remain useful
+local validation but cannot be reused. CI verifies the PR head, actual merge tree,
+commands and live toolchain; every mismatch runs hosted tests. See
+`docs/local-ci-results.md` for trust, setup and fallback behavior. Do not use these
+receipts to replace firmware, app-build symbols, release or physical acceptance.
+
 ### ESP32 firmware
 
 Before the first build/upload/device-debug action in a task, identify which
@@ -287,9 +295,22 @@ for that stronger claim.
 
 ### GitHub firmware CI
 
-Automatic pull-request and `main` CI intentionally build only the 1.75-inch
-ordinary and production firmware profiles. The aggregate gate therefore does
-not prove that 2.06-inch firmware compiles.
+PRs and merge groups select affected checks behind `CI Gate`; the same CI does
+not run again on a main push. Drafts retain fast checks. Production-path firmware
+libraries retain production and lifecycle qualification; renderer/debug/radio
+inputs also select their distinct profiles. Common board, runtime and configuration
+changes qualify both 175 and 206 with all four regular profiles. Unknown libraries
+retain the full selected hardware matrix. A 206-specific path cannot select only
+175. Explicit manual hardware selection and release CI retain every regular profile.
+Image reserve, debug-route exclusions, factory packaging and lifecycle assertions
+remain mandatory. Zone fixtures run once with both board definitions under CI Gate.
+
+Scheduled diagnostics skip only when relevant trees are unchanged since a successful
+comparable diagnostic run. Missing comparison evidence runs the sweep. Manual hardware
+qualification runs all diagnostic profiles. Release candidates reuse the same-run
+production factory artifacts already validated by CI, and CI owns remote-debug
+qualification once per board. Signing, source/profile/hash checks and physical release
+acceptance remain separate. See `docs/development-checks.md` for the scope table.
 
 When the user explicitly asks in a Codex task to run 2.06 CI, dispatch the
 manual firmware scope for the current branch and wait for the exact run:
@@ -315,12 +336,8 @@ done
 gh run watch "$run_id" --exit-status
 ```
 
-Use `firmware_hardware=all` only when the user requests both boards or when a
-release/full-qualification workflow requires them. A manual 2.06 CI run builds
-both `WAVESHARE_AMOLED_206` and `WAVESHARE_AMOLED_206_PRODUCTION`; it does not
-flash or otherwise touch a physical device. Report 2.06 validation only after
-the dispatched run completes successfully. Tagged firmware releases always
-request `all` and continue to qualify both board families.
+Manual scopes build all four regular profiles for the selected board. Report success
+only after the exact dispatched run completes; this never flashes a device.
 
 ### Firmware release and factory-image qualification
 

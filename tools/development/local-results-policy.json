@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "repository": "seichris/open-bike-computer",
+  "maxAgeSeconds": 604800,
+  "publicKeys": [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJjdgRh2CY2haT5fi/oeiyz1Dtce/33FyURsZX6eH4hV"
+  ],
+  "checks": [
+    "ios-navigation-map",
+    "ios-navigation-sensors",
+    "ios-navigation-workout",
+    "ios-navigation-radio",
+    "ios-fast-run-ride-diagnostics-recorder-tests",
+    "ios-fast-run-shared-route-and-watch-ble-contract-tests",
+    "ios-fast-type-check-the-complete-watch-source-graph",
+    "ios-fast-run-watch-offline-navigation-persistence-tests",
+    "ios-fast-run-watch-online-navigation-policy-tests",
+    "ios-simulator",
+    "ios-fast-durable-diagnostics-acquisition-contracts",
+    "ios-fast-bounded-diagnostics-capture-policy-contracts",
+    "ios-fast-paired-diagnostics-broker-contracts",
+    "social-runtime-tests"
+  ]
+}
