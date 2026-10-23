@@ -11,6 +11,7 @@ import UIKit
 
 private enum ContentSheetDestination: Identifiable, Equatable {
     case settings
+    case savedMapsSettings
     case socialLink
     case socialProfile
     case offlineRoutes
@@ -27,6 +28,7 @@ private enum ContentSheetDestination: Identifiable, Equatable {
         case .socialLink: return "social-link"
         case .socialProfile: return "social-profile"
         case .settings: return "settings"
+        case .savedMapsSettings: return "saved-maps-settings"
         case .offlineRoutes: return "offline-routes"
         case .savePlannedRoute(let draft): return "save-route:\(draft.id.uuidString)"
         case .bikeComputerSetup: return "bike-computer-setup"
@@ -71,6 +73,7 @@ struct ContentView: View {
     
     @StateObject private var coordinator: BikeComputerCoordinator
     @StateObject private var mapViewControlState: MapViewControlState
+    @StateObject private var onlinePlaces = OnlinePOISearchSession()
     @StateObject private var offlineMapManager: OfflineMapManager
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
@@ -118,6 +121,8 @@ struct ContentView: View {
     @State private var hasPendingRouteSearchAfterSheetDismissal = false
     @State private var dismissedOfflineMapOnboarding = false
     @State private var confirmedDeviceMapMissing = false
+    @State private var confirmedMapSwitchKey: String?
+    @State private var dismissedMapSwitchKey: String?
     @State private var isOfflineMapOnboardingStatePrepared = false
     @State private var isAwaitingFirstRunLocationDecision = false
     @State private var hasPendingBicinoSetupAppLink = false
@@ -423,6 +428,20 @@ struct ContentView: View {
                     )
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
                     .zIndex(20)
+                } else if shouldShowMapSwitchPrompt,
+                          case .switchMap(let map) = deviceMapAssistance {
+                    Color.black.opacity(0.18)
+                        .ignoresSafeArea()
+                    InstalledMapSwitchPrompt(
+                        mapName: map.name,
+                        onCancel: { dismissedMapSwitchKey = mapSwitchPromptKey },
+                        onOpenSavedMaps: {
+                            dismissedMapSwitchKey = mapSwitchPromptKey
+                            presentedSheet = .savedMapsSettings
+                        }
+                    )
+                    .transition(.scale(scale: 0.96).combined(with: .opacity))
+                    .zIndex(20)
                 }
 
                 if let workoutSegmentToast,
@@ -469,8 +488,12 @@ struct ContentView: View {
         }
         .onChange(of: isSearchPanelExpanded) { isExpanded in
             if isExpanded { clearSavedRoutePreview() }
-            else { routeSearchInitialDestination = nil }
+            else {
+                routeSearchInitialDestination = nil
+                onlinePlaces.clear()
+            }
         }
+        .onDisappear { onlinePlaces.clear() }
         .onChange(of: savedRouteMapPreview?.identity) { identity in
             if identity == nil { synchronizeRideMetricsSheet() }
         }
@@ -548,6 +571,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) { newValue in
+            if newValue != .active { onlinePlaces.clear() }
             onApplicationActiveChange(newValue == .active)
             social.friendLive.setApplicationActive(newValue == .active)
             coordinator.setViewingMap(newValue == .active)
@@ -647,7 +671,7 @@ struct ContentView: View {
         }
         .onChange(of: offlineMapManager.isMapAreaSelectionActive) { isActive in
             if isActive {
-                if presentedSheet == .settings {
+                if presentedSheet == .settings || presentedSheet == .savedMapsSettings {
                     presentedSheet = nil
                 }
                 offlineMapSelectionWidth = nil
@@ -672,6 +696,14 @@ struct ContentView: View {
 
             guard deviceMapMissingCandidate else { return }
             confirmedDeviceMapMissing = true
+        }
+        .task(id: mapSwitchPromptKey) {
+            confirmedMapSwitchKey = nil
+            guard let key = mapSwitchPromptKey else { return }
+            do { try await Task.sleep(nanoseconds: 1_000_000_000) }
+            catch { return }
+            guard !Task.isCancelled, key == mapSwitchPromptKey else { return }
+            confirmedMapSwitchKey = key
         }
         .task(id: workoutSegmentToast?.index) {
             guard let index = workoutSegmentToast?.index else { return }
@@ -905,7 +937,7 @@ struct ContentView: View {
                 ))
                 .presentationDetents([.large])
                 .presentationBackgroundInteraction(.disabled)
-        case .settings:
+        case .settings, .savedMapsSettings:
             SettingsView(
                 locationAuthorizationStatus:
                     coordinator.locationAuthorizationStatus,
@@ -930,6 +962,7 @@ struct ContentView: View {
                     coordinator.requestLocationAuthorization()
                 },
                 onSaveOnlineRoute: openOfflineRouteSearch,
+                opensSavedMaps: destination == .savedMapsSettings,
                 onStartTestNavigation: { destination in
                     clearSavedRoutePreview()
                     coordinator.startNavigation(
@@ -1509,7 +1542,7 @@ struct ContentView: View {
         offlineMapManager.resumePendingMapJobIfNeeded(bleManager: coordinator.bleManager)
     }
 
-    private var deviceMapMissingCandidate: Bool {
+    private var deviceMapCoverageGap: Bool {
         OfflineMapOnboardingPolicy.shouldOfferDownload(
             isLocationAuthorized: coordinator.isLocationAuthorized,
             isNavigationReady: coordinator.bleManager.isNavigationReady,
@@ -1518,6 +1551,40 @@ struct ContentView: View {
             mapStateKnown: coordinator.bleManager.deviceMapStateKnown,
             mapFoundForCurrentLocation: coordinator.bleManager.deviceMapFoundForCurrentLocation
         )
+    }
+
+    private var deviceMapAssistance: DeviceMapAssistance {
+        guard deviceMapCoverageGap, coordinator.bleManager.hasFreshMapTransferStatus,
+              let location = coordinator.currentLocation,
+              DeviceDestinationLocationPolicy.isUsable(location) else { return .none }
+        guard let library = coordinator.bleManager.deviceMapLibrary else {
+            // Unknown/malformed modern inventory is not evidence that a map
+            // needs downloading. Old firmware keeps its existing flow.
+            return coordinator.bleManager.supportsDeviceMapLibrary ? .none : .download
+        }
+        return DeviceMapAssistance.evaluate(library: library,
+            latitude: location.coordinate.latitude, longitude: location.coordinate.longitude)
+    }
+
+    private var deviceMapMissingCandidate: Bool { deviceMapAssistance == .download }
+
+    private var mapSwitchPromptKey: String? {
+        guard case .switchMap(let map) = deviceMapAssistance,
+              let library = coordinator.bleManager.deviceMapLibrary,
+              let coverage = library.coverage else { return nil }
+        return "\(coordinator.bleManager.activeDeviceID ?? ""):\(coordinator.bleManager.transferConnectionEpoch):\(library.selectedSessionID):\(map.sessionID):\(coverage.blockX):\(coverage.blockY)"
+    }
+
+    private var shouldShowMapSwitchPrompt: Bool {
+        guard let key = mapSwitchPromptKey else { return false }
+        return key == confirmedMapSwitchKey && key != dismissedMapSwitchKey &&
+            hasCompletedFirstRunWelcome && isOfflineMapOnboardingStatePrepared &&
+            scenePhase == .active && presentedSheet == nil && !isSheetDismissalInFlight &&
+            !coordinator.isNavigating && !workoutStore.shouldMaintainWorkoutServices &&
+            !offlineMapManager.isMapAreaSelectionActive && !offlineMapManager.isBusy &&
+            !offlineMapManager.isDeviceTransferBusy && !offlineMapManager.hasActiveBackgroundUpload &&
+            !offlineMapManager.hasPendingMapJob && offlineMapManager.currentJob == nil &&
+            offlineMapManager.downloadedPackURL == nil && offlineMapManager.errorMessage == nil
     }
 
     private var offlineMapOnboardingPresentation: OfflineMapOnboardingPresentation {
@@ -1996,6 +2063,8 @@ struct ContentView: View {
                 currentAddress: coordinator.currentAddress,
                 currentLocation: coordinator.currentLocation,
                 maxExpandedHeight: maxHeight,
+                onlinePlaces: onlinePlaces,
+                nearbySearchRegion: { mapViewControlState.mapView?.region },
                 initialDestination: routeSearchInitialDestination,
                 onStartNavigation: { source, destination, transport in
                     clearSavedRoutePreview()
@@ -2265,6 +2334,7 @@ struct ContentView: View {
         savedRoutePreviewBottomPadding: CGFloat?
     ) -> some View {
         let canSelectDestination = !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive
+            && !onlinePlaces.isActive
 
         return MapViewContainer(
             appearance: mapAppearance,
@@ -2283,7 +2353,7 @@ struct ContentView: View {
             isUserLocationAuthorized: coordinator.isLocationAuthorized,
             offlineMapSelectionFrame: selectionFrame,
             onMapTapped: {
-                if isSearchPanelExpanded {
+                if isSearchPanelExpanded && !onlinePlaces.isActive {
                     isSearchPanelExpanded = false
                 }
             },
@@ -2309,7 +2379,11 @@ struct ContentView: View {
             socialPhotos: social.photos,
             socialMarkerStyle: SocialMapMarkerStyle(
                 scale: .resolved(friendMarkerScale)
-            )
+            ),
+            onlinePOIItems: onlinePlaces.items,
+            selectedOnlinePOI: onlinePlaces.selectedItem,
+            isOnlinePOISearchActive: onlinePlaces.isActive,
+            onOnlinePOISelected: { onlinePlaces.select($0) }
         )
     }
 

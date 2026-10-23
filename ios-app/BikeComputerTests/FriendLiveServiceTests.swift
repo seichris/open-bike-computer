@@ -8,6 +8,7 @@ private final class FriendNetwork: SocialRideNetworking {
     var serverTime = 1000.0
     var snapshotFailure: Error?
     var consentFailure: Error?
+    var stopFailure: Error?
     var consentWrites = 0
     var lastSequences: [String: Int] = [:]
     var consents: [String: [String: Any]] = [:]
@@ -27,6 +28,7 @@ private final class FriendNetwork: SocialRideNetworking {
         if path == "friend-sharing" {
             if method == "GET" { snapshotReads += 1 }
             if method == "GET", let snapshotFailure { throw snapshotFailure }
+            if method == "DELETE", let stopFailure { throw stopFailure }
             if method == "DELETE" { consents = [:] }
             value = ["outgoing": Array(consents.values.filter {
                 $0["sharing"] as? Bool == true && ($0["sharingExpiresAt"] as? Double ?? 0) > serverTime
@@ -74,15 +76,36 @@ private final class FriendNetwork: SocialRideNetworking {
     func socket(rideID: String) async throws -> any SocialSocket { throw SocialFailure.unavailable }
 }
 
+/// The Keychain: it survives a reinstall, which only replaces `installation`.
 @MainActor
 private final class FriendPersistence: SocialSecureStore {
     var values: [String: Data] = [:]
     var writes = 0
     var failWrites = false
-    func read(_ key: String) throws -> Data? { values[key] }
+    var failReads = false
+    var installation: FriendInstallation
+    init(installation: FriendInstallation = FriendInstallation()) { self.installation = installation }
+    func read(_ key: String) throws -> Data? {
+        if failReads { throw SocialSecureStoreError(status: -25308) }  // errSecInteractionNotAllowed
+        return values[key]
+    }
     func write(_ data: Data?, for key: String) throws {
         if failWrites { throw SocialFailure.unavailable }
         writes += 1; values[key] = data
+    }
+}
+
+/// The marker in the app container, which deleting the app removes.
+@MainActor
+private final class FriendInstallation: SocialInstallationMarker {
+    var value = UUID().uuidString
+    var rotations = 0
+    var failRotations = false
+    func current() throws -> String { value }
+    func rotate() throws -> String {
+        if failRotations { throw CocoaError(.fileWriteNoPermission) }
+        rotations += 1; value = UUID().uuidString
+        return value
     }
 }
 
@@ -188,27 +211,32 @@ struct FriendLiveServiceTests {
         reopened.reset(); service.reset()
         try await publicationPacing()
         try await rememberedSharing()
+        try await restorationHardening()
         print("Direct friend sharing permission, audience, expiry, relaunch, consent race and publication pacing regressions passed")
     }
 
+    /// A relaunch on the same installation unless another marker is given.
+    private static func make(_ network: FriendNetwork, _ store: FriendPersistence,
+                             installation: FriendInstallation? = nil,
+                             sleep: @escaping (UInt64) async throws -> Void = { _ in throw CancellationError() }) -> FriendLiveService {
+        let service = FriendLiveService(client: network, store: store, installation: installation ?? store.installation,
+            uptime: { network.seconds }, sleep: sleep)
+        service.prepareLocation = { true }
+        return service
+    }
+    static func settle() async { for _ in 0..<20 { await Task.yield() } }
+    private static func seed() async throws -> (FriendNetwork, FriendPersistence, FriendLiveService) {
+        let network = FriendNetwork(), store = FriendPersistence()
+        let service = make(network, store)
+        service.start(owner: "alice"); await settle()
+        try await service.setSharing(true, with: "bob"); await settle()
+        network.seconds = 3
+        service.updateLocation(fix()); await service.tick()
+        check(service.isSharing && !network.publications.isEmpty, "seed publishes an explicitly selected friend")
+        return (network, store, service)
+    }
+
     static func rememberedSharing() async throws {
-        func make(_ network: FriendNetwork, _ store: FriendPersistence) -> FriendLiveService {
-            let service = FriendLiveService(client: network, store: store, uptime: { network.seconds },
-                sleep: { _ in throw CancellationError() })
-            service.prepareLocation = { true }
-            return service
-        }
-        func settle() async { for _ in 0..<20 { await Task.yield() } }
-        func seed() async throws -> (FriendNetwork, FriendPersistence, FriendLiveService) {
-            let network = FriendNetwork(), store = FriendPersistence()
-            let service = make(network, store)
-            service.start(owner: "alice"); await settle()
-            try await service.setSharing(true, with: "bob"); await settle()
-            network.seconds = 3
-            service.updateLocation(fix()); await service.tick()
-            check(service.isSharing && !network.publications.isEmpty, "seed publishes an explicitly selected friend")
-            return (network, store, service)
-        }
         let (network, store, first) = try await seed()
         let originalExpiry = network.consents["bob"]?["sharingExpiresAt"] as! Double
         let originalSequence = network.publications.last?["sequence"] as! Int
@@ -231,7 +259,7 @@ struct FriendLiveServiceTests {
         check(!reopened.isSharing && store.values.isEmpty, "restored sharing expires at the original deadline, not four hours after relaunch")
 
         // A reboot and a changed wall clock cannot extend the server's deadline.
-        let expiredStore = FriendPersistence(); expiredStore.values = saved
+        let expiredStore = FriendPersistence(installation: store.installation); expiredStore.values = saved
         network.seconds = 0; network.serverTime = originalExpiry+1
         let expired = make(network, expiredStore); expired.start(owner: "alice"); await settle()
         check(!expired.isSharing && expiredStore.values.isEmpty, "expired server leases are discarded even with a fresh uptime")
@@ -247,11 +275,18 @@ struct FriendLiveServiceTests {
 
         let (offlineNetwork, offlineStore, _) = try await seed()
         offlineNetwork.snapshotFailure = URLError(.notConnectedToInternet)
-        let offline = make(offlineNetwork, offlineStore)
-        offline.start(owner: "alice", restoringOnly: true); await settle()
+        var offlineDelays: [UInt64] = []
+        let offline = make(offlineNetwork, offlineStore, sleep: { delay in
+            offlineDelays.append(delay)
+            if offlineDelays.count == 3 { throw CancellationError() }
+        })
+        let seededReads = offlineNetwork.snapshotReads
+        offline.start(owner: "alice", restoringOnly: true)
+        try await wait { offlineDelays.count == 3 }
         check(!offline.isSharing, "offline relaunch cannot send before server revalidation")
         check(offline.sharingIDs == ["bob"] && offline.pendingIDs == ["bob"], "a remembered selection remains switchable while offline")
-        check(offlineNetwork.snapshotReads > 1, "remembered sharing retries independently of unavailable capability discovery")
+        check(offlineNetwork.snapshotReads == seededReads+3 && offlineDelays == Array(repeating: 3_000_000_000, count: 3),
+              "remembered sharing keeps retrying at the active interval while capability discovery is unavailable")
         offlineNetwork.snapshotFailure = nil
         await offline.tick()
         check(offline.sharingIDs == ["bob"], "pending restoration retries when the server is reachable")
@@ -323,6 +358,103 @@ struct FriendLiveServiceTests {
         failureNetwork.seconds = 9; await failure.tick()
         check(failureNetwork.publications.count == sent+1 && failure.isSharing, "publication retries with a durably reserved sequence")
         print("Remembered friend sharing relaunch, original expiry, revocation, account, offline Stop, permission race and sequence durability checks passed")
+    }
+
+    /// Reinstalls, unreadable records, Keychain refusals and Stop all stay closed
+    /// while the signed-in account can still receive friends and share again.
+    static func restorationHardening() async throws {
+        // Keychain items survive deleting the app; the container marker does not.
+        let (reinstallNetwork, reinstallStore, _) = try await seed()
+        let reinstalled = make(reinstallNetwork, reinstallStore, installation: FriendInstallation())
+        reinstalled.start(owner: "alice"); await settle()
+        check(reinstalled.sharingIDs.isEmpty && !reinstalled.isSharing && reinstallStore.values.isEmpty && reinstalled.error == nil,
+              "a reinstall never resumes sharing saved by the previous installation")
+
+        let (legacyNetwork, legacyStore, _) = try await seed()
+        let legacyKey = legacyStore.values.keys.first!
+        let legacy = try JSONSerialization.jsonObject(with: legacyStore.values[legacyKey]!) as! [String: Any]
+        legacyStore.values[legacyKey] = try JSONSerialization.data(withJSONObject: legacy.filter { $0.key != "installation" })
+        let upgraded = make(legacyNetwork, legacyStore); upgraded.start(owner: "alice")
+        check(upgraded.sharingIDs.isEmpty && legacyStore.values.isEmpty && upgraded.error != nil,
+              "a record without an installation is removed and reported, never resumed")
+
+        // An unreadable record fails closed for good, matching what the rider is told.
+        let (unreadableNetwork, unreadableStore, _) = try await seed()
+        unreadableStore.failReads = true
+        let unreadable = make(unreadableNetwork, unreadableStore); unreadable.start(owner: "alice")
+        check(unreadable.sharingIDs.isEmpty && unreadable.error != nil && unreadableStore.values.isEmpty,
+              "a Keychain read failure removes the record it reports as lost")
+        unreadableStore.failReads = false
+        let later = make(unreadableNetwork, unreadableStore); later.start(owner: "alice")
+        check(later.sharingIDs.isEmpty, "a later readable launch cannot silently resume it")
+
+        // Offline sign-out with a refused Keychain delete disowns the record instead.
+        let (signOutNetwork, signOutStore, signedIn) = try await seed()
+        signOutNetwork.stopFailure = URLError(.notConnectedToInternet)
+        signOutStore.failWrites = true
+        await signedIn.stopAll()
+        check(signOutStore.installation.rotations == 1 && !signOutStore.values.isEmpty && signedIn.error == nil,
+              "a refused delete rotates the installation marker")
+        signOutStore.failWrites = false
+        let signedBackIn = make(signOutNetwork, signOutStore); signedBackIn.start(owner: "alice")
+        check(signedBackIn.sharingIDs.isEmpty && signOutStore.values.isEmpty,
+              "signing back in cannot resume a disowned record while its server lease is still live")
+
+        // When neither can record the stop, this process reads nothing until one does.
+        let (stuckNetwork, stuckStore, stuck) = try await seed()
+        stuckNetwork.stopFailure = URLError(.notConnectedToInternet)
+        stuckStore.failWrites = true; stuckStore.installation.failRotations = true
+        await stuck.stopAll()
+        check(stuck.error != nil, "an unrecordable sign-out stop is reported")
+        stuck.start(owner: "alice")
+        check(stuck.sharingIDs.isEmpty && stuck.error != nil, "nothing is restored while the stop is unrecorded")
+        stuckStore.failWrites = false; stuckStore.installation.failRotations = false
+        await stuck.stopAll(); stuck.start(owner: "alice")
+        check(stuck.sharingIDs.isEmpty && stuckStore.values.isEmpty && stuckStore.installation.rotations == 1,
+              "the stop is recorded before any record is trusted again")
+
+        // Stop all ends outgoing streams durably and offline, without signing out.
+        let (stopNetwork, stopStore, sharing) = try await seed()
+        try await sharing.setSharing(true, with: "carol")
+        stopNetwork.stopFailure = URLError(.notConnectedToInternet)
+        stopNetwork.holdConsent = true
+        let pendingStart = Task { try await sharing.setSharing(true, with: "dave") }
+        try await wait { stopNetwork.held != nil }
+        let reads = stopNetwork.snapshotReads
+        try await sharing.stopSharingWithAll()
+        check(sharing.sharingIDs.isEmpty && !sharing.isSharing && stopStore.values.isEmpty,
+              "Stop all is local and saved before its offline revocation")
+        stopNetwork.held?.resume(); stopNetwork.held = nil
+        do { try await pendingStart.value; preconditionFailure("Stop all must cancel a pending start") }
+        catch SocialFailure.cancelled { }
+        try await wait { stopNetwork.snapshotReads > reads }
+        check(sharing.sharingIDs.isEmpty, "a start pending during Stop all cannot add its friend")
+        stopNetwork.stopFailure = nil
+        try await sharing.setSharing(true, with: "erin")
+        let relaunched = make(stopNetwork, stopStore); relaunched.start(owner: "alice")
+        check(relaunched.sharingIDs == ["erin"], "the same account keeps polling and remembers only choices made after Stop all")
+
+        // A selection this iPhone cannot remember never starts or keeps a server lease.
+        stopStore.failWrites = true
+        do { try await sharing.setSharing(true, with: "frank"); preconditionFailure("an unsaved selection must not start") }
+        catch is FriendSharingSaveFailure { }
+        check(!sharing.sharingIDs.contains("frank") && stopNetwork.consents["frank"]?["sharing"] as? Bool == false,
+              "an unsaved selection is withdrawn from the server")
+
+        // An accepted fix does not hide a removal that could not be saved.
+        stopStore.failWrites = false
+        try await sharing.setSharing(true, with: "gina")
+        stopNetwork.seconds = 6; sharing.updateLocation(fix(0.1)); await sharing.tick()
+        stopNetwork.consents["gina"]?["epoch"] = UUID().uuidString
+        stopStore.failWrites = true
+        let published = stopNetwork.publications.count
+        stopNetwork.seconds = 9; sharing.updateLocation(fix(0.2)); await sharing.tick()
+        check(stopNetwork.publications.count == published+1 && sharing.error != nil,
+              "a successful publication keeps an unsaved-removal error visible")
+        stopStore.failWrites = false
+        stopNetwork.seconds = 12; sharing.updateLocation(fix(0.3)); await sharing.tick()
+        check(sharing.error == nil && sharing.sharingIDs == ["erin"], "the next saved change clears it")
+        print("Reinstall, unreadable record, Keychain refusal and Stop all checks passed")
     }
 
     /// Wakes cancel an in-flight poll and restart immediately; neither may report a

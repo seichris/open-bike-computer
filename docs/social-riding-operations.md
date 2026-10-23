@@ -541,18 +541,29 @@ accepted friends only. Received positions disappear at 60 seconds; the worker
 clears stale fixes and expired leases. Unfriend/block deletes both directions;
 account deletion/disable also clears them. Re-adding/unblocking never restores
 consent. This installation remembers explicitly enabled outgoing consents in its
-app-private, device-only Keychain, scoped to the authenticated account. On a
+app-private, device-only Keychain, scoped to the authenticated account and bound
+to an installation marker in the app container (excluded from backup). Keychain
+items can survive deleting the app, but the marker does not, so a reinstall never
+resumes earlier consents; records without a matching marker are deleted. On a
 foreground relaunch it resumes only after a snapshot confirms the same epoch,
 friendship and original server deadline. It never creates or extends a lease to
-resume. Offline launches retry validation independently of capability discovery.
+resume. Offline launches retry validation every three seconds while foregrounded,
+independently of capability discovery.
 Saved selections stay on with a waiting status until validated, and can be
-switched off while offline (including Stop all before friend names have loaded).
-Sign-out/account switches,
-revocation and expiry clear remembered recipients. Another device's server
+switched off while offline. Stop all (available before friend names have loaded)
+saves the cleared selection, then sends one `DELETE /friend-sharing`; the account
+stays signed in and keeps receiving friends. Sign-out/account switches,
+revocation and expiry clear remembered recipients. An unreadable or invalid
+record is deleted and reported, never resumed later. If the Keychain refuses to
+record a stop, a new installation marker disowns every saved record; if that also
+fails, the error is shown and this process reads no record again until one
+succeeds. A
+selection that cannot be saved is not started and its new server lease is
+withdrawn. Another device's server
 consents alone cannot start publication. Reserved sequence blocks survive a
 force-close without retaining location fixes. Local Stop durably removes the recipient before any
 network await. `DELETE /friend-sharing` revokes all outgoing friend consents in
-one request for sign-out, while preserving incoming consents. Group and friend
+one request for sign-out and Stop all, while preserving incoming consents. Group and friend
 sharing share one GPS lifecycle so stopping either does not stop the other.
 Turning off the rollout flag rejects snapshots/publications/start requests while
 retaining consent reads and explicit stops.

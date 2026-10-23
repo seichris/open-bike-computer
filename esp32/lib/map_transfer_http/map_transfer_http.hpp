@@ -41,6 +41,7 @@ public:
   void setStreamTrustStore(MapStreamTrustStore trustStore);
   void setStreamStorageAvailable(bool available);
   void setStreamStorageProbe(std::function<bool()> probe);
+  void setStreamStorageSpaceProbe(MapStreamFreeSpaceProbe probe) { streamStorageSpaceProbe_ = std::move(probe); }
   bool refreshStreamStorageCapability(bool requireWritable = true);
   bool streamInstallSupported() const;
   bool setEnabled(bool enabled);
@@ -73,6 +74,16 @@ public:
   void submitPendingRollback();
   void submitPendingOperationTask();
   bool takeRuntimeRollback(ActiveMapSelection &restored, bool &succeeded);
+  // Authenticated BLE commands only enqueue bounded work. Filesystem access
+  // executes on the storage worker through the internal operation owner.
+  bool requestMapLibrary(const std::string &action,
+                         const std::string &session = "",
+                         const std::string &receipt = "", const std::string &requestID = "");
+  std::string mapLibraryJson(bool paged = false) const;
+  bool requestMapLibraryPage(size_t offset);
+  void considerAutomaticMap(int32_t latitudeE7, int32_t longitudeE7, bool currentMapFound);
+  void considerMapSuggestion(int32_t latitudeE7, int32_t longitudeE7, bool currentMapFound);
+  void submitPendingMapLibrary() { submitLibraryTask(); }
 
 private:
   class OperationStoreGuard {
@@ -101,6 +112,33 @@ private:
   std::atomic<uint32_t> storageProgressSequence_{0};
   std::string operationDeviceID_;
   MapSelectionHealth selectionHealth_;
+  std::vector<InstalledMap> libraryMaps_;
+  std::string libraryAction_ = "refresh", librarySession_, libraryReceipt_;
+  std::string libraryError_, libraryRequestID_, libraryCommandID_, libraryCommandError_;
+  std::string pendingMapLibraryCommandID_;
+  std::vector<std::string> libraryRejectedSessions_;
+  bool libraryKnown_ = false, libraryAutomatic_ = true, librarySubmitted_ = false, librarySelectionStarted_ = false;
+  // A journaled manual Use pins selection until reconciliation settles it.
+  bool libraryManualPending_ = false;
+  // Library switches leave the renderer on its previous root when loading fails.
+  bool pendingMapFromLibrary_ = false, rollbackFromLibrary_ = false;
+  uint32_t libraryRevision_ = 0;
+  uint32_t libraryRetryAfterMs_ = 0;
+  uint8_t libraryRetryStreak_ = 0;
+  void scheduleLibraryRetry(uint32_t baseMs);
+  bool libraryRetryPending();
+  uint64_t libraryAutomaticBlock_ = 0;
+  bool libraryAutomaticBlockKnown_ = false;
+  bool libraryCoverageKnown_ = false, libraryCurrentCovered_ = false;
+  uint32_t libraryCoverageBoundsMask_ = 0;
+  std::string libraryCoveringSession_, libraryCoverageSelection_;
+  size_t libraryPageOffset_ = 0;
+  int32_t libraryLatitudeE7_ = 0, libraryLongitudeE7_ = 0;
+  void submitLibraryTask();
+  static void libraryTask(void *context);
+  static void ownedLibraryTask(void *context, const char *, bool);
+  void executeLibraryTask();
+  void recoverLibraryTask(const char *code);
   std::string selectionOperationID(const ActiveMapSelection &selected) const;
   mutable operation::AdmissionFence operationAdmission_;
   bool observeOperationRevision(uint64_t revision) const;
@@ -131,6 +169,8 @@ private:
   std::string readOperationStatus(const std::string &operationID) const;
   bool admitReceivingOperation(const device_transfer::HttpRequest &request,
                                const MapStreamInstallSnapshot &snapshot);
+  std::string resolveRejectedStreamOperation(const device_transfer::HttpRequest &request,
+                                             const MapStreamInstallSnapshot &snapshot);
   bool handleOperationControl(const device_transfer::HttpRequest &request,
                               device_transfer::TransferClient &client);
   bool recordPreparedOperation(const device_transfer::HttpRequest &request,
@@ -151,6 +191,7 @@ private:
   bool streamStatusActive_ = false;
   bool streamStorageAvailable_ = false;
   std::function<bool()> streamStorageProbe_;
+  MapStreamFreeSpaceProbe streamStorageSpaceProbe_;
   std::string pendingMapRoot_;
   std::string pendingMapSessionId_;
   std::string pendingMapId_;

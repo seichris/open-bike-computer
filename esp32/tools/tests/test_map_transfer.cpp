@@ -984,7 +984,7 @@ static void testPruningPreservesLiveDurableStreamReferences() {
   assert(!exists(maps + "/obsolete"));
 }
 
-static void testPrunesLegacyRollbackAfterVersionedMapIsActive() {
+static void testPreservesLegacyLayoutAfterVersionedMapIsActive() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
   const std::string vectmap = root + "/VECTMAP";
@@ -1004,7 +1004,7 @@ static void testPrunesLegacyRollbackAfterVersionedMapIsActive() {
 
   assert(installer.pruneObsoleteInstalledMaps());
   assert(exists(vectmap + "/.maps/current/+0032+0008/new.fmb"));
-  assert(!exists(vectmap + "/+9999+9999"));
+  assert(exists(vectmap + "/+9999+9999/old.fmb"));
   assert(exists(vectmap + "/active-map.json"));
 }
 
@@ -1490,7 +1490,258 @@ static void testPendingArchiveActivationSurvivesRestart() {
   assert(!afterRestart.readPendingArchiveActivation(recoveredSession));
 }
 
+static void testPersistentMapLibrary() {
+  const auto root = tempRoot();
+  MapTransferInstaller installer(root);
+  const auto data = validFmb();
+  for (int i = 0; i < 6; ++i) {
+    const auto session = "city-" + std::to_string(i);
+    const auto mapID = "map-" + std::to_string(i);
+    const auto stage = installer.stagingRoot(session);
+    assert(::system(("mkdir -p " + stage + "/VECTMAP/" + mapID + "/+0000+0000").c_str()) == 0);
+    writeFile(stage + "/VECTMAP/" + mapID + "/+0000+0000/0.fmb", data);
+    writeFile(stage + "/manifest.json", "{\"schemaVersion\":1,\"mapId\":\"" + mapID +
+        "\",\"displayName\":\"City " + std::to_string(i) +
+        "\",\"boundsE7\":[1200000000,300000000,1220000000,320000000],\"files\":[{\"path\":\"VECTMAP/" +
+        mapID + "/+0000+0000/0.fmb\",\"bytes\":" + std::to_string(data.size()) +
+        ",\"sha256\":\"" + sha(data) + "\"}]}");
+    MapManifest manifest;
+    assert(installer.validateStagedMap(session, manifest).ok);
+    assert(installer.activateStagedMap(session, manifest).ok);
+    assert(installer.pruneObsoleteInstalledMaps());
+  }
+  std::vector<map_transfer::InstalledMap> maps;
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 6);
+  assert(maps[0].presentation.displayName == "City 0");
+  assert(maps[0].payloadBytes == data.size());
+  assert(maps[0].contains(310000000, 1210000000));
+  assert(!maps[0].contains(310000000, 1030000000));
+  assert(!installer.installedMapCovers(maps[0], 310000000, 1210000000));
+  auto origin = maps[0]; origin.presentation.boundsE7 = {-1000000, -1000000, 1000000, 1000000};
+  assert(::system(("mkdir -p " + root + origin.root + "/+000+000").c_str()) == 0);
+  writeFile(root + origin.root + "/+000+000/0_0.fmb", data);
+  assert(installer.installedMapCovers(origin, 0, 0));
+  assert(installer.mapRootHasBlock(origin.root, 0, 0));
+  assert(!installer.mapRootHasBlock(origin.root, 900000000, 0));
+  assert(map_transfer::libraryPositionBlockKey(0, 0) == map_transfer::libraryPositionBlockKey(1, 1));
+
+
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1210000000)->sessionId == "city-0");
+  assert(map_transfer::coveringLibraryMap(maps, maps[5].root, 310000000, 1210000000) == nullptr);
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1030000000) == nullptr);
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1210000000, {"city-0"})->sessionId == "city-1");
+  auto smaller = maps[0]; smaller.sessionId = "smaller"; smaller.root += "-smaller";
+  smaller.presentation.boundsE7 = {1205000000, 305000000, 1215000000, 315000000};
+  maps.push_back(smaller);
+  assert(map_transfer::coveringLibraryMap(maps, "", 310000000, 1210000000)->sessionId == "smaller");
+  maps.pop_back();
+  const auto path = root + maps[0].root + "/+0000+0000/0.fmb";
+  struct stat before{}, after{};
+  assert(::stat(path.c_str(), &before) == 0);
+  assert(!installer.selectInstalledMap(maps[0].sessionId, std::string(64, '0')).ok);
+  assert(installer.selectInstalledMap(maps[0].sessionId, maps[0].manifestReceipt).ok);
+  ActiveMapSelection selected;
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  assert(selected.previousSessionId == "city-5");
+  assert(::stat(path.c_str(), &after) == 0 && before.st_ino == after.st_ino);
+  assert(installer.recoverInterruptedActivation().ok);
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  assert(!installer.removeInstalledMap(maps[0].sessionId, maps[0].manifestReceipt).ok);
+  assert(!installer.removeInstalledMap(maps[5].sessionId, maps[5].manifestReceipt).ok);
+  assert(installer.removeInstalledMap(maps[2].sessionId, maps[2].manifestReceipt).ok);
+  assert(installer.readMapLibrary(maps).ok && maps.size() == 5);
+  // Same-size corruption is deliberately invisible to cheap inventory, but
+  // must be rejected before selecting/reusing the installed payload.
+  const auto corrupt = root + maps[1].root + "/+0000+0000/0.fmb";
+  writeFile(corrupt, std::string(data.size(), 'x'));
+  assert(installer.selectInstalledMap(maps[1].sessionId, maps[1].manifestReceipt).code == "library_integrity");
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  MetadataWriteFailingInstaller failing(root);
+  assert(!failing.selectInstalledMap(maps[3].sessionId, maps[3].manifestReceipt).ok);
+  assert(installer.readActiveMap(selected).ok && selected.sessionId == "city-0");
+  assert(!installer.selectInstalledMap("../city-1", maps[1].manifestReceipt).ok);
+  assert(installer.automaticMapSelection());
+  assert(installer.setAutomaticMapSelection(false));
+  assert(!MapTransferInstaller(root).automaticMapSelection());
+  assert(installer.setAutomaticMapSelection(true));
+  assert(MapTransferInstaller(root).automaticMapSelection());
+  // A truncated completed root remains visible and removable; a cut after
+  // rename can no longer hide an undeletable half-removed installation.
+  auto damaged = maps[1];
+  writeFile(root + damaged.root + "/+0000+0000/0.fmb", "");
+  assert(installer.readMapLibrary(maps).ok);
+  const auto unavailable = std::find_if(maps.begin(), maps.end(), [&](const auto &m) { return m.sessionId == damaged.sessionId; });
+  assert(unavailable != maps.end() && !unavailable->available);
+  class RemovalCut : public MapTransferInstaller {
+  public: using MapTransferInstaller::MapTransferInstaller;
+  protected:
+    void storageMutationBoundary(const char *op, const std::string &path, bool after) const override {
+      if (after && std::string(op) == "rename" && path.find("/.removing-") != std::string::npos) throw 42;
+    }
+  } removal(root);
+  bool interrupted = false;
+  try { removal.removeInstalledMap(damaged.sessionId, damaged.manifestReceipt); } catch (int) { interrupted = true; }
+  assert(interrupted);
+  const auto tombstone = root + "/VECTMAP/.maps/.removing-" + damaged.sessionId;
+  assert(exists(tombstone));
+  assert(installer.pruneObsoleteInstalledMaps());
+  assert(!exists(tombstone));
+  const auto overflowRoot = tempRoot();
+  for (int i = 0; i < 33; ++i) {
+    const auto slot = overflowRoot + "/VECTMAP/.maps/external-" + std::to_string(i);
+    assert(::system(("mkdir -p " + slot + " && cp -R " + root + "/VECTMAP/.maps/city-0/. " + slot).c_str()) == 0);
+  }
+  MapTransferInstaller overflow(overflowRoot);
+  assert(overflow.readMapLibrary(maps).ok && maps.size() == 32);
+  assert(overflow.removeInstalledMap(maps.front().sessionId, maps.front().manifestReceipt).ok);
+  assert(overflow.readMapLibrary(maps).ok && maps.size() == 32);
+}
+
+// Simulates a power cut at an exact atomic-write boundary (before or after the
+// write lands), or a write that fails without crashing.
+struct WriteCut {};
+class CuttingInstaller : public MapTransferInstaller {
+public:
+  enum class Mode { BeforeWrite, AfterWrite, FailWrite };
+  CuttingInstaller(const std::string &root, std::string suffix, Mode mode)
+      : MapTransferInstaller(root), suffix_(std::move(suffix)), mode_(mode) {}
+
+protected:
+  bool writeTextFileAtomic(const std::string &path, const std::string &text) const override {
+    const bool target = path.size() >= suffix_.size() &&
+        path.compare(path.size() - suffix_.size(), suffix_.size(), suffix_) == 0;
+    if (target && mode_ == Mode::BeforeWrite) throw WriteCut{};
+    if (target && mode_ == Mode::FailWrite) return false;
+    const bool written = MapTransferInstaller::writeTextFileAtomic(path, text);
+    if (target && mode_ == Mode::AfterWrite) throw WriteCut{};
+    return written;
+  }
+
+private:
+  std::string suffix_;
+  Mode mode_;
+};
+
+static std::vector<map_transfer::InstalledMap> buildLibrary(const std::string &root, int count) {
+  MapTransferInstaller installer(root);
+  const auto data = validFmb();
+  for (int i = 0; i < count; ++i) {
+    const auto session = "town-" + std::to_string(i);
+    const auto mapID = "town-map-" + std::to_string(i);
+    const auto stage = installer.stagingRoot(session);
+    assert(::system(("mkdir -p " + stage + "/VECTMAP/" + mapID + "/+0000+0000").c_str()) == 0);
+    writeFile(stage + "/VECTMAP/" + mapID + "/+0000+0000/0.fmb", data);
+    writeFile(stage + "/manifest.json", "{\"schemaVersion\":1,\"mapId\":\"" + mapID +
+        "\",\"files\":[{\"path\":\"VECTMAP/" + mapID + "/+0000+0000/0.fmb\",\"bytes\":" +
+        std::to_string(data.size()) + ",\"sha256\":\"" + sha(data) + "\"}]}");
+    MapManifest manifest;
+    assert(installer.validateStagedMap(session, manifest).ok);
+    assert(installer.activateStagedMap(session, manifest).ok);
+  }
+  std::vector<map_transfer::InstalledMap> maps;
+  assert(installer.readMapLibrary(maps).ok && maps.size() == size_t(count));
+  return maps;
+}
+
+// N6: a manual Use journals its exact target before the pointer moves. Every
+// pointer/policy boundary reconciles to the durable pointer: pinned manual if
+// it moved, otherwise the earlier policy is untouched.
+static void testManualSelectionJournalRecovery() {
+  using Mode = CuttingInstaller::Mode;
+  const auto useTarget = [](MapTransferInstaller &installer, const map_transfer::InstalledMap &map) {
+    assert(installer.writeManualSelectionIntent(map.sessionId, map.root, map.manifestReceipt));
+    return installer.selectInstalledMap(map.sessionId, map.manifestReceipt);
+  };
+  for (const bool earlierAutomatic : {true, false}) {
+    // Cut after the journal, before the pointer: Use never happened.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      CuttingInstaller cut(root, "/.library-selection-intent.json", Mode::AfterWrite);
+      bool interrupted = false;
+      try { (void)useTarget(cut, maps[0]); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted);
+      MapTransferInstaller rebooted(root);
+      assert(rebooted.manualSelectionIntentPending());
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_discarded");
+      assert(rebooted.automaticMapSelection() == earlierAutomatic && !rebooted.manualSelectionIntentPending());
+    }
+    // Cut before the canonical pointer write lands: Use never happened.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      CuttingInstaller cut(root, "/VECTMAP/active-map.json", Mode::BeforeWrite);
+      bool interrupted = false;
+      try { (void)useTarget(cut, maps[0]); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted);
+      MapTransferInstaller rebooted(root);
+      ActiveMapSelection active; assert(rebooted.readActiveMap(active).ok && active.root != maps[0].root);
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_discarded");
+      assert(rebooted.automaticMapSelection() == earlierAutomatic);
+    }
+    // Cut after the pointer, before the policy: the reboot pins manual.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      CuttingInstaller cut(root, "/VECTMAP/active-map.json", Mode::AfterWrite);
+      bool interrupted = false;
+      try { (void)useTarget(cut, maps[0]); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted);
+      MapTransferInstaller rebooted(root);
+      ActiveMapSelection active; assert(rebooted.readActiveMap(active).ok && active.root == maps[0].root);
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_manual");
+      assert(!rebooted.automaticMapSelection() && !rebooted.manualSelectionIntentPending());
+    }
+    // Cut after the policy, before the journal cleanup: settles idempotently.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      MapTransferInstaller installer(root);
+      assert(useTarget(installer, maps[0]).ok);
+      CuttingInstaller cut(root, "/VECTMAP/.library-automatic", Mode::AfterWrite);
+      bool interrupted = false;
+      try { (void)cut.reconcileManualSelectionIntent(); } catch (const WriteCut &) { interrupted = true; }
+      assert(interrupted && installer.manualSelectionIntentPending() && !installer.automaticMapSelection());
+      MapTransferInstaller rebooted(root);
+      assert(rebooted.reconcileManualSelectionIntent().code == "library_intent_manual");
+      assert(!rebooted.automaticMapSelection() && !rebooted.manualSelectionIntentPending());
+    }
+    // Renderer rollback after a durable pointer write: the journal is dropped
+    // and the earlier policy stays exactly as it was.
+    {
+      const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+      assert(MapTransferInstaller(root).setAutomaticMapSelection(earlierAutomatic));
+      MapTransferInstaller installer(root);
+      assert(useTarget(installer, maps[0]).ok);
+      assert(installer.rollbackActiveMap(maps[0].sessionId).ok);
+      assert(installer.reconcileManualSelectionIntent().code == "library_intent_discarded");
+      assert(installer.automaticMapSelection() == earlierAutomatic);
+    }
+  }
+  // A policy write failure keeps the journal as the durable manual pin and is
+  // retried until it lands; a failed journal write performs no selection.
+  {
+    const auto root = tempRoot(); const auto maps = buildLibrary(root, 3);
+    MapTransferInstaller installer(root);
+    assert(useTarget(installer, maps[1]).ok);
+    CuttingInstaller failing(root, "/VECTMAP/.library-automatic", Mode::FailWrite);
+    assert(failing.reconcileManualSelectionIntent().code == "library_policy_write");
+    assert(failing.manualSelectionIntentPending() && failing.automaticMapSelection());
+    assert(installer.reconcileManualSelectionIntent().code == "library_intent_manual");
+    assert(!installer.automaticMapSelection() && !installer.manualSelectionIntentPending());
+    CuttingInstaller noJournal(root, "/.library-selection-intent.json", Mode::FailWrite);
+    assert(!noJournal.writeManualSelectionIntent(maps[2].sessionId, maps[2].root, maps[2].manifestReceipt));
+    assert(!noJournal.manualSelectionIntentPending());
+    // An explicit automatic choice discards an unsettled journal.
+    assert(installer.writeManualSelectionIntent(maps[2].sessionId, maps[2].root, maps[2].manifestReceipt));
+    assert(installer.setAutomaticMapSelection(true) && installer.discardManualSelectionIntent());
+    assert(installer.reconcileManualSelectionIntent().code == "library_intent_none" && installer.automaticMapSelection());
+  }
+}
+
 int main() {
+  testManualSelectionJournalRecovery();
+  testPersistentMapLibrary();
   testSha256KnownVector();
   testTargetTwoLabelContractValidation();
   testTargetThreeBuildingContractValidation();
@@ -1510,7 +1761,7 @@ int main() {
   testPruningPreservesForeignFilesystemEntries();
   testPreservesPreviousAndPrunesObsoleteVersions();
   testPruningPreservesLiveDurableStreamReferences();
-  testPrunesLegacyRollbackAfterVersionedMapIsActive();
+  testPreservesLegacyLayoutAfterVersionedMapIsActive();
   testRollsBackInterruptedVersionPublish();
   testRollbackPreservesPendingArchiveForBootResume();
   testCompletesPointerSwitchInterruptedBeforeJournalCommit();

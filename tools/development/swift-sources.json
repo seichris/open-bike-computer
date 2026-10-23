@@ -1,6 +1,12 @@
 {
   "schema": 1,
   "groups": {
+    "online-poi": {
+      "sources": [
+        "ios-app/BikeComputer/BikeComputer/Managers/OnlinePOISearchSession.swift",
+        "ios-app/BikeComputerTests/OnlinePOISearchTests.swift"
+      ]
+    },
     "topography-native-reader": {
       "sources": [
         "ios-app/BikeComputer/BikeComputer/Utilities/TopographyContourOverview.swift",

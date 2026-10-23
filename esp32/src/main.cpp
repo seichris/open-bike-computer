@@ -10,6 +10,7 @@
 #include "ipc_stack_budget.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #ifndef FIRMWARE_DIAGNOSTICS
@@ -2083,6 +2084,11 @@ void setup() {
   mapTransferHttp.configure("/sdcard", 8080, &deviceTransferHttp);
   mapTransferHttp.setStreamStorageProbe(
       [] { return storage.getSdLoaded(); });
+  mapTransferHttp.setStreamStorageSpaceProbe([]() -> std::optional<uint64_t> {
+    uint64_t bytes = 0;
+    if (!storage.tryRemovableSdFreeBytes(bytes)) return std::nullopt;
+    return bytes;
+  });
   mapTransferHttp.setStreamStorageAvailable(sdResult == ESP_OK &&
                                             storage.getSdLoaded());
   mapTransferHttp.setStorageControlSubmit([](void (*work)(void *), void *context) {
@@ -2553,6 +2559,18 @@ void loop() {
     deviceTransferHttp.process();
     mapTransferHttp.submitPendingRollback();
     mapTransferHttp.submitPendingOperationTask();
+    static uint32_t lastLibraryLocationMs = 0;
+    if (now - lastLibraryLocationMs >= 5000U) {
+      lastLibraryLocationMs = now;
+      if (gps.gpsData.fixMode >= 2 && mapView.followGps &&
+          std::isfinite(gps.gpsData.latitude) && std::isfinite(gps.gpsData.longitude) &&
+          gps.gpsData.latitude >= -90 && gps.gpsData.latitude <= 90 &&
+          gps.gpsData.longitude >= -180 && gps.gpsData.longitude <= 180)
+        mapTransferHttp.considerMapSuggestion(
+            static_cast<int32_t>(gps.gpsData.latitude * 10000000.0),
+            static_cast<int32_t>(gps.gpsData.longitude * 10000000.0), mapView.debugIsMapFound());
+    }
+    mapTransferHttp.submitPendingMapLibrary();
   }
 
   const BLEDebugStats bleStatsBeforeWork = bleNavServer.getDebugStats();

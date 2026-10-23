@@ -54,6 +54,26 @@ struct DeviceMapOperationTests {
         func expectFailure(_ operation: () throws -> Void, _ label: String) {
             do { try operation(); fatalError(label) } catch { }
         }
+        // A device refusal before any payload write (full card) returns this
+        // operation's own Failed receipt beside the error. Background completion
+        // must make the client record terminal so no installation stays pending.
+        do {
+            let rejectedStore = DeviceMapOperationStore(url: directory.appendingPathComponent("rejected.json"))
+            try rejectedStore.save(record)
+            let attempt = UUID()
+            try rejectedStore.beginUpload(operationID: record.operationID, deviceID: deviceID,
+                                          appNamespace: record.appNamespace, uploadAttemptID: attempt)
+            let failed = try JSONSerialization.jsonObject(with: JSONEncoder().encode(receipt("failed", 2)))
+            let body = try JSONSerialization.data(withJSONObject: [
+                "ok": false, "error": ["code": "stream_sd_full", "message": "remove a map"], "operation": failed])
+            try check(try rejectedStore.completeUpload(operationID: record.operationID, deviceID: deviceID,
+                appNamespace: record.appNamespace, mapID: record.mapID, sessionID: record.sessionID,
+                uploadAttemptID: attempt, responseBody: body, httpStatus: 507, errorCode: nil))
+            let resolved = try rejectedStore.records()[0]
+            try check(resolved.isTerminal && resolved.observation == "failed_or_rolled_back" &&
+                      !resolved.blocksNewTransfer(connectionEpoch: record.connectionEpoch, processID: UUID()),
+                      "a full-card refusal leaves no pending client installation")
+        }
         let completionURL = directory.appendingPathComponent("completion.json")
         let completionStore = DeviceMapOperationStore(url: completionURL)
         try completionStore.save(record)

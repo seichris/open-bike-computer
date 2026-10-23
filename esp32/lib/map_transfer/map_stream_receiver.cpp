@@ -62,9 +62,12 @@ MapStreamReceiveResult MapStreamReceiver::result() const {
   if (!state.errorCode.empty() &&
       (parser_.error() == MapStreamParserError::ConsumerRejected ||
        parser_.error() == MapStreamParserError::ResourceUnavailable)) {
-    return {false, parser_.error() == MapStreamParserError::ResourceUnavailable
-                       ? 503
-                       : 500,
+    // Conflicts with retained SD content need a rider action, not a retry.
+    const bool conflict = state.errorCode == "stream_session_conflict" ||
+                          state.errorCode == "stream_repair_requires_removal";
+    return {false, state.errorCode == "stream_sd_full" ? 507 : conflict ? 409 :
+                       (state.errorCode == "stream_storage_unavailable" ||
+                        parser_.error() == MapStreamParserError::ResourceUnavailable ? 503 : 500),
             state.errorCode, state.errorMessage};
   }
   const std::string code = parser_.errorCode();

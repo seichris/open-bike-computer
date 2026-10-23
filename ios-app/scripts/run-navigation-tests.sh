@@ -3,6 +3,8 @@ set -euo pipefail
 
 DEV_SWIFT_COMPILER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/development/swift_compile.py"
 
+bash "$(dirname "${BASH_SOURCE[0]}")/run-online-poi-tests.sh"
+
 RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/bicino-swift-check.XXXXXX")"
 trap 'rm -rf "$RUN_TMP"' EXIT
 export TMPDIR="${RUN_TMP}/"

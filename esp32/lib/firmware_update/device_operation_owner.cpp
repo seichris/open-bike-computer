@@ -197,7 +197,8 @@ device_transfer::NetworkStartResult DeviceOperationOwner::startAccessPointDetail
 
 esp_err_t DeviceOperationOwner::runMapActivation(
     MapOperation operation, void *context, const std::string &sessionId,
-    bool automaticExit) {
+    bool automaticExit, bool *issued) {
+  if (issued) *issued = false;
   if (operation == nullptr || sessionId.empty() || sessionId.size() >= sizeof(mapSessionId_))
     return ESP_ERR_INVALID_ARG;
   Result result;
@@ -206,7 +207,7 @@ esp_err_t DeviceOperationOwner::runMapActivation(
   command.mapContext = context;
   command.automaticExit = automaticExit;
   const esp_err_t dispatch = execute(command, result, nullptr, &sessionId,
-                                     nullptr, kMapActivationTimeoutTicks);
+                                     nullptr, kMapActivationTimeoutTicks, issued);
   return dispatch == ESP_OK ? result.error : dispatch;
 }
 
@@ -336,7 +337,8 @@ esp_err_t DeviceOperationOwner::acknowledgeFirmwareOperation(const receipt::Reco
 esp_err_t DeviceOperationOwner::execute(
     const Command &command, Result &result, const uint8_t *writeData,
     const std::string *networkSsid,
-    const std::string *networkPassword, TickType_t timeoutTicks) {
+    const std::string *networkPassword, TickType_t timeoutTicks, bool *issued) {
+  if (issued) *issued = false;
   if (workerTask_ != nullptr && xTaskGetCurrentTaskHandle() == workerTask_) {
     return ESP_ERR_INVALID_STATE;
   }
@@ -396,6 +398,7 @@ esp_err_t DeviceOperationOwner::execute(
       dispatch = ESP_ERR_TIMEOUT;
       break;
     }
+    if (issued) *issued = true;
     dispatchState_.store(internal_owner_policy::commandIssued(
                              dispatchState_.load(std::memory_order_relaxed)),
                          std::memory_order_release);

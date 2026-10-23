@@ -2,6 +2,11 @@ import Combine
 import CoreLocation
 import Foundation
 
+/// A sharing choice this iPhone could not save, reported instead of a Keychain status.
+struct FriendSharingSaveFailure: LocalizedError {
+    var errorDescription: String? { "Your sharing change could not be saved on this iPhone. Try again." }
+}
+
 /// Route-independent, one-way friend sharing. This installation remembers explicit
 /// consents and revalidates their epochs and original deadlines before resuming.
 @MainActor
@@ -16,8 +21,12 @@ final class FriendLiveService: ObservableObject {
     var onRidersChanged: (([SocialRider]) -> Void)?
     private let client: any SocialRideNetworking
     private let store: any SocialSecureStore
+    private let installation: any SocialInstallationMarker
     private var owner: String?
     private var persisted: Data?
+    /// A stop that neither the Keychain nor a new installation marker could record.
+    /// Until one succeeds, no saved consent is read again.
+    private var unrecordedStop = false
     private struct RememberedConsent: Codable, Equatable {
         let epoch: String
         let expiresAt: Double
@@ -25,7 +34,10 @@ final class FriendLiveService: ObservableObject {
     private struct RememberedSharing: Codable {
         let consents: [String: RememberedConsent]
         let nextSequence: Int
+        /// Keychain items can survive deleting the app; the marker in its container cannot.
+        let installation: String
     }
+    private static let unsavedChange = "Your sharing change could not be saved on this iPhone."
     private var remembered: [String: RememberedConsent] = [:]
     private var reservedSequence = 0
     private var persistenceKey: String? { owner.map { "friend-sharing.v1.\(SocialSecret.digest($0))" } }
@@ -51,11 +63,13 @@ final class FriendLiveService: ObservableObject {
 
     init(client: any SocialRideNetworking,
          store: (any SocialSecureStore)? = nil,
+         installation: (any SocialInstallationMarker)? = nil,
          uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          pollNanoseconds: UInt64 = 3_000_000_000,
          idlePollNanoseconds: UInt64 = 60_000_000_000,
          sleep: @escaping (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }) {
         self.client = client; self.store = store ?? SocialMemoryStore(); self.uptime = uptime; self.pollNanoseconds = pollNanoseconds
+        self.installation = installation ?? SocialMemoryInstallation()
         self.idlePollNanoseconds = idlePollNanoseconds; self.sleep = sleep
     }
 
@@ -70,23 +84,7 @@ final class FriendLiveService: ObservableObject {
         if self.owner != owner {
             reset()
             self.owner = owner
-            do {
-                if let key = persistenceKey, let data = try store.read(key) {
-                    let value = try JSONDecoder().decode(RememberedSharing.self, from: data)
-                    guard value.consents.count <= 100, value.nextSequence >= 0,
-                          value.nextSequence < 9_007_199_254_740_928,
-                          value.consents.allSatisfy({ !$0.key.isEmpty && !$0.value.epoch.isEmpty && $0.value.expiresAt.isFinite }) else {
-                        throw SocialFailure.invalidResponse
-                    }
-                    remembered = value.consents
-                    persisted = data
-                    // Previously reserved numbers may have reached the server even
-                    // if this process never received their replies.
-                    sequence = value.nextSequence; reservedSequence = sequence
-                }
-            } catch {
-                self.error = "Your previous friend sharing could not be restored. Turn sharing on again."
-            }
+            restoreSaved()
         }
         updateSharing()
         // Authentication can recover while capability discovery is offline.
@@ -96,6 +94,50 @@ final class FriendLiveService: ObservableObject {
         enabled = true
         guard task == nil else { return }
         resumePolling()
+    }
+
+    private func restoreSaved() {
+        guard let key = persistenceKey else { return }
+        if unrecordedStop {
+            // An earlier stop is still unrecorded: disown every saved record first.
+            guard (try? installation.rotate()) != nil else { error = Self.unsavedChange; return }
+            unrecordedStop = false
+        }
+        do {
+            guard let data = try store.read(key) else { return }
+            let value = try JSONDecoder().decode(RememberedSharing.self, from: data)
+            guard value.installation == (try installation.current()) else {
+                // Written before a reinstall (or disowned): never resumed, nothing lost now.
+                discardSaved(key); return
+            }
+            guard value.consents.count <= 100, value.nextSequence >= 0,
+                  value.nextSequence < 9_007_199_254_740_928,
+                  value.consents.allSatisfy({ !$0.key.isEmpty && !$0.value.epoch.isEmpty && $0.value.expiresAt.isFinite }) else {
+                throw SocialFailure.invalidResponse
+            }
+            remembered = value.consents
+            persisted = data
+            // Previously reserved numbers may have reached the server even
+            // if this process never received their replies.
+            sequence = value.nextSequence; reservedSequence = sequence
+        } catch {
+            // Fail closed for good: a record reported as lost must not resume on a later launch.
+            discardSaved(key)
+            self.error = "Your previous friend sharing could not be restored. Turn sharing on again."
+        }
+    }
+
+    /// Removes a saved record before anything can trust it again. If the Keychain
+    /// refuses, a new installation marker disowns every saved record instead.
+    @discardableResult
+    private func discardSaved(_ key: String) -> Bool {
+        if (try? store.write(nil, for: key)) != nil || (try? installation.rotate()) != nil {
+            if key == persistenceKey { persisted = nil }
+            return true
+        }
+        unrecordedStop = true
+        error = Self.unsavedChange
+        return false
     }
 
     /// No idle network traffic while backgrounded; active streams stay timely.
@@ -131,7 +173,7 @@ final class FriendLiveService: ObservableObject {
         let expected = generation
         busyIDs.insert(id)
         defer { if expected == generation { busyIDs.remove(id) } }
-        var persistenceError: Error?
+        var stopSaved = true
         if enabled {
             guard await prepareLocation?() == true else { throw SocialFailure.server("location_access_required") }
             guard expected == generation else { throw SocialFailure.cancelled }
@@ -139,7 +181,7 @@ final class FriendLiveService: ObservableObject {
             // Stop GPS publication before any network await, including offline revocation.
             leases[id] = nil; remembered[id] = nil; updateSharing()
             // A crash or offline stop must not restore this recipient on launch.
-            do { try persist() } catch { persistenceError = error }
+            stopSaved = saveStop()
         }
         let path = "friend-sharing/\(id)/consent"
         let current = try await client.json(path)
@@ -155,31 +197,45 @@ final class FriendLiveService: ObservableObject {
             }
             remembered[id] = RememberedConsent(epoch: consent.epoch, expiresAt: expiry)
             do { try persist() }
-            catch { remembered[id] = nil; leases[id] = nil; updateSharing(); throw error }
+            catch {
+                remembered[id] = nil; leases[id] = nil; updateSharing()
+                // Never leave a server lease this iPhone could not remember or stop after relaunch.
+                _ = try? await client.json(path, method: "POST", body: ["epoch": consent.epoch, "location": false, "stats": false])
+                throw FriendSharingSaveFailure()
+            }
             leases[id] = (consent.epoch, requestedAt + min(4*3600, max(0, expiry-consent.serverTime)))
             lastPublished = nil
         }
-        error = nil
+        if stopSaved { error = nil }
         updateSharing()
         self.enabled = true
         resumePolling()
-        if let persistenceError { throw persistenceError }
+        if !stopSaved { throw FriendSharingSaveFailure() }
     }
 
     private func persist() throws {
         guard let key = persistenceKey else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        let data = remembered.isEmpty ? nil : try encoder.encode(
-            RememberedSharing(consents: remembered, nextSequence: reservedSequence))
+        let data = remembered.isEmpty ? nil : try encoder.encode(RememberedSharing(
+            consents: remembered, nextSequence: reservedSequence, installation: try installation.current()))
         guard data != persisted else { return }
         try store.write(data, for: key)
         persisted = data
     }
 
-    private func persistRemoval() {
-        do { try persist() }
-        catch { self.error = "Your sharing change could not be saved on this iPhone." }
+    @discardableResult
+    private func persistRemoval() -> Bool {
+        do { try persist(); return true }
+        catch { self.error = Self.unsavedChange; return false }
+    }
+
+    /// Records a stop before any network request. When the narrower selection cannot
+    /// be written, removing or disowning the whole saved record still keeps it stopped;
+    /// any remaining selection is saved again by the next successful write.
+    private func saveStop() -> Bool {
+        do { try persist(); return true }
+        catch { return persistenceKey.map { discardSaved($0) } ?? true }
     }
 
     private func updateSharing() {
@@ -290,9 +346,10 @@ final class FriendLiveService: ObservableObject {
             for (id, epoch) in epochs where leases[id]?.epoch == epoch && !accepted.contains(id) {
                 leases[id] = nil; remembered[id] = nil
             }
-            persistRemoval()
+            // An accepted fix must not hide a selection change that is still unsaved.
+            let saved = persistRemoval()
             updateSharing()
-            if error != nil { error = nil }
+            if saved, error != nil { error = nil }
         } catch {
             guard expected == generation else { return }
             // A cancelled or lost request may still have been committed.
@@ -316,18 +373,37 @@ final class FriendLiveService: ObservableObject {
         if hadConsent { _ = try? await client.json("friend-sharing", method: "DELETE") }
     }
 
+    /// Stops every outgoing friend stream while this account stays signed in and keeps
+    /// receiving friends. The cleared selection is saved before the batched revocation,
+    /// so an offline stop still holds after relaunch.
+    func stopSharingWithAll() async throws {
+        let hadConsent = !remembered.isEmpty || !leases.isEmpty || !busyIDs.isEmpty
+        // Fence pending starts, restorations and publications before the first await.
+        generation = UUID()
+        leases = [:]; remembered = [:]; busyIDs = []; lastPublished = nil
+        updateSharing()
+        let saved = saveStop()
+        resumePolling()
+        if hadConsent { _ = try? await client.json("friend-sharing", method: "DELETE") }
+        if !saved { throw FriendSharingSaveFailure() }
+    }
+
     func forget(_ id: String) {
         leases[id] = nil; remembered[id] = nil; persistRemoval(); updateSharing()
         riders.removeAll { $0.id == id }
     }
 
     func reset() {
-        remembered = [:]; persistRemoval(); owner = nil; persisted = nil
+        let saved = persisted == nil ? nil : persistenceKey
+        remembered = [:]; owner = nil; persisted = nil
         generation = UUID(); task?.cancel(); task = nil
         enabled = false; pollingGeneration = UUID()
         leases = [:]; sharingIDs = []; pendingIDs = []; busyIDs = []; isSharing = false
         riders = []; latestLocation = nil; error = nil; lastPublished = nil
         lastPublicationAttempt = nil
         progress = SharedRideProgress(); sequence = 0; reservedSequence = 0
+        // Sign-out and account changes remove the saved selection; a refusal is
+        // reported and disowns it rather than leaving it to resume later.
+        if let saved { discardSaved(saved) }
     }
 }
