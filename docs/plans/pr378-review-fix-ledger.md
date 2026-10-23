@@ -16,10 +16,15 @@ enablement. The four generated ESP32 SDK/bootstrap files remain never-stage.
   later development promotion `b576d2f04d6969fba241c120a917719e87232529`
   merged as `bf56baedb379f40e217a12cd8114e2a201065f79`. Normal merges and
   fast-forward pushes only; no history rewrite or force push.
+- The owner then merged main `d2b10c00d09a722f95baf9042f22e0b4e6a78714`
+  (#624 map tracking controls, #625 Apple Maps route elevation: iOS, docs and
+  backend only, no firmware) through GitHub as
+  `404e6ae6c398a11c083beb708f97eaee63439c7d`.
 
 | ID | Priority | Trigger, fix and verification | State |
 | --- | --- | --- | --- |
-| R32 | P1 | Main's released route elevation owns CAP2 extended bit 2/client 32 and screen type 6, the same values as the unpublished POI/Nearby allocation; a merged build would have read route-elevation firmware as POI-capable and mapped Nearby onto Elevation. POIs move to extended bit 3/client 33 and Nearby to screen type 7 (tile 9); the client version is 33; both bindings and the pinned-LVGL preview metadata are regenerated. Firmware and iOS tests cover bit/client separation, combined words, route-elevation-only firmware receiving no POI bits, and the 175 diagnostics+POI matrix where Elevation and Nearby coexist | fixed; firmware host verified, iOS/CI pending |
+| R32 | P1 | Main's released route elevation owns CAP2 extended bit 2/client 32 and screen type 6, the same values as the unpublished POI/Nearby allocation; a merged build would have read route-elevation firmware as POI-capable and mapped Nearby onto Elevation. POIs move to extended bit 3/client 33 and Nearby to screen type 7 (tile 9); the client version is 33; both bindings and the pinned-LVGL preview metadata are regenerated. Firmware and iOS tests cover bit/client separation, combined words, route-elevation-only firmware receiving no POI bits, and the 175 diagnostics+POI matrix where Elevation and Nearby coexist | fixed; firmware host, iOS fast and exact-head CI verified at `99c8032d` |
+| R33 | P1 | After integration the enabled-POI `WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION` image no longer fits the dual 3 MiB slot with the 65,536-byte reserve: total image 3,094,427 bytes, about 14.4 KB over the 3,080,192-byte `firmware.bin` maximum. Main's production-behavior growth since the previous integration (about 49.5 KB) exceeds the former 35,232-byte margin; the POI runtime cost itself is unchanged. No budget, partition or profile change was made | open; blocks merge |
 
 Conflict resolutions (23 files):
 
@@ -71,9 +76,52 @@ Verification: local, on the exact merge `f5a8387a` unless noted.
 - Registry flag matrix (default, diagnostics, POI, Elevation, POI+Elevation,
   175 diagnostics+POI) and capability/contract-reuse tests pass; the pinned
   LVGL preview `--check` and fast preview test pass.
-- The iOS fast re-run after `2edf8896`, exact-head CI and the enabled-175
-  padded binary/reserve result are recorded in the PR description; earlier
-  `b64ca6c7` artifacts (3,045,056 bytes) are not relabeled for this head.
+- iOS fast after `2edf8896`, on stable head `99c8032d`: 12/12 passed with
+  `sourceUnchanged=true`. Earlier `b64ca6c7` artifacts (3,045,056 bytes) are
+  not relabeled for this head.
+
+### Exact-head CI and application budget (R33)
+
+PR CI [39933153447](https://github.com/seichris/open-bike-computer/actions/runs/39933153447)
+built `99c8032d` (merge ref `11735fbf`). Passed: ESP32 host tests; 175
+ordinary, production, lifecycle-qualification and remote-debug firmware; map
+backend, OSM pipeline (including native POI equivalence), Social PostgreSQL,
+topography readers, Cloudflare catalog; iOS fast, simulator and app builds;
+CI selection; Workout Zone contracts. Failed: the enabled-POI 175
+qualification image at the verified reserve gate ("leaves less than the
+required 65536-byte application reserve"), and therefore CI Gate. The
+branch-bound firmware run
+[39933173298](https://github.com/seichris/open-bike-computer/actions/runs/39933173298)
+passed the same four 175 profiles and host tests; its POI job stopped on a
+transient `tool-mklittlefs` download reset before any size result.
+
+| Image (175) | Source | Total image | `firmware.bin` | Beyond 65,536-byte reserve |
+| --- | --- | ---: | ---: | ---: |
+| Lifecycle, POIs off | this PR, merge ref `11735fbf` | 3,054,183 | 3,054,336 | +25,856 |
+| Lifecycle, POIs on | this PR, merge ref `11735fbf` | 3,094,427 | about 3,094,580 (not recorded; gate failed) | about -14,390 |
+| Lifecycle, POIs off | main after #618/#620, merge ref `2430001e` | 3,077,795 | 3,077,952 | +2,240 |
+| Lifecycle, POIs on | previous baseline `c6181a70` | - | 3,044,960 | +35,232 |
+
+The binary estimate adds the 153-157 bytes of image overhead observed for
+the passing profiles. Linker-map and symbol comparison of the two POI-off
+lifecycle ELFs explains the gap without any lost main code: main still links
+libstdc++ file-stream and locale instantiations (about 42 KB of
+`.flash.rodata`, mostly unwind tables, plus their code) that this PR's
+`MapReadFile`/`MapWriteFile` path removes, while the PR's always-on target-5
+manifest, block and index code adds about 18 KB of `.flash.text`. The POI
+runtime itself (Nearby screen, query cursor and layout, map icon layer,
+manifest checks) costs about 40.2 KB at the same head. Main's own lifecycle
+image is therefore within 2.3 KB of the gate.
+
+A per-translation-unit size study with the pinned Xtensa toolchain found
+about 7-8 KB of PR-local, behavior-preserving savings (Nearby view state
+moved from `.data` to `.bss`, compact JSON and manifest field builders, a
+table-driven icon painter, one sort instead of two instantiations). That is
+roughly half the shortfall; closing it also needs main-owned code changes,
+deeper Nearby algorithm rewrites, the separate partition migration (#461) or
+a narrower POI scope. Those are owner decisions and none was taken. A local
+exact-head firmware build was abandoned when this Mac ran out of disk space;
+no local firmware artifact exists for this head.
 
 ## October 23 Claude review follow-up
 
