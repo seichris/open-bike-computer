@@ -144,9 +144,9 @@ int main(int argc, char **argv) {
 
   char footer[64];
   ep::footerText(footer, sizeof(footer), hill);
-  assert(std::strcmp(footer, "Copernicus DEM") == 0);
+  assert(std::strcmp(footer, "") == 0);
   ep::footerText(footer, sizeof(footer), gaps);
-  assert(std::strcmp(footer, "Copernicus DEM - partial") == 0);
+  assert(std::strcmp(footer, "Partial elevation") == 0);
   assert(ep::gradeColor(0) == ep::gradeColor(2) && ep::gradeColor(7) == 0xFF372E);
 
   std::cout << "elevation presentation tests passed\n";
