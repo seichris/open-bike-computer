@@ -1,5 +1,33 @@
 # PR #378 review fixes
 
+## October 23 physical Nearby test: phone GPS gating
+
+R34 (P1): the connected 175 remained at `Waiting for GPS` even while Bicino
+Dev recorded fresh CoreLocation samples and successful GPS ATT writes. The
+Nearby predicate additionally required `isGpsFixed`, which is owned only by
+the onboard NMEA receiver; authenticated phone packets never set that flag.
+The source-owned presentation timestamp already validates freshness for both
+sources and invalidates a disconnected BLE source. Nearby now uses that clock
+and valid coordinates, matching the map renderer, without changing global
+receiver status, ride-detection quality, or the strict 2.5-second age bound.
+
+A native regression executes the actual `nearbyFreshPosition` and
+`nearbyStartSearch` bodies. It fails on `8d4f62b0` and passes with the fix:
+fresh stationary phone positions search without an onboard fix; stale,
+unknown-age, disconnected and invalid-coordinate inputs cannot search;
+millisecond wrap and independent hardware-source timing remain valid.
+All three lifecycle tests and the four affected Nearby/render-ahead host
+checks pass locally. Exact-commit firmware size and physical acceptance are
+separate pending gates, not implied by those host results.
+
+The current phone recorder's 26 chunks and manifest validate with the
+repository diagnostics parser (no truncated tails or sequence gaps). Its
+13:20-13:46 UTC window shows fresh fixes and successful BLE writes, not
+durable firmware application evidence: no imported firmware chunks were in
+that acquisition. The running iOS app requires no code change. This GPS fix
+does not waive target-5 POI-map service, transfer or physical Nearby-result
+qualification, change trust/partitions, or enable POIs in shipping profiles.
+
 ## October 23 main integration (route elevation and device map library)
 
 Mode: publish. Scoped update requested by the user: merge current `main` into

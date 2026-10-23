@@ -39,6 +39,19 @@ or enabled merely because it exists in the branch.
 
 ## Baseline
 
+### October 23 physical GPS correction
+
+The initial 175/phone test exposed an onboard-only `isGpsFixed` gate in Nearby.
+Use the current position source's validated presentation timestamp and valid
+coordinates, as the renderer does, so a fresh authenticated iPhone position
+can search even without an onboard satellite fix. Keep the strict 2.5-second
+age limit and BLE-session invalidation; stationary position search must not
+require a speed measurement. Native regression covers the actual search
+entry point, stale/disconnected/unknown-age positions and hardware timing.
+Firmware budget and real-device retesting remain independent gates. See R34
+in [the review ledger](pr378-review-fix-ledger.md); a GPS fix alone does not
+qualify an offline POI pack or its end-to-end delivery.
+
 ### October 23 main integration: route elevation and device map library
 
 Integrate GitHub `main` through `b84e68543ac5aa402ae55ecfe3d34439d14786ff`

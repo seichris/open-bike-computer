@@ -1,4 +1,4 @@
-"""Execute actual activation and UI retry branches with deterministic faults."""
+"""Execute actual activation, GPS gating and UI retry branches with faults."""
 from pathlib import Path
 import shutil
 import subprocess
@@ -35,11 +35,112 @@ class NearbyLifecycleTests(unittest.TestCase):
             binary = root / "fixture"
             for command in (
                 [compiler, "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                 "-DMAP_POIS_RUNTIME_ENABLED=1", str(fixture), "-o", str(binary)],
+                 "-DMAP_POIS_RUNTIME_ENABLED=1",
+                 "-I", str(ROOT / "lib/ble_navigation"),
+                 "-I", str(ROOT / "lib/maps/src"),
+                 str(fixture), "-o", str(binary)],
                 [str(binary), str(candidate)],
             ):
                 result = subprocess.run(command, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_search_uses_current_position_source_not_onboard_receiver_fix(self):
+        source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()
+        fixture = r'''
+#include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include "gps_input_freshness.hpp"
+#include "mapNearbyQuery.hpp"
+bool isGpsFixed=false; // Onboard NMEA receiver has no fix indoors.
+struct Gps {
+  struct Data { double latitude=31.2, longitude=121.4; } gpsData;
+  GpsSampleTiming presentationSample;
+} gps;
+struct Server {
+  struct Stats { GpsSampleTiming gpsSource; } stats;
+  Stats getDebugStats() const { return stats; }
+} bleNavServer;
+struct Nearby {
+  bool showingMap=true, querying=false, haveResults=false;
+  uint32_t selectedMask=3, lastQueryMs=0, querySequence=0;
+  double radiusM=10000;
+  map_nearby_query::Position lastQueryPosition;
+  void *status=nullptr;
+} nearby;
+const char *lastStatus=nullptr;
+void lv_label_set_text(void *, const char *text) { lastStatus=text; }
+struct View {
+  unsigned requests=0;
+  uint32_t requestNearbySearch(map_nearby_query::Position position,
+                              uint32_t mask, double radius) {
+    assert(position.latitude==gps.gpsData.latitude);
+    assert(position.longitude==gps.gpsData.longitude);
+    assert(mask==3 && radius==10000);
+    ++requests;
+    return 42;
+  }
+} mapView;
+'''
+        fixture += fragment(source, "static bool nearbyFreshPosition(")
+        fixture += "\n" + fragment(source, "static void nearbyStartSearch(")
+        fixture += r'''
+void expectSearch(uint32_t now, bool expected) {
+  nearby=Nearby{}; mapView.requests=0; lastStatus=nullptr;
+  nearbyStartSearch(now);
+  assert(mapView.requests==(expected ? 1U : 0U));
+  assert(nearby.querying==expected);
+  assert(std::strcmp(lastStatus, expected ? "Finding nearby places..."
+                                         : "Waiting for GPS")==0);
+  assert(nearby.querySequence==(expected ? 42U : 0U));
+}
+int main() {
+  // A stationary phone can have a fresh location without a speed sample or
+  // an independent satellite fix on the bike. Exercise the production search
+  // entry point, not a duplicated approximation of its predicate.
+  gps.presentationSample={true, false, 1000, RidePositionSource::AuthenticatedBle};
+  bleNavServer.stats.gpsSource=gps.presentationSample;
+  expectSearch(1075, true);
+  assert(!isGpsFixed); // Do not change the onboard receiver's status globally.
+  expectSearch(3499, true);
+  expectSearch(3500, false); // Keep the existing strict 2.5-second freshness bound.
+
+  // Repeated transport traffic must not make an old source measurement fresh.
+  bleNavServer.stats.gpsSource.capturedAtMs=1000;
+  expectSearch(10000, false);
+  // BLE disconnect/session invalidation supersedes cached presentation state.
+  bleNavServer.stats.gpsSource={};
+  expectSearch(1075, false);
+  isGpsFixed=true;
+  expectSearch(1075, false); // An onboard fix cannot bless a stale BLE source.
+  bleNavServer.stats.gpsSource={false, false, 1000,
+                              RidePositionSource::AuthenticatedBle};
+  expectSearch(1075, false); // Unknown source age stays unavailable.
+
+  bleNavServer.stats.gpsSource={true, false, UINT32_MAX-1000,
+                              RidePositionSource::AuthenticatedBle};
+  expectSearch(100, true); // Millisecond wrap remains valid.
+  gps.gpsData.latitude=std::numeric_limits<double>::quiet_NaN();
+  expectSearch(100, false);
+  gps.gpsData.latitude=91;
+  expectSearch(100, false);
+  gps.gpsData.latitude=31.2; gps.gpsData.longitude=181;
+  expectSearch(100, false);
+  gps.gpsData.longitude=121.4;
+
+  // Physical NMEA sources retain their own validated capture clock and do not
+  // inherit a fresh or invalidated BLE sample.
+  gps.presentationSample={true, false, 1000, RidePositionSource::HardwareNmea};
+  bleNavServer.stats.gpsSource={};
+  expectSearch(1075, true);
+  expectSearch(3500, false);
+  gps.presentationSample.ageKnown=false;
+  expectSearch(1075, false);
+}
+'''
+        self.run_fixture(fixture)
 
     def test_activation_preserves_old_map_on_transient_metadata_failure(self):
         source = (ROOT / "lib/maps/src/maps.cpp").read_text()

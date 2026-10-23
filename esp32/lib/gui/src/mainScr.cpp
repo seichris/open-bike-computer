@@ -2083,8 +2083,9 @@ static bool nearbyFreshPosition(uint32_t nowMs,
   const auto sample = gps_input_freshness::presentationSample(
       gps.presentationSample, bleNavServer.getDebugStats().gpsSource);
   position = {gps.gpsData.latitude, gps.gpsData.longitude};
-  return isGpsFixed && sample.fresh(nowMs) &&
-         map_nearby_query::valid(position);
+  // isGpsFixed describes only the onboard NMEA receiver. Phone positions use
+  // their own source timestamp, including BLE disconnect invalidation above.
+  return sample.fresh(nowMs) && map_nearby_query::valid(position);
 }
 
 static void nearbyPickerStatus() {
