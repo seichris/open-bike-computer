@@ -497,6 +497,8 @@ jobs:
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-device-screen-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-device-screen-protocol-host-tests/results.json"
       - name: World Radio protocol and screen registry host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-world-radio-protocol-and-screen-registry-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-world-radio-protocol-and-screen-registry-host-tests/results.json"
+      - name: Route elevation protocol and Elevation screen host tests
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-route-elevation-protocol-and-screen-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-route-elevation-protocol-and-screen-host-tests/results.json"
       - name: Device ownership crypto host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-device-ownership-crypto-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-device-ownership-crypto-host-tests/results.json"
       - name: Device ownership state host tests

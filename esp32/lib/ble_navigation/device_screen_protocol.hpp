@@ -11,8 +11,9 @@ namespace device_screen_protocol {
 constexpr int32_t CURRENT_MASK_MARKER = 1 << 30;
 constexpr int32_t BATTERY_STATUS_BIT = 1 << static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::BatteryStatus);
 constexpr int32_t WORLD_RADIO_BIT = 1 << static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::WorldRadio);
+constexpr int32_t ELEVATION_BIT = 1 << static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::Elevation);
 constexpr int32_t EXTENSION_SCREEN_BITS =
-    BATTERY_STATUS_BIT | WORLD_RADIO_BIT;
+    BATTERY_STATUS_BIT | WORLD_RADIO_BIT | ELEVATION_BIT;
 
 inline int32_t applyCompatibility(int32_t incomingMask,
                                   uint8_t currentMask) {

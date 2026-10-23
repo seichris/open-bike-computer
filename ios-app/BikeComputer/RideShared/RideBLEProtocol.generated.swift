@@ -15,7 +15,7 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let capabilityRequestMagic = "CAPS"
     static let capabilityResponseMagic = "CAP2"
     static let capabilitySchemaVersion: UInt8 = 1
-    static let currentClientVersion: UInt8 = 31
+    static let currentClientVersion: UInt8 = 32
     static let extendedFeatureTLVType: UInt8 = 3
     static let deviceSoundsFeature: UInt32 = 1 << 0
     static let deviceSoundsMinimumClientVersion: UInt8 = 1
@@ -85,6 +85,8 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let extendedGroupRidersV1MinimumClientVersion: UInt8 = 30
     static let extendedFriendMarkerScaleV1Feature: UInt32 = 1 << 1
     static let extendedFriendMarkerScaleV1MinimumClientVersion: UInt8 = 31
+    static let extendedRouteElevationV1Feature: UInt32 = 1 << 2
+    static let extendedRouteElevationV1MinimumClientVersion: UInt8 = 32
     static let screenConfigurationSchemaVersion: UInt8 = 1
     static let screenConfigurationCapabilityTLVType: UInt8 = 2
     static let maximumScreenConfigurationInstances = 16
@@ -99,6 +101,8 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let destinationRequestMagic = "DREQ"
     static let worldRadioRequestMagic = "WRQ1"
     static let worldRadioStatusMagic = "WRS1"
+    static let routeElevationMagic = "ELV1"
+    static let routeElevationAcknowledgementMagic = "EAK1"
     static let applicationCommandMagic = "RCM1"
     static let applicationAcknowledgementMagic = "RAK1"
     static let applicationDeliveryVersion: UInt8 = 1
@@ -158,6 +162,7 @@ nonisolated enum RideBLEScreenTypeV1: UInt8, CaseIterable, Codable, Sendable {
     case mapPlusNavigation = 3
     case batteryStatus = 4
     case worldRadio = 5
+    case elevation = 6
 }
 
 nonisolated enum RideBLELegacyScreenV1: Int, CaseIterable, Codable, Sendable {
@@ -167,6 +172,7 @@ nonisolated enum RideBLELegacyScreenV1: Int, CaseIterable, Codable, Sendable {
     case mapPlusNavigation = 3
     case batteryStatus = 4
     case worldRadio = 5
+    case elevation = 6
 
     var wireType: RideBLEScreenTypeV1 {
         switch self {
@@ -176,6 +182,7 @@ nonisolated enum RideBLELegacyScreenV1: Int, CaseIterable, Codable, Sendable {
         case .mapPlusNavigation: return .mapPlusNavigation
         case .batteryStatus: return .batteryStatus
         case .worldRadio: return .worldRadio
+        case .elevation: return .elevation
         }
     }
 }

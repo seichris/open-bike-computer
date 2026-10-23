@@ -89,9 +89,11 @@ func testDeviceScreenConfigurationCodecAndValidation() {
         legacyCapabilities,
         "legacy screen capability TLV retains its exact limits and mask"
     )
+    // Development firmware with native zones and every screen type,
+    // including Elevation (bit 6).
     let zoneCapabilityValue = Data([
         1, 16, 24, 7,
-        0x3f, 0, 0, 0,
+        0x7f, 0, 0, 0,
         0xff, 0xff, 0x3f, 0,
         0x00, 0x10,
     ])
@@ -193,6 +195,20 @@ func testDeviceScreenConfigurationCodecAndValidation() {
     assert(
         (try? DeviceScreenConfigurationCodec.encode(radioDocument, capabilities: productionCapabilities)) == nil,
         "production capabilities reject World Radio instances"
+    )
+    let elevationDocument = DeviceScreenConfigurationDocument(
+        defaultInstanceID: 7,
+        instances: [.defaults(id: 7, type: .elevation)]
+    )
+    assertEqual(
+        try? DeviceScreenConfigurationCodec.decode(DeviceScreenConfigurationCodec.encode(elevationDocument)),
+        elevationDocument, "Elevation survives the configurable-screen wire round trip"
+    )
+    assertEqual(elevationDocument.instances[0].name, "Elevation", "Elevation has a default screen name")
+    productionCapabilities.supportedScreenTypes &= ~ConfiguredDeviceScreenType.elevation.bit
+    assert(
+        (try? DeviceScreenConfigurationCodec.encode(elevationDocument, capabilities: productionCapabilities)) == nil,
+        "firmware without the Elevation screen rejects Elevation instances"
     )
     var navigation = DeviceScreenInstance.defaults(
         id: 1, type: .mapPlusNavigation, name: "Nav"

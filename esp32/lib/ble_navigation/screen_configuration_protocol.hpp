@@ -6,6 +6,7 @@
 #include "../utils/src/wireBytes.hpp"
 #include "ride_ble_protocol.generated.hpp"
 #include "../world_radio/world_radio_config.hpp"
+#include "../route_elevation/route_elevation_config.hpp"
 
 #include <array>
 #include <cstddef>
@@ -51,7 +52,8 @@ constexpr uint32_t SUPPORTED_SCREEN_TYPES =
     screenTypeBit(ScreenType::RideStats) |
     screenTypeBit(ScreenType::MapNavigation) |
     screenTypeBit(ScreenType::BatteryStatus) |
-    (world_radio_config::ENABLED ? screenTypeBit(ScreenType::WorldRadio) : 0);
+    (world_radio_config::ENABLED ? screenTypeBit(ScreenType::WorldRadio) : 0) |
+    (route_elevation_config::ENABLED ? screenTypeBit(ScreenType::Elevation) : 0);
 
 using RideStatsWidget = ride_ble_protocol_generated::RideStatsWidget;
 
@@ -218,7 +220,7 @@ inline bool isValidUtf8Name(const char *value, std::size_t length) {
 
 inline bool isSupportedScreenType(ScreenType type) {
   const uint8_t raw = static_cast<uint8_t>(type);
-  return raw <= static_cast<uint8_t>(ScreenType::WorldRadio) &&
+  return raw <= static_cast<uint8_t>(ScreenType::Elevation) &&
          (SUPPORTED_SCREEN_TYPES & (1UL << raw)) != 0;
 }
 
@@ -404,6 +406,7 @@ inline std::size_t payloadSize(ScreenType type) {
   case ScreenType::Navigation:
   case ScreenType::BatteryStatus:
   case ScreenType::WorldRadio:
+  case ScreenType::Elevation:
     return EMPTY_PAYLOAD_BYTES;
   }
   return 0;
@@ -450,6 +453,7 @@ inline bool encodePayload(Writer &writer, const ScreenInstance &instance) {
   case ScreenType::Navigation:
   case ScreenType::BatteryStatus:
   case ScreenType::WorldRadio:
+  case ScreenType::Elevation:
     return writer.byte(PAYLOAD_VERSION);
   }
   return false;
@@ -602,7 +606,8 @@ inline DecodeResult decodeDocument(const uint8_t *input, std::size_t length,
     }
     case ScreenType::Navigation:
     case ScreenType::BatteryStatus:
-    case ScreenType::WorldRadio: {
+    case ScreenType::WorldRadio:
+    case ScreenType::Elevation: {
       uint8_t version = 0;
       if (payloadLength != EMPTY_PAYLOAD_BYTES || !reader.byte(version) ||
           version != PAYLOAD_VERSION)

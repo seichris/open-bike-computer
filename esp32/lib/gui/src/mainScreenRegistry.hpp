@@ -3,6 +3,7 @@
 #include "mainScreenTypes.hpp"
 #include "../../ble_navigation/ride_ble_protocol.generated.hpp"
 #include "../../world_radio/world_radio_config.hpp"
+#include "../../route_elevation/route_elevation_config.hpp"
 
 #include <array>
 #include <cstddef>
@@ -19,10 +20,16 @@ struct Descriptor {
   const char *debugName;
 };
 
-inline constexpr std::array<Descriptor, world_radio_config::ENABLED ? 6 : 5> SCREENS{{
+inline constexpr std::size_t SCREEN_COUNT =
+    5 + (world_radio_config::ENABLED ? 1 : 0) + (route_elevation_config::ENABLED ? 1 : 0);
+
+inline constexpr std::array<Descriptor, SCREEN_COUNT> SCREENS{{
     {MAP_GUIDANCE, DeviceScreenId::MapPlusNavigation, true,
      "map guidance"},
     {RIDESTATS, DeviceScreenId::RideStats, false, "ride telemetry"},
+#if ROUTE_ELEVATION_SCREEN_ENABLED
+    {ELEVATION, DeviceScreenId::Elevation, false, "elevation"},
+#endif
     {MAP, DeviceScreenId::Map, true, "map"},
     {NAV, DeviceScreenId::Navigation, false, "navigation"},
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS

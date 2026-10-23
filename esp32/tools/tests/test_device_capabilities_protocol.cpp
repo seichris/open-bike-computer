@@ -124,7 +124,9 @@ int main() {
       0, extendedPower, true, output, extendedSize - 1, screens, sizeof(screens), 1) == 0);
   static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE == 2);
   static_assert(ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION == 31);
-  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 31);
+  static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE == 4);
+  static_assert(ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_MINIMUM_CLIENT_VERSION == 32);
+  static_assert(ride_ble_protocol_generated::CURRENT_CLIENT_VERSION == 32);
   // The friend-marker size flag shares the extended word with group riders.
   assert(device_capabilities_protocol::encodeCap2(
       0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),
@@ -133,6 +135,14 @@ int main() {
   const uint8_t friendScaleGolden[] = {3, 4, 3, 0, 0, 0};
   for (size_t index = 0; index < sizeof(friendScaleGolden); ++index)
     assert(output[30 + index] == friendScaleGolden[index]);
+  // Route elevation is extended bit 2, independent of the first word's bit 2.
+  assert(device_capabilities_protocol::encodeCap2(
+      0, extendedPower, true, output, sizeof(output), screens, sizeof(screens),
+      ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE) == extendedSize);
+  const uint8_t routeElevationGolden[] = {3, 4, 4, 0, 0, 0};
+  for (size_t index = 0; index < sizeof(routeElevationGolden); ++index)
+    assert(output[30 + index] == routeElevationGolden[index]);
+  assert(output[5] == 0 && output[6] == 0 && output[7] == 0 && output[8] == 0);
   const uint8_t power[] = {1, 4, 80};
   const size_t size = device_capabilities_protocol::encodeCap2(
       0x00003fff, power, true, output, sizeof(output));

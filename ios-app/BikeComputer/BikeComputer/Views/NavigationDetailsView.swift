@@ -340,6 +340,17 @@ struct RideMetricsPanel: View {
                     expandedNavigationMetrics
                 }
             }
+
+            if isNavigating, let elevation = coordinator.navigationElevation {
+                VStack(alignment: .leading, spacing: 14) {
+                    sheetSectionTitle("Elevation", systemImage: "mountain.2")
+                    NavigationElevationSection(
+                        presentation: elevation,
+                        onRetry: coordinator.retryNavigationElevation
+                    )
+                    .padding(.horizontal, 8)
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

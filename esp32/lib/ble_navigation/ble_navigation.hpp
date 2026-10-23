@@ -25,6 +25,7 @@
 #include "ride_ble_protocol.generated.hpp"
 #include "../world_radio/world_radio_protocol.hpp"
 #include "../world_radio/world_radio_config.hpp"
+#include "../route_elevation/route_elevation_config.hpp"
 
 // Forward declarations - actual NimBLE includes only in .cpp
 class NimBLEServer;
@@ -72,15 +73,20 @@ enum DeviceScreenSetting : uint8_t {
       static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::BatteryStatus),
   DEVICE_SCREEN_WORLD_RADIO =
       static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::WorldRadio),
+  DEVICE_SCREEN_ELEVATION =
+      static_cast<uint8_t>(ride_ble_protocol_generated::ScreenType::Elevation),
 };
 
 static constexpr uint8_t DEVICE_SCREEN_SUPPORTED_MASK =
     (1 << DEVICE_SCREEN_MAP) | (1 << DEVICE_SCREEN_NAVIGATION) |
     (1 << DEVICE_SCREEN_RIDE_STATS) | (1 << DEVICE_SCREEN_MAP_PLUS_NAVIGATION) |
     (1 << DEVICE_SCREEN_BATTERY_STATUS) |
-    (world_radio_config::ENABLED ? (1 << DEVICE_SCREEN_WORLD_RADIO) : 0);
+    (world_radio_config::ENABLED ? (1 << DEVICE_SCREEN_WORLD_RADIO) : 0) |
+    (route_elevation_config::ENABLED ? (1 << DEVICE_SCREEN_ELEVATION) : 0);
+// Extension screens are opt-in: existing riders keep their current cycle.
 static constexpr uint8_t DEVICE_SCREEN_DEFAULT_MASK =
-    DEVICE_SCREEN_SUPPORTED_MASK & ~(1 << DEVICE_SCREEN_WORLD_RADIO);
+    DEVICE_SCREEN_SUPPORTED_MASK & ~(1 << DEVICE_SCREEN_WORLD_RADIO) &
+    ~(1 << DEVICE_SCREEN_ELEVATION);
 
 static constexpr uint32_t MAP_VISIBILITY_BUILDINGS =
     map_profile_protocol::VISIBILITY_BUILDINGS;
@@ -312,6 +318,8 @@ public:
   WorkoutStartRequestPresentation workoutStartRequestPresentation() const;
   bool requestWorldRadio(const world_radio_protocol::Request &request);
   bool canRequestWorldRadio() const;
+  /** True while an authenticated owner session negotiated route elevation profiles. */
+  bool routeElevationSessionActive() const;
   bool notifyRideAutomationFrame(const uint8_t *data, size_t length,
       ride_command_admission::Authorization expected = {});
 

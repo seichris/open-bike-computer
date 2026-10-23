@@ -51,9 +51,8 @@ def sample_fixed_grid(native, native_valid, native_transform, grid, cancel):
     return result
 
 
-def audited_copernicus_pixels(dataset, cell: list[int]):
-    import numpy as np
-
+def validate_copernicus_dataset(dataset, cell: list[int]) -> str:
+    """Check the source raster contract without reading pixels; return registration."""
     if (dataset.count != 1 or dataset.crs is None or dataset.crs.to_epsg() != 4326
             or not 1 <= dataset.width <= 3601 or not 1 <= dataset.height <= 3601
             or dataset.dtypes != ("float32",)):
@@ -76,6 +75,15 @@ def audited_copernicus_pixels(dataset, cell: list[int]):
     nodata = dataset.nodata
     if nodata is not None and math.isinf(nodata):
         raise ValueError("infinite DEM no-data metadata")
+    return registration
+
+
+def audited_copernicus_pixels(dataset, cell: list[int]):
+    import numpy as np
+
+    registration = validate_copernicus_dataset(dataset, cell)
+    transform = dataset.transform
+    nodata = dataset.nodata
     native = dataset.read(1)
     valid = (dataset.read_masks(1) != 0) & np.isfinite(native)
     invalid_count = int(native.size - np.count_nonzero(valid))

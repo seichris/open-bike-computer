@@ -1072,7 +1072,7 @@ MaximumDocumentBytes: UInt16LE (=4096)
 ```
 
 Screen types are `0=Map`, `1=Navigation`, `2=Ride Stats`, `3=Map +
-Navigation`, and `4=Battery Status`. Multiple instances may use the same type.
+Navigation`, `4=Battery Status`, `5=World Radio` and `6=Elevation`. Multiple instances may use the same type.
 Each instance has a nonzero stable `UInt32` ID, an independent enabled flag and
 name, and type-specific payload. The ordered enabled instances define the
 device's tap/PWR-button cycle; `DefaultInstanceID` must identify an enabled
@@ -1348,8 +1348,9 @@ versioned workout zones. Version `28` requests bit `30`, topographic contours.
 Version `29` requests bit `31`, diagnostic terrain experiments. Version `30`
 requests the extended feature word (TLV type `3`), with bit `0` for group riders.
 Version `31` requests extended bit `1`, the shared friend-marker size (setting
-ID `39`).
-The current iPhone client negotiates version `31`; older direct Watch clients
+ID `39`). Version `32` requests extended bit `2`, route elevation profiles
+(`ELV1`, see [Route elevation profiles](#route-elevation-profiles-elv1-v1)).
+The current iPhone client negotiates version `32`; older direct Watch clients
 remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
@@ -1384,8 +1385,8 @@ persisted PWR honk configuration as
 exactly three bytes (`Enabled`, `SoundID`, `VolumePercent`). TLV type `2`
 carries the 14-byte screen-configuration limits and support masks. TLV type `3`
 carries exactly four bytes of little-endian extended feature flags, independently
-numbered from the first word. Its bit `0` is `group_riders_v1` and bit `1` is
-`friend_marker_scale_v1`; absent means zero. Firmware sets bit `1` whenever it
+numbered from the first word. Its bit `0` is `group_riders_v1`, bit `1` is
+`friend_marker_scale_v1` and bit `2` is `route_elevation_v1`; absent means zero. Firmware sets bit `1` whenever it
 can draw friends (`FIRMWARE_DIAGNOSTICS=1` with its portrait memory ready),
 independent of this session's group-rider relay, so a stored size can be
 changed before friends appear. Firmware without bit `1` ignores setting `39`.
@@ -2709,3 +2710,64 @@ line distance, distinct from the phone's confident same-route progress gap.
 Overlapping footprints show a count badge. Pan/zoom gestures hide the layer until
 the published projection is stable. The existing full-buffer/full-refresh display
 strategy is unchanged.
+
+## Route elevation profiles (ELV1 v1)
+
+CAP2 extended feature word (TLV type `3`) bit `2` (`route_elevation_v1`)
+requires client version `32`, an owner-authenticated session, ATT MTU of at
+least 100 and the PSRAM session state. Firmware compiles the transport and the
+optional Elevation screen (screen type `6`, legacy mask bit `6`) only where
+`ROUTE_ELEVATION_SCREEN_ENABLED` is set: today the 1.75-inch development
+(`FIRMWARE_DIAGNOSTICS=1`) profiles. Production and 2.06-inch builds advertise
+neither bit `2` nor screen type `6`. The screen is default-off and follows Ride
+Stats in the cycle. Scoped Watch sessions are rejected. See
+[Route elevation](route-elevation-profile.md) for the profile contract.
+
+The phone owns retrieval, processing, statistics and route matching. Firmware
+stages, validates and atomically activates a compact display profile, places
+the marker from the phone's along-route progress and shows phone-computed
+values; it never derives ascent or grade itself.
+
+All fields are little endian. Frames use the protected navigation
+characteristic; every frame starts with `ELV1`, version `1` (u8) and an
+operation (u8).
+
+| Op | Bytes after header | Meaning |
+| --- | --- | --- |
+| 1 state | token:u32, revision:u16, state:u8, reason:u8 | `0` cleared (token/revision may be 0), `1` loading, `2` unavailable, `3` failed. A non-ready state replaces any active profile. Reasons: `0` unspecified, `1` phone offline, `2` source not permitted, `3` service unavailable, `4` quota exhausted, `5` no coverage, `6` transfer failed, `7` route too long |
+| 2 begin | token:u32, revision:u16, transfer:u16, bodyLength:u16, chunkCount:u8, reserved:u8=0, crc32:u32 | Starts staging; a new token/revision binding shows loading |
+| 3 chunk | transfer:u16, index:u8, bytes | Strictly ordered, contiguous body bytes |
+| 4 commit | transfer:u16 | Validates length, chunk count, CRC-32 (IEEE), body and binding, then activates |
+| 5 progress | token:u32, revision:u16, sequence:u16, progress:u32 m (`0xFFFFFFFF` unknown), flags:u8, reserved:u8=0, elevation:i16 m, grade:i16 0.1 %, ascentRemaining:u16 m | Ignored unless it matches the active profile; repeated sequence ignored; progress clamps to the route length. Flags: on route, elevation valid, elevation estimated, grade valid, grade estimated, remaining valid, remaining is a lower bound |
+
+The body is a 32-byte header — version `1`, flags (stats complete, includes
+estimated, partial, ambiguous structures, ascent valid, range valid), source
+(`1` GPX, `2` hosted terrain, `3` internal DEM), point count (2–192), token,
+revision, coverage (per mille), route length (m), total ascent and descent (m),
+minimum and maximum elevation (i16 m), estimated distance (per mille) and a
+reserved zero u16 — followed by 7-byte points: distance:u32 m (non-decreasing,
+within the route length), elevation:i16 m (`-32768` unknown, otherwise
+−500…9000) and flags (grade band in bits 0–2, estimated bit 3, structure level
+unknown bit 4, bridge or tunnel bit 5). The largest body is 1,376 bytes in at
+most 64 chunks. The phone sends at most 160 points: min/max per bucket keeps
+peaks, valleys and gap boundaries, while totals always come from the canonical
+profile.
+
+Each BEGIN and COMMIT returns a protected 16-byte `EAK1`: magic:4, version:u8,
+op:u8, result:u8 (`0` applied, `1` stale, `2` malformed, `3` CRC mismatch,
+`4` incomplete, `5` unsupported), reserved:u8, token:u32, revision:u16,
+transfer:u16. A malformed BEGIN or COMMIT is acknowledged so the phone stops
+waiting; an unknown frame version answers op `1` with `unsupported`. A staged
+transfer expires after 10 seconds.
+
+The iPhone sends a STATE or a complete BEGIN…COMMIT batch atomically, uses a
+fresh random token per route and BLE session, takes a new nonzero revision for
+every content change, waits up to 6 seconds for COMMIT, retries at most three
+times with a new transfer ID and then sends `failed`/`transfer failed`.
+Progress follows only after an applied COMMIT, at most once per second when it
+changes and every 15 seconds otherwise. Stopping navigation sends `cleared`.
+Disconnect, authentication changes and ownership reset clear the device state.
+
+`protocol/fixtures/route-elevation-v1/transfer-v1.txt` holds golden bodies,
+frames, progress, state and acknowledgement bytes; the Swift encoder and the
+C++ decoder are both checked against them.

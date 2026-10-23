@@ -60,6 +60,8 @@ bash "${SCRIPT_DIR}/run-bluetooth-restoration-tests.sh"
 
 bash "${SCRIPT_DIR}/run-world-radio-tests.sh"
 
+bash "${SCRIPT_DIR}/run-route-elevation-tests.sh"
+
 CYCLING_SENSOR_OUT="${TMPDIR:-/tmp}/open-bike-cycling-sensor-tests"
 
 for CYCLING_SENSOR_TEST in CyclingSensorTests CyclingSensorObservationIntegrationTests; do

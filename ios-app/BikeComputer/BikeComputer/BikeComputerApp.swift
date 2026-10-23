@@ -67,6 +67,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     let routeLibrary: PhoneRouteLibrary
     let bicinoServiceSession: BicinoServiceSession
     let stravaIntegrationCoordinator: StravaIntegrationCoordinator
+    let routeElevationService: RouteElevationService
     let destinationStore: SavedDestinationStore
     let locationManager: CurrentLocationManager
     let rideDiagnosticsRecorder: RideDiagnosticsRecorder
@@ -159,6 +160,10 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             routeLibrary: routeLibrary,
             callbackScheme: callbackScheme
         )
+        routeElevationService = RouteElevationService(
+            fetcher: RouteElevationClient(serviceSession: bicinoServiceSession),
+            sidecars: routeLibrary
+        )
         super.init()
         social.live.prepareLocation = { [weak locationManager] in
             guard let locationManager else { return false }
@@ -224,6 +229,7 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         )
         _ = coordinator
         _ = rideAutomationCoordinator
+        coordinator.configureRouteElevation(routeElevationService)
         let bleManager = coordinator.bleManager
         social.bindBLE(bleManager)
 
