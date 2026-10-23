@@ -2,8 +2,8 @@ import CryptoKit
 import Foundation
 import Security
 
-/// Small secrets that let this app installation prove earlier social actions
-/// without an account token: its push installation secret and deletion receipts.
+/// App-private social installation proofs and consent metadata: push secrets,
+/// deletion receipts, invitations and remembered friend-sharing leases.
 @MainActor
 protocol SocialSecureStore: AnyObject {
     func read(_ key: String) throws -> Data?
