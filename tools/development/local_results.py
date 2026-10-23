@@ -29,7 +29,8 @@ NAMESPACE = "bicino-local-ci-v1"
 MAX_ENVELOPE = 700_000
 MAX_LOG = 8_000_000
 SHA = re.compile(r"[0-9a-f]{40}\Z")
-ERRORS = (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError, zlib.error)
+ERRORS = (OSError, ValueError, KeyError, IndexError, TypeError, AttributeError, StopIteration,
+          RuntimeError, subprocess.SubprocessError, zlib.error)
 
 
 def canonical(value):
