@@ -71,6 +71,7 @@ struct ContentView: View {
     
     @StateObject private var coordinator: BikeComputerCoordinator
     @StateObject private var mapViewControlState: MapViewControlState
+    @StateObject private var onlinePlaces = OnlinePOISearchSession()
     @StateObject private var offlineMapManager: OfflineMapManager
     @StateObject private var watchAvailability: WorkoutWatchAvailabilityMonitor
     @ObservedObject private var firmwareUpdateManager: FirmwareUpdateManager
@@ -469,8 +470,12 @@ struct ContentView: View {
         }
         .onChange(of: isSearchPanelExpanded) { isExpanded in
             if isExpanded { clearSavedRoutePreview() }
-            else { routeSearchInitialDestination = nil }
+            else {
+                routeSearchInitialDestination = nil
+                onlinePlaces.clear()
+            }
         }
+        .onDisappear { onlinePlaces.clear() }
         .onChange(of: savedRouteMapPreview?.identity) { identity in
             if identity == nil { synchronizeRideMetricsSheet() }
         }
@@ -548,6 +553,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) { newValue in
+            if newValue != .active { onlinePlaces.clear() }
             onApplicationActiveChange(newValue == .active)
             social.friendLive.setApplicationActive(newValue == .active)
             coordinator.setViewingMap(newValue == .active)
@@ -1992,6 +1998,8 @@ struct ContentView: View {
                 currentAddress: coordinator.currentAddress,
                 currentLocation: coordinator.currentLocation,
                 maxExpandedHeight: maxHeight,
+                onlinePlaces: onlinePlaces,
+                nearbySearchRegion: { mapViewControlState.mapView?.region },
                 initialDestination: routeSearchInitialDestination,
                 onStartNavigation: { source, destination, transport in
                     clearSavedRoutePreview()
@@ -2261,6 +2269,7 @@ struct ContentView: View {
         savedRoutePreviewBottomPadding: CGFloat?
     ) -> some View {
         let canSelectDestination = !coordinator.isNavigating && !offlineMapManager.isMapAreaSelectionActive
+            && !onlinePlaces.isActive
 
         return MapViewContainer(
             appearance: mapAppearance,
@@ -2279,7 +2288,7 @@ struct ContentView: View {
             isUserLocationAuthorized: coordinator.isLocationAuthorized,
             offlineMapSelectionFrame: selectionFrame,
             onMapTapped: {
-                if isSearchPanelExpanded {
+                if isSearchPanelExpanded && !onlinePlaces.isActive {
                     isSearchPanelExpanded = false
                 }
             },
@@ -2305,7 +2314,11 @@ struct ContentView: View {
             socialPhotos: social.photos,
             socialMarkerStyle: SocialMapMarkerStyle(
                 scale: .resolved(friendMarkerScale)
-            )
+            ),
+            onlinePOIItems: onlinePlaces.items,
+            selectedOnlinePOI: onlinePlaces.selectedItem,
+            isOnlinePOISearchActive: onlinePlaces.isActive,
+            onOnlinePOISelected: { onlinePlaces.select($0) }
         )
     }
 

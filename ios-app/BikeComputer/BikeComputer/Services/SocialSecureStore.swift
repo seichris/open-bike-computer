@@ -2,8 +2,9 @@ import CryptoKit
 import Foundation
 import Security
 
-/// Small secrets that let this app installation prove earlier social actions
-/// without an account token: its push installation secret and deletion receipts.
+/// App-private social installation proofs and consent metadata: push secrets,
+/// deletion receipts, invitations and remembered friend-sharing leases. Unlike the
+/// app container, these items can survive deleting and reinstalling the app.
 @MainActor
 protocol SocialSecureStore: AnyObject {
     func read(_ key: String) throws -> Data?
@@ -66,6 +67,70 @@ final class SocialMemoryStore: SocialSecureStore {
     private var values: [String: Data] = [:]
     func read(_ key: String) throws -> Data? { values[key] }
     func write(_ data: Data?, for key: String) throws { values[key] = data }
+}
+
+/// Names one app installation. Keychain items can outlive deleting the app but its
+/// container cannot, so consent bound to this marker never resumes after a reinstall.
+/// Rotating it disowns every record written under the previous value.
+@MainActor
+protocol SocialInstallationMarker: AnyObject {
+    func current() throws -> String
+    func rotate() throws -> String
+}
+
+/// A missing or damaged file starts a new installation; a protected or unreadable
+/// file is an error, so it is never silently replaced.
+@MainActor
+final class SocialInstallationFile: SocialInstallationMarker {
+    let url: URL
+    private var value: String?
+
+    init(url: URL? = nil) {
+        self.url = url ?? FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        )[0].appendingPathComponent("Social/installation-v1")
+    }
+
+    func current() throws -> String {
+        if let value { return value }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain
+            && error.code == NSFileReadNoSuchFileError {
+            return try rotate()
+        }
+        let stored = String(decoding: data, as: UTF8.self)
+        guard stored.count == 43 else { return try rotate() }
+        value = stored
+        return stored
+    }
+
+    func rotate() throws -> String {
+        let next = SocialSecret.make()
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // A restored backup must not revive an earlier installation's identity.
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableDirectory = directory
+        try mutableDirectory.setResourceValues(values)
+#if os(iOS)
+        try Data(next.utf8).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+#else
+        try Data(next.utf8).write(to: url, options: .atomic)
+#endif
+        value = next
+        return next
+    }
+}
+
+/// Process-only marker for builds without social riding and for tests.
+@MainActor
+final class SocialMemoryInstallation: SocialInstallationMarker {
+    private var value = SocialSecret.make()
+    func current() throws -> String { value }
+    func rotate() throws -> String { value = SocialSecret.make(); return value }
 }
 
 nonisolated enum SocialSecret {
