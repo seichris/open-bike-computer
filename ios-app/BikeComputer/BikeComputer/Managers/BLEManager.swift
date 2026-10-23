@@ -1148,6 +1148,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published var mapTransferActiveMapId: String = ""
     @Published var mapTransferActiveSessionId: String = ""
     @Published private(set) var activeDeviceMap: DeviceActiveMapDescriptor?
+    @Published private(set) var deviceMapLibrary: DeviceMapLibrary?
+    private var deviceMapLibraryPages = DeviceMapLibraryPages()
+    private(set) var lastMapLibraryRequestID = ""
     @Published private(set) var mapSelectionHealth: MapSelectionHealth?
     private var mapSelectionHealthProjection = MapSelectionHealthProjection()
     private var mapSelectionHealthDeviceID: String?
@@ -1247,6 +1250,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var deviceHasSDCard: Bool?
     @Published var deviceMapStateKnown = false
     @Published var deviceMapFoundForCurrentLocation: Bool?
+    @Published private(set) var supportsDeviceMapLibrary = false
     @Published var deviceMapBlockCount: Int = 0
     
     // MARK: - Map Settings (persisted for UI display)
@@ -6129,6 +6133,20 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     @discardableResult
+    func requestDeviceMapLibrary(_ action: String = "refresh", map: DeviceInstalledMap? = nil) -> Bool {
+        let requestID = (action == "select" || action == "remove") ? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased() : nil
+        guard isNavigationReady, !firmwareMaintenanceReconnectExpected,
+              authenticatedWriteSession != nil,
+              !mapTransferModeEnabled, deviceTransferMode.isEmpty,
+              action == "refresh" || (hasFreshMapTransferStatus && deviceMapLibrary?.known == true && deviceMapLibrary?.busy == false),
+              let packet = DeviceMapLibrary.command(action, map: map, requestID: requestID) else { return false }
+        let queued = sendTransferControlPacket(packet, label: "device map library \(action)",
+            coalescingKey: "transfer.map.library.\(action)")
+        if queued { lastMapLibraryRequestID = requestID ?? "" }
+        return queued
+    }
+
+    @discardableResult
     func requestMapOperationStatus(operationID: String) -> Bool {
         guard supportsMapOperationsV1,
               !firmwareMaintenanceReconnectExpected,
@@ -6864,6 +6882,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceHasSDCard = nil
         deviceMapStateKnown = false
         deviceMapFoundForCurrentLocation = nil
+        supportsDeviceMapLibrary = false
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
         authFlowState = .idle
@@ -6991,6 +7010,8 @@ class BLEManager: NSObject, ObservableObject {
     }
 
     private func clearTransferState() {
+        deviceMapLibrary = nil
+        deviceMapLibraryPages = DeviceMapLibraryPages()
         mapSelectionHealth = nil
         mapSelectionHealthProjection = MapSelectionHealthProjection()
         mapSelectionHealthDeviceID = nil
@@ -10070,6 +10091,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         deviceHasSDCard = nil
         deviceMapStateKnown = false
         deviceMapFoundForCurrentLocation = nil
+        supportsDeviceMapLibrary = false
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
         authFlowState = .idle
@@ -11752,7 +11774,24 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     }
 #endif
 
+    private func projectDeviceMapLibrary(_ page: DeviceMapLibrary?) {
+        guard let page else {
+            deviceMapLibrary = nil; deviceMapLibraryPages = DeviceMapLibraryPages(); return
+        }
+        let result = deviceMapLibraryPages.ingest(page)
+        deviceMapLibrary = result.library
+        if let offset = result.nextOffset,
+           isNavigationReady, authenticatedWriteSession != nil,
+           !firmwareMaintenanceReconnectExpected,
+           let packet = MapLibraryControlPacket.page(offset: offset) {
+            _ = sendTransferControlPacket(packet, label: "device map library page",
+                coalescingKey: "transfer.map.library.page")
+        }
+    }
+
     private func applyVerifiedMapTransferStatus(_ status: MapTransferDeviceStatus) {
+        if status.hasMapLibrary || status.mapLibrary != nil { supportsDeviceMapLibrary = true }
+        projectDeviceMapLibrary(status.mapLibrary)
         if let enabled = status.enabled {
             mapTransferModeEnabled = enabled
         }
@@ -11838,6 +11877,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         mapTransferActiveSessionId = object["activeSessionId"] as? String ?? ""
         activeMapManifestReceipt = object["activeManifestReceipt"] as? String ?? ""
         activeDeviceMap = DeviceActiveMapDescriptor(statusObject: object)
+        if let library = object["mapLibrary"],
+           let data = try? JSONSerialization.data(withJSONObject: library),
+           let decoded = try? JSONDecoder().decode(DeviceMapLibrary.self, from: data), decoded.isValid {
+            projectDeviceMapLibrary(decoded)
+        } else {
+            projectDeviceMapLibrary(nil)
+        }
         activeMapRendererFormat =
             (object["activeRendererFormat"] as? NSNumber)?.intValue
         activeMapLabelProfileVersion =

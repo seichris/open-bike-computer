@@ -1790,6 +1790,11 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | --- | --- | --- | --- |
 | `MTRN` | iOS -> ESP32 | `enter` | Enable short-lived map-transfer mode. |
 | `MTRN` | iOS -> ESP32 | `exit` | Disable map-transfer mode. |
+| `MTRN` | iOS -> ESP32 | `library` | Refresh the completed SD-map inventory without enabling Wi-Fi. |
+| `MTRN` | iOS -> ESP32 | `library-page\|offset` | Read four cached entries at offsets 0, 4, 8, ... without filesystem access. |
+| `MTRN` | iOS -> ESP32 | `library-auto` / `library-manual` | Legacy automatic/manual policy commands; current GPS updates only suggest maps. |
+| `MTRN` | iOS -> ESP32 | `library-select\|sessionID\|manifestReceipt` | Verify and select an exact completed installation; disables automatic selection. |
+| `MTRN` | iOS -> ESP32 | `library-remove\|sessionID\|manifestReceipt` | Remove an exact unselected installation, subject to recovery protection. |
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
 | `MSTC` | ESP32 -> iOS | Framed UTF-8 JSON chunk | Current map-transfer status notification. |
 | `DTRN` | iOS -> ESP32 | `enter\|map` | Preferred atomic map-mode entry; publishes both map status and generic device-transfer status. |
@@ -2709,3 +2714,116 @@ line distance, distinct from the phone's confident same-route progress gap.
 Overlapping footprints show a count badge. Pan/zoom gestures hide the layer until
 the published projection is stable. The existing full-buffer/full-refresh display
 strategy is unchanged.
+
+
+## Persistent SD map library
+
+See [Device map library](device-map-library.md) for lifecycle, limits, migration,
+and physical qualification. No BLE characteristic or UUID changes.
+
+Authenticated `MSTS` and `GET /map-transfer/status` include `mapLibrary`:
+
+```json
+{
+  "schemaVersion": 1,
+  "known": true,
+  "automatic": true,
+  "busy": false,
+  "revision": 1,
+  "error": "",
+  "selectedSessionID": "installed-session",
+  "commandID": "<32 lowercase hex characters of the last explicit command, or empty>",
+  "commandError": "",
+  "coverage": {
+    "known": true,
+    "currentCovered": false,
+    "blockX": 3299,
+    "blockY": 890,
+    "boundsMask": 1,
+    "selectedSessionID": "installed-session",
+    "suggestedSessionID": "another-installed-session"
+  },
+  "offset": 0,
+  "total": 1,
+  "maps": [{
+    "sessionID": "installed-session",
+    "mapID": "shanghai-map",
+    "manifestReceipt": "<64 lowercase hex characters>",
+    "signedManifestReceipt": "<64 lowercase hex characters, or empty for a legacy archive>",
+    "displayName": "Shanghai",
+    "payloadBytes": 1350000,
+    "available": true,
+    "boundsE7": [1210000000, 310000000, 1220000000, 320000000]
+  }]
+}
+```
+
+`coverage` is optional for backwards compatibility. It is a read-only storage-worker
+result, never a selection request or upload receipt. `known:false`, a busy/partial
+inventory, a changed `selectedSessionID`, or a different current GPS block makes
+the result unusable for prompting. `blockX` and `blockY` are signed Web Mercator
+meter coordinates truncated to int32 then shifted right by 12, matching renderer
+block addressing. `boundsMask` is a uint32 bitmap in assembled inventory order:
+bit i is set when the checked coordinate lies within map i's declared bounds.
+Clients recompute it for the current GPS fix, and the firmware re-probes when
+this membership changes even inside the same block. A known empty `suggestedSessionID` with `currentCovered:false`
+means no completed usable installation has a renderer block at that location;
+bounds alone cannot establish coverage. Pages must agree on the complete coverage
+object as well as revision. The GPS loop queues suggestions only and never moves
+the canonical selection. The landing-page confirmation opens Saved Maps; selecting
+there remains a separate explicit authenticated action.
+
+`automatic` is a legacy policy value; the app no longer exposes its toggle.
+`automatic` is false while a manual **Use** journal is unsettled, because that
+journal already pins the manual choice. `selectedSessionID` names only the root
+the renderer acknowledged; after a failed library switch it keeps naming the
+renderer's previous live map.
+
+`boundsE7` is optional. `payloadBytes` sums installed manifest payloads, excluding
+archive framing and filesystem allocation overhead. Inventory is boot/connection
+scoped, bounded to 32 maps, and not persistent evidence of a completed new upload.
+Unknown, busy, malformed, duplicate-session, or future-schema inventory cannot
+authorize app-side reuse. Exact signed reuse matches map ID, manifest receipt,
+and signed manifest receipt. Version changes require installation.
+
+Library commands require the existing owner-authenticated BLE envelope. Callbacks
+only enqueue bounded work; the storage worker dispatches filesystem work through
+the internal operation owner. Commands wait for map/firmware transfer mode to
+exit and reject unresolved durable map operations with `library_operation_pending`,
+except that removal may proceed while a *different* map's upload is Receiving or
+Prepared (removal frees space for it); that upload's own map and any Accepted
+activation still block it. Selection retains the prior
+map, rechecks file checksums and reader contracts, and uses the existing canonical
+pointer/readback/recovery mechanism. The renderer must acknowledge the new root
+before `selectedSessionID` identifies it as in use. Selection does not issue or
+rewrite an upload operation's Installed receipt. Removal cannot delete selected,
+rollback, transaction, selection-anchor or live-renderer roots.
+
+A durable `PUT /map-transfer/sessions/<session>/install-stream` refused before it writes payload, such
+as `stream_sd_full` (507) or `stream_storage_unavailable` (503) for a fresh
+attempt, resolves its own Receiving operation as `failed` and returns that receipt
+beside the error: `{"ok":false,"error":{"code":"stream_sd_full","message":"..."},
+"operation":{...,"phase":"failed",...}}`. Interrupted uploads with durable progress
+stay resumable, except for a full card. Reinstalling a damaged copy of the same
+signed version returns 409 `stream_repair_requires_removal`; a protected root or a
+different version in the same slot returns 409 `stream_session_conflict`. Neither
+overwrites the existing copy.
+
+
+BLE library inventory is paginated in four-map pages inside the existing MSTS
+chunk stream. `offset` and `total` describe the immutable cached inventory at
+`revision`; HTTPS returns the complete inventory at offset zero. The app requests
+subsequent cached pages only after assembling the current one, and restarts at
+zero if a revision, selection, policy, count, or ordering changes. Duplicate
+sessions or malformed pages are rejected. A partial or connection-stale inventory
+cannot drive reuse or removal. This keeps a full SD library from exceeding the
+255-chunk status limit at reduced ATT MTUs.
+
+Library follow-up semantics: `library-select|session|receipt|requestID` and
+`library-remove|session|receipt|requestID` accept an optional 32-lowercase-hex client
+request ID. `mapLibrary.commandID` / `commandError` echo only explicit command
+results; coverage probes do not overwrite them. Pages must also agree on these
+fields. `available:false` keeps a completed version with damaged payload files
+visible for removal while disabling reuse. Busy rejections and owner failures
+publish a revision and the exact request result. BLE status requests received
+while a chunk stream is active schedule a fresh snapshot after it finishes.

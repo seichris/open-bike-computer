@@ -79,7 +79,7 @@ public:
   esp_err_t acknowledgeFirmwareOperation(const receipt::Record &record);
   using MapOperation = void (*)(void *, const char *, bool);
   esp_err_t runMapActivation(MapOperation operation, void *context,
-                             const std::string &sessionId, bool automaticExit);
+                             const std::string &sessionId, bool automaticExit, bool *issued = nullptr);
 
 private:
   enum class Operation : uint8_t {
@@ -165,7 +165,7 @@ private:
                     const uint8_t *writeData = nullptr,
                     const std::string *networkSsid = nullptr,
                     const std::string *networkPassword = nullptr,
-                    TickType_t timeoutTicks = kCommandTimeoutTicks);
+                    TickType_t timeoutTicks = kCommandTimeoutTicks, bool *issued = nullptr);
   bool startLocked();
   static bool callerStackIsInternal();
   void run();

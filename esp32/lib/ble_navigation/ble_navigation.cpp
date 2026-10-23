@@ -178,6 +178,7 @@ static NimBLECharacteristic *mapTransferStatusCharacteristic = nullptr;
 static map_transfer_status_protocol::ChunkTransmission
     pendingMapTransferStatusChunks;
 static std::atomic<bool> pendingMapTransferStatusContinuation{false};
+static bool pendingMapTransferStatusRefresh = false;
 static std::atomic<bool> pendingMapAvailabilityStatus{false};
 static map_transfer_status_protocol::ChunkTransmission
     pendingDeviceTransferStatusChunks;
@@ -2848,7 +2849,10 @@ __attribute__((noinline)) static std::string composeMapTransferStatusJson(
 }
 
 static std::string mapTransferStatusJson() {
-  return composeMapTransferStatusJson(readActiveMapStatusSnapshot());
+  auto body = composeMapTransferStatusJson(readActiveMapStatusSnapshot());
+  body.pop_back();
+  body += ",\"mapLibrary\":" + mapTransferHttp.mapLibraryJson(true) + "}";
+  return body;
 }
 
 static std::atomic<bool> diagnosticsLiveRequested{false};
@@ -3182,6 +3186,7 @@ static void notifyMapTransferStatus(NimBLECharacteristic *pChar) {
     return;
   }
   if (pendingMapTransferStatusChunks.active()) {
+    pendingMapTransferStatusRefresh = true;
     pumpPendingMapTransferStatusChunks();
     return;
   }
@@ -3232,6 +3237,7 @@ static void pumpPendingMapTransferStatusChunks() {
   if (!bleSessionAuthenticated ||
       activeConnHandle == BLE_HS_CONN_HANDLE_NONE ||
       mapTransferStatusCharacteristic == nullptr) {
+    pendingMapTransferStatusRefresh = false;
     pendingMapTransferStatusChunks.reset();
     pendingMapTransferStatusContinuation.store(false,
                                                std::memory_order_release);
@@ -3255,6 +3261,10 @@ static void pumpPendingMapTransferStatusChunks() {
     pendingMapTransferStatusChunks.reset();
     pendingMapTransferStatusContinuation.store(false,
                                                std::memory_order_release);
+    if (pendingMapTransferStatusRefresh) {
+      pendingMapTransferStatusRefresh = false;
+      queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
+    }
   }
 }
 
@@ -4651,6 +4661,38 @@ static void handleMapTransferControlPayload(const uint8_t *data, size_t len,
     queueTransferControl(ble_transfer::Action::DisableMap,
                          ble_transfer::NotifyMap);
     Serial.println("BLE Map Transfer: exit queued");
+    return;
+  }
+
+  if (command.compare(0, 13, "library-page|") == 0) {
+    const auto offset = command.substr(13);
+    if (!offset.empty() && offset.size() <= 2 &&
+        std::all_of(offset.begin(), offset.end(), [](char c) { return c >= '0' && c <= '9'; }))
+      (void)mapTransferHttp.requestMapLibraryPage(static_cast<size_t>(std::atoi(offset.c_str())));
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
+    return;
+  }
+
+  if (command == "library" || command == "library-auto" || command == "library-manual") {
+    const auto action = command == "library" ? "refresh" :
+        (command == "library-auto" ? "auto" : "manual");
+    if (!mapTransferHttp.requestMapLibrary(action))
+      mapTransferHttp.setLastError("library_busy", "map library is busy");
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
+    return;
+  }
+  const auto first = command.find('|');
+  const auto second = first == std::string::npos ? std::string::npos : command.find('|', first + 1);
+  const auto third = second == std::string::npos ? std::string::npos : command.find('|', second + 1);
+  if (second != std::string::npos && (third == std::string::npos || command.find('|', third + 1) == std::string::npos) &&
+      (command.substr(0, first) == "library-select" || command.substr(0, first) == "library-remove")) {
+    const auto action = command.substr(0, first) == "library-select" ? "select" : "remove";
+    if (!mapTransferHttp.requestMapLibrary(action,
+        command.substr(first + 1, second - first - 1),
+        command.substr(second + 1, third == std::string::npos ? std::string::npos : third - second - 1),
+        third == std::string::npos ? "" : command.substr(third + 1)))
+      mapTransferHttp.setLastError("library_busy", "map library command was not accepted");
+    queueTransferControl(ble_transfer::Action::None, ble_transfer::NotifyMap);
     return;
   }
 

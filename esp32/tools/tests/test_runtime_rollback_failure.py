@@ -50,6 +50,11 @@ public:
   std::string rollbackOperationID_, terminalOperationID_, terminalSessionID_, terminalMapID_;
   bool terminalAutomaticExit_ = false, terminalFailed_ = false;
   bool operationStatusNotification_ = false;
+  bool libraryAutomaticBlockKnown_ = true;
+  bool libraryCoverageKnown_ = true;
+  uint32_t libraryRetryAfterMs_ = 123;
+  bool rollbackFromLibrary_ = false;
+  std::string libraryAction_;
   bool rollbackAutomaticExit_ = false;
   bool rollbackSucceeded_ = false;
   bool rollbackComplete_ = false;
@@ -72,6 +77,8 @@ int main() {
   server.selectionHealth_.degrade("/maps/new");
   server.selectionHealth_.beginRollback();
   server.executeRollback();
+  if (server.libraryAutomaticBlockKnown_ || server.libraryCoverageKnown_ ||
+      server.libraryRetryAfterMs_) return 5;
   if (!server.rollbackComplete_ || server.rollbackSucceeded_ ||
       server.selectionHealth_.state != "rollback_failed" ||
       server.selectionHealth_.affectedOperationID != "installed-operation") return 1;
@@ -81,6 +88,8 @@ int main() {
   success.selectionHealth_.degrade("/maps/new");
   success.selectionHealth_.beginRollback();
   success.executeRollback();
+  if (success.libraryAutomaticBlockKnown_ || success.libraryCoverageKnown_ ||
+      success.libraryRetryAfterMs_) return 6;
   if (!success.rollbackComplete_ || !success.rollbackSucceeded_ ||
       success.selectionHealth_.state != "unknown" ||
       success.selectionHealth_.affectedOperationID != "installed-operation") return 2;
