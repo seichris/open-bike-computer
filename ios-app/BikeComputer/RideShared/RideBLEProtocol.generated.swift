@@ -175,6 +175,7 @@ nonisolated enum RideBLELegacyScreenV1: Int, CaseIterable, Codable, Sendable {
     case mapPlusNavigation = 3
     case batteryStatus = 4
     case worldRadio = 5
+    case elevation = 6
 
     var wireType: RideBLEScreenTypeV1 {
         switch self {
@@ -184,6 +185,7 @@ nonisolated enum RideBLELegacyScreenV1: Int, CaseIterable, Codable, Sendable {
         case .mapPlusNavigation: return .mapPlusNavigation
         case .batteryStatus: return .batteryStatus
         case .worldRadio: return .worldRadio
+        case .elevation: return .elevation
         }
     }
 }

@@ -105,8 +105,8 @@ func testDeviceScreenConfigurationCodecAndValidation() {
     }
     assertEqual(
         zoneCapabilities.supportedScreenTypes,
-        0x3f,
-        "older native-zone firmware does not advertise Nearby"
+        0x7f,
+        "native-zone firmware with Elevation (bit 6) does not advertise Nearby (bit 7)"
     )
     assert(
         !legacyCapabilities.supports(.nearby) &&
