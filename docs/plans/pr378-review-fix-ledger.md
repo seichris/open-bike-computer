@@ -1,5 +1,80 @@
 # PR #378 review fixes
 
+## October 23 main integration (route elevation and device map library)
+
+Mode: publish. Scoped update requested by the user: merge current `main` into
+the existing PR branch, resolve conflicts, verify, push; no PR merge, flash,
+install, deployment, hardware/serial access, 206 build or shipping POI
+enablement. The four generated ESP32 SDK/bootstrap files remain never-stage.
+
+- Published PR head before the update: `b64ca6c79b5d0b9a7ecd6e752afd9da3917e4e40`.
+- Integrated main: `b84e68543ac5aa402ae55ecfe3d34439d14786ff` (34 commits:
+  shared route elevation #620, SD map library and coverage selection #618,
+  iPhone online nearby places #615, friend-sharing resume/hardening #619/#621).
+- Merge commit: `f5a8387a89659bb8f51f5df8710f8690ea50db63`; follow-up
+  `2edf8896f6320e6bd9bbd18347299f279b1cf1c7` (legacy Elevation enum); main's
+  later development promotion `b576d2f04d6969fba241c120a917719e87232529`
+  merged as `bf56baedb379f40e217a12cd8114e2a201065f79`. Normal merges and
+  fast-forward pushes only; no history rewrite or force push.
+
+| ID | Priority | Trigger, fix and verification | State |
+| --- | --- | --- | --- |
+| R32 | P1 | Main's released route elevation owns CAP2 extended bit 2/client 32 and screen type 6, the same values as the unpublished POI/Nearby allocation; a merged build would have read route-elevation firmware as POI-capable and mapped Nearby onto Elevation. POIs move to extended bit 3/client 33 and Nearby to screen type 7 (tile 9); the client version is 33; both bindings and the pinned-LVGL preview metadata are regenerated. Firmware and iOS tests cover bit/client separation, combined words, route-elevation-only firmware receiving no POI bits, and the 175 diagnostics+POI matrix where Elevation and Nearby coexist | fixed; firmware host verified, iOS/CI pending |
+
+Conflict resolutions (23 files):
+
+- Contract, generated C++/Swift bindings, `docs/ble-protocol.md`: keep main's
+  route elevation; add `map_pois` bit 3/client 33 and `nearby: 7`.
+- Firmware screens (`ble_navigation.*`, `screen_configuration*`,
+  `mainScreenTypes.hpp`, `mainScreenRegistry.hpp`, `mainScr.cpp`): enumerate
+  both Elevation and Nearby; masks stay one byte (Nearby is bit 7). Both screens
+  are opt-in: the registry default mask now also excludes Elevation, matching
+  main's `DEVICE_SCREEN_DEFAULT_MASK`. R21 stored-document normalization still
+  applies to Nearby only; Elevation keeps main's own downgrade behavior.
+- `map_transfer_http.hpp`/`main.cpp`: keep both the renderer health probes and
+  main's stream free-space probe. `test_map_transfer.cpp`: run both POI and
+  map-library tests.
+- iOS model/view/tests: add `.nearby` beside `.elevation`; update pinned screen
+  types, client version and CAP2 fixtures (POIs are extended byte `0x08`).
+  The first local Swift helper run exposed that the regenerated legacy
+  screen enum dropped main's Elevation (used by BLEManager's legacy screen
+  settings); `2edf8896` keeps the six original screens plus Elevation and
+  leaves Nearby wire-only, and fixes the native-zone capability fixture.
+- `tools/development/checks.json`: keep the PR's `python3` fix and main's
+  map-library control test; add the diagnostics+POI registry and
+  screen-configuration variants to the Nearby feature-gate check.
+
+Reviewed auto-merged interactions: main's map library activates a selected
+installed map through the same renderer activation as transfers. R30's
+transient POI metadata failure reports a failed activation; the previous map
+stays active, a transfer rolls back and a library candidate is excluded only
+until the next library command clears `libraryRejectedSessions_`. POI-disabled
+firmware omits installed target-5 maps from the library (manifest rejected)
+rather than deleting them. R29 routing still selects the native OSM gate for
+backend shard changes. R31's generation/shutdown-aware retry is unchanged.
+
+Verification: local, on the exact merge `f5a8387a` unless noted.
+
+- `tools/dev-check` (auto, fast): 55 checks passed with `sourceUnchanged=true`,
+  including every firmware host check (Nearby query/lifecycle/layout/feature
+  gate, screen configuration, registry, device capabilities, map transfer,
+  route elevation). Failed: Swift helper tests (the legacy-enum compile error
+  fixed in `2edf8896`) and OSM extraction (host venv lacks `shapely`, `osmium`,
+  `freetype`). Blocked: map backend tests (no `map-platform/backend/.venv`;
+  not created, to avoid installing packages).
+- OSM suite with the dependency-capable Python 3.11: 181 tests, 179 pass; the
+  two native OGR tests abort because this Mac's Homebrew `ogr2ogr` lacks
+  `libx265`. CI runs them in the product tools image.
+- Backend unit tests with Python 3.11: 978 run, 54 skipped, 7 import errors
+  (`rasterio` x5 terrain, `sqlalchemy` x2 social) - missing optional extras,
+  not merge regressions. Deployment: 61 pass. CI installs the full extras.
+- Registry flag matrix (default, diagnostics, POI, Elevation, POI+Elevation,
+  175 diagnostics+POI) and capability/contract-reuse tests pass; the pinned
+  LVGL preview `--check` and fast preview test pass.
+- The iOS fast re-run after `2edf8896`, exact-head CI and the enabled-175
+  padded binary/reserve result are recorded in the PR description; earlier
+  `b64ca6c7` artifacts (3,045,056 bytes) are not relabeled for this head.
+
 ## October 23 Claude review follow-up
 
 Mode: publish. Profile: standard. Strategy: sequential-local, zero subagents.

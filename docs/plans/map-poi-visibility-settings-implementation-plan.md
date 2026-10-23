@@ -39,6 +39,50 @@ or enabled merely because it exists in the branch.
 
 ## Baseline
 
+### October 23 main integration: route elevation and device map library
+
+Integrate GitHub `main` through `b84e68543ac5aa402ae55ecfe3d34439d14786ff`
+into the published head `b64ca6c79b5d0b9a7ecd6e752afd9da3917e4e40` (normal
+merge `f5a8387a89659bb8f51f5df8710f8690ea50db63`), then main's later
+development promotion `b576d2f04d6969fba241c120a917719e87232529` (merge
+`bf56baedb379f40e217a12cd8114e2a201065f79`). Main adds shared route
+elevation (#620), the SD map library with coverage-based selection (#618),
+iPhone online nearby places in destination search (#615) and friend-sharing
+resume/hardening (#619/#621).
+
+Route elevation is released on main with CAP2 **extended bit 2/client 32**
+and screen type **6** (`Elevation`, tile 8). Those values were this branch's
+unpublished POI allocation, so POIs/Nearby move again, without an alias:
+**extended bit 3/client 33**, Nearby **screen type 7** and GUI tile 9. The
+current client version is 33; bit 2 means route elevation only, and versions
+31/32 cannot negotiate POIs. Earlier development POI apps/firmware must be
+upgraded together. Both bindings and the pinned-LVGL Ride Stats preview
+metadata are regenerated; the preview atlas pixels are unchanged. The iPhone
+legacy screen-settings enum keeps main's Elevation, while Nearby remains a
+configurable-screen wire type only.
+
+Elevation and Nearby coexist in 175 diagnostics builds with POIs enabled
+(`WAVESHARE_AMOLED_175_REMOTE_DEBUG`). Both stay opt-in: the legacy
+enabled-screens default and the registry default mask exclude World Radio,
+Elevation and Nearby. Stored documents still drop Nearby only when the
+runtime lacks it (R21); Elevation keeps main's own downgrade behavior.
+
+The device map library activates a selected installed map through the same
+renderer activation as transfers. A transient POI metadata failure (R30)
+reports a failed activation: the previous map stays active, a transfer rolls
+back, and a library candidate is excluded only until the next library command.
+POI-disabled firmware omits installed target-5 maps from the library because
+their manifests are rejected; it does not delete them. R29 routing, R30
+transactional activation and R31 generation-aware retry are otherwise
+unchanged. The normative POI allocation in this plan is now extended bit
+3/client 33 and screen type 7; older sections record historical checkpoints.
+
+Local verification and the fresh exact-head CI, enabled-175 size/reserve and
+remaining gates are recorded in the review ledger and PR description. The
+3 MiB slots, 65,536-byte reserve and POI-disabled shipping profiles are
+unchanged; no 206 build, flash, installation, deployment or merge is part of
+this integration.
+
 ### October 23 Claude review follow-up
 
 The clean `c6181a70` baseline passes all 18 PR checks and the branch-bound
@@ -107,8 +151,9 @@ Main now owns extended CAP2 bit 1/client 31 for shared friend-marker sizing
 (setting 39). Preserve that released assignment and move POIs/Nearby to
 **extended bit 2/client 32**. Regenerate both BLE bindings and native preview
 metadata; retain tests for each independent capability and their combination.
-The older allocations below describe historical checkpoints only; the current
-normative allocation is bit 2/client 32 throughout this plan.
+The older allocations below describe historical checkpoints only. The October 23
+main integration supersedes bit 2/client 32 with **extended bit 3/client 33**
+and Nearby screen type 7.
 
 The prior head's October 22 CI completed all 18 checks successfully, including
 all five 175 firmware profiles, iOS Debug/Release builds, simulator/fast tests,
@@ -268,8 +313,8 @@ reaches undownloaded geography rather than reporting a false empty search.
 The feature remains **off by default** with
 `MAP_POIS_RUNTIME_ENABLED=0` in ordinary and production profiles. Both
 `*_REMOTE_DEBUG` development profiles opt in for hardware qualification and
-advertise CAP2 extended bit 2 only when the configurable-screen subsystem is ready
-for client version 32 or newer. Prior exact-head iOS qualification and 1.75-inch
+advertise CAP2 extended bit 3 only when the configurable-screen subsystem is ready
+for client version 33 or newer. Prior exact-head iOS qualification and 1.75-inch
 CI builds passed; the coverage change requires new exact-head checks, and
 physical acceptance on both board families is still required. The user
 identified the connected board as Waveshare 1.75-inch for build-only validation.
@@ -277,7 +322,7 @@ This does not authorize a flash or qualify a physical device, and no 2.06-inch
 build is authorized for this review run.
 
 The integrated allocation is target 5/FMB v6, visibility bits 18-22,
-and CAP2 extended bit 2/client 32. Current main's terrain sidecar and
+and CAP2 extended bit 3/client 33. Current main's terrain sidecar and
 visibility assignments remain intact; they are not POI format reservations.
 
 At the recorded `main` baseline, the missing pieces were point extraction,
@@ -295,7 +340,7 @@ visibility bit 13, and CAP2 bit 26 to POIs. Current main assigns those
 identifiers to topographic contours and configurable screens. The integrated
 branch has migrated the golden vectors, generated BLE files, manifests,
 readers, policies, and tests to target 5 / FMB v6 section 6, visibility bits
-18-22, and CAP2 extended bit 2. Never accept both meanings behind the same version:
+18-22, and CAP2 extended bit 3. Never accept both meanings behind the same version:
 already-created target-4 artifacts and old clients would become ambiguous.
 
 ### 3 MiB production application budget
@@ -562,10 +607,10 @@ business details without requiring them for offline category discovery.
 5. Use 32-bit visibility bits 18-22 in each configurable screen's map profile.
    Reuse setting IDs `8` and `20` for the legacy profile path. Do not allocate
    five new setting IDs or maintain a second authoritative per-instance store.
-6. Reserve CAP2 extended bit 2 / minimum client version 32 for the complete target-5
+6. Reserve CAP2 extended bit 3 / minimum client version 33 for the complete target-5
    reader/render/settings/Nearby contract. Capability presence means the firmware
    can validate and render both defined target-5 variants, query its POI index,
-   and understands visibility bits 18-22. Nearby screen type 6 is additionally
+   and understands visibility bits 18-22. Nearby screen type 7 is additionally
    advertised through the existing configurable-screen type mask. Do not alter
    the meanings of CAP2 bits 26 or 30.
 7. Classify POIs during map generation. Firmware never parses raw OSM tags.
@@ -1211,7 +1256,7 @@ or every source POI.
 
 ### Capability
 
-Add `map_pois` at CAP2 extended bit 2 with minimum client version 32 in
+Add `map_pois` at CAP2 extended bit 3 with minimum client version 33 in
 `protocol/ride-ble-contract-v1.json`, then regenerate the Swift and C++ protocol
 files. Update capability golden vectors and Watch/iPhone compatibility tests.
 Encode this bit only in the extended feature TLV (type 3), alongside but
@@ -1389,11 +1434,11 @@ plan. It is not completed by this documentation refresh.
    golden artifacts. Keep current main's FMB v5 contour contract, schema-v2
    generation policy, generated BLE mappings, and target-4 companion path.
 3. Migrate the existing POI extractor, writer, backend, firmware, iPhone, and
-   tests to target 5/FMB v6/section 6, bits 18-22, CAP2 extended bit 2/client 32.
+   tests to target 5/FMB v6/section 6, bits 18-22, CAP2 extended bit 3/client 33.
    Audit every numeric `>= 4` or `== 4` format check for feature meaning,
    every configurable-screen allowed/render mask, and all early reuse paths.
    Implement the combined/no-elevation discriminated contract, FPI1 index,
-   requested-feature policy, and Nearby screen type 6 as new work: these are
+   requested-feature policy, and Nearby screen type 7 as new work: these are
    not supplied by renumbering the original visibility-only implementation.
 4. Preserve target-4 topography, FME terrain sidecars, and visibility bits
    14-17. Keep POI format/capability assignments separate from the terrain
@@ -1411,7 +1456,7 @@ plan. It is not completed by this documentation refresh.
 
 1. Add `docs/fmb-v6-pois.md`, category/bit mappings, target-5 manifest rules, and
    BLE capability documentation. Specify combined-layer availability, requested
-   features, FPI1 bytes/limits, and screen type 6 with its payload.
+   features, FPI1 bytes/limits, and screen type 7 with its payload.
 2. Add synthetic OSM fixtures containing point, way, relation, lifecycle,
    overlap-precedence, boundary, invalid-geometry, and dense-block cases.
 3. Add cross-language FMB v6, FPI1, and manifest golden vectors for combined,
@@ -1442,7 +1487,7 @@ limit fixtures fail with typed errors.
 1. Add signed target-5/FMB v6 install validation and runtime decode.
 2. Add bounded POI selection, collision, icons, street-label reservations, and
    diagnostics.
-3. Add visibility bits, NVS defaults, render invalidation, and CAP2 extended bit 2
+3. Add visibility bits, NVS defaults, render invalidation, and CAP2 extended bit 3
    without changing contour bit 13 or configurable-screen bit 26.
    Include the screen-document allowed mask and runtime render mask.
 4. Add Nearby picker/result state, worker-owned nearest search, edge indicators,
@@ -1753,7 +1798,7 @@ while explicit POI and active target-5 regeneration fail closed.
 | Firmware format/install | `mapBlockFormat.*`, `map_stream_parser.cpp`, `map_transfer.*`, parser/install tests |
 | Firmware render | new POI block/layout/icon helpers, `maps.hpp`, `maps.cpp`, renderer diagnostics/tests |
 | Nearby discovery | new FPI1 writer/readers and pure nearest-query/perimeter-layout helpers, existing single map worker, activation/status metadata |
-| Nearby screen | `mainScreenTypes.hpp`, `mainScreenRegistry.hpp`, main-screen controller/UI, generated screen type 6, configuration payload models and tests |
+| Nearby screen | `mainScreenTypes.hpp`, `mainScreenRegistry.hpp`, main-screen controller/UI, generated screen type 7, configuration payload models and tests |
 | BLE/profile | `protocol/ride-ble-contract-v1.json`, generated protocol files, `map_profile_protocol.hpp`, `screen_configuration_protocol.hpp`, `screen_configuration.cpp`, persistence/redraw tests, `ble_navigation.*`, `docs/ble-protocol.md` |
 | iPhone | `DeviceScreenConfiguration.swift`, `DeviceScreenConfigurationController.swift`, `DeviceScreensSettingsView.swift`, legacy `BLEManager.swift`/`SettingsView.swift`, offline-map models/manager, screen-configuration and navigation tests |
 | Shared validation | `tools/development/checks.json`, `swift-sources.json`, `protocol/scenarios/` where relevant, development reports and build evidence |
