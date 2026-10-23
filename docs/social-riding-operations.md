@@ -544,7 +544,10 @@ consent. This installation remembers explicitly enabled outgoing consents in its
 app-private, device-only Keychain, scoped to the authenticated account. On a
 foreground relaunch it resumes only after a snapshot confirms the same epoch,
 friendship and original server deadline. It never creates or extends a lease to
-resume. Offline launches wait for server validation; sign-out/account switches,
+resume. Offline launches retry validation independently of capability discovery.
+Saved selections stay on with a waiting status until validated, and can be
+switched off while offline (including Stop all before friend names have loaded).
+Sign-out/account switches,
 revocation and expiry clear remembered recipients. Another device's server
 consents alone cannot start publication. Reserved sequence blocks survive a
 force-close without retaining location fixes. Local Stop durably removes the recipient before any

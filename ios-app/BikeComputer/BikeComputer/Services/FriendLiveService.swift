@@ -8,6 +8,7 @@ import Foundation
 final class FriendLiveService: ObservableObject {
     @Published private(set) var riders: [SocialRider] = []
     @Published private(set) var sharingIDs: Set<String> = []
+    @Published private(set) var pendingIDs: Set<String> = []
     @Published private(set) var busyIDs: Set<String> = []
     @Published private(set) var isSharing = false
     @Published private(set) var error: String?
@@ -87,6 +88,7 @@ final class FriendLiveService: ObservableObject {
                 self.error = "Your previous friend sharing could not be restored. Turn sharing on again."
             }
         }
+        updateSharing()
         // Authentication can recover while capability discovery is offline.
         // Only this phone's earlier explicit consents may start retrying then;
         // a successful snapshot still gates all GPS restoration/publication.
@@ -181,8 +183,12 @@ final class FriendLiveService: ObservableObject {
     }
 
     private func updateSharing() {
-        let ids = Set(leases.keys)
+        // The toggle represents the rider's saved choice, including a paused
+        // restoration they may want to turn off while the network is unavailable.
+        let ids = Set(remembered.keys)
         if sharingIDs != ids { sharingIDs = ids }
+        let pending = ids.subtracting(leases.keys)
+        if pendingIDs != pending { pendingIDs = pending }
         if isSharing != !leases.isEmpty { isSharing = !leases.isEmpty }
     }
 
@@ -319,7 +325,7 @@ final class FriendLiveService: ObservableObject {
         remembered = [:]; persistRemoval(); owner = nil; persisted = nil
         generation = UUID(); task?.cancel(); task = nil
         enabled = false; pollingGeneration = UUID()
-        leases = [:]; sharingIDs = []; busyIDs = []; isSharing = false
+        leases = [:]; sharingIDs = []; pendingIDs = []; busyIDs = []; isSharing = false
         riders = []; latestLocation = nil; error = nil; lastPublished = nil
         lastPublicationAttempt = nil
         progress = SharedRideProgress(); sequence = 0; reservedSequence = 0

@@ -250,16 +250,31 @@ struct FriendLiveServiceTests {
         let offline = make(offlineNetwork, offlineStore)
         offline.start(owner: "alice", restoringOnly: true); await settle()
         check(!offline.isSharing, "offline relaunch cannot send before server revalidation")
+        check(offline.sharingIDs == ["bob"] && offline.pendingIDs == ["bob"], "a remembered selection remains switchable while offline")
         check(offlineNetwork.snapshotReads > 1, "remembered sharing retries independently of unavailable capability discovery")
         offlineNetwork.snapshotFailure = nil
         await offline.tick()
         check(offline.sharingIDs == ["bob"], "pending restoration retries when the server is reachable")
+        check(offline.pendingIDs.isEmpty, "a validated stream clears its waiting status")
         offlineNetwork.consentFailure = URLError(.notConnectedToInternet)
         do { try await offline.setSharing(false, with: "bob"); preconditionFailure("offline revocation should report the network failure") }
         catch is URLError { }
         let stopped = make(offlineNetwork, offlineStore)
         stopped.start(owner: "alice"); await settle()
         check(!stopped.isSharing && offlineStore.values.isEmpty, "offline Stop is durable despite a still-active server lease")
+
+        let (pendingNetwork, pendingStore, _) = try await seed()
+        pendingNetwork.snapshotFailure = URLError(.notConnectedToInternet)
+        pendingNetwork.consentFailure = URLError(.notConnectedToInternet)
+        let pending = make(pendingNetwork, pendingStore)
+        pending.start(owner: "alice", restoringOnly: true); await settle()
+        check(pending.pendingIDs == ["bob"] && !pending.isSharing, "offline selection is waiting without GPS")
+        do { try await pending.setSharing(false, with: "bob"); preconditionFailure("offline Stop reports the request failure") }
+        catch is URLError { }
+        pendingNetwork.snapshotFailure = nil; pendingNetwork.consentFailure = nil
+        await pending.tick()
+        check(pending.sharingIDs.isEmpty && !pending.isSharing && pendingStore.values.isEmpty,
+              "turning off a pending selection prevents restoration when connectivity returns")
 
         let emptyNetwork = FriendNetwork(), emptyStore = FriendPersistence()
         let empty = make(emptyNetwork, emptyStore)
