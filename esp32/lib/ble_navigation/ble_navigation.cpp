@@ -40,6 +40,7 @@ extern Power power;
 #include "ride_delivery_protocol.hpp"
 #include "screen_configuration.hpp"
 #include "authenticated_workout_telemetry.hpp"
+#include "../route_elevation/route_elevation_runtime.hpp"
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 #include "../world_radio/world_radio_runtime.hpp"
 #endif
@@ -149,6 +150,7 @@ static std::atomic<bool> bleSessionSupportsRideDiagnostics{false};
 static std::atomic<bool> bleSessionSupportsRideDeliveryAck{false};
 static std::atomic<bool> bleSessionSupportsWorkoutZones{false};
 static std::atomic<bool> bleSessionSupportsGroupRiders{false};
+static std::atomic<bool> bleSessionSupportsRouteElevation{false};
 #if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
 static std::atomic<bool> bleSessionSupportsWorldRadio{false};
 #endif
@@ -835,7 +837,7 @@ bool BLENavigationServer::requestWorkoutStart() {
 }
 
 static uint8_t deviceScreenBit(uint8_t screen) {
-  return (screen <= DEVICE_SCREEN_WORLD_RADIO) ? (1 << screen) : 0;
+  return (screen <= DEVICE_SCREEN_ELEVATION) ? (1 << screen) : 0;
 }
 
 static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
@@ -846,7 +848,7 @@ static uint8_t normalizedEnabledScreensMask(int32_t rawMask) {
 static uint8_t normalizedDefaultScreen(int32_t rawDefault,
                                        uint8_t enabledScreensMask) {
   uint8_t defaultScreen =
-      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_WORLD_RADIO
+      rawDefault >= 0 && rawDefault <= DEVICE_SCREEN_ELEVATION
           ? (uint8_t)rawDefault
           : (uint8_t)DEVICE_SCREEN_MAP_PLUS_NAVIGATION;
   if (enabledScreensMask & deviceScreenBit(defaultScreen)) {
@@ -866,6 +868,9 @@ static uint8_t normalizedDefaultScreen(int32_t rawDefault,
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_WORLD_RADIO)) {
     return DEVICE_SCREEN_WORLD_RADIO;
+  }
+  if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_ELEVATION)) {
+    return DEVICE_SCREEN_ELEVATION;
   }
   if (enabledScreensMask & deviceScreenBit(DEVICE_SCREEN_BATTERY_STATUS)) {
     return DEVICE_SCREEN_BATTERY_STATUS;
@@ -1418,6 +1423,8 @@ static bool decodeSessionPayload(
     clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
     bleSessionSupportsExplicitInvalidGpsHeading.store(false,
                                                       std::memory_order_release);
     bleSessionSupportsRendererDiagnostics.store(false,
@@ -2247,6 +2254,8 @@ static void handleAuthPayload(const std::string &frame) {
       clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
       bleSessionSupportsExplicitInvalidGpsHeading.store(
           false, std::memory_order_release);
       bleSessionSupportsRendererDiagnostics.store(false,
@@ -2292,6 +2301,8 @@ static void handleAuthPayload(const std::string &frame) {
                 clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
                 rideDeliveryLeaseGenerationSnapshot.store(
                     0, std::memory_order_release);
                 advanceRidePayloadGeneration();
@@ -2307,6 +2318,8 @@ static void handleAuthPayload(const std::string &frame) {
                 clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
                 bleSessionSupportsExplicitInvalidGpsHeading.store(
                     false, std::memory_order_release);
                 bleSessionSupportsRendererDiagnostics.store(
@@ -2381,6 +2394,8 @@ static void handleAuthPayload(const std::string &frame) {
     clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
     bleSessionUsesIndependentMapProfiles = false;
     bleSessionSupportsStreetLabels = false;
     bleSessionSupports3DBuildings = false;
@@ -4334,10 +4349,19 @@ static void notifyDeviceCapabilities(NimBLECharacteristic *pChar,
     const bool supportsFriendMarkerScale = social_riders::ENABLED &&
         clientVersion >= ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION &&
         social_riders::ready();
+    // Profile chunks need room for the 22-byte protected envelope plus a
+    // useful payload; the PSRAM session must exist before advertising.
+    const bool supportsRouteElevation =
+        route_elevation_config::supportsClient(clientVersion) &&
+        activePeerMtu.load(std::memory_order_acquire) >= 100 &&
+        route_elevation_runtime::ready();
+    bleSessionSupportsRouteElevation.store(supportsRouteElevation, std::memory_order_release);
     const uint32_t extendedFeatureFlags =
         (supportsGroup ? ride_ble_protocol_generated::EXTENDED_GROUP_RIDERS_V1_FEATURE : 0) |
         (supportsFriendMarkerScale
-             ? ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE : 0);
+             ? ride_ble_protocol_generated::EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE : 0) |
+        (supportsRouteElevation
+             ? ride_ble_protocol_generated::EXTENDED_ROUTE_ELEVATION_V1_FEATURE : 0);
     if (map_profile_protocol::VISIBILITY_TERRAIN != 0 && clientVersion >=
         ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_MINIMUM_CLIENT_VERSION)
       featureFlags |= ride_ble_protocol_generated::TERRAIN_EXPERIMENTS_FEATURE;
@@ -6030,6 +6054,8 @@ public:
     clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
     resetScreenConfigurationTransport();
     server->connected = true;
     bleSessionAuthenticated = false;
@@ -6187,6 +6213,8 @@ public:
     clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
     phoneBatteryLevelPercent = -1;
     phoneBatteryCharging = false;
     unauthTimeoutDisconnectRequested = false;
@@ -6335,6 +6363,27 @@ public:
       return;
     }
 #endif
+
+    if (route_elevation_protocol::hasFrameMagic(
+            reinterpret_cast<const uint8_t *>(value.data()), value.size())) {
+      // Builds without the Elevation screen never advertise the capability
+      // and drop ELV1 frames here, before any other parser sees them.
+      if constexpr (route_elevation_config::ENABLED) {
+        // Owner-only: scoped Watch sessions are default-denied above and
+        // never relay elevation profiles.
+        if (scopedWatchSession || !requireAuthenticated("route elevation") ||
+            !bleSessionSupportsRouteElevation.load(std::memory_order_acquire)) return;
+        power_metrics::noteBlePacket(power_metrics::BlePacketClass::Control);
+        route_elevation_runtime::ingest(reinterpret_cast<const uint8_t *>(value.data()),
+                                        value.size(), millis());
+        std::array<uint8_t, route_elevation_protocol::ACK_BYTES> acknowledgement{};
+        while (route_elevation_runtime::takeAcknowledgement(acknowledgement)) {
+          notifyAuthenticatedNavigation(pChar, acknowledgement.data(), acknowledgement.size());
+        }
+        ui_scheduler::notify(ui_scheduler::WakeReason::Ble);
+      }
+      return;
+    }
 
     if (value.size() >= 4 && std::memcmp(value.data(), "GRUP", 4) == 0) {
       if (scopedWatchSession || !requireAuthenticated("group riders") ||
@@ -7525,6 +7574,11 @@ void BLENavigationServer::setNavigationActivity(bool active) {
 #endif
 }
 
+bool BLENavigationServer::routeElevationSessionActive() const {
+  return route_elevation_config::ENABLED && connected && bleSessionAuthenticated &&
+         bleSessionSupportsRouteElevation.load(std::memory_order_acquire);
+}
+
 bool BLENavigationServer::canRequestWorldRadio() const {
 #if !defined(FIRMWARE_DIAGNOSTICS) || !FIRMWARE_DIAGNOSTICS
   return false;
@@ -7623,6 +7677,8 @@ bool BLENavigationServer::forgetOwner() {
   clearAuthenticatedBleGpsRideObservation();
     social_riders::reset();
     bleSessionSupportsGroupRiders.store(false, std::memory_order_release);
+    route_elevation_runtime::reset();
+    bleSessionSupportsRouteElevation.store(false, std::memory_order_release);
   bleDebugStats.updateWith([](BLEDebugStats &stats) {
     stats.authenticated = false;
   });

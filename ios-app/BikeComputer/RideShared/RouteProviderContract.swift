@@ -54,6 +54,19 @@ nonisolated enum RouteProviderPolicyV1 {
         metadata == importedGPX || metadata == mapKitSavedOnPhone
     }
 
+    /// Whether this route's geometry may be sent to the Bicino route elevation
+    /// service, which forwards sample points to its hosted terrain provider.
+    /// Apple Maps geometry stays off this path: the privacy checklist forbids a
+    /// MapKit export path without explicit approval under the current Apple
+    /// terms (docs/reviews/mapkit-route-storage-2026-09-15.md). Strava API
+    /// routes stay on the phone and use their own GPX elevations. Changing
+    /// this is a product-policy decision, not an implementation detail.
+    static func allowsRouteElevationService(
+        _ metadata: RouteProviderMetadataV1
+    ) -> Bool {
+        metadata == importedGPX
+    }
+
     static func hasConsistentKnownPolicy(
         _ metadata: RouteProviderMetadataV1
     ) -> Bool {

@@ -11,3 +11,21 @@ Coverage includes negative and boundary E7 coordinates, `UInt32.max` request
 identity, full UTF-8 byte budgets (48/28/24), NFC accents, reserved bytes,
 unknown versions/commands/states, zero IDs and short/overlong packets.
 There are no protocol layout or version changes in the reuse refactor.
+
+# Route elevation fixtures
+
+`route-elevation-v1/` is generated from the backend processing reference by
+`tools/generate_route_elevation_fixtures.py`; `--check` fails on drift.
+
+- `processing.json`: route geometry, raw or GPX-vertex heights and structure
+  spans with the expected canonical samples, statistics, quality, display
+  points and progress queries. Python and Swift reprocess every case within the
+  listed tolerances; display points and queries are exact.
+- `transfer-v1.txt`: `name hex` ELV1 bodies, frames, progress, state and EAK1
+  bytes derived from the committed rounded values, plus malformed bodies.
+  `RouteElevationTests.swift` checks the phone encoder and
+  `test_route_elevation_protocol.cpp` the firmware decoder against them.
+- `service-response-v1.json`: a ready `POST /v1/route-elevation-profiles`
+  answer the Swift decoder validates.
+
+Terrain values are synthetic; no case claims measured accuracy.

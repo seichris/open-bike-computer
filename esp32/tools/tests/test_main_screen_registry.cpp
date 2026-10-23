@@ -14,7 +14,29 @@ int main() {
                 world_radio_config::ENABLED);
   static_assert(world_radio_config::supportsClient(255) ==
                 world_radio_config::ENABLED);
-#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
+  static_assert(!route_elevation_config::supportsClient(31));
+  static_assert(route_elevation_config::supportsClient(32) == route_elevation_config::ENABLED);
+#if ROUTE_ELEVATION_SCREEN_ENABLED
+  static_assert(SUPPORTED_MASK == 0x7F);
+  static_assert(deviceScreenForTile(ELEVATION) == 6);
+  static_assert(tileForDeviceScreen(6) == ELEVATION);
+  static_assert(!isMapBacked(ELEVATION));
+  assert(nextEnabled(RIDESTATS, SUPPORTED_MASK) == ELEVATION);
+  assert(nextEnabled(ELEVATION, SUPPORTED_MASK) == MAP);
+  assert(nextEnabled(RIDESTATS, static_cast<uint8_t>(SUPPORTED_MASK & ~screenBit(DeviceScreenId::Elevation))) == MAP);
+  assert(previousEnabled(MAP, SUPPORTED_MASK) == ELEVATION);
+  static_assert(normalizedDefault(6, 0x40) == 6);
+#else
+  static_assert(descriptorForTile(ELEVATION) == nullptr);
+  static_assert(descriptorForDeviceScreen(6) == nullptr);
+  static_assert(normalizedDefault(6, 0x7F) == 3);
+#endif
+#if defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS && ROUTE_ELEVATION_SCREEN_ENABLED
+  static_assert(SUPPORTED_MASK == 0x7F);
+  static_assert(deviceScreenForTile(WORLD_RADIO) == 5);
+  assert(nextEnabled(NAV, SUPPORTED_MASK) == WORLD_RADIO);
+  assert(nextEnabled(WORLD_RADIO, SUPPORTED_MASK) == BATTERY_STATUS);
+#elif defined(FIRMWARE_DIAGNOSTICS) && FIRMWARE_DIAGNOSTICS
   static_assert(SUPPORTED_MASK == 0x3F);
   static_assert(deviceScreenForTile(WORLD_RADIO) == 5);
   static_assert(tileForDeviceScreen(5) == WORLD_RADIO);

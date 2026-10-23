@@ -4,7 +4,7 @@ The source IDs are intentionally explicit: a new elevation source must supply
 its own reviewed notice before the map pipeline can publish its artifacts.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 
@@ -17,6 +17,30 @@ _PRODUCTS = {
     "copernicus-glo30-public-2021": "Copernicus WorldDEM-30",
     "copernicus-glo90-2021": "Copernicus WorldDEM™-90",
 }
+
+
+def route_elevation_notices(source_ids: Sequence[str]) -> tuple[str, ...]:
+    """Reviewed notices for route elevation profiles derived from pinned sources."""
+    if not source_ids:
+        raise ValueError("route elevation profile has no contributing sources")
+    lines = [
+        "Route elevation is derived from a digital surface model, which includes "
+        "buildings and vegetation, and is not surveyed road elevation.",
+        "Bicino is not endorsed by the Copernicus DEM provider or programme.",
+    ]
+    for source_id in source_ids:
+        product = _PRODUCTS.get(source_id)
+        if product is None:
+            raise ValueError("route elevation source has no reviewed public notice")
+        lines.extend(
+            [
+                f"Source notice: {_COPYRIGHT}",
+                f"Adapted data notice: produced using {product} {_COPYRIGHT}",
+                "Liability notice: The organisations in charge of the Copernicus "
+                f"programme by law or by delegation do not incur any liability for any use of the {product}.",
+            ]
+        )
+    return tuple(lines)
 
 
 def topography_attribution(sample: Mapping[str, Any]) -> bytes:

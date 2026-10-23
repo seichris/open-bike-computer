@@ -459,6 +459,8 @@ enum DeviceBLEProtocol {
     static let displayInactivityTimeoutsSettingCoalescingKey =
         "display-inactivity-timeouts-setting"
     static let worldRadioStatusCoalescingKey = "world-radio-status"
+    static let routeElevationProgressCoalescingKey = "route-elevation-progress"
+    static let routeElevationAcknowledgementBytes = 16
     // Large enough for the worst schema-v1 three-favorite catalog at the
     // minimum BLE write length, without retaining a long stale GPS backlog.
     static let fallbackWriteQueueCapacity = 64
@@ -726,17 +728,19 @@ extension RideBLELegacyScreenV1: Identifiable {
         allCases.reduce(0) { $0 | $1.bit }
     }
 
+    /// Extension screens are opt-in so existing riders keep their cycle.
     static var defaultScreensMask: Int {
-        allScreensMask & ~worldRadio.bit
+        allScreensMask & ~(worldRadio.bit | elevation.bit)
     }
 
     static var legacyScreensMask: Int {
-        allScreensMask & ~(batteryStatus.bit | worldRadio.bit)
+        allScreensMask & ~(batteryStatus.bit | worldRadio.bit | elevation.bit)
     }
 
+    /// Matches the firmware cycle: Elevation follows Ride Stats.
     static var displayOrder: [DeviceScreen] {
-        [.mapPlusNavigation, .rideStats, .map, .navigation, .worldRadio,
-         .batteryStatus]
+        [.mapPlusNavigation, .rideStats, .elevation, .map, .navigation,
+         .worldRadio, .batteryStatus]
     }
 
     static func normalizedMask(_ rawMask: Int) -> Int {
@@ -1072,6 +1076,9 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var supportsMapNavigationOrientation = false
     @Published private(set) var supportsGroupRiders = false
     @Published private(set) var supportsFriendMarkerScale = false
+    /// Route elevation profiles (ELV1) and the optional Elevation screen.
+    @Published private(set) var supportsRouteElevation = false
+    var onRouteElevationAcknowledgement: ((Data) -> Void)?
     /// Shared by the iPhone map and every bike-computer map screen.
     @Published private(set) var friendMarkerScale: FriendMarkerScale = .normal
     var onSocialAcknowledgement: ((Data) -> Void)?
@@ -5395,7 +5402,7 @@ class BLEManager: NSObject, ObservableObject {
             settingID = DeviceBLEProtocol.mapPlusNavigationLabelDensitySettingID
             enabled = mapPlusNavigationLabelsEnabled
             density = mapPlusNavigationLabelDensity
-        case .navigation, .rideStats, .batteryStatus, .worldRadio:
+        case .navigation, .rideStats, .batteryStatus, .worldRadio, .elevation:
             return
         }
         sendSetting(
@@ -5677,6 +5684,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsTopographicContours = false
         supportsGroupRiders = false
         supportsFriendMarkerScale = false
+        supportsRouteElevation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -5764,7 +5772,7 @@ class BLEManager: NSObject, ObservableObject {
                 mask |= DeviceBLEProtocol.contoursVisibilityMask
             }
             settingID = DeviceBLEProtocol.mapPlusNavigationVisibilityMaskSettingID
-        case .navigation, .rideStats, .batteryStatus, .worldRadio:
+        case .navigation, .rideStats, .batteryStatus, .worldRadio, .elevation:
             return
         }
 
@@ -5790,6 +5798,9 @@ class BLEManager: NSObject, ObservableObject {
         }
         if !supportsWorldRadio {
             mask |= enabledDeviceScreensMask & DeviceScreen.worldRadio.bit
+        }
+        if !supportsRouteElevation {
+            mask |= enabledDeviceScreensMask & DeviceScreen.elevation.bit
         }
         if enabled {
             mask |= screen.bit
@@ -5834,7 +5845,7 @@ class BLEManager: NSObject, ObservableObject {
             mask: enabledDeviceScreensMask
         )
         var outgoingMask = Int32(effectiveEnabledDeviceScreensMask)
-        if supportsBatteryStatusScreen || supportsWorldRadio {
+        if supportsBatteryStatusScreen || supportsWorldRadio || supportsRouteElevation {
             outgoingMask |= DeviceBLEProtocol.currentScreenMaskMarker
         }
         sendSetting(id: DeviceBLEProtocol.enabledScreensSettingID,
@@ -5858,6 +5869,9 @@ class BLEManager: NSObject, ObservableObject {
         }
         if supportsWorldRadio {
             mask |= DeviceScreen.worldRadio.bit
+        }
+        if supportsRouteElevation {
+            mask |= DeviceScreen.elevation.bit
         }
         return mask
     }
@@ -7128,6 +7142,7 @@ class BLEManager: NSObject, ObservableObject {
         supportsTopographicContours = false
         supportsGroupRiders = false
         supportsFriendMarkerScale = false
+        supportsRouteElevation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -10623,6 +10638,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         supportsTopographicContours = false
         supportsGroupRiders = false
         supportsFriendMarkerScale = false
+        supportsRouteElevation = false
         supportsRideAutomation = false
         supportsExplicitInvalidGPSHeading = false
         supportsScopedWatchController = false
@@ -10794,6 +10810,8 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         let hasExplicitInvalidGPSHeading =
             flags & DeviceBLEProtocol.explicitInvalidGPSHeadingCapabilityMask != 0
         supportsGroupRiders = extendedFeatureFlags & RideBLEGeneratedProtocolV1.extendedGroupRidersV1Feature != 0
+        supportsRouteElevation = extendedFeatureFlags &
+            RideBLEGeneratedProtocolV1.extendedRouteElevationV1Feature != 0
         let hasFriendMarkerScale = extendedFeatureFlags &
             RideBLEGeneratedProtocolV1.extendedFriendMarkerScaleV1Feature != 0
         if supportsFriendMarkerScale != hasFriendMarkerScale {
@@ -11039,6 +11057,53 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         return sendFallbackMapPacket(data, label: "group rider", writeClass: .settingsControl, atomically: true)
     }
 
+    /// Largest plaintext ELV1 frame for this protected session, or nil when
+    /// the device did not negotiate route elevation profiles.
+    var routeElevationMaximumWriteLength: Int? {
+        guard supportsRouteElevation, isNavigationReady,
+              authenticatedWriteSession != nil,
+              let endpoint = navigationWriteEndpoint else { return nil }
+        return min(endpoint.maximumWriteLength, NavigationWriteQueue.maximumFrameBytes)
+    }
+
+    /// Queues one logical ELV1 message on the protected navigation channel: a
+    /// STATE frame or a complete BEGIN/CHUNK/COMMIT transfer, never a prefix.
+    /// A single coalescible frame (progress) replaces an older pending one.
+    @discardableResult
+    func sendRouteElevationFrames(_ frames: [Data], coalescible: Bool) -> Bool {
+        guard let maximumLength = routeElevationMaximumWriteLength,
+              let endpoint = navigationWriteEndpoint,
+              !frames.isEmpty,
+              frames.allSatisfy({ $0.count <= maximumLength }),
+              !firmwareMaintenanceActive,
+              !firmwareMaintenanceReconnectExpected else {
+            return false
+        }
+        if coalescible, frames.count == 1 {
+            return enqueueNavigationWrite(
+                frames[0],
+                endpoint: endpoint,
+                label: "route elevation progress",
+                writeClass: .settingsControl,
+                coalescingKey: DeviceBLEProtocol.routeElevationProgressCoalescingKey
+            )
+        }
+        let writes = frames.enumerated().map { index, frame in
+            NavigationWrite(
+                data: frame,
+                label: "route elevation \(index + 1)/\(frames.count)",
+                writeClass: .settingsControl
+            )
+        }
+        guard navigationWriteQueue.enqueueAtomically(writes) else {
+            log("Route elevation frames not queued: insufficient write queue capacity")
+            return false
+        }
+        flushPendingNavigationWrites(endpoint: endpoint)
+        scheduleNavigationFlushRetryIfNeeded()
+        return true
+    }
+
     @discardableResult
     func sendWorldRadioStatus(_ status: WorldRadioStatus) -> Bool {
         guard supportsWorldRadio, isNavigationReady,
@@ -11059,6 +11124,13 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     func handleNavigationCharacteristicNotification(_ data: Data) -> Bool {
         if data.starts(with: Data("GACK".utf8)) {
             if isNavigationReady && supportsGroupRiders && data.count == 17 { onSocialAcknowledgement?(data) }
+            return true
+        }
+        if data.starts(with: Data(RideBLEGeneratedProtocolV1.routeElevationAcknowledgementMagic.utf8)) {
+            if isNavigationReady && supportsRouteElevation &&
+                data.count == DeviceBLEProtocol.routeElevationAcknowledgementBytes {
+                onRouteElevationAcknowledgement?(data)
+            }
             return true
         }
         if data.starts(with: RideBLEApplicationAcknowledgementV1.prefix) {

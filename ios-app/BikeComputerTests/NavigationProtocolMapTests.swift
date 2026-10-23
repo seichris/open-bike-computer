@@ -3685,7 +3685,7 @@ extension NavigationProtocolTests {
                 deviceSection.contains("case .mapPlusNavigation:") &&
                 deviceSection.contains("? .mapPlusNavigation\n                : .map") &&
                 deviceSection.contains(
-                    "case .navigation, .rideStats, .batteryStatus, .worldRadio:\n            return nil"
+                    "case .navigation, .rideStats, .batteryStatus, .worldRadio, .elevation:\n            return nil"
                 ),
             "only Map rows receive gears and legacy firmware opens the shared map profile"
         )
@@ -9065,7 +9065,9 @@ extension NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 31, "capability version negotiates the shared friend-marker size alongside group riders and terrain")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 32, "capability version negotiates route elevation profiles alongside friend-marker size, group riders and terrain")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedRouteElevationV1Feature, 1 << 2, "extended bit 2 advertises route elevation profiles")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedRouteElevationV1MinimumClientVersion, 32, "route elevation negotiation requires protocol 32")
         assertEqual(RideBLEGeneratedProtocolV1.extendedFriendMarkerScaleV1Feature, 1 << 1, "extended bit 1 advertises the shared friend-marker size")
         assertEqual(RideBLEGeneratedProtocolV1.extendedFriendMarkerScaleV1MinimumClientVersion, 31, "friend-marker size negotiation requires protocol 31")
         assertEqual(DeviceBLEProtocol.friendMarkerScaleSettingID, 39, "the friend-marker size uses the first free global setting ID")
@@ -9175,14 +9177,16 @@ extension NavigationProtocolTests {
         assertEqual(DeviceScreen.mapPlusNavigation.rawValue, 3, "Map + Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.batteryStatus.rawValue, 4, "Battery Status screen uses protocol value 4")
         assertEqual(DeviceScreen.worldRadio.rawValue, 5, "World Radio screen uses protocol value 5")
+        assertEqual(DeviceScreen.elevation.rawValue, 6, "Elevation screen uses protocol value 6")
+        assertEqual(DeviceScreen.elevation.title, "Elevation", "Elevation has a user-facing label")
         assertEqual(DeviceScreen.mapPlusNavigation.title, "Map + Navigation", "combined map/navigation screen keeps user-facing label")
         assertEqual(DeviceScreen.batteryStatus.title, "Battery Status", "battery screen has a user-facing label")
         assertEqual(DeviceScreen.worldRadio.title, "World Radio", "World Radio has a user-facing label")
         assertEqual(DeviceScreen.displayOrder,
-                    [.mapPlusNavigation, .rideStats, .map, .navigation, .worldRadio, .batteryStatus],
-                    "World Radio precedes Battery Status in settings and cycling order")
-        assertEqual(DeviceScreen.allScreensMask, 0x3F, "all supported device screens use the low six mask bits")
-        assertEqual(DeviceScreen.defaultScreensMask, 0x1F, "World Radio is off by default")
+                    [.mapPlusNavigation, .rideStats, .elevation, .map, .navigation, .worldRadio, .batteryStatus],
+                    "Elevation follows Ride Stats and World Radio precedes Battery Status, matching the firmware cycle")
+        assertEqual(DeviceScreen.allScreensMask, 0x7F, "all supported device screens use the low seven mask bits")
+        assertEqual(DeviceScreen.defaultScreensMask, 0x1F, "World Radio and Elevation are off by default")
         assertEqual(DeviceScreen.legacyScreensMask, 0x0F, "legacy firmware receives only the original four screen bits")
         assertEqual(DisconnectedSleepTimeout.oneMinute.settingValue, 60, "one-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.twoMinutes.settingValue, 120, "two-minute sleep timeout sends seconds")

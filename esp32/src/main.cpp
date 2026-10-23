@@ -905,6 +905,10 @@ static const char *debugTileName(uint8_t tile) {
     return "RIDESTATS";
   case BATTERY_STATUS:
     return "BATTERY_STATUS";
+  case WORLD_RADIO:
+    return "WORLD_RADIO";
+  case ELEVATION:
+    return "ELEVATION";
   default:
     return "UNKNOWN";
   }

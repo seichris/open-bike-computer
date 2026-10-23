@@ -1331,7 +1331,8 @@ extension NavigationProtocolTests {
                "Battery Status remains the last available screen")
         let currentSettings = screenSettings(in: currentPackets())
         assertEqual(currentSettings[DeviceBLEProtocol.enabledScreensSettingID],
-                    Int32(DeviceScreen.allScreensMask & ~DeviceScreen.worldRadio.bit) |
+                    Int32(DeviceScreen.allScreensMask &
+                          ~(DeviceScreen.worldRadio.bit | DeviceScreen.elevation.bit)) |
                         DeviceBLEProtocol.currentScreenMaskMarker,
                     "Battery Status firmware receives a marked five-screen mask")
         assertEqual(currentSettings[DeviceBLEProtocol.defaultScreenSettingID],
@@ -1355,7 +1356,7 @@ extension NavigationProtocolTests {
                "World Radio is available on capable firmware")
         let radioSettings = screenSettings(in: radioPackets())
         assertEqual(radioSettings[DeviceBLEProtocol.enabledScreensSettingID],
-                    Int32(DeviceScreen.allScreensMask) |
+                    Int32(DeviceScreen.allScreensMask & ~DeviceScreen.elevation.bit) |
                         DeviceBLEProtocol.currentScreenMaskMarker,
                     "World Radio firmware receives a marked six-screen mask")
 

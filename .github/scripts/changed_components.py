@@ -98,6 +98,10 @@ SHARED_FMB_FIXTURE_PREFIX = "tools/tests/fixtures/fmb/"
 SHARED_MAP_STREAM_FIXTURE_PATH = (
     "map-platform/backend/tests/fixtures/map_stream_v1_golden.txt"
 )
+SHARED_ROUTE_ELEVATION_FIXTURE_PATHS = (
+    "protocol/fixtures/route-elevation-v1/",
+    "tools/generate_route_elevation_fixtures.py",
+)
 SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 ZERO_SHA = "0" * 40
 
@@ -244,6 +248,13 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
 
         if path == SHARED_MAP_STREAM_FIXTURE_PATH:
             # The same signed-stream bytes are parsed by backend, iOS, and firmware.
+            selected["firmware_host"] = True
+            selected["ios"] = True
+            selected["map_backend"] = True
+
+        if path.startswith(SHARED_ROUTE_ELEVATION_FIXTURE_PATHS):
+            # Backend processing, the Swift codec and the firmware decoder all
+            # assert the same route elevation fixtures.
             selected["firmware_host"] = True
             selected["ios"] = True
             selected["map_backend"] = True

@@ -1926,6 +1926,10 @@ struct ContentView: View {
                     onHide: clearSavedRoutePreview,
                     onStart: { startPreviewedOfflineRoute(preview) }
                 ) {
+                    if let elevation = coordinator.routeElevationService {
+                        SavedRouteElevationPreview(identity: preview.identity, service: elevation)
+                            .id(preview.layoutIdentity)
+                    }
                     SavedRouteSocialActions(store: social, library: routeLibrary, identity: preview.identity,
                         openProfile: { presentedSheet = .socialProfile },
                         groupCreated: { presentedSheet = .socialProfile })

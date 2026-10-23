@@ -92,6 +92,12 @@ from .rate_limits import (
     RateLimitPolicy,
 )
 from .request_limits import RequestBodyLimitMiddleware
+from .route_elevation_providers import ElevationTransport
+from .route_elevation_service import (
+    RouteElevationBusyError,
+    RouteElevationRequestError,
+    RouteElevationService,
+)
 from .source_cache import (
     SourceCache,
     SourceCacheError,
@@ -145,6 +151,7 @@ def create_app(
     strava_transport: StravaTransport | None = None,
     strava_clock=time.time,
     app_attest_verifier: AppAttestationVerifying | None = None,
+    route_elevation_transport: ElevationTransport | None = None,
 ):
     if _FASTAPI_IMPORT_ERROR is not None:
         raise RuntimeError(
@@ -313,6 +320,24 @@ def create_app(
         int(os.environ.get("MAP_PLATFORM_STRAVA_DISCONNECT_LIMIT_PER_HOUR", "30")),
         3_600,
     )
+    route_elevation_ip_policy = RateLimitPolicy(
+        "route-elevation-ip",
+        int(os.environ.get("MAP_PLATFORM_ROUTE_ELEVATION_IP_LIMIT_PER_HOUR", "60")),
+        3_600,
+    )
+    route_elevation_installation_hour_policy = RateLimitPolicy(
+        "route-elevation-installation-hour",
+        int(os.environ.get("MAP_PLATFORM_ROUTE_ELEVATION_LIMIT_PER_HOUR", "30")),
+        3_600,
+    )
+    route_elevation_installation_day_policy = RateLimitPolicy(
+        "route-elevation-installation-day",
+        int(os.environ.get("MAP_PLATFORM_ROUTE_ELEVATION_LIMIT_PER_DAY", "120")),
+        86_400,
+    )
+    route_elevation_requires_app_attest = os.environ.get(
+        "MAP_PLATFORM_ROUTE_ELEVATION_REQUIRE_APP_ATTEST", "true"
+    ).strip().lower() not in {"0", "false", "no"}
     rollout_approvals_path = Path(
         os.environ.get(
             "MAP_PLATFORM_MAP_STREAM_ROLLOUT_APPROVALS",
@@ -377,6 +402,13 @@ def create_app(
     require_production_topography_approval(
         generation_profile_policy, topography_source_policy, deployment_channel,
     )
+    route_elevation_service = RouteElevationService.from_environment(
+        data_root=data_root,
+        pseudonym_secret=installation_secret,
+        topography_policy=topography_source_policy,
+        deployment_channel=deployment_channel,
+        transport=route_elevation_transport,
+    )
     service = MapJobService(
         SourceIndex.from_json(source_index_path, fallback_provider=source_provider),
         job_store,
@@ -406,8 +438,11 @@ def create_app(
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=max_request_body_bytes,
-        body_limits={(method, path): 5*1024*1024 for method, path in (("PUT", "/v1/social/me/avatar"), ("POST", "/v1/social/routes"), ("POST", "/v1/social/activities"))}
-            if os.environ.get("BICINO_SOCIAL_ENABLED", "false").lower() == "true" else {},
+        body_limits={
+            ("POST", "/v1/route-elevation-profiles"): 1024 * 1024,
+            **({(method, path): 5*1024*1024 for method, path in (("PUT", "/v1/social/me/avatar"), ("POST", "/v1/social/routes"), ("POST", "/v1/social/activities"))}
+               if os.environ.get("BICINO_SOCIAL_ENABLED", "false").lower() == "true" else {}),
+        },
     )
     app.state.artifact_store = artifact_store
     app.state.installation_store = installation_store
@@ -420,6 +455,7 @@ def create_app(
     app.state.rate_limiter = rate_limiter
     app.state.catalog_client = catalog_client
     app.state.strava_integration = strava_integration
+    app.state.route_elevation_service = route_elevation_service
 
     def client_ip(request: Request) -> str:
         return client_address_resolver.resolve(
@@ -503,6 +539,7 @@ def create_app(
             or path == "/v1/capabilities"
             or path == "/v1/integrations/strava/oauth/callback"
             or path == "/v1/source-regions"
+            or path == "/v1/route-elevation-profiles"
             or path == "/v1/map-jobs"
             or path.startswith(("/v1/map-jobs/", "/v1/map-packs/"))
         )
@@ -643,6 +680,7 @@ def create_app(
             "stravaIntegration": (
                 "enabled" if strava_integration.config.enabled else "disabled"
             ),
+            "routeElevation": route_elevation_service.public_summary(),
         }
 
     @app.get("/v1/capabilities")
@@ -662,8 +700,62 @@ def create_app(
         result = service.generation_capabilities(installation_id)
         result["integrations"] = {
             "stravaRouteImport": strava_integration.capability(),
+            "routeElevation": route_elevation_service.capability(),
         }
         return result
+
+    @app.post("/v1/route-elevation-profiles")
+    def create_route_elevation_profile(
+        request: Request,
+        response: Response,
+        payload: dict[str, Any],
+        clientInstallationId: str,
+        x_installation_token: str | None = Header(
+            default=None,
+            alias="X-Installation-Token",
+        ),
+    ) -> dict[str, Any]:
+        installation_id = verify_registered_installation(
+            clientInstallationId,
+            x_installation_token,
+        )
+        if (
+            route_elevation_requires_app_attest
+            and app_attest_store.key_id_for_installation(installation_id) is None
+        ):
+            raise AppAttestError(
+                "installation_attestation_required",
+                "installation App Attest enrollment is required",
+            )
+        enforce_rate_limits(
+            (route_elevation_ip_policy, client_ip(request)),
+            (route_elevation_installation_hour_policy, installation_id),
+            (route_elevation_installation_day_policy, installation_id),
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        try:
+            return route_elevation_service.create_profile(
+                payload,
+                installation_id=installation_id,
+            )
+        except RouteElevationRequestError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": exc.code, "message": str(exc)},
+                headers={"Cache-Control": "private, no-store"},
+            ) from exc
+        except RouteElevationBusyError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "route_elevation_busy",
+                    "message": "route elevation service is busy",
+                },
+                headers={
+                    "Cache-Control": "private, no-store",
+                    "Retry-After": str(exc.retry_after_seconds),
+                },
+            ) from exc
 
     @app.get("/v1/admin/maps", dependencies=[Depends(require_admin_token)])
     def admin_maps(includeUndownloaded: bool = False) -> dict[str, Any]:
