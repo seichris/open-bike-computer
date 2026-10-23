@@ -540,8 +540,14 @@ replaying an obsolete permission payload.
 accepted friends only. Received positions disappear at 60 seconds; the worker
 clears stale fixes and expired leases. Unfriend/block deletes both directions;
 account deletion/disable also clears them. Re-adding/unblocking never restores
-consent. Outgoing consent is volatile and never silently resumed after
-relaunch, sign-out or account switch. Local Stop removes the recipient before any
+consent. This installation remembers explicitly enabled outgoing consents in its
+app-private, device-only Keychain, scoped to the authenticated account. On a
+foreground relaunch it resumes only after a snapshot confirms the same epoch,
+friendship and original server deadline. It never creates or extends a lease to
+resume. Offline launches wait for server validation; sign-out/account switches,
+revocation and expiry clear remembered recipients. Another device's server
+consents alone cannot start publication. Reserved sequence blocks survive a
+force-close without retaining location fixes. Local Stop durably removes the recipient before any
 network await. `DELETE /friend-sharing` revokes all outgoing friend consents in
 one request for sign-out, while preserving incoming consents. Group and friend
 sharing share one GPS lifecycle so stopping either does not stop the other.

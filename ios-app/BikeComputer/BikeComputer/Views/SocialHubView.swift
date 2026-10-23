@@ -98,7 +98,7 @@ struct SocialHubView: View {
                     Text("Friends")
                 } footer: {
                     Text(store.capabilities.friendSharing
-                         ? "Each toggle shares your live location, speed, distance and ride times with that friend for up to 4 hours, including outside Group Rides. They choose whether to share back. Turn off, remove or block to stop."
+                         ? "Each toggle shares your live location, speed, distance and ride times with that friend for up to 4 hours, including outside Group Rides. Sharing resumes when you reopen this app, for the time remaining. They choose whether to share back. Turn off, remove or block to stop."
                          : "Live sharing with individual friends is not available on this server yet.")
                     if let error = store.friendLive.error { Text(error).foregroundStyle(.red) }
                 }

@@ -81,10 +81,10 @@ final class SocialCoordinator: ObservableObject {
         let client = BicinoSocialClient(session: session, baseURL: URL(string: OfflineMapServiceConfig.defaultServerURLString)?.appendingPathComponent("v1/social"))
         self.client = client
         live = LiveRideService(client: client)
-        friendLive = FriendLiveService(client: client)
         savedRouteSharing = SocialSavedRouteSharing(client: client, currentGeneration: { session.generation })
         // The existing explicit app-private group; no shared group is introduced.
         let store: any SocialSecureStore = session.keychainGroup.map { SocialKeychainStore(accessGroup: $0) } ?? SocialMemoryStore()
+        friendLive = FriendLiveService(client: client, store: store)
         #if DEBUG
         let environment = "development"
         #else
@@ -165,7 +165,10 @@ final class SocialCoordinator: ObservableObject {
         if self.capabilities != capabilities { self.capabilities = capabilities }
         if !capabilities.groups { await live.stopSharing(); live.reset() }
         guard expected == session.generation else { return nil }
-        if capabilities.friendSharing { friendLive.start() } else { await friendLive.stopAll() }
+        if capabilities.friendSharing, let owner = session.currentUID {
+            friendLive.setApplicationActive(UIApplication.shared.applicationState == .active)
+            friendLive.start(owner: owner)
+        } else { await friendLive.stopAll() }
         guard expected == session.generation else { return nil }
         if !capabilities.media { photos = [:] }
         return capabilities
