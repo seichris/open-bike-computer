@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -192,7 +193,11 @@ def verify(envelope, policy, source, expected_commit, expected_recipe, toolchain
             p["checkId"] != expected_recipe["check"]["id"]):
         raise ValueError("command or execution profile mismatch")
     if p["toolchain"] != toolchain or not toolchain:
-        raise ValueError("toolchain mismatch")
+        def packages(value):
+            python = value.get("python") if isinstance(value, dict) else None
+            return python.get("packages") if isinstance(python, dict) else None
+        dependency_mismatch = packages(p["toolchain"]) != packages(toolchain)
+        raise ValueError("dependencies mismatch" if dependency_mismatch else "toolchain mismatch")
     if p["status"] != "passed" or p["exitCode"] != 0 or p["execution"] != "local":
         raise ValueError("receipt does not attest a successful local execution")
     now = int(time.time()) if now is None else now
@@ -230,8 +235,25 @@ def publish(envelope):
     api("contents/" + path, "PUT", body)
 
 
+_metrics_spec = importlib.util.spec_from_file_location("reuse_metrics", Path(__file__).with_name("reuse_metrics.py"))
+metrics = importlib.util.module_from_spec(_metrics_spec)
+_metrics_spec.loader.exec_module(metrics)
+metric = metrics.metric
+
+
 class Session:
     def __init__(self, checks, source, *, reuse=False, plan=False, **options):
+        self.metric_hosted = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+        self.metrics = metric(lambda: metrics.ReuseMetrics(REPOSITORY, self.metric_hosted))
+        self.metric_stage = "policy"
+        self.metric_reason = "disabled"
+        started = time.monotonic()
+        try:
+            self._initialize(checks, source, reuse=reuse, plan=plan, **options)
+        finally:
+            metric(lambda: self.metrics.report.update(initializationMs=(time.monotonic() - started) * 1000))
+
+    def _initialize(self, checks, source, *, reuse=False, plan=False, **options):
         self.source, self.options = source, options
         self.policy, self.key, self.expected_commit = None, None, None
         self.fingerprints, self.contracts = {}, {}
@@ -276,35 +298,63 @@ class Session:
             for check in candidates:
                 if check["id"] in self.policy["checks"]:
                     self.contracts[check["id"]] = recipe(check, **options)
+            self.metric_stage = "fingerprint"
             for simulated in {c == "ios-simulator" for c in self.contracts}:
                 self.fingerprints[simulated] = fingerprint(simulated)
             self.reason = "no matching local result"
+            self.metric_reason = "absent"
         except ERRORS as error:
+            metric(lambda: setattr(self, "metric_reason", metrics.category(error, self.metric_stage)))
             self.contracts = {}
             self.reason = str(error) if isinstance(error, ValueError) else "local evidence unavailable"
 
-    def try_reuse(self, check, report_path):
+    def observation(self, check, status=None):
+        reason = ("local-execution" if not self.metric_hosted else "disabled" if not self.reuse else
+                  "policy-ineligible" if self.policy and check["id"] not in self.policy["checks"] else self.metric_reason)
+        return metric(lambda: self.metrics.start(check["id"], eligible(check), status or reason))
+
+    def try_reuse(self, check, report_path, observation=None):
         if not self.reuse or check["id"] not in self.contracts:
             return None, self.reason
+        stage = "lookup"
+        metric(lambda: observation.update(attempted=True, outcome="miss", reason="absent"))
         try:
-            data = read_file(receipt_path(self.source, check["id"]), BRANCH, missing=True)
+            started = time.monotonic()
+            try:
+                data = read_file(receipt_path(self.source, check["id"]), BRANCH, missing=True)
+            finally:
+                metric(lambda: observation.update(lookupMs=(time.monotonic() - started) * 1000))
             if data is None:
                 return None, "no matching local result"
-            envelope = json.loads(data[0])
-            log = verify(envelope, self.policy, self.source, self.expected_commit,
-                         self.contracts[check["id"]], self.fingerprints[check["id"] == "ios-simulator"])
-            directory = report_path.parent / "reused-local-results"
-            directory.mkdir(parents=True, exist_ok=True)
-            evidence_path = directory / (check["id"] + ".json")
-            evidence_path.write_bytes(data[0])
-            log_path = directory / (check["id"] + ".log")
-            log_path.write_bytes(log)
+            stage = "verification"
+            started = time.monotonic()
+            try:
+                envelope = json.loads(data[0])
+                log = verify(envelope, self.policy, self.source, self.expected_commit,
+                             self.contracts[check["id"]], self.fingerprints[check["id"] == "ios-simulator"])
+                directory = report_path.parent / "reused-local-results"
+                directory.mkdir(parents=True, exist_ok=True)
+                evidence_path = directory / (check["id"] + ".json")
+                evidence_path.write_bytes(data[0])
+                log_path = directory / (check["id"] + ".log")
+                log_path.write_bytes(log)
+            finally:
+                metric(lambda: observation.update(verificationMs=(time.monotonic() - started) * 1000))
+            metric(lambda: observation.update(outcome="accepted", reason="accepted",
+                estimatedAvoidedExecutionMs=(envelope["payload"]["completedAt"] - envelope["payload"]["startedAt"]) * 1000))
             return {"status": "passed", "exitCode": 0, "execution": "reused-local",
                     "log": str(log_path), "signedReceipt": str(evidence_path),
                     "receiptSha256": digest(data[0]), "receiptBlob": data[1],
                     "localCompletedAt": envelope["payload"]["completedAt"]}, "verified local result"
         except ERRORS as error:
+            metric(lambda: observation.update(reason=metrics.category(error, stage)))
             return None, str(error) if isinstance(error, ValueError) else "local evidence unavailable"
+
+    def record_execution(self, observation, duration_ms):
+        metric(lambda: self.metrics.execution(observation, duration_ms))
+
+    def write_metrics(self, filename):
+        metric(lambda: self.metrics.write(filename))
 
     def finish(self, report):
         if (not self.key or not self.contracts or report["status"] != "passed" or
