@@ -821,61 +821,84 @@ static __attribute__((noinline)) MapTargetMetadata targetMetadataFromJson(const 
   return target;
 }
 
+// Appends ,"<key>": with an unprefixed key's first letter lower-cased. In-place
+// appends keep this hot serializer free of string temporaries.
+static void appendMetadataKey(std::string &json, const std::string &prefix,
+                              const char *name) {
+  json += ",\"";
+  if (prefix.empty()) {
+    json += static_cast<char>(std::tolower(name[0]));
+    json += name + 1;
+  } else {
+    json += prefix;
+    json += name;
+  }
+  json += "\":";
+}
+
+static void appendMetadataNumber(std::string &json, const std::string &prefix,
+                                 const char *name, uint32_t value) {
+  appendMetadataKey(json, prefix, name);
+  json += std::to_string(value);
+}
+
+static void appendMetadataText(std::string &json, const std::string &prefix,
+                               const char *name, const std::string &value) {
+  appendMetadataKey(json, prefix, name);
+  json += '"';
+  json += jsonEscape(value);
+  json += '"';
+}
+
 static std::string targetMetadataJson(const MapTargetMetadata &target,
                                       const std::string &prefix) {
   if (targetMetadataEmpty(target))
     return "";
-  const auto key = [&](const char *name) {
-    if (!prefix.empty())
-      return prefix + name;
-    std::string value = name;
-    value.front() = static_cast<char>(std::tolower(value.front()));
-    return value;
-  };
-  std::string json = ",\"" + key("Renderer") + "\":\"" +
-                     jsonEscape(target.renderer) + "\",\"" +
-                     key("FormatVersion") + "\":" +
-                     std::to_string(target.formatVersion) + ",\"" +
-                     key("LabelProfileVersion") + "\":" +
-                     std::to_string(target.labelProfileVersion) + ",\"" +
-                     key("LabelLanguages") + "\":[";
+  std::string json;
+  appendMetadataText(json, prefix, "Renderer", target.renderer);
+  appendMetadataNumber(json, prefix, "FormatVersion", target.formatVersion);
+  appendMetadataNumber(json, prefix, "LabelProfileVersion",
+                       target.labelProfileVersion);
+  appendMetadataKey(json, prefix, "LabelLanguages");
+  json += '[';
   for (size_t index = 0; index < target.labelLanguages.size(); ++index) {
     if (index != 0)
-      json += ",";
-    json += "\"" + jsonEscape(target.labelLanguages[index]) + "\"";
+      json += ',';
+    json += '"';
+    json += jsonEscape(target.labelLanguages[index]);
+    json += '"';
   }
-  json += "],\"" + key("InternationalFallback") + "\":\"" +
-          jsonEscape(target.internationalFallback) + "\",\"" +
-          key("BuildingProfileVersion") + "\":" +
-          std::to_string(target.buildingProfileVersion);
+  json += ']';
+  appendMetadataText(json, prefix, "InternationalFallback",
+                     target.internationalFallback);
+  appendMetadataNumber(json, prefix, "BuildingProfileVersion",
+                       target.buildingProfileVersion);
   if (target.formatVersion == 5) {
-    json += ",\"" + key("PoiProfileVersion") + "\":" +
-            std::to_string(target.poiProfileVersion) + ",\"" +
-            key("PoiIndexProfileVersion") + "\":" +
-            std::to_string(target.poiIndexProfileVersion) + ",\"" +
-            key("PoiRecordCount") + "\":" +
-            std::to_string(target.poiRecordCount) + ",\"" +
-            key("ContoursIncluded") + "\":" +
-            std::to_string(target.contoursIncluded ? 1 : 0) + ",\"" +
-            key("PoiIndexSha256") + "\":\"" +
-            jsonEscape(target.poiIndexSha256) + "\"";
+    appendMetadataNumber(json, prefix, "PoiProfileVersion",
+                         target.poiProfileVersion);
+    appendMetadataNumber(json, prefix, "PoiIndexProfileVersion",
+                         target.poiIndexProfileVersion);
+    appendMetadataNumber(json, prefix, "PoiRecordCount", target.poiRecordCount);
+    appendMetadataNumber(json, prefix, "ContoursIncluded",
+                         target.contoursIncluded ? 1 : 0);
+    appendMetadataText(json, prefix, "PoiIndexSha256", target.poiIndexSha256);
   }
   if (target.formatVersion == 4 ||
       (target.formatVersion == 5 && target.contoursIncluded)) {
-    json += ",\"" + key("TopographyProfileVersion") + "\":" +
-            std::to_string(target.topographyProfileVersion) + ",\"" +
-            key("TopographyQualityMode") + "\":\"" +
-            jsonEscape(target.topographyQualityMode) + "\",\"" +
-            key("ContourMinorIntervalM") + "\":" +
-            std::to_string(target.contourMinorIntervalM) + ",\"" +
-            key("ContourIndexIntervalM") + "\":" +
-            std::to_string(target.contourIndexIntervalM) + ",\"" +
-            key("ContourRecordCount") + "\":" +
-            std::to_string(target.contourRecordCount) + ",\"" +
-            key("ContourNoDataMillionths") + "\":" +
-            std::to_string(target.contourNoDataMillionths) + ",\"" +
-            key("TopographySourcePolicySha256") + "\":\"" +
-            jsonEscape(target.topographySourcePolicySha256) + "\"";
+    appendMetadataNumber(json, prefix, "TopographyProfileVersion",
+                         target.topographyProfileVersion);
+    appendMetadataText(json, prefix, "TopographyQualityMode",
+                       target.topographyQualityMode);
+    appendMetadataNumber(json, prefix, "ContourMinorIntervalM",
+                         target.contourMinorIntervalM);
+    appendMetadataNumber(json, prefix, "ContourIndexIntervalM",
+                         target.contourIndexIntervalM);
+    appendMetadataNumber(json, prefix, "ContourRecordCount",
+                         target.contourRecordCount);
+    appendMetadataNumber(json, prefix, "ContourNoDataMillionths",
+                         target.contourNoDataMillionths);
+    appendMetadataText(json, prefix, "TopographySourcePolicySha256",
+                       target.topographySourcePolicySha256);
   }
   return json;
 }
@@ -4195,28 +4218,48 @@ bool MapTransferInstaller::publishInstalledMetadata(
                              manifestReceipt(manifest));
 }
 
+// Receipt fields are newline-terminated. In-place appends avoid one string
+// temporary per operator+ without changing the hashed bytes.
+static void appendReceiptLine(std::string &value, const char *text) {
+  value += text;
+  value += '\n';
+}
+
+static void appendReceiptLine(std::string &value, const std::string &text) {
+  value += text;
+  value += '\n';
+}
+
+static void appendReceiptNumber(std::string &value, uint64_t number) {
+  value += std::to_string(number);
+  value += '\n';
+}
+
 std::string
 MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
-  std::string value =
-      std::to_string(manifest.schemaVersion) + "\n" + manifest.mapId + "\n" +
-      manifest.renderer + "\n" + std::to_string(manifest.formatVersion) + "\n" +
-      std::to_string(manifest.labelProfileVersion) + "\n";
+  std::string value;
+  appendReceiptNumber(value, manifest.schemaVersion);
+  appendReceiptLine(value, manifest.mapId);
+  appendReceiptLine(value, manifest.renderer);
+  appendReceiptNumber(value, manifest.formatVersion);
+  appendReceiptNumber(value, manifest.labelProfileVersion);
   for (const std::string &language : manifest.labelLanguages)
-    value += language + "\n";
-  value += manifest.internationalFallback + "\n" +
-           std::to_string(manifest.buildingProfileVersion) + "\n" +
-           std::to_string(manifest.buildingRecordCount) + "\n";
+    appendReceiptLine(value, language);
+  appendReceiptLine(value, manifest.internationalFallback);
+  appendReceiptNumber(value, manifest.buildingProfileVersion);
+  appendReceiptNumber(value, manifest.buildingRecordCount);
   for (uint32_t count : manifest.buildingProvenanceCounts)
-    value += std::to_string(count) + "\n";
+    appendReceiptNumber(value, count);
   if (manifest.formatVersion == 5) {
-    value += std::to_string(manifest.poiProfileVersion) + "\n" +
-             std::to_string(manifest.poiIndexProfileVersion) + "\n" +
-             std::to_string(manifest.poiRecordCount) + "\n" +
-             (manifest.contoursIncluded ? "included\n" : "not-included\n");
+    appendReceiptNumber(value, manifest.poiProfileVersion);
+    appendReceiptNumber(value, manifest.poiIndexProfileVersion);
+    appendReceiptNumber(value, manifest.poiRecordCount);
+    appendReceiptLine(value,
+                      manifest.contoursIncluded ? "included" : "not-included");
     for (uint32_t count : manifest.poiCategoryCounts)
-      value += std::to_string(count) + "\n";
+      appendReceiptNumber(value, count);
     for (const std::string &feature : manifest.requestedFeatures)
-      value += feature + "\n";
+      appendReceiptLine(value, feature);
     for (const auto &block : manifest.nearbyCoverageBlocks) {
       value += std::to_string(block.x);
       value.push_back(',');
@@ -4226,21 +4269,23 @@ MapTransferInstaller::manifestReceipt(const MapManifest &manifest) const {
   }
   if (manifest.formatVersion == 4 ||
       (manifest.formatVersion == 5 && manifest.contoursIncluded)) {
-    value += std::to_string(manifest.topographyProfileVersion) + "\n" +
-             manifest.contourQualityMode + "\n" +
-             std::to_string(manifest.contourRecordCount) + "\n" +
-             std::to_string(manifest.contourPointCount) + "\n" +
-             std::to_string(manifest.contourMinorIntervalM) + "\n" +
-             std::to_string(manifest.contourIndexIntervalM) + "\n" +
-             std::to_string(manifest.contourNoDataMillionths) + "\n" +
-             manifest.topographySourcePolicySha256 + "\n" +
-             manifest.topographyIntermediateSha256 + "\n" +
-             manifest.topographyAttributionSha256 + "\n";
+    appendReceiptNumber(value, manifest.topographyProfileVersion);
+    appendReceiptLine(value, manifest.contourQualityMode);
+    appendReceiptNumber(value, manifest.contourRecordCount);
+    appendReceiptNumber(value, manifest.contourPointCount);
+    appendReceiptNumber(value, manifest.contourMinorIntervalM);
+    appendReceiptNumber(value, manifest.contourIndexIntervalM);
+    appendReceiptNumber(value, manifest.contourNoDataMillionths);
+    appendReceiptLine(value, manifest.topographySourcePolicySha256);
+    appendReceiptLine(value, manifest.topographyIntermediateSha256);
+    appendReceiptLine(value, manifest.topographyAttributionSha256);
   }
-  value += manifest.minimumFirmwareVersion + "\n";
+  appendReceiptLine(value, manifest.minimumFirmwareVersion);
   for (const ManifestFile &file : manifest.files) {
-    value += file.path + "\n" + file.publishPath + "\n" +
-             std::to_string(file.bytes) + "\n" + file.sha256 + "\n";
+    appendReceiptLine(value, file.path);
+    appendReceiptLine(value, file.publishPath);
+    appendReceiptNumber(value, file.bytes);
+    appendReceiptLine(value, file.sha256);
   }
   return sha256Hex(reinterpret_cast<const uint8_t *>(value.data()),
                    value.size());

@@ -288,6 +288,20 @@ static void testTargetFiveIndexMatchesSignedBlocks() {
   assert(active.target.poiRecordCount == 1);
   assert(!active.target.contoursIncluded);
   assert(active.target.poiIndexSha256 == sha(index));
+  // Golden bytes recorded from the operator+ serializers before they became
+  // in-place appends: an unchanged manifest must keep its persisted receipt
+  // and active-map metadata byte for byte.
+  assert(readFile(root + active.root + "/.verified.sha256") ==
+         "9b665e07393055d7cc4e24ee9e3fbe3143845b6bbdb3ccf1c4aa9bbea5a46ff0");
+  assert(readFile(root + "/VECTMAP/active-map.json") ==
+         "{\"mapId\":\"map-pois\",\"sessionId\":\"session-pois\","
+         "\"root\":\"/VECTMAP/.maps/session-pois\",\"renderer\":\"esp32-fmb\","
+         "\"formatVersion\":5,\"labelProfileVersion\":1,"
+         "\"labelLanguages\":[\"en\"],\"internationalFallback\":\"en\","
+         "\"buildingProfileVersion\":1,\"poiProfileVersion\":1,"
+         "\"poiIndexProfileVersion\":1,\"poiRecordCount\":1,"
+         "\"contoursIncluded\":0,\"poiIndexSha256\":\"" + sha(index) +
+         "\"}\n");
 
   const std::string installedRoot = root + active.root;
   std::string status;
@@ -1775,6 +1789,9 @@ static void testPersistentMapLibrary() {
   std::vector<map_transfer::InstalledMap> maps;
   assert(installer.readMapLibrary(maps).ok && maps.size() == 6);
   assert(maps[0].presentation.displayName == "City 0");
+  // Golden receipt recorded before the receipt serializer used appends.
+  assert(maps[0].manifestReceipt ==
+         "1bb8e3b231b440be1d878d92341b02563724611b0b315b10958e05df8e7d46a5");
   assert(maps[0].payloadBytes == data.size());
   assert(maps[0].contains(310000000, 1210000000));
   assert(!maps[0].contains(310000000, 1030000000));

@@ -11,12 +11,20 @@ inline void appendRendererLayerStatus(std::string &body, const Target &target,
   const bool healthyPois = target.formatVersion == 5 &&
       target.poiProfileVersion == 1 && target.poiIndexProfileVersion == 1 &&
       poiHealthy;
+  const char *poiHealth = healthyPois ? "true" : "false";
+  // In-place appends avoid one string temporary per operator+ in both
+  // transports' status serializers.
   body += ",\"fontAssetHealthy\":";
   body += target.formatVersion >= 2 && fontHealthy ? "true" : "false";
-  body += ",\"poiProfileVersion\":" + std::to_string(target.poiProfileVersion) +
-      ",\"poiIndexProfileVersion\":" + std::to_string(target.poiIndexProfileVersion) +
-      ",\"poiDataHealthy\":" + (healthyPois ? "true" : "false") +
-      ",\"poiIndexHealthy\":" + (healthyPois ? "true" : "false") +
-      ",\"contourLayerIncluded\":" + (target.contoursIncluded ? "true" : "false");
+  body += ",\"poiProfileVersion\":";
+  body += std::to_string(target.poiProfileVersion);
+  body += ",\"poiIndexProfileVersion\":";
+  body += std::to_string(target.poiIndexProfileVersion);
+  body += ",\"poiDataHealthy\":";
+  body += poiHealth;
+  body += ",\"poiIndexHealthy\":";
+  body += poiHealth;
+  body += ",\"contourLayerIncluded\":";
+  body += target.contoursIncluded ? "true" : "false";
 }
 } // namespace map_transfer

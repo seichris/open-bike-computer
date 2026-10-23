@@ -2,6 +2,7 @@
 
 #include "ble_navigation.hpp"
 #include "map_profile_persistence.hpp"
+#include "../utils/src/startup_constructed.hpp"
 
 #include <Preferences.h>
 
@@ -48,7 +49,8 @@ struct ReplayRecord {
 };
 
 Preferences preferences;
-Snapshot active{};
+StartupConstructed<Snapshot> activeStorage;
+Snapshot &active = activeStorage.value;
 bool ready = false;
 char activeSlot = 'A';
 uint32_t activeLegacyDigest = 0;

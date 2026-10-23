@@ -25,6 +25,7 @@
 #include "uiUpdatePolicy.hpp"
 #include "../../ble_navigation/workout_telemetry_runtime.hpp"
 #include "../../utils/src/mapTapArbiter.hpp"
+#include "../../utils/src/startup_constructed.hpp"
 #include "../../maps/src/mapPoiIcon.hpp"
 #include <algorithm>
 #include <array>
@@ -142,7 +143,8 @@ struct NearbyView {
   bool haveResults = false;
   uint8_t highlightedResult = 255;
 };
-static NearbyView nearby;
+static StartupConstructed<NearbyView> nearbyStorage;
+static NearbyView &nearby = nearbyStorage.value;
 static std::array<std::array<uint16_t, 14 * 14>, 5> nearbyIconPixels{};
 #endif
 struct DestinationRowContext {

@@ -11,6 +11,7 @@ extern Power power;
 
 #include "ble_navigation.hpp"
 #include "../utils/src/runtime_ownership.hpp"
+#include "../utils/src/startup_constructed.hpp"
 #include "../utils/src/runtime_mutex.hpp"
 
 #ifndef FIRMWARE_DIAGNOSTICS
@@ -161,7 +162,10 @@ static std::atomic<bool> bleSessionSupportsWorldRadio{false};
 // mutex.
 static std::atomic<uint32_t> rideDeliveryLeaseGenerationSnapshot{0};
 static std::atomic<uint32_t> ridePayloadGeneration{1};
-static ride_delivery_protocol::GroupTracker rideDeliveryTracker;
+static StartupConstructed<ride_delivery_protocol::GroupTracker>
+    rideDeliveryTrackerStorage;
+static ride_delivery_protocol::GroupTracker &rideDeliveryTracker =
+    rideDeliveryTrackerStorage.value;
 static portMUX_TYPE rideDeliveryTrackerMux = portMUX_INITIALIZER_UNLOCKED;
 static std::atomic<uint32_t> lastRendererMetricsRequestMs{0};
 static std::atomic<uint32_t> lastRendererWindowRequestMs{0};
@@ -253,8 +257,10 @@ struct DeferredNotification {
   uint16_t length = 0;
   uint8_t payload[kDeferredNotificationBytes] = {};
 };
-static DeferredNotification deferredNotifications[
-    kDeferredNotificationCapacity];
+static StartupConstructed<DeferredNotification[kDeferredNotificationCapacity]>
+    deferredNotificationsStorage;
+static DeferredNotification (&deferredNotifications)[
+    kDeferredNotificationCapacity] = deferredNotificationsStorage.value;
 static uint8_t deferredNotificationHead = 0;
 static uint8_t deferredNotificationTail = 0;
 static uint8_t deferredNotificationCount = 0;
@@ -301,7 +307,9 @@ static std::atomic<bool> diagnosticsSessionPreparationComplete{false};
 static ride_diagnostics::transfer_policy::StoragePreparation diagnosticsStorageResult{};
 static ride_diagnostics::transfer_policy::SealPreparation diagnosticsSealResult{};
 static portMUX_TYPE destinationPickerMux = portMUX_INITIALIZER_UNLOCKED;
-static DestinationCatalogSnapshot destinationCatalog;
+static StartupConstructed<DestinationCatalogSnapshot> destinationCatalogStorage;
+static DestinationCatalogSnapshot &destinationCatalog =
+    destinationCatalogStorage.value;
 static DestinationPickerStatusSnapshot destinationPickerStatus;
 static destination_picker_protocol::CatalogReassembler destinationCatalogReassembler;
 static StaticSemaphore_t destinationCatalogReassemblerMutexStorage;
@@ -344,7 +352,10 @@ static StaticSemaphore_t screenConfigurationMutexStorage;
 static SemaphoreHandle_t screenConfigurationMutex = nullptr;
 static screen_configuration_protocol::UploadReassembler
     screenConfigurationUpload;
-static PendingScreenConfigurationControl pendingScreenConfiguration;
+static StartupConstructed<PendingScreenConfigurationControl>
+    pendingScreenConfigurationStorage;
+static PendingScreenConfigurationControl &pendingScreenConfiguration =
+    pendingScreenConfigurationStorage.value;
 static OutgoingScreenConfigurationSnapshot outgoingScreenConfiguration;
 static std::atomic<bool> screenConfigurationSnapshotActive{false};
 static std::atomic<bool> screenConfigurationResetRequested{false};
