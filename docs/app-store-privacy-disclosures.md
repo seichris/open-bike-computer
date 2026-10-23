@@ -95,6 +95,13 @@ other identifier as linked even when the app has no account or real-world name.
   path without explicit approval under the current Apple terms.
 - Confirm `maps.8o.vc` stores map geometry only for requested map jobs and does
   not repurpose it for analytics, advertising, or tracking.
+- Confirm route elevation requests (`POST /v1/route-elevation-profiles`) are
+  served in real time only: the geometry is neither stored nor logged, the
+  in-memory replay cache holds no coordinates and expires within 10 minutes, the
+  Geoapify request carries only sample coordinates from the server, and the
+  credit ledger keeps only installation pseudonyms with day-scoped counts that
+  expire within 48 hours. Apple Maps and Strava geometry must never reach this
+  endpoint. If any of these change, revisit the Precise Location answer.
 - Confirm custom map names, job/status timestamps, and download receipts remain
   limited to installation-scoped map listing, recovery, and delivery.
 - Confirm reverse-proxy and infrastructure access-log retention. The app

@@ -31,16 +31,21 @@ int main() {
   MemoryStorage io;
   Store store(io,std::string(32,'a')); auto id=identity(); Record record;
   assert(store.restore()==Result::Ok);
+  assert(!store.hasUnresolvedOperation()); // empty slots default to Receiving, but own no work
   assert(store.initializeAdmission(100)==Result::Ok);
   assert(store.query(id,record)==Result::Unavailable);
   assert(store.admit(id,store.admissionRevision())==Result::Ok);
+  assert(store.hasUnresolvedOperation());
   assert(store.accept(id)==Result::NotAccepted);
   assert(store.rendererAcknowledged(id,id.manifest,id.signedManifest)==Result::NotAccepted);
   assert(store.prepare(id)==Result::Ok);
+  assert(store.hasUnresolvedOperation());
   assert(store.accept(id)==Result::Ok);
+  assert(store.hasUnresolvedOperation());
   assert(store.cancel(id)==Result::TooLate);
   assert(store.rendererAcknowledged(id,std::string(64,'e'),id.signedManifest)==Result::SelectionMismatch);
   assert(store.rendererAcknowledged(id,id.manifest,id.signedManifest)==Result::Ok);
+  assert(!store.hasUnresolvedOperation()); // terminal record plus three empty slots
   assert(store.admit(id,store.admissionRevision())==Result::Replay);
   auto conflict=id; conflict.streamBytes++;
   assert(store.admit(conflict,store.admissionRevision())==Result::Conflict);

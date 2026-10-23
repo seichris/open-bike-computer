@@ -3136,12 +3136,13 @@ extension NavigationProtocolTests {
             source.contains("if item.isActiveOnDevice {") &&
                 source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
                 source.contains("? \"arrow.clockwise.circle\"") &&
-                source.contains(": \"arrow.up.circle\"") &&
+                source.contains("\"arrow.up.circle\"") &&
+                !source.contains("\"arrow.triangle.swap\"") &&
                 !source.contains("IPhoneDownloadStatusIcon") &&
                 !source.contains("Image(systemName: \"iphone\")") &&
                 !source.contains("BikeComputerMapStatusIcon") &&
                 !source.contains("Text(\"b\")"),
-            "saved maps use the same active check and inactive upload icons regardless of origin"
+            "saved maps use the upload icon for retained SD maps and keep active and retry states"
         )
         assert(
             source.contains("Text(\"No offline maps yet\")"),
@@ -3150,7 +3151,8 @@ extension NavigationProtocolTests {
         assert(
             source.contains("This map is not saved on this iPhone") &&
                 source.contains("is active on the Bike Computer") &&
-                source.contains("Transfer \\(displayName) to device"),
+                source.contains("Install \\(displayName) on the Bike Computer") &&
+                source.contains("already installed on the SD card"),
             "saved-map presence indicators expose accessible state labels"
         )
         assert(
@@ -3248,13 +3250,14 @@ extension NavigationProtocolTests {
         )
         assert(
             source.contains("manager.detailPreviewImage(for: preview.item)") &&
-                source.contains("Loading high-resolution preview") &&
+                source.contains("Loading map preview…") &&
+                !previewSource.contains("fallbackImage") &&
                 source.contains(".interpolation(.high)") &&
                 source.contains(".task(id: preview.id)") &&
                 source.contains(
                     "await manager.loadDetailPreviewIfNeeded(for: preview.item)"
                 ),
-            "the preview modal upgrades its thumbnail through cancellable Retina loading"
+            "the preview modal loads Retina directly without showing the list thumbnail first"
         )
         assert(
             source.contains("manager.savedMapListItems(") &&
@@ -3682,7 +3685,7 @@ extension NavigationProtocolTests {
                 deviceSection.contains("case .mapPlusNavigation:") &&
                 deviceSection.contains("? .mapPlusNavigation\n                : .map") &&
                 deviceSection.contains(
-                    "case .navigation, .rideStats, .batteryStatus, .worldRadio:\n            return nil"
+                    "case .navigation, .rideStats, .batteryStatus, .worldRadio, .elevation:\n            return nil"
                 ),
             "only Map rows receive gears and legacy firmware opens the shared map profile"
         )
@@ -5189,6 +5192,97 @@ extension NavigationProtocolTests {
                     "recorded legacy transfer identity refreshes the live inventory")
         assert(refreshedItems[0].isOnIPhone && refreshedItems[0].isActiveOnDevice,
                "protocol-v1 fallback installation merges without an app relaunch")
+
+        let installedStream = DeviceInstalledMap(
+            sessionID: "retained-stream", mapID: "stream-map",
+            manifestReceipt: streamArtifact.manifestReceipt!,
+            signedManifestReceipt: signedReceipt, displayName: "Stream Map",
+            payloadBytes: 1024, boundsE7: nil
+        )
+        let sdOnlyMap = DeviceInstalledMap(
+            sessionID: "retained-city", mapID: "sd-city",
+            manifestReceipt: String(repeating: "e", count: 64),
+            signedManifestReceipt: String(repeating: "f", count: 64),
+            displayName: "SD-only City", payloadBytes: 8192,
+            boundsE7: [-1_000_000, -1_000_000, 1_000_000, 1_000_000]
+        )
+        var library = DeviceMapLibrary(schemaVersion: 1, known: true,
+            automatic: true, busy: false, revision: 1, error: "",
+            selectedSessionID: "", maps: [installedStream, sdOnlyMap])
+        var retainedItems = streamManager.savedMapListItems(
+            activeDeviceMap: nil, deviceMapLibrary: library)
+        assertEqual(retainedItems.count, 2,
+                    "Saved Maps merges the exact installed version and includes SD-only maps")
+        assert(retainedItems.contains { $0.isOnIPhone && $0.installedDeviceMap == installedStream },
+               "a retained map is marked as saved on Bicino without claiming it is active")
+        assert(retainedItems.contains {
+            !$0.isOnIPhone && !$0.isActiveOnDevice && $0.installedDeviceMap == sdOnlyMap &&
+                $0.previewDeviceMap?.bounds != nil
+        }, "inactive SD-only maps remain previewable and selectable in Saved Maps")
+        var damaged = installedStream
+        damaged.available = false
+        library.maps = [damaged, sdOnlyMap]
+        retainedItems = streamManager.savedMapListItems(activeDeviceMap: nil, deviceMapLibrary: library)
+        assertEqual(retainedItems.count, 2, "damaged maps stay visible for explicit SD removal")
+        assert(retainedItems.contains { $0.installedDeviceMap?.isAvailable == false },
+               "damaged copies do not become a healthy saved-on-Bicino status")
+        let differentVersion = DeviceInstalledMap(
+            sessionID: "another-stream-version", mapID: "stream-map",
+            manifestReceipt: String(repeating: "c", count: 64),
+            signedManifestReceipt: signedReceipt, displayName: "Stream Map",
+            payloadBytes: 2048, boundsE7: nil
+        )
+        library.maps = [differentVersion, sdOnlyMap]
+        retainedItems = streamManager.savedMapListItems(activeDeviceMap: nil, deviceMapLibrary: library)
+        assertEqual(retainedItems.count, 3, "different signed versions of the same city stay distinct")
+        assertEqual(streamManager.savedMapListItems(activeDeviceMap: nil).count, 1,
+                    "disconnect removes SD-only entries and preserves the local map")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "", suggestedSessionID: sdOnlyMap.sessionID)
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .switchMap(sdOnlyMap), "a verified covering SD map offers switching instead of downloading")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 1, longitude: 1),
+                    .none, "coverage from an earlier GPS block cannot prompt at a new location")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: .nan, longitude: 0),
+                    .none, "invalid GPS cannot produce a map prompt")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "stale-selection", suggestedSessionID: sdOnlyMap.sessionID)
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .none, "a changed active map invalidates a previously checked suggestion")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: true,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "", suggestedSessionID: "")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .none, "working current coverage needs neither prompt")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "", suggestedSessionID: "")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .download, "a checked hole with no covering installed map keeps Download Map")
+        let smallMap = DeviceInstalledMap(sessionID: "small-map", mapID: "small-map",
+            manifestReceipt: String(repeating: "a", count: 64),
+            signedManifestReceipt: String(repeating: "b", count: 64), displayName: "Small Map",
+            payloadBytes: 2048, boundsE7: [10_000, 10_000, 100_000, 100_000])
+        var smallLibrary = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: false,
+            busy: false, revision: 2, error: "", selectedSessionID: "", maps: [smallMap])
+        smallLibrary.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 0, selectedSessionID: "", suggestedSessionID: "")
+        assertEqual(DeviceMapAssistance.evaluate(library: smallLibrary, latitude: 0.002, longitude: 0.002),
+                    .none, "entering a small map inside the same renderer block waits for a new probe")
+        smallLibrary.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 1, selectedSessionID: "", suggestedSessionID: smallMap.sessionID)
+        assertEqual(DeviceMapAssistance.evaluate(library: smallLibrary, latitude: 0.002, longitude: 0.002),
+                    .switchMap(smallMap), "the refreshed bounds context offers the installed small map")
+        library.coverage = nil
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .none, "an inventory without a completed coverage check cannot claim no suitable map exists")
+        let inventoryJSON = try! JSONEncoder().encode(library)
+        let inventoryStatus = try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+            from: Data("{\"mapLibrary\":".utf8) + inventoryJSON + Data("}".utf8))
+        assert(inventoryStatus.hasMapLibrary && inventoryStatus.mapLibrary != nil,
+               "valid inventory advertises the installed-map capability")
+        let malformedInventory = try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+            from: Data("{\"mapLibrary\":{\"schemaVersion\":999}}".utf8))
+        assert(malformedInventory.hasMapLibrary && malformedInventory.mapLibrary == nil,
+               "malformed modern inventory cannot masquerade as firmware without a map library")
     }
 
     static func testOfflineMapManifestDecoding() {
@@ -8971,12 +9065,14 @@ extension NavigationProtocolTests {
         assertEqual(DeviceBLEProtocol.rendererBenchmarkSampleCapabilityMask, 1 << 23, "CAP2 bit 23 advertises atomic renderer replay samples")
         assertEqual(DeviceBLEProtocol.watchGPSMotionEvidenceV1CapabilityMask, 1 << 25, "CAP2 bit 25 advertises Watch GPS motion evidence")
         assertEqual(DeviceBLEProtocol.rendererBenchmarkWindowPrefix, "RBW1", "ordinary renderer windows stay firmware-compatible")
-        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 32, "capability version negotiates POIs independently of friend-marker size, group riders and terrain")
+        assertEqual(DeviceBLEProtocol.deviceCapabilitiesVersion, 33, "capability version negotiates POIs after route elevation, friend-marker size, group riders and terrain")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedRouteElevationV1Feature, 1 << 2, "extended bit 2 advertises route elevation profiles")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedRouteElevationV1MinimumClientVersion, 32, "route elevation negotiation requires protocol 32")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedMapPoisFeature, 1 << 3, "extended bit 3 advertises map POIs and Nearby")
+        assertEqual(RideBLEGeneratedProtocolV1.extendedMapPoisMinimumClientVersion, 33, "POI negotiation requires protocol 33")
         assertEqual(RideBLEGeneratedProtocolV1.extendedFriendMarkerScaleV1Feature, 1 << 1, "extended bit 1 advertises the shared friend-marker size")
         assertEqual(RideBLEGeneratedProtocolV1.extendedFriendMarkerScaleV1MinimumClientVersion, 31, "friend-marker size negotiation requires protocol 31")
         assertEqual(DeviceBLEProtocol.friendMarkerScaleSettingID, 39, "the friend-marker size uses the first free global setting ID")
-        assertEqual(RideBLEGeneratedProtocolV1.extendedMapPoisFeature, 1 << 2, "extended bit 2 advertises POIs without reusing friend-marker size")
-        assertEqual(RideBLEGeneratedProtocolV1.extendedMapPoisMinimumClientVersion, 32, "POI negotiation requires protocol 32")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1Feature, 1 << 29, "CAP2 bit 29 advertises versioned workout zones without reusing the display inactivity capability")
         assertEqual(RideBLEGeneratedProtocolV1.workoutZonesV1MinimumClientVersion, 27, "zone negotiation requires protocol 27, independent of the iOS version")
         assertEqual(DeviceBLEProtocol.topographicContoursCapabilityMask, 1 << 30, "CAP2 bit 30 advertises signed topographic contour support")
@@ -9083,14 +9179,16 @@ extension NavigationProtocolTests {
         assertEqual(DeviceScreen.mapPlusNavigation.rawValue, 3, "Map + Navigation screen protocol value stays stable")
         assertEqual(DeviceScreen.batteryStatus.rawValue, 4, "Battery Status screen uses protocol value 4")
         assertEqual(DeviceScreen.worldRadio.rawValue, 5, "World Radio screen uses protocol value 5")
+        assertEqual(DeviceScreen.elevation.rawValue, 6, "Elevation screen uses protocol value 6")
+        assertEqual(DeviceScreen.elevation.title, "Elevation", "Elevation has a user-facing label")
         assertEqual(DeviceScreen.mapPlusNavigation.title, "Map + Navigation", "combined map/navigation screen keeps user-facing label")
         assertEqual(DeviceScreen.batteryStatus.title, "Battery Status", "battery screen has a user-facing label")
         assertEqual(DeviceScreen.worldRadio.title, "World Radio", "World Radio has a user-facing label")
         assertEqual(DeviceScreen.displayOrder,
-                    [.mapPlusNavigation, .rideStats, .map, .navigation, .worldRadio, .batteryStatus],
-                    "World Radio precedes Battery Status in settings and cycling order")
-        assertEqual(DeviceScreen.allScreensMask, 0x3F, "all supported device screens use the low six mask bits")
-        assertEqual(DeviceScreen.defaultScreensMask, 0x1F, "World Radio is off by default")
+                    [.mapPlusNavigation, .rideStats, .elevation, .map, .navigation, .worldRadio, .batteryStatus],
+                    "Elevation follows Ride Stats and World Radio precedes Battery Status, matching the firmware cycle")
+        assertEqual(DeviceScreen.allScreensMask, 0x7F, "all supported device screens use the low seven mask bits")
+        assertEqual(DeviceScreen.defaultScreensMask, 0x1F, "World Radio and Elevation are off by default")
         assertEqual(DeviceScreen.legacyScreensMask, 0x0F, "legacy firmware receives only the original four screen bits")
         assertEqual(DisconnectedSleepTimeout.oneMinute.settingValue, 60, "one-minute sleep timeout sends seconds")
         assertEqual(DisconnectedSleepTimeout.twoMinutes.settingValue, 120, "two-minute sleep timeout sends seconds")
@@ -9913,6 +10011,110 @@ extension NavigationProtocolTests {
         )
         assert(disconnectedEndingPair.transmissions.first?.prioritized == true,
                "ending freshness loss uses the priority lane")
+    }
+
+    static func testDeviceMapLibrary() {
+        let receipt = String(repeating: "a", count: 64)
+        let signed = String(repeating: "b", count: 64)
+        let map = DeviceInstalledMap(sessionID: "shanghai-1", mapID: "shanghai",
+            manifestReceipt: receipt, signedManifestReceipt: signed, displayName: "Shanghai",
+            payloadBytes: 1_354_311, boundsE7: [1_210_000_000, 310_000_000, 1_220_000_000, 320_000_000])
+        let library = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 7, error: "", selectedSessionID: "", maps: [map])
+        assert(library.isValid, "valid installed map inventory")
+        assertEqual(library.installed(mapID: "shanghai", manifestReceipt: receipt, signedManifestReceipt: signed), map,
+                    "exact verified version can be reused")
+        assert(library.installed(mapID: "shanghai", manifestReceipt: String(repeating: "c", count: 64),
+            signedManifestReceipt: signed) == nil, "same name with different content must upload")
+        assert(library.installed(mapID: "shanghai", manifestReceipt: receipt,
+            signedManifestReceipt: String(repeating: "c", count: 64)) == nil, "different signed version must upload")
+        let packet = DeviceMapLibrary.command("select", map: map)!
+        assertEqual(String(data: packet, encoding: .utf8), "MTRNlibrary-select|shanghai-1|" + receipt,
+                    "library selection binds the installed session and receipt")
+        assert(MapLibraryControlPacket.make(action: "select", sessionID: "../map", manifestReceipt: receipt) == nil,
+               "reject unsafe session")
+        assert(MapLibraryControlPacket.make(action: "remove", sessionID: "map|injected", manifestReceipt: receipt) == nil,
+               "reject command delimiter injection")
+        assert(MapLibraryControlPacket.make(action: "remove", sessionID: "map", manifestReceipt: "short") == nil,
+               "reject truncated identity")
+        assert(DeviceMapLibrary.command("unknown") == nil, "reject unknown library actions")
+        assertEqual(String(data: MapLibraryControlPacket.page(offset: 4)!, encoding: .utf8), "MTRNlibrary-page|4",
+                    "small BLE pages use a bounded read-only command")
+        assert(MapLibraryControlPacket.page(offset: 3) == nil && MapLibraryControlPacket.page(offset: 32) == nil,
+               "reject invalid page offsets")
+        let pagedMaps = (0..<6).map { index in
+            DeviceInstalledMap(sessionID: "page-\(index)", mapID: "map-\(index)",
+                manifestReceipt: receipt, signedManifestReceipt: signed, displayName: "Map \(index)",
+                payloadBytes: 100, boundsE7: nil)
+        }
+        var firstPage = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 9, error: "", selectedSessionID: "", maps: Array(pagedMaps.prefix(4)))
+        firstPage.offset = 0; firstPage.total = 6
+        var lastPage = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 9, error: "", selectedSessionID: "", maps: Array(pagedMaps.suffix(2)))
+        lastPage.offset = 4; lastPage.total = 6
+        var malformed = firstPage; malformed.offset = Int.min; malformed.total = Int.max
+        assert(!malformed.isValid, "untrusted pagination integers cannot overflow validation")
+        var pages = DeviceMapLibraryPages()
+        let partial = pages.ingest(firstPage)
+        assert(partial.library?.isComplete == false && partial.nextOffset == 4,
+               "partial inventories never authorize reuse")
+        var stale = lastPage; stale = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 8, error: "", selectedSessionID: "", maps: stale.maps, offset: 4, total: 6)
+        assertEqual(pages.ingest(stale).nextOffset, 0, "mixed revisions restart from page zero")
+        _ = pages.ingest(firstPage)
+        let assembled = pages.ingest(lastPage)
+        assertEqual(assembled.library?.maps.count, 6, "all maps assemble from one snapshot")
+        assert(assembled.library?.isComplete == true && assembled.nextOffset == nil,
+               "only a complete snapshot enables commands")
+        assertEqual(pages.ingest(firstPage).library?.maps.count, 6, "late duplicate pages cannot replace a complete snapshot")
+        pages = DeviceMapLibraryPages()
+        assertEqual(pages.ingest(lastPage).nextOffset, 0, "a new connection cannot inherit old partial pages")
+
+        let nonce = String(repeating: "a", count: 32)
+        assertEqual(String(data: MapLibraryControlPacket.make(action: "select", sessionID: "city", manifestReceipt: receipt, requestID: nonce)!, encoding: .utf8),
+                    "MTRNlibrary-select|city|\(receipt)|\(nonce)", "selection results match an exact request nonce")
+        assert(MapLibraryControlPacket.make(action: "select", sessionID: "city", manifestReceipt: receipt, requestID: "bad") == nil,
+               "reject malformed selection request identity")
+        let futureStatus = try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+            from: Data("{\"enabled\":false,\"mapLibrary\":{\"schemaVersion\":2}}".utf8))
+        assert(futureStatus.mapLibrary == nil && futureStatus.enabled == false,
+               "a future optional inventory cannot break ordinary HTTP transfer status")
+        var damagedMap = map; damagedMap.available = false
+        let damagedLibrary = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 10, error: "", selectedSessionID: "", maps: [damagedMap])
+        assert(damagedLibrary.installed(mapID: map.mapID, manifestReceipt: receipt, signedManifestReceipt: signed) == nil,
+               "damaged payloads remain removable but never authorize reuse")
+        assert(OfflineMapPlatformError.serverStatus(503, "{\"code\":\"stream_storage_unavailable\"}").localizedDescription.contains("busy or unavailable"),
+               "temporary SD unavailability is distinct from a full card")
+        let fullCard = OfflineMapPlatformError.serverStatus(507,
+            "{\"ok\":false,\"error\":{\"code\":\"stream_sd_full\",\"message\":\"remove a map\"},\"operation\":{\"phase\":\"failed\"}}")
+        assert(DeviceMapLibrary.requiresLibraryAction(fullCard) && fullCard.localizedDescription.contains("needs space"),
+               "a full-card refusal names the SD-library remedy even when an upload pauses")
+        assert(OfflineMapPlatformError.serverStatus(409, "{\"error\":{\"code\":\"stream_repair_requires_removal\"}}")
+                .localizedDescription.contains("damaged"), "a damaged SD copy is repaired by removal, then reinstall")
+        assert(OfflineMapPlatformError.serverStatus(409, "{\"error\":{\"code\":\"stream_session_conflict\"}}")
+                .localizedDescription.contains("Another copy"), "a protected or different copy needs an explicit choice")
+        assert(DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(409,
+            "{\"error\":{\"code\":\"stream_repair_requires_removal\"}}")), "repair refusals are not resumable")
+        assert(!DeviceMapLibrary.requiresLibraryAction(OfflineMapPlatformError.serverStatus(500, "{}")) &&
+               !DeviceMapLibrary.requiresLibraryAction(CancellationError()), "ordinary interruptions still resume")
+        assert(DeviceMapLibrary.errorDescription("library_operation_pending").contains("cancel"),
+               "a pending installation prerequisite is actionable")
+        assert(DeviceMapLibrary.errorDescription("library_in_use").contains("in use"),
+               "protected removal explains why it is refused")
+        let encoded = try! JSONEncoder().encode(library)
+        assertEqual(try! JSONDecoder().decode(DeviceMapLibrary.self, from: encoded), library, "inventory wire round trip")
+        let duplicate = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: false,
+            revision: 8, error: "", selectedSessionID: "", maps: [map, map])
+        assert(!duplicate.isValid, "duplicate installed identities cannot drive actions")
+        let future = DeviceMapLibrary(schemaVersion: 2, known: true, automatic: true, busy: false,
+            revision: 8, error: "", selectedSessionID: "", maps: [map])
+        assert(!future.isValid, "future inventory schemas fail closed")
+        let busy = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: true, busy: true,
+            revision: 8, error: "", selectedSessionID: "", maps: [map])
+        assert(busy.installed(mapID: "shanghai", manifestReceipt: receipt, signedManifestReceipt: signed) == nil,
+               "busy inventory is not reuse authority")
     }
 
 }

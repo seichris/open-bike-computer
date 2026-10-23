@@ -424,7 +424,8 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
       instance.mapProfile.buildings3DEnabled = after.buildings3DEnabled;
   };
   const uint8_t mask = legacy.enabledScreensMask & DEVICE_SCREEN_SUPPORTED_MASK;
-  bool represented[7]{};
+  constexpr uint8_t SCREEN_TYPE_COUNT = static_cast<uint8_t>(ScreenType::Nearby) + 1;
+  bool represented[SCREEN_TYPE_COUNT]{};
   for (uint8_t index = 0; index < document.instanceCount; ++index) {
     ScreenInstance &instance = document.instances[index];
     const uint8_t rawType = static_cast<uint8_t>(instance.type);
@@ -432,7 +433,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     if (importMask)
       instance.enabled = (mask & (1U << rawType)) != 0;
   }
-  for (uint8_t rawType = 0; rawType < 7 &&
+  for (uint8_t rawType = 0; rawType < SCREEN_TYPE_COUNT &&
                             document.instanceCount <
                                 screen_configuration_protocol::MAX_INSTANCES;
        ++rawType) {
@@ -451,6 +452,7 @@ void importLegacy(Document &document, const MapRenderSettings &legacy,
     case ScreenType::MapNavigation: name = "Map + Navigation"; break;
     case ScreenType::BatteryStatus: name = "Battery Status"; break;
     case ScreenType::WorldRadio: name = "World Radio"; break;
+    case ScreenType::Elevation: name = "Elevation"; break;
     case ScreenType::Nearby: name = "Nearby"; break;
     }
     (void)screen_configuration_protocol::setName(instance, name,
@@ -519,6 +521,14 @@ Document makeMigratedDocument(const MapRenderSettings &legacy) {
     radio.type = ScreenType::WorldRadio;
     radio.enabled = true;
     (void)screen_configuration_protocol::setName(radio, "World Radio", 11);
+  }
+  if (route_elevation_config::ENABLED &&
+      (legacy.enabledScreensMask & screen_configuration_protocol::screenTypeBit(ScreenType::Elevation))) {
+    auto &elevation = document.instances[document.instanceCount++];
+    elevation.id = 7;
+    elevation.type = ScreenType::Elevation;
+    elevation.enabled = true;
+    (void)screen_configuration_protocol::setName(elevation, "Elevation", 9);
   }
   const ScreenType requestedDefault =
       screen_configuration_protocol::isSupportedScreenType(static_cast<ScreenType>(legacy.defaultScreen))

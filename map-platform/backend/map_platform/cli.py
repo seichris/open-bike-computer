@@ -50,6 +50,7 @@ from .monitoring import (
 from .pipeline import MapBuildPipeline, PipelinePaths, run_job
 from .preparation_estimates import load_estimate_coordinator
 from .rate_limits import purge_expired_rate_limits
+from .route_elevation_providers import purge_expired_route_elevation_credits
 from .resource_report import worker_resource_report
 from .source_cache import SourceCache, default_backend_data_root
 from .sources import SourceIndex
@@ -327,6 +328,10 @@ def _perform_maintenance(
         (
             "removedRateLimits",
             lambda: purge_expired_rate_limits(data_root / "rate-limits.sqlite3"),
+        ),
+        (
+            "removedRouteElevationCredits",
+            lambda: purge_expired_route_elevation_credits(data_root / "route-elevation.sqlite3"),
         ),
         (
             "buildingBlockCache",
@@ -613,10 +618,38 @@ def main() -> int:
         "resource-report",
         help="print a read-only worker cgroup and memory capability report",
     )
+    route_structures = subparsers.add_parser(
+        "route-elevation-structures",
+        help="build a read-only OSM bridge/tunnel index for route elevation correction",
+    )
+    route_structures.add_argument("--osm", type=Path, required=True, help="OSM PBF or XML extract")
+    route_structures.add_argument("--output", type=Path, required=True, help="new .sqlite3 index path")
+    route_structures.add_argument(
+        "--source-label",
+        required=True,
+        help="provenance label, for example geofabrik:europe/france",
+    )
+    route_structures.add_argument(
+        "--bounds",
+        type=float,
+        nargs=4,
+        metavar=("WEST", "SOUTH", "EAST", "NORTH"),
+    )
 
     args = parser.parse_args()
     if args.command == "resource-report":
         print(json.dumps(worker_resource_report(), indent=2, sort_keys=True))
+        return 0
+    if args.command == "route-elevation-structures":
+        from .route_elevation_structures import build_structure_index
+
+        summary = build_structure_index(
+            args.osm,
+            args.output,
+            source_label=args.source_label,
+            bounds=tuple(args.bounds) if args.bounds else None,
+        )
+        print(json.dumps(summary, indent=2, sort_keys=True))
         return 0
     repo_root = Path(args.repo_root).resolve()
     data_root = (

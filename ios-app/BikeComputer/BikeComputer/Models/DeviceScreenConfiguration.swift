@@ -15,6 +15,7 @@ extension RideBLEScreenTypeV1: Identifiable {
         case .mapPlusNavigation: return "Map + Navigation"
         case .batteryStatus: return "Battery Status"
         case .worldRadio: return "World Radio"
+        case .elevation: return "Elevation"
         case .nearby: return "Nearby"
         }
     }
@@ -337,7 +338,7 @@ struct DeviceScreenConfigurationDocument: Equatable, Codable, Sendable {
                 guard layout.slots.contains(where: { $0 != .empty }) else {
                     throw DeviceScreenConfigurationValidationError.emptyRideStatsLayout
                 }
-            case .navigation, .batteryStatus, .worldRadio:
+            case .navigation, .batteryStatus, .worldRadio, .elevation:
                 guard instance.mapProfile == nil,
                       instance.rideStatsLayout == nil else {
                     throw DeviceScreenConfigurationValidationError.invalidPayload
@@ -569,7 +570,7 @@ enum DeviceScreenConfigurationCodec {
             payload.append(1)
             payload.append(UInt8(layout.slots.count))
             payload.append(contentsOf: layout.slots.map(\.rawValue))
-        case .navigation, .batteryStatus, .worldRadio:
+        case .navigation, .batteryStatus, .worldRadio, .elevation:
             break
         }
         return payload
@@ -641,7 +642,7 @@ enum DeviceScreenConfigurationCodec {
                 slots.append(widget)
             }
             rideStatsLayout = RideStatsLayout(slots: slots)
-        case .navigation, .batteryStatus, .worldRadio:
+        case .navigation, .batteryStatus, .worldRadio, .elevation:
             guard payload.count == 1 else {
                 throw DeviceScreenConfigurationValidationError.invalidPayload
             }

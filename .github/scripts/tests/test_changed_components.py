@@ -247,6 +247,25 @@ class ChangedComponentsTests(unittest.TestCase):
             selected,
         )
 
+    def test_route_elevation_fixtures_select_every_consumer(self) -> None:
+        for path in (
+            "protocol/fixtures/route-elevation-v1/transfer-v1.txt",
+            "protocol/fixtures/route-elevation-v1/processing.json",
+            "protocol/fixtures/route-elevation-v1/service-response-v1.json",
+            "tools/generate_route_elevation_fixtures.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {
+                        "firmware_build": False,
+                        "firmware_host": True,
+                        "ios": True,
+                        "map_backend": True,
+                        "osm": False,
+                    },
+                    changed_components.classify_paths([path]),
+                )
+
     def test_contract_documents_select_their_consumers(self) -> None:
         firmware_contracts = (
             "docs/firmware-battery-life-hardware-validation.md",

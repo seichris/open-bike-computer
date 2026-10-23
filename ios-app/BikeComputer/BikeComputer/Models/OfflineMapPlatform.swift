@@ -1426,6 +1426,21 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
                 return "We couldn't build this map. Try again. If it keeps failing, report the problem."
             }
         case .serverStatus(let status, let body):
+            if body.contains("\"library_full\"") || body.contains("\"stream_sd_full\"") {
+                return "The SD card needs space. Remove a map in Settings → Saved Maps (swipe left on the map), then try again."
+            }
+            if body.contains("\"stream_storage_unavailable\"") {
+                return "The SD card is busy or unavailable. Try again shortly."
+            }
+            if body.contains("\"stream_repair_requires_removal\"") {
+                return "This map's copy on the Bike Computer is damaged. Remove it in Settings → Saved Maps (swipe left on the map), then install it again."
+            }
+            if body.contains("\"stream_session_conflict\"") {
+                return "Another copy of this map is on the Bike Computer. Choose another map first if this copy is in use. Then swipe left on it in Settings → Saved Maps, remove it from Bicino, and try again."
+            }
+            if body.contains("\"library_busy\"") {
+                return "The Bike Computer is finishing a map switch. Try again shortly."
+            }
             if status == 429,
                let data = body.data(using: .utf8),
                let envelope = try? JSONDecoder().decode(OfflineMapAPIErrorEnvelope.self, from: data) {
@@ -1635,6 +1650,174 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     }
 }
 
+nonisolated struct DeviceInstalledMap: Codable, Equatable, Identifiable, Sendable {
+    let sessionID: String
+    let mapID: String
+    let manifestReceipt: String
+    let signedManifestReceipt: String
+    let displayName: String
+    let payloadBytes: UInt64
+    let boundsE7: [Int]?
+    var available: Bool? = nil
+    var isAvailable: Bool { available != false }
+    var id: String { sessionID }
+    var name: String { displayName.isEmpty ? mapID : displayName }
+
+    var isValid: Bool {
+        Self.safeSession(sessionID) && !mapID.isEmpty && mapID.utf8.count <= 160 &&
+            Self.receipt(manifestReceipt) &&
+            (signedManifestReceipt.isEmpty || Self.receipt(signedManifestReceipt)) &&
+            displayName.utf8.count <= 240 && payloadBytes > 0 && payloadBytes <= 512 * 1024 * 1024 &&
+            (boundsE7 == nil || Self.validBounds(boundsE7!))
+    }
+    static func safeSession(_ value: String) -> Bool { MapLibraryControlPacket.validSession(value) }
+    static func receipt(_ value: String) -> Bool { MapLibraryControlPacket.validReceipt(value) }
+    private static func validBounds(_ b: [Int]) -> Bool {
+        b.count == 4 && b[0] >= -1_800_000_000 && b[2] <= 1_800_000_000 &&
+            b[1] >= -900_000_000 && b[3] <= 900_000_000 && b[0] < b[2] && b[1] < b[3]
+    }
+}
+
+nonisolated struct DeviceMapCoverage: Codable, Equatable, Sendable {
+    let known: Bool
+    let currentCovered: Bool
+    let blockX: Int
+    let blockY: Int
+    let boundsMask: UInt32
+    let selectedSessionID: String
+    let suggestedSessionID: String
+
+    var isValid: Bool {
+        (-5000...5000).contains(blockX) && (-5000...5000).contains(blockY) &&
+            (selectedSessionID.isEmpty || DeviceInstalledMap.safeSession(selectedSessionID)) &&
+            (suggestedSessionID.isEmpty || DeviceInstalledMap.safeSession(suggestedSessionID))
+    }
+
+    func matches(latitude: Double, longitude: Double, maps: [DeviceInstalledMap]) -> Bool {
+        guard isValid, latitude.isFinite, longitude.isFinite,
+              maps.count <= 32,
+              (-85.0511287...85.0511287).contains(latitude),
+              (-180.0...180.0).contains(longitude) else { return false }
+        // Match the firmware's E7 truncation and 4096 m Mercator block key.
+        let latitudeE7 = Int(latitude * 10_000_000), longitudeE7 = Int(longitude * 10_000_000)
+        let lat = Double(latitudeE7) / 10_000_000
+        let lon = Double(longitudeE7) / 10_000_000
+        let radians = 0.017453292519943295, radius = 6_378_137.0
+        let x = Int32(lon * radians * radius)
+        let y = Int32(log(tan(lat * radians / 2 + 0.7853981633974483)) * radius)
+        var mask: UInt32 = 0
+        for (index, map) in maps.enumerated() {
+            if let b = map.boundsE7, b.count == 4,
+               longitudeE7 >= b[0], latitudeE7 >= b[1],
+               longitudeE7 <= b[2], latitudeE7 <= b[3] {
+                mask |= UInt32(1) << index
+            }
+        }
+        return Int(x >> 12) == blockX && Int(y >> 12) == blockY && mask == boundsMask
+    }
+}
+
+nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let known: Bool
+    let automatic: Bool
+    let busy: Bool
+    let revision: UInt32
+    let error: String
+    let selectedSessionID: String
+    var maps: [DeviceInstalledMap]
+    var offset: Int? = nil
+    var total: Int? = nil
+    var commandID: String? = nil
+    var commandError: String? = nil
+    var coverage: DeviceMapCoverage? = nil
+    var isComplete: Bool { known && !busy && isValid && (offset ?? 0) == 0 && maps.count == (total ?? maps.count) }
+    var isValid: Bool {
+        let count = total ?? maps.count, start = offset ?? 0
+        // Bound untrusted integers before subtraction or addition.
+        guard (0...32).contains(count), (0...32).contains(start), maps.count <= 32 else { return false }
+        let shape = (start == 0 && maps.count == count) ||
+            (start.isMultiple(of: 4) && start < count && maps.count == min(4, count - start))
+        return shape && schemaVersion == 1 && coverage?.isValid != false && maps.count <= 32 && maps.allSatisfy(\.isValid) &&
+            Set(maps.map(\.sessionID)).count == maps.count &&
+            (0...32).contains(total ?? maps.count) && (0...32).contains(offset ?? 0) &&
+            (offset ?? 0) + maps.count <= (total ?? maps.count) &&
+            (!(known && !busy) || maps.count > 0 || (total ?? 0) == 0) &&
+            (selectedSessionID.isEmpty || DeviceInstalledMap.safeSession(selectedSessionID))
+    }
+    func installed(mapID: String, manifestReceipt: String, signedManifestReceipt: String) -> DeviceInstalledMap? {
+        guard isComplete, !manifestReceipt.isEmpty else { return nil }
+        return maps.first { $0.isAvailable && $0.mapID == mapID && $0.manifestReceipt == manifestReceipt &&
+            $0.signedManifestReceipt == signedManifestReceipt }
+    }
+    static func command(_ action: String, map: DeviceInstalledMap? = nil, requestID: String? = nil) -> Data? {
+        if action == "select" || action == "remove" {
+            guard let map, map.isValid else { return nil }
+            return MapLibraryControlPacket.make(action: action, sessionID: map.sessionID,
+                manifestReceipt: map.manifestReceipt, requestID: requestID)
+        }
+        return MapLibraryControlPacket.make(action: action)
+    }
+    /// Actionable text for a device library error code.
+    static func errorDescription(_ code: String) -> String {
+        switch code {
+        case "library_in_use":
+            return "That map is in use or retained for recovery and cannot be removed yet."
+        case "library_operation_pending":
+            return "A map installation on the Bike Computer is still pending. Resume it, or cancel the map installation, then try again."
+        case "library_policy_write":
+            return "The Bike Computer could not save the map choice yet. It keeps the choice and retries; refresh to check."
+        default:
+            return "Could not update the device maps. Refresh and try again."
+        }
+    }
+    /// Device upload refusals that need an SD-library action rather than a resume.
+    static func requiresLibraryAction(_ error: Error) -> Bool {
+        guard let platformError = error as? OfflineMapPlatformError,
+              case .serverStatus(_, let body) = platformError else { return false }
+        return ["library_full", "stream_sd_full", "stream_storage_unavailable",
+                "stream_repair_requires_removal", "stream_session_conflict"]
+            .contains { body.contains("\"\($0)\"") }
+    }
+}
+
+// Connection-scoped snapshot assembly. A page is never reuse/removal authority
+// until every entry belongs to the same revision and selection snapshot.
+nonisolated struct DeviceMapLibraryPages {
+    private var first: DeviceMapLibrary?
+    private var entries: [DeviceInstalledMap] = []
+    private var complete: DeviceMapLibrary?
+
+    mutating func ingest(_ page: DeviceMapLibrary) -> (library: DeviceMapLibrary?, nextOffset: Int?) {
+        guard page.isValid else { self = Self(); return (nil, nil) }
+        guard page.known, !page.busy else { self = Self(); return (page, nil) }
+        let same: (DeviceMapLibrary, DeviceMapLibrary) -> Bool = { a, b in
+            a.revision == b.revision && a.total == b.total && a.automatic == b.automatic &&
+                a.error == b.error && a.selectedSessionID == b.selectedSessionID &&
+                a.commandID == b.commandID && a.commandError == b.commandError && a.coverage == b.coverage
+        }
+        if let complete, same(complete, page) { return (complete, nil) }
+        if page.isComplete { self = Self(); complete = page; return (page, nil) }
+        let offset = page.offset ?? 0
+        if offset == 0 { first = page; entries = [] }
+        guard let first, same(first, page), offset == entries.count else {
+            self = Self(); return (nil, 0)
+        }
+        entries += page.maps
+        guard Set(entries.map(\.sessionID)).count == entries.count else {
+            self = Self(); return (nil, 0)
+        }
+        if entries.count == (page.total ?? page.maps.count) {
+            var result = page; result.maps = entries; result.offset = 0
+            complete = result; self.first = nil; entries = []
+            return (result, nil)
+        }
+        let loading = DeviceMapLibrary(schemaVersion: 1, known: false, automatic: page.automatic,
+            busy: true, revision: page.revision, error: page.error, selectedSessionID: "", maps: [])
+        return (loading, entries.count)
+    }
+}
+
 nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     struct TransferError: Decodable, Equatable {
         let code: String?
@@ -1655,6 +1838,8 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     }
 
     var selectionHealth: MapSelectionHealth? = nil
+    var mapLibrary: DeviceMapLibrary? = nil
+    var hasMapLibrary: Bool = false
     var activeRoot: String? = nil
     var mapOperationsV1: Bool? = nil
     let enabled: Bool?
@@ -1687,6 +1872,33 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
 
     func supportsBikeMapStreamV1(trustCapability: String) -> Bool {
         supportsBikeMapStreamV1 && streamTrust?.contains(trustCapability) == true
+    }
+}
+
+
+extension MapTransferDeviceStatus {
+    private enum CodingKeys: String, CodingKey { case selectionHealth, mapLibrary, activeRoot, mapOperationsV1, enabled, activeMapId, activeSessionId, activeManifestReceipt, activeMapDisplayName, activeMapBoundsE7, activation, protocols, streamFormatVersions, streamTrust, firmwareVersion, firmwareBuild, firmwareGitSha }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        selectionHealth = try container.decodeIfPresent(MapSelectionHealth.self, forKey: .selectionHealth)
+        mapLibrary = try? container.decodeIfPresent(DeviceMapLibrary.self, forKey: .mapLibrary)
+        hasMapLibrary = container.contains(.mapLibrary)
+        activeRoot = try container.decodeIfPresent(String.self, forKey: .activeRoot)
+        mapOperationsV1 = try container.decodeIfPresent(Bool.self, forKey: .mapOperationsV1)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+        activeMapId = try container.decodeIfPresent(String.self, forKey: .activeMapId)
+        activeSessionId = try container.decodeIfPresent(String.self, forKey: .activeSessionId)
+        activeManifestReceipt = try container.decodeIfPresent(String.self, forKey: .activeManifestReceipt)
+        activeMapDisplayName = try container.decodeIfPresent(String.self, forKey: .activeMapDisplayName)
+        activeMapBoundsE7 = try container.decodeIfPresent([Int].self, forKey: .activeMapBoundsE7)
+        activation = try container.decodeIfPresent(Activation.self, forKey: .activation)
+        protocols = try container.decodeIfPresent([Int].self, forKey: .protocols)
+        streamFormatVersions = try container.decodeIfPresent([Int].self, forKey: .streamFormatVersions)
+        streamTrust = try container.decodeIfPresent([String].self, forKey: .streamTrust)
+        firmwareVersion = try container.decodeIfPresent(String.self, forKey: .firmwareVersion)
+        firmwareBuild = try container.decodeIfPresent(UInt32.self, forKey: .firmwareBuild)
+        firmwareGitSha = try container.decodeIfPresent(String.self, forKey: .firmwareGitSha)
+        if mapLibrary?.isValid == false { mapLibrary = nil }
     }
 }
 

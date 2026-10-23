@@ -19,7 +19,8 @@ class WorldRadioContractReuseTests(unittest.TestCase):
         self.assertEqual(contract["screen_types"], {
             "map": 0, "navigation": 1, "ride_stats": 2,
             "map_plus_navigation": 3, "battery_status": 4, "world_radio": 5,
-            "nearby": 6,
+            "elevation": 6,
+            "nearby": 7,
         })
         self.assertEqual(generator.SWIFT_OUTPUT.read_text(), generator.render_swift(contract))
         self.assertEqual(generator.CPP_OUTPUT.read_text(), generator.render_cpp(contract))

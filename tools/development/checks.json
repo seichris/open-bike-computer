@@ -380,6 +380,17 @@
       ]
     },
     {
+      "id": "esp32-host-route-elevation-protocol-and-screen-host-tests",
+      "name": "Route elevation protocol and Elevation screen host tests",
+      "component": "firmware_host",
+      "cwd": "esp32",
+      "command": "for test in test_route_elevation_protocol test_elevation_presentation; do\n  g++ -std=c++17 -Wall -Wextra -Werror \\\n    \"tools/tests/${test}.cpp\" \\\n    -o \"${TMPDIR}/${test}\"\n  \"${TMPDIR}/${test}\"\ndone\ng++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 -DWAVESHARE_AMOLED_175 \\\n  tools/tests/test_main_screen_registry.cpp \\\n  -o ${TMPDIR}/test_main_screen_registry_elevation\n${TMPDIR}/test_main_screen_registry_elevation\ng++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 -DWAVESHARE_AMOLED_175 \\\n  tools/tests/test_screen_configuration_protocol.cpp \\\n  -o ${TMPDIR}/test_screen_configuration_protocol_elevation\n${TMPDIR}/test_screen_configuration_protocol_elevation",
+      "tools": [
+        "python3",
+        "g++"
+      ]
+    },
+    {
       "id": "esp32-host-device-ownership-crypto-host-tests",
       "name": "Device ownership crypto host tests",
       "component": "firmware_host",
@@ -514,7 +525,7 @@
       "name": "Nearby POI feature gate host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_screen_configuration_protocol.cpp -o ${TMPDIR}/test_nearby_screen_configuration\n${TMPDIR}/test_nearby_screen_configuration\ng++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_main_screen_registry.cpp -o ${TMPDIR}/test_nearby_screen_registry\n${TMPDIR}/test_nearby_screen_registry\ng++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_map_profile_protocol.cpp -o ${TMPDIR}/test_nearby_map_profile\n${TMPDIR}/test_nearby_map_profile",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_screen_configuration_protocol.cpp -o ${TMPDIR}/test_nearby_screen_configuration\n${TMPDIR}/test_nearby_screen_configuration\ng++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_main_screen_registry.cpp -o ${TMPDIR}/test_nearby_screen_registry\n${TMPDIR}/test_nearby_screen_registry\ng++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 -DWAVESHARE_AMOLED_175 -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_main_screen_registry.cpp -o ${TMPDIR}/test_nearby_elevation_screen_registry\n${TMPDIR}/test_nearby_elevation_screen_registry\ng++ -std=c++17 -Wall -Wextra -Werror -DFIRMWARE_DIAGNOSTICS=1 -DWAVESHARE_AMOLED_175 -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_screen_configuration_protocol.cpp -o ${TMPDIR}/test_nearby_elevation_screen_configuration\n${TMPDIR}/test_nearby_elevation_screen_configuration\ng++ -std=c++17 -Wall -Wextra -Werror -DMAP_POIS_RUNTIME_ENABLED=1 tools/tests/test_map_profile_protocol.cpp -o ${TMPDIR}/test_nearby_map_profile\n${TMPDIR}/test_nearby_map_profile",
       "tools": [
         "python3",
         "g++"
@@ -568,7 +579,7 @@
       "name": "Device transfer HTTP limit host tests",
       "component": "firmware_host",
       "cwd": "esp32",
-      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_failure_policy.cpp \\\n  -o ${TMPDIR}/test_device_transfer_failure_policy\n${TMPDIR}/test_device_transfer_failure_policy\npython3 -m unittest tools.tests.test_device_transfer_failure_contract\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_http_limits.cpp \\\n  -o ${TMPDIR}/test_device_transfer_http_limits\n${TMPDIR}/test_device_transfer_http_limits\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_network_protocol.cpp \\\n  -o ${TMPDIR}/test_device_transfer_network_protocol\n${TMPDIR}/test_device_transfer_network_protocol\npython3 -m unittest tools.tests.test_map_operation_contract\npython3 -m unittest tools.tests.test_map_commit_callbacks tools.tests.test_map_commit_recovery tools.tests.test_map_operation_control\npython3 -m unittest tools.tests.test_map_activation_handoff",
+      "command": "g++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_failure_policy.cpp \\\n  -o ${TMPDIR}/test_device_transfer_failure_policy\n${TMPDIR}/test_device_transfer_failure_policy\npython3 -m unittest tools.tests.test_device_transfer_failure_contract\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_http_limits.cpp \\\n  -o ${TMPDIR}/test_device_transfer_http_limits\n${TMPDIR}/test_device_transfer_http_limits\ng++ -std=c++17 -Wall -Wextra -Werror \\\n  tools/tests/test_device_transfer_network_protocol.cpp \\\n  -o ${TMPDIR}/test_device_transfer_network_protocol\n${TMPDIR}/test_device_transfer_network_protocol\npython3 -m unittest tools.tests.test_map_operation_contract\npython3 -m unittest tools.tests.test_map_commit_callbacks tools.tests.test_map_commit_recovery tools.tests.test_map_operation_control\npython3 -m unittest tools.tests.test_map_activation_handoff tools.tests.test_map_library_control",
       "tools": [
         "python3",
         "g++"

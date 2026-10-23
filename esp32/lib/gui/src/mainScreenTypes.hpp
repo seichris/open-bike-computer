@@ -13,5 +13,6 @@ enum tileName {
   MAP_GUIDANCE = 5,
   BATTERY_STATUS = 6,
   WORLD_RADIO = 7,
-  NEARBY = 8,
+  ELEVATION = 8,
+  NEARBY = 9,
 };

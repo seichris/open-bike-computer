@@ -129,6 +129,21 @@ struct ReadyStreamMap {
   uint64_t payloadBytes = 0;
 };
 
+// A completed installation, independently of the current renderer selection.
+// The bound keeps authenticated BLE inventory snapshots below the chunk limit.
+constexpr size_t kMaximumLibraryMaps = 32;
+struct InstalledMap {
+  std::string sessionId, mapId, root, manifestReceipt, signedManifestReceipt;
+  MapPresentationMetadata presentation;
+  uint64_t payloadBytes = 0;
+  bool available = true;
+  bool contains(int32_t latitudeE7, int32_t longitudeE7) const;
+};
+uint64_t libraryPositionBlockKey(int32_t latitudeE7, int32_t longitudeE7);
+const InstalledMap *coveringLibraryMap(const std::vector<InstalledMap> &maps,
+    const std::string &currentRoot, int32_t latitudeE7, int32_t longitudeE7,
+    const std::vector<std::string> &rejectedSessions = {});
+
 class Sha256Hasher {
 public:
   void update(const uint8_t *data, size_t len);
@@ -251,6 +266,26 @@ public:
       const ActiveMapSelection &selection,
       MapPresentationRevision &revision) const;
   InstallStatus readActiveMapId(std::string &mapId) const;
+  InstallStatus readInstalledMap(const std::string &sessionId, InstalledMap &map, bool requirePayload = true) const;
+  InstallStatus readMapLibrary(std::vector<InstalledMap> &maps) const;
+  bool mapRootHasBlock(const std::string &root, int32_t latitudeE7, int32_t longitudeE7) const;
+  bool installedMapCovers(const InstalledMap &map, int32_t latitudeE7, int32_t longitudeE7) const;
+  InstallStatus selectInstalledMap(const std::string &sessionId,
+                                   const std::string &receipt) const;
+  InstallStatus removeInstalledMap(const std::string &sessionId,
+                                   const std::string &receipt) const;
+  bool automaticMapSelection() const;
+  bool setAutomaticMapSelection(bool enabled) const;
+  // A manual Use journals its exact target before the canonical pointer moves.
+  // Reconciliation pins manual selection only when that pointer survived
+  // (renderer rollback/recovery included); otherwise the journal is dropped and
+  // the previous automatic/manual policy remains untouched.
+  bool writeManualSelectionIntent(const std::string &sessionId,
+                                  const std::string &root,
+                                  const std::string &receipt) const;
+  bool manualSelectionIntentPending() const;
+  bool discardManualSelectionIntent() const;
+  InstallStatus reconcileManualSelectionIntent() const;
   InstallStatus rollbackActiveMap(const std::string &sessionId) const;
   InstallStatus discardIncompleteStreamMap(
       const std::string &sessionId) const;
@@ -343,6 +378,7 @@ private:
       const std::string &transaction) const;
   bool clearPendingStreamActivation(const std::string &sessionId) const;
   bool markStreamActivationConsumed(const ReadyStreamMap &ready) const;
+  bool restoreRetainedLibraryVersion(const std::string &sessionId) const;
   bool rollbackRootMatches(const std::string &root, const std::string &mapId,
                            const std::string &manifestReceipt,
                            const std::string &signedManifestReceipt) const;

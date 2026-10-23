@@ -189,6 +189,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
         case .mapPlusNavigation: return "location.north.line"
         case .batteryStatus: return "battery.100percent"
         case .worldRadio: return "radio"
+        case .elevation: return "mountain.2"
         case .nearby: return "mappin.and.ellipse"
         }
     }

@@ -36,6 +36,8 @@ final class PhoneRouteLibrary: ObservableObject {
 
     private let operations: WatchRouteOperationJournalV2
     private let store: NavigationRouteFileStoreV1
+    /// Phone-only GPX heights and cached service profiles, bound to the exact archive.
+    let elevationSidecars: RouteElevationSidecarStoreV1
     private let stravaBookmarkStore: StravaRouteReloadBookmarkStoreV1
     private let connectivity: PhoneWatchConnectivityCoordinator
     private let now: () -> Date
@@ -107,6 +109,9 @@ final class PhoneRouteLibrary: ObservableObject {
     ) {
         self.operations = WatchRouteOperationJournalV2(rootDirectory: store.rootDirectory)
         self.store = store
+        self.elevationSidecars = RouteElevationSidecarStoreV1(
+            directory: store.rootDirectory.appendingPathComponent("route-elevation", isDirectory: true)
+        )
         self.stravaBookmarkStore = stravaBookmarkStore ??
             StravaRouteReloadBookmarkStoreV1(
                 fileURL: store.rootDirectory.appendingPathComponent(
@@ -309,6 +314,7 @@ final class PhoneRouteLibrary: ObservableObject {
                 throw NavigationRouteFileStoreError.revisionConflict
             }
             let verified = try offlineArchive(for: existing.summary)
+            attachMissingGPXElevations(draft, to: verified)
             return OfflineRouteSaveResult(summary: PlannedRouteSummaryV1(archive: verified), alreadySaved: true)
         }
         if let duplicate = store.records(now: now()).first(where: {
@@ -316,12 +322,95 @@ final class PhoneRouteLibrary: ObservableObject {
         }) {
             // Re-read the exact identity, also covering expiry/corruption races.
             let verified = try offlineArchive(for: duplicate.summary)
+            attachMissingGPXElevations(draft, to: verified)
             reload()
             return OfflineRouteSaveResult(summary: PlannedRouteSummaryV1(archive: verified), alreadySaved: true)
         }
         let summary = try importArchive(archive.encoded(purpose: .offlineNavigation, now: now()))
-        _ = try offlineArchive(for: summary)
+        let saved = try offlineArchive(for: summary)
+        if let elevations = draft.gpxVertexElevations {
+            saveGPXElevations(elevations, for: saved)
+        }
         return OfflineRouteSaveResult(summary: summary, alreadySaved: false)
+    }
+
+    static func elevationBinding(for archive: NavigationRouteArchiveV1) -> RouteElevationArchiveBindingV1 {
+        RouteElevationArchiveBindingV1(
+            routeID: archive.routeID,
+            revision: archive.revision,
+            contentHash: archive.contentHash
+        )
+    }
+
+    /// Re-importing an identical GPX restores heights for a route saved before
+    /// GPX elevation was kept. Existing sidecars are never replaced.
+    private func attachMissingGPXElevations(_ draft: OfflineRouteSaveDraft, to archive: NavigationRouteArchiveV1) {
+        guard let elevations = draft.gpxVertexElevations,
+              draft.archive.route.points == archive.route.points,
+              elevationSidecars.load(Self.elevationBinding(for: archive))?.gpxVertexElevations == nil else { return }
+        let cached = elevationSidecars.load(Self.elevationBinding(for: archive))?.serviceProfile
+        saveGPXElevations(elevations, for: archive)
+        if let cached { storeElevationProfile(cached, for: Self.elevationBinding(for: archive)) }
+    }
+
+    /// Elevation is optional: a failed sidecar write never fails the route save.
+    func saveGPXElevations(_ elevations: [Double?], for archive: NavigationRouteArchiveV1) {
+        guard elevations.count == archive.route.points.count,
+              RouteProviderPolicyV1.allowsDurableStorage(archive.route.provider),
+              let geometry = try? RouteElevationProcessorV1.geometry(
+                  points: archive.route.points,
+                  maximumPoints: NavigationRouteLimitsV1.production.maximumPoints
+              ) else { return }
+        try? elevationSidecars.save(RouteElevationSidecarV1(
+            binding: Self.elevationBinding(for: archive),
+            geometryDigest: geometry.digest,
+            gpxVertexElevations: elevations,
+            serviceProfile: nil
+        ))
+    }
+
+    /// Bindings come from live archives and a sidecar loads only for its exact
+    /// binding; deletion and reload pruning remove the rest.
+    func elevationSidecar(for binding: RouteElevationArchiveBindingV1) -> RouteElevationSidecarV1? {
+        elevationSidecars.load(binding)
+    }
+
+    /// Caches a validated service profile with its live, durable archive only.
+    func storeElevationProfile(
+        _ profile: RouteElevationProfileV1,
+        for binding: RouteElevationArchiveBindingV1
+    ) {
+        guard let record = try? store.record(
+            matching: WatchRouteIdentityV1(
+                routeID: binding.routeID, revision: binding.revision, contentHash: binding.contentHash
+            ),
+            now: now()
+        ), RouteProviderPolicyV1.allowsDurableStorage(record.archive.route.provider) else { return }
+        let existing = elevationSidecars.load(binding)
+        let sidecar = existing?.replacingServiceProfile(profile) ?? RouteElevationSidecarV1(
+            binding: binding,
+            geometryDigest: profile.geometry.digest,
+            gpxVertexElevations: nil,
+            serviceProfile: profile
+        )
+        try? elevationSidecars.save(sidecar)
+    }
+
+    /// The exact saved archive for an elevation lookup, or nil after deletion,
+    /// replacement or expiry. Unlike a map selection it has no side effects.
+    func elevationSubject(for binding: RouteElevationArchiveBindingV1) -> RouteElevationSubjectV1? {
+        let identity = WatchRouteIdentityV1(
+            routeID: binding.routeID, revision: binding.revision, contentHash: binding.contentHash
+        )
+        guard (try? requireUsableIdentity(identity)) != nil,
+              let record = try? store.record(matching: identity, now: now()),
+              (try? record.archive.validate(purpose: .offlineNavigation, now: now())) != nil else {
+            return nil
+        }
+        return RouteElevationSubjectV1(
+            route: record.archive.route,
+            binding: Self.elevationBinding(for: record.archive)
+        )
     }
 
     func offlineDraft(for summary: PlannedRouteSummaryV1) throws -> OfflineRouteSaveDraft {
@@ -723,6 +812,9 @@ final class PhoneRouteLibrary: ObservableObject {
             removeArchiveAndQueueWatchDeletion(record)
         }
         _ = store.pruneInvalidAndExpired(now: timestamp)
+        elevationSidecars.prune(keeping: Set(store.records(now: timestamp).map {
+            Self.elevationBinding(for: $0.archive)
+        }))
         routes = store.records(now: timestamp).filter {
             let identity = WatchRouteIdentityV1(archive: $0.archive)
             return !localDeletionTombstones.contains(identity) &&
@@ -909,13 +1001,14 @@ final class PhoneRouteLibrary: ObservableObject {
         guard timestamp < receipt.deleteAfter else {
             throw PhoneRouteLibraryError.stravaRouteExpired
         }
-        let archive = try GPXRouteImporterV1.archive(
+        let imported = try GPXRouteImporterV1.importRoute(
             data: data,
             fallbackName: "Strava route",
             routeID: routeID,
             revision: revision,
             source: .strava(receipt: receipt)
         )
+        let archive = imported.archive
         let replacementBookmark = try StravaRouteReloadBookmarkV1(
             routeURL: receipt.routeURL,
             routeID: routeID,
@@ -956,6 +1049,10 @@ final class PhoneRouteLibrary: ObservableObject {
             )
             displayNames = updated
             displayNames.persist(to: defaults)
+        }
+        // Strava heights stay on this phone and expire with the route lease.
+        if let elevations = imported.vertexElevations {
+            saveGPXElevations(elevations, for: record.archive)
         }
         reload()
         return record.summary
@@ -1009,6 +1106,9 @@ final class PhoneRouteLibrary: ObservableObject {
         }
         localDeletionTombstones.remove(identity)
         persistLocalDeletionTombstones()
+        if !store.recordsIncludingExpired().contains(where: { $0.archive.routeID == identity.routeID }) {
+            elevationSidecars.remove(routeID: identity.routeID)
+        }
         if stravaBookmark(routeID: identity.routeID) == nil &&
             !store.recordsIncludingExpired().contains(where: { $0.archive.routeID == identity.routeID }) {
             removeDisplayName(routeID: identity.routeID)
@@ -1284,3 +1384,5 @@ final class PhoneRouteLibrary: ObservableObject {
         "\(identity.routeID.uuidString.lowercased())|\(identity.revision)|\(identity.contentHash)"
     }
 }
+
+extension PhoneRouteLibrary: RouteElevationSidecarProviding {}

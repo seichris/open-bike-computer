@@ -9,6 +9,7 @@
 #include "mainScr.hpp"
 #include "mainScreenRegistry.hpp"
 #include "worldRadioScr.hpp"
+#include "elevationScr.hpp"
 #include "../../ble_navigation/ble_navigation.hpp" // Access mapRenderSettings
 #include "../../ble_navigation/gps_input_freshness.hpp"
 #include "../../ble_navigation/screen_configuration.hpp"
@@ -80,6 +81,7 @@ lv_obj_t *navTile;
 lv_obj_t *rideStatsTile;
 lv_obj_t *batteryStatusTile;
 lv_obj_t *worldRadioTile;
+lv_obj_t *elevationTile;
 lv_obj_t *mapTile;
 lv_obj_t *satTrackTile;
 lv_obj_t *btnFullScreen;
@@ -722,6 +724,12 @@ static bool worldRadioTapCyclesScreens() {
 static bool worldRadioPhoneReady() {
   return bleNavServer.canRequestWorldRadio();
 }
+static bool elevationPhoneConnected() {
+  return bleNavServer.isConnected() && bleNavServer.isAuthenticated();
+}
+static bool elevationProfilesSupported() {
+  return bleNavServer.routeElevationSessionActive();
+}
 static void updateMapGuidanceOverlay();
 static void revealPendingMapTileIfReady();
 
@@ -818,6 +826,8 @@ static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::Battery
                   DEVICE_SCREEN_BATTERY_STATUS);
 static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::WorldRadio) ==
                   DEVICE_SCREEN_WORLD_RADIO);
+static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::Elevation) ==
+                  DEVICE_SCREEN_ELEVATION);
 static_assert(static_cast<uint8_t>(main_screen_registry::DeviceScreenId::Nearby) ==
                   DEVICE_SCREEN_NEARBY);
 static_assert(main_screen_registry::SUPPORTED_MASK ==
@@ -1454,6 +1464,13 @@ void updateMainScreen(lv_timer_t *t) {
     case WORLD_RADIO:
       if constexpr (world_radio_config::ENABLED) {
         updateWorldRadioScr();
+      }
+      break;
+
+    case ELEVATION:
+      // Revision-gated: a no-op until the BLE profile, progress or session changes.
+      if constexpr (route_elevation_config::ENABLED) {
+        updateElevationScr();
       }
       break;
 
@@ -2686,6 +2703,7 @@ static void serviceNearbyScreen(uint32_t nowMs) {
 static void showMainTile(tileName tile) {
   if (!mapTile || !navTile || !rideStatsTile || !batteryStatusTile ||
       (world_radio_config::ENABLED && !worldRadioTile) ||
+      (route_elevation_config::ENABLED && !elevationTile) ||
       !mapGuidanceOverlay) {
     return;
   }
@@ -2761,6 +2779,9 @@ static void showMainTile(tileName tile) {
     if (worldRadioTile != nullptr) {
       lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
     }
+    if (elevationTile != nullptr) {
+      lv_obj_add_flag(elevationTile, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   }
 
@@ -2816,6 +2837,13 @@ static void showMainTile(tileName tile) {
       log_i("UI: switched to world radio screen");
     }
     break;
+  case ELEVATION:
+    if constexpr (route_elevation_config::ENABLED) {
+      lv_obj_clear_flag(elevationTile, LV_OBJ_FLAG_HIDDEN);
+      activateElevationScr();
+      log_i("UI: switched to elevation screen");
+    }
+    break;
   case MAP:
   default:
     lv_obj_send_event(mapTile, LV_EVENT_VALUE_CHANGED, NULL);
@@ -2857,6 +2885,9 @@ static void revealPendingMapTileIfReady() {
   lv_obj_add_flag(rideStatsTile, LV_OBJ_FLAG_HIDDEN);
   if (worldRadioTile != nullptr) {
     lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (elevationTile != nullptr) {
+    lv_obj_add_flag(elevationTile, LV_OBJ_FLAG_HIDDEN);
   }
   lv_obj_add_flag(batteryStatusTile, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(mapTile, LV_OBJ_FLAG_HIDDEN);
@@ -2911,6 +2942,7 @@ void showConfiguredDefaultMainScreen() {
 void applyDeviceScreenSettings() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
       !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      (route_elevation_config::ENABLED && !elevationTile) ||
       !mapGuidanceOverlay) {
     return;
   }
@@ -2972,6 +3004,7 @@ static void mapGuidanceOverlayTapEvent(lv_event_t *event) {
 void toggleNavigationScreen() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
       !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      (route_elevation_config::ENABLED && !elevationTile) ||
       !mapGuidanceOverlay) {
     return;
   }
@@ -2982,6 +3015,7 @@ void toggleNavigationScreen() {
 void togglePreviousNavigationScreen() {
   if (!isMainScreen || !mainScreen || !mapTile || !navTile || !rideStatsTile ||
       !batteryStatusTile || (world_radio_config::ENABLED && !worldRadioTile) ||
+      (route_elevation_config::ENABLED && !elevationTile) ||
       !mapGuidanceOverlay) {
     return;
   }
@@ -3067,6 +3101,21 @@ void createMainScr() {
     worldRadioCallbacks.phoneReady = worldRadioPhoneReady;
     worldRadioScr(worldRadioTile, worldRadioCallbacks);
     lv_obj_add_flag(worldRadioTile, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  if constexpr (route_elevation_config::ENABLED) {
+    elevationTile = lv_obj_create(mainScreen);
+    lv_obj_remove_style_all(elevationTile);
+    lv_obj_set_size(elevationTile, TFT_WIDTH, TFT_HEIGHT);
+    lv_obj_set_pos(elevationTile, 0, 0);
+    lv_obj_clear_flag(elevationTile, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(elevationTile, LV_OBJ_FLAG_CLICKABLE);
+    ElevationScreenCallbacks elevationCallbacks{};
+    elevationCallbacks.phoneConnected = elevationPhoneConnected;
+    elevationCallbacks.profilesSupported = elevationProfilesSupported;
+    elevationScr(elevationTile, elevationCallbacks);
+    lv_obj_add_event_cb(elevationTile, tapCycleScreenEvent, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_flag(elevationTile, LV_OBJ_FLAG_HIDDEN);
   }
 
   batteryStatusTile = lv_obj_create(mainScreen);

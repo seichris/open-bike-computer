@@ -31,7 +31,7 @@
     "request_magic": "CAPS",
     "response_magic": "CAP2",
     "response_schema_version": 1,
-    "current_client_version": 32,
+    "current_client_version": 33,
     "features": {
       "device_sounds": {"bit": 0, "minimum_client_version": 1},
       "power_button_honk": {"bit": 1, "minimum_client_version": 1},
@@ -70,7 +70,8 @@
     "extended_features": {
       "group_riders_v1": {"bit": 0, "minimum_client_version": 30},
       "friend_marker_scale_v1": {"bit": 1, "minimum_client_version": 31},
-      "map_pois": {"bit": 2, "minimum_client_version": 32}
+      "route_elevation_v1": {"bit": 2, "minimum_client_version": 32},
+      "map_pois": {"bit": 3, "minimum_client_version": 33}
     }
   },
   "screen_types": {
@@ -80,7 +81,8 @@
     "map_plus_navigation": 3,
     "battery_status": 4,
     "world_radio": 5,
-    "nearby": 6
+    "elevation": 6,
+    "nearby": 7
   },
   "screen_configuration": {
     "schema_version": 1,
@@ -114,7 +116,9 @@
     "workout_start_magic": "WREQ",
     "destination_magic": "DREQ",
     "world_radio_request_magic": "WRQ1",
-    "world_radio_status_magic": "WRS1"
+    "world_radio_status_magic": "WRS1",
+    "route_elevation_magic": "ELV1",
+    "route_elevation_ack_magic": "EAK1"
   },
   "application_delivery": {
     "command_magic": "RCM1",

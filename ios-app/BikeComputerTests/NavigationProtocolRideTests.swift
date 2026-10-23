@@ -1199,22 +1199,29 @@ extension NavigationProtocolTests {
                "released renderer replay bit 23 must not enable map POIs")
         let incompleteMapPOICapability =
             Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
-            Data([1, 0, 0, 0, 0, 3, 4, 4, 0, 0, 0])
+            Data([1, 0, 0, 0, 0, 3, 4, 8, 0, 0, 0])
         assert(manager.handleDeviceCapabilitiesNotification(incompleteMapPOICapability),
                "CAP2 extended POI capability is parsed without prerequisites")
         assert(!manager.supportsMapPois,
                "POI controls stay off without extended visibility and target-5 reader prerequisites")
-        let cap2WithMapPois =
+        let cap2WithRouteElevationOnly =
             Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 4, 0, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithRouteElevationOnly),
+               "released route elevation capabilities are accepted")
+        assert(manager.supportsRouteElevation && !manager.supportsMapPois,
+               "released extended bit 2 is route elevation and must not enable POIs")
+        let cap2WithMapPois =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 8, 0, 0, 0])
         assert(manager.handleDeviceCapabilitiesNotification(cap2WithMapPois),
                "CAP2 map POI notification should be consumed")
         assert(manager.supportsStreetLabels && manager.supports3DBuildings,
                "the target-5 fixture carries its prerequisite capabilities")
         assert(manager.supportsMapPois,
-               "CAP2 extended bit 2 enables map POI profiles and controls")
-        assert(!manager.supportsFriendMarkerScale,
-               "POI capability alone must not enable friend-marker sizing")
+               "CAP2 extended bit 3 enables map POI profiles and controls")
+        assert(!manager.supportsFriendMarkerScale && !manager.supportsRouteElevation,
+               "POI capability alone must not enable friend-marker sizing or route elevation")
         let cap2WithFriendScaleOnly =
             Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 2, 0, 0, 0])
@@ -1224,11 +1231,12 @@ extension NavigationProtocolTests {
                "released extended bit 1 must not enable POIs even with map prerequisites")
         let cap2WithBoth =
             Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
-            Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 6, 0, 0, 0])
+            Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 0x0E, 0, 0, 0])
         assert(manager.handleDeviceCapabilitiesNotification(cap2WithBoth),
-               "POIs and friend-marker sizing coexist in the extended word")
-        assert(manager.supportsMapPois && manager.supportsFriendMarkerScale,
-               "combined capabilities enable both independent features")
+               "POIs, route elevation and friend-marker sizing coexist in the extended word")
+        assert(manager.supportsMapPois && manager.supportsFriendMarkerScale &&
+               manager.supportsRouteElevation,
+               "combined capabilities enable every independent feature")
 
         let cap2WithScopedWatch = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, 0, 0x7F, 0, 0])
@@ -1373,7 +1381,8 @@ extension NavigationProtocolTests {
                "Battery Status remains the last available screen")
         let currentSettings = screenSettings(in: currentPackets())
         assertEqual(currentSettings[DeviceBLEProtocol.enabledScreensSettingID],
-                    Int32(DeviceScreen.allScreensMask & ~DeviceScreen.worldRadio.bit) |
+                    Int32(DeviceScreen.allScreensMask &
+                          ~(DeviceScreen.worldRadio.bit | DeviceScreen.elevation.bit)) |
                         DeviceBLEProtocol.currentScreenMaskMarker,
                     "Battery Status firmware receives a marked five-screen mask")
         assertEqual(currentSettings[DeviceBLEProtocol.defaultScreenSettingID],
@@ -1397,7 +1406,7 @@ extension NavigationProtocolTests {
                "World Radio is available on capable firmware")
         let radioSettings = screenSettings(in: radioPackets())
         assertEqual(radioSettings[DeviceBLEProtocol.enabledScreensSettingID],
-                    Int32(DeviceScreen.allScreensMask) |
+                    Int32(DeviceScreen.allScreensMask & ~DeviceScreen.elevation.bit) |
                         DeviceBLEProtocol.currentScreenMaskMarker,
                     "World Radio firmware receives a marked six-screen mask")
 
@@ -3907,7 +3916,7 @@ extension NavigationProtocolTests {
         let poiManager = BLEManager()
         let poiCapabilities =
             Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
-            Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 4, 0, 0, 0])
+            Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 8, 0, 0, 0])
         assert(poiManager.handleDeviceCapabilitiesNotification(poiCapabilities),
                "CAP2 map POI capability is accepted")
         poiManager.isConnected = true
@@ -3938,6 +3947,24 @@ extension NavigationProtocolTests {
         poiManager.sendVisibilityMask(for: .map)
         assertEqual(readInt32LE(poiPackets[0], offset: 5), 0x541000,
                     "capable firmware receives selected POI bits and the extended marker")
+
+        // Route elevation firmware owns extended bit 2; it never receives POIs.
+        assert(poiManager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+                Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 4, 0, 0, 0])),
+               "CAP2 route elevation capability is accepted")
+        assert(!poiManager.supportsMapPois, "route elevation never unlocks POI controls")
+        poiManager.isConnected = true
+        poiManager.isNavigationReady = true
+        poiPackets.removeAll()
+        poiManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { poiPackets.append($0) }
+        ))
+        poiManager.sendVisibilityMask(for: .map)
+        assertEqual(readInt32LE(poiPackets[0], offset: 5), 0x1000,
+                    "route elevation firmware receives no POI visibility bits")
     }
 
     static func testBLEManagerGatesTopographicContourVisibility() {

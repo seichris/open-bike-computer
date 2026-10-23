@@ -1100,6 +1100,25 @@ nonisolated enum OfflineMapOnboardingPresentation: Equatable {
     case step(OfflineMapOnboardingStep)
 }
 
+nonisolated enum DeviceMapAssistance: Equatable {
+    case none
+    case download
+    case switchMap(DeviceInstalledMap)
+
+    static func evaluate(library: DeviceMapLibrary, latitude: Double, longitude: Double) -> Self {
+        guard library.isComplete, let coverage = library.coverage, coverage.known,
+              coverage.selectedSessionID == library.selectedSessionID,
+              coverage.matches(latitude: latitude, longitude: longitude, maps: library.maps),
+              !coverage.currentCovered else { return .none }
+        if coverage.suggestedSessionID.isEmpty { return .download }
+        guard let map = library.maps.first(where: {
+            $0.sessionID == coverage.suggestedSessionID && $0.isAvailable &&
+                $0.sessionID != library.selectedSessionID
+        }) else { return .none }
+        return .switchMap(map)
+    }
+}
+
 nonisolated enum OfflineMapOnboardingPolicy {
     static func presentation(
         hasCompletedFirstRun: Bool,
@@ -1968,16 +1987,27 @@ nonisolated struct SavedMapLocalRecord: Equatable, Sendable {
     let catalogMapEntryID: String?
 }
 
+nonisolated extension DeviceInstalledMap {
+    var previewDescriptor: DeviceActiveMapDescriptor? {
+        DeviceActiveMapDescriptor(mapID: mapID, sessionID: sessionID,
+            manifestReceipt: manifestReceipt, displayName: name, boundsE7: boundsE7)
+    }
+}
+
 nonisolated struct SavedMapListItem: Identifiable, Equatable, Sendable {
     let id: String
     let localRecord: SavedMapLocalRecord?
     let deviceMap: DeviceActiveMapDescriptor?
     let displayName: String
     let catalogMap: OfflineMapCatalogMap?
+    var installedDeviceMap: DeviceInstalledMap? = nil
 
     var packURL: URL? { localRecord?.packURL }
     var isOnIPhone: Bool { localRecord != nil }
     var isActiveOnDevice: Bool { deviceMap != nil }
+    var previewDeviceMap: DeviceActiveMapDescriptor? {
+        deviceMap ?? installedDeviceMap?.previewDescriptor
+    }
     var isAvailableInLibrary: Bool { catalogMap != nil }
     var hasKnownMapLibraryCopy: Bool {
         isAvailableInLibrary || localRecord?.catalogMapEntryID != nil
@@ -2199,6 +2229,7 @@ final class OfflineMapManager: ObservableObject {
     private let previewLoadRegistry = OfflineMapPreviewLoadRegistry()
     private let detailPreviewLoadRegistry = OfflineMapPreviewLoadRegistry()
     private var currentActiveDeviceMap: DeviceActiveMapDescriptor?
+    private var currentInstalledDeviceMaps: [DeviceInstalledMap] = []
 #endif
 
     init(
@@ -2646,6 +2677,15 @@ final class OfflineMapManager: ObservableObject {
         )
     }
 
+    func installedDeviceMap(for packURL: URL, library: DeviceMapLibrary?) -> DeviceInstalledMap? {
+        guard let metadata = SavedMapArtifactMetadataStore.load(for: packURL),
+              let artifact = metadata.primaryArtifact,
+              let receipt = artifact.manifestReceipt,
+              let signedReceipt = artifact.signedManifestReceipt else { return nil }
+        return library?.installed(mapID: metadata.mapID, manifestReceipt: receipt,
+            signedManifestReceipt: signedReceipt)
+    }
+
     func resumePausedMapUpload(bleManager: BLEManager) {
         guard let packURL = lastTransferArtifactURL(mapID: lastTransferMapId),
               isPausedMapUpload(packURL) else {
@@ -2796,6 +2836,7 @@ final class OfflineMapManager: ObservableObject {
 
     func savedMapListItems(
         activeDeviceMap: DeviceActiveMapDescriptor?,
+        deviceMapLibrary: DeviceMapLibrary? = nil,
         scope: SavedMapListScope = .savedMaps
     ) -> [SavedMapListItem] {
         var remainingRecords = cachedMapRecords
@@ -2894,6 +2935,38 @@ final class OfflineMapManager: ObservableObject {
                 catalogMap: map
             )
         })
+        // Reconcile exact versions, never just city names or map IDs. Include
+        // retained SD-only versions even when their iPhone copy was deleted.
+        if let library = deviceMapLibrary, library.known, library.isValid {
+            var remainingInstalledMaps = library.maps
+            for index in items.indices {
+                let item = items[index]
+                let artifact = item.packURL.flatMap {
+                    SavedMapArtifactMetadataStore.load(for: $0)?.primaryArtifact
+                }
+                if let match = remainingInstalledMaps.firstIndex(where: { map in
+                    if let active = item.deviceMap, active.sessionID == map.sessionID {
+                        return active.mapID == map.mapID
+                    }
+                    if let local = item.localRecord, local.mapID == map.mapID,
+                       local.acceptedSessionIDs.contains(map.sessionID) {
+                        return true
+                    }
+                    return item.localRecord?.mapID == map.mapID &&
+                        artifact?.manifestReceipt == map.manifestReceipt &&
+                        artifact?.signedManifestReceipt == map.signedManifestReceipt
+                }) {
+                    items[index].installedDeviceMap = remainingInstalledMaps.remove(at: match)
+                }
+            }
+            items.append(contentsOf: remainingInstalledMaps.map { map in
+                SavedMapListItem(
+                    id: "installed:\(map.sessionID)", localRecord: nil,
+                    deviceMap: nil, displayName: map.name, catalogMap: nil,
+                    installedDeviceMap: map
+                )
+            })
+        }
         let channel = OfflineMapCatalogConfig.channel(
             generationServerURLString: serverURLString
         )
@@ -2901,27 +2974,52 @@ final class OfflineMapManager: ObservableObject {
     }
 
 #if canImport(UIKit)
+    func updateDeviceMapLibrary(_ library: DeviceMapLibrary?) {
+        // Keep preview work alive while a new connection-scoped snapshot pages.
+        // A nil library still invalidates every SD-only preview on disconnect.
+        if let library, !library.known && library.busy { return }
+        let previous = currentInstalledDeviceMaps
+        currentInstalledDeviceMaps = library.flatMap {
+            $0.known && $0.isValid ? $0.maps : nil
+        } ?? []
+        for map in previous where !currentInstalledDeviceMaps.contains(map) {
+            guard let descriptor = map.previewDescriptor,
+                  !isDevicePreviewCurrent(descriptor) else { continue }
+            invalidateDevicePreview(descriptor)
+        }
+    }
+
+    private func isDevicePreviewCurrent(_ descriptor: DeviceActiveMapDescriptor) -> Bool {
+        descriptor == currentActiveDeviceMap ||
+            currentInstalledDeviceMaps.contains { $0.previewDescriptor == descriptor }
+    }
+
+    private func invalidateDevicePreview(_ descriptor: DeviceActiveMapDescriptor) {
+        let key = devicePreviewCacheKey(for: descriptor)
+        previewLoadRegistry.invalidate(key)
+        previewLoadTasks.removeValue(forKey: key)?.cancel()
+        packPreviewImages.removeValue(forKey: key)
+        unavailablePackPreviews.remove(key)
+        detailPreviewLoadRegistry.invalidate(key)
+        removeDetailPreviewImage(forKey: key)
+        detailPreviewLoadingKeys.remove(key)
+        unavailableDetailPreviews.remove(key)
+    }
+
     func updateActiveDeviceMap(_ descriptor: DeviceActiveMapDescriptor?) {
         guard descriptor != currentActiveDeviceMap else { return }
-        if let currentActiveDeviceMap {
-            let key = devicePreviewCacheKey(for: currentActiveDeviceMap)
-            previewLoadRegistry.invalidate(key)
-            previewLoadTasks.removeValue(forKey: key)?.cancel()
-            packPreviewImages.removeValue(forKey: key)
-            unavailablePackPreviews.remove(key)
-            detailPreviewLoadRegistry.invalidate(key)
-            removeDetailPreviewImage(forKey: key)
-            detailPreviewLoadingKeys.remove(key)
-            unavailableDetailPreviews.remove(key)
-        }
+        let previous = currentActiveDeviceMap
         currentActiveDeviceMap = descriptor
+        if let previous, !isDevicePreviewCurrent(previous) {
+            invalidateDevicePreview(previous)
+        }
     }
 
     func previewImage(for item: SavedMapListItem) -> UIImage? {
         if let packURL = item.packURL {
             return previewImage(forCachedPack: packURL)
         }
-        guard let descriptor = item.deviceMap else { return nil }
+        guard let descriptor = item.previewDeviceMap else { return nil }
         return packPreviewImages[devicePreviewCacheKey(for: descriptor)]
     }
 
@@ -2930,7 +3028,7 @@ final class OfflineMapManager: ObservableObject {
             loadPreviewIfNeeded(forCachedPack: packURL)
             return
         }
-        guard let descriptor = item.deviceMap else { return }
+        guard let descriptor = item.previewDeviceMap else { return }
         loadDevicePreviewIfNeeded(for: descriptor)
     }
 
@@ -2979,7 +3077,7 @@ final class OfflineMapManager: ObservableObject {
             bounds = loaded.1
             storedFileExists = loaded.2
             cacheRoot = nil
-        } else if let descriptor = item.deviceMap,
+        } else if let descriptor = item.previewDeviceMap,
                   let root = try? cachedPackDirectory() {
             let loaded = await Task.detached(priority: .utility) {
                 let storedURL = DeviceMapDetailPreviewStore.imageURL(
@@ -3015,7 +3113,7 @@ final class OfflineMapManager: ObservableObject {
         if storedFileExists {
             if let packURL = item.packURL {
                 try? SavedMapDetailPreviewStore.delete(for: packURL)
-            } else if let descriptor = item.deviceMap, let cacheRoot {
+            } else if let descriptor = item.previewDeviceMap, let cacheRoot {
                 try? DeviceMapDetailPreviewStore.delete(
                     for: descriptor,
                     in: cacheRoot
@@ -3044,7 +3142,7 @@ final class OfflineMapManager: ObservableObject {
         }
         if let packURL = item.packURL {
             try? SavedMapDetailPreviewStore.save(generatedData, for: packURL)
-        } else if let descriptor = item.deviceMap, let cacheRoot {
+        } else if let descriptor = item.previewDeviceMap, let cacheRoot {
             try? DeviceMapDetailPreviewStore.save(
                 generatedData,
                 for: descriptor,
@@ -3207,7 +3305,7 @@ final class OfflineMapManager: ObservableObject {
         if let packURL = item.packURL {
             return previewCacheKey(for: packURL)
         }
-        guard let descriptor = item.deviceMap else { return nil }
+        guard let descriptor = item.previewDeviceMap else { return nil }
         return devicePreviewCacheKey(for: descriptor)
     }
 
@@ -3218,15 +3316,13 @@ final class OfflineMapManager: ObservableObject {
         if item.packURL != nil {
             return cachedPackURLs.contains { previewCacheKey(for: $0) == key }
         }
-        return item.deviceMap == currentActiveDeviceMap
+        return item.previewDeviceMap.map(isDevicePreviewCurrent) ?? false
     }
 
     private func loadDevicePreviewIfNeeded(
         for descriptor: DeviceActiveMapDescriptor
     ) {
-        if currentActiveDeviceMap != descriptor {
-            updateActiveDeviceMap(descriptor)
-        }
+        guard isDevicePreviewCurrent(descriptor) else { return }
         let key = devicePreviewCacheKey(for: descriptor)
         guard packPreviewImages[key] == nil,
               !unavailablePackPreviews.contains(key),
@@ -3253,7 +3349,7 @@ final class OfflineMapManager: ObservableObject {
             guard let self,
                   self.previewLoadRegistry.isCurrent(token, for: key),
                   !Task.isCancelled,
-                  self.currentActiveDeviceMap == descriptor else {
+                  self.isDevicePreviewCurrent(descriptor) else {
                 return
             }
             if let storedImage = self.usableSnapshotImage(from: storedData) {
@@ -3285,7 +3381,7 @@ final class OfflineMapManager: ObservableObject {
             }
             self.previewLoadTasks.removeValue(forKey: key)
             guard !Task.isCancelled,
-                  self.currentActiveDeviceMap == descriptor else {
+                  self.isDevicePreviewCurrent(descriptor) else {
                 return
             }
             if let generatedData,
@@ -6105,6 +6201,42 @@ final class OfflineMapManager: ObservableObject {
             return
         }
 
+        if !resumePausedUpload, bleManager.hasFreshMapTransferStatus,
+           let library = bleManager.deviceMapLibrary, library.isComplete {
+            if let installed = library.installed(mapID: prepared.mapID,
+                manifestReceipt: prepared.artifact.manifestReceipt,
+                signedManifestReceipt: prepared.artifact.signedManifestReceipt) {
+                let pending = try deviceMapOperationStore.records().contains {
+                    $0.deviceID == transferDeviceID && $0.blocksNewTransfer(
+                        connectionEpoch: transferEpoch, processID: DeviceMapOperationStore.observationProcessID)
+                }
+                guard !pending else { throw OfflineMapPlatformError.backgroundMapUploadInProgress }
+                if library.selectedSessionID == installed.sessionID {
+                    statusMessage = "map already in use"; transferProgress = 1; return
+                }
+                guard bleManager.requestDeviceMapLibrary("select", map: installed) else {
+                    throw OfflineMapPlatformError.invalidPack("The Bike Computer is busy. Try selecting the map again.")
+                }
+                let requestID = bleManager.lastMapLibraryRequestID
+                statusMessage = "selecting installed map"
+                for attempt in 0..<1200 {
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    guard transferDeviceID == bleManager.activeDeviceID,
+                          transferEpoch == bleManager.transferConnectionEpoch else { throw CancellationError() }
+                    if let current = bleManager.deviceMapLibrary, current.commandID == requestID {
+                        if let error = current.commandError, !error.isEmpty {
+                            throw OfflineMapPlatformError.mapActivationFailed(error)
+                        }
+                        if current.isComplete && current.selectedSessionID == installed.sessionID {
+                            statusMessage = "map selected"; transferProgress = 1; return
+                        }
+                    }
+                    if attempt % 4 == 0 { bleManager.requestMapTransferStatus() }
+                }
+                throw OfflineMapPlatformError.mapActivationFailed("Map selection was not confirmed. Reconnect to the Bike Computer and check its active map.")
+            }
+        }
+
         var deviceOperation: DeviceMapOperationRecord?
         if let deviceID = bleManager.activeDeviceID, !deviceID.hasPrefix("legacy:") {
             let existing = try self.deviceMapOperationStore.records().first {
@@ -6475,6 +6607,10 @@ final class OfflineMapManager: ObservableObject {
                        : "Map upload paused. Tap Upload to resume.")
                 if case OfflineMapPlatformError.mapStreamCompatibilityRejected = error {
                     errorMessage = diagnosticMessage(for: error)
+                } else if DeviceMapLibrary.requiresLibraryAction(error) {
+                    // A paused upload refused for SD space/content still needs
+                    // the rider's library action before Resume can succeed.
+                    errorMessage = error.localizedDescription
                 } else {
                     errorMessage = nil
                 }
@@ -7706,6 +7842,11 @@ final class OfflineMapManager: ObservableObject {
             }
 #if canImport(UIKit)
             var activePreviewKeys = Set(packURLs.map(previewCacheKey))
+            for map in currentInstalledDeviceMaps {
+                if let descriptor = map.previewDescriptor {
+                    activePreviewKeys.insert(devicePreviewCacheKey(for: descriptor))
+                }
+            }
             if let currentActiveDeviceMap {
                 activePreviewKeys.insert(
                     devicePreviewCacheKey(for: currentActiveDeviceMap)
