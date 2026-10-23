@@ -148,6 +148,22 @@ struct MapCompassControl: UIViewRepresentable {
     }
 }
 
+struct MapUserTrackingControl: UIViewRepresentable {
+    @ObservedObject var controlState: MapViewControlState
+
+    func makeUIView(context: Context) -> MKUserTrackingButton {
+        let button = MKUserTrackingButton(mapView: controlState.mapView)
+        // The shared control rail supplies the background and shadow.
+        button.backgroundColor = .clear
+        button.layer.shadowOpacity = 0
+        return button
+    }
+
+    func updateUIView(_ button: MKUserTrackingButton, context: Context) {
+        button.mapView = controlState.mapView
+    }
+}
+
 /// Render input only; identity wraps the full UUID/revision/content-hash value.
 /// The map does not load archives, convert coordinates, or own navigation.
 struct MapSavedRouteOverlay {
@@ -324,13 +340,13 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.updateTopographyOverlay(topographyOverlay, on: mapView)
         mapView.showsUserLocation = isUserLocationAuthorized
         mapView.userTrackingMode = isUserLocationAuthorized &&
-            visibleSavedRoutePreview == nil ? .follow : .none
+            visibleSavedRoutePreview == nil
+                ? (isNavigating ? .followWithHeading : .follow) : .none
         
         // Configure map appearance
         mapView.showsCompass = false
         mapView.showsScale = true
         context.coordinator.controlState = controlState
-        context.coordinator.installTrackingControl(on: mapView)
         
         // Add long press gesture recognizer
         let longPress = UILongPressGestureRecognizer(
@@ -389,6 +405,9 @@ struct MapViewContainer: UIViewRepresentable {
         )
         let preview = visibleSavedRoutePreview
         let isFreePanActive = otherFreePanActive || preview != nil
+        let shouldResetTracking = context.coordinator.isNavigating != isNavigating ||
+            (!context.coordinator.isUserLocationAuthorized && isUserLocationAuthorized) ||
+            (context.coordinator.isSimulationMode && !isSimulationMode)
 
         // Store reference to map view in coordinator
         context.coordinator.mapView = uiView
@@ -403,7 +422,6 @@ struct MapViewContainer: UIViewRepresentable {
         context.coordinator.isSimulationMode = isSimulationMode
         context.coordinator.isUserLocationAuthorized = isUserLocationAuthorized
         context.coordinator.simulatedPosition = simulatedPosition
-        context.coordinator.updateControlVisibility(isNavigating: isNavigating)
         if controlState.mapView !== uiView {
             DispatchQueue.main.async {
                 controlState.connect(to: uiView)
@@ -473,7 +491,7 @@ struct MapViewContainer: UIViewRepresentable {
                     mapView: uiView,
                     isNavigating: isNavigating,
                     isOfflineMapSelectionActive: isOfflineMapSelectionActive,
-                    preservesStoppedTracking: true
+                    preservesCurrentTracking: !shouldResetTracking
                 )
             } else {
                 if uiView.showsUserLocation {
@@ -614,7 +632,6 @@ struct MapViewContainer: UIViewRepresentable {
         private(set) var displayedSavedRouteFinishAnnotation: SavedRouteFinishAnnotation?
         private var savedRouteCamera = SavedRouteMapCameraState<AnyHashable>()
         private var routeOverlays: [MKPolyline] = []
-        private var trackingButton: MKUserTrackingButton?
         private var lastNavigationCoordinate: CLLocationCoordinate2D?
         private var lastNavigationHeading: CLLocationDirection = 0
         private var routeAlternativeIDsByOverlay:
@@ -641,33 +658,11 @@ struct MapViewContainer: UIViewRepresentable {
             lastAppliedAppearance = appearance
         }
 
-        func installTrackingControl(on mapView: MKMapView) {
-            guard trackingButton == nil else { return }
-
-            let tracking = MKUserTrackingButton(mapView: mapView)
-            tracking.translatesAutoresizingMaskIntoConstraints = false
-            mapView.addSubview(tracking)
-
-            NSLayoutConstraint.activate([
-                tracking.trailingAnchor.constraint(equalTo: mapView.safeAreaLayoutGuide.trailingAnchor, constant: -18),
-                tracking.topAnchor.constraint(
-                    equalTo: mapView.safeAreaLayoutGuide.topAnchor,
-                    constant: 220
-                )
-            ])
-
-            trackingButton = tracking
-        }
-
-        func updateControlVisibility(isNavigating: Bool) {
-            trackingButton?.isHidden = !isNavigating
-        }
-
         func updateUserTrackingMode(
             mapView: MKMapView,
             isNavigating: Bool,
             isOfflineMapSelectionActive: Bool,
-            preservesStoppedTracking: Bool = false,
+            preservesCurrentTracking: Bool = false,
             animated: Bool = true
         ) {
             let isDestinationSelectionActive = mapView.selectedAnnotations.contains {
@@ -705,7 +700,7 @@ struct MapViewContainer: UIViewRepresentable {
             guard MapTrackingPolicy.shouldApplyDesiredMode(
                 currentMode: currentTrackingBehavior,
                 desiredMode: desiredTrackingBehavior,
-                preservesStoppedTracking: preservesStoppedTracking
+                preservesCurrentTracking: preservesCurrentTracking
             ) else { return }
 
             mapView.setUserTrackingMode(desiredTrackingMode, animated: animated)

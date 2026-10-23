@@ -20,13 +20,14 @@ enum MapTrackingPolicy {
     static func shouldApplyDesiredMode(
         currentMode: MapTrackingBehavior,
         desiredMode: MapTrackingBehavior,
-        preservesStoppedTracking: Bool
+        preservesCurrentTracking: Bool
     ) -> Bool {
         guard currentMode != desiredMode else { return false }
 
-        if preservesStoppedTracking,
-           currentMode == .none,
-           desiredMode != .none {
+        // GPS and view updates must preserve both a pan (.none) and a mode
+        // selected with the native tracking button. Selection overlays still
+        // need to stop tracking so their camera remains under user control.
+        if preservesCurrentTracking, desiredMode != .none {
             return false
         }
 
