@@ -346,17 +346,13 @@ struct RouteSearchPanel: View {
                 if !destinationStore.favoriteDestinations.isEmpty {
                     savedDestinationSectionHeader("Favorites")
 
-                    ForEach(destinationStore.favoriteDestinations) { destination in
-                        savedDestinationButton(destination, icon: "star.fill")
-                    }
+                    savedDestinationRows(destinationStore.favoriteDestinations, icon: "star.fill")
                 }
 
                 if !destinationStore.nonFavoriteRecentDestinations.isEmpty {
                     savedDestinationSectionHeader("Recent Searches")
 
-                    ForEach(destinationStore.nonFavoriteRecentDestinations) { destination in
-                        savedDestinationButton(destination, icon: "clock.arrow.circlepath")
-                    }
+                    savedDestinationRows(destinationStore.nonFavoriteRecentDestinations, icon: "clock.arrow.circlepath")
                 }
             }
         }
@@ -372,15 +368,21 @@ struct RouteSearchPanel: View {
             .padding(.bottom, 6)
     }
 
-    @ViewBuilder
+    private func savedDestinationRows(_ destinations: [SavedDestination], icon: String) -> some View {
+        ForEach(destinations) { destination in
+            savedDestinationButton(destination, icon: icon)
+            if destination.id != destinations.last?.id {
+                Divider()
+            }
+        }
+    }
+
     private func savedDestinationButton(_ destination: SavedDestination, icon: String) -> some View {
         Button(action: { selectDestination(destination) }) {
             SavedDestinationRow(destination: destination, icon: icon)
                 .padding(.vertical, 12)
         }
         .buttonStyle(.plain)
-
-        Divider()
     }
 
     private var favoriteButton: some View {

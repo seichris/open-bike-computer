@@ -7,49 +7,42 @@ struct OnlinePOICategoryRow: View {
     @ScaledMetric(relativeTo: .body) private var iconSize = 48.0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Nearby").font(.subheadline.weight(.semibold))
-                Spacer()
-                Text("Online · Apple Maps").font(.caption).foregroundStyle(.secondary)
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 12) {
-                    ForEach(OnlinePOICategory.allCases) { category in
-                        let selected = session.categories.contains(category)
-                        Button { onToggle(category) } label: {
-                            VStack(spacing: 6) {
-                                Image(systemName: category.symbol)
-                                    .font(.title3.weight(.semibold))
-                                    .foregroundStyle(selected ? .white : .blue)
-                                    .frame(width: iconSize, height: iconSize)
-                                    .background(selected ? Color.blue : Color.blue.opacity(0.12), in: Circle())
-                                    .overlay(alignment: .topTrailing) {
-                                        if selected {
-                                            Image(systemName: "checkmark.circle.fill")
-                                                .foregroundStyle(.white, .blue)
-                                                .background(.blue, in: Circle())
-                                        }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 12) {
+                ForEach(OnlinePOICategory.allCases) { category in
+                    let selected = session.categories.contains(category)
+                    Button { onToggle(category) } label: {
+                        VStack(spacing: 6) {
+                            Image(systemName: category.symbol)
+                                .font(.title3.weight(.semibold))
+                                .foregroundStyle(selected ? .white : .blue)
+                                .frame(width: iconSize, height: iconSize)
+                                .background(selected ? Color.blue : Color.blue.opacity(0.12), in: Circle())
+                                .overlay(alignment: .topTrailing) {
+                                    if selected {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(.white, .blue)
+                                            .background(.blue, in: Circle())
                                     }
-                                Text(category.title)
-                                    .font(.caption)
-                                    .foregroundStyle(.primary)
-                                    .multilineTextAlignment(.center)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .frame(width: max(78, iconSize + 16))
-                            .contentShape(Rectangle())
+                                }
+                            Text(category.title)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(category.title)
-                        .accessibilityValue(selected ? "Selected" : "Not selected")
-                        .accessibilityAddTraits(selected ? .isSelected : [])
-                        .accessibilityHint("Double tap to toggle this nearby category")
-                        .accessibilityIdentifier("online-poi-category-\(category.rawValue)")
+                        .frame(width: max(78, iconSize + 16))
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(category.title)
+                    .accessibilityValue(selected ? "Selected" : "Not selected")
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                    .accessibilityHint("Double tap to toggle this nearby category")
+                    .accessibilityIdentifier("online-poi-category-\(category.rawValue)")
                 }
-                .padding(.vertical, 3)
             }
+            .padding(.vertical, 3)
         }
     }
 }
