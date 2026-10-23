@@ -9,6 +9,36 @@ import CoreLocation
 import SwiftUI
 import UIKit
 
+struct InstalledMapSwitchPrompt: View {
+    let mapName: String
+    let onCancel: () -> Void
+    let onOpenSavedMaps: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "map.circle")
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundColor(.accentColor)
+                .accessibilityHidden(true)
+            Text("Switch Bicino map?")
+                .font(.title2.weight(.semibold))
+            Text("Your current map does not cover this location. \(mapName) is already saved to your Bicino. Open Saved Maps to switch to it.")
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Open Saved Maps", action: onOpenSavedMaps)
+                .buttonStyle(.borderedProminent)
+            Button("Cancel", action: onCancel)
+                .buttonStyle(.bordered)
+        }
+        .multilineTextAlignment(.center)
+        .padding(24)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: .black.opacity(0.18), radius: 24, x: 0, y: 12)
+        .padding(.horizontal, 22)
+        .accessibilityIdentifier("installed-map-switch-prompt")
+    }
+}
+
 struct OfflineMapOnboardingView: View {
     @ObservedObject var manager: OfflineMapManager
     let step: OfflineMapOnboardingStep

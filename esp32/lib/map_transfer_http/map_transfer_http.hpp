@@ -82,6 +82,7 @@ public:
   std::string mapLibraryJson(bool paged = false) const;
   bool requestMapLibraryPage(size_t offset);
   void considerAutomaticMap(int32_t latitudeE7, int32_t longitudeE7, bool currentMapFound);
+  void considerMapSuggestion(int32_t latitudeE7, int32_t longitudeE7, bool currentMapFound);
   void submitPendingMapLibrary() { submitLibraryTask(); }
 
 private:
@@ -128,6 +129,9 @@ private:
   bool libraryRetryPending();
   uint64_t libraryAutomaticBlock_ = 0;
   bool libraryAutomaticBlockKnown_ = false;
+  bool libraryCoverageKnown_ = false, libraryCurrentCovered_ = false;
+  uint32_t libraryCoverageBoundsMask_ = 0;
+  std::string libraryCoveringSession_, libraryCoverageSelection_;
   size_t libraryPageOffset_ = 0;
   int32_t libraryLatitudeE7_ = 0, libraryLongitudeE7_ = 0;
   void submitLibraryTask();

@@ -144,6 +144,9 @@ public:
   uint32_t libraryRevision_=0,libraryRetryAfterMs_=0;
   uint8_t libraryRetryStreak_=0;
   uint64_t libraryAutomaticBlock_=0,pendingCommitGrant_=0;
+  bool libraryCoverageKnown_=false,libraryCurrentCovered_=false;
+  uint32_t libraryCoverageBoundsMask_=0;
+  std::string libraryCoveringSession_,libraryCoverageSelection_;
   bool libraryAutomaticBlockKnown_=false,streamStorageAvailable_=true,operationTaskSubmitted_=false;
   size_t libraryPageOffset_=0;
   int32_t libraryLatitudeE7_=0,libraryLongitudeE7_=0;
@@ -168,6 +171,7 @@ public:
   bool libraryRetryPending();
   void scheduleLibraryRetry(uint32_t);
   void considerAutomaticMap(int32_t,int32_t,bool);
+  void considerMapSuggestion(int32_t,int32_t,bool);
   void submitLibraryTask();
   void lockState(){} void unlockState(){}
   void finishActivation(std::string a,std::string b,std::string c,std::string d){activationState_.finish(a,b,c,d);}
@@ -226,6 +230,30 @@ void failRendererAndRollback(MapTransferHttpServer&s,const std::string&root){
 }
 }
 int main(){using namespace map_transfer;
+  for(bool currentCovers:{false,true})for(bool candidateCovers:{false,true}){
+    reset();MapTransferHttpServer suggestion;suggestion.libraryMaps_={city()};
+    suggestion.libraryAutomatic_=false;suggestion.installer_.automatic=false;
+    suggestion.installer_.currentCovers=currentCovers;suggestion.installer_.candidateCovers=candidateCovers;
+    suggestion.considerMapSuggestion(0,0,false);
+    assert(suggestion.libraryAction_=="suggest");suggestion.executeLibraryTask();
+    assert(suggestion.libraryCoverageKnown_&&suggestion.libraryCurrentCovered_==currentCovers);
+    assert((suggestion.libraryCoveringSession_=="city")==(!currentCovers&&candidateCovers));
+    assert(suggestion.installer_.selected==0&&!suggestion.pendingRendererAcknowledgement_);
+    assert(!suggestion.installer_.manualSelectionIntentPending());
+    assert(!suggestion.installer_.automatic);
+    auto json=suggestion.mapLibraryJson(false);assert(json.find("\"coverage\":{\"known\":true")!=std::string::npos);
+    clockMs+=5000;suggestion.considerMapSuggestion(0,0,false);assert(suggestion.libraryAction_.empty());
+  }
+  {
+    reset();MapTransferHttpServer small;auto narrow=city();
+    narrow.presentation.boundsE7={10000,10000,100000,100000};small.libraryMaps_={narrow};
+    small.installer_.currentCovers=false;small.installer_.candidateCovers=true;
+    small.considerMapSuggestion(0,0,false);small.executeLibraryTask();
+    assert(small.libraryCoveringSession_.empty());
+    small.considerMapSuggestion(20000,20000,false);assert(small.libraryAction_=="suggest");
+    small.executeLibraryTask();assert(small.libraryCoveringSession_=="city");
+    assert(small.installer_.selected==0);
+  }
   for(int phase=0;phase<5;++phase){
     reset();MapOperationStorage disk("");operation::Store store(disk,std::string(32,'a'));
     assert(store.restore()==operation::Result::Ok);assert(store.initializeAdmission(99)==operation::Result::Ok);

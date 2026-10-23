@@ -1317,16 +1317,16 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
             }
         case .serverStatus(let status, let body):
             if body.contains("\"library_full\"") || body.contains("\"stream_sd_full\"") {
-                return "The SD card needs space. Remove a map in Settings → Maps on this Bike Computer, then try again."
+                return "The SD card needs space. Remove a map in Settings → Saved Maps (swipe left on the map), then try again."
             }
             if body.contains("\"stream_storage_unavailable\"") {
                 return "The SD card is busy or unavailable. Try again shortly."
             }
             if body.contains("\"stream_repair_requires_removal\"") {
-                return "This map's copy on the Bike Computer is damaged. Remove it in Settings → Maps on this Bike Computer, then install it again."
+                return "This map's copy on the Bike Computer is damaged. Remove it in Settings → Saved Maps (swipe left on the map), then install it again."
             }
             if body.contains("\"stream_session_conflict\"") {
-                return "Another copy of this map is on the Bike Computer. Remove it in Settings → Maps on this Bike Computer (choose another map first if it is in use), then try again."
+                return "Another copy of this map is on the Bike Computer. Choose another map first if this copy is in use. Then swipe left on it in Settings → Saved Maps, remove it from Bicino, and try again."
             }
             if body.contains("\"library_busy\"") {
                 return "The Bike Computer is finishing a map switch. Try again shortly."
@@ -1567,6 +1567,45 @@ nonisolated struct DeviceInstalledMap: Codable, Equatable, Identifiable, Sendabl
     }
 }
 
+nonisolated struct DeviceMapCoverage: Codable, Equatable, Sendable {
+    let known: Bool
+    let currentCovered: Bool
+    let blockX: Int
+    let blockY: Int
+    let boundsMask: UInt32
+    let selectedSessionID: String
+    let suggestedSessionID: String
+
+    var isValid: Bool {
+        (-5000...5000).contains(blockX) && (-5000...5000).contains(blockY) &&
+            (selectedSessionID.isEmpty || DeviceInstalledMap.safeSession(selectedSessionID)) &&
+            (suggestedSessionID.isEmpty || DeviceInstalledMap.safeSession(suggestedSessionID))
+    }
+
+    func matches(latitude: Double, longitude: Double, maps: [DeviceInstalledMap]) -> Bool {
+        guard isValid, latitude.isFinite, longitude.isFinite,
+              maps.count <= 32,
+              (-85.0511287...85.0511287).contains(latitude),
+              (-180.0...180.0).contains(longitude) else { return false }
+        // Match the firmware's E7 truncation and 4096 m Mercator block key.
+        let latitudeE7 = Int(latitude * 10_000_000), longitudeE7 = Int(longitude * 10_000_000)
+        let lat = Double(latitudeE7) / 10_000_000
+        let lon = Double(longitudeE7) / 10_000_000
+        let radians = 0.017453292519943295, radius = 6_378_137.0
+        let x = Int32(lon * radians * radius)
+        let y = Int32(log(tan(lat * radians / 2 + 0.7853981633974483)) * radius)
+        var mask: UInt32 = 0
+        for (index, map) in maps.enumerated() {
+            if let b = map.boundsE7, b.count == 4,
+               longitudeE7 >= b[0], latitudeE7 >= b[1],
+               longitudeE7 <= b[2], latitudeE7 <= b[3] {
+                mask |= UInt32(1) << index
+            }
+        }
+        return Int(x >> 12) == blockX && Int(y >> 12) == blockY && mask == boundsMask
+    }
+}
+
 nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
     let schemaVersion: Int
     let known: Bool
@@ -1580,6 +1619,7 @@ nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
     var total: Int? = nil
     var commandID: String? = nil
     var commandError: String? = nil
+    var coverage: DeviceMapCoverage? = nil
     var isComplete: Bool { known && !busy && isValid && (offset ?? 0) == 0 && maps.count == (total ?? maps.count) }
     var isValid: Bool {
         let count = total ?? maps.count, start = offset ?? 0
@@ -1587,7 +1627,7 @@ nonisolated struct DeviceMapLibrary: Codable, Equatable, Sendable {
         guard (0...32).contains(count), (0...32).contains(start), maps.count <= 32 else { return false }
         let shape = (start == 0 && maps.count == count) ||
             (start.isMultiple(of: 4) && start < count && maps.count == min(4, count - start))
-        return shape && schemaVersion == 1 && maps.count <= 32 && maps.allSatisfy(\.isValid) &&
+        return shape && schemaVersion == 1 && coverage?.isValid != false && maps.count <= 32 && maps.allSatisfy(\.isValid) &&
             Set(maps.map(\.sessionID)).count == maps.count &&
             (0...32).contains(total ?? maps.count) && (0...32).contains(offset ?? 0) &&
             (offset ?? 0) + maps.count <= (total ?? maps.count) &&
@@ -1643,7 +1683,7 @@ nonisolated struct DeviceMapLibraryPages {
         let same: (DeviceMapLibrary, DeviceMapLibrary) -> Bool = { a, b in
             a.revision == b.revision && a.total == b.total && a.automatic == b.automatic &&
                 a.error == b.error && a.selectedSessionID == b.selectedSessionID &&
-                a.commandID == b.commandID && a.commandError == b.commandError
+                a.commandID == b.commandID && a.commandError == b.commandError && a.coverage == b.coverage
         }
         if let complete, same(complete, page) { return (complete, nil) }
         if page.isComplete { self = Self(); complete = page; return (page, nil) }
@@ -1688,6 +1728,7 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
 
     var selectionHealth: MapSelectionHealth? = nil
     var mapLibrary: DeviceMapLibrary? = nil
+    var hasMapLibrary: Bool = false
     var activeRoot: String? = nil
     var mapOperationsV1: Bool? = nil
     let enabled: Bool?
@@ -1721,6 +1762,7 @@ extension MapTransferDeviceStatus {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         selectionHealth = try container.decodeIfPresent(MapSelectionHealth.self, forKey: .selectionHealth)
         mapLibrary = try? container.decodeIfPresent(DeviceMapLibrary.self, forKey: .mapLibrary)
+        hasMapLibrary = container.contains(.mapLibrary)
         activeRoot = try container.decodeIfPresent(String.self, forKey: .activeRoot)
         mapOperationsV1 = try container.decodeIfPresent(Bool.self, forKey: .mapOperationsV1)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)

@@ -3137,12 +3137,12 @@ extension NavigationProtocolTests {
                 source.contains("Image(systemName: \"checkmark.circle.fill\")") &&
                 source.contains("? \"arrow.clockwise.circle\"") &&
                 source.contains("\"arrow.up.circle\"") &&
-                source.contains("\"arrow.triangle.swap\"") &&
+                !source.contains("\"arrow.triangle.swap\"") &&
                 !source.contains("IPhoneDownloadStatusIcon") &&
                 !source.contains("Image(systemName: \"iphone\")") &&
                 !source.contains("BikeComputerMapStatusIcon") &&
                 !source.contains("Text(\"b\")"),
-            "saved maps distinguish active maps, retained SD selections, uploads and retries"
+            "saved maps use the upload icon for retained SD maps and keep active and retry states"
         )
         assert(
             source.contains("Text(\"No offline maps yet\")"),
@@ -3250,13 +3250,14 @@ extension NavigationProtocolTests {
         )
         assert(
             source.contains("manager.detailPreviewImage(for: preview.item)") &&
-                source.contains("Loading high-resolution preview") &&
+                source.contains("Loading map preview…") &&
+                !previewSource.contains("fallbackImage") &&
                 source.contains(".interpolation(.high)") &&
                 source.contains(".task(id: preview.id)") &&
                 source.contains(
                     "await manager.loadDetailPreviewIfNeeded(for: preview.item)"
                 ),
-            "the preview modal upgrades its thumbnail through cancellable Retina loading"
+            "the preview modal loads Retina directly without showing the list thumbnail first"
         )
         assert(
             source.contains("manager.savedMapListItems(") &&
@@ -5191,6 +5192,97 @@ extension NavigationProtocolTests {
                     "recorded legacy transfer identity refreshes the live inventory")
         assert(refreshedItems[0].isOnIPhone && refreshedItems[0].isActiveOnDevice,
                "protocol-v1 fallback installation merges without an app relaunch")
+
+        let installedStream = DeviceInstalledMap(
+            sessionID: "retained-stream", mapID: "stream-map",
+            manifestReceipt: streamArtifact.manifestReceipt!,
+            signedManifestReceipt: signedReceipt, displayName: "Stream Map",
+            payloadBytes: 1024, boundsE7: nil
+        )
+        let sdOnlyMap = DeviceInstalledMap(
+            sessionID: "retained-city", mapID: "sd-city",
+            manifestReceipt: String(repeating: "e", count: 64),
+            signedManifestReceipt: String(repeating: "f", count: 64),
+            displayName: "SD-only City", payloadBytes: 8192,
+            boundsE7: [-1_000_000, -1_000_000, 1_000_000, 1_000_000]
+        )
+        var library = DeviceMapLibrary(schemaVersion: 1, known: true,
+            automatic: true, busy: false, revision: 1, error: "",
+            selectedSessionID: "", maps: [installedStream, sdOnlyMap])
+        var retainedItems = streamManager.savedMapListItems(
+            activeDeviceMap: nil, deviceMapLibrary: library)
+        assertEqual(retainedItems.count, 2,
+                    "Saved Maps merges the exact installed version and includes SD-only maps")
+        assert(retainedItems.contains { $0.isOnIPhone && $0.installedDeviceMap == installedStream },
+               "a retained map is marked as saved on Bicino without claiming it is active")
+        assert(retainedItems.contains {
+            !$0.isOnIPhone && !$0.isActiveOnDevice && $0.installedDeviceMap == sdOnlyMap &&
+                $0.previewDeviceMap?.bounds != nil
+        }, "inactive SD-only maps remain previewable and selectable in Saved Maps")
+        var damaged = installedStream
+        damaged.available = false
+        library.maps = [damaged, sdOnlyMap]
+        retainedItems = streamManager.savedMapListItems(activeDeviceMap: nil, deviceMapLibrary: library)
+        assertEqual(retainedItems.count, 2, "damaged maps stay visible for explicit SD removal")
+        assert(retainedItems.contains { $0.installedDeviceMap?.isAvailable == false },
+               "damaged copies do not become a healthy saved-on-Bicino status")
+        let differentVersion = DeviceInstalledMap(
+            sessionID: "another-stream-version", mapID: "stream-map",
+            manifestReceipt: String(repeating: "c", count: 64),
+            signedManifestReceipt: signedReceipt, displayName: "Stream Map",
+            payloadBytes: 2048, boundsE7: nil
+        )
+        library.maps = [differentVersion, sdOnlyMap]
+        retainedItems = streamManager.savedMapListItems(activeDeviceMap: nil, deviceMapLibrary: library)
+        assertEqual(retainedItems.count, 3, "different signed versions of the same city stay distinct")
+        assertEqual(streamManager.savedMapListItems(activeDeviceMap: nil).count, 1,
+                    "disconnect removes SD-only entries and preserves the local map")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "", suggestedSessionID: sdOnlyMap.sessionID)
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .switchMap(sdOnlyMap), "a verified covering SD map offers switching instead of downloading")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 1, longitude: 1),
+                    .none, "coverage from an earlier GPS block cannot prompt at a new location")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: .nan, longitude: 0),
+                    .none, "invalid GPS cannot produce a map prompt")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "stale-selection", suggestedSessionID: sdOnlyMap.sessionID)
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .none, "a changed active map invalidates a previously checked suggestion")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: true,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "", suggestedSessionID: "")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .none, "working current coverage needs neither prompt")
+        library.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 2, selectedSessionID: "", suggestedSessionID: "")
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .download, "a checked hole with no covering installed map keeps Download Map")
+        let smallMap = DeviceInstalledMap(sessionID: "small-map", mapID: "small-map",
+            manifestReceipt: String(repeating: "a", count: 64),
+            signedManifestReceipt: String(repeating: "b", count: 64), displayName: "Small Map",
+            payloadBytes: 2048, boundsE7: [10_000, 10_000, 100_000, 100_000])
+        var smallLibrary = DeviceMapLibrary(schemaVersion: 1, known: true, automatic: false,
+            busy: false, revision: 2, error: "", selectedSessionID: "", maps: [smallMap])
+        smallLibrary.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 0, selectedSessionID: "", suggestedSessionID: "")
+        assertEqual(DeviceMapAssistance.evaluate(library: smallLibrary, latitude: 0.002, longitude: 0.002),
+                    .none, "entering a small map inside the same renderer block waits for a new probe")
+        smallLibrary.coverage = DeviceMapCoverage(known: true, currentCovered: false,
+            blockX: 0, blockY: 0, boundsMask: 1, selectedSessionID: "", suggestedSessionID: smallMap.sessionID)
+        assertEqual(DeviceMapAssistance.evaluate(library: smallLibrary, latitude: 0.002, longitude: 0.002),
+                    .switchMap(smallMap), "the refreshed bounds context offers the installed small map")
+        library.coverage = nil
+        assertEqual(DeviceMapAssistance.evaluate(library: library, latitude: 0, longitude: 0),
+                    .none, "an inventory without a completed coverage check cannot claim no suitable map exists")
+        let inventoryJSON = try! JSONEncoder().encode(library)
+        let inventoryStatus = try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+            from: Data("{\"mapLibrary\":".utf8) + inventoryJSON + Data("}".utf8))
+        assert(inventoryStatus.hasMapLibrary && inventoryStatus.mapLibrary != nil,
+               "valid inventory advertises the installed-map capability")
+        let malformedInventory = try! JSONDecoder().decode(MapTransferDeviceStatus.self,
+            from: Data("{\"mapLibrary\":{\"schemaVersion\":999}}".utf8))
+        assert(malformedInventory.hasMapLibrary && malformedInventory.mapLibrary == nil,
+               "malformed modern inventory cannot masquerade as firmware without a map library")
     }
 
     static func testOfflineMapManifestDecoding() {

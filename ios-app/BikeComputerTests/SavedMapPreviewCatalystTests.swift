@@ -1134,6 +1134,30 @@ struct SavedMapPreviewCatalystTests {
             fail("disconnect should clear live device-only thumbnail and detail state")
         }
 
+        let retainedMap = DeviceInstalledMap(sessionID: "inactive-city", mapID: "inactive-city",
+            manifestReceipt: String(repeating: "a", count: 64),
+            signedManifestReceipt: String(repeating: "b", count: 64),
+            displayName: "Inactive City", payloadBytes: 4096,
+            boundsE7: [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000])
+        let retainedLibrary = DeviceMapLibrary(schemaVersion: 1, known: true,
+            automatic: false, busy: false, revision: 1, error: "", selectedSessionID: "",
+            maps: [retainedMap])
+        devicePreviewManager.updateDeviceMapLibrary(retainedLibrary)
+        guard let retainedItem = devicePreviewManager.savedMapListItems(
+            activeDeviceMap: nil, deviceMapLibrary: retainedLibrary
+        ).first(where: { $0.installedDeviceMap == retainedMap }) else {
+            fail("an inactive SD-only city should be available in Saved Maps")
+        }
+        await devicePreviewManager.loadDetailPreviewIfNeeded(for: retainedItem)
+        devicePreviewManager.updateActiveDeviceMap(nil)
+        guard imageMatchesPNG(devicePreviewManager.detailPreviewImage(for: retainedItem), data: detailSnapshotPNG) else {
+            fail("inactive SD-only previews load at Retina resolution without changing the active map")
+        }
+        devicePreviewManager.updateDeviceMapLibrary(nil)
+        guard devicePreviewManager.detailPreviewImage(for: retainedItem) == nil else {
+            fail("disconnect invalidates inactive SD-only detail previews too")
+        }
+
         let sessionlessDescriptorA = DeviceActiveMapDescriptor(
             mapID: "legacy-map",
             boundsE7: [1_209_000_000, 307_000_000, 1_219_500_000, 315_500_000]

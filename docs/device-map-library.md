@@ -6,11 +6,15 @@ upload staging remains recoverable or reclaimable through the existing protocol.
 
 ## App behavior
 
-Settings shows **Maps on this Bike Computer**, with installed payload sizes,
-**Available offline** and **In use** states, a **Use** action, and an automatic
-selection toggle. Swiping an inactive map exposes explicit SD removal with a
-confirmation bound to that phone connection and device identity. iPhone files
-and cloud-library references are separate from SD removal.
+Settings uses one **Saved Maps** list for iPhone, catalog, active-device and
+retained SD versions. Inactive installed maps use the same upload icon as maps
+on the phone; the action reuses the installed exact version. Tapping a thumbnail
+opens its high-resolution preview directly, with a compact saved-to-Bicino or
+iPhone-only status immediately below the image. Topography details and source
+attribution follow without a full-height image spacer. Swiping an inactive map
+exposes **Remove from Bicino**, with confirmation bound to the phone connection
+and device identity. iPhone files and cloud references remain separate from SD
+removal. Damaged copies stay visible with repair instructions.
 
 When the upload action finds an exact verified signed version in a fresh device
 inventory, it selects that installation over authenticated BLE. No map payload
@@ -19,22 +23,33 @@ and follows the normal validated installation path. A missing library capability
 preserves compatibility with older firmware. Unresolved uploads still require
 their own durable reconciliation; inventory is not a new upload receipt.
 
-## Automatic selection
+## Location-based switch prompts
 
-Automatic selection defaults on and persists on the SD card. While following a
-valid GPS position, the device checks coverage at five-second intervals. It
-keeps a working covering map across overlaps. Otherwise it chooses the smallest
-covering bounds, breaking ties by session ID. The storage worker also checks for
-the actual renderer block at that coordinate, so a route corridor's bounding
-rectangle cannot claim an empty interior as coverage. Pan/browse mode does not
-automatically switch maps. Each position block is checked once per inventory
-refresh; gaps do not repeatedly scan manifests or cancel rendering. Temporary
-owner-dispatch, storage and allocation failures back off exponentially (from 30
-seconds, or 5 seconds after an allocation failure) up to five minutes. A refused
-probe, or a repeated identical failure, publishes no new inventory revision, so
-the phone does not repage. Working flat legacy maps
-and maps without bounds remain selected while their current block is present.
-There is no network request or download when no map covers a location.
+GPS updates never silently switch maps. While following GPS, the device checks
+current coverage and searches completed installations on the storage worker at
+five-second intervals. It checks actual renderer blocks, so a route corridor's
+bounding rectangle cannot claim an empty interior as coverage. One probe per
+4096 m Mercator block and declared-bounds membership is cached until refresh or selection; temporary failures
+back off and do not report a false absence of installed coverage.
+
+The authenticated inventory includes a coverage result bound to its current
+renderer selection and GPS block. The foreground landing page waits for a fresh,
+complete inventory and a usable matching GPS fix. When the current map does not
+cover the location and another installed map does, **Switch Bicino map?** offers
+**Cancel** or **Open Saved Maps**. The latter opens Settings scrolled to Saved
+Maps; it does not select anything. Cancel suppresses that prompt for the same
+connection, selection, suggested map and GPS block. Prompts wait during rides,
+navigation, other sheets and map operations.
+
+If no installed map covers the location, the existing **Download Map** /
+**Choose Area** onboarding remains. An unknown or busy coverage probe cannot
+trigger that download prompt. Older firmware without a map library keeps the
+existing download flow. Pan/browse mode does not probe the user's current GPS.
+There is no automatic network request or download when coverage is missing.
+
+The old `automatic` field and policy commands remain for protocol compatibility;
+the current firmware GPS loop only queues a read-only suggestion. The app no
+longer exposes an automatic-selection setting.
 
 **Use** pins a manual map and persists automatic selection off. It first journals
 its exact target (`/VECTMAP/.library-selection-intent.json`), then moves the
@@ -47,8 +62,7 @@ unsettled the inventory reports `automatic: false` and no automatic switch runs.
 A failed library switch leaves the renderer on its previous root, so **In use** and
 live-renderer removal protection keep naming that map; the version that never
 loaded can be removed. If the pointer cannot follow the renderer back, health
-reports `rollback_failed` and both maps stay protected. Re-enabling the
-toggle returns to location-based selection. Invalid automatic candidates are excluded
+reports `rollback_failed` and both maps stay protected. Choosing another map in Saved Maps selects that version explicitly. Invalid automatic candidates are excluded
 from repeated selection until an explicit library command/refresh or a reboot.
 Temporary upload/storage-busy conditions remain eligible for a later retry.
 Label/font contract failures are candidate verdicts and do not trigger repeated
@@ -100,7 +114,7 @@ it never silently evicts a city. Payload sizes exclude filesystem allocation,
 metadata and archive overhead. Space availability remains enforced by the
 manifest preflight: remaining payload bytes, conservative FAT cluster slack and
 metadata reserve are checked before the first payload file. A full card or a
-33rd-map attempt directs the app to **Maps on this Bike Computer** for removal.
+33rd-map attempt directs the app to **Saved Maps** for removal.
 A durable upload refused before it writes payload resolves its own operation as
 Failed and returns that receipt with the error. Neither the device nor the phone
 then keeps a pending installation that would block the removal. Removal also
@@ -138,9 +152,9 @@ Physical acceptance remains required separately for the 1.75 and 2.06 boards:
 
 1. Install two disjoint signed maps and verify both remain in inventory after a
    further installation and a full power cycle.
-2. Select the older map, confirm zero payload upload and a fresh rendered frame.
+2. Select the older map from Saved Maps, confirm zero payload upload and a fresh rendered frame.
 3. Drive the test GPS between covered locations and an uncovered location;
-   verify overlap stability, route-corridor holes and manual selection.
+   verify switch/download prompt routing, Cancel, route-corridor holes and explicit selection.
 4. Interrupt an update and selection, then cold boot and verify recovery without
    admitting uncommitted content or losing another completed map.
 5. Remove an unprotected map explicitly; confirm selected/recovery maps cannot

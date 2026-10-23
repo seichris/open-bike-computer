@@ -1792,7 +1792,7 @@ The authenticated `2A6E` framed command channel carries these control commands:
 | `MTRN` | iOS -> ESP32 | `exit` | Disable map-transfer mode. |
 | `MTRN` | iOS -> ESP32 | `library` | Refresh the completed SD-map inventory without enabling Wi-Fi. |
 | `MTRN` | iOS -> ESP32 | `library-page\|offset` | Read four cached entries at offsets 0, 4, 8, ... without filesystem access. |
-| `MTRN` | iOS -> ESP32 | `library-auto` / `library-manual` | Persist automatic/manual map selection. |
+| `MTRN` | iOS -> ESP32 | `library-auto` / `library-manual` | Legacy automatic/manual policy commands; current GPS updates only suggest maps. |
 | `MTRN` | iOS -> ESP32 | `library-select\|sessionID\|manifestReceipt` | Verify and select an exact completed installation; disables automatic selection. |
 | `MTRN` | iOS -> ESP32 | `library-remove\|sessionID\|manifestReceipt` | Remove an exact unselected installation, subject to recovery protection. |
 | `MSTS` | iOS -> ESP32 | empty | Request current map-transfer status. |
@@ -2734,6 +2734,15 @@ Authenticated `MSTS` and `GET /map-transfer/status` include `mapLibrary`:
   "selectedSessionID": "installed-session",
   "commandID": "<32 lowercase hex characters of the last explicit command, or empty>",
   "commandError": "",
+  "coverage": {
+    "known": true,
+    "currentCovered": false,
+    "blockX": 3299,
+    "blockY": 890,
+    "boundsMask": 1,
+    "selectedSessionID": "installed-session",
+    "suggestedSessionID": "another-installed-session"
+  },
   "offset": 0,
   "total": 1,
   "maps": [{
@@ -2749,6 +2758,22 @@ Authenticated `MSTS` and `GET /map-transfer/status` include `mapLibrary`:
 }
 ```
 
+`coverage` is optional for backwards compatibility. It is a read-only storage-worker
+result, never a selection request or upload receipt. `known:false`, a busy/partial
+inventory, a changed `selectedSessionID`, or a different current GPS block makes
+the result unusable for prompting. `blockX` and `blockY` are signed Web Mercator
+meter coordinates truncated to int32 then shifted right by 12, matching renderer
+block addressing. `boundsMask` is a uint32 bitmap in assembled inventory order:
+bit i is set when the checked coordinate lies within map i's declared bounds.
+Clients recompute it for the current GPS fix, and the firmware re-probes when
+this membership changes even inside the same block. A known empty `suggestedSessionID` with `currentCovered:false`
+means no completed usable installation has a renderer block at that location;
+bounds alone cannot establish coverage. Pages must agree on the complete coverage
+object as well as revision. The GPS loop queues suggestions only and never moves
+the canonical selection. The landing-page confirmation opens Saved Maps; selecting
+there remains a separate explicit authenticated action.
+
+`automatic` is a legacy policy value; the app no longer exposes its toggle.
 `automatic` is false while a manual **Use** journal is unsettled, because that
 journal already pins the manual choice. `selectedSessionID` names only the root
 the renderer acknowledged; after a failed library switch it keeps naming the
@@ -2797,7 +2822,7 @@ cannot drive reuse or removal. This keeps a full SD library from exceeding the
 Library follow-up semantics: `library-select|session|receipt|requestID` and
 `library-remove|session|receipt|requestID` accept an optional 32-lowercase-hex client
 request ID. `mapLibrary.commandID` / `commandError` echo only explicit command
-results; automatic probes do not overwrite them. Pages must also agree on these
+results; coverage probes do not overwrite them. Pages must also agree on these
 fields. `available:false` keeps a completed version with damaged payload files
 visible for removal while disabling reuse. Busy rejections and owner failures
 publish a revision and the exact request result. BLE status requests received

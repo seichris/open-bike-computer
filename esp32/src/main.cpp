@@ -2562,7 +2562,7 @@ void loop() {
           std::isfinite(gps.gpsData.latitude) && std::isfinite(gps.gpsData.longitude) &&
           gps.gpsData.latitude >= -90 && gps.gpsData.latitude <= 90 &&
           gps.gpsData.longitude >= -180 && gps.gpsData.longitude <= 180)
-        mapTransferHttp.considerAutomaticMap(
+        mapTransferHttp.considerMapSuggestion(
             static_cast<int32_t>(gps.gpsData.latitude * 10000000.0),
             static_cast<int32_t>(gps.gpsData.longitude * 10000000.0), mapView.debugIsMapFound());
     }

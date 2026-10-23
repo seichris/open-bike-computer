@@ -1250,6 +1250,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var deviceHasSDCard: Bool?
     @Published var deviceMapStateKnown = false
     @Published var deviceMapFoundForCurrentLocation: Bool?
+    @Published private(set) var supportsDeviceMapLibrary = false
     @Published var deviceMapBlockCount: Int = 0
     
     // MARK: - Map Settings (persisted for UI display)
@@ -6881,6 +6882,7 @@ class BLEManager: NSObject, ObservableObject {
         deviceHasSDCard = nil
         deviceMapStateKnown = false
         deviceMapFoundForCurrentLocation = nil
+        supportsDeviceMapLibrary = false
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
         authFlowState = .idle
@@ -10089,6 +10091,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         deviceHasSDCard = nil
         deviceMapStateKnown = false
         deviceMapFoundForCurrentLocation = nil
+        supportsDeviceMapLibrary = false
         deviceMapBlockCount = 0
         pendingAuthNonce = nil
         authFlowState = .idle
@@ -11787,6 +11790,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
     }
 
     private func applyVerifiedMapTransferStatus(_ status: MapTransferDeviceStatus) {
+        if status.hasMapLibrary || status.mapLibrary != nil { supportsDeviceMapLibrary = true }
         projectDeviceMapLibrary(status.mapLibrary)
         if let enabled = status.enabled {
             mapTransferModeEnabled = enabled
