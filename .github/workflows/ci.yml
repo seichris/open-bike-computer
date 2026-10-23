@@ -387,13 +387,15 @@ jobs:
       - name: Run selected Swift and host contracts
         env:
           IOS_CHECKS: ${{ needs.changes.outputs.ios_checks }}
+          GH_TOKEN: ${{ github.token }}
+          LOCAL_RESULTS_ALLOWED: ${{ github.event_name == 'pull_request' && !inputs.scope }}
         run: |
           python3 - <<'PYTHON'
           import json, os, subprocess
           checks = json.loads(os.environ['IOS_CHECKS'])
           if not isinstance(checks, list) or not checks:
               raise SystemExit('iOS scope must select at least one check')
-          command = ['python3', 'tools/dev_check.py']
+          command = ['python3', 'tools/dev_check.py', '--reuse-local']
           for check in checks:
               command.extend(['--check', check])
           command.extend(['--report', os.environ['RUNNER_TEMP']+'/dev-checks/ios-fast/results.json'])
@@ -419,7 +421,10 @@ jobs:
       - name: Configure job-scoped Xcode DerivedData
         run: echo "CI_DERIVED_DATA_PATH=$RUNNER_TEMP/BikeComputerDerivedData" >> "$GITHUB_ENV"
       - name: Run iOS and Watch simulator contracts
-        run: python3 tools/dev_check.py --check ios-simulator --report "$RUNNER_TEMP/dev-checks/ios-simulator/results.json"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOCAL_RESULTS_ALLOWED: ${{ github.event_name == 'pull_request' && !inputs.scope }}
+        run: python3 tools/dev_check.py --reuse-local --check ios-simulator --report "$RUNNER_TEMP/dev-checks/ios-simulator/results.json"
       - name: Retain check evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

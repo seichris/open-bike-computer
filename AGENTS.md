@@ -43,6 +43,14 @@ DerivedData. Use `--fresh --evidence` for clean-source app qualification;
 `--evidence` explicitly retains exact-build symbols. CI keeps strict evidence
 requirements. Never describe a dirty local build as clean-commit validation.
 
+On the configured trusted Mac, clean successful `tools/dev-check` runs automatically
+publish signed iOS helper/simulator results for PR CI. Run checks after the final
+commit and before pushing to make them available to CI. Dirty runs remain useful
+local validation but cannot be reused. CI verifies the PR head, actual merge tree,
+commands and live toolchain; every mismatch runs hosted tests. See
+`docs/local-ci-results.md` for trust, setup and fallback behavior. Do not use these
+receipts to replace firmware, app-build symbols, release or physical acceptance.
+
 ### ESP32 firmware
 
 Before the first build/upload/device-debug action in a task, identify which
