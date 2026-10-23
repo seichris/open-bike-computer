@@ -75,9 +75,10 @@ struct Installer {
   int selected=0,scans=0,selectAttempts=0,removed=0;bool throwRefresh=false;std::string selectionError,intentRoot;
   ActiveMapSelection active,previous;
   bool automaticMapSelection(){return automatic;}
-  bool setAutomaticMapSelection(bool value){if(policyWrite)automatic=value;return policyWrite;}
+  bool setAutomaticMapSelection(bool value){if(policyWrite){automatic=value;}return policyWrite;}
   bool writeManualSelectionIntent(const std::string&,const std::string&root,const std::string&){
-    if(!intentWrite)return false;intentRoot=root;return true;
+    if(!intentWrite){return false;}
+    intentRoot=root;return true;
   }
   bool manualSelectionIntentPending(){return !intentRoot.empty();}
   bool discardManualSelectionIntent(){intentRoot.clear();return true;}
@@ -160,7 +161,8 @@ public:
     storageControlSubmit_=[this](void(*work)(void*),void*context){queuedWork_=work;queuedContext_=context;return true;};
   }
   bool runQueued(){
-    if(!queuedWork_)return false;auto work=queuedWork_;queuedWork_=nullptr;work(queuedContext_);return true;
+    if(!queuedWork_){return false;}
+    auto work=queuedWork_;queuedWork_=nullptr;work(queuedContext_);return true;
   }
   bool requestMapLibrary(const std::string&,const std::string&="",const std::string&="",const std::string&="");
   bool libraryRetryPending();
