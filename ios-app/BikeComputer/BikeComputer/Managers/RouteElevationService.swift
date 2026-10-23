@@ -185,7 +185,9 @@ nonisolated enum RouteElevationPreparationV1 {
         return Prepared(geometry: geometry, localProfile: profile)
     }
 
-    static func request(for geometry: RouteElevationGeometryV1, requestID: UUID) -> RouteElevationServiceRequestV1 {
+    static func request(
+        for geometry: RouteElevationGeometryV1, requestID: UUID, routeSource: String
+    ) -> RouteElevationServiceRequestV1 {
         RouteElevationServiceRequestV1(
             schema: RouteElevationContractV1.requestSchema,
             requestId: requestID.uuidString.lowercased(),
@@ -196,7 +198,7 @@ nonisolated enum RouteElevationPreparationV1 {
                 digest: geometry.digest
             ),
             travelMode: "cycling",
-            routeSource: "gpx"
+            routeSource: routeSource
         )
     }
 
@@ -322,7 +324,7 @@ final class RouteElevationService {
             remember(stored)
             return .ready(stored)
         }
-        guard RouteProviderPolicyV1.allowsRouteElevationService(subject.route.provider) else {
+        guard let routeSource = RouteProviderPolicyV1.routeElevationServiceSource(subject.route.provider) else {
             return .unavailable(.sourceNotPermitted)
         }
         guard geometry.pointCount <= RouteElevationContractV1.maximumRoutePoints else {
@@ -338,7 +340,9 @@ final class RouteElevationService {
         if let existing = inFlight[digest] {
             task = existing
         } else {
-            let request = RouteElevationPreparationV1.request(for: geometry, requestID: UUID())
+            let request = RouteElevationPreparationV1.request(
+                for: geometry, requestID: UUID(), routeSource: routeSource
+            )
             task = Task { @MainActor [weak self] in
                 let state: RouteElevationStateV1
                 var failure: RouteElevationClientError?

@@ -22,13 +22,12 @@ The iPhone resolves a profile for a route in this order:
    the same sidecar so a saved route shows elevation offline.
 3. **The managed service**, only when
    `RouteProviderPolicyV1.allowsRouteElevationService` admits the route's
-   provider. Today that is imported GPX only. Apple Maps geometry is not sent
-   (the privacy checklist forbids a MapKit export path without explicit approval
-   under the current Apple terms, see
-   `docs/reviews/mapkit-route-storage-2026-09-15.md`); those routes show
-   "Elevation isn't available for this route source". Strava API routes stay on
-   the phone and use only their own GPX heights. Changing either is a product
-   policy decision.
+   provider: imported GPX and both active and saved Apple Maps routes. The
+   maintainer explicitly enabled Apple Maps elevation lookup on 23 October
+   2026; requests preserve `routeSource: "mapkit"` and use the same transient
+   processing and retention limits as GPX. See the implementation-policy record
+   in `docs/reviews/mapkit-route-storage-2026-09-15.md`. Strava API routes stay
+   on the phone and use only their own GPX heights.
 
 The service tries providers in order and never mixes providers inside one
 profile:
@@ -134,8 +133,9 @@ them.
 }
 ```
 
-`routeSource` `mapkit` and `strava` are rejected server-side as well. The
-answer has `Cache-Control: private, no-store`:
+The app sends `routeSource: "gpx"` for imported GPX and `"mapkit"` for active
+or saved Apple Maps routes. `strava` is rejected server-side. The answer has
+`Cache-Control: private, no-store`:
 
 ```json
 {"schema": "bicino-route-elevation-response-v1", "status": "ready" | "unavailable",

@@ -65,6 +65,21 @@ Strava are still rejected. Hash verification, immutable room snapshots and
 organizer provenance apply to Apple Maps copies just as to GPX; received routes
 cannot be republished by another rider. No Watch transfer is enabled.
 
+## 23 October 2026: route elevation lookup
+
+The maintainer explicitly requested removing the Apple Maps elevation-service
+block after testing an online route. Both active-only and deliberately saved
+Apple Maps routes may now send their WGS-84 geometry to Bicino's managed route
+elevation service, identified as `routeSource: "mapkit"`. The service forwards
+sample coordinates to Geoapify or samples its own staged DEM. It does not store
+or log route coordinates; coordinate-free replay profiles expire after ten
+minutes and pseudonymous daily usage counts expire within 48 hours. Saved
+elevation profiles follow the existing phone-side route sidecar lifecycle.
+
+This records the maintainer's implementation-policy decision, not written Apple
+permission or a legal approval. The separate distribution resolution above
+remains open. Strava's elevation-service policy is unchanged.
+
 ## Verification expectations
 
 Run the focused offline-save, full navigation, saved-map, shared route and
