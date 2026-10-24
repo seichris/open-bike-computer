@@ -439,7 +439,11 @@ final class DeviceScreenConfigurationController: ObservableObject {
         guard draft.instances.count < Int(capabilities.maximumInstances) else {
             throw DeviceScreenConfigurationValidationError.invalidInstanceCount
         }
-        _ = try draft.add(type: type, after: instanceID)
+        let id = try draft.add(type: type, after: instanceID)
+        if let index = draft.instances.firstIndex(where: { $0.id == id }) {
+            draft.instances[index].mapProfile =
+                draft.instances[index].mapProfile?.supported(by: capabilities)
+        }
         self.draft = draft
     }
 
@@ -457,7 +461,7 @@ final class DeviceScreenConfigurationController: ObservableObject {
             profile.visibilityMask = DeviceScreenMapProfile.defaultVisibilityMask | style.rawValue
             profile.labelDensity = 0
         }
-        draft.instances[index].mapProfile = profile
+        draft.instances[index].mapProfile = profile.supported(by: capabilities)
         self.draft = draft
     }
 

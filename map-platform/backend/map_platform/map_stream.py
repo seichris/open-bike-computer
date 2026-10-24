@@ -19,6 +19,8 @@ from .manifest import (
     MAX_PACK_RELATIVE_PATH_BYTES,
     validate_pack_path,
 )
+from .building_scope import GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS
+from .reuse import MAP_BLOCK_SIZE_METERS, block_from_pack_path
 
 
 MAGIC = b"BIKEMAP1"
@@ -110,6 +112,42 @@ def _reject_floating_json(value: Any) -> None:
     elif isinstance(value, (list, tuple)):
         for child in value:
             _reject_floating_json(child)
+
+
+def _validate_nearby_coverage(manifest: dict[str, Any]) -> None:
+    target = manifest.get("target")
+    format_version = target.get("formatVersion") if isinstance(target, dict) else None
+    coverage = manifest.get("nearbyCoverage")
+    if format_version != 5:
+        if coverage is not None:
+            raise MapStreamFormatError("Nearby coverage requires renderer target 5")
+        return
+    if (not isinstance(coverage, dict)
+            or set(coverage) != {"profileVersion", "blockSizeMeters", "blocks"}
+            or type(coverage["profileVersion"]) is not int
+            or coverage["profileVersion"] != 1
+            or type(coverage["blockSizeMeters"]) is not int
+            or coverage["blockSizeMeters"] != MAP_BLOCK_SIZE_METERS):
+        raise MapStreamFormatError("Nearby coverage profile is invalid")
+    blocks = coverage["blocks"]
+    if not isinstance(blocks, list) or not 1 <= len(blocks) <= GLOBAL_BUILDING_MAX_OUTPUT_BLOCKS:
+        raise MapStreamFormatError("Nearby coverage block count is invalid")
+    previous = None
+    for pair in blocks:
+        if (not isinstance(pair, list) or len(pair) != 2
+                or any(type(value) is not int or abs(value) > 4893 for value in pair)
+                or (previous is not None and tuple(pair) <= previous)):
+            raise MapStreamFormatError("Nearby coverage blocks are invalid or unordered")
+        previous = tuple(pair)
+    selected = {tuple(pair) for pair in blocks}
+    files = manifest.get("files")
+    if not isinstance(files, list):
+        raise MapStreamFormatError("Nearby coverage files are invalid")
+    for file in files:
+        if isinstance(file, dict) and isinstance(file.get("path"), str) and file["path"].endswith(".fmb"):
+            block = block_from_pack_path(file["path"])
+            if block is None or (block.x, block.y) not in selected:
+                raise MapStreamFormatError("map block lies outside Nearby coverage")
 
 
 @dataclass(frozen=True)
@@ -267,6 +305,7 @@ def canonical_manifest_bytes(manifest: dict[str, Any]) -> bytes:
     normalized = deepcopy(manifest)
     _normalize_bounds_e7(normalized)
     _reject_floating_json(normalized)
+    _validate_nearby_coverage(normalized)
     if normalized.get("schemaVersion") != 1:
         raise MapStreamFormatError("map stream manifest schema version is unsupported")
     map_id = normalized.get("mapId")

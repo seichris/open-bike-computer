@@ -32,10 +32,15 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(targets,tuple(t for t in full if t.endswith(('_PRODUCTION','_LIFECYCLE_QUALIFICATION'))))
         self.assertIn('WAVESHARE_AMOLED_175_REMOTE_DEBUG',scope.firmware_targets(['esp32/lib/device_debug/device_debug_http.cpp'],full))
         for path in ('esp32/platformio.ini','esp32/tools/build_firmware.py','esp32/include/board.h','esp32/lib/panel/WAVESHARE_AMOLED_175.cpp'):
-            self.assertEqual(len(scope.firmware_targets([path],full)),8,path)
+            self.assertEqual(scope.firmware_targets([path],full),scope.board_firmware_targets(('175','206')),path)
         for path in ('esp32/waveshare_206_hello.cpp','esp32/lib/panel/WAVESHARE_AMOLED_206.cpp'):
             self.assertTrue(all('206' in t for t in scope.firmware_targets([path],full)))
         self.assertEqual(scope.firmware_targets(None,full),full)
+        # Hard-coded subsets must not drop a registered profile such as the POI
+        # qualification builds that platformio.ini itself defines.
+        self.assertEqual(scope.board_firmware_targets(('175','206')),components.select_firmware_targets('all'))
+        self.assertIn('WAVESHARE_AMOLED_175_POI_LIFECYCLE_QUALIFICATION',scope.firmware_targets(['esp32/platformio.ini'],full))
+        self.assertIn('WAVESHARE_AMOLED_206_POI_LIFECYCLE_QUALIFICATION',scope.firmware_targets(['esp32/lib/panel/WAVESHARE_AMOLED_206.cpp'],full))
 
     def test_ios_scopes_keep_consumers_and_unknown_fallback(self):
         select=lambda paths:scope.ios_scopes(paths,native=True,selected=True)

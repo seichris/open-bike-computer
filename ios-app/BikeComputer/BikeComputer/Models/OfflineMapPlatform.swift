@@ -102,6 +102,7 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         let rendererFormatVersion: Int
         let firmwareVersion: String?
         var terrainProfileVersion: Int? = nil
+        var requestedFeatures: [String]? = nil
     }
 
     struct LabelProfile: Encodable, Equatable {
@@ -184,6 +185,25 @@ struct OfflineMapJobRequest: Encodable, Equatable {
         )
     }
 
+    func withMapPois(_ enabled: Bool) -> OfflineMapJobRequest {
+        guard enabled else { return self }
+        return OfflineMapJobRequest(
+            mode: mode, bbox: bbox, geometry: geometry, route: route,
+            corridorWidthM: corridorWidthM,
+            clientInstallationId: clientInstallationId,
+            clientRequestId: clientRequestId, installOnDevice: installOnDevice,
+            target: RendererTarget(
+                renderer: "esp32-fmb", rendererFormatVersion: 5,
+                firmwareVersion: target?.firmwareVersion,
+                // Terrain experiments have a separate target-4 contract.
+                // Target 5 supports the independent contour layer, not FME.
+                terrainProfileVersion: nil,
+                requestedFeatures: (["3d-buildings", "map-pois", "street-labels"] +
+                    (target?.rendererFormatVersion == 4 ? ["contours"] : [])).sorted()
+            ), labels: labels ?? Self.defaultLabelProfile
+        )
+    }
+
     static func customBBox(_ bounds: OfflineMapBounds) -> OfflineMapJobRequest {
         OfflineMapJobRequest(
             mode: "custom_bbox",
@@ -262,7 +282,8 @@ struct OfflineMapJobRequest: Encodable, Equatable {
                 renderer: "esp32-fmb",
                 rendererFormatVersion: target?.rendererFormatVersion ?? 3,
                 firmwareVersion: firmwareVersion.isEmpty ? nil : firmwareVersion,
-                terrainProfileVersion: target?.terrainProfileVersion
+                terrainProfileVersion: target?.terrainProfileVersion,
+                requestedFeatures: target?.requestedFeatures
             ),
             labels: labels ?? Self.defaultLabelProfile
         )
@@ -1168,6 +1189,7 @@ struct OfflineMapGenerationProfile: Decodable, Equatable {
     let id: String
     let rendererFormatVersion: Int
     let features: [String]
+    let optionalFeatures: [String]?
 }
 
 struct OfflineMapGenerationCapabilities: Decodable, Equatable {
@@ -1177,6 +1199,25 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
     let generationProfiles: [OfflineMapGenerationProfile]
 
     func require(rendererFormatVersion: Int) throws {
+        try validate()
+        let supported = generationProfiles.map(\.rendererFormatVersion)
+        guard supported.contains(rendererFormatVersion) else {
+            throw OfflineMapPlatformError.unsupportedRendererTarget(
+                requestedRendererFormatVersion: rendererFormatVersion,
+                supportedRendererFormatVersions: supported,
+                message: "Renderer format \(rendererFormatVersion) generation is not available in the \(deploymentChannel) map service."
+            )
+        }
+    }
+
+    /// The installation-scoped target-5 profile, after validating the whole
+    /// response. Its optional features are this installation's authorization.
+    func mapPoiProfile() throws -> OfflineMapGenerationProfile? {
+        try validate()
+        return generationProfiles.first { $0.rendererFormatVersion == 5 }
+    }
+
+    func validate() throws {
         let supported = generationProfiles.map(\.rendererFormatVersion)
         let profileIDs = generationProfiles.map(\.id)
         let profileContracts: [Int: (id: String, features: Set<String>)] = [
@@ -1186,6 +1227,10 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
             4: (
                 "topographic-contours-v1",
                 ["3d-buildings", "contours", "street-labels"]
+            ),
+            5: (
+                "map-pois-v1",
+                ["3d-buildings", "map-pois", "street-labels"]
             ),
         ]
         guard schemaVersion == 1,
@@ -1200,17 +1245,86 @@ struct OfflineMapGenerationCapabilities: Decodable, Equatable {
                   let features = Set($0.features)
                   return $0.id == contract.id &&
                       contract.features.isSubset(of: features) &&
-                      features.count == $0.features.count
+                      features.count == $0.features.count &&
+                      ($0.rendererFormatVersion == 5
+                        ? Set($0.optionalFeatures ?? []).isSubset(of: ["contours"]) &&
+                          Set($0.optionalFeatures ?? []).count ==
+                            ($0.optionalFeatures ?? []).count
+                        : $0.optionalFeatures == nil)
               }) else {
             throw OfflineMapPlatformError.invalidResponse
         }
-        guard supported.contains(rendererFormatVersion) else {
+    }
+}
+
+// Default (MainActor in the app) isolation, matching the request and
+// capability models these policies read; callers are UI/manager code.
+enum OfflineMapRegenerationPurpose: Equatable {
+    /// Street-label refresh: add POIs only when available, but never drop the
+    /// POI layer of an active target-5 map.
+    case streetLabels
+    /// The Points of Interest action: POIs are the reason for the request.
+    case pointsOfInterest
+}
+
+/// Chooses the renderer target before submission. Target 5 is selected only
+/// when the device and this installation's validated service capabilities
+/// support every requested layer. The create endpoint stays authoritative and
+/// a submitted request is never retried as another target.
+enum OfflineMapPoiRequestPolicy {
+    enum Requirement: Equatable {
+        /// Otherwise keep the existing target-3/4 request unchanged.
+        case opportunistic
+        /// Fail closed before submission instead of dropping POIs or contours.
+        case required
+    }
+
+    static func regenerationRequirement(
+        purpose: OfflineMapRegenerationPurpose,
+        activeRendererFormatVersion: Int?
+    ) -> Requirement {
+        purpose == .pointsOfInterest || activeRendererFormatVersion == 5
+            ? .required : .opportunistic
+    }
+
+    static func request(
+        _ base: OfflineMapJobRequest,
+        deviceSupportsMapPois: Bool,
+        capabilities: OfflineMapGenerationCapabilities?,
+        requirement: Requirement
+    ) throws -> OfflineMapJobRequest {
+        // A malformed response is never evidence for any target.
+        let profile = try capabilities?.mapPoiProfile()
+        let baseFormat = base.target?.rendererFormatVersion
+        let unavailable: String?
+        if !deviceSupportsMapPois {
+            unavailable = "Update the Bike Computer firmware to add points of interest."
+        } else if baseFormat != 3 && baseFormat != 4 {
+            unavailable = "Points of interest require a street-label and 3D-building map."
+        } else if base.target?.terrainProfileVersion != nil {
+            // Target 5 carries the independent contour layer, not the target-4
+            // terrain experiment; never drop a requested layer silently.
+            unavailable = "Points of interest cannot be combined with terrain experiments."
+        } else if capabilities == nil {
+            unavailable = "This map service does not report point-of-interest map support."
+        } else if let profile {
+            unavailable = baseFormat == 4 &&
+                !(profile.optionalFeatures ?? []).contains("contours")
+                ? "This map service cannot add points of interest while keeping this map's contours."
+                : nil
+        } else {
+            unavailable = "Points of interest are not available from this map service for this app installation."
+        }
+        guard let unavailable else { return base.withMapPois(true) }
+        guard requirement == .opportunistic else {
             throw OfflineMapPlatformError.unsupportedRendererTarget(
-                requestedRendererFormatVersion: rendererFormatVersion,
-                supportedRendererFormatVersions: supported,
-                message: "Renderer format \(rendererFormatVersion) generation is not available in the \(deploymentChannel) map service."
+                requestedRendererFormatVersion: 5,
+                supportedRendererFormatVersions:
+                    capabilities?.generationProfiles.map(\.rendererFormatVersion) ?? [],
+                message: unavailable
             )
         }
+        return base
     }
 }
 
@@ -1494,6 +1608,7 @@ nonisolated struct OfflineMapPackManifest: Decodable, Equatable {
     struct Target: Decodable, Equatable {
         let renderer: String?
         let formatVersion: Int?
+        var requestedFeatures: [String]? = nil
     }
 
     let mapId: String?
@@ -1737,6 +1852,15 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
     var activeManifestReceipt: String? = nil
     var activeMapDisplayName: String? = nil
     var activeMapBoundsE7: [Int]? = nil
+    var activeRendererFormat: Int? = nil
+    var labelProfileVersion: Int? = nil
+    var labelLanguages: [String]? = nil
+    var fontAssetHealthy: Bool? = nil
+    var poiProfileVersion: Int? = nil
+    var poiIndexProfileVersion: Int? = nil
+    var poiDataHealthy: Bool? = nil
+    var poiIndexHealthy: Bool? = nil
+    var contourLayerIncluded: Bool? = nil
     let activation: Activation?
     let protocols: [Int]?
     let streamFormatVersions: [Int]?
@@ -1757,7 +1881,7 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
 
 
 extension MapTransferDeviceStatus {
-    private enum CodingKeys: String, CodingKey { case selectionHealth, mapLibrary, activeRoot, mapOperationsV1, enabled, activeMapId, activeSessionId, activeManifestReceipt, activeMapDisplayName, activeMapBoundsE7, activation, protocols, streamFormatVersions, streamTrust, firmwareVersion, firmwareBuild, firmwareGitSha }
+    private enum CodingKeys: String, CodingKey { case selectionHealth, mapLibrary, activeRoot, mapOperationsV1, enabled, activeMapId, activeSessionId, activeManifestReceipt, activeMapDisplayName, activeMapBoundsE7, activeRendererFormat, labelProfileVersion, labelLanguages, fontAssetHealthy, poiProfileVersion, poiIndexProfileVersion, poiDataHealthy, poiIndexHealthy, contourLayerIncluded, activation, protocols, streamFormatVersions, streamTrust, firmwareVersion, firmwareBuild, firmwareGitSha }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         selectionHealth = try container.decodeIfPresent(MapSelectionHealth.self, forKey: .selectionHealth)
@@ -1771,6 +1895,17 @@ extension MapTransferDeviceStatus {
         activeManifestReceipt = try container.decodeIfPresent(String.self, forKey: .activeManifestReceipt)
         activeMapDisplayName = try container.decodeIfPresent(String.self, forKey: .activeMapDisplayName)
         activeMapBoundsE7 = try container.decodeIfPresent([Int].self, forKey: .activeMapBoundsE7)
+        // Renderer-layer fields are advisory: an unexpected shape from older
+        // firmware must not reject an otherwise valid authenticated status.
+        activeRendererFormat = try? container.decodeIfPresent(Int.self, forKey: .activeRendererFormat)
+        labelProfileVersion = try? container.decodeIfPresent(Int.self, forKey: .labelProfileVersion)
+        labelLanguages = try? container.decodeIfPresent([String].self, forKey: .labelLanguages)
+        fontAssetHealthy = try? container.decodeIfPresent(Bool.self, forKey: .fontAssetHealthy)
+        poiProfileVersion = try? container.decodeIfPresent(Int.self, forKey: .poiProfileVersion)
+        poiIndexProfileVersion = try? container.decodeIfPresent(Int.self, forKey: .poiIndexProfileVersion)
+        poiDataHealthy = try? container.decodeIfPresent(Bool.self, forKey: .poiDataHealthy)
+        poiIndexHealthy = try? container.decodeIfPresent(Bool.self, forKey: .poiIndexHealthy)
+        contourLayerIncluded = try? container.decodeIfPresent(Bool.self, forKey: .contourLayerIncluded)
         activation = try container.decodeIfPresent(Activation.self, forKey: .activation)
         protocols = try container.decodeIfPresent([Int].self, forKey: .protocols)
         streamFormatVersions = try container.decodeIfPresent([Int].self, forKey: .streamFormatVersions)

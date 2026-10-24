@@ -6,11 +6,14 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from map_platform.building_scope import selection_output_blocks
 from map_platform.geometry import normalize_geometry
-from map_platform.manifest import PipelineMetadata, build_identity_manifest, build_manifest, stable_map_id, validate_pack_path, write_pack_archive
+from map_platform.manifest import PipelineMetadata, build_identity_manifest, build_manifest, collect_map_files, stable_map_id, validate_pack_path, write_pack_archive
 from map_platform.map_stream import canonical_manifest_bytes
+from map_platform.poi_index import build_index
 from map_platform.models import Bounds, GeometryMode, JobStatus, MapJob, NormalizedGeometry, SourceRegion
 from map_platform.preview import render_boundary_preview
+from tests.map_label_fixtures import fmb6_with_pois, one_label_fma1
 
 
 def fake_job() -> MapJob:
@@ -35,6 +38,60 @@ def fake_job() -> MapJob:
 
 
 class ManifestTests(unittest.TestCase):
+    def test_target5_signed_manifest_preserves_empty_selected_blocks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = fake_job()
+            job.geometry = normalize_geometry({"mode": "custom_bbox", "bbox": [0, 0, 0.08, 0.08]})
+            job.request = {
+                "displayName": "Nearby coverage fixture",
+                "target": {"rendererFormatVersion": 5, "firmwareVersion": "1.2.3",
+                           "requestedFeatures": ["3d-buildings", "map-pois", "street-labels"]},
+                "labels": {"profileVersion": 1, "preferredLanguages": ["en"],
+                           "internationalFallback": "en"},
+            }
+            job.map_id = stable_map_id(job)
+            map_root = root / "VECTMAP" / job.map_id
+            (map_root / "+000+000").mkdir(parents=True)
+            (map_root / "+000+000/0_0.fmb").write_bytes(fmb6_with_pois())
+            (map_root / "assets").mkdir()
+            (map_root / "assets/street-labels.fma").write_bytes(one_label_fma1())
+            (map_root / "assets/nearby-pois.fpi").write_bytes(
+                build_index(root, job.map_id, collect_map_files(root, job.map_id))
+            )
+            manifest = build_manifest(job, root, PipelineMetadata())
+            selected = {tuple(block) for block in manifest["nearbyCoverage"]["blocks"]}
+            self.assertIn((0, 0), selected)
+            self.assertGreater(len(selected), 1)
+            self.assertEqual(len([file for file in manifest["files"]
+                                  if file["path"].endswith(".fmb")]), 1)
+            self.assertEqual(
+                json.loads(canonical_manifest_bytes(manifest))["nearbyCoverage"],
+                manifest["nearbyCoverage"],
+            )
+
+    def test_nearby_coverage_selection_retains_polygon_holes_and_corridor_shape(self):
+        job = fake_job()
+        job.geometry = normalize_geometry({
+            "mode": "custom_polygon",
+            "geometry": {"type": "Polygon", "coordinates": [
+                [[0, 0], [0.4, 0], [0.4, 0.4], [0, 0.4], [0, 0]],
+                [[0.1, 0.1], [0.1, 0.3], [0.3, 0.3], [0.3, 0.1], [0.1, 0.1]],
+            ]},
+        })
+        polygon = selection_output_blocks(job, 1024)
+        self.assertIn((0, 0), {(block.x, block.y) for block in polygon})
+        self.assertNotIn((5, 5), {(block.x, block.y) for block in polygon})
+        job.geometry = normalize_geometry({
+            "mode": "route_corridor",
+            "route": {"type": "LineString", "coordinates": [[0, 0], [0.4, 0]]},
+            "corridorWidthM": 1000,
+        })
+        corridor = selection_output_blocks(job, 1024)
+        self.assertTrue(corridor)
+        self.assertNotIn((5, 5), {(block.x, block.y) for block in corridor})
+        self.assertLess(len(corridor), len(polygon))
+
     def test_derived_identity_must_hash_to_its_primary_key(self):
         job = fake_job()
         derivation = {

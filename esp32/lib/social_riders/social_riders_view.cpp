@@ -1,9 +1,11 @@
 #include "social_riders_view.hpp"
+#include "../utils/src/startup_constructed.hpp"
 #include <esp_heap_caps.h>
 #include <cstdio>
 namespace social_riders {
 struct Badge { lv_obj_t *root=nullptr,*frame=nullptr,*portrait=nullptr,*initials=nullptr,*label=nullptr,*countLabel=nullptr; unsigned count=0,nextCount=0; bool seen=false,canvasReady=false; PresentationCache cache; uint8_t *pixels=nullptr; size_t capacity=0; std::array<uint8_t,32> hash{}; uint16_t scale=0; };
-static Badge badges[CAPACITY];
+static StartupConstructed<Badge[CAPACITY]> badgesStorage;
+static Badge (&badges)[CAPACITY] = badgesStorage.value;
 static const lv_font_t *font(int pixels) {
   switch(pixels) {
   case 14: return &lv_font_montserrat_14;

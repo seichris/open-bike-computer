@@ -28,21 +28,30 @@ def map_scopes(paths, *, selected):
     return result
 
 
+# Profile suffixes of changed_components.FIRMWARE_TARGETS, in registry order.
+FIRMWARE_PROFILE_SUFFIXES = ('', '_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION',
+                             '_POI_LIFECYCLE_QUALIFICATION')
+
+
+def board_firmware_targets(boards):
+    return tuple('WAVESHARE_AMOLED_'+b+s for b in boards for s in FIRMWARE_PROFILE_SUFFIXES)
+
+
 def firmware_targets(paths, full_targets):
     if not paths:
         return full_targets
     relevant = [p for p in paths if p.startswith('esp32/')]
     if len(relevant) != len(paths):
-        return tuple('WAVESHARE_AMOLED_'+b+s for b in ('175', '206') for s in ('', '_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION'))
+        return board_firmware_targets(('175', '206'))
     if all('206' in p for p in relevant):
-        return tuple('WAVESHARE_AMOLED_206'+s for s in ('', '_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION'))
+        return board_firmware_targets(('206',))
     # Common board/runtime/config changes qualify both families and every profile.
     if any(not p.startswith('esp32/lib/') or p.startswith(('esp32/lib/panel/', 'esp32/lib/power/', 'esp32/lib/display/')) for p in relevant):
         if all('206' in p for p in relevant):
             boards = ('206',)
         else:
             boards = ('175', '206')
-        return tuple('WAVESHARE_AMOLED_'+b+s for b in boards for s in ('', '_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION'))
+        return board_firmware_targets(boards)
     production_libraries = ('map_transfer', 'device_transfer', 'ble_navigation', 'maps', 'gui', 'device_debug', 'world_radio')
     if any(p.split('/')[2] not in production_libraries for p in relevant):
         return full_targets

@@ -235,6 +235,22 @@ class CatalogTests(unittest.TestCase):
         )
         self.assertEqual(map_entry_id(job), first)
 
+    def test_target_five_catalog_requires_cumulative_poi_features(self):
+        job = ready_job()
+        job.request["target"]["rendererFormatVersion"] = 5
+        job.request["target"]["requestedFeatures"] = ["3d-buildings", "map-pois", "street-labels"]
+
+        payload = publication_payload(job, "production")
+
+        self.assertEqual(
+            payload["features"],
+            ["3d-buildings", "map-pois", "street-labels"],
+        )
+        self.assertEqual(
+            payload["artifacts"][0]["readerRequirements"]["requiredFeatures"],
+            ["3d-buildings", "map-pois", "street-labels"],
+        )
+
     def test_topographic_publication_requires_one_exact_companion(self):
         job = topographic_ready_job()
         payload = publication_payload(job, "development")

@@ -27,11 +27,11 @@ TOPOGRAPHY_COMPANION_MEDIA_TYPE = "application/vnd.bicino.topography+sqlite3"
 
 
 def renderer_has_labels(format_version: int) -> bool:
-    return format_version in {2, 3, TOPOGRAPHY_RENDERER_FORMAT_VERSION}
+    return format_version in {2, 3, TOPOGRAPHY_RENDERER_FORMAT_VERSION, 5}
 
 
 def renderer_has_buildings(format_version: int) -> bool:
-    return format_version in {3, TOPOGRAPHY_RENDERER_FORMAT_VERSION}
+    return format_version in {3, TOPOGRAPHY_RENDERER_FORMAT_VERSION, 5}
 
 
 def vector_renderer_format_version(format_version: int) -> int:
@@ -157,11 +157,42 @@ def empty_fmb5(profile_fingerprint: int, section: ContourSection) -> bytes:
 
 
 def _encode_fmb5(base: bytes, sections: list[bytes]) -> bytes:
+    return _encode_extended_fmb(base, sections, 5)
+
+
+def replace_fmb6_contours(path: Path, section: ContourSection) -> bytes:
+    """Compose approved elevation without changing any POI or vector bytes."""
+    from .map_artifact_validation import _parse_base_geometry, validate_fmb6
+
+    validate_fmb6(path)
+    raw = path.read_bytes()
+    directory, _ = _parse_base_geometry(raw)
+    sections = []
+    for number in range(6):
+        offset, length = struct.unpack_from("<II", raw, directory + 8 + number * 16 + 4)
+        sections.append(raw[offset:offset + length])
+    sections[4] = encode_contour_section(section)
+    return _encode_extended_fmb(raw[:directory], sections, 6)
+
+
+def empty_fmb6(profile_fingerprint: int, section: ContourSection) -> bytes:
+    """Contour-only coverage in a combined map still has an explicit POI section."""
+    if type(profile_fingerprint) is not int or not 0 < profile_fingerprint <= 0xffffffff:
+        raise ValueError("invalid label profile fingerprint")
+    return _encode_extended_fmb(b"FMB\x06\0\0\0\0", [
+        b"\0\0", b"\0\0", struct.pack("<IH", profile_fingerprint, 0),
+        b"\0" * 8, encode_contour_section(section), struct.pack("<HHI", 0, 8, 0),
+    ], 6)
+
+
+def _encode_extended_fmb(base: bytes, sections: list[bytes], version: int) -> bytes:
     from .map_artifact_validation import MAX_FMB_BYTES
+    if version not in {5, 6} or len(sections) != version or any(not section for section in sections):
+        raise ValueError("invalid extension section set")
     output = bytearray(base)
-    output[3] = 5
-    output.extend(b"EXT5\x05\0\0\0")
-    offset = len(output) + 5 * 16
+    output[3] = version
+    output.extend(b"EXT" + bytes((ord("0") + version, version, 0, 0, 0)))
+    offset = len(output) + version * 16
     if offset + sum(map(len, sections)) > MAX_FMB_BYTES:
         raise ValueError("topographic FMB exceeds block byte bound")
     for number, payload in enumerate(sections, 1):

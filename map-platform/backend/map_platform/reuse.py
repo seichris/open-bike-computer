@@ -11,6 +11,7 @@ from .map_labels import renderer_format_version
 from .map_buildings import BUILDING_PROFILE_VERSION, BUILDING_RENDERER_FORMAT_VERSION
 from .topography_artifacts import TOPOGRAPHY_RENDERER_FORMAT_VERSION
 from .topography_reuse import valid_input_identity
+from .map_pois import request_has_contours
 from .models import Bounds, GeometryMode, MapJob
 from .preview import render_boundary_preview
 
@@ -89,7 +90,7 @@ def reuse_keys(
 ) -> MapReuseKeys | None:
     """Return fail-closed cache identities for an immutable worker build."""
     format_version = renderer_format_version(job.request)
-    if format_version == TOPOGRAPHY_RENDERER_FORMAT_VERSION and not valid_input_identity(topography_input_identity):
+    if request_has_contours(job.request) and not valid_input_identity(topography_input_identity):
         return None
     if not _SHA256_RE.fullmatch(producer_build_sha256 or ""):
         return None
@@ -130,7 +131,7 @@ def reuse_keys(
         "target": job.request.get("target") or {},
         "labels": job.request.get("labels"),
     }
-    if format_version in (BUILDING_RENDERER_FORMAT_VERSION, TOPOGRAPHY_RENDERER_FORMAT_VERSION):
+    if format_version in (BUILDING_RENDERER_FORMAT_VERSION, TOPOGRAPHY_RENDERER_FORMAT_VERSION, 5):
         building_identity = (
             building_preprocessing_identity or _legacy_building_identity()
         )
@@ -157,7 +158,7 @@ def reuse_keys(
         if isinstance(scope_identity, dict):
             scope_identity.pop("scopePlanSha256", None)
         compatibility_document["buildingPreprocessing"] = compatibility_identity
-    if format_version == TOPOGRAPHY_RENDERER_FORMAT_VERSION:
+    if request_has_contours(job.request):
         compatibility_document["topographyInputsSha256"] = topography_input_identity["identitySha256"]
     compatibility = _document_sha256(compatibility_document)
     if preview_sha256 is None:
@@ -185,7 +186,7 @@ def reuse_keys(
             "corridorWidthM": job.geometry.corridor_width_m,
         },
     }
-    if format_version in (BUILDING_RENDERER_FORMAT_VERSION, TOPOGRAPHY_RENDERER_FORMAT_VERSION):
+    if format_version in (BUILDING_RENDERER_FORMAT_VERSION, TOPOGRAPHY_RENDERER_FORMAT_VERSION, 5):
         exact_document["buildingPreprocessingIdentitySha256"] = (
             exact_building_identity_sha256
         )
@@ -199,11 +200,26 @@ def aligned_processing_bounds(
     job: MapJob,
     *,
     complete_blocks: bool = False,
+    output_blocks: tuple[MapBlock, ...] = (),
 ) -> Bounds:
-    """Expand builds that require complete fixed Web Mercator blocks."""
-    if not complete_blocks and job.geometry.mode != GeometryMode.CUSTOM_BBOX:
+    """Expand builds that require complete fixed Web Mercator blocks.
+
+    ``output_blocks`` are canonical selection blocks that must be extracted in
+    full. A route corridor's physical buffer can reach one block past the
+    request bounds, which expand by the centre latitude's metre scale.
+    """
+    if (
+        not complete_blocks
+        and not output_blocks
+        and job.geometry.mode != GeometryMode.CUSTOM_BBOX
+    ):
         return job.geometry.bounds
     min_x, min_y, max_x, max_y = aligned_projected_extent(job.geometry.bounds)
+    if output_blocks:
+        min_x = min(min_x, min(block.x for block in output_blocks) * MAP_BLOCK_SIZE_METERS)
+        min_y = min(min_y, min(block.y for block in output_blocks) * MAP_BLOCK_SIZE_METERS)
+        max_x = max(max_x, (max(block.x for block in output_blocks) + 1) * MAP_BLOCK_SIZE_METERS)
+        max_y = max(max_y, (max(block.y for block in output_blocks) + 1) * MAP_BLOCK_SIZE_METERS)
     return Bounds(
         _x_to_lon(min_x),
         _y_to_lat(min_y),
