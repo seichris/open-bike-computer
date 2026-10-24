@@ -25,6 +25,8 @@ private final class MapOperationRecoveryTestBLEManager: BLEManager {
     var recoveryDeviceID: String?
     var recoveryEpoch: UInt64 = 0
     var requestedOperationIDs: [String] = []
+    var mapStatusRequests = 0
+    var onOperationStatusRequest: (() -> Void)?
 
     override var activeDeviceID: String? {
         get { recoveryDeviceID }
@@ -37,8 +39,103 @@ private final class MapOperationRecoveryTestBLEManager: BLEManager {
 
     override func requestMapOperationStatus(operationID: String) -> Bool {
         requestedOperationIDs.append(operationID)
+        onOperationStatusRequest?()
         return true
     }
+
+    override func requestMapTransferStatus() -> Bool {
+        mapStatusRequests += 1
+        return super.requestMapTransferStatus()
+    }
+}
+
+/// Firmware transfer state for map transport cleanup. `finalizing` means the
+/// installed receipt is saved while finalize still holds the commit grant, so
+/// the firmware refuses exit with `commit_in_progress`.
+@MainActor
+private final class MapTransportCleanupDevice {
+    enum State { case idle, map, finalizing, otherSession }
+    static let token = String(repeating: "d", count: 32)
+    static let generation: UInt32 = 10
+    var state = State.idle
+    var answersStatus = true
+    var onStatusRequest: (() -> Void)?
+    var packets: [String] = []
+    weak var ble: BLEManager?
+
+    func statusPacket() -> Data {
+        let prefix = Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8)
+        guard state != .idle else {
+            return prefix + Data(#"{"configured":true,"enabled":false,"mode":""}"#.utf8)
+        }
+        let other = state == .otherSession
+        let token = other ? String(repeating: "f", count: 32) : Self.token
+        let generation = other ? Self.generation + 1 : Self.generation
+        let refusal = state == .finalizing
+            ? #","lastError":{"code":"commit_in_progress","message":"commit boundary","sequence":7}"# : ""
+        let json = #"{"configured":true,"enabled":true,"port":8080,"mode":"map","# +
+            #""baseUrl":"https://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","# +
+            #""apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","# +
+            #""sessionToken":"\#(token)","tls":{"identityVersion":1,"certificateSha256":"# +
+            #""\#(String(repeating: "c", count: 64))"},"transferGeneration":\#(generation),"# +
+            #""capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"mapOperationsV1":true,"# +
+            #""legacyArchivePolicy":"disabled"}\#(refusal)}"#
+        return prefix + Data(json.utf8)
+    }
+
+    func publishSoon() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            guard let self, let ble = self.ble else { return }
+            _ = ble.handleDeviceTransferStatusNotification(self.statusPacket())
+        }
+    }
+
+    func handle(_ packet: Data) {
+        let text = String(data: packet, encoding: .utf8) ?? "<binary>"
+        packets.append(text)
+        switch text {
+        case "DTRNexit":
+            if state == .map { state = .idle }
+            publishSoon()
+        case "DSTS":
+            onStatusRequest?()
+            if answersStatus { publishSoon() }
+        case "DTRNenter|map":
+            state = .map
+            publishSoon()
+        default:
+            break
+        }
+    }
+}
+
+@MainActor
+private func mapTransportCleanupBLE(deviceID: String,
+                                    device: MapTransportCleanupDevice) -> MapOperationRecoveryTestBLEManager {
+    let ble = MapOperationRecoveryTestBLEManager()
+    ble.recoveryDeviceID = deviceID
+    ble.recoveryEpoch = 2
+    ble.setConnectedDeviceIDForTesting(deviceID)
+    ble.isConnected = true
+    ble.isNavigationReady = true
+    device.ble = ble
+    ble.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+        maximumWriteLength: 64, canSend: { true }, write: { device.handle($0) }))
+    _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+    return ble
+}
+
+/// Leaves the cleanup record exactly as an exit refused during finalize does,
+/// with the recorded session identity, without waiting out the exit window.
+@MainActor
+private func strandMapTransport(_ coordinator: DeviceOperationCoordinator, deviceID: String) throws {
+    let lease = try coordinator.acquire(deviceID: deviceID, mode: "map", epoch: 2)
+    coordinator.recordAuthorization(lease,
+        digest: SHA256.hash(data: Data(MapTransportCleanupDevice.token.utf8))
+            .map { String(format: "%02x", $0) }.joined(),
+        generation: MapTransportCleanupDevice.generation)
+    coordinator.finish(lease, remoteClear: false)
 }
 
 
@@ -3981,7 +4078,9 @@ extension NavigationProtocolTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         for scenario in ["retire", "same-epoch", "commit", "accepted", "wrong-admission-device",
                          "wrong-receipt-operation", "foreign-app", "cleanup-failed", "cleanup-stale",
-                         "device-changed", "epoch-changed", "write-failed"] {
+                         "device-changed", "epoch-changed", "write-failed",
+                         "query-disconnected", "query-epoch-changed", "query-token-rotated",
+                         "query-no-http-context"] {
             let suite = "fenced-retirement-\(UUID().uuidString)"
             let defaults = UserDefaults(suiteName: suite)!
             defer { defaults.removePersistentDomain(forName: suite) }
@@ -4022,7 +4121,7 @@ extension NavigationProtocolTests {
             ble.recoveryEpoch = 2
             ble.isConnected = true
             ble.isNavigationReady = true
-            ble.deviceTransferSessionToken = "test-token"
+            ble.deviceTransferSessionToken = scenario == "query-no-http-context" ? nil : "test-token"
             ble.deviceTransferMode = "map"
             var cleanupCount = 0
             manager.useFencedRetirementCleanupForTesting { _ in
@@ -4046,6 +4145,21 @@ extension NavigationProtocolTests {
             var paths: [String] = []
             FirmwareRequestCaptureProtocol.handler = { request, _ in
                 paths.append(request.url!.lastPathComponent)
+                if request.url!.lastPathComponent == fixture.wireOperationID,
+                   scenario.hasPrefix("query-") {
+                    let changeConnection = {
+                        MainActor.assumeIsolated {
+                            switch scenario {
+                            case "query-disconnected": ble.isConnected = false
+                            case "query-epoch-changed": ble.recoveryEpoch += 1
+                            case "query-token-rotated": ble.deviceTransferSessionToken = "replacement-test-token"
+                            default: break
+                            }
+                        }
+                    }
+                    if Thread.isMainThread { changeConnection() }
+                    else { DispatchQueue.main.sync(execute: changeConnection) }
+                }
                 let object: [String: Any]
                 if request.url!.lastPathComponent == "admission" {
                     object = ["schemaVersion": 1,
@@ -4063,11 +4177,15 @@ extension NavigationProtocolTests {
             let client = MapTransferDeviceClient(baseURL: URL(string: "https://device.test:8080")!,
                 sessionToken: "test-token", session: session)
             var clock = Date(timeIntervalSince1970: 100)
+            var pollSleeps = 0
             var result: MapActivationConfirmationResult?
             do {
                 result = try await manager.confirmActivatedMap(expectedMapId: fixture.mapID, sessionId: fixture.sessionID,
                     previousMapId: nil, previousSessionId: nil, previousSequence: nil, acceptedSequence: nil,
-                    client: client, bleManager: ble, timeout: 1, now: { clock }, sleep: { _ in clock.addTimeInterval(2) })
+                    client: client, bleManager: ble, timeout: 1, now: { clock }, sleep: { _ in
+                        pollSleeps += 1
+                        clock.addTimeInterval(2)
+                    })
             } catch {
                 assertEqual(scenario, "write-failed", "only injected persistence failure may throw")
             }
@@ -4090,9 +4208,160 @@ extension NavigationProtocolTests {
             } else {
                 assert(result != .retiredUnknown, "\(scenario) cannot release admission")
                 assertEqual(try! store.records(), [fixture], "\(scenario) preserves the original operation")
+                if scenario.hasPrefix("query-") {
+                    assertEqual(paths, scenario == "query-no-http-context" ? [] : [fixture.wireOperationID],
+                        "a stale recovery owner sends no further HTTP controls")
+                    assertEqual(ble.requestedOperationIDs.count, 0, "a stale recovery owner must not poll the replacement BLE connection")
+                    assertEqual(pollSleeps, 0, "a stale recovery owner exits immediately, not at the ten-minute deadline")
+                    if case .continuesOnDevice? = result {} else {
+                        assert(false, "a changed recovery session preserves the unresolved result")
+                    }
+                }
                 if ["same-epoch", "commit", "accepted", "wrong-admission-device", "wrong-receipt-operation", "foreign-app"].contains(scenario) {
                     assertEqual(cleanupCount, 0, "\(scenario) cannot stop transport without a valid fence")
                 }
+            }
+        }
+    }
+
+    @MainActor
+    static func testOfflineMapManagerConfirmsAcceptedOperationAfterTransportExit() async {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // After accepting a commit the device installs on its own, pushes the
+        // MSTS receipt and then leaves transfer mode, revoking the HTTP session
+        // while the BLE link that carries the receipt stays current.
+        for scenario in ["exit-during-sleep", "exit-during-query", "exit-before-receipt",
+                         "saved-result-link-not-ready", "accepted-link-lost"] {
+            let suite = "accepted-exit-\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let namespace = BackgroundMapUploadSessionNamespace.identifier(bundleIdentifier: Bundle.main.bundleIdentifier)
+            let base = DeviceMapOperationRecord(schemaVersion: 1,
+                deviceID: String(repeating: "a", count: 32), operationID: UUID(),
+                sessionID: "accepted-session", mapID: "accepted-map", manifestReceipt: String(repeating: "b", count: 64),
+                signedManifestReceipt: String(repeating: "c", count: 64), streamSHA256: String(repeating: "d", count: 64),
+                streamBytes: 123, artifactFilename: "accepted.bmap", appNamespace: namespace,
+                createdAt: Date(timeIntervalSince1970: 1), connectionEpoch: 2, observation: "commit_accepted",
+                cleanup: "pending", usesDurableProtocol: true, lastReceipt: nil,
+                admissionEpoch: String(repeating: "e", count: 32), admissionRevision: 42,
+                commitRequestedAt: Date(timeIntervalSince1970: 2))
+            let receipt = { (phase: String, revision: UInt64) in
+                DeviceMapOperationReceipt(schemaVersion: 1, deviceID: base.deviceID,
+                    operationID: base.wireOperationID, sessionID: base.sessionID, mapID: base.mapID,
+                    manifestReceipt: base.manifestReceipt, signedManifestReceipt: base.signedManifestReceipt,
+                    streamSHA256: base.streamSHA256, streamBytes: base.streamBytes,
+                    phase: phase, revision: revision, status: nil)
+            }
+            let accepted = receipt("accepted", 3)
+            let installed = receipt("installed", 4)
+            var operation = base
+            operation.lastReceipt = accepted
+            if scenario == "saved-result-link-not-ready" {
+                operation.observation = "installed_confirmed"
+                operation.lastReceipt = installed
+            }
+            let fixture = operation
+            defaults.set(fixture.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            defaults.set(fixture.mapID, forKey: "offlineMap.lastTransfer.mapId")
+            defaults.set(fixture.sessionID, forKey: "offlineMap.lastTransfer.sessionId")
+            defaults.set("unconfirmed", forKey: "offlineMap.lastTransfer.outcome")
+            let store = DeviceMapOperationStore(url: directory.appendingPathComponent("\(scenario)/operations.json"))
+            try! store.save(fixture)
+            let manager = OfflineMapManager(defaults: defaults,
+                cacheDirectory: directory.appendingPathComponent("\(scenario)/cache"))
+            manager.useMapOperationStoreForTesting(store)
+            let ble = MapOperationRecoveryTestBLEManager()
+            ble.recoveryDeviceID = fixture.deviceID
+            ble.setConnectedDeviceIDForTesting(fixture.deviceID)
+            ble.recoveryEpoch = 2
+            ble.isConnected = true
+            ble.isNavigationReady = scenario != "saved-result-link-not-ready"
+            ble.deviceTransferSessionToken = "test-token"
+            ble.deviceTransferMode = "map"
+            let deliverReceipt = { (operationReceipt: DeviceMapOperationReceipt) in
+                let object = try! JSONSerialization.jsonObject(with: JSONEncoder().encode(operationReceipt))
+                let body = try! JSONSerialization.data(withJSONObject: ["operation": object])
+                assert(ble.handleMapTransferStatusNotification(Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + body),
+                       "the real MSTS parser accepts the device operation receipt")
+            }
+            let deliverAutomaticExit = {
+                assert(ble.handleDeviceTransferStatusNotification(Data("DSTS{\"enabled\":false,\"mode\":\"\"}".utf8)),
+                       "the real DSTS parser accepts the automatic transfer exit")
+            }
+            if scenario == "exit-before-receipt" {
+                ble.onOperationStatusRequest = { deliverReceipt(installed) }
+            }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [FirmwareRequestCaptureProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel(); FirmwareRequestCaptureProtocol.handler = nil }
+            var paths: [String] = []
+            FirmwareRequestCaptureProtocol.handler = { request, _ in
+                var linkDropped = false
+                let observe = {
+                    MainActor.assumeIsolated {
+                        paths.append(request.url!.lastPathComponent)
+                        guard request.url!.lastPathComponent == fixture.wireOperationID else { return }
+                        switch scenario {
+                        case "exit-during-query":
+                            deliverReceipt(installed)
+                            deliverAutomaticExit()
+                            linkDropped = true
+                        case "accepted-link-lost":
+                            ble.isConnected = false
+                        default: break
+                        }
+                    }
+                }
+                if Thread.isMainThread { observe() } else { DispatchQueue.main.sync(execute: observe) }
+                if linkDropped { throw URLError(.networkConnectionLost) }
+                let body = request.url!.lastPathComponent == fixture.wireOperationID
+                    ? try JSONEncoder().encode(accepted) : Data()
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, body)
+            }
+            let client = MapTransferDeviceClient(baseURL: URL(string: "https://device.test:8080")!,
+                sessionToken: "test-token", session: session)
+            var clock = Date(timeIntervalSince1970: 100)
+            var pollSleeps = 0
+            var result: MapActivationConfirmationResult?
+            do {
+                result = try await manager.confirmActivatedMap(expectedMapId: fixture.mapID, sessionId: fixture.sessionID,
+                    previousMapId: nil, previousSessionId: nil, previousSequence: nil, acceptedSequence: nil,
+                    client: client, bleManager: ble, timeout: 60, now: { clock }, sleep: { _ in
+                        pollSleeps += 1
+                        clock.addTimeInterval(2)
+                        guard pollSleeps == 1 else { return }
+                        switch scenario {
+                        case "exit-during-sleep":
+                            deliverReceipt(installed)
+                            deliverAutomaticExit()
+                        case "exit-before-receipt":
+                            deliverAutomaticExit()
+                        default: break
+                        }
+                    })
+            } catch {
+                assert(false, "\(scenario) cannot fail an accepted operation: \(error)")
+            }
+            let persisted = try! store.records()[0]
+            if scenario == "accepted-link-lost" {
+                if case .continuesOnDevice? = result {} else {
+                    assert(false, "a changed BLE link still yields accepted work to a fresh owner")
+                }
+                assertEqual(persisted, fixture, "a lost link preserves the accepted operation")
+                assertEqual(ble.requestedOperationIDs.count, 0, "accepted work never polls a changed BLE link")
+                assertEqual(pollSleeps, 0, "a lost link exits immediately")
+                continue
+            }
+            assertEqual(result, .installed, "\(scenario) confirms the autonomous installation in the foreground")
+            assertEqual(persisted.observation, "installed_confirmed", "\(scenario) records the installed receipt")
+            assertEqual(persisted.lastReceipt?.phase, "installed", "\(scenario) keeps the device receipt")
+            assertEqual(paths.filter { $0 == fixture.wireOperationID }.count,
+                scenario == "saved-result-link-not-ready" ? 0 : 1,
+                "\(scenario) sends no operation query through the revoked HTTP session")
+            if scenario == "saved-result-link-not-ready" {
+                assertEqual(ble.requestedOperationIDs.count, 0, "a saved result needs no live link")
             }
         }
     }
@@ -4305,6 +4574,12 @@ extension NavigationProtocolTests {
                     manager.reconcileLastTransfer(bleManager: ble)
                     assertEqual(ble.requestedOperationIDs.count, queriesBeforeRecovery,
                         "polling yields while the foreground recovery owns query and control")
+                    let statusRequestsBeforeMonitor = ble.mapStatusRequests
+                    manager.pollActivationReconciliationForTesting(bleManager: ble)
+                    assertEqual(ble.mapStatusRequests, statusRequestsBeforeMonitor,
+                        "the background monitor cannot queue status snapshots during foreground recovery")
+                    assertEqual(ble.requestedOperationIDs.count, queriesBeforeRecovery,
+                        "the background monitor cannot invalidate the foreground operation proof")
                     assertEqual(try store.records(), original,
                         "starting transport recovery does not infer a terminal map result")
                 }
@@ -10117,4 +10392,299 @@ extension NavigationProtocolTests {
                "busy inventory is not reuse authority")
     }
 
+}
+
+private func installedMapOperationRecord(deviceID: String, appNamespace: String? = nil) -> DeviceMapOperationRecord {
+    var record = DeviceMapOperationRecord(
+        schemaVersion: 1, deviceID: deviceID, operationID: UUID(),
+        sessionID: String(repeating: "6", count: 64), mapID: "cleanup-map",
+        manifestReceipt: String(repeating: "a", count: 64),
+        signedManifestReceipt: String(repeating: "6", count: 64),
+        streamSHA256: String(repeating: "b", count: 64), streamBytes: 1234,
+        artifactFilename: "cleanup-map.bmap",
+        appNamespace: appNamespace ?? BackgroundMapUploadSessionNamespace.identifier(
+            bundleIdentifier: Bundle.main.bundleIdentifier),
+        createdAt: Date(timeIntervalSince1970: 1_000), connectionEpoch: 2,
+        observation: "installed_confirmed", cleanup: "pending", usesDurableProtocol: true,
+        lastReceipt: nil, admissionEpoch: String(repeating: "e", count: 32), admissionRevision: 15,
+        uploadAttemptID: UUID(), uploadCompletedAt: Date(timeIntervalSince1970: 1_100),
+        uploadHTTPStatus: 200, observationProcessID: DeviceMapOperationStore.observationProcessID,
+        commitRequestedAt: Date(timeIntervalSince1970: 1_101),
+        acknowledgedAt: Date(timeIntervalSince1970: 1_200))
+    record.lastReceipt = DeviceMapOperationReceipt(
+        schemaVersion: 1, deviceID: deviceID, operationID: record.wireOperationID,
+        sessionID: record.sessionID, mapID: record.mapID, manifestReceipt: record.manifestReceipt,
+        signedManifestReceipt: record.signedManifestReceipt, streamSHA256: record.streamSHA256,
+        streamBytes: record.streamBytes, phase: "installed", revision: 19, status: nil)
+    return record
+}
+
+extension NavigationProtocolTests {
+    /// Firmware refuses a map exit while it finalizes an install, which used to
+    /// strand the cleanup record until the next explicit transfer. The device's
+    /// own automatic exit must now converge it with one fresh status request.
+    @MainActor
+    static func testMapTransportCleanupConvergesAfterRefusedExit() async {
+        let suite = "map-transport-cleanup.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let coordinator = DeviceOperationCoordinator(defaults: defaults)
+        let manager = DeviceTransferManager(coordinator: coordinator)
+        var resolved: [String] = []
+        manager.onMapTransportCleanupResolved = { resolved.append($0) }
+        let device = MapTransportCleanupDevice()
+        let ble = mapTransportCleanupBLE(deviceID: "device-a", device: device)
+        do {
+            _ = try await manager.enterMapTransfer(bleManager: ble, status: { _ in })
+        } catch {
+            assert(false, "map transfer entry fixture: \(error)")
+            return
+        }
+        device.state = .finalizing
+        let exited = await manager.exitMapTransfer(bleManager: ble)
+        assert(!exited && coordinator.lease == nil && coordinator.unresolved != nil,
+               "an exit refused during finalize leaves the cleanup record")
+        device.packets.removeAll()
+        for _ in 0..<3 {
+            _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        assert(device.packets.isEmpty && coordinator.unresolved != nil && resolved.isEmpty,
+               "nothing is sent while the device still reports the recorded session")
+        // Finalize completed; the firmware leaves transfer mode by itself.
+        device.state = .idle
+        _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+        for _ in 0..<100 where !coordinator.isCleanupComplete {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        assert(coordinator.isCleanupComplete, "the device's own exit converges the stranded cleanup")
+        assertEqual(device.packets, ["DSTS"], "one fresh status request confirms it and no exit is sent")
+        assertEqual(resolved, ["device-a"], "the journal owner learns the recorded device once")
+        assert(defaults.data(forKey: "device-operation-cleanup-v1") == nil,
+               "the saved cleanup record is removed only after fresh confirmation")
+        _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        assertEqual(device.packets, ["DSTS"], "later status traffic does not restart the confirmation")
+    }
+
+    /// Passive confirmation never displaces another device, an OS upload, the
+    /// recorded or an unrelated active session, or a replaced link, and a stale
+    /// cached idle status without a fresh answer is not enough.
+    @MainActor
+    static func testPassiveMapCleanupKeepsOwnerSessionAndLinkFences() async {
+        for scenario in ["other-device", "os-upload-claim", "recorded-session-active",
+                         "unrelated-session-active", "link-changed", "no-fresh-status"] {
+            let suite = "map-transport-fence.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let coordinator = DeviceOperationCoordinator(defaults: defaults)
+            let manager = DeviceTransferManager(coordinator: coordinator)
+            let device = MapTransportCleanupDevice()
+            var ble = mapTransportCleanupBLE(deviceID: "device-a", device: device)
+            do {
+                try strandMapTransport(coordinator, deviceID: "device-a")
+            } catch {
+                assert(false, "\(scenario): stranded cleanup fixture: \(error)")
+                continue
+            }
+            guard let stored = coordinator.unresolved else {
+                assert(false, "\(scenario): stranded cleanup record")
+                continue
+            }
+            var claim: UUID?
+            switch scenario {
+            case "other-device":
+                ble = mapTransportCleanupBLE(deviceID: "device-b", device: device)
+            case "os-upload-claim":
+                claim = coordinator.restoreClaim(operationID: stored.id, deviceID: "device-a", network: nil)
+                assert(claim != nil && coordinator.lease != nil, "\(scenario): restored OS upload claim")
+            case "recorded-session-active":
+                device.onStatusRequest = { device.state = .finalizing }
+            case "unrelated-session-active":
+                device.onStatusRequest = { device.state = .otherSession }
+            case "link-changed":
+                let link = ble
+                device.onStatusRequest = { link.recoveryEpoch += 1 }
+            default:
+                device.answersStatus = false
+            }
+            device.packets.removeAll()
+            let converged = await manager.reconcileUnresolvedMapCleanup(bleManager: ble)
+            assert(!converged, "\(scenario): no convergence")
+            assertEqual(coordinator.unresolved?.id, stored.id, "\(scenario): the cleanup record is kept")
+            assert(!device.packets.contains("DTRNexit"), "\(scenario): no exit is sent")
+            assert(scenario == "os-upload-claim" ? coordinator.lease != nil : coordinator.lease == nil,
+                   "\(scenario): no session is adopted")
+            if scenario == "other-device" || scenario == "os-upload-claim" {
+                assertEqual(device.packets, [], "\(scenario): rejected before any BLE command")
+            }
+            if let claim { coordinator.release(claim) }
+        }
+    }
+
+    /// An explicit transfer started while a passive confirmation waits for its
+    /// fresh status waits for it instead of failing busy or repeating recovery.
+    @MainActor
+    static func testExplicitTransferWaitsForPassiveMapCleanup() async {
+        let suite = "map-transport-serialize.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let coordinator = DeviceOperationCoordinator(defaults: defaults)
+        let manager = DeviceTransferManager(coordinator: coordinator)
+        let device = MapTransportCleanupDevice()
+        let ble = mapTransportCleanupBLE(deviceID: "device-a", device: device)
+        do {
+            try strandMapTransport(coordinator, deviceID: "device-a")
+        } catch {
+            assert(false, "stranded cleanup fixture: \(error)")
+            return
+        }
+        device.answersStatus = false // the fresh reply is late
+        device.packets.removeAll()
+        let passive = Task { await manager.reconcileUnresolvedMapCleanup(bleManager: ble) }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let explicit = Task { try await manager.enterMapTransfer(bleManager: ble, status: { _ in }) }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        device.answersStatus = true
+        _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+        let confirmed = await passive.value
+        do {
+            let session = try await explicit.value
+            assert(confirmed && session.operationLeaseID != nil,
+                   "the explicit transfer waits for the confirmation, then acquires")
+            assertEqual(device.packets.filter { $0 == "DTRNenter|map" }.count, 1, "one entry request")
+            assert(!device.packets.contains("DTRNexit"), "no exit while confirming")
+            device.state = .map
+            let cleaned = await manager.exitMapTransfer(bleManager: ble)
+            assert(cleaned && coordinator.isCleanupComplete, "the new transfer cleans up normally")
+        } catch {
+            assert(false, "explicit transfer beside a passive confirmation: \(error)")
+        }
+    }
+
+    /// Firmware, diagnostics and remote debug own separate managers on the
+    /// shared coordinator. Their recoveries must not race a passive one.
+    @MainActor
+    static func testOtherManagersSerializeWithPassiveMapCleanup() async {
+        for scenario in ["passive-first", "explicit-first"] {
+            let suite = "map-transport-managers.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let coordinator = DeviceOperationCoordinator(defaults: defaults)
+            let mapManager = DeviceTransferManager(coordinator: coordinator)
+            let otherManager = DeviceTransferManager(coordinator: coordinator)
+            let device = MapTransportCleanupDevice()
+            let ble = mapTransportCleanupBLE(deviceID: "device-a", device: device)
+            do {
+                try strandMapTransport(coordinator, deviceID: "device-a")
+            } catch {
+                assert(false, "\(scenario): stranded cleanup fixture: \(error)")
+                continue
+            }
+            device.answersStatus = false // the fresh reply is late
+            device.packets.removeAll()
+            var passiveConfirmed = false
+            let explicit: Task<DeviceTransferSession, Error>
+            if scenario == "passive-first" {
+                let passive = Task { await mapManager.reconcileUnresolvedMapCleanup(bleManager: ble) }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                explicit = Task { try await otherManager.enterMapTransfer(bleManager: ble, status: { _ in }) }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                device.answersStatus = true
+                _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+                passiveConfirmed = await passive.value
+            } else {
+                explicit = Task { try await otherManager.enterMapTransfer(bleManager: ble, status: { _ in }) }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                let started = ProcessInfo.processInfo.systemUptime
+                let confirmed = await mapManager.reconcileUnresolvedMapCleanup(bleManager: ble)
+                assert(!confirmed && ProcessInfo.processInfo.systemUptime - started < 0.1,
+                       "a passive confirmation does not start beside another manager's recovery")
+                device.answersStatus = true
+                _ = ble.handleDeviceTransferStatusNotification(device.statusPacket())
+            }
+            do {
+                let session = try await explicit.value
+                assert(session.operationLeaseID != nil,
+                       "\(scenario): the other manager's transfer recovers the record, then acquires")
+                assert(scenario != "passive-first" || passiveConfirmed,
+                       "the passive confirmation still completes first")
+                assertEqual(device.packets.filter { $0 == "DTRNenter|map" }.count, 1,
+                            "\(scenario): one entry request")
+                assert(!device.packets.contains("DTRNexit"), "\(scenario): no exit while recovering")
+                device.state = .map
+                let cleaned = await otherManager.exitMapTransfer(bleManager: ble)
+                assert(cleaned && coordinator.isCleanupComplete, "\(scenario): the transfer cleans up normally")
+            } catch {
+                assert(false, "\(scenario): another manager's transfer beside a passive confirmation: \(error)")
+            }
+        }
+    }
+
+    /// The app journal marks a terminal operation's transport cleanup only once
+    /// the recorded device is confirmed idle, whatever the displayed outcome, and
+    /// never for another device, another app or a device still in its session.
+    @MainActor
+    static func testTerminalJournalCleanupConvergesFromFreshIdleStatus() async {
+        let deviceID = String(repeating: "a", count: 32)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for scenario in ["clean-transport", "stranded-device-idle", "stranded-device-in-session",
+                         "other-app", "other-device", "selected-device-not-connected"] {
+            let suite = "map-cleanup-journal.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let coordinator = DeviceOperationCoordinator(defaults: defaults)
+            if scenario != "clean-transport" {
+                do {
+                    try strandMapTransport(coordinator, deviceID: deviceID)
+                } catch {
+                    assert(false, "\(scenario): stranded cleanup fixture: \(error)")
+                    continue
+                }
+            }
+            let otherDevice = scenario == "other-device" || scenario == "selected-device-not-connected"
+            let record = installedMapOperationRecord(
+                deviceID: otherDevice ? String(repeating: "b", count: 32) : deviceID,
+                appNamespace: scenario == "other-app" ? "other.app.map-transfer.background" : nil)
+            let store = DeviceMapOperationStore(url: directory.appendingPathComponent("\(scenario)/operations.json"))
+            try! store.save(record)
+            defaults.set(record.operationID.uuidString, forKey: "offlineMap.deviceOperationID")
+            defaults.set(record.mapID, forKey: "offlineMap.lastTransfer.mapId")
+            defaults.set(record.sessionID, forKey: "offlineMap.lastTransfer.sessionId")
+            defaults.set("installed", forKey: "offlineMap.lastTransfer.outcome")
+            let manager = OfflineMapManager(defaults: defaults,
+                cacheDirectory: directory.appendingPathComponent("\(scenario)/cache"),
+                deviceTransferManager: DeviceTransferManager(coordinator: coordinator))
+            manager.useMapOperationStoreForTesting(store)
+            let device = MapTransportCleanupDevice()
+            device.state = scenario == "stranded-device-in-session" ? .finalizing : .idle
+            let ble = mapTransportCleanupBLE(deviceID: deviceID, device: device)
+            if scenario == "selected-device-not-connected" {
+                // The journal's device is selected while the previous one is
+                // still connected; that one's idle status says nothing about it.
+                ble.recoveryDeviceID = record.deviceID
+            }
+            device.packets.removeAll()
+            for _ in 0..<4 {
+                manager.reconcileLastTransfer(bleManager: ble)
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            let saved = (try? store.records())?.first { $0.operationID == record.operationID }
+            let transfer = device.packets.filter { $0.hasPrefix("DTRN") || $0 == "DSTS" }
+            switch scenario {
+            case "clean-transport":
+                assertEqual(saved?.cleanup, "complete", "a clean transport marks the pending journal")
+                assertEqual(transfer, [], "without any BLE command")
+            case "stranded-device-idle":
+                assertEqual(saved?.cleanup, "complete", "a fresh idle status marks the journal")
+                assert(coordinator.isCleanupComplete, "and clears the transport record")
+                assertEqual(transfer, ["DSTS"], "with one fresh status request and no exit")
+            default:
+                assertEqual(saved?.cleanup, "pending", "\(scenario): the journal stays pending")
+                assertEqual(transfer, [], "\(scenario): nothing is sent")
+            }
+        }
+    }
 }

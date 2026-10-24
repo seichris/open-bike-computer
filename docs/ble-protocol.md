@@ -1336,7 +1336,7 @@ path described above. Bit `27` reports World Radio. Bit `28` reports the
 atomic configurable display-inactivity timeout pair (setting ID `38`). Bit
 `29` reports versioned workout zones. Bit `30` reports the complete renderer
 format 4/FMB5 contour decode, installation, status, and visibility path. Bit
-`31` reports diagnostic terrain experiments. Extended bit `2` reports the
+`31` reports diagnostic terrain experiments. Extended bit `3` reports the
 target-5/FMB6 POI reader, independent visibility controls and indexed Nearby
 screen; it is not part of this primary word. Client version `11` requests
 bit `13`, version `12` requests
@@ -1369,8 +1369,9 @@ remain valid at version `23`. Bit `23` remains the
 renderer replay capability and must never be interpreted as World Radio.
 Firmware sets extended bit `3` only when `MAP_POIS_RUNTIME_ENABLED=1` and the
 configurable-screen store and characteristic are ready. The opt-in
-`*_REMOTE_DEBUG` profiles currently enable it for physical qualification;
-ordinary and production profiles keep it clear.
+`*_REMOTE_DEBUG` and `*_POI_LIFECYCLE_QUALIFICATION` profiles (including the
+1.75-inch isolated qualification variant) currently enable it for physical
+qualification; ordinary and production profiles keep it clear.
 World Radio is an optional, default-off screen (screen ID `5`, mask bit `5`).
 Firmware advertises it only with `FIRMWARE_DIAGNOSTICS=1`; production
 omits both the screen and capability pending physical interaction qualification.
@@ -1482,8 +1483,11 @@ Diagnostic terrain experiments, CAP2 schema 1, only primary feature bit 31:
 Friend-marker sizing, CAP2 schema 1, extended feature bit 1 (TLV type 3):
 43 41 50 32 01 00 00 00 00 03 04 02 00 00 00
 
-Map POIs and Nearby, CAP2 schema 1, extended feature bit 2 (TLV type 3):
+Route elevation profiles, CAP2 schema 1, extended feature bit 2 (TLV type 3):
 43 41 50 32 01 00 00 00 00 03 04 04 00 00 00
+
+Map POIs and Nearby, CAP2 schema 1, extended feature bit 3 (TLV type 3):
+43 41 50 32 01 00 00 00 00 03 04 08 00 00 00
 This isolates the feature bit; usable POIs also require the map prerequisites.
 ```
 

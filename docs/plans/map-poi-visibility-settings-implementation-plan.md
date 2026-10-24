@@ -39,6 +39,83 @@ or enabled merely because it exists in the branch.
 
 ## Baseline
 
+### October 25 publication candidate: recovery, radio and cleanup fixes
+
+This section is the current status; dated checkpoints below are historical.
+The candidate integrates GitHub main
+`cd7ad00bb6c4f9566195cd44ab4d6a675518b94d` with the existing PR head
+`69008639a56264e16dc8d41b39015848655904a1`, the reviewed local fixes through
+`645681ea`, and the separately reviewed cleanup changes from `4f9c7b1d`.
+The reconstructed source tree was byte-for-byte identical to the independently
+verified integration tree before this documentation refresh. Preserve normal
+PR ancestry; do not force-push or merge the PR as part of publication.
+
+Implemented in this candidate:
+
+- Nearby uses fresh source-owned phone position timing, category-specific
+  symbols, a black picker with selected-only outlines, larger icons, and
+  map-anchored pins during drag. Either hardware short press returns from the
+  results map to the picker. Results are the nearest ten matches across the
+  selected categories in total, not ten per category or a guaranteed result
+  from each category; a dense restaurant category can fill all ten slots.
+- Metadata writes check flush/fsync/close and readback, recover failed
+  publications, and preserve damaged terminal-journal evidence through bounded
+  verified quarantine. Recovery retains main's orphan-temporary and single-cut
+  liveness, while inventorying primary/backup/temporary authority before legacy
+  fallback. R71's corrupt-primary/foreign signed-backup reproduction now keeps
+  both journals and returns owner-required recovery instead of deleting them.
+- Accepted map installs can finish confirmation over the original BLE link
+  after the HTTP session exits. Durable terminal evidence is not discarded
+  merely because the link is no longer ready. Foreground operations and passive
+  cleanup serialize ownership; device identity, connection epoch, fresh status
+  revision, token and generation fences remain enforced.
+- Startup no longer mistakes a new link's retained error for a fresh rejection.
+  Repeated finalizer failures cannot emit alternating full-status bursts without
+  the five-second bound. The renderer's layer state survives HTTP refresh;
+  POI-disabled builds reject target-5 streams before payload admission, and
+  opportunistic POI negotiation does not silently replace terrain target 4.
+- The CI selection includes the opt-in POI qualification profiles. The
+  source-wiring test follows the cleanup helper while retaining every
+  authorization fence; no runtime behavior was changed to satisfy that test.
+
+Prepublication local evidence (uncommitted integration, **not** clean-head CI
+or flash qualification): 58/60 broad checks passed; the stale wiring assertion
+subsequently passed the complete 228-test manifest check. Host OSM dependency
+failures were covered by all 183 tests passing in an isolated read-only
+OrbStack run with native OGR and the real font fixture, with no skips. Backend:
+1,053 tests, three skipped. iOS/Watch simulator and unsigned Debug/Release
+container reruns passed with a stable final source fingerprint. Independent
+recovery checks explored 2,420 schedules and 2,364 recovery cuts with no lost
+previous map, invalid result or unavailable outcome in that model.
+
+The unchanged dual **3,145,728-byte slots** retain the full **65,536-byte
+reserve**: `firmware.bin` must not exceed **3,080,192 bytes**. Local dirty
+measurements were 3,006,704 bytes for 175 production (73,488 bytes beyond the
+reserve) and 3,068,736 bytes for isolated POI qualification (11,456 beyond it).
+These are baseline measurements only: publication and device delivery require
+new clean-commit artifacts and exact-head CI. Production POIs remain off; no
+production service, signer, credential or rollout policy changes are included.
+
+Review accounting remains three used passes plus the explicitly authorized
+R71 repair and single independent confirmation; publication does not reset it.
+R71 and integration-test INT-1 are fixed and independently verified locally.
+The feature is **not merge-ready**: target-5 contour companion coordination
+(R53/R56), the configurable-screen POI regeneration action (R54), and target-5
+reuse (R55) remain open, not silently user-deferred. Main's radio pressure and
+ATT fairness issues (R65/R66, associated follow-ups R67-R70) are separate,
+pre-existing concerns. H-R71b remains an unproven multi-fault writer-path
+hypothesis, not a claimed fix. Map+Navigation's black/entry failure remains
+physically undiagnosed. Fresh upload/ACK/cleanup, reconnect/GPS, Nearby, cold
+boot and both-board acceptance remain physical gates.
+
+Next: publish the verified batch and refreshed description, check the exact
+head's CI, then deliver only the user-selected isolated qualification image to
+the identified 175 after exact-image/device verification and approval. A prior
+dirty build or prior device approval does not authorize different bytes.
+No manual 2.06 workflow, PR merge, backend deployment or iPhone installation
+is implied. See [the review ledger](pr378-review-fix-ledger.md) and
+[isolated qualification](pr378-isolated-nearby-qualification.md).
+
 ### October 23 physical GPS correction
 
 The initial 175/phone test exposed an onboard-only `isGpsFixed` gate in Nearby.

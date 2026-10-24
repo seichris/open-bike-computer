@@ -130,6 +130,7 @@ def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selec
         temporary = report_path.with_name(report_path.name + ".tmp")
         temporary.write_text(json.dumps(report, indent=2) + "\n")
         temporary.replace(report_path)
+        local.write_metrics(report_path.with_name(report_path.stem + "-reuse-metrics.json"))
 
     # Find every prerequisite problem before starting expensive checks.
     readiness = {check["id"]: prerequisites(check) for check in checks}
@@ -141,13 +142,14 @@ def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selec
             reasons.append("select the identified board with --board 175 or --board 206")
         entry = {"id": check["id"], "name": check["name"], "status": "blocked" if reasons else "planned",
                  "reasons": reasons, "durationMs": 0}
+        observation = local.observation(check, "blocked" if reasons else "planned" if plan else None)
         results.append(entry)
         save()
         if reasons or plan:
             print(f'{entry["status"].upper()}: {check["name"]}' + (" — " + "; ".join(reasons) if reasons else ""), flush=True)
             continue
         if reuse_local:
-            reused, reason = local.try_reuse(check, report_path)
+            reused, reason = local.try_reuse(check, report_path, observation)
             entry["localReuseDecision"] = reason
             if reused:
                 entry.update(reused)
@@ -204,6 +206,7 @@ def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selec
                             os.killpg(child.pid, signal.SIGKILL)
                             child.wait()
         entry["durationMs"] = round((time.monotonic() - started) * 1000)
+        local.record_execution(observation, entry["durationMs"])
         entry["completedAt"] = int(time.time())
         save()
         print(f'{entry["status"].upper()}: {check["name"]} ({entry["durationMs"]/1000:.1f}s)', flush=True)

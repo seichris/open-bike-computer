@@ -2,6 +2,7 @@
 #include "../maps/src/mapBlockFormat.hpp"
 #include "../maps/src/mapFontAssetFormat.hpp"
 #include "../maps/src/mapNearbyCoverage.hpp"
+#include "../ble_navigation/map_profile_protocol.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -1250,6 +1251,12 @@ bool parseMapStreamManifest(std::string_view manifestText,
   return payloadBytes == header.payloadBytes;
 }
 
+bool mapStreamTargetSupported(const MapManifest &manifest) {
+  // Without the POI reader a target 5 map can never be selected. Refuse it
+  // before its payload is written instead of failing at activation.
+  return MAP_POIS_RUNTIME_ENABLED || manifest.formatVersion != 5;
+}
+
 bool mapStreamFirmwareCompatible(const std::string &currentVersion,
                                  const std::string &minimumVersion) {
   std::array<uint32_t, 3> current = {};
@@ -1472,7 +1479,8 @@ bool MapStreamIncrementalParser::preparePayload() {
   if (!parseMapStreamManifest(manifestText, header_, verified_.manifest))
     return fail(MapStreamParserError::ManifestInvalid);
   if (!mapStreamFirmwareCompatible(options_.currentFirmwareVersion,
-                 verified_.manifest.metadata.minimumFirmwareVersion))
+                 verified_.manifest.metadata.minimumFirmwareVersion) ||
+      !mapStreamTargetSupported(verified_.manifest.metadata))
     return fail(MapStreamParserError::FirmwareIncompatible);
   verified_.manifestReceipt = mapStreamManifestReceipt(
       manifestBuffer_, manifestBuffered_);

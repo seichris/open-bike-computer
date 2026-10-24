@@ -82,7 +82,7 @@ inline bool pinFits(double x, double y, double width, double height,
                     bool round, double topInset, double bottomInset,
                     bool wasOnMap) {
   if (!std::isfinite(x) || !std::isfinite(y)) return false;
-  const double margin = wasOnMap ? 15.0 : 23.0;
+  const double margin = wasOnMap ? 21.0 : 29.0;
   if (x < margin || x > width - margin ||
       y < topInset + margin || y > height - bottomInset - margin)
     return false;
@@ -106,8 +106,8 @@ inline Layout arrange(const Input *inputs, size_t inputCount, double width,
   const double centerX = width / 2.0;
   const double centerY = (topInset + height - bottomInset) / 2.0;
   const double halfWidth = width / 2.0 - 49.0;
-  const double halfHeight = (height - topInset - bottomInset) / 2.0 - 35.0;
-  const double roundRadius = std::min(width, height) / 2.0 - 56.0;
+  const double halfHeight = (height - topInset - bottomInset) / 2.0 - 39.0;
+  const double roundRadius = std::min(width, height) / 2.0 - 60.0;
   if (halfWidth <= 0.0 || halfHeight <= 0.0 ||
       (round && roundRadius <= 0.0)) return layout;
 
@@ -138,7 +138,7 @@ inline Layout arrange(const Input *inputs, size_t inputCount, double width,
       y = centerY + dy * scale;
       // The physical round clip and the reserved control bands both apply.
       x = std::clamp(x, 49.0, width - 49.0);
-      y = std::clamp(y, topInset + 35.0, height - bottomInset - 35.0);
+      y = std::clamp(y, topInset + 39.0, height - bottomInset - 39.0);
     }
 
     double directionX = input.directionX;
@@ -172,10 +172,10 @@ inline Layout arrange(const Input *inputs, size_t inputCount, double width,
       auto &group = layout.placements[first];
       for (size_t second = first + 1; second < layout.count; ++second) {
         const auto &other = layout.placements[second];
-        const double widthSum = (group.edge ? 76.0 : 30.0) +
-                                (other.edge ? 76.0 : 30.0);
-        const double heightSum = (group.edge ? 56.0 : 30.0) +
-                                 (other.edge ? 56.0 : 30.0);
+        const double widthSum = (group.edge ? 80.0 : 44.0) +
+                                (other.edge ? 80.0 : 44.0);
+        const double heightSum = (group.edge ? 68.0 : 44.0) +
+                                 (other.edge ? 68.0 : 44.0);
         if (std::fabs(group.x - other.x) * 2.0 >= widthSum ||
             std::fabs(group.y - other.y) * 2.0 >= heightSum) continue;
         if (!group.edge && other.edge) {

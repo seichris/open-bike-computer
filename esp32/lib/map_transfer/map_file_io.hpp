@@ -51,16 +51,17 @@ public:
   off_t tell() const {
     return failed_ ? static_cast<off_t>(-1) : ::ftello(file_);
   }
-  bool readAll(std::string &text, size_t maximumBytes) {
+  // Reads exactly the size the caller just measured, in one allocation, and
+  // requires the file to end there. Appending in chunks would reallocate
+  // multi-megabyte manifests repeatedly and roughly double their peak heap.
+  bool readAll(std::string &text, size_t expectedBytes) {
     text.clear();
-    std::array<char, 1024> buffer{};
-    while (good()) {
-      read(buffer.data(), buffer.size());
-      if (gcount() > maximumBytes - text.size())
-        return false;
-      text.append(buffer.data(), gcount());
-    }
-    return eof() && std::ferror(file_) == 0;
+    if (!good())
+      return false;
+    text.resize(expectedBytes);
+    if (expectedBytes != 0)
+      read(&text[0], expectedBytes);
+    return good() && std::fgetc(file_) == EOF && std::ferror(file_) == 0;
   }
 
 private:

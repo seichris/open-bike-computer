@@ -12003,15 +12003,21 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         mapTransferActiveMapId = status.activeMapId ?? ""
         mapTransferActiveSessionId = status.activeSessionId ?? ""
         activeMapManifestReceipt = status.activeManifestReceipt ?? ""
-        activeMapRendererFormat = status.activeRendererFormat
-        activeMapLabelProfileVersion = status.labelProfileVersion
-        activeMapLabelLanguages = status.labelLanguages ?? []
-        activeMapFontAssetHealthy = status.fontAssetHealthy ?? false
-        activeMapPoiProfileVersion = status.poiProfileVersion
-        activeMapPoiIndexProfileVersion = status.poiIndexProfileVersion
-        activeMapPoiDataHealthy = status.poiDataHealthy ?? false
-        activeMapPoiIndexHealthy = status.poiIndexHealthy ?? false
-        activeMapContourLayerIncluded = status.contourLayerIncluded ?? false
+        // Only firmware that publishes the renderer-layer block (POI profile
+        // fields with runtime font/POI health) may replace the BLE-reported
+        // renderer state. Older HTTP status reports font health as merely
+        // "format >= 2", so keep the BLE projection exactly as before.
+        if status.poiProfileVersion != nil {
+            activeMapRendererFormat = status.activeRendererFormat
+            activeMapLabelProfileVersion = status.labelProfileVersion
+            activeMapLabelLanguages = status.labelLanguages ?? []
+            activeMapFontAssetHealthy = status.fontAssetHealthy ?? false
+            activeMapPoiProfileVersion = status.poiProfileVersion
+            activeMapPoiIndexProfileVersion = status.poiIndexProfileVersion
+            activeMapPoiDataHealthy = status.poiDataHealthy ?? false
+            activeMapPoiIndexHealthy = status.poiIndexHealthy ?? false
+            activeMapContourLayerIncluded = status.contourLayerIncluded ?? false
+        }
         normalizeActiveMapPoiStatus()
         if let mapID = status.activeMapId {
             activeDeviceMap = DeviceActiveMapDescriptor(

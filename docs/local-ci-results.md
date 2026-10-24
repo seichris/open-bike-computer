@@ -89,3 +89,5 @@ Only ordinary same-repository PRs can reuse results. Forks, merge groups, manual
 qualification, reusable release workflows and tags always execute hosted checks.
 Linux/GCC coverage, firmware builds, app-container builds and exact-build symbols,
 release signing and physical device acceptance remain outside this mechanism.
+
+Reuse counters, categorized fallbacks, elapsed timings and aggregation are described in [Local-result reuse metrics](local-ci-metrics.md).

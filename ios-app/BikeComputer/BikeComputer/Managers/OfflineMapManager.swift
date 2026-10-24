@@ -2200,7 +2200,7 @@ final class OfflineMapManager: ObservableObject {
     private let catalogCredentialCoordinator = OfflineMapCatalogCredentialCoordinator()
     private(set) var clientInstallationId: String
     private(set) var clientInstallationToken: String?
-    private let deviceTransferManager = DeviceTransferManager()
+    private let deviceTransferManager: DeviceTransferManager
     private var deviceMapOperationStore = DeviceMapOperationStore.shared
 #if HOST_TESTING
     private var fencedRetirementCleanupForTesting: ((BLEManager) async -> Bool)?
@@ -2212,6 +2212,8 @@ final class OfflineMapManager: ObservableObject {
     private var catalogSyncTask: Task<Void, Never>?
     private var pendingShareToken: String?
     private var activationReconciliationTask: Task<Void, Never>?
+    private var terminalTransportCleanupTask: Task<Void, Never>?
+    private var terminalTransportCleanupAttempts: (epoch: UInt64, count: Int) = (0, 0)
     private var backgroundUploadObserver: AnyCancellable?
     private var activityCounter = OfflineMapActivityCounter()
 #if canImport(UIKit) && canImport(MapKit)
@@ -2271,10 +2273,12 @@ final class OfflineMapManager: ObservableObject {
         metadataSave: @escaping SavedMapArtifactMetadataSaveOperation = { metadata, url in
             try SavedMapArtifactMetadataStore.save(metadata, for: url)
         },
-        diagnosticsRecorder: (any RideDiagnosticsEventSink)? = nil
+        diagnosticsRecorder: (any RideDiagnosticsEventSink)? = nil,
+        deviceTransferManager: DeviceTransferManager? = nil
     ) {
         OfflineMapPackCompatibilityArchive.removeOrphans()
         self.defaults = defaults
+        self.deviceTransferManager = deviceTransferManager ?? DeviceTransferManager()
         self.mapPlatformSession = mapPlatformSession
         let bicinoServiceSession = bicinoServiceSession ??
             BicinoServiceSession(
@@ -2348,6 +2352,9 @@ final class OfflineMapManager: ObservableObject {
         restoreLastTransferPresentation()
         self.diagnosticsRecorder = diagnosticsRecorder
         self.deviceTransferManager.diagnosticsRecorder = diagnosticsRecorder
+        self.deviceTransferManager.onMapTransportCleanupResolved = { [weak self] deviceID in
+            self?.markTerminalTransportCleanupResolved(deviceID: deviceID)
+        }
 #if os(iOS)
         backgroundUploadObserver = NotificationCenter.default.publisher(
             for: BackgroundMapUploadStateStore.didChangeNotification
@@ -4334,7 +4341,7 @@ final class OfflineMapManager: ObservableObject {
             updateLastTransferOutcome("installed")
             statusMessage = "map installed: \(displayName(forMapId: record.mapID))"
             errorMessage = nil
-            Task { await self.cleanupTerminalMapOperationIfNeeded(bleManager: bleManager) }
+            cleanupTerminalMapOperationInBackground(bleManager: bleManager)
             return true
         }
         if record.isTerminal {
@@ -4345,7 +4352,7 @@ final class OfflineMapManager: ObservableObject {
             } else {
                 errorMessage = "Device reported \(record.lastReceipt?.phase ?? "failed") for this map operation"
             }
-            Task { await self.cleanupTerminalMapOperationIfNeeded(bleManager: bleManager) }
+            cleanupTerminalMapOperationInBackground(bleManager: bleManager)
             return true
         }
         if let receipt = bleManager.mapOperationStatus,
@@ -4356,14 +4363,14 @@ final class OfflineMapManager: ObservableObject {
                 updateLastTransferOutcome("installed")
                 statusMessage = "map installed: \(displayName(forMapId: updated.mapID))"
                 errorMessage = nil
-                Task { await self.cleanupTerminalMapOperationIfNeeded(bleManager: bleManager) }
+                cleanupTerminalMapOperationInBackground(bleManager: bleManager)
                 return true
             case "failed_or_rolled_back", "cancelled_before_commit":
                 updateLastTransferOutcome(updated.observation == "cancelled_before_commit" ? "cancelled" : "failed")
                 statusMessage = updated.observation == "cancelled_before_commit" ? "Map upload cancelled before installation" : ""
                 errorMessage = updated.observation == "cancelled_before_commit" ? nil :
                     "Device reported \(receipt.phase ?? "failed") for this map operation"
-                Task { await self.cleanupTerminalMapOperationIfNeeded(bleManager: bleManager) }
+                cleanupTerminalMapOperationInBackground(bleManager: bleManager)
                 return true
             default:
                 if (updated.nextControlAction == .commit || updated.nextControlAction == .cancel),
@@ -4392,6 +4399,49 @@ final class OfflineMapManager: ObservableObject {
         return true
     }
 
+    // A terminal result does not mean the transport was torn down. After an
+    // expired exit window, mark this app's journal once the recorded device is
+    // confirmed idle, whatever the displayed outcome. Never beside a foreground
+    // transfer or an OS upload, and never by sending an exit.
+    private func scheduleTerminalTransportCleanupIfNeeded(bleManager: BLEManager) {
+        guard terminalTransportCleanupTask == nil, !isDeviceTransferBusy, !hasActiveBackgroundUpload,
+              bleManager.isConnected, bleManager.isNavigationReady,
+              bleManager.deviceTransferMode.isEmpty,
+              bleManager.deviceTransferSessionToken?.isEmpty != false,
+              let record = currentDeviceMapOperation, record.isTerminal, record.cleanup != "complete",
+              // Only the connected device's own status can confirm its cleanup;
+              // a newly selected one may still be waiting for its link.
+              record.deviceID == bleManager.activeDeviceID,
+              record.deviceID == bleManager.connectedDeviceID,
+              record.appNamespace == BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: Bundle.main.bundleIdentifier) else { return }
+        // Bounded per link so repeated status refreshes cannot flood BLE.
+        let epoch = bleManager.transferConnectionEpoch
+        let attempts = terminalTransportCleanupAttempts.epoch == epoch ? terminalTransportCleanupAttempts.count : 0
+        guard attempts < 3 else { return }
+        terminalTransportCleanupAttempts = (epoch, attempts + 1)
+        let operationID = record.operationID
+        terminalTransportCleanupTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.terminalTransportCleanupTask = nil }
+            guard await self.deviceTransferManager.reconcileUnresolvedMapCleanup(bleManager: bleManager),
+                  !self.isDeviceTransferBusy,
+                  let current = self.currentDeviceMapOperation, current.operationID == operationID,
+                  current.isTerminal, current.cleanup != "complete",
+                  current.deviceID == bleManager.connectedDeviceID,
+                  bleManager.transferConnectionEpoch == epoch else { return }
+            try? self.deviceMapOperationStore.markCleanupComplete(operationID: operationID)
+        }
+    }
+
+    private func markTerminalTransportCleanupResolved(deviceID: String) {
+        guard !isDeviceTransferBusy, let record = currentDeviceMapOperation, record.isTerminal,
+              record.cleanup != "complete", record.deviceID == deviceID,
+              record.appNamespace == BackgroundMapUploadSessionNamespace.identifier(
+                bundleIdentifier: Bundle.main.bundleIdentifier) else { return }
+        try? deviceMapOperationStore.markCleanupComplete(operationID: record.operationID)
+    }
+
     private func restorePendingDurableTransfer(bleManager: BLEManager) {
         guard let record = currentDeviceMapOperation,
               record.usesDurableProtocol, !record.isTerminal, !record.isRetiredUnknown,
@@ -4417,6 +4467,7 @@ final class OfflineMapManager: ObservableObject {
 
     func reconcileLastTransfer(bleManager: BLEManager) {
         restorePendingDurableTransfer(bleManager: bleManager)
+        scheduleTerminalTransportCleanupIfNeeded(bleManager: bleManager)
         if lastTransferOutcome == "unconfirmed", reconcileDurableMapOperation(bleManager: bleManager) { return }
         guard bleManager.hasFreshMapTransferStatus else {
             lastTransferObservedIdleOnAnotherMap = false
@@ -5072,6 +5123,10 @@ final class OfflineMapManager: ObservableObject {
 
     func useFencedRetirementCleanupForTesting(_ cleanup: @escaping (BLEManager) async -> Bool) {
         fencedRetirementCleanupForTesting = cleanup
+    }
+
+    func pollActivationReconciliationForTesting(bleManager: BLEManager) {
+        pollActivationReconciliation(bleManager: bleManager)
     }
 
     func rejectMapStreamBeforeUploadForTesting(_ rejection: MapInstallProtocolRejection,
@@ -6811,6 +6866,13 @@ final class OfflineMapManager: ObservableObject {
         }
     }
 
+    // A foreground transfer exits its own transport after acknowledging the
+    // result; a background exit could otherwise race that acknowledgement.
+    private func cleanupTerminalMapOperationInBackground(bleManager: BLEManager) {
+        guard !isDeviceTransferBusy else { return }
+        Task { await self.cleanupTerminalMapOperationIfNeeded(bleManager: bleManager) }
+    }
+
     private func cleanupTerminalMapOperationIfNeeded(bleManager: BLEManager) async {
         let record = currentDeviceMapOperation
         if defaults.string(forKey: "offlineMap.deviceOperationID") != nil, record == nil {
@@ -6904,6 +6966,7 @@ final class OfflineMapManager: ObservableObject {
         let confirmationHTTPContext = bleManager.captureMapTransferHTTPStatusContext()
         var consumedOperationObservation = bleManager.mapOperationObservationGeneration
         while now() < deadline {
+            try Task.checkCancellation()
             if defaults.string(forKey: "offlineMap.deviceOperationID") != nil,
                currentDeviceMapOperation == nil {
                 return .continuesOnDevice(lastState: "saved operation journal requires recovery")
@@ -6912,7 +6975,7 @@ final class OfflineMapManager: ObservableObject {
             if let operation = currentDeviceMapOperation, operation.usesDurableProtocol,
                operation.mapID == expectedMapId && operation.sessionID == sessionId {
                 guard operation.deviceID == confirmationDeviceID else {
-                    return .continuesOnDevice(lastState: "reconnect the original device")
+                    return .continuesOnDevice(lastState: "device connection changed; exact result remains unconfirmed")
                 }
                 if operation.isRetiredUnknown { return .retiredUnknown }
                 if operation.observation == "installed_confirmed", operation.lastReceipt?.phase == "installed" {
@@ -6931,6 +6994,18 @@ final class OfflineMapManager: ObservableObject {
                     if operation.observation == "cancelled_before_commit" { return .cancelled }
                     throw OfflineMapPlatformError.mapActivationFailed(operation.lastReceipt?.phase ?? "failed")
                 }
+                // A saved terminal result above is durable evidence on its own;
+                // live queries and controls still need the original link.
+                guard bleManager.isConnected, bleManager.isNavigationReady,
+                      confirmationEpoch == bleManager.transferConnectionEpoch else {
+                    return .continuesOnDevice(lastState: "device connection changed; exact result remains unconfirmed")
+                }
+                if confirmationHTTPContext == nil, operation.lastReceipt?.phase != "accepted" {
+                    // Precommit recovery needs a live pinned session to cancel
+                    // or obtain the boot fence. BLE polling alone cannot settle
+                    // it. Accepted work may still finish autonomously via BLE.
+                    return .continuesOnDevice(lastState: "secure transfer session unavailable; exact result remains unconfirmed")
+                }
                 var receipt: DeviceMapOperationReceipt?
                 var receivedHTTPReceipt = false
                 if bleManager.isCurrentMapTransferHTTPStatusContext(confirmationHTTPContext) {
@@ -6938,7 +7013,22 @@ final class OfflineMapManager: ObservableObject {
                     if !bleManager.isCurrentMapTransferHTTPStatusContext(confirmationHTTPContext) { receipt = nil }
                     receivedHTTPReceipt = receipt != nil
                 }
-                guard confirmationDeviceID == bleManager.activeDeviceID else { return .continuesOnDevice(lastState: "device connection changed; exact result remains unconfirmed") }
+                try Task.checkCancellation()
+                guard confirmationDeviceID == bleManager.activeDeviceID,
+                      bleManager.isConnected, bleManager.isNavigationReady,
+                      confirmationEpoch == bleManager.transferConnectionEpoch else {
+                    return .continuesOnDevice(lastState: "device connection changed; exact result remains unconfirmed")
+                }
+                // A replaced/revoked secure session cannot perform the saved
+                // precommit control or boot-fence reads. Yield ownership instead
+                // of polling the replacement BLE link until the ten-minute limit.
+                // Keep the durable intent intact for a fresh recovery session.
+                // Accepted work needs no session: the device installs and then
+                // exits transfer mode itself, so its receipt arrives over BLE.
+                if let confirmationHTTPContext, operation.lastReceipt?.phase != "accepted",
+                   !bleManager.isCurrentMapTransferHTTPStatusContext(confirmationHTTPContext) {
+                    return .continuesOnDevice(lastState: "secure transfer session changed; exact result remains unconfirmed")
+                }
                 if receipt == nil {
                     if bleManager.mapOperationConnectionEpoch == bleManager.transferConnectionEpoch,
                        bleManager.mapOperationObservationGeneration != consumedOperationObservation {
@@ -7227,6 +7317,14 @@ final class OfflineMapManager: ObservableObject {
 #endif
     }
 
+    private func pollActivationReconciliation(bleManager: BLEManager) {
+        // Foreground entry/recovery owns status and control while busy. A second
+        // BLE poller can queue stale snapshots over its authenticated handshake.
+        guard bleManager.isNavigationReady, !isDeviceTransferBusy else { return }
+        bleManager.requestMapTransferStatus()
+        reconcileLastTransfer(bleManager: bleManager)
+    }
+
     private func startActivationReconciliationMonitor(bleManager: BLEManager) {
         guard activationReconciliationTask == nil,
               lastTransferOutcome == "unconfirmed" else {
@@ -7237,10 +7335,7 @@ final class OfflineMapManager: ObservableObject {
                   let self,
                   let bleManager,
                   self.lastTransferOutcome == "unconfirmed" {
-                if bleManager.isNavigationReady {
-                    bleManager.requestMapTransferStatus()
-                    self.reconcileLastTransfer(bleManager: bleManager)
-                }
+                self.pollActivationReconciliation(bleManager: bleManager)
                 try? await Task.sleep(
                     nanoseconds: OfflineMapDefaults.activationPollIntervalNanoseconds
                 )

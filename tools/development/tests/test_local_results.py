@@ -130,7 +130,7 @@ class LocalResultsTests(unittest.TestCase):
         def read(path, ref, **kwargs):
             seen.append((path, ref))
             if transport_error:
-                raise RuntimeError("offline")
+                raise RuntimeError("GitHub evidence transport unavailable")
             if path == local.POLICY:
                 return local.canonical(self.policy), "policy-blob"
             return None if receipt is None else (local.canonical(receipt), "receipt-blob")
@@ -153,6 +153,15 @@ class LocalResultsTests(unittest.TestCase):
         self.assertFalse(self.marker.exists())
         entry = report["checks"][0]
         self.assertEqual(entry["execution"], "reused-local")
+        metrics = json.loads((self.root / "report-reuse-metrics.json").read_text())
+        row = metrics["observations"][0]
+        self.assertEqual((row["eligible"], row["attempted"], row["outcome"], row["reason"]), (True, True, "accepted", "accepted"))
+        self.assertEqual(row["estimatedAvoidedExecutionMs"], 9000)
+        self.assertIsNone(row["fallbackDurationMs"])
+        self.assertGreater(row["verificationMs"], 0)
+        self.assertGreater(metrics["initializationMs"], 0)
+        self.assertNotIn("Actual local test output", json.dumps(metrics))
+        self.assertNotIn("signature", json.dumps(metrics))
         self.assertEqual(Path(entry["log"]).read_bytes(), self.verify())
         self.assertEqual(json.loads(Path(entry["signedReceipt"]).read_text()), self.envelope)
         self.assertEqual(seen[0], (local.POLICY, "d" * 40))
@@ -171,6 +180,11 @@ class LocalResultsTests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertTrue(self.marker.exists())
                 self.assertEqual(report["checks"][0]["execution"], "hosted")
+                row = json.loads((self.root / "report-reuse-metrics.json").read_text())["observations"][0]
+                self.assertTrue(row["eligible"])
+                self.assertNotEqual(row["outcome"], "accepted")
+                self.assertEqual(row["estimatedAvoidedExecutionMs"], 0)
+                self.assertGreaterEqual(row["fallbackDurationMs"], 0)
 
     def test_failed_hosted_fallback_remains_a_failed_gate_input(self):
         self.check["command"] = "exit 8"
@@ -178,6 +192,48 @@ class LocalResultsTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(report["checks"][0]["exitCode"], 8)
         self.assertEqual(report["status"], "failed")
+
+    def test_metrics_categories_come_from_real_signed_validation(self):
+        cases = [("source-mismatch", {"source": {**self.source, "tree": "c" * 40}}),
+                 ("recipe-mismatch", {"recipe": {**self.recipe, "fresh": True}}),
+                 ("toolchain-mismatch", {"toolchain": {**self.toolchain, "sdk": "other"}}),
+                 ("dependencies-mismatch", {"toolchain": {**self.toolchain, "python": {"packages": ["different"]}}}),
+                 ("stale-or-invalid-time", {"startedAt": self.now - 3601})]
+        for reason, changes in cases:
+            with self.subTest(reason=reason):
+                self.run_ci(local.sign({**self.payload, **changes}, self.key))
+                row = json.loads((self.root / "report-reuse-metrics.json").read_text())["observations"][0]
+                self.assertEqual(row["reason"], reason)
+                self.assertTrue(row["attempted"])
+                self.assertTrue(self.marker.exists())
+        altered = copy.deepcopy(self.envelope)
+        altered["payload"]["exitCode"] = 8
+        self.run_ci(altered)
+        row = json.loads((self.root / "report-reuse-metrics.json").read_text())["observations"][0]
+        self.assertEqual(row["reason"], "signature-invalid")
+
+    def test_telemetry_collection_and_write_failures_do_not_change_gates(self):
+        with patch.object(local.metrics.ReuseMetrics, "start", side_effect=RuntimeError("private")), \
+             patch.object(local.metrics.ReuseMetrics, "write", side_effect=OSError("private")):
+            code, report, _ = self.run_ci(self.envelope)
+            self.assertEqual(code, 0)
+            self.assertEqual(report["checks"][0]["execution"], "reused-local")
+            self.assertFalse(self.marker.exists())
+            self.check["command"] = "exit 8"
+            code, report, _ = self.run_ci(None)
+            self.assertEqual(code, 1)
+            self.assertEqual(report["checks"][0]["exitCode"], 8)
+
+    def test_metrics_distinguish_disabled_and_policy_ineligible_from_absence(self):
+        with patch.dict(os.environ, {"CI": "1", "GITHUB_ACTIONS": "", "GITHUB_EVENT_PATH": ""}):
+            session = local.Session([], self.source, reuse=False)
+            self.assertEqual(session.metrics.report["context"], "ci-mode")
+            self.assertEqual(session.observation(self.check)["reason"], "disabled")
+            session.reuse = True
+            session.policy = {**self.policy, "checks": []}
+            self.assertEqual(session.observation(self.check)["reason"], "policy-ineligible")
+            session.metric_hosted = False
+            self.assertEqual(session.observation(self.check)["reason"], "local-execution")
 
     def test_execution_profile_drops_test_filters_and_compiler_overrides(self):
         with patch.dict(os.environ, {"ONLY_TESTING": "OneTest", "SDKROOT": "/fake", "BASH_ENV": "/fake",

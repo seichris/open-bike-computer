@@ -816,6 +816,14 @@ struct NavigationProtocolTests {
     }
 
     static func main() async {
+        if CommandLine.arguments.contains("--map-startup-only") {
+            await testMapTransferStartupDeadline()
+            await testDeviceTransferManagerWaitsForMapToken(startupDelayNanoseconds: 9_000_000_000)
+            await testDeviceTransferManagerSurfacesFreshMapRejectionEarly()
+            await testDeviceTransferManagerKeepsMapStartupBeforeFirstLinkStatus()
+            print("Delayed map startup regression passed")
+            return
+        }
 #if BLUETOOTH_RESTORATION_ADAPTER_TESTING
         if CommandLine.arguments.contains("--bluetooth-restoration-adapter-only") {
             testBluetoothRestorationAdapter()
@@ -829,9 +837,19 @@ struct NavigationProtocolTests {
             print("Background upload state regression passed")
             return
         }
+        if CommandLine.arguments.contains("--map-transport-cleanup-only") {
+            await testMapTransportCleanupConvergesAfterRefusedExit()
+            await testPassiveMapCleanupKeepsOwnerSessionAndLinkFences()
+            await testExplicitTransferWaitsForPassiveMapCleanup()
+            await testOtherManagersSerializeWithPassiveMapCleanup()
+            await testTerminalJournalCleanupConvergesFromFreshIdleStatus()
+            print("Map transport cleanup regression passed")
+            return
+        }
         if CommandLine.arguments.contains("--map-operation-recovery-only") {
             testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary()
             await testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit()
+            await testOfflineMapManagerConfirmsAcceptedOperationAfterTransportExit()
             await testOfflineMapManagerCancelsUnusedIncompatibleMapAdmission()
             print("Map operation recovery regression passed")
             return
@@ -987,6 +1005,7 @@ struct NavigationProtocolTests {
         testNavigationEngineReplacesRouteWithoutResettingTelemetry()
         testOfflineMapCustomBBoxRequest()
         testOfflineMapPoiTargetNegotiation()
+        testHTTPMapTransferStatusKeepsRendererLayerState()
         testOfflineMapServiceConfigChannels()
         testOfflineMapCatalogConfigChannels()
         testOfflineMapCatalogTrustStoreChannels()
@@ -1023,7 +1042,11 @@ struct NavigationProtocolTests {
         testMapStreamBackgroundUploadRequest()
         testDeviceTransferServerProbePolicy()
         await testDeviceTransferReadinessWindow()
+        await testMapTransferStartupDeadline()
         await testDeviceTransferManagerWaitsForMapToken()
+        await testDeviceTransferManagerWaitsForMapToken(startupDelayNanoseconds: 9_000_000_000)
+        await testDeviceTransferManagerSurfacesFreshMapRejectionEarly()
+        await testDeviceTransferManagerKeepsMapStartupBeforeFirstLinkStatus()
         await testDeviceTransferManagerWaitsForFreshDebugToken()
         await testDeviceTransferManagerKeepsConfirmedLANDebugSession()
         await testDeviceTransferManagerCompensatesCancelledDebugEntry()
@@ -1092,7 +1115,13 @@ struct NavigationProtocolTests {
         testOfflineMapManagerRestoresLastTransferIdentity()
         testOfflineMapManagerRecoversDurableOperationIndependentlyOfSummary()
         await testOfflineMapManagerRetiresOnlyFencedUnavailablePrecommit()
+        await testOfflineMapManagerConfirmsAcceptedOperationAfterTransportExit()
         await testOfflineMapManagerCancelsUnusedIncompatibleMapAdmission()
+        await testMapTransportCleanupConvergesAfterRefusedExit()
+        await testPassiveMapCleanupKeepsOwnerSessionAndLinkFences()
+        await testExplicitTransferWaitsForPassiveMapCleanup()
+        await testOtherManagersSerializeWithPassiveMapCleanup()
+        await testTerminalJournalCleanupConvergesFromFreshIdleStatus()
         testOfflineMapManagerResendsUnobservedLegacyResult()
         testOfflineMapManagerReconcilesInterruptedActivation()
         testOfflineMapManagerReconcilesAcknowledgedFirstInstall()
@@ -7383,6 +7412,52 @@ struct NavigationProtocolTests {
                "empty firmware metadata is omitted")
     }
 
+    static func testHTTPMapTransferStatusKeepsRendererLayerState() {
+        func decode(_ json: String) -> MapTransferDeviceStatus {
+            try! JSONDecoder().decode(MapTransferDeviceStatus.self, from: Data(json.utf8))
+        }
+        func notify(_ manager: BLEManager, _ json: String) {
+            assert(manager.handleMapTransferStatusNotification(
+                Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)),
+                "BLE map transfer status is consumed")
+        }
+        // Same keys the firmware's authenticated HTTP map-transfer/status emits.
+        let layered = #"{"enabled":true,"activeMapId":"pois-v5","activeSessionId":"s5","activeRendererFormat":5,"labelProfileVersion":1,"labelLanguages":["en"],"fontAssetHealthy":true,"poiProfileVersion":1,"poiIndexProfileVersion":1,"poiDataHealthy":true,"poiIndexHealthy":false,"contourLayerIncluded":true,"activation":{"status":"idle"}}"#
+        let decoded = decode(layered)
+        assertEqual(decoded.activeRendererFormat, 5, "HTTP status decodes the renderer format")
+        assertEqual(decoded.labelProfileVersion, 1, "HTTP status decodes the label profile")
+        assertEqual(decoded.labelLanguages, ["en"], "HTTP status decodes label languages")
+        assertEqual(decoded.fontAssetHealthy, true, "HTTP status decodes font health")
+        assertEqual(decoded.poiProfileVersion, 1, "HTTP status decodes the POI profile")
+        assertEqual(decoded.poiIndexProfileVersion, 1, "HTTP status decodes the POI index profile")
+        assertEqual(decoded.poiDataHealthy, true, "HTTP status decodes POI data health")
+        assertEqual(decoded.poiIndexHealthy, false, "HTTP status decodes POI index health")
+        assertEqual(decoded.contourLayerIncluded, true, "HTTP status decodes the contour layer")
+
+        // Older firmware's HTTP status has no layer block, and its font health
+        // only means "format >= 2": keep the BLE-reported renderer state.
+        let legacy = BLEManager()
+        notify(legacy, #"{"enabled":false,"activeMapId":"alps-v4","activeSessionId":"alps-s1","activeRendererFormat":4,"labelProfileVersion":1,"labelLanguages":["de","en"],"fontAssetHealthy":false,"activation":{"status":"idle"}}"#)
+        legacy.applyAuthenticatedMapTransferStatus(decode(#"{"enabled":true,"activeMapId":"alps-v4","activeSessionId":"alps-s1","activeRendererFormat":4,"labelProfileVersion":1,"labelLanguages":["de","en"],"fontAssetHealthy":true,"activation":{"status":"idle"}}"#))
+        assertEqual(legacy.activeMapRendererFormat, 4, "older HTTP status keeps the BLE renderer format")
+        assertEqual(legacy.activeMapLabelLanguages, ["de", "en"], "older HTTP status keeps label languages")
+        assert(!legacy.activeMapFontAssetHealthy,
+               "older HTTP format-level font health never overrides BLE runtime health")
+
+        // Current firmware publishes runtime layer health over HTTP as well.
+        let current = BLEManager()
+        notify(current, layered.replacingOccurrences(of: "\"poiIndexHealthy\":false",
+                                                      with: "\"poiIndexHealthy\":true"))
+        assert(current.activeMapPoiIndexHealthy, "BLE reports a healthy POI index")
+        current.applyAuthenticatedMapTransferStatus(decoded)
+        assertEqual(current.activeMapRendererFormat, 5, "HTTP status keeps target 5")
+        assertEqual(current.activeMapPoiProfileVersion, 1, "HTTP status keeps the POI profile")
+        assert(current.activeMapPoiDataHealthy, "HTTP status projects POI data health")
+        assert(!current.activeMapPoiIndexHealthy, "HTTP status projects the newer POI index health")
+        assert(current.activeMapContourLayerIncluded, "HTTP status keeps the contour layer")
+        assert(current.activeMapFontAssetHealthy, "HTTP status projects runtime font health")
+    }
+
     static func testOfflineMapPoiTargetNegotiation() {
         func capabilities(_ profiles: String) -> OfflineMapGenerationCapabilities {
             let document = "{\"schemaVersion\":1,\"deploymentChannel\":\"development\"," +
@@ -7481,6 +7556,30 @@ struct NavigationProtocolTests {
                     }
                 }
             }
+        }
+
+        // Target 5 cannot carry the target-4 terrain experiment. Keep that
+        // request unchanged, or fail closed when POIs are required.
+        let terrain = OfflineMapJobRequest.customBBox(bounds)
+            .withTopography(true, terrain: true)
+            .forDevice(firmwareVersion: "1.0.0")
+            .identified(clientInstallationId: "installation",
+                        clientRequestId: "request", installOnDevice: true)
+        let contourCanary = capabilities(legacy + topography + pois("\"contours\""))
+        assertEqual(try? OfflineMapPoiRequestPolicy.request(
+            terrain, deviceSupportsMapPois: true, capabilities: contourCanary,
+            requirement: .opportunistic), terrain,
+            "an opportunistic terrain request keeps target 4 and its terrain layer")
+        do {
+            _ = try OfflineMapPoiRequestPolicy.request(
+                terrain, deviceSupportsMapPois: true, capabilities: contourCanary,
+                requirement: .required)
+            assert(false, "required POIs fail closed instead of dropping terrain")
+        } catch OfflineMapPlatformError.unsupportedRendererTarget(let requested, _, let message) {
+            assertEqual(requested, 5, "the terrain conflict names target 5")
+            assert(!message.isEmpty, "the terrain conflict explains why")
+        } catch {
+            assert(false, "unexpected terrain negotiation error \(error)")
         }
 
         assertEqual(OfflineMapPoiRequestPolicy.regenerationRequirement(
@@ -7622,6 +7721,39 @@ struct NavigationProtocolTests {
     }
 
     static func testOfflineMapServiceConfigChannels() {
+        let qualification = "http://qualification-mac.local:8765"
+        assert(OfflineMapServiceConfig.isMatchingLANQualificationOrigin(
+            "http://QUALIFICATION-MAC.local:8765/", configuredOrigin: qualification
+        ))
+        for rejected in ["http://other.local:8765", "http://qualification-mac.local:8766",
+                         "https://qualification-mac.local:8765", "http://qualification-mac.local",
+                         "http://qualification-mac.local:8765/path", "http://qualification-mac.local:8765?q=1",
+                         "http://qualification-mac.local:8765#fragment", "http://user@qualification-mac.local:8765",
+                         "http://qualification-mac.local.evil:8765", "http://127.0.0.1:8765"] {
+            assert(!OfflineMapServiceConfig.isMatchingLANQualificationOrigin(
+                rejected, configuredOrigin: qualification
+            ), "LAN qualification must bind the exact explicit local origin")
+        }
+        assert(!OfflineMapServiceConfig.isMatchingLANQualificationOrigin(
+            qualification, configuredOrigin: nil
+        ))
+        assert(!OfflineMapServiceConfig.isMatchingLANQualificationOrigin(
+            "https://attacker.example:8765", configuredOrigin: "https://attacker.example:8765"
+        ))
+        assert(!OfflineMapServerIdentity.isManaged(qualification),
+               "LAN qualification must not alter the managed server set")
+#if !DEBUG
+        let qualificationDefaultsName = "OfflineMapLANQualification.\(UUID().uuidString)"
+        let qualificationDefaults = UserDefaults(suiteName: qualificationDefaultsName)!
+        qualificationDefaults.set(qualification,
+            forKey: OfflineMapServiceConfig.lanQualificationOriginDefaultsKey)
+        let qualificationSession = BicinoServiceSession(defaults: qualificationDefaults)
+        let qualificationClient = try! qualificationSession.makeOfflineMapClient(
+            serverURLString: qualification)
+        assert(qualificationClient.managedAppAttestClient == nil,
+               "non-Debug clients ignore the LAN qualification opt-in")
+        qualificationDefaults.removePersistentDomain(forName: qualificationDefaultsName)
+#endif
         assertEqual(
             OfflineMapServiceConfig.serverURLString(
                 infoDictionary: ["BicinoMapServiceHost": "maps-dev.8o.vc"]

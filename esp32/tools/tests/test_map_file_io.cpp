@@ -11,9 +11,16 @@ int main() {
   using namespace map_transfer;
   static_assert(!std::is_copy_constructible<MapReadFile>::value);
   static_assert(!std::is_copy_constructible<MapWriteFile>::value);
-  char directory[] = "/tmp/map-file-io-XXXXXX";
-  assert(::mkdtemp(directory) != nullptr);
-  const std::string path = std::string(directory) + "/binary";
+  // Development checks give each run a private TMPDIR.
+  const char *temporaryRoot = std::getenv("TMPDIR");
+  std::string pattern = temporaryRoot != nullptr && *temporaryRoot != '\0' ? temporaryRoot : "/tmp";
+  if (pattern.back() != '/')
+    pattern += '/';
+  pattern += "map-file-io-XXXXXX";
+  std::vector<char> directory(pattern.begin(), pattern.end());
+  directory.push_back('\0');
+  assert(::mkdtemp(directory.data()) != nullptr);
+  const std::string path = std::string(directory.data()) + "/binary";
   std::string expected(4097, 'x');
   expected[2] = '\0';
   {
@@ -68,7 +75,7 @@ int main() {
     invalid.flush();
     invalid.close();
     assert(invalid.fail());
-    MapReadFile directoryInput(directory);
+    MapReadFile directoryInput(directory.data());
     assert(!directoryInput.readAll(text, 100));
   }
   {
@@ -91,6 +98,21 @@ int main() {
     MapReadFile input(path);
     std::string text;
     assert(input.readAll(text, 3) && text == "abc");
+    MapReadFile shorter(path);
+    assert(!shorter.readAll(text, 4)); // a measured size must still be there
+  }
+  {
+    // A large manifest takes one exact allocation instead of growing by
+    // appends, which roughly doubled its peak heap.
+    const std::string large(1024 * 1024 + 1, 'm');
+    MapWriteFile output(path);
+    output.write(large.data(), large.size());
+    output.close();
+    assert(output.good());
+    MapReadFile input(path);
+    std::string text;
+    assert(input.readAll(text, large.size()) && text == large);
+    assert(text.capacity() < large.size() + 4096);
   }
 #ifdef __linux__
   {
@@ -108,6 +130,6 @@ int main() {
   }
 #endif
   assert(std::remove(path.c_str()) == 0);
-  assert(::rmdir(directory) == 0);
+  assert(::rmdir(directory.data()) == 0);
   std::cout << "map file I/O tests passed\n";
 }

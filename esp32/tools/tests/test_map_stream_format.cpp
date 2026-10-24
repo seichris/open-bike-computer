@@ -5,6 +5,7 @@
 #include "../../lib/map_transfer/map_stream_sha.hpp"
 #include "../../lib/map_transfer/map_stream_trust.hpp"
 #include "../../lib/maps/src/mapBlockFormat.hpp"
+#include "../../lib/ble_navigation/map_profile_protocol.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -797,6 +798,13 @@ int main() {
     assert(parsed.metadata.poiCategoryCounts[1] == 1);
     assert(parsed.metadata.poiCategoryCounts[4] == 1);
     assert(parsed.metadata.nearbyCoverageBlocks.size() == 1);
+    // Admission refuses a target 5 map unless this build has the POI reader,
+    // before any payload is written; earlier targets are unaffected.
+    assert(mapStreamTargetSupported(parsed.metadata) ==
+           (MAP_POIS_RUNTIME_ENABLED != 0));
+    map_transfer::MapManifest contourTarget;
+    contourTarget.formatVersion = 4;
+    assert(mapStreamTargetSupported(contourTarget));
     auto missingCoverage = poiManifest;
     const std::string coverageField =
         "\"nearbyCoverage\":{\"blockSizeMeters\":4096,\"blocks\":[[0,0]],"

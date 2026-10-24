@@ -805,7 +805,37 @@ void MapTransferHttpServer::executeOperationTask() try {
       completed=result==operation::Result::Ok || result==operation::Result::Replay;
       if (completed) completed=observeOperationRevision(store.admissionRevision());
       if (completed && !failed && result==operation::Result::Ok) transferServer_->sampleResources("map_terminal");
-      if (completed) completed=installer_.finalizeOperation(session,terminal).ok;
+      if (completed) {
+        const auto cleanup = installer_.finalizeOperation(session,terminal);
+        completed = cleanup.ok;
+        bool report = false;
+        if (!completed) {
+          // Storage retries run back to back and each report pushes a full
+          // status stream, so after the first failure report at most one
+          // change per interval. A refused exit replaces the device's error
+          // with commit_in_progress; compare with what it reports now.
+          constexpr uint32_t kCleanupReportIntervalMs = 5000;
+          const uint32_t now = millis();
+          bool first = false, due = false;
+          {
+            StateGuard guard(*this);
+            first = !terminalCleanupReported_;
+            due = first || now - terminalCleanupReportedAtMs_ >= kCleanupReportIntervalMs;
+          }
+          report = first || (due && transferServer_->status().lastErrorCode != cleanup.code);
+          if (report) {
+            StateGuard guard(*this);
+            terminalCleanupReported_ = true;
+            terminalCleanupReportedAtMs_ = now;
+          }
+        }
+        // Installed precedes cleanup. Retain its real failure instead of only
+        // commit_in_progress.
+        if (report) {
+          rememberOwnerRecovery(cleanup.code.c_str());
+          setLastError(cleanup.code,cleanup.message);
+        }
+      }
       if (completed && store.queryID(terminal,record)==operation::Result::Ok)
         body=operationReceiptJson(record);
     }
@@ -823,6 +853,7 @@ void MapTransferHttpServer::executeOperationTask() try {
     {
       StateGuard guard(*this);
       terminalOperationID_.clear(); terminalSessionID_.clear(); terminalMapID_.clear();
+      terminalCleanupReported_ = false;
     }
     releaseCommitGrant();
     if (automaticExit) requestAutomaticExit();

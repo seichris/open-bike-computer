@@ -1301,6 +1301,10 @@ enum OfflineMapPoiRequestPolicy {
             unavailable = "Update the Bike Computer firmware to add points of interest."
         } else if baseFormat != 3 && baseFormat != 4 {
             unavailable = "Points of interest require a street-label and 3D-building map."
+        } else if base.target?.terrainProfileVersion != nil {
+            // Target 5 carries the independent contour layer, not the target-4
+            // terrain experiment; never drop a requested layer silently.
+            unavailable = "Points of interest cannot be combined with terrain experiments."
         } else if capabilities == nil {
             unavailable = "This map service does not report point-of-interest map support."
         } else if let profile {
@@ -1877,7 +1881,7 @@ nonisolated struct MapTransferDeviceStatus: Decodable, Equatable {
 
 
 extension MapTransferDeviceStatus {
-    private enum CodingKeys: String, CodingKey { case selectionHealth, mapLibrary, activeRoot, mapOperationsV1, enabled, activeMapId, activeSessionId, activeManifestReceipt, activeMapDisplayName, activeMapBoundsE7, activation, protocols, streamFormatVersions, streamTrust, firmwareVersion, firmwareBuild, firmwareGitSha }
+    private enum CodingKeys: String, CodingKey { case selectionHealth, mapLibrary, activeRoot, mapOperationsV1, enabled, activeMapId, activeSessionId, activeManifestReceipt, activeMapDisplayName, activeMapBoundsE7, activeRendererFormat, labelProfileVersion, labelLanguages, fontAssetHealthy, poiProfileVersion, poiIndexProfileVersion, poiDataHealthy, poiIndexHealthy, contourLayerIncluded, activation, protocols, streamFormatVersions, streamTrust, firmwareVersion, firmwareBuild, firmwareGitSha }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         selectionHealth = try container.decodeIfPresent(MapSelectionHealth.self, forKey: .selectionHealth)
@@ -1891,6 +1895,17 @@ extension MapTransferDeviceStatus {
         activeManifestReceipt = try container.decodeIfPresent(String.self, forKey: .activeManifestReceipt)
         activeMapDisplayName = try container.decodeIfPresent(String.self, forKey: .activeMapDisplayName)
         activeMapBoundsE7 = try container.decodeIfPresent([Int].self, forKey: .activeMapBoundsE7)
+        // Renderer-layer fields are advisory: an unexpected shape from older
+        // firmware must not reject an otherwise valid authenticated status.
+        activeRendererFormat = try? container.decodeIfPresent(Int.self, forKey: .activeRendererFormat)
+        labelProfileVersion = try? container.decodeIfPresent(Int.self, forKey: .labelProfileVersion)
+        labelLanguages = try? container.decodeIfPresent([String].self, forKey: .labelLanguages)
+        fontAssetHealthy = try? container.decodeIfPresent(Bool.self, forKey: .fontAssetHealthy)
+        poiProfileVersion = try? container.decodeIfPresent(Int.self, forKey: .poiProfileVersion)
+        poiIndexProfileVersion = try? container.decodeIfPresent(Int.self, forKey: .poiIndexProfileVersion)
+        poiDataHealthy = try? container.decodeIfPresent(Bool.self, forKey: .poiDataHealthy)
+        poiIndexHealthy = try? container.decodeIfPresent(Bool.self, forKey: .poiIndexHealthy)
+        contourLayerIncluded = try? container.decodeIfPresent(Bool.self, forKey: .contourLayerIncluded)
         activation = try container.decodeIfPresent(Activation.self, forKey: .activation)
         protocols = try container.decodeIfPresent([Int].self, forKey: .protocols)
         streamFormatVersions = try container.decodeIfPresent([Int].self, forKey: .streamFormatVersions)

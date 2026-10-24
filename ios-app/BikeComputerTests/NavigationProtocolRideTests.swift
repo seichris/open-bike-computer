@@ -6430,7 +6430,7 @@ extension NavigationProtocolTests {
         assert(coordinator.lease == nil, "refused admission creates no lease")
     }
 
-    static func testDeviceTransferManagerWaitsForMapToken() async {
+    static func testDeviceTransferManagerWaitsForMapToken(startupDelayNanoseconds: UInt64 = 0) async {
         await assertDeviceTransferAdmissionRejectsUnownedSession()
         let suiteName = "transfer-fixture.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -6485,6 +6485,18 @@ extension NavigationProtocolTests {
                         "generic map entry requests mode and fresh HTTP credential atomically")
         }
 
+        if startupDelayNanoseconds > 0 {
+            // Real startup can publish mode before the endpoint and credential
+            // snapshot completes. Do not exit an accepted session at eight seconds.
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(#"{"configured":true,"enabled":true,"mode":"map"}"#.utf8)
+            )
+            try? await Task.sleep(nanoseconds: startupDelayNanoseconds)
+            assert(!sentPackets.contains(Data("DTRNexit".utf8)),
+                   "delayed map readiness must not trigger premature device cleanup")
+        }
+
         let mapStatus = """
         {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sdPresent":true,"mapFound":true,"mapBlocks":1,"activation":{"status":"idle"}}
         """
@@ -6515,6 +6527,121 @@ extension NavigationProtocolTests {
                         "map transfer handshake waits for the fresh token")
         } catch {
             assert(false, "map transfer handshake should succeed: \(error)")
+        }
+    }
+
+    @MainActor
+    static func testDeviceTransferManagerSurfacesFreshMapRejectionEarly() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        let deliver = { (json: String) in
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+            )
+        }
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in deliver(#"{"configured":true,"enabled":false,"mode":""}"#) }
+                }
+            }
+        ))
+        // The device keeps its last error for diagnostics across transfers.
+        let retained = #"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"sd_unavailable","message":"earlier","sequence":7}}"#
+        deliver(retained)
+
+        let started = ProcessInfo.processInfo.systemUptime
+        var outcome: Result<DeviceTransferSession, Error>?
+        let transferTask = Task { @MainActor in
+            do {
+                outcome = .success(try await manager.enterMapTransfer(bleManager: bleManager, status: { _ in }))
+            } catch {
+                outcome = .failure(error)
+            }
+        }
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|map".utf8)) {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        deliver(retained)
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        assert(outcome == nil, "a retained earlier error cannot end map startup")
+
+        deliver(#"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"sd_unavailable","message":"no card","sequence":8}}"#)
+        await transferTask.value
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        if case .failure(let error)? = outcome,
+           case .deviceSDCardUnavailable? = error as? OfflineMapPlatformError {} else {
+            assert(false, "a fresh entry rejection keeps its classified error: \(String(describing: outcome))")
+        }
+        assert(elapsed < MapTransferStartupPolicy.timeout / 2,
+               "a fresh entry rejection ends startup without waiting for the readiness deadline (\(elapsed) s)")
+    }
+
+    @MainActor
+    static func testDeviceTransferManagerKeepsMapStartupBeforeFirstLinkStatus() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        let deliver = { (json: String) in
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+            )
+        }
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+        // A pending install resumes as soon as a new link is navigation-ready,
+        // before the reply to the post-authentication status request arrives.
+        assertEqual(bleManager.deviceTransferStatusRevision, 0,
+                    "map entry starts before the link's first device status")
+
+        var outcome: Result<DeviceTransferSession, Error>?
+        let transferTask = Task { @MainActor in
+            do {
+                outcome = .success(try await manager.enterMapTransfer(bleManager: bleManager, status: { _ in }))
+            } catch {
+                outcome = .failure(error)
+            }
+        }
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|map".utf8)) {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let retainedError = #""lastError":{"code":"sd_unavailable","message":"earlier","sequence":7}"#
+        deliver(#"{"configured":true,"enabled":false,"mode":"","# + retainedError + "}")
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        assert(outcome == nil, "an error retained before the link's first status cannot end map startup")
+        assert(!sentPackets.contains(Data("DTRNexit".utf8)),
+               "an error retained before the link's first status does not exit the entry")
+
+        let tlsFingerprint = String(repeating: "c", count: 64)
+        deliver("""
+        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"https://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"dddddddddddddddddddddddddddddddd","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":4,"capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"legacyArchivePolicy":"disabled"},\(retainedError)}
+        """)
+        await transferTask.value
+        if case .success(let session)? = outcome {
+            assertEqual(session.sessionToken, "dddddddddddddddddddddddddddddddd",
+                        "the entry's own session wins over an error retained before the link's first status")
+            _ = await manager.exitMapTransfer(bleManager: bleManager)
+        } else {
+            assert(false, "map startup succeeds despite a retained earlier error: \(String(describing: outcome))")
         }
     }
 
@@ -9188,6 +9315,68 @@ extension NavigationProtocolTests {
 }
 
 extension NavigationProtocolTests {
+    static func testMapTransferStartupDeadline() async {
+        var now: TimeInterval = 100
+        var polls: [TimeInterval] = []
+        do {
+            let delayed: String? = try await MapTransferStartupPolicy.waitForSession(
+                clock: { now }, sleep: { now += Double($0) / 1_000_000_000 },
+                session: { now >= 112 ? "complete-secure-session" : nil },
+                requestStatus: { polls.append(now) }
+            )
+            assertEqual(delayed, "complete-secure-session", "readiness beyond eight seconds is accepted")
+            assertEqual(now, 112, "startup completes immediately when the full session arrives")
+            assertEqual(polls, [102, 104, 106, 108, 110], "status polling is bounded and paced")
+
+            now = 0; polls = []
+            var observations = 0
+            let absent: String? = try await MapTransferStartupPolicy.waitForSession(
+                clock: { now }, sleep: { now += Double($0) / 1_000_000_000 },
+                session: { observations += 1; return nil }, requestStatus: { polls.append(now) }
+            )
+            assert(absent == nil && now == 30 && observations <= 121,
+                   "incomplete/progress-only snapshots cannot renew the absolute startup deadline")
+            assertEqual(polls.count, 14, "an absent device cannot trigger an unbounded polling loop")
+
+            now = 0
+            let atDeadline: String? = try await MapTransferStartupPolicy.waitForSession(
+                clock: { now }, sleep: { now += Double($0) / 1_000_000_000 },
+                session: { now == 30 ? "ready" : nil }, requestStatus: {}
+            )
+            assertEqual(atDeadline, "ready", "the final deadline observation is not skipped")
+
+            now = 0
+            let late: String? = try await MapTransferStartupPolicy.waitForSession(
+                clock: { now }, sleep: { _ in now = 31 },
+                session: { now > 0 ? "too-late" : nil }, requestStatus: {}
+            )
+            assert(late == nil, "scheduler overrun must not accept a session beyond the deadline")
+
+            var checks = 0
+            do {
+                let _: String? = try await MapTransferStartupPolicy.waitForSession(
+                    clock: { 0 }, sleep: { _ in throw CancellationError() },
+                    session: { checks += 1; return nil }, requestStatus: {}
+                )
+                assert(false, "startup cancellation must propagate")
+            } catch is CancellationError {
+                assertEqual(checks, 1, "cancellation must not request a successor session")
+            }
+            for failure in [DeviceTransferSecurityError.secureTransferRequired,
+                            .signedMapStreamRequired] {
+                do {
+                    let _: String? = try await MapTransferStartupPolicy.waitForSession(
+                        clock: { 0 }, sleep: { _ in assert(false, "security rejection must not retry") },
+                        session: { throw failure }, requestStatus: {}
+                    )
+                    assert(false, "security failures remain terminal")
+                } catch let error as DeviceTransferSecurityError {
+                    assertEqual(error, failure, "startup preserves the original security rejection")
+                }
+            }
+        } catch { assert(false, "map startup simulation failed: \(error)") }
+    }
+
     static func testDeviceTransferReadinessWindow() async {
         let offline = DeviceTransferServerProbeResult(
             outcome: .transportError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet),

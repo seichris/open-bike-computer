@@ -1,5 +1,67 @@
 # PR #378 review fixes
 
+## October 25 verified-fix publication and remaining gates
+
+Mode: publish; standard profile; sequential-local; zero subagents; P0/P1/P2
+gate. The user authorized committing/pushing the already verified fixes,
+refreshing plan/PR text, checking CI, then flashing the selected isolated POI
+profile to the identified 175. This does not authorize a PR merge, production
+rollout, unrelated fixes, manual 2.06 CI or an automatic review-budget reset.
+
+Source: main `cd7ad00bb6c4f9566195cd44ab4d6a675518b94d`, published PR head
+before this batch `69008639a56264e16dc8d41b39015848655904a1`, reviewed local
+source through `645681ea` and separate cleanup `4f9c7b1d`. The publication
+reconstruction's full source tree matched verified tree
+`165f34d6a34e042b7b87e32d088666ad909b6735` before these documentation edits.
+Main's current policy and verification-runner changes were kept unchanged.
+An inherited blank EOF line in main's REVIEW.md is not a runtime change and
+is not repaired here; the PR delta against current main passes diff checking.
+
+The latest whole-PR review used all three passes. Its final pass exposed R71;
+the user explicitly authorized its narrow repair plus one independent
+confirming verification. That confirmation passed. No additional broad audit
+or unlimited repair cycle is implied by this publication. Older iteration
+records below are historical, not new budget grants.
+
+| ID / class | Current disposition and evidence |
+| --- | --- |
+| R71 / COD-JOURNAL-VARIANT-AUTHORITY, P1 | Fixed+verified locally: malformed primary plus foreign signed backup preserves both journals and yields owner-required recovery, with POI runtime off/on. Three canonical recovery/stream/durable checks passed at clean local 645681ea; 2,420 modeled schedules and 2,364 recovery cuts had no previous-map loss/invalid/unavailable outcomes. |
+| INT-1, integration test | Fixed+verified: the source-wiring assertion now checks guarded device capture, helper invocation and all fresh identity/epoch/readiness/revision/mode/token/generation fields. Complete canonical manifest check: 228 tests passed. Runtime code was not weakened. |
+| First-pass and radio/cleanup repairs | Included from the independently checked local batches: accepted-install confirmation, HTTP layer state, target negotiation/admission, metadata allocation/readback/recovery, startup rejection, bounded finalizer error reports and cross-manager/device cleanup fencing. Prior clean local reports passed 15 iOS/41 firmware checks, 58 radio checks, and 15 cleanup checks; those retained reports are not new published-head CI. |
+| R53/R56, P2 | Active: iOS/backend/catalog target-5 contour companion contract needs coordinated work. No deployment is included. |
+| R54, P2 | Active: POI regeneration action is missing from the configurable-screen editor. |
+| R55, P2 | Active: target-5 reuse misses regenerate the map; cost/efficiency rather than incorrect data. |
+| R65/R66 and R67-R70 | Pre-existing main concerns/separate follow-ups: ATT fairness, status/buffer pressure, retry/reconnect and UI staleness. No claim that this batch solves them or proves the observed field root cause. |
+| H-R71b | Hypothesis only: foreign backup beside a valid own v2 primary in other writer/cleanup paths requires a multi-fault reproduction; not invalidated or described as fixed. |
+| Map+Navigation / physical acceptance | Active unverified behavior: black/entry failure remains undiagnosed. New-head transfer/cleanup, GPS/reconnect, Nearby and cold/both-board acceptance are separate physical gates. |
+
+The narrow R71/integration scope has two fixed+verified items and zero active
+items; the full feature still has the active items above. No finding is
+silently user-deferred. State: **not merge-ready / physical and feature gates
+open**. Publishing the verified repair batch is not whole-PR approval.
+
+Uncommitted integrated local validation: 58 broad checks passed, the wiring
+failure was repaired and its full check passed, OSM passed all 183 tests in
+an isolated container despite broken host GDAL/Python dependencies, backend
+ran 1,053 tests with three skips, and stable-source iOS/Watch simulator plus
+Debug/Release container checks passed. These are executed local checks with
+the documented environment limitations, not CI reuse claims.
+
+Dirty 175 build measurements: production 3,006,704 bytes, isolated POI
+qualification 3,068,736 bytes. Slots remain 3,145,728 bytes each and reserve
+65,536 bytes, leaving 73,488 / 11,456 bytes beyond the reserve respectively.
+Clean published-head size/provenance/CI and exact device delivery remain new
+gates; earlier dirty artifacts have uploadEligible=0 and must never be flashed.
+
+Risk: **high**, because activation recovery and authenticated transfer
+ownership affect installed map state. Preserve retained incident bytes and
+working maps. Before a reset/flash, establish that no transfer or unpreserved
+recovery evidence is active. Any rollback needs an operator-approved compatible
+firmware/app/map snapshot after reconciling pending operations; do not erase
+journals, overwrite unknown authority or restore an older image blindly.
+Production remains unchanged and POIs disabled there. The PR description owns
+the exact published head, CI links and subsequent delivery results.
+
 ## October 23 physical Nearby test: phone GPS gating
 
 R34 (P1): the connected 175 remained at `Waiting for GPS` even while Bicino

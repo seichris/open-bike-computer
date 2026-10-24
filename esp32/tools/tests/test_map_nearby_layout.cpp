@@ -1,5 +1,6 @@
 #include "../../lib/maps/src/mapNearbyLayout.hpp"
 #include "../../lib/maps/src/mapNearbyViewport.hpp"
+#include "../../lib/maps/src/mapNearbyIcons.hpp"
 
 #include <array>
 #include <cassert>
@@ -9,6 +10,24 @@
 using map_nearby_layout::Input;
 
 int main() {
+  std::array<uint16_t, 16 * 16> color{};
+  std::array<uint8_t, 16 * 16> alpha{};
+  std::array<unsigned, 5> glyphPixels{};
+  for (uint8_t category = 1; category <= 5; ++category) {
+    map_nearby_icons::draw({color.data(), alpha.data(), 16, 16, 16, 16}, category);
+    unsigned opaque = 0;
+    for (size_t pixel = 0; pixel < color.size(); ++pixel) {
+      assert(alpha[pixel] == 0 || alpha[pixel] == 255);
+      if (alpha[pixel]) ++opaque;
+      if (color[pixel] == 0xFFFF) ++glyphPixels[category - 1];
+    }
+    assert(glyphPixels[category - 1] > 20);
+    assert(opaque > glyphPixels[category - 1] && opaque < color.size());
+    for (uint8_t previous = 1; previous < category; ++previous)
+      assert(map_nearby_icons::kGlyphs[previous - 1] != map_nearby_icons::kGlyphs[category - 1]);
+  }
+  map_nearby_icons::draw({color.data(), alpha.data(), 16, 16, 16, 16}, 0);
+  for (auto value : alpha) assert(value == 0);
   struct Center { int32_t x, y; };
   for (bool originalFollow : {false, true}) {
     map_nearby_viewport::Bookmark bookmark;
@@ -81,7 +100,7 @@ int main() {
 
   std::array<bool, map_nearby_layout::kMaximumResults> previouslyOnMap{};
   previouslyOnMap[0] = true;
-  Input atBoundary{19, 233, 0, 0, true, 1, 100};
+  Input atBoundary{25, 233, 0, 0, true, 1, 100};
   assert(map_nearby_layout::arrange(
              &atBoundary, 1, 466, 466, false, 0, 0, previouslyOnMap)
              .onMap[0]);

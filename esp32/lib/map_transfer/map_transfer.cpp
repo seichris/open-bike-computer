@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <limits>
 #include <memory>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -46,6 +47,9 @@ constexpr const char *kVectMapPrefix = "VECTMAP/";
 constexpr const char *kActiveMapFile = "/VECTMAP/active-map.json";
 constexpr const char *kActivationTransactionFile =
     "/VECTMAP/.activation-transaction.json";
+constexpr size_t kActivationTransactionBytes = 4096;
+// A contour-enabled target 5 map replacing another exceeds 2 KiB.
+constexpr size_t kActiveMapBytes = 4096;
 constexpr const char *kPendingArchiveActivationFile =
     "/VECTMAP/.pending-archive-activation";
 constexpr const char *kPendingStreamActivationFile =
@@ -95,14 +99,16 @@ static uint32_t readLe32(const uint8_t *data) {
          (static_cast<uint32_t>(data[3]) << 24);
 }
 
-static std::string joinPath(const std::string &a, const std::string &b) {
+static std::string joinPath(const std::string &a, std::string_view b) {
   if (a.empty())
-    return b;
+    return std::string(b);
   if (b.empty())
     return a;
-  if (a.back() == '/')
-    return a + (b.front() == '/' ? b.substr(1) : b);
-  return a + "/" + (b.front() == '/' ? b.substr(1) : b);
+  std::string result=a;
+  if (result.back()!='/') result.push_back('/');
+  if (b.front()=='/') b.remove_prefix(1);
+  result.append(b.data(),b.size());
+  return result;
 }
 
 static std::string dirnameOf(const std::string &path) {
@@ -132,18 +138,32 @@ static std::string jsonEscape(const std::string &value) {
   return out;
 }
 
-static bool startsWith(const std::string &value, const std::string &prefix) {
+static bool startsWith(const std::string &value, std::string_view prefix) {
   return value.size() >= prefix.size() &&
-         value.compare(0, prefix.size(), prefix) == 0;
+         value.compare(0, prefix.size(), prefix.data(),prefix.size()) == 0;
+}
+
+static size_t jsonKeyPosition(const std::string &json,std::string_view key) {
+  if (key.empty()) return json.find("\"\"");
+  size_t position=json.find(key.data(),0,key.size());
+  while (position!=std::string::npos) {
+    size_t colon=position+key.size()+1;
+    while (colon<json.size() && std::isspace(static_cast<unsigned char>(json[colon]))) ++colon;
+    // Only a quoted name followed by a colon is a key. A string value that
+    // equals one, such as a user's map display name, is skipped.
+    if (position!=0 && json[position-1]=='"' && position+key.size()<json.size() &&
+        json[position+key.size()]=='"' && colon<json.size() && json[colon]==':') return position-1;
+    position=json.find(key.data(),position+1,key.size());
+  }
+  return std::string::npos;
 }
 
 static std::string jsonStringValue(const std::string &json,
-                                   const std::string &key) {
-  const std::string needle = "\"" + key + "\"";
-  size_t pos = json.find(needle);
+                                   std::string_view key) {
+  size_t pos = jsonKeyPosition(json,key);
   if (pos == std::string::npos)
     return "";
-  pos = json.find(':', pos + needle.size());
+  pos = json.find(':', pos + key.size()+2);
   if (pos == std::string::npos)
     return "";
   pos = json.find('"', pos + 1);
@@ -418,12 +438,11 @@ static bool jsonPresentationBoundsE7(const std::string &json,
   return boundsE7Valid(bounds);
 }
 
-static uint64_t jsonUintValue(const std::string &json, const std::string &key) {
-  const std::string needle = "\"" + key + "\"";
-  size_t pos = json.find(needle);
+static uint64_t jsonUintValue(const std::string &json, std::string_view key) {
+  size_t pos = jsonKeyPosition(json,key);
   if (pos == std::string::npos)
     return 0;
-  pos = json.find(':', pos + needle.size());
+  pos = json.find(':', pos + key.size()+2);
   if (pos == std::string::npos)
     return 0;
   pos++;
@@ -441,11 +460,10 @@ static uint64_t jsonUintValue(const std::string &json, const std::string &key) {
 
 static std::string jsonObjectValue(const std::string &json,
                                    const std::string &key) {
-  const std::string needle = "\"" + key + "\"";
-  size_t cursor = json.find(needle);
+  size_t cursor = jsonKeyPosition(json, key);
   if (cursor == std::string::npos)
     return {};
-  cursor = json.find('{', cursor + needle.size());
+  cursor = json.find('{', cursor + key.size() + 2);
   if (cursor == std::string::npos)
     return {};
   const size_t start = cursor;
@@ -482,11 +500,10 @@ jsonStringArrayValue(const std::string &json, const std::string &key,
   if (valid != nullptr)
     *valid = false;
   std::vector<std::string> values;
-  const std::string needle = "\"" + key + "\"";
-  size_t cursor = json.find(needle);
+  size_t cursor = jsonKeyPosition(json, key);
   if (cursor == std::string::npos)
     return values;
-  cursor = json.find('[', cursor + needle.size());
+  cursor = json.find('[', cursor + key.size() + 2);
   if (cursor == std::string::npos)
     return values;
   cursor++;
@@ -1403,7 +1420,7 @@ MapTransferInstaller::validateManifestText(const std::string &manifestText,
               manifest.nearbyCoverageBlocks, {x, y}))
         return fail("manifest_poi_coverage", "block outside coverage");
     }
-  } else if (manifestText.find("\"nearbyCoverage\"") != std::string::npos) {
+  } else if (jsonKeyPosition(manifestText, "nearbyCoverage") != std::string::npos) {
     return fail("manifest_poi_coverage", "coverage needs target 5");
   }
   if (((manifest.formatVersion == 2 || manifest.formatVersion == 3 ||
@@ -2294,6 +2311,7 @@ InstallStatus MapTransferInstaller::finalizeOperation(
   struct Workspace : ActivationOperationWorkspace {
     ReadyStreamMap ready;
     ActiveMapSelection selected;
+    std::array<std::string,3> damagedPaths, damagedBytes;
     using ActivationOperationWorkspace::ActivationOperationWorkspace;
   };
   const auto workspace = makeActivationWorkspace<Workspace>(storageRoot_, operationDeviceID_);
@@ -2304,22 +2322,57 @@ InstallStatus MapTransferInstaller::finalizeOperation(
     if (candidate.identity.operation==operationID && candidate.identity.session==sessionId) record=&candidate;
   if (!record || (record->phase!=operation::Phase::Installed && record->phase!=operation::Phase::Failed))
     return fail("operation_not_terminal","renderer result is not persisted");
+  auto &ready = workspace->ready;
+  auto &selected = workspace->selected;
+  if (record->phase==operation::Phase::Installed &&
+      (!readReadyStreamMap(sessionId,ready).ok || ready.operationID!=operationID ||
+       ready.mapId!=record->identity.map || ready.manifestReceipt!=record->identity.manifest ||
+       ready.signedManifestReceipt!=record->identity.signedManifest ||
+       !readActiveMap(selected).ok || selected.root!=ready.root || selected.sessionId!=sessionId ||
+       selected.mapId!=ready.mapId || selected.manifestReceipt!=ready.manifestReceipt ||
+       selected.signedManifestReceipt!=ready.signedManifestReceipt))
+    return fail("operation_cleanup_selection","terminal selection does not match persisted receipt");
   const auto transactionPath=joinPath(storageRoot_,kActivationTransactionFile);
-  for (const auto &path : {transactionPath,transactionPath+".bak"}) {
+  size_t damaged=0;
+  for (const auto &path : {transactionPath,transactionPath+".bak",transactionPath+".tmp"}) {
     std::string transaction;
     if (!fileExists(path)) continue;
-    if (!readTextFile(path,transaction,2048) || jsonStringValue(transaction,"sessionId")!=sessionId ||
-        jsonStringValue(transaction,"operationID")!=operationID)
+    if (!readTextFile(path,transaction,kActivationTransactionBytes))
+      return fail("operation_cleanup_conflict","activation journal is unreadable");
+    const auto owner=jsonStringValue(transaction,"operationID");
+    const auto session=jsonStringValue(transaction,"sessionId");
+    const auto protocol=jsonUintValue(transaction,"protocolVersion");
+    const auto contradicts=[&](const char *key,const std::string &expected) {
+      const auto value=jsonStringValue(transaction,key);
+      return !value.empty() && value!=expected;
+    };
+    if ((!owner.empty() && owner!=operationID) || (!session.empty() && session!=sessionId) ||
+        (protocol!=0 && protocol!=2) || contradicts("mapId",record->identity.map) ||
+        contradicts("manifestReceipt",record->identity.manifest) ||
+        contradicts("signedManifestReceipt",record->identity.signedManifest) ||
+        contradicts("root",std::string("/VECTMAP/.maps/")+sessionId))
       return fail("operation_cleanup_conflict","another transaction owns recovery evidence");
+    if (owner==operationID && session==sessionId && protocol==2 &&
+        transaction.find('\0')==std::string::npos) continue;
+    workspace->damagedPaths[damaged]=path;
+    workspace->damagedBytes[damaged++]=std::move(transaction);
+  }
+  // Inventory primary, backup and temporary before mutating any. Never infer
+  // Installed from a pointer, a damaged journal or a scan of ready roots.
+  if (damaged!=0) {
+    // Retirement rests on this operation's own verified payload. A legacy
+    // archive predecessor has no signed receipt and is not touched here.
+    selected.previousRoot.clear();
+    if (record->phase!=operation::Phase::Installed ||
+        std::any_of(store.records().begin(),store.records().end(),[&](const operation::Record &other) {
+          return other.phase==operation::Phase::Accepted && other.identity.operation!=operationID;
+        }) || !anchorSelectionVerified(selected))
+      return fail("operation_cleanup_conflict","corrupt activation journal requires verified recovery");
+    for (size_t index=0;index<damaged;++index)
+      if (!quarantineTransaction(workspace->damagedPaths[index],workspace->damagedBytes[index],operationID))
+        return fail("operation_cleanup_conflict","activation evidence quarantine must retry");
   }
   if (record->phase==operation::Phase::Installed) {
-    auto &ready = workspace->ready;
-    auto &selected = workspace->selected;
-    if (!readReadyStreamMap(sessionId,ready).ok || ready.operationID!=operationID ||
-        ready.manifestReceipt!=record->identity.manifest || ready.signedManifestReceipt!=record->identity.signedManifest ||
-        !readActiveMap(selected).ok || selected.root!=ready.root || selected.sessionId!=sessionId ||
-        selected.mapId!=record->identity.map || selected.manifestReceipt!=ready.manifestReceipt || selected.signedManifestReceipt!=ready.signedManifestReceipt)
-      return fail("operation_cleanup_selection","terminal selection does not match persisted receipt");
     const auto root=joinPath(storageRoot_,ready.root);
     if (!markStreamActivationConsumed(ready) || !clearPendingStreamActivation(sessionId) ||
         !removeTree(joinPath(root,kStreamCheckpointFile)) || !removeTree(joinPath(root,kStreamInstallingFile)) ||
@@ -2329,7 +2382,7 @@ InstallStatus MapTransferInstaller::finalizeOperation(
   } else {
     std::string transaction;
     auto &selected = workspace->selected;
-    const bool retained=readTextFile(transactionPath,transaction,2048) &&
+    const bool retained=readTextFile(transactionPath,transaction,kActivationTransactionBytes) &&
         jsonUintValue(transaction,"retainedSelection")==1 && readActiveMap(selected).ok &&
         selected.sessionId==sessionId && selected.manifestReceipt==record->identity.manifest &&
         selected.signedManifestReceipt==record->identity.signedManifest;
@@ -2351,6 +2404,60 @@ InstallStatus MapTransferInstaller::finalizeOperation(
   if (!removeTree(transactionPath+".tmp") || !removeTree(transactionPath+".bak") || !removeTree(transactionPath))
     return fail("operation_cleanup","terminal journal cleanup must retry");
   return {true,"operation_terminal_cleaned",""};
+}
+
+bool MapTransferInstaller::quarantineTransaction(const std::string &path,
+    const std::string &bytes, const std::string &operationID) const {
+  const auto destination=path+".corrupt-"+operationID;
+  std::string preserved;
+  if (fileExists(destination)) {
+    // A previous interrupted recovery may already own this bounded slot.
+    return readTextFile(destination,preserved,kActivationTransactionBytes) && preserved==bytes;
+  }
+  if (fileExists(destination+".bak") &&
+      (!readTextFile(destination+".bak",preserved,kActivationTransactionBytes) || preserved!=bytes)) return false;
+  const auto directory=joinPath(storageRoot_,"/VECTMAP");
+  std::unique_ptr<DIR,DirectoryCloser> entries(::opendir(directory.c_str()));
+  if (!entries) return false;
+  size_t count=0;
+  while (const auto *entry=::readdir(entries.get())) {
+    const std::string name=entry->d_name;
+    if (name==destination.substr(directory.size()+1)+".tmp" ||
+        name==destination.substr(directory.size()+1)+".bak") continue;
+    if (startsWith(name,".activation-transaction.json") && name.find(".corrupt-")!=std::string::npos)
+      ++count;
+  }
+  entries.reset();
+  // Preserve at most four 4-KiB journals; exhaustion requires explicit archive,
+  // never silent deletion or replacement of earlier failure evidence.
+  // Copy, sync and verify before retiring the original. A failed readback or
+  // interruption must leave a discoverable obligation at its original path.
+  if (count>=4 || !writeTextFileAtomic(destination,bytes)) return false;
+  return readTextFile(destination,preserved,kActivationTransactionBytes) && preserved==bytes;
+}
+
+InstallStatus MapTransferInstaller::recoverTerminalSelection() const {
+  struct Workspace { ActiveMapSelection selected; ReadyStreamMap ready; };
+  const auto workspace=makeActivationWorkspace<Workspace>();
+  auto &selected=workspace->selected;
+  auto &ready=workspace->ready;
+  const bool ledgerPresent=fileExists(joinPath(storageRoot_,"/VECTMAP/.operations-v1-0")) ||
+      fileExists(joinPath(storageRoot_,"/VECTMAP/.operations-v1-1"));
+  if (!readActiveMap(selected).ok && !ledgerPresent) {
+    // Availability-only recovery of an exact verified predecessor. This never
+    // creates an operation receipt or authorizes clearing durable evidence.
+    const auto anchor=recoverSelectionAnchor();
+    if (!anchor.ok || !readActiveMap(selected).ok)
+      return fail("operation_recovery_unresolved","no verified recovery selection");
+  }
+  if (!readReadyStreamMap(selected.sessionId,ready).ok)
+    return fail("operation_recovery_unresolved","ready identity requires reconciliation");
+  if (ready.operationID.empty())
+    return ledgerPresent ? fail("operation_recovery_unresolved","durable operation evidence requires reconciliation")
+                         : InstallStatus{true,"operation_recovery_none",""};
+  // finalizeOperation restores and validates the device ledger, including
+  // acknowledged tombstones. Accepted/foreign/missing results stay unresolved.
+  return finalizeOperation(selected.sessionId,ready.operationID);
 }
 
 bool MapTransferInstaller::clearPendingStreamActivation(
@@ -2979,24 +3086,83 @@ InstallStatus MapTransferInstaller::recoverInterruptedActivation() const {
   const std::string transactionPath =
       joinPath(storageRoot_, kActivationTransactionFile);
   std::string transaction;
-  if (!readTextFile(transactionPath, transaction, 2048)) {
+  if (!readTextFile(transactionPath, transaction, kActivationTransactionBytes)) {
     const std::string backupPath = transactionPath + ".bak";
+    if (fileExists(transactionPath))
+      return fail("transaction_recovery","activation journal is unreadable");
     if (!fileExists(backupPath)) {
+      // A temporary alone was never published: activation writes its journal
+      // before any other mutation, and the pending intent resumes the work.
       removeTree(transactionPath + ".tmp");
       return recoverActiveSelection();
     }
-    if (renameStoragePath(backupPath.c_str(), transactionPath.c_str()) != 0 ||
-        !readTextFile(transactionPath, transaction, 2048)) {
+    // Inspect the backup in place. Never replace unreadable/foreign evidence
+    // merely to choose a parser; the actual recovery inventories all variants.
+    if (!readTextFile(backupPath, transaction, kActivationTransactionBytes)) {
       return fail("transaction_recovery",
                   "could not recover map activation journal");
     }
   }
 
-  if (jsonUintValue(transaction, "protocolVersion") == 2)
-    return recoverStreamActivationTransaction(transaction);
+  return dispatchActivationRecovery(transaction);
+}
+
+InstallStatus MapTransferInstaller::dispatchActivationRecovery(const std::string &transaction) const {
+  if (jsonUintValue(transaction, "protocolVersion") == 2) {
+    const auto recovered=recoverStreamActivationTransaction(transaction);
+    if (recovered.code!="stream_transaction_invalid") return recovered;
+    const auto terminal=recoverTerminalSelection();
+    return terminal.code=="operation_recovery_none" ? recovered : terminal;
+  }
+
+  if (jsonUintValue(transaction,"protocolVersion")>2)
+    return fail("transaction_recovery","activation journal requires newer firmware");
+  const bool ledger=fileExists(joinPath(storageRoot_,"/VECTMAP/.operations-v1-0")) ||
+      fileExists(joinPath(storageRoot_,"/VECTMAP/.operations-v1-1"));
+  // Only signed or durable evidence needs an owner. Other unreadable bytes keep
+  // the legacy recovery, which verifies or rolls back the selection and clears
+  // the journal instead of blocking every later activation. That recovery
+  // deletes every journal version, so a damaged primary must not hide
+  // evidence that only its backup or temporary still holds.
+  if (ledger || journalNeedsOwner(transaction) || journalVersionsNeedOwner()) {
+    const auto terminal=recoverTerminalSelection();
+    if (terminal.code!="operation_recovery_none") return terminal;
+    // A verified predecessor restores availability, not ownership of this
+    // unknown journal. Preserve it rather than routing torn v2 bytes to legacy.
+    return fail("transaction_recovery","activation journal has no verified recovery authority");
+  }
 
   // Dispatch before reserving any legacy recovery locals on the v2 path.
   return recoverLegacyActivationTransaction(transaction);
+}
+
+bool MapTransferInstaller::journalNeedsOwner(const std::string &transaction) const {
+  const auto root=jsonStringValue(transaction,"root");
+  return jsonUintValue(transaction,"protocolVersion")>=2 ||
+      !jsonStringValue(transaction,"manifestReceipt").empty() ||
+      !jsonStringValue(transaction,"signedManifestReceipt").empty() ||
+      !jsonStringValue(transaction,"operationID").empty() ||
+      (safeActiveRoot(root) &&
+       (fileExists(joinPath(joinPath(storageRoot_,root),".operation-ready")) ||
+        fileExists(joinPath(joinPath(storageRoot_,root),".operation-prepared"))));
+}
+
+bool MapTransferInstaller::journalVersionsNeedOwner() const {
+  const auto path=joinPath(storageRoot_,kActivationTransactionFile);
+  const struct { std::string path; bool published; } versions[]={
+      {path,true},{path+".bak",true},{path+".tmp",false}};
+  std::string bytes;
+  for (const auto &version:versions) {
+    if (!fileExists(version.path)) continue;
+    // A published version that cannot be read is ambiguous evidence. A
+    // temporary was never published and carries no committed state.
+    if (!readTextFile(version.path,bytes,kActivationTransactionBytes)) {
+      if (version.published) return true;
+    } else if (journalNeedsOwner(bytes)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 InstallStatus MapTransferInstaller::recoverLegacyActivationTransaction(
@@ -3191,7 +3357,7 @@ MapTransferInstaller::rollbackActiveMap(const std::string &sessionId) const {
     return fail("active_rollback_conflict",
                 "active map no longer matches renderer rollback session");
   std::string operationTransaction;
-  if (readTextFile(joinPath(storageRoot_,kActivationTransactionFile),operationTransaction,2048) &&
+  if (readTextFile(joinPath(storageRoot_,kActivationTransactionFile),operationTransaction,kActivationTransactionBytes) &&
       jsonUintValue(operationTransaction,"retainedSelection")==1 &&
       jsonStringValue(operationTransaction,"sessionId")==sessionId &&
       jsonStringValue(operationTransaction,"root")==selected.root &&
@@ -3380,7 +3546,7 @@ MapTransferInstaller::readActiveMap(ActiveMapSelection &selection) const {
   selection = ActiveMapSelection();
   const std::string activePath = joinPath(storageRoot_, kActiveMapFile);
   std::string text;
-  if (!readTextFile(activePath, text, 2048))
+  if (!readTextFile(activePath, text, kActiveMapBytes))
     return fail("active_missing", "active map metadata is missing");
   return parseActiveMapText(text, selection);
 }
@@ -3888,7 +4054,7 @@ bool MapTransferInstaller::pruneObsoleteInstalledMaps(
   std::string transactionPreviousRoot;
   std::string transaction;
   if (readTextFile(joinPath(storageRoot_, kActivationTransactionFile),
-                   transaction, 2048)) {
+                   transaction, kActivationTransactionBytes)) {
     const std::string candidate = jsonStringValue(transaction, "root");
     const std::string previousCandidate =
         jsonStringValue(transaction, "previousRoot");
@@ -4651,7 +4817,10 @@ bool MapTransferInstaller::persistPredecessorAnchor(const ActiveMapSelection &in
   // Unsigned legacy /VECTMAP state is not invented into a verified anchor.
   if (!anchorSelectionVerified(prior)) return true;
   std::string selection;
-  if (!readTextFile(joinPath(storageRoot_,kActiveMapFile),selection,2048)) return false;
+  if (!readTextFile(joinPath(storageRoot_,kActiveMapFile),selection,kActiveMapBytes)) return false;
+  // Anchors keep the size older firmware reads, or a downgrade would fail
+  // every activation. A larger predecessor keeps journal and backup recovery.
+  if (selection.size()>selection_anchor::kMaximumSelectionBytes) return true;
   if (highest!=0 && latest==selection) return true;
   if (highest==std::numeric_limits<uint64_t>::max()) return false;
   auto &ready = workspace->ready;
@@ -4704,7 +4873,7 @@ InstallStatus MapTransferInstaller::recoverSelectionAnchor() const {
   if(!writeTextFileAtomic(activePath,selectedText))
     return fail("selection_anchor_write","predecessor selection recovery must retry");
   std::string readback;
-  if(!readTextFile(activePath,readback,2048) || readback!=selectedText)
+  if(!readTextFile(activePath,readback,kActiveMapBytes) || readback!=selectedText)
     return fail("selection_anchor_readback","predecessor selection readback must retry");
   // This is availability recovery only. It issues no commit grant, renderer
   // acknowledgement, terminal receipt, or new-operation installed result.
@@ -4772,7 +4941,7 @@ bool MapTransferInstaller::writeCanonicalActiveMap(
             selection.signedManifestReceipt + "\"";
   }
   json += "}\n";
-  if (json.size() > 2048 ||
+  if (json.size() > kActiveMapBytes ||
       !writeTextFileAtomic(joinPath(storageRoot_, kActiveMapFile), json))
     return false;
   ActiveMapSelection readback;
@@ -4900,10 +5069,19 @@ bool MapTransferInstaller::writeTextFile(const std::string &path,
   const bool flushed = std::fflush(output.get()) == 0;
   storageMutationBoundary("flush", path, true);
   if (!written || !flushed) return false;
+  storageMutationBoundary("fsync", path, false);
+  const bool synced = ::fsync(::fileno(output.get())) == 0;
+  storageMutationBoundary("fsync", path, true);
+  if (!synced) return false;
   storageMutationBoundary("close", path, false);
   const bool closed = std::fclose(output.release()) == 0;
   storageMutationBoundary("close", path, true);
-  return closed;
+  // SDK success alone is not enough to publish boot-eligible metadata. Detect
+  // silent/partial writes (including a zeroed stdio-sized prefix) while the
+  // previous primary/backup is still intact. This is not SD power-loss proof.
+  std::string digest;
+  return closed && fileSha256Hex(path,digest) &&
+      digest==sha256Hex(reinterpret_cast<const uint8_t *>(text.data()),text.size());
 }
 
 bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
@@ -4911,31 +5089,48 @@ bool MapTransferInstaller::writeTextFileAtomic(const std::string &path,
   const std::string temporaryPath = path + ".tmp";
   const std::string backupPath = path + ".bak";
   removeTree(temporaryPath);
-  if (!writeTextFile(temporaryPath, text))
+  if (!writeTextFile(temporaryPath, text)) {
+    // Unpublished bytes never describe committed state; leave none behind.
+    removeTree(temporaryPath);
     return false;
-
-  // POSIX filesystems replace the destination atomically. Some embedded FAT
-  // implementations reject replacement, so retain a recoverable backup while
-  // using their two-rename fallback.
-  if (renameStoragePath(temporaryPath.c_str(), path.c_str()) == 0) {
-    removeTree(backupPath);
-    return true;
   }
 
-  removeTree(backupPath);
+  // Keep the old primary until the temporary bytes are synced and verified,
+  // then keep its backup until publication is read back. This also works on
+  // FAT implementations that cannot replace an existing destination.
+  const auto expected=sha256Hex(reinterpret_cast<const uint8_t *>(text.data()),text.size());
   const bool hadPrevious = fileExists(path);
-  if (hadPrevious && renameStoragePath(path.c_str(), backupPath.c_str()) != 0) {
+  bool preserveBackup=fileExists(backupPath);
+  std::string digest;
+  if (hadPrevious && preserveBackup && (!fileSha256Hex(backupPath,digest) || digest!=expected)) {
+    // Both survive only after an interrupted publication, whose primary is the
+    // newer version. Drop the stale backup; refusing here would fail every
+    // later write of this file.
+    if (!removeTree(backupPath)) {
+      removeTree(temporaryPath);
+      return false;
+    }
+    preserveBackup=false;
+  }
+  if (hadPrevious && (preserveBackup ? !removeTree(path) :
+      renameStoragePath(path.c_str(), backupPath.c_str()) != 0)) {
     removeTree(temporaryPath);
     return false;
   }
   if (renameStoragePath(temporaryPath.c_str(), path.c_str()) != 0) {
-    if (hadPrevious)
+    if (hadPrevious && !preserveBackup)
       renameStoragePath(backupPath.c_str(), path.c_str());
     removeTree(temporaryPath);
     return false;
   }
-  removeTree(backupPath);
-  return true;
+  if (!fileSha256Hex(path,digest) || digest!=expected) {
+    // Put back the version this call replaced rather than leaving a corrupt
+    // publication beside it. Without one, the file returns to absent.
+    if (removeTree(path) && hadPrevious && fileExists(backupPath))
+      renameStoragePath(backupPath.c_str(), path.c_str());
+    return false;
+  }
+  return removeTree(backupPath);
 }
 
 bool MapTransferInstaller::readTextFile(const std::string &path,
@@ -4947,7 +5142,7 @@ bool MapTransferInstaller::readTextFile(const std::string &path,
   MapReadFile input(path);
   if (!input)
     return false;
-  return input.readAll(text, maxBytes);
+  return input.readAll(text, static_cast<size_t>(size));
 }
 
 } // namespace map_transfer

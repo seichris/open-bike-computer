@@ -325,6 +325,12 @@ private:
   __attribute__((noinline)) InstallStatus resolvePendingStreamActivation(
       std::string &sessionId) const;
   __attribute__((noinline)) InstallStatus recoverActiveSelection() const;
+  __attribute__((noinline)) InstallStatus recoverTerminalSelection() const;
+  __attribute__((noinline)) InstallStatus dispatchActivationRecovery(const std::string &transaction) const;
+  bool journalNeedsOwner(const std::string &transaction) const;
+  bool journalVersionsNeedOwner() const;
+  bool quarantineTransaction(const std::string &path, const std::string &bytes,
+                             const std::string &operationID) const;
   bool preparationBlocksActivation(const ReadyStreamMap &ready) const;
   InstallStatus readStreamMapMetadata(const std::string &sessionId,
                                       ReadyStreamMap &ready, bool prepared) const;

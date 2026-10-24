@@ -70,9 +70,17 @@ inline bool decodeManifestInto(std::string_view manifest,
   blocks.clear();
   constexpr std::string_view needle = "\"nearbyCoverage\"";
   size_t cursor = manifest.find(needle);
-  if (cursor == std::string_view::npos) return false;
-  cursor += needle.size();
-  if (!consume(manifest, cursor, ':') || !consume(manifest, cursor, '{'))
+  // Only the key is followed by a colon; skip a string value equal to it,
+  // such as a user's map display name.
+  while (cursor != std::string_view::npos) {
+    size_t value = cursor + needle.size();
+    if (consume(manifest, value, ':')) {
+      cursor = value;
+      break;
+    }
+    cursor = manifest.find(needle, cursor + 1);
+  }
+  if (cursor == std::string_view::npos || !consume(manifest, cursor, '{'))
     return false;
   // Both the archive producer and the signed stream serialize sorted keys.
   // Requiring that order keeps the device reader small and fail-closed.

@@ -44,6 +44,154 @@ class NearbyLifecycleTests(unittest.TestCase):
                 result = subprocess.run(command, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_both_hardware_short_presses_return_to_picker_before_cycling(self):
+        source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()
+        fixture = r'''
+#include <cassert>
+bool isMainScreen=true;
+void *mainScreen=(void*)1, *mapTile=(void*)1, *navTile=(void*)1,
+     *rideStatsTile=(void*)1, *batteryStatusTile=(void*)1,
+     *worldRadioTile=nullptr, *elevationTile=nullptr, *mapGuidanceOverlay=(void*)1;
+namespace world_radio_config { constexpr bool ENABLED=false; }
+namespace route_elevation_config { constexpr bool ENABLED=false; }
+constexpr unsigned NEARBY=7;
+unsigned activeTile=NEARBY, next=0, previous=0, picker=0;
+struct { bool showingMap=true; } nearby;
+void showNearbyPicker() { ++picker; nearby.showingMap=false; }
+void showNextMainScreen() { ++next; }
+void showPreviousMainScreen() { ++previous; }
+'''
+        fixture += fragment(source, "void toggleNavigationScreen()")
+        fixture += fragment(source, "void togglePreviousNavigationScreen()")
+        fixture += r'''
+int main() {
+  toggleNavigationScreen();
+  assert(picker==1 && next==0 && !nearby.showingMap);
+  nearby.showingMap=true;
+  togglePreviousNavigationScreen();
+  assert(picker==2 && previous==0 && !nearby.showingMap);
+  toggleNavigationScreen(); togglePreviousNavigationScreen();
+  assert(next==1 && previous==1); // picker still permits normal screen cycling
+  activeTile=0; nearby.showingMap=true;
+  toggleNavigationScreen(); togglePreviousNavigationScreen();
+  assert(next==2 && previous==2 && picker==2);
+  activeTile=NEARBY; isMainScreen=false;
+  toggleNavigationScreen(); togglePreviousNavigationScreen();
+  assert(next==2 && previous==2 && picker==2);
+}
+'''
+        self.run_fixture(fixture)
+
+    def test_icon_binding_retains_alpha_plane_on_creation_and_rebinding(self):
+        source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()
+        fixture = r'''
+#include <array>
+#include <cassert>
+#include <cstdint>
+#include "mapNearbyIcons.hpp"
+struct Buffer { unsigned data_size=0; void *data=nullptr; };
+struct lv_obj_t { Buffer buffer; };
+constexpr int LV_COLOR_FORMAT_RGB565A8=1;
+alignas(4) std::array<std::array<uint8_t,16*16*3>,5> nearbyIconPixels{};
+void lv_canvas_set_buffer(lv_obj_t *icon,void *data,int w,int h,int cf) {
+  assert(w==16 && h==16 && cf==LV_COLOR_FORMAT_RGB565A8);
+  icon->buffer={512,data}; // reproduce the pinned LVGL metadata quirk
+}
+Buffer *lv_canvas_get_draw_buf(lv_obj_t *icon) { return &icon->buffer; }
+'''
+        fixture += fragment(source, "static void nearbyBindIcon(")
+        fixture += r'''
+int main() {
+  lv_obj_t icon;
+  for (uint8_t category=1; category<=5; ++category) {
+    nearbyBindIcon(&icon,category);
+    assert(icon.buffer.data_size==768);
+    assert(icon.buffer.data==nearbyIconPixels[category-1].data());
+  }
+  nearbyBindIcon(&icon,0); nearbyBindIcon(nullptr,1);
+  assert(icon.buffer.data_size==768);
+}
+'''
+        self.run_fixture(fixture)
+
+    def test_pins_use_actual_canvas_transform_during_drag_and_settlement(self):
+        source = (ROOT / "lib/maps/src/maps.cpp").read_text()
+        fixture = r'''
+#include <cassert>
+#include <cmath>
+#include "mapNearbyQuery.hpp"
+#include "mapNearbyLayout.hpp"
+#include "mapPresentation.hpp"
+#include "mapTransform.hpp"
+constexpr double EARTH_RADIUS=6378137.0;
+constexpr int LV_SCALE_NONE=256;
+struct Canvas { int x=40, y=60, px=0, py=0, angle=0, sx=256, sy=256; } canvas;
+struct lv_point_t { int x,y; };
+void lv_obj_update_layout(Canvas *) {}
+int lv_obj_get_x(Canvas *p) { return p->x; }
+int lv_obj_get_y(Canvas *p) { return p->y; }
+int lv_image_get_rotation(Canvas *p) { return p->angle; }
+int lv_image_get_scale_x(Canvas *p) { return p->sx; }
+int lv_image_get_scale_y(Canvas *p) { return p->sy; }
+void lv_image_get_pivot(Canvas *p,lv_point_t *v) { *v={p->px,p->py}; }
+struct Projection {
+  struct Config { struct { double x=0; } worldOrigin; };
+  Config config() const { return {}; }
+  struct Point { double x=100, y=120; bool valid=true; } point;
+  Point projectWorld(map_transform::WorldPoint) const { return point; }
+  struct Ground { double lateral=3, forward=4; };
+  Ground groundForWorld(map_transform::WorldPoint) const { return {}; }
+};
+struct Maps {
+  bool publishedMapFrame=true, hasVisibleProjection=true;
+  Canvas *canvasMap=&canvas;
+  Projection visibleProjection;
+  bool projectNearbyResult(const map_nearby_query::Result &,map_nearby_layout::Input &) const;
+};
+'''
+        fixture += fragment(source, "bool Maps::projectNearbyResult(")
+        fixture += r'''
+int main() {
+  Maps view;
+  map_nearby_query::Result place{};
+  place.position={31.2,121.4}; place.category=2; place.directDistanceM=100;
+  map_nearby_layout::Input pin;
+  assert(view.projectNearbyResult(place,pin) && pin.projected);
+  assert(pin.x==140 && pin.y==180 && pin.category==2);
+  canvas.x+=30; canvas.y-=20; // live drag, before a new raster exists
+  assert(view.projectNearbyResult(place,pin));
+  assert(pin.x==170 && pin.y==160);
+  assert(view.projectNearbyResult(place,pin)); // clamped/settling pixels unchanged
+  assert(pin.x==170 && pin.y==160);
+  canvas.x-=100; view.visibleProjection.point.x+=100; // synthetic source-frame rebase
+  assert(view.projectNearbyResult(place,pin));
+  assert(pin.x==170 && pin.y==160);
+  canvas={40,60,20,30,900,512,256};
+  view.visibleProjection.point={100,120,true};
+  assert(view.projectNearbyResult(place,pin));
+  assert(std::abs(pin.x-(-30))<1e-8 && std::abs(pin.y-250)<1e-8);
+  view.visibleProjection.point.valid=false;
+  assert(view.projectNearbyResult(place,pin) && !pin.projected);
+  assert(std::abs(pin.directionX-4)<1e-8 && std::abs(pin.directionY-6)<1e-8);
+  view.publishedMapFrame=false;
+  assert(!view.projectNearbyResult(place,pin));
+}
+'''
+        self.run_fixture(fixture)
+
+    def test_picker_is_black_with_selection_borders_and_no_checkbox_or_map_back_button(self):
+        source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()
+        picker = fragment(source, "static void createNearbyScreen() {")
+        state = fragment(source, "static void nearbyPickerStatus()")
+        self.assertIn("lv_color_black()", picker)
+        self.assertIn("lv_obj_remove_style_all(button)", picker)
+        self.assertIn("lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0)", picker)
+        self.assertIn("selected ? 2 : 0", state)
+        self.assertNotIn("categoryChecks", source)
+        self.assertNotIn('"[x]"', source)
+        self.assertNotIn('"Categories"', picker)
+        self.assertNotIn("Direct distance - not route distance", source)
+
     def test_search_uses_current_position_source_not_onboard_receiver_fix(self):
         source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()
         fixture = r'''
@@ -64,7 +212,7 @@ struct Server {
   Stats getDebugStats() const { return stats; }
 } bleNavServer;
 struct Nearby {
-  bool showingMap=true, querying=false, haveResults=false;
+  bool showingMap=true, querying=false, haveResults=false, waitingForPosition=false;
   uint32_t selectedMask=3, lastQueryMs=0, querySequence=0;
   double radiusM=10000;
   map_nearby_query::Position lastQueryPosition;
@@ -74,18 +222,24 @@ const char *lastStatus=nullptr;
 void lv_label_set_text(void *, const char *text) { lastStatus=text; }
 struct View {
   unsigned requests=0;
+  uint32_t nextSequence=42;
   uint32_t requestNearbySearch(map_nearby_query::Position position,
                               uint32_t mask, double radius) {
     assert(position.latitude==gps.gpsData.latitude);
     assert(position.longitude==gps.gpsData.longitude);
     assert(mask==3 && radius==10000);
     ++requests;
-    return 42;
+    return nextSequence;
   }
 } mapView;
 '''
         fixture += fragment(source, "static bool nearbyFreshPosition(")
         fixture += "\n" + fragment(source, "static void nearbyStartSearch(")
+        fixture += "\n" + fragment(source, "static bool nearbyRefreshPosition(")
+        fixture += "\nvoid retrySearch(uint32_t nowMs) {\n"
+        fixture += "map_nearby_query::Position current{gps.gpsData.latitude, gps.gpsData.longitude};\n"
+        fixture += fragment(source, "  if (!nearby.querying &&\n      static_cast<uint32_t>(nowMs - nearby.lastQueryMs)")
+        fixture += "\n}\n"
         fixture += r'''
 void expectSearch(uint32_t now, bool expected) {
   nearby=Nearby{}; mapView.requests=0; lastStatus=nullptr;
@@ -104,6 +258,36 @@ int main() {
   bleNavServer.stats.gpsSource=gps.presentationSample;
   expectSearch(1075, true);
   assert(!isGpsFixed); // Do not change the onboard receiver's status globally.
+  nearby.querying=false; nearby.haveResults=true;
+  map_nearby_query::Position position;
+  assert(!nearbyRefreshPosition(3500, position));
+  assert(nearby.waitingForPosition);
+  assert(std::strcmp(lastStatus, "Waiting for GPS - results stale")==0);
+  bleNavServer.stats.gpsSource.capturedAtMs=3501;
+  const auto requestsBeforeRecovery=mapView.requests;
+  assert(nearbyRefreshPosition(3502, position));
+  assert(!nearby.waitingForPosition && nearby.querying);
+  assert(mapView.requests==requestsBeforeRecovery+1);
+  assert(std::strcmp(lastStatus, "Updating nearby places...")==0);
+  assert(nearbyRefreshPosition(3503, position));
+  assert(mapView.requests==requestsBeforeRecovery+1);
+  nearby.querying=false;
+  assert(!nearbyRefreshPosition(6001, position));
+  bleNavServer.stats.gpsSource.capturedAtMs=6002;
+  mapView.nextSequence=0; // transient worker/mutex admission rejection
+  assert(nearbyRefreshPosition(6003, position));
+  assert(nearby.haveResults && !nearby.querying && nearby.querySequence==0);
+  assert(std::strcmp(lastStatus, "Nearby search unavailable")==0);
+  const auto rejectedRequests=mapView.requests;
+  mapView.nextSequence=42;
+  bleNavServer.stats.gpsSource.capturedAtMs=11002;
+  assert(nearbyRefreshPosition(11002, position));
+  retrySearch(11002);
+  assert(mapView.requests==rejectedRequests);
+  retrySearch(11003); // same coordinates, existing five-second backoff
+  assert(mapView.requests==rejectedRequests+1 && nearby.querying);
+  assert(nearby.querySequence==42 && nearby.haveResults);
+  bleNavServer.stats.gpsSource.capturedAtMs=1000;
   expectSearch(3499, true);
   expectSearch(3500, false); // Keep the existing strict 2.5-second freshness bound.
 

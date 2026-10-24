@@ -5812,55 +5812,32 @@ bool Maps::projectNearbyResult(
   if (!std::isfinite(world.x) || !std::isfinite(world.y)) return false;
   world.x += std::round((visibleProjection.config().worldOrigin.x - world.x) /
                         worldWidth) * worldWidth;
-  const map_transform::WorldPoint pivotWorld =
-      visibleRenderResult.followPosition && hasPresentedPose
-          ? map_transform::WorldPoint{presentedPose.position.x,
-                                      presentedPose.position.y}
-          : visibleRenderResult.center;
   const auto point = visibleProjection.projectWorld(world);
-  const auto pivot = visibleProjection.projectWorld(pivotWorld);
   const auto ground = visibleProjection.groundForWorld(world);
-  if (!pivot.valid) return false;
-
-  double rotationDelta = 0.0;
-  if (!map_profile_protocol::STABLE_CAMERA_ENABLED) {
-    double desiredRotation = visibleRenderResult.rotationRad;
-    if (rotationMode == ROT_COURSE_UP && hasPresentedPose &&
-        presentedPose.headingValid)
-      desiredRotation = -presentedPose.headingDegrees * pi / 180.0;
-    else if (rotationMode == ROT_NORTH_UP)
-      desiredRotation = 0.0;
-    rotationDelta = map_presentation::signedHeadingDelta(
-        visibleRenderResult.rotationRad * 180.0 / pi,
-        desiredRotation * 180.0 / pi) * pi / 180.0;
-  }
+  lv_obj_update_layout(canvasMap);
+  // Project through the canvas that is actually on screen, including live
+  // drag, clamping, rolling-raster rebases and pending settlement. Rebuilding
+  // an ideal viewport transform pins overlays to the display during a drag.
+  const double rotationDelta = lv_image_get_rotation(canvasMap) * pi / 1800.0;
+  const double scaleX = lv_image_get_scale_x(canvasMap) / double(LV_SCALE_NONE);
+  const double scaleY = lv_image_get_scale_y(canvasMap) / double(LV_SCALE_NONE);
   const double cosine = std::cos(rotationDelta);
   const double sine = std::sin(rotationDelta);
-  output.directionX = cosine * ground.lateral + sine * ground.forward;
-  output.directionY = sine * ground.lateral - cosine * ground.forward;
+  output.directionX = cosine * ground.lateral * scaleX + sine * ground.forward * scaleY;
+  output.directionY = sine * ground.lateral * scaleX - cosine * ground.forward * scaleY;
   output.category = place.category;
   output.directDistanceM = place.directDistanceM;
   output.projected = point.valid;
   if (!point.valid) return true;
 
-  if (map_profile_protocol::STABLE_CAMERA_ENABLED) {
-    output.x = (lv_obj_get_width(mapTile) - visibleRenderResult.renderWidth) /
-                   2.0 + point.x;
-    output.y = (lv_obj_get_height(mapTile) - visibleRenderResult.renderHeight) /
-                   2.0 + point.y;
-    return true;
-  }
-  const double originX = gui_layout::centeredViewportOrigin(
-      lv_obj_get_width(mapTile), visibleRenderResult.viewportWidth);
-  const double originY = gui_layout::centeredViewportOrigin(
-      lv_obj_get_height(mapTile), visibleRenderResult.viewportHeight);
-  const map_presentation::ScreenPoint anchor{
-      originX + visibleRenderResult.projection.anchorX() -
-          visibleRenderResult.overscanPixels,
-      originY + visibleRenderResult.projection.anchorY() -
-          visibleRenderResult.overscanPixels};
+  lv_point_t pivot{};
+  lv_image_get_pivot(canvasMap, &pivot);
+  const double dx = (point.x - pivot.x) * scaleX;
+  const double dy = (point.y - pivot.y) * scaleY;
   const auto shown = map_presentation::presentFramePoint(
-      {point.x, point.y}, {pivot.x, pivot.y}, anchor, rotationDelta);
+      {dx, dy}, {0, 0},
+      {double(lv_obj_get_x(canvasMap)) + pivot.x,
+       double(lv_obj_get_y(canvasMap)) + pivot.y}, rotationDelta);
   output.x = shown.x;
   output.y = shown.y;
   return true;

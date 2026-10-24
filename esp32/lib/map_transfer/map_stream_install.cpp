@@ -275,7 +275,7 @@ bool readText(const std::string &path, std::string &value,
   MapReadFile input(path);
   if (!input)
     return false;
-  return input.readAll(value, maximumBytes);
+  return input.readAll(value, static_cast<size_t>(bytes));
 }
 
 std::string jsonEscape(const std::string &value) {
@@ -902,7 +902,8 @@ bool MapStreamInstallSession::prepareRoot(
     const std::string activePath =
         joinPath(storageRoot_, "/VECTMAP/active-map.json");
     for (const std::string &candidate : {activePath, activePath + ".bak"}) {
-      if (storage_->readText(candidate, active, 2048) &&
+      // Same 4 KiB limit as the installer's pointer reader and writer.
+      if (storage_->readText(candidate, active, 4096) &&
           (jsonString(active, "root") == inactiveRootRelative() ||
            jsonString(active, "previousRoot") == inactiveRootRelative())) {
         return fail("stream_session_conflict",

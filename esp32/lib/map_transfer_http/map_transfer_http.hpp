@@ -156,6 +156,8 @@ private:
   std::string terminalOperationID_;
   std::string terminalSessionID_;
   std::string terminalMapID_;
+  bool terminalCleanupReported_ = false;
+  uint32_t terminalCleanupReportedAtMs_ = 0;
   bool terminalAutomaticExit_ = false;
   bool terminalFailed_ = false;
   std::string rollbackOperationID_;

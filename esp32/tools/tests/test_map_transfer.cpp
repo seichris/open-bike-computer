@@ -821,6 +821,26 @@ static void testParsesOptionalActiveMapPresentationMetadata() {
       manifest);
   assert(status.ok);
   assert(manifest.displayName == maximumName);
+
+  // A user's map name may equal a manifest key, and the backend's sorted
+  // keys place displayName before buildings, layers, nearbyCoverage and pois.
+  for (const char *name : {"pois", "layers", "nearbyCoverage", "buildings"}) {
+    status = installer.validateManifestText(
+        "{\"displayName\":\"" + std::string(name) +
+            "\",\"files\":[{\"bytes\":1,\"path\":"
+            "\"VECTMAP/map-1/+0000+0000/1.fmb\",\"sha256\":\"" +
+            std::string(64, '0') + "\"}],\"mapId\":\"map-1\","
+            "\"schemaVersion\":1}",
+        manifest);
+    assert(status.ok);
+    assert(manifest.displayName == name);
+  }
+  std::vector<map_nearby_coverage::Block> coverage;
+  assert(map_nearby_coverage::decodeManifest(
+      "{\"displayName\":\"nearbyCoverage\",\"nearbyCoverage\":"
+      "{\"blockSizeMeters\":4096,\"blocks\":[[0,0]],\"profileVersion\":1}}",
+      coverage));
+  assert(coverage.size() == 1 && coverage[0].x == 0 && coverage[0].y == 0);
 }
 
 static void testIgnoresInvalidOptionalActiveMapPresentationMetadata() {
@@ -1580,6 +1600,106 @@ static void testCorruptJournalRollsBackUnverifiableSelectedMap() {
   assert(!exists(root + "/VECTMAP/.maps/session-commit"));
 }
 
+static void testDamagedPrimaryKeepsSignedBackupEvidence() {
+  const std::string root = tempRoot();
+  MapTransferInstaller installer(root);
+  prepareInterruptedSelectedVersion(root, validFmb());
+  const std::string journal = root + "/VECTMAP/.activation-transaction.json";
+  const std::string primary = "{not-json}\n";
+  const std::string backup = "{\"protocolVersion\":2,\"sessionId\":\"foreign\","
+                             "\"operationID\":\"" + std::string(32, '8') + "\"}";
+  writeFile(journal, primary);
+  writeFile(journal + ".bak", backup);
+  const std::string selectedBefore = readFile(root + "/VECTMAP/active-map.json");
+
+  // The damaged primary says nothing; the backup is signed, durable evidence
+  // of another operation. Legacy recovery would select and delete both.
+  const auto recovered = installer.recoverInterruptedActivation();
+  assert(!recovered.ok);
+  assert(readFile(journal) == primary);
+  assert(readFile(journal + ".bak") == backup);
+  assert(readFile(root + "/VECTMAP/active-map.json") == selectedBefore);
+  assert(exists(root + "/VECTMAP/.maps/session-commit"));
+  assert(exists(root + "/VECTMAP/.maps/session-old"));
+  assert(installer.hasInterruptedActivation());
+}
+
+static void testJournalVersionEvidenceBlocksLegacyRecovery() {
+  struct Version { const char *name; bool present; std::string bytes; bool evidence; };
+  const std::string oversized(5000, ' ');
+  // "legacy" keeps the fixture's own interrupted legacy journal.
+  const std::vector<Version> primaries = {
+      {"absent", false, "", false}, {"legacy", true, "", false},
+      {"damaged", true, "{not-json}\n", false}};
+  const std::vector<Version> backups = {
+      {"absent", false, "", false},
+      {"torn", true, "{\"sessionId\":\"sess", false},
+      {"v2", true, "{\"protocolVersion\":2,\"sessionId\":\"session-commit\"}", true},
+      {"v2-foreign", true, "{\"protocolVersion\":2,\"sessionId\":\"foreign\","
+                           "\"operationID\":\"" + std::string(32, '8') + "\"}", true},
+      {"receipt", true, "{\"sessionId\":\"session-commit\",\"manifestReceipt\":\"" +
+                            std::string(64, '3') + "\"}", true},
+      {"operation", true, "{\"operationID\":\"" + std::string(32, '8') + "\"}", true},
+      {"unreadable", true, oversized, true}};
+  // An unpublished temporary only counts when it carries evidence itself.
+  const std::vector<Version> temporaries = {
+      {"absent", false, "", false}, {"torn", true, "{\"phase\":\"re", false},
+      {"unreadable", true, oversized, false},
+      {"v2", true, "{\"protocolVersion\":2,\"operationID\":\"" +
+                       std::string(32, '9') + "\"}", true}};
+  for (const auto &primary : primaries) {
+    std::string baseline;
+    for (const auto &backup : backups) {
+      // Without a primary or backup the temporary alone is removed (liveness);
+      // a v2 backup alone dispatches the unchanged v2 recovery.
+      if (!primary.present && (!backup.present ||
+          backup.bytes.find("\"protocolVersion\":2") != std::string::npos)) continue;
+      for (const auto &temporary : temporaries) {
+        const std::string label = std::string(primary.name) + "/" + backup.name + "/" +
+                                  temporary.name;
+        const std::string root = tempRoot();
+        MapTransferInstaller installer(root);
+        prepareInterruptedSelectedVersion(root, validFmb());
+        const std::string journal = root + "/VECTMAP/.activation-transaction.json";
+        if (!primary.present) assert(::unlink(journal.c_str()) == 0);
+        else if (!primary.bytes.empty()) writeFile(journal, primary.bytes);
+        if (backup.present) writeFile(journal + ".bak", backup.bytes);
+        if (temporary.present) writeFile(journal + ".tmp", temporary.bytes);
+        const std::string selectedBefore = readFile(root + "/VECTMAP/active-map.json");
+        const std::string primaryBefore = primary.present ? readFile(journal) : "";
+        const auto recovered = installer.recoverInterruptedActivation();
+        const auto check = [&](bool condition, const char *expectation) {
+          if (condition) return;
+          std::cerr << "FAIL " << label << ": " << expectation << " (" << recovered.code
+                    << ")\n";
+          std::abort();
+        };
+        if (backup.evidence || temporary.evidence) {
+          check(!recovered.ok, "evidence in any journal version blocks legacy recovery");
+          check(!primary.present || readFile(journal) == primaryBefore, "primary preserved");
+          check(!backup.present || readFile(journal + ".bak") == backup.bytes,
+                "backup preserved");
+          check(!temporary.present || readFile(journal + ".tmp") == temporary.bytes,
+                "temporary preserved");
+          check(readFile(root + "/VECTMAP/active-map.json") == selectedBefore,
+                "selection unchanged");
+          check(exists(root + "/VECTMAP/.maps/session-commit") &&
+                    exists(root + "/VECTMAP/.maps/session-old"),
+                "map versions kept");
+          check(installer.hasInterruptedActivation(), "journal still pending");
+        } else {
+          check(recovered.ok, "evidence-free journals keep the legacy recovery");
+          check(!exists(journal) && !exists(journal + ".bak") && !exists(journal + ".tmp"),
+                "legacy recovery clears every journal version");
+          check(!installer.hasInterruptedActivation(), "activation is no longer blocked");
+          if (baseline.empty()) baseline = recovered.code;
+          check(recovered.code == baseline, "same outcome as without other versions");
+        }
+      }
+    }
+  }
+}
+
 static void testRejectsChecksumMismatch() {
   std::string root = tempRoot();
   MapTransferInstaller installer(root);
@@ -2069,6 +2189,8 @@ int main() {
   testRecoveryClearsCorruptMetadataWithoutJournal();
   testRecoveryClearsCorruptJournalWithoutBlockingActiveMap();
   testCorruptJournalRollsBackUnverifiableSelectedMap();
+  testDamagedPrimaryKeepsSignedBackupEvidence();
+  testJournalVersionEvidenceBlocksLegacyRecovery();
   testRejectsChecksumMismatch();
   testVerificationReceiptControlsResumeEligibility();
   testStoredArchivePreparesAndActivatesInBackgroundTransferPath();
