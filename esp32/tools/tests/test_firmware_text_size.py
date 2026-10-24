@@ -31,7 +31,8 @@ class FirmwareTextSizeTests(unittest.TestCase):
             program += function(source,signature) + '\n'
         program += r'''
 std::string oldJoin(const std::string &a,const std::string &b) {
-  if(a.empty())return b;if(b.empty())return a;
+  if (a.empty()) return b;
+  if (b.empty()) return a;
   if(a.back()=='/')return a+(b.front()=='/'?b.substr(1):b);
   return a+"/"+(b.front()=='/'?b.substr(1):b);
 }
