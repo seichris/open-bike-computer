@@ -1181,6 +1181,7 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
     private var nextDiagnosticsMarkerSequence: UInt32 = 1
+    private var diagnosticsCaptureBindingGeneration: UInt64 = 0
     @Published private(set) var diagnosticsIssueMarkerDelivery: DiagnosticsIssueMarkerDelivery?
 #if HOST_TESTING
     private var diagnosticsIssueMarkerRetryDelay = DiagnosticsIssueMarkerRetryPolicy.retryDelay
@@ -6559,10 +6560,14 @@ class BLEManager: NSObject, ObservableObject {
         // flags are cleared. Persist the recorder's requested state before any
         // connection/capability guard so reconnect never revives a stale ride
         // ID or stale detailed consent.
-        desiredDiagnosticsCaptureBinding = RideDiagnosticsCaptureBinding(
+        let binding = RideDiagnosticsCaptureBinding(
             captureID: captureID,
             detailed: requestedDetailed
         )
+        if desiredDiagnosticsCaptureBinding != binding {
+            diagnosticsCaptureBindingGeneration &+= 1
+        }
+        desiredDiagnosticsCaptureBinding = binding
         guard supportsRideDiagnostics else { return false }
         // Production firmware supports standard correlation but deliberately
         // omits the detailed one-Hz producer. Downgrade the binding instead of
@@ -6629,6 +6634,24 @@ class BLEManager: NSObject, ObservableObject {
             marker = "mark|1|\(markerSequence)|\(code.rawValue)"
         }
         let packet = Data("\(DeviceBLEProtocol.deviceTransferControlPrefix)\(marker)".utf8)
+        let captureGeneration = diagnosticsCaptureBindingGeneration
+        let captureID = diagnosticsRecorder?.currentCaptureID
+        let connectionGeneration = rideDeliveryConnectionGeneration
+        let replaySafe = incidentID != nil &&
+            diagnosticsCaptureStatus?.valid == true &&
+            diagnosticsCaptureStatus?.schemaDigest == DiagnosticsSchema.digest &&
+            diagnosticsCaptureStatus?.markerReplaySafe == true
+        let isCurrent: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return self.isNavigationReady && self.supportsRideDiagnostics &&
+                self.rideDeliveryConnectionGeneration == connectionGeneration &&
+                self.diagnosticsCaptureBindingGeneration == captureGeneration &&
+                self.diagnosticsRecorder?.currentCaptureID == captureID &&
+                self.diagnosticsIssueMarkerDelivery?.sequence == markerSequence &&
+                (!replaySafe || (self.diagnosticsCaptureStatus?.valid == true &&
+                    self.diagnosticsCaptureStatus?.schemaDigest == DiagnosticsSchema.digest &&
+                    self.diagnosticsCaptureStatus?.markerReplaySafe == true))
+        }
         // Publish before queueing: a write without response can succeed
         // before the send call returns.
         let previousDelivery = diagnosticsIssueMarkerDelivery
@@ -6641,7 +6664,8 @@ class BLEManager: NSObject, ObservableObject {
             packet,
             sequence: markerSequence,
             attempt: 1,
-            connectionGeneration: rideDeliveryConnectionGeneration
+            replaySafe: replaySafe,
+            isCurrent: isCurrent
         ) else {
             diagnosticsIssueMarkerDelivery = previousDelivery
             return false
@@ -6654,18 +6678,24 @@ class BLEManager: NSObject, ObservableObject {
         _ packet: Data,
         sequence: UInt32,
         attempt: Int,
-        connectionGeneration: UInt64
+        replaySafe: Bool,
+        isCurrent: @escaping () -> Bool
     ) -> Bool {
         sendTransferControlPacket(
             packet,
             label: "diagnostics issue marker",
             coalescingKey: nil,
+            isStillValid: isCurrent,
+            onDrop: { [weak self] in
+                self?.settleDiagnosticsIssueMarker(sequence: sequence, state: .notDelivered)
+            },
             onWriteFailure: { [weak self] in
                 self?.retryDiagnosticsIssueMarker(
                     packet,
                     sequence: sequence,
                     failedAttempt: attempt,
-                    connectionGeneration: connectionGeneration
+                    replaySafe: replaySafe,
+                    isCurrent: isCurrent
                 )
             },
             onWriteSuccess: { [weak self] in
@@ -6678,9 +6708,11 @@ class BLEManager: NSObject, ObservableObject {
         _ packet: Data,
         sequence: UInt32,
         failedAttempt: Int,
-        connectionGeneration: UInt64
+        replaySafe: Bool,
+        isCurrent: @escaping () -> Bool
     ) {
-        guard failedAttempt < DiagnosticsIssueMarkerRetryPolicy.maximumAttemptCount else {
+        guard replaySafe,
+              failedAttempt < DiagnosticsIssueMarkerRetryPolicy.maximumAttemptCount else {
             settleDiagnosticsIssueMarker(sequence: sequence, state: .notDelivered)
             return
         }
@@ -6690,16 +6722,15 @@ class BLEManager: NSObject, ObservableObject {
             guard let self,
                   self.diagnosticsIssueMarkerDelivery?.sequence == sequence,
                   self.diagnosticsIssueMarkerDelivery?.state == .pending else { return }
-            // Resend the identical packet only on the authenticated link whose
-            // write failed. Firmware accepts each sequence once, so a retry of
-            // a write that did arrive is rejected rather than duplicated.
-            guard self.isNavigationReady,
-                  self.rideDeliveryConnectionGeneration == connectionGeneration,
+            // Recheck again at dispatch, not just here: a queued retry can be
+            // overtaken by a capture binding while another ATT write is busy.
+            guard isCurrent(),
                   self.sendDiagnosticsIssueMarkerAttempt(
                     packet,
                     sequence: sequence,
                     attempt: failedAttempt + 1,
-                    connectionGeneration: connectionGeneration
+                    replaySafe: replaySafe,
+                    isCurrent: isCurrent
                   ) else {
                 self.settleDiagnosticsIssueMarker(sequence: sequence, state: .notDelivered)
                 return
@@ -6721,6 +6752,7 @@ class BLEManager: NSObject, ObservableObject {
     @discardableResult
     func endDiagnosticsCapture() -> Bool {
         guard supportsRideDiagnostics else { return false }
+        diagnosticsCaptureBindingGeneration &+= 1
         let packet = Data(
             "\(DeviceBLEProtocol.deviceTransferControlPrefix)capture_end".utf8
         )
@@ -8818,6 +8850,7 @@ class BLEManager: NSObject, ObservableObject {
         _ data: Data,
         endpoint: NavigationWriteEndpoint,
         label: String,
+        isStillValid: (() -> Bool)? = nil,
         writeClass: NavigationWriteClass = .other,
         coalescingKey: String? = nil,
         prioritized: Bool = false,
@@ -8841,6 +8874,7 @@ class BLEManager: NSObject, ObservableObject {
         let write = NavigationWrite(
             data: data,
             label: label,
+            isStillValid: isStillValid,
             transportWrite: transportWrite,
             onWrite: onWrite,
             onDrop: onDrop,
@@ -9019,6 +9053,7 @@ class BLEManager: NSObject, ObservableObject {
         label: String,
         writeClass: NavigationWriteClass = .settingsControl,
         coalescingKey: String? = nil,
+        isStillValid: (() -> Bool)? = nil,
         prioritized: Bool = false,
         atomically: Bool = false,
         payloadProvider: (() -> Data)? = nil,
@@ -9043,6 +9078,7 @@ class BLEManager: NSObject, ObservableObject {
             data,
             endpoint: endpoint,
             label: "fallback \(label)",
+            isStillValid: isStillValid,
             writeClass: writeClass,
             coalescingKey: coalescingKey,
             prioritized: prioritized,
@@ -9067,6 +9103,8 @@ class BLEManager: NSObject, ObservableObject {
         _ data: Data,
         label: String,
         coalescingKey: String?,
+        isStillValid: (() -> Bool)? = nil,
+        onDrop: (() -> Void)? = nil,
         forMaintenanceReconnect: Bool = false,
         onWriteFailure: (() -> Void)? = nil,
         onWriteSuccess: (() -> Void)? = nil
@@ -9080,7 +9118,9 @@ class BLEManager: NSObject, ObservableObject {
                 label: label,
                 writeClass: .transfer,
                 coalescingKey: coalescingKey,
+                isStillValid: isStillValid,
                 prioritized: true,
+                onDrop: onDrop,
                 onWriteFailure: onWriteFailure,
                 onWriteSuccess: onWriteSuccess
             )
@@ -9092,7 +9132,9 @@ class BLEManager: NSObject, ObservableObject {
                     label: label,
                     writeClass: .transfer,
                     coalescingKey: coalescingKey,
+                    isStillValid: isStillValid,
                     prioritized: true,
+                    onDrop: onDrop,
                     onWriteFailure: onWriteFailure,
                     onWriteSuccess: onWriteSuccess
                 )
@@ -9103,7 +9145,9 @@ class BLEManager: NSObject, ObservableObject {
                     label: label,
                     writeClass: .transfer,
                     coalescingKey: coalescingKey,
+                    isStillValid: isStillValid,
                     prioritized: true,
+                    onDrop: onDrop,
                     onWriteFailure: onWriteFailure,
                     onWriteSuccess: onWriteSuccess
                 )
@@ -9117,6 +9161,7 @@ class BLEManager: NSObject, ObservableObject {
         label: String,
         writeClass: NavigationWriteClass = .settingsControl,
         coalescingKey: String? = nil,
+        isStillValid: (() -> Bool)? = nil,
         prioritized: Bool = false,
         onDrop: (() -> Void)? = nil,
         onWriteFailure: (() -> Void)? = nil,
@@ -9144,6 +9189,7 @@ class BLEManager: NSObject, ObservableObject {
             data,
             endpoint: endpoint,
             label: "native \(label)",
+            isStillValid: isStillValid,
             writeClass: writeClass,
             coalescingKey: coalescingKey,
             prioritized: prioritized,

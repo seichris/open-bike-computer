@@ -1,5 +1,50 @@
 # PR #378 review fixes
 
+## October 25 physical-feedback fixes: publication checkpoint
+
+Mode publish; standard profile; sequential-local; zero subagents; P0/P1/P2
+gate. User authorizes commit/push to PR378, plan/description refresh, CI inspection
+and preparation of an exact isolated POI-enabled 175 image. **No merge or flash.**
+This supersedes older delivery authorization in historical records below.
+
+Snapshot: base/main `cd7ad00bb6c4f9566195cd44ab4d6a675518b94d`, remote PR
+before publication `1c6bbbbafd7987747f944218badd07e0e68610c0`, nine reviewed
+local commits through `e23952b870b72536ad0370719be27dede57c9dd8`, then the
+verified 13-file repair patch SHA-256
+`b38fa32e31ccd3c1cf02fd0b5f7fcb4c8f39cd7878ffd589b6c1f0f712b3bbd6`.
+Publication adds documentation only to that verified runtime/test batch.
+
+| ID | State and direct evidence |
+| --- | --- |
+| VF-MARKER-REPLAY-ERROR, P2 | Fixed+verified: latest admitted v2 replay is a bounded no-op; explicit capability gates iOS retries. Actual diagnostics waiter ignores only foreign marker rejection at both error sites, still requiring secure readiness and failing on genuine/unknown entry errors. Admission failure, delayed readiness and bounded timeout are exercised. |
+| VF-MARKER-CAPTURE-FENCE, P2 | Fixed+verified: latest firmware receipt survives capture rebind; actual iOS scheduled and queued retries recheck link, capture, binding and latest sequence. Legacy absent/false capability and v1 remain one-shot. |
+| VF-NEARBY-PARTIAL-HINT, P2 | Fixed+verified: actual GUI branch explains missing selected categories for complete and partial coverage, retaining the map-edge warning and nearest-ten-total behavior. |
+| SIM-SEGMENT-TIMEOUT | Test-only synchronization repair approved by user. Existing controlled waiter replaces the unsound fixed sleep; original outcome/replay/late-success assertions retained. No workout production defect established or production code changed. |
+
+Focused scope: **3 fixed+verified, 0 active, 0 invalidated, 0 user-deferred**.
+Original whole-PR 3/3 and earlier R71/CI-1 authority retained; focused R1 was
+non-clean, explicitly authorized focused R2 confirmed the repair. Publication is
+not another broad review. Whole-feature state remains **needs-rethink / not
+merge-ready**: R53/R56, R54 and R55 remain active; H-R71b remains hypothetical;
+main's R65–R70 concerns remain separate. Original Map+Navigation failure and
+fresh transfer/cleanup, GPS/reconnect, Nearby and cold/both-board physical gates
+remain unverified. No zero-regression or physical acceptance claim.
+
+Retained precommit evidence: R1 fast 58/58; R2 affected map group passed,
+Debug/Release container check passed, native iOS 127/127 and Watch 131/131 passed,
+all at stable recorded source fingerprints. Actual marker/GUI tests also passed
+under GCC 15 and Clang. Production175 binary 3,006,864 bytes; unchanged-input
+R1 isolated POI binary 3,070,032 bytes. These dirty artifacts are upload-ineligible;
+do not present them as clean publication artifacts. Dual 3,145,728-byte slots,
+full 65,536-byte reserve and production POIs off are unchanged. Exact published
+SHA, clean revalidation, CI and new image hashes belong in the PR description.
+
+Keep signed local-test receipt publication suppressed per process, preserving
+persistent config and prior evidence. High risk remains shared BLE ownership,
+map activation and recovery. Any rollback must reconcile pending operations and
+use a compatible operator-approved firmware/app/map snapshot; never delete
+unknown journals or overwrite incident evidence. No production change is included.
+
 ## October 25 verified-fix publication and remaining gates
 
 Mode: publish; standard profile; sequential-local; zero subagents; P0/P1/P2

@@ -200,6 +200,14 @@ struct RemoteDebugLANCredentialStore {
 }
 
 enum DeviceDiagnosticsRejectionPolicy {
+    static func isSessionEntryFailure(code: String) -> Bool {
+        // Markers share DSTS.lastError with transfer control, but recorder
+        // admission failure is not authority over a diagnostics enter request.
+        // Retain the error for its consumers; do not clear shared status or
+        // weaken secure-session validation or any genuine entry rejection.
+        !code.isEmpty && code != "marker_rejected"
+    }
+
     static func message(code: String, fallback: String?) -> String {
         let explanation: String
         switch code {
@@ -2007,7 +2015,7 @@ final class DeviceTransferManager {
                 if let session = try self.secureSession(mode: .diagnostics, bleManager: bleManager) {
                     return session
                 }
-                // A fresh firmware rejection is authoritative. Do not spend the
+                // A fresh entry rejection is authoritative. Do not spend the
                 // remainder of the readiness window polling after the device
                 // has already classified storage or seal preparation.
                 if knowsRetainedError,
@@ -2016,7 +2024,7 @@ final class DeviceTransferManager {
                        currentSequence: bleManager.deviceTransferLastErrorSequence,
                        code: bleManager.deviceTransferLastErrorCode,
                        message: bleManager.deviceTransferLastErrorMessage
-                   ) {
+                   ), DeviceDiagnosticsRejectionPolicy.isSessionEntryFailure(code: failure.code) {
                     throw RemoteDeviceDebugError.rejected(
                         code: failure.code,
                         message: DeviceDiagnosticsRejectionPolicy.message(
@@ -2032,7 +2040,7 @@ final class DeviceTransferManager {
         if let readySession { return readySession }
         if bleManager.deviceTransferStatusRevision != initialRevision,
            let code = bleManager.deviceTransferLastErrorCode,
-           !code.isEmpty {
+           DeviceDiagnosticsRejectionPolicy.isSessionEntryFailure(code: code) {
             let fallback = bleManager.deviceTransferLastErrorMessage
                 .flatMap { $0.isEmpty ? nil : $0 }
             throw RemoteDeviceDebugError.rejected(

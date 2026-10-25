@@ -6,6 +6,18 @@ P-256 signing key. Never copy production signing material into the lab.
 
 ## Current delivery status — October 25
 
+Latest authorization is **prepare only**: publish the independently verified
+physical-feedback/marker repairs, check exact-head CI, then build and retain the
+exact clean POI-enabled 175 image for approval. **Do not flash or merge.**
+Earlier image approvals do not authorize these new bytes. The PR description
+will record the new commit, binary/flash-plan hashes, size and reserve. Dirty
+measurements and historical physical observations below are not that approval.
+The latest dirty POI measurement was 3,070,032 bytes (10,160 bytes beyond the
+full reserve); final clean bytes must be measured independently. Map+Navigation
+and mixed-category Nearby behavior require a new physical test after approval.
+
+The following delivery checkpoint is historical:
+
 The user selected this isolated POI profile for the next 175 delivery, after
 publishing the verified fixes and checking exact-head CI. This supersedes the
 older no-further-flash checkpoint below only for that requested delivery.

@@ -865,6 +865,7 @@ struct NavigationProtocolTests {
             testDeviceTransferHandshakePolicy()
             await testDeviceDiagnosticsWaitsForDelayedReadiness()
             await testDeviceDiagnosticsFailsFastOnFirmwareRejection()
+            await testDeviceDiagnosticsMarkerErrorDoesNotOwnEntry()
             await testDeviceDiagnosticsKeepsWaitingBeforeFirstLinkStatus()
             print("Diagnostics entry readiness regressions passed")
             return
@@ -1081,6 +1082,7 @@ struct NavigationProtocolTests {
         await testDeviceDiagnosticsInterruptedChunk()
         await testDeviceDiagnosticsWaitsForDelayedReadiness()
         await testDeviceDiagnosticsFailsFastOnFirmwareRejection()
+        await testDeviceDiagnosticsMarkerErrorDoesNotOwnEntry()
         await testDeviceDiagnosticsKeepsWaitingBeforeFirstLinkStatus()
         await testDeviceDiagnosticsRecordsEntryFailure()
         await testDeviceDiagnosticsDownloadEndToEnd()

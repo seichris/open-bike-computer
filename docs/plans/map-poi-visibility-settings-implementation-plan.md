@@ -39,9 +39,56 @@ or enabled merely because it exists in the branch.
 
 ## Baseline
 
+### October 25 physical-feedback repair publication
+
+This is the latest checkpoint; the publication measurements below are historical.
+The batch follows PR head `1c6bbbbafd7987747f944218badd07e0e68610c0`
+and Claude's local fixes through `e23952b870b72536ad0370719be27dede57c9dd8`,
+with main `cd7ad00bb6c4f9566195cd44ab4d6a675518b94d` retained.
+
+- Map+Navigation treats the canonical idle navigation-clear packet as no active
+  guidance. Map render keys and the phone's zoom controls use the actual supported
+  levels 1–5. These address plausible entry/render causes; the reported black
+  screen still requires fresh physical reproduction and acceptance.
+- The bounded POI candidate pool reserves space across enabled categories before
+  layout. Nearby still returns the nearest ten **total**, so restaurants can fill
+  all ten even when toilets are selected. Both complete and partial coverage now
+  explain categories absent from those results, retaining the downloaded-area
+  warning. The picker makes selected categories easier to distinguish.
+- Diagnostics entry allows the bounded map-startup readiness window. Marker
+  retries require the explicit replay-safe capability and an incident-bearing
+  v2 marker. Firmware deduplicates the latest admitted tuple across capture
+  rebind; iOS checks link/capture/binding/latest-marker identity again at queue
+  dispatch. A marker rejection cannot abort unrelated diagnostics entry; genuine
+  entry errors, authenticated readiness, cancellation and deadlines still apply.
+- ATT-failed setting writes retry within the same connection epoch with bounded
+  attempts and newer-value protection. The simulator timeout regression now uses
+  the manager's existing controlled waiter instead of assuming a 50 ms sleep
+  synchronizes separately scheduled tasks; workout production logic is unchanged.
+
+Independent focused repair: VF-MARKER-REPLAY-ERROR,
+VF-MARKER-CAPTURE-FENCE and VF-NEARBY-PARTIAL-HINT are fixed+verified locally.
+The original whole-PR budget remains 3/3; explicitly authorized focused R1 was
+non-clean and focused R2 confirmed these repairs. This does not reset that budget
+or close R53/R56, R54, R55 or physical gates.
+
+Precommit evidence: 58/58 fast checks at R1; affected map consumers, unsigned
+Debug/Release containers and native iOS (127 passed) / Watch (131 passed) reran
+successfully at R2 with stable source. Actual marker/GUI regressions also ran
+under Clang and GCC 15. These are dirty-source local results, not exact-head CI.
+Production measured 3,006,864 bytes; isolated POI firmware measured 3,070,032
+bytes. Both retain dual 3,145,728-byte slots and the full 65,536-byte reserve;
+the POI measurement leaves 10,160 bytes beyond that reserve. New clean-head
+artifacts and CI must establish their own identity after publication.
+
+Current authorization: commit/push this batch, refresh plan/PR description, check
+CI and prepare the exact isolated POI-enabled 175 image for approval. **Do not
+merge or flash.** Production POIs remain disabled; no deployment, physical app
+installation, manual 2.06 workflow or evidence deletion is included.
+
 ### October 25 publication candidate: recovery, radio and cleanup fixes
 
-This section is the current status; dated checkpoints below are historical.
+This earlier publication checkpoint is historical; see the latest status above.
 The candidate integrates GitHub main
 `cd7ad00bb6c4f9566195cd44ab4d6a675518b94d` with the existing PR head
 `69008639a56264e16dc8d41b39015848655904a1`, the reviewed local fixes through

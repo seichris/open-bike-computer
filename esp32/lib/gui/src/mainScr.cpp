@@ -2668,7 +2668,7 @@ static void serviceNearbyScreen(uint32_t nowMs) {
           lv_label_set_text_fmt(nearby.status,
               "No matches in downloaded area (%.0f km)\nMap edge nearby",
               nearby.radiusM / 1000.0);
-      } else if (replacement.coverageComplete) {
+      } else {
         // The nearest ten are counted across every selected category; say
         // which selected category they crowded out.
         uint8_t categories[map_nearby_layout::kMaximumResults]{};
@@ -2680,13 +2680,11 @@ static void serviceNearbyScreen(uint32_t nowMs) {
         const bool missing = map_nearby_layout::formatAbsentCategories(
             nearby.selectedMask, categories, count, nearby.radiusM / 1000.0,
             absent, sizeof(absent));
-        lv_label_set_text_fmt(nearby.status, "%u places - %.0f km%s%s",
+        lv_label_set_text_fmt(nearby.status, "%u places - %.0f km%s%s%s",
             replacement.count, nearby.radiusM / 1000.0,
-            missing ? "\n" : "", missing ? absent : "");
-      } else {
-        lv_label_set_text_fmt(nearby.status,
-            "%u places - %.0f km\nDownloaded area only; map edge nearby",
-            replacement.count, nearby.radiusM / 1000.0);
+            missing ? "\n" : "", missing ? absent : "",
+            replacement.coverageComplete ? "" :
+                "\nDownloaded area only; map edge nearby");
       }
       break;
     case map_nearby_storage::Status::Unavailable:

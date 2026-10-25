@@ -4831,15 +4831,16 @@ extension NavigationProtocolTests {
         let marker = "DTRNmark|2|1|connection_drop|\(incident.uuidString.lowercased())"
         // An authenticated link with acknowledged writes and the matching
         // diagnostics registry, which admits v2 markers carrying an incident.
-        func connect(_ manager: BLEManager) -> () -> [String] {
+        func connect(_ manager: BLEManager, replaySafe: Bool? = true) -> () -> [String] {
             manager.isConnected = true
             manager.isNavigationReady = true
             _ = manager.handleDeviceCapabilitiesNotification(
                 Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 0x30, 0])
             )
+            let replayField = replaySafe.map { ",\"markerReplaySafe\":\($0)" } ?? ""
             _ = manager.handleDeviceTransferStatusNotification(
                 Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data("""
-                {"configured":true,"enabled":false,"mode":"","diagnosticsPolicy":{"schema":2,"schemaDigest":"\(DiagnosticsSchema.digest)","supportedMask":1,"generation":0,"mask":0,"minimumLevel":2,"active":false,"captureId":"","remainingBytes":0,"filteredCount":0,"deadlineUptimeMs":0,"baselineMinimumLevel":2,"rawPayloads":false}}
+                {"configured":true,"enabled":false,"mode":"","diagnosticsPolicy":{"schema":2,"schemaDigest":"\(DiagnosticsSchema.digest)","supportedMask":1,"generation":0,"mask":0,"minimumLevel":2,"active":false,"captureId":"","remainingBytes":0,"filteredCount":0,"deadlineUptimeMs":0,"baselineMinimumLevel":2,"rawPayloads":false\(replayField)}}
                 """.utf8)
             )
             manager.setDiagnosticsIssueMarkerRetryDelayForTesting(0.05)
@@ -4905,6 +4906,53 @@ extension NavigationProtocolTests {
                     "a first successful write sends the marker")
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         assertEqual(deliveredPackets().count, 1, "a successful marker write is not retried")
+
+        for capability in ([false, nil] as [Bool?]) {
+            let legacy = BLEManager()
+            let legacyPackets = connect(legacy, replaySafe: capability)
+            assert(legacy.sendDiagnosticsIssueMarker(.other, incidentID: incident))
+            legacy.completeNavigationWriteForTesting(error: attFailure)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            assertEqual(legacyPackets().count, 1, "absent/false capability forbids ambiguous retries")
+            assertEqual(legacy.diagnosticsIssueMarkerDelivery?.state, .notDelivered,
+                        "one-shot delivery settles without retry on older firmware")
+        }
+
+        let v1 = BLEManager()
+        let v1Packets = connect(v1)
+        assert(v1.sendDiagnosticsIssueMarker(.other))
+        v1.completeNavigationWriteForTesting(error: attFailure)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(v1Packets(), ["DTRNmark|1|1|other"], "v1 has no idempotency key")
+
+        for queuedRetry in [false, true] {
+            let rotated = BLEManager()
+            let rotatedPackets = connect(rotated)
+            assert(rotated.sendDiagnosticsIssueMarker(.connectionDrop, incidentID: incident))
+            rotated.completeNavigationWriteForTesting(error: attFailure)
+            if queuedRetry {
+                // Hold another ATT write, so the retry gets admitted but cannot
+                // dispatch. Capture binding can then invalidate the queued item.
+                assert(rotated.requestDeviceTransferStatus())
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            }
+            assert(rotated.sendDiagnosticsCaptureBinding(UUID()))
+            if queuedRetry { rotated.completeNavigationWriteForTesting(error: nil) }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            assertEqual(rotatedPackets().filter { $0 == marker }.count, 1,
+                        "capture rotation fences scheduled and already queued marker retries")
+            assertEqual(rotated.diagnosticsIssueMarkerDelivery?.state, .notDelivered,
+                        "a capture change settles its invalidated marker")
+        }
+
+        let ended = BLEManager()
+        let endedPackets = connect(ended)
+        assert(ended.sendDiagnosticsIssueMarker(.connectionDrop, incidentID: incident))
+        ended.completeNavigationWriteForTesting(error: attFailure)
+        assert(ended.endDiagnosticsCapture())
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(endedPackets().filter { $0 == marker }.count, 1,
+                    "capture end fences pending retry even without a local recorder")
 
         let relinked = BLEManager()
         let firstLinkPackets = connect(relinked)
@@ -5368,6 +5416,56 @@ extension NavigationProtocolTests {
         assertEqual(absent.elapsed, MapTransferStartupPolicy.timeout,
                     "diagnostics entry ends at the absolute readiness deadline")
         assertEqual(absent.polls.count, 14, "an absent device cannot trigger an unbounded polling loop")
+    }
+
+    @MainActor
+    static func testDeviceDiagnosticsMarkerErrorDoesNotOwnEntry() async {
+        let preparing = #"{"configured":true,"enabled":false,"mode":""}"#
+        let markerError = #"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"marker_rejected","message":"recorder busy","sequence":1}}"#
+        assert(!DeviceDiagnosticsRejectionPolicy.isSessionEntryFailure(code: "marker_rejected"))
+        assert(!DeviceDiagnosticsRejectionPolicy.isSessionEntryFailure(code: ""))
+        for outcome in ["ready", "timeout", "diagnostics_writable_probe_failed", "future_entry_failure"] {
+            let manager = BLEManager()
+            let deliver = { (json: String) in
+                _ = manager.handleDeviceTransferStatusNotification(
+                    Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+                )
+            }
+            deliver(preparing)
+            let observed = await simulateDiagnosticsReadiness(manager) { before, now in
+                if before < 1, now >= 1 { deliver(markerError) }
+                if outcome == "ready", before < 12, now >= 12 {
+                    deliver(diagnosticsReadyStatus)
+                } else if outcome != "ready", outcome != "timeout", before < 3, now >= 3 {
+                    deliver("""
+                    {"configured":true,"enabled":false,"mode":"","lastError":{"code":"\(outcome)","message":"entry failed","sequence":2}}
+                    """)
+                }
+            }
+            switch outcome {
+            case "ready":
+                guard case .success(let session) = observed.result else {
+                    fatalError("foreign marker failure must not abort entry: \(observed.result)")
+                }
+                assertEqual(session.mode, .diagnostics, "secure diagnostics session is still required")
+                assertEqual(observed.elapsed, 12, "entry waits for actual readiness, not marker status")
+                assertEqual(observed.polls, [2, 4, 6, 8, 10], "marker failure does not change polling cadence")
+            case "timeout":
+                guard case .failure(let error) = observed.result,
+                      case .missingDiagnosticsSession? = error as? RemoteDeviceDebugError else {
+                    fatalError("marker failure is neither readiness nor an entry rejection: \(observed.result)")
+                }
+                assertEqual(observed.elapsed, MapTransferStartupPolicy.timeout, "entry keeps its absolute deadline")
+                assertEqual(manager.deviceTransferLastErrorCode, "marker_rejected", "foreign error is retained, not globally cleared")
+            default:
+                guard case .failure(let error) = observed.result,
+                      case .rejected(let code, _)? = error as? RemoteDeviceDebugError else {
+                    fatalError("genuine fresh entry rejection must remain authoritative: \(observed.result)")
+                }
+                assertEqual(code, outcome, "including unknown future entry failures")
+                assertEqual(observed.elapsed, 3, "real failure still fails fast after foreign marker error")
+            }
+        }
     }
 
     @MainActor

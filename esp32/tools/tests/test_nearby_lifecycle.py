@@ -198,17 +198,67 @@ int main() {
 
     def test_results_name_crowded_out_categories_and_mark_mixed_groups(self):
         # Nearby keeps the nearest ten in total. When a selected category is
-        # absent from complete-coverage results, say so; a merged group of
+        # absent from either coverage mode, say so; a merged group of
         # different categories gets a distinct count badge.
         source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()
         service = fragment(source, "static void serviceNearbyScreen(uint32_t nowMs) {")
-        complete = service.index("} else if (replacement.coverageComplete) {")
-        self.assertLess(complete,
-                        service.index("map_nearby_layout::formatAbsentCategories("))
         self.assertIn("nearby.selectedMask, categories, count", service)
         markers = fragment(source, "static void refreshNearbyMarkers(uint32_t nowMs) {")
         self.assertIn("const bool mixed = placed.category == 0;", markers)
         self.assertIn("mixed ? LV_OPA_COVER : LV_OPA_TRANSP", markers)
+
+    def test_actual_status_keeps_absent_category_and_partial_coverage_warning(self):
+        source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()
+        fixture = r'''
+#include <algorithm>
+#include <cassert>
+#include <cstdarg>
+#include <cstdio>
+#include <string>
+#include "mapNearbyLayout.hpp"
+namespace map_nearby_storage {
+enum class Status {Ok, Unavailable, Corrupt, ReadFailed, ResourceRejected, Cancelled};
+}
+struct Result {
+  map_nearby_storage::Status status=map_nearby_storage::Status::Ok;
+  unsigned count=10;
+  bool coverageComplete=false;
+  struct Place {uint8_t category=2;} places[10];
+} replacement;
+struct {
+  void *status=nullptr;
+  double radiusM=10000;
+  uint32_t selectedMask=(1U<<1U)|(1U<<2U), querySequence=1;
+  bool haveResults=true;
+} nearby;
+std::string displayed;
+void lv_label_set_text(void *,const char *text) {displayed=text;}
+void lv_label_set_text_fmt(void *,const char *format,...) {
+  char value[512]; va_list args; va_start(args,format);
+  vsnprintf(value,sizeof(value),format,args); va_end(args); displayed=value;
+}
+void refreshStatus() {
+'''
+        fixture += fragment(source, "switch (replacement.status)")
+        fixture += r'''
+}
+int main() {
+  refreshStatus();
+  assert(displayed.find("No toilets in nearest 10")!=std::string::npos);
+  assert(displayed.find("Downloaded area only; map edge nearby")!=std::string::npos);
+  replacement.coverageComplete=true; refreshStatus();
+  assert(displayed.find("No toilets in nearest 10")!=std::string::npos);
+  assert(displayed.find("map edge")==std::string::npos);
+  replacement.places[0].category=3; refreshStatus();
+  assert(displayed.find("No toilets")==std::string::npos);
+  replacement.coverageComplete=false; replacement.count=0; refreshStatus();
+  assert(displayed.find("No matches in downloaded area")!=std::string::npos);
+  assert(displayed.find("Map edge nearby")!=std::string::npos);
+  replacement.coverageComplete=true; refreshStatus();
+  assert(displayed.find("No matching places within")!=std::string::npos);
+}
+'''
+        self.run_fixture(fixture)
 
     def test_search_uses_current_position_source_not_onboard_receiver_fix(self):
         source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()
