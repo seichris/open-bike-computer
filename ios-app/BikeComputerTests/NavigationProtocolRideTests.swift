@@ -4825,7 +4825,8 @@ extension NavigationProtocolTests {
     }
 
     static func testDiagnosticsIssueMarkerDelivery() {
-        let attFailure = CBATTError(.unlikelyError)
+        // Not CBATTError: the restoration build links a CoreBluetooth double.
+        let attFailure = NSError(domain: "ATT", code: 1)
         let incident = UUID(uuidString: "0f1e2d3c-4b5a-4968-8776-655443322110")!
         let marker = "DTRNmark|2|1|connection_drop|\(incident.uuidString.lowercased())"
         // An authenticated link with acknowledged writes and the matching
@@ -4929,7 +4930,7 @@ extension NavigationProtocolTests {
     }
 
     static func testSettingWriteRetry() {
-        let attFailure = CBATTError(.unlikelyError)
+        let attFailure = NSError(domain: "ATT", code: 1)
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
         defer { defaults.removeObject(forKey: "deviceSettings.brightnessPercent") }
