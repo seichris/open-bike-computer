@@ -965,7 +965,7 @@ Current setting IDs:
 | `3` | Map route line width | `2...48` |
 | `4` | Legacy display rotation | Ignored. Rotation is fixed by firmware target: 90° on the 1.75-inch device and 0° on the 2.06-inch device. |
 | `6` | Map rotation mode | `0` north-up, `1` course-up |
-| `7` | Map zoom level | `0...5` |
+| `7` | Map zoom level | `0...5`; firmware renders `1...5` and draws a stored `0` at `1`, so the app offers `1...5` |
 | `8` | Map visibility and global navigation-overlay mask | bit 0 buildings, bit 1 parks/green space, bit 2 paths/footways, bit 3 major roads, bit 4 residential/other local roads, bit 5 water, bit 6 railways, bit 7 other areas, bit 8 route overlay, bit 9 current position marker, bit 10 service roads, bit 11 tracks, bit 12 extended-mask marker, bit 13 topographic contours, bits 18-22 shops, restaurants/cafes, public toilets, gas stations, and bicycle shops/repair respectively |
 | `9` | Map street width | Absolute rendered width is `1...24` px. The wire value remains `width - 4` (`-3...20`) so older apps that send a boost remain compatible. |
 | `10` | Map current-position marker scale | `1...5`; default is `2`, so the map position marker renders at twice its original size. The firmware shows a route-blue dot when no route is loaded and a route-blue arrow while navigating. Both shapes are rendered at their final display resolution. |
@@ -977,7 +977,7 @@ Current setting IDs:
 | `16` | Map + Navigation minimum polygon size | `0...50` |
 | `17` | Map + Navigation detail level | `0` low, `1` medium, `2` high |
 | `18` | Map + Navigation route line width | `2...48` |
-| `19` | Map + Navigation zoom level | `0...5` |
+| `19` | Map + Navigation zoom level | Same values as ID `7` |
 | `20` | Map + Navigation feature visibility mask | feature bits and the extended-mask marker use the same meanings as ID `8`; navigation overlay bits remain global via ID `8` |
 | `21` | Map + Navigation street width | Absolute rendered width is `1...24` px, encoded as `width - 4` (`-3...20`) for compatibility. |
 | `22` | Map + Navigation current-position marker scale | `1...5` |

@@ -2990,9 +2990,10 @@ private struct MapStyleSettingsView: View {
                 }
             }
 
-            Section(header: Text("Zoom Level"), footer: Text("0 = Closest, 5 = Farthest")) {
+            // Firmware renders zoom 1-5; a stored 0 is drawn at 1.
+            Section(header: Text("Zoom Level"), footer: Text("1 = Closest, 5 = Farthest")) {
                 Picker("Zoom", selection: zoomLevel) {
-                    ForEach(0...5, id: \.self) { level in
+                    ForEach(1...5, id: \.self) { level in
                         Text("\(level)").tag(level)
                     }
                 }
