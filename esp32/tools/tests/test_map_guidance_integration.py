@@ -445,6 +445,25 @@ class MapGuidanceIntegrationTests(unittest.TestCase):
             request.index("Course-up frame deferred"),
         )
 
+    def test_render_semantics_key_on_the_zoom_actually_rendered(self):
+        # A screen profile may store zoom 0 while the renderer clamps to 1.
+        # Keying the per-tick projection check on the raw value but the request
+        # on the clamped one flipped the signature every tick, cancelling each
+        # render so the screen never published a frame.
+        clamp = "requestedZoom = map_transform::clampRuntimeZoom(requestedZoom)"
+        semantics = function_body(
+            MAP_RENDERER_SOURCE, "void Maps::invalidateRenderSemanticsForScreen"
+        )
+        request = function_body(
+            MAP_RENDERER_SOURCE, "bool Maps::buildRenderRequestForScreen"
+        )
+        self.assertIn(clamp, semantics)
+        self.assertLess(semantics.index(clamp),
+                        semantics.index("projectionSignature("))
+        self.assertIn(clamp, request)
+        self.assertLess(request.index(clamp),
+                        request.index("request.zoom = requestedZoom"))
+
     def test_position_only_requests_do_not_cancel_active_render(self):
         job = (ESP32_ROOT / "lib" / "maps" / "src" / "mapRenderJob.hpp").read_text(
             encoding="utf-8"

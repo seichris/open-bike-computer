@@ -422,7 +422,8 @@ private struct DeviceScreenMapProfileEditor: View {
             Stepper("Route Width: \(profile.routeLineWidth)", value: $profile.routeLineWidth, in: 2...48)
             Stepper("Street Width: \(profile.streetLineWidth)", value: $profile.streetLineWidth, in: 1...24)
             Stepper("Position Scale: \(profile.positionMarkerScale)", value: $profile.positionMarkerScale, in: 1...5)
-            Stepper("Zoom: \(profile.zoomLevel)", value: $profile.zoomLevel, in: 0...5)
+            // Firmware renders zoom 1-5; a stored 0 is drawn at 1.
+            Stepper("Zoom: \(profile.zoomLevel)", value: $profile.zoomLevel, in: 1...5)
         }
 
         Section("Map Content") {

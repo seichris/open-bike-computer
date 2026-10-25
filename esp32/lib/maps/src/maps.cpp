@@ -4457,6 +4457,10 @@ void Maps::invalidateRenderSemanticsForScreen(uint32_t nowMs,
                                               uint8_t requestedZoom,
                                               bool mapVisible,
                                               bool guidanceScreenActive) {
+  // Key on the zoom actually rendered. A stored 0 is rendered at 1; keying
+  // callers on different values flipped the projection every tick and
+  // cancelled each render before it could publish.
+  requestedZoom = map_transform::clampRuntimeZoom(requestedZoom);
   bool semanticChanged = false;
   const ScreenMapRenderSettings &style = map_profile_protocol::select(
       mapRenderSettings.mapStyle, mapRenderSettings.mapNavigationStyle,
@@ -4693,6 +4697,7 @@ bool Maps::buildRenderRequestForScreen(uint8_t requestedZoom, uint32_t nowMs,
                                        bool mapVisible,
                                        bool guidanceScreenActive,
                                        RenderRequest &request) {
+  requestedZoom = map_transform::clampRuntimeZoom(requestedZoom);
   invalidateRenderSemanticsForScreen(nowMs, requestedZoom, mapVisible,
                                      guidanceScreenActive);
   updatePresentedPoseForScreen(nowMs, mapVisible);
