@@ -59,6 +59,21 @@ int main() {
   assert(markerSequenceAfterBinding(captureA, captureB, 7) == 0);
   assert(markerSequenceAfterBinding(nullptr, captureB, 7) == 0);
 
+  MarkerReplayReceipt receipt;
+  assert(!receipt.matches(7, "other", captureA));
+  receipt.remember(7, "other", captureA);
+  assert(receipt.matches(7, "other", captureA));
+  // Capture rotation resets sequence admission, not the last receipt.
+  assert(markerSequenceAfterBinding(captureA, captureB, 7) == 0);
+  assert(receipt.matches(7, "other", captureA));
+  assert(receipt.sameIncident(captureA));
+  assert(!receipt.matches(8, "other", captureA));
+  assert(!receipt.matches(7, "device_blank", captureA));
+  assert(!receipt.matches(7, "other", nullptr)); // legacy stays one-shot
+  receipt.remember(8, "navigation_wrong", captureB);
+  assert(!receipt.sameIncident(captureA));
+  assert(receipt.matches(8, "navigation_wrong", captureB));
+
   using namespace ride_diagnostics::transfer_policy;
   assert(storageReady(StoragePreparation::ReadyRemovable));
   assert(storageReady(StoragePreparation::ReadyInternalFallback));

@@ -16,7 +16,7 @@ inline constexpr char RIDE_AUTOMATION_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B
 inline constexpr char SCREEN_CONFIGURATION_UUID[] = "9D7B3F30-3F6A-4D1C-9F6D-1FBF0E8B1005";
 inline constexpr std::size_t PROTECTED_FRAME_OVERHEAD = 22;
 inline constexpr uint8_t CAPABILITY_SCHEMA_VERSION = 1;
-inline constexpr uint8_t CURRENT_CLIENT_VERSION = 32;
+inline constexpr uint8_t CURRENT_CLIENT_VERSION = 33;
 inline constexpr uint8_t EXTENDED_FEATURE_TLV_TYPE = 3;
 inline constexpr uint32_t DEVICE_SOUNDS_FEATURE = 1UL << 0;
 inline constexpr uint8_t DEVICE_SOUNDS_MINIMUM_CLIENT_VERSION = 1;
@@ -88,6 +88,8 @@ inline constexpr uint32_t EXTENDED_FRIEND_MARKER_SCALE_V1_FEATURE = 1UL << 1;
 inline constexpr uint8_t EXTENDED_FRIEND_MARKER_SCALE_V1_MINIMUM_CLIENT_VERSION = 31;
 inline constexpr uint32_t EXTENDED_ROUTE_ELEVATION_V1_FEATURE = 1UL << 2;
 inline constexpr uint8_t EXTENDED_ROUTE_ELEVATION_V1_MINIMUM_CLIENT_VERSION = 32;
+inline constexpr uint32_t EXTENDED_MAP_POIS_FEATURE = 1UL << 3;
+inline constexpr uint8_t EXTENDED_MAP_POIS_MINIMUM_CLIENT_VERSION = 33;
 inline constexpr char WORKOUT_START_REQUEST_MAGIC[] = "WREQ";
 inline constexpr char DESTINATION_REQUEST_MAGIC[] = "DREQ";
 inline constexpr char WORLD_RADIO_REQUEST_MAGIC[] = "WRQ1";
@@ -169,6 +171,7 @@ enum class ScreenType : uint8_t {
   BatteryStatus = 4,
   WorldRadio = 5,
   Elevation = 6,
+  Nearby = 7,
   MapNavigation = MapPlusNavigation,
 };
 

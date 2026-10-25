@@ -59,7 +59,7 @@ struct Diagnostics {
 // identical inputs and shares one collision/repetition space across all blocks.
 MapLabelLayoutVector<Placement>
 place(MapLabelLayoutVector<Option> options, Bounds screen, uint8_t density,
-      const std::vector<ReservedRegion> &reserved = {},
+      const MapLabelLayoutVector<ReservedRegion> &reserved = {},
       Diagnostics *diagnostics = nullptr);
 
 } // namespace map_label_layout

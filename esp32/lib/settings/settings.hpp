@@ -119,8 +119,10 @@ public:
 
 extern EasyPreferencesDummy cfg;
 #endif
-#include "battery.hpp"
-#include "gps.hpp"
+// These headers participate in gps/settings/GUI dependency cycles. Resolve
+// direct dependencies explicitly, not via LDF's traversal-dependent -I set.
+#include "../battery/battery.hpp"
+#include "../gps/gps.hpp"
 #include "../tft/tft.hpp"
 #include <NMEAGPS.h>
 #ifndef DISABLE_COMPASS

@@ -879,15 +879,11 @@ extension NavigationProtocolTests {
                     "transfer handshake retains its eight-second readiness window")
         assertEqual(DeviceTransferHandshakePolicy.remoteDebugAttemptCount, 64,
                     "LAN-first debug startup allows station timeout plus hotspot fallback")
-        assertEqual(
-            DeviceTransferHandshakePolicy.diagnosticsAttemptCount(lanFirst: true),
-            DeviceTransferHandshakePolicy.remoteDebugAttemptCount,
-            "LAN-first diagnostics allows station timeout plus hotspot fallback"
-        )
-        assertEqual(
-            DeviceTransferHandshakePolicy.diagnosticsAttemptCount(lanFirst: false),
-            DeviceTransferHandshakePolicy.attemptCount,
-            "hotspot-only diagnostics keeps the ordinary readiness window"
+        assert(
+            MapTransferStartupPolicy.timeout >=
+                Double(DeviceTransferHandshakePolicy.remoteDebugAttemptCount) *
+                Double(DeviceTransferHandshakePolicy.retryIntervalNanoseconds) / 1_000_000_000,
+            "diagnostics startup keeps the LAN-first station timeout plus hotspot fallback"
         )
         assertEqual(DeviceTransferHandshakePolicy.remoteDebugExitAttemptCount, 32,
                     "debug teardown allows the worker's bounded stop path to finish")
@@ -1163,6 +1159,8 @@ extension NavigationProtocolTests {
                "malformed CAPS clears remote-debug support")
         assert(!manager.supportsGPSPositionQualityV1,
                "malformed CAPS clears GPS-quality support")
+        assert(!manager.supportsMapPois,
+               "malformed CAPS clears map POI support")
         assert(!manager.hasReceivedDeviceCapabilities, "malformed CAPS does not complete negotiation")
 
         let cap2 = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
@@ -1187,6 +1185,54 @@ extension NavigationProtocolTests {
                "CAP2 bit 13 does not collide with remote device debugging")
         assert(manager.hasReceivedDeviceCapabilities,
                "valid CAP2 completes capability negotiation")
+
+        let cap2WithRendererReplay =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0x11, 0x80, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithRendererReplay),
+               "CAP2 renderer replay notification should be consumed")
+        assert(!manager.supportsMapPois,
+               "released renderer replay bit 23 must not enable map POIs")
+        let incompleteMapPOICapability =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0, 0, 0, 0, 3, 4, 8, 0, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(incompleteMapPOICapability),
+               "CAP2 extended POI capability is parsed without prerequisites")
+        assert(!manager.supportsMapPois,
+               "POI controls stay off without extended visibility and target-5 reader prerequisites")
+        let cap2WithRouteElevationOnly =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 4, 0, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithRouteElevationOnly),
+               "released route elevation capabilities are accepted")
+        assert(manager.supportsRouteElevation && !manager.supportsMapPois,
+               "released extended bit 2 is route elevation and must not enable POIs")
+        let cap2WithMapPois =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 8, 0, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithMapPois),
+               "CAP2 map POI notification should be consumed")
+        assert(manager.supportsStreetLabels && manager.supports3DBuildings,
+               "the target-5 fixture carries its prerequisite capabilities")
+        assert(manager.supportsMapPois,
+               "CAP2 extended bit 3 enables map POI profiles and controls")
+        assert(!manager.supportsFriendMarkerScale && !manager.supportsRouteElevation,
+               "POI capability alone must not enable friend-marker sizing or route elevation")
+        let cap2WithFriendScaleOnly =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 2, 0, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithFriendScaleOnly),
+               "released friend-marker sizing capabilities are accepted")
+        assert(manager.supportsFriendMarkerScale && !manager.supportsMapPois,
+               "released extended bit 1 must not enable POIs even with map prerequisites")
+        let cap2WithBoth =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 0x0E, 0, 0, 0])
+        assert(manager.handleDeviceCapabilitiesNotification(cap2WithBoth),
+               "POIs, route elevation and friend-marker sizing coexist in the extended word")
+        assert(manager.supportsMapPois && manager.supportsFriendMarkerScale &&
+               manager.supportsRouteElevation,
+               "combined capabilities enable every independent feature")
 
         let cap2WithScopedWatch = Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
             Data([1, 0, 0x7F, 0, 0])
@@ -3862,6 +3908,59 @@ extension NavigationProtocolTests {
         assertEqual(sentPackets.count, 1, "legacy firmware receives one visibility packet")
         assertEqual(readInt32LE(sentPackets[0], offset: 5), 0x14,
                     "legacy firmware folds tracks into paths and service roads into local streets")
+
+        let poiManager = BLEManager()
+        let poiCapabilities =
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+            Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 8, 0, 0, 0])
+        assert(poiManager.handleDeviceCapabilitiesNotification(poiCapabilities),
+               "CAP2 map POI capability is accepted")
+        poiManager.isConnected = true
+        poiManager.isNavigationReady = true
+        poiManager.showBuildings = false
+        poiManager.showGreenSpace = false
+        poiManager.showPaths = false
+        poiManager.showTracks = false
+        poiManager.showMajorRoads = false
+        poiManager.showLocalStreets = false
+        poiManager.showServiceRoads = false
+        poiManager.showWater = false
+        poiManager.showRailways = false
+        poiManager.showOtherAreas = false
+        poiManager.showRouteOverlay = false
+        poiManager.showCurrentPosition = false
+        poiManager.showPOIShops = true
+        poiManager.showPOIRestaurantsAndCafes = false
+        poiManager.showPOIPublicToilets = true
+        poiManager.showPOIGasStations = false
+        poiManager.showPOIBicycleServices = true
+        var poiPackets: [Data] = []
+        poiManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { poiPackets.append($0) }
+        ))
+        poiManager.sendVisibilityMask(for: .map)
+        assertEqual(readInt32LE(poiPackets[0], offset: 5), 0x541000,
+                    "capable firmware receives selected POI bits and the extended marker")
+
+        // Route elevation firmware owns extended bit 2; it never receives POIs.
+        assert(poiManager.handleDeviceCapabilitiesNotification(
+            Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) +
+                Data([1, 0x10, 0x11, 0, 0x40, 3, 4, 4, 0, 0, 0])),
+               "CAP2 route elevation capability is accepted")
+        assert(!poiManager.supportsMapPois, "route elevation never unlocks POI controls")
+        poiManager.isConnected = true
+        poiManager.isNavigationReady = true
+        poiPackets.removeAll()
+        poiManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 20,
+            canSend: { true },
+            write: { poiPackets.append($0) }
+        ))
+        poiManager.sendVisibilityMask(for: .map)
+        assertEqual(readInt32LE(poiPackets[0], offset: 5), 0x1000,
+                    "route elevation firmware receives no POI visibility bits")
     }
 
     static func testBLEManagerGatesTopographicContourVisibility() {
@@ -3878,6 +3977,7 @@ extension NavigationProtocolTests {
             Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 0, 0xc0])),
             "CAP2 terrain capability is accepted")
         assert(manager.supportsTerrainExperiments, "CAP2 bit 31 unlocks experimental Map presets")
+        assert(!manager.supportsMapPois, "terrain capability never unlocks POI controls")
         assert(!manager.supportsGroupRiders, "terrain bit 31 must never unlock social packets")
         assert(RideBLEGeneratedProtocolV1.extendedGroupRidersV1Feature == 1 << 0 &&
                RideBLEGeneratedProtocolV1.extendedGroupRidersV1MinimumClientVersion == 30 &&
@@ -4724,6 +4824,252 @@ extension NavigationProtocolTests {
                "ending maintenance restores the normal connection policy")
     }
 
+    static func testDiagnosticsIssueMarkerDelivery() {
+        // Not CBATTError: the restoration build links a CoreBluetooth double.
+        let attFailure = NSError(domain: "ATT", code: 1)
+        let incident = UUID(uuidString: "0f1e2d3c-4b5a-4968-8776-655443322110")!
+        let marker = "DTRNmark|2|1|connection_drop|\(incident.uuidString.lowercased())"
+        // An authenticated link with acknowledged writes and the matching
+        // diagnostics registry, which admits v2 markers carrying an incident.
+        func connect(_ manager: BLEManager, replaySafe: Bool? = true) -> () -> [String] {
+            manager.isConnected = true
+            manager.isNavigationReady = true
+            _ = manager.handleDeviceCapabilitiesNotification(
+                Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 0x30, 0])
+            )
+            let replayField = replaySafe.map { ",\"markerReplaySafe\":\($0)" } ?? ""
+            _ = manager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data("""
+                {"configured":true,"enabled":false,"mode":"","diagnosticsPolicy":{"schema":2,"schemaDigest":"\(DiagnosticsSchema.digest)","supportedMask":1,"generation":0,"mask":0,"minimumLevel":2,"active":false,"captureId":"","remainingBytes":0,"filteredCount":0,"deadlineUptimeMs":0,"baselineMinimumLevel":2,"rawPayloads":false\(replayField)}}
+                """.utf8)
+            )
+            manager.setDiagnosticsIssueMarkerRetryDelayForTesting(0.05)
+            var packets: [Data] = []
+            manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 96,
+                expectsWriteResponse: true,
+                canSend: { true },
+                write: { packets.append($0) }
+            ))
+            return { packets.map { String(decoding: $0, as: UTF8.self) } }
+        }
+
+        let retried = BLEManager()
+        let retriedPackets = connect(retried)
+        assert(retried.sendDiagnosticsIssueMarker(.connectionDrop, incidentID: incident),
+               "a marker is queued for the connected Bicino")
+        assertEqual(retriedPackets(), [marker], "the first marker attempt reaches BLE")
+        assertEqual(
+            retried.diagnosticsIssueMarkerDelivery,
+            DiagnosticsIssueMarkerDelivery(sequence: 1, incidentID: incident, state: .pending),
+            "a marker is pending until its BLE write succeeds"
+        )
+        retried.completeNavigationWriteForTesting(error: attFailure)
+        assertEqual(retried.diagnosticsIssueMarkerDelivery?.state, .pending,
+                    "a failed marker write stays pending while it is retried")
+        assert(waitForMainLoop(timeout: 2) { retriedPackets().count == 2 },
+               "an ATT-failed marker is retried")
+        assertEqual(retriedPackets(), [marker, marker],
+                    "the retry keeps the marker sequence and incident")
+        retried.completeNavigationWriteForTesting(error: nil)
+        assertEqual(retried.diagnosticsIssueMarkerDelivery?.state, .sent,
+                    "a successful BLE write reports the marker as sent")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(retriedPackets().count, 2, "a sent marker is never repeated")
+        assert(retried.sendDiagnosticsIssueMarker(.other, incidentID: UUID()),
+               "a later marker is queued")
+        assert(retriedPackets().last?.hasPrefix("DTRNmark|2|2|other|") == true,
+               "a retry does not consume another marker sequence")
+
+        let exhausted = BLEManager()
+        let exhaustedPackets = connect(exhausted)
+        assert(exhausted.sendDiagnosticsIssueMarker(.deviceBlank, incidentID: incident),
+               "a marker is queued before its writes fail")
+        for attempt in 1...DiagnosticsIssueMarkerRetryPolicy.maximumAttemptCount {
+            assert(waitForMainLoop(timeout: 2) { exhaustedPackets().count == attempt },
+                   "marker attempt \(attempt) reaches BLE")
+            exhausted.completeNavigationWriteForTesting(error: attFailure)
+        }
+        assertEqual(exhausted.diagnosticsIssueMarkerDelivery?.state, .notDelivered,
+                    "a marker whose bounded retries all fail is not delivered")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(exhaustedPackets().count, DiagnosticsIssueMarkerRetryPolicy.maximumAttemptCount,
+                    "marker retries remain bounded")
+        assertEqual(Set(exhaustedPackets()).count, 1, "every attempt resends the same marker")
+
+        let delivered = BLEManager()
+        let deliveredPackets = connect(delivered)
+        assert(delivered.sendDiagnosticsIssueMarker(.sensorMissing, incidentID: incident),
+               "a marker is queued before its write succeeds")
+        delivered.completeNavigationWriteForTesting(error: nil)
+        assertEqual(delivered.diagnosticsIssueMarkerDelivery?.state, .sent,
+                    "a first successful write sends the marker")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(deliveredPackets().count, 1, "a successful marker write is not retried")
+
+        for capability in ([false, nil] as [Bool?]) {
+            let legacy = BLEManager()
+            let legacyPackets = connect(legacy, replaySafe: capability)
+            assert(legacy.sendDiagnosticsIssueMarker(.other, incidentID: incident))
+            legacy.completeNavigationWriteForTesting(error: attFailure)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            assertEqual(legacyPackets().count, 1, "absent/false capability forbids ambiguous retries")
+            assertEqual(legacy.diagnosticsIssueMarkerDelivery?.state, .notDelivered,
+                        "one-shot delivery settles without retry on older firmware")
+        }
+
+        let v1 = BLEManager()
+        let v1Packets = connect(v1)
+        assert(v1.sendDiagnosticsIssueMarker(.other))
+        v1.completeNavigationWriteForTesting(error: attFailure)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(v1Packets(), ["DTRNmark|1|1|other"], "v1 has no idempotency key")
+
+        // Exercise callback delays beyond the old fixed 200 ms observation.
+        // Queue admission and invalidation are observable state transitions.
+        for retryDelay in [0.05, 0.3] {
+            for queuedRetry in [false, true] {
+                let rotated = BLEManager()
+                let rotatedPackets = connect(rotated)
+                rotated.setDiagnosticsIssueMarkerRetryDelayForTesting(retryDelay)
+                assert(rotated.sendDiagnosticsIssueMarker(.connectionDrop, incidentID: incident))
+                rotated.completeNavigationWriteForTesting(error: attFailure)
+                if queuedRetry {
+                    // Hold another ATT write until the retry is actually queued.
+                    assert(rotated.requestDeviceTransferStatus())
+                    assert(waitForMainLoop(timeout: 2) {
+                        rotated.rendererBenchmarkBLETransportEvidence().queueDepth == 1
+                    }, "the retry is queued behind the held status write")
+                    assertEqual(rotatedPackets(), [marker, "DSTS"],
+                                "the queued retry has not reached BLE")
+                }
+                assert(rotated.sendDiagnosticsCaptureBinding(UUID()))
+                if queuedRetry { rotated.completeNavigationWriteForTesting(error: nil) }
+                assert(waitForMainLoop(timeout: 2) {
+                    rotated.diagnosticsIssueMarkerDelivery?.state == .notDelivered
+                }, "a capture change settles its invalidated marker")
+                assertEqual(rotatedPackets().filter { $0 == marker }.count, 1,
+                            "capture rotation fences scheduled and already queued marker retries")
+            }
+        }
+
+        let ended = BLEManager()
+        let endedPackets = connect(ended)
+        assert(ended.sendDiagnosticsIssueMarker(.connectionDrop, incidentID: incident))
+        ended.completeNavigationWriteForTesting(error: attFailure)
+        assert(ended.endDiagnosticsCapture())
+        assert(waitForMainLoop(timeout: 2) {
+            ended.diagnosticsIssueMarkerDelivery?.state == .notDelivered
+        }, "capture end settles its invalidated marker")
+        assertEqual(endedPackets().filter { $0 == marker }.count, 1,
+                    "capture end fences pending retry even without a local recorder")
+
+        let relinked = BLEManager()
+        let firstLinkPackets = connect(relinked)
+        assert(relinked.sendDiagnosticsIssueMarker(.navigationWrong, incidentID: incident),
+               "a marker is queued before its link drops")
+        relinked.completeNavigationWriteForTesting(error: attFailure)
+        let failedGeneration = relinked.rideConnectionGenerationForTesting
+        relinked.clearConnectionStateForTesting()
+        assert(relinked.rideConnectionGenerationForTesting != failedGeneration,
+               "losing the link ends its connection generation")
+        assertEqual(relinked.diagnosticsIssueMarkerDelivery?.state, .notDelivered,
+                    "a marker awaiting a retry is not delivered once its link is lost")
+        let successorPackets = connect(relinked)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(firstLinkPackets().count, 1, "the lost link receives no retry")
+        assert(successorPackets().isEmpty,
+               "a marker is never retried on a later connection generation")
+        assert(relinked.sendDiagnosticsIssueMarker(.other, incidentID: incident),
+               "a marker is queued on the successor link")
+        relinked.clearConnectionStateForTesting()
+        assertEqual(relinked.diagnosticsIssueMarkerDelivery?.state, .notDelivered,
+                    "a marker in flight when its link drops is not left pending")
+    }
+
+    static func testSettingWriteRetry() {
+        let attFailure = NSError(domain: "ATT", code: 1)
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
+        defer { defaults.removeObject(forKey: "deviceSettings.brightnessPercent") }
+        // No settings characteristic, so settings use acknowledged fallback writes.
+        func connect(_ manager: BLEManager) -> () -> [Data] {
+            manager.isConnected = true
+            manager.isNavigationReady = true
+            manager.setSettingWriteRetryDelayForTesting(0.05)
+            var packets: [Data] = []
+            manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                expectsWriteResponse: true,
+                canSend: { true },
+                write: { packets.append($0) }
+            ))
+            return { packets }
+        }
+        func setting(_ id: UInt8, _ value: Int32) -> Data {
+            var packet = Data(DeviceBLEProtocol.settingsFallbackPrefix.utf8)
+            packet.append(id)
+            withUnsafeBytes(of: value.littleEndian) { packet.append(contentsOf: $0) }
+            return packet
+        }
+        let brightness = DeviceBLEProtocol.brightnessSettingID
+
+        let retried = BLEManager()
+        let retriedPackets = connect(retried)
+        assert(retried.sendSetting(id: brightness, value: 40), "a setting is queued for the connected Bicino")
+        assertEqual(retriedPackets(), [setting(brightness, 40)], "the first setting attempt reaches BLE")
+        retried.completeNavigationWriteForTesting(error: attFailure)
+        assert(waitForMainLoop(timeout: 2) { retriedPackets().count == 2 },
+               "an ATT-failed setting write is retried")
+        assertEqual(retriedPackets(), [setting(brightness, 40), setting(brightness, 40)],
+                    "the retry resends the same value")
+        retried.completeNavigationWriteForTesting(error: nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(retriedPackets().count, 2, "a delivered setting is never repeated")
+
+        let exhausted = BLEManager()
+        let exhaustedPackets = connect(exhausted)
+        assert(exhausted.sendSetting(id: brightness, value: 55), "a setting is queued before its writes fail")
+        for attempt in 1...SettingWriteRetryPolicy.maximumAttemptCount {
+            assert(waitForMainLoop(timeout: 2) { exhaustedPackets().count == attempt },
+                   "setting attempt \(attempt) reaches BLE")
+            exhausted.completeNavigationWriteForTesting(error: attFailure)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(exhaustedPackets().count, SettingWriteRetryPolicy.maximumAttemptCount,
+                    "setting retries remain bounded")
+        assertEqual(Set(exhaustedPackets()), [setting(brightness, 55)],
+                    "every attempt resends the same value")
+
+        let superseded = BLEManager()
+        let supersededPackets = connect(superseded)
+        assert(superseded.sendSetting(id: brightness, value: 30), "a setting is queued before its write fails")
+        superseded.completeNavigationWriteForTesting(error: attFailure)
+        assert(superseded.sendSetting(id: brightness, value: 70), "a newer value is queued")
+        superseded.completeNavigationWriteForTesting(error: nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(supersededPackets(), [setting(brightness, 30), setting(brightness, 70)],
+                    "a newer value supersedes the retry of an older one")
+
+        let relinked = BLEManager()
+        let firstLinkPackets = connect(relinked)
+        assert(relinked.sendSetting(id: brightness, value: 45), "a setting is queued before its link drops")
+        relinked.completeNavigationWriteForTesting(error: attFailure)
+        relinked.clearConnectionStateForTesting()
+        let successorPackets = connect(relinked)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(firstLinkPackets().count, 1, "the lost link receives no retry")
+        assert(successorPackets().isEmpty,
+               "a setting is never retried on a later connection generation")
+
+        let reboot = BLEManager()
+        let rebootPackets = connect(reboot)
+        assert(reboot.sendSetting(id: 5, value: 1), "the reboot command is queued")
+        reboot.completeNavigationWriteForTesting(error: attFailure)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(rebootPackets(), [setting(5, 1)], "the one-shot reboot command is never repeated")
+    }
+
     @MainActor
     static func testDeviceDiagnosticsTransferPolicy() async {
         let configuration = URLSessionConfiguration.ephemeral
@@ -5000,40 +5346,193 @@ extension NavigationProtocolTests {
         )
     }
 
+    static let diagnosticsReadyStatus = """
+    {"configured":true,"enabled":true,"port":8443,"mode":"diagnostics","baseUrl":"https://192.168.4.20:8443","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"dddddddddddddddddddddddddddddddd","tls":{"identityVersion":1,"certificateSha256":"\(String(repeating: "c", count: 64))"},"transferGeneration":4,"capabilities":{"secureTransferV1":true}}
+    """
+
+    /// Runs the diagnostics readiness wait on a simulated clock. `device`
+    /// publishes firmware status as time advances; DSTS polls are recorded.
+    @MainActor
+    static func simulateDiagnosticsReadiness(
+        _ bleManager: BLEManager,
+        device: (_ before: TimeInterval, _ now: TimeInterval) -> Void
+    ) async -> (result: Result<DeviceTransferSession, Error>, elapsed: TimeInterval, polls: [TimeInterval]) {
+        final class SimulatedTime {
+            var now: TimeInterval = 0
+            var polls: [TimeInterval] = []
+        }
+        let time = SimulatedTime()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { if $0 == Data("DSTS".utf8) { time.polls.append(time.now) } }
+        ))
+        let result: Result<DeviceTransferSession, Error>
+        do {
+            result = .success(try await DeviceTransferManager().waitForDiagnosticsSessionForTesting(
+                bleManager: bleManager,
+                afterRevision: bleManager.deviceTransferStatusRevision,
+                afterErrorSequence: bleManager.deviceTransferLastErrorSequence,
+                clock: { time.now },
+                sleep: { nanoseconds in
+                    let before = time.now
+                    time.now += Double(nanoseconds) / 1_000_000_000
+                    device(before, time.now)
+                }
+            ))
+        } catch {
+            result = .failure(error)
+        }
+        return (result, time.now, time.polls)
+    }
+
+    @MainActor
+    static func testDeviceDiagnosticsWaitsForDelayedReadiness() async {
+        let preparing = #"{"configured":true,"enabled":false,"mode":""}"#
+        let bleManager = BLEManager()
+        let deliver = { (json: String) in
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+            )
+        }
+        deliver(preparing)
+        // Storage preparation and the bounded seal publish an empty mode with
+        // no error; physical hardware then needs 11-18 s before Wi-Fi is ready.
+        let delayed = await simulateDiagnosticsReadiness(bleManager) { before, now in
+            if before < 0.5, now >= 0.5 { deliver(preparing) }
+            if before < 12, now >= 12 { deliver(diagnosticsReadyStatus) }
+        }
+        if case .success(let session) = delayed.result {
+            assertEqual(session.mode, .diagnostics, "delayed diagnostics readiness opens a diagnostics session")
+            assertEqual(session.sessionToken, "dddddddddddddddddddddddddddddddd",
+                        "delayed diagnostics readiness returns the fresh token")
+        } else {
+            assert(false, "diagnostics readiness after 12 s must not time out: \(delayed.result)")
+        }
+        assertEqual(delayed.elapsed, 12, "diagnostics entry completes as soon as the session arrives")
+        assertEqual(delayed.polls, [2, 4, 6, 8, 10], "diagnostics status polling is bounded and paced")
+
+        let absentManager = BLEManager()
+        _ = absentManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(preparing.utf8)
+        )
+        let absent = await simulateDiagnosticsReadiness(absentManager) { _, _ in }
+        if case .failure(let error) = absent.result,
+           case .missingDiagnosticsSession? = error as? RemoteDeviceDebugError {} else {
+            assert(false, "an absent diagnostics session still fails: \(absent.result)")
+        }
+        assertEqual(absent.elapsed, MapTransferStartupPolicy.timeout,
+                    "diagnostics entry ends at the absolute readiness deadline")
+        assertEqual(absent.polls.count, 14, "an absent device cannot trigger an unbounded polling loop")
+    }
+
+    @MainActor
+    static func testDeviceDiagnosticsMarkerErrorDoesNotOwnEntry() async {
+        let preparing = #"{"configured":true,"enabled":false,"mode":""}"#
+        let markerError = #"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"marker_rejected","message":"recorder busy","sequence":1}}"#
+        assert(!DeviceDiagnosticsRejectionPolicy.isSessionEntryFailure(code: "marker_rejected"))
+        assert(!DeviceDiagnosticsRejectionPolicy.isSessionEntryFailure(code: ""))
+        for outcome in ["ready", "timeout", "diagnostics_writable_probe_failed", "future_entry_failure"] {
+            let manager = BLEManager()
+            let deliver = { (json: String) in
+                _ = manager.handleDeviceTransferStatusNotification(
+                    Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+                )
+            }
+            deliver(preparing)
+            let observed = await simulateDiagnosticsReadiness(manager) { before, now in
+                if before < 1, now >= 1 { deliver(markerError) }
+                if outcome == "ready", before < 12, now >= 12 {
+                    deliver(diagnosticsReadyStatus)
+                } else if outcome != "ready", outcome != "timeout", before < 3, now >= 3 {
+                    deliver("""
+                    {"configured":true,"enabled":false,"mode":"","lastError":{"code":"\(outcome)","message":"entry failed","sequence":2}}
+                    """)
+                }
+            }
+            switch outcome {
+            case "ready":
+                guard case .success(let session) = observed.result else {
+                    fatalError("foreign marker failure must not abort entry: \(observed.result)")
+                }
+                assertEqual(session.mode, .diagnostics, "secure diagnostics session is still required")
+                assertEqual(observed.elapsed, 12, "entry waits for actual readiness, not marker status")
+                assertEqual(observed.polls, [2, 4, 6, 8, 10], "marker failure does not change polling cadence")
+            case "timeout":
+                guard case .failure(let error) = observed.result,
+                      case .missingDiagnosticsSession? = error as? RemoteDeviceDebugError else {
+                    fatalError("marker failure is neither readiness nor an entry rejection: \(observed.result)")
+                }
+                assertEqual(observed.elapsed, MapTransferStartupPolicy.timeout, "entry keeps its absolute deadline")
+                assertEqual(manager.deviceTransferLastErrorCode, "marker_rejected", "foreign error is retained, not globally cleared")
+            default:
+                guard case .failure(let error) = observed.result,
+                      case .rejected(let code, _)? = error as? RemoteDeviceDebugError else {
+                    fatalError("genuine fresh entry rejection must remain authoritative: \(observed.result)")
+                }
+                assertEqual(code, outcome, "including unknown future entry failures")
+                assertEqual(observed.elapsed, 3, "real failure still fails fast after foreign marker error")
+            }
+        }
+    }
+
     @MainActor
     static func testDeviceDiagnosticsFailsFastOnFirmwareRejection() async {
         let bleManager = BLEManager()
-        let initialRevision = bleManager.deviceTransferStatusRevision
-        let manager = DeviceTransferManager()
-        let started = Date()
-        let wait = Task {
-            try await manager.waitForDiagnosticsSessionForTesting(
-                bleManager: bleManager,
-                afterRevision: initialRevision,
-                attemptCount: 32
+        let deliver = { (json: String) in
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
             )
         }
-        try? await Task.sleep(nanoseconds: 20_000_000)
-        let rejectedStatus = """
-        {"configured":true,"enabled":false,"mode":"","lastError":{"code":"diagnostics_writable_probe_failed","message":"probe failed"}}
-        """
-        _ = bleManager.handleDeviceTransferStatusNotification(
-            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
-                Data(rejectedStatus.utf8)
-        )
-        do {
-            _ = try await wait.value
-            assert(false, "firmware diagnostics rejection must fail entry")
-        } catch RemoteDeviceDebugError.rejected(let code, let message) {
+        // The device keeps its last transfer error for diagnostics.
+        let retained = #"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"diagnostics_seal_timeout","message":"earlier","sequence":7}}"#
+        deliver(retained)
+        let rejected = await simulateDiagnosticsReadiness(bleManager) { before, now in
+            if before < 0.5, now >= 0.5 { deliver(retained) }
+            if before < 3, now >= 3 {
+                deliver(#"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"diagnostics_writable_probe_failed","message":"probe failed","sequence":9}}"#)
+            }
+        }
+        if case .failure(let error) = rejected.result,
+           case .rejected(let code, let message)? = error as? RemoteDeviceDebugError {
             assertEqual(code, "diagnostics_writable_probe_failed",
                         "diagnostics handshake retains the firmware code")
-            assert(message.contains("diagnostics_writable_probe_failed"),
+            assert(message.contains("[diagnostics_writable_probe_failed]"),
                    "diagnostics rejection presented to the user includes its code")
-            assert(Date().timeIntervalSince(started) < 1.5,
-                   "fresh firmware rejection bypasses the full polling window")
-        } catch {
-            assert(false, "firmware diagnostics rejection has the right error")
+        } else {
+            assert(false, "a fresh firmware diagnostics rejection must fail entry: \(rejected.result)")
         }
+        assertEqual(rejected.elapsed, 3,
+                    "a retained error waits, while a fresh rejection bypasses the readiness window")
+    }
+
+    @MainActor
+    static func testDeviceDiagnosticsKeepsWaitingBeforeFirstLinkStatus() async {
+        let bleManager = BLEManager()
+        let deliver = { (json: String) in
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+            )
+        }
+        assertEqual(bleManager.deviceTransferStatusRevision, 0,
+                    "diagnostics entry starts before the link's first device status")
+        // The reply to the post-authentication status request can still carry
+        // an error retained from an attempt made before this link existed.
+        let delayed = await simulateDiagnosticsReadiness(bleManager) { before, now in
+            if before < 0.5, now >= 0.5 {
+                deliver(#"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"diagnostics_seal_timeout","message":"earlier","sequence":7}}"#)
+            }
+            if before < 6, now >= 6 { deliver(diagnosticsReadyStatus) }
+        }
+        if case .success(let session) = delayed.result {
+            assertEqual(session.sessionToken, "dddddddddddddddddddddddddddddddd",
+                        "the entry's own session wins over an error retained before the link's first status")
+        } else {
+            assert(false, "an error retained before the link's first status cannot end diagnostics entry: \(delayed.result)")
+        }
+        assertEqual(delayed.elapsed, 6, "diagnostics entry keeps waiting for its own session")
     }
 
     @MainActor
@@ -6326,7 +6825,7 @@ extension NavigationProtocolTests {
         assert(coordinator.lease == nil, "refused admission creates no lease")
     }
 
-    static func testDeviceTransferManagerWaitsForMapToken() async {
+    static func testDeviceTransferManagerWaitsForMapToken(startupDelayNanoseconds: UInt64 = 0) async {
         await assertDeviceTransferAdmissionRejectsUnownedSession()
         let suiteName = "transfer-fixture.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -6381,6 +6880,18 @@ extension NavigationProtocolTests {
                         "generic map entry requests mode and fresh HTTP credential atomically")
         }
 
+        if startupDelayNanoseconds > 0 {
+            // Real startup can publish mode before the endpoint and credential
+            // snapshot completes. Do not exit an accepted session at eight seconds.
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
+                Data(#"{"configured":true,"enabled":true,"mode":"map"}"#.utf8)
+            )
+            try? await Task.sleep(nanoseconds: startupDelayNanoseconds)
+            assert(!sentPackets.contains(Data("DTRNexit".utf8)),
+                   "delayed map readiness must not trigger premature device cleanup")
+        }
+
         let mapStatus = """
         {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","sdPresent":true,"mapFound":true,"mapBlocks":1,"activation":{"status":"idle"}}
         """
@@ -6411,6 +6922,121 @@ extension NavigationProtocolTests {
                         "map transfer handshake waits for the fresh token")
         } catch {
             assert(false, "map transfer handshake should succeed: \(error)")
+        }
+    }
+
+    @MainActor
+    static func testDeviceTransferManagerSurfacesFreshMapRejectionEarly() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        let deliver = { (json: String) in
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+            )
+        }
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { packet in
+                sentPackets.append(packet)
+                if packet == Data("DTRNexit".utf8) {
+                    Task { @MainActor in deliver(#"{"configured":true,"enabled":false,"mode":""}"#) }
+                }
+            }
+        ))
+        // The device keeps its last error for diagnostics across transfers.
+        let retained = #"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"sd_unavailable","message":"earlier","sequence":7}}"#
+        deliver(retained)
+
+        let started = ProcessInfo.processInfo.systemUptime
+        var outcome: Result<DeviceTransferSession, Error>?
+        let transferTask = Task { @MainActor in
+            do {
+                outcome = .success(try await manager.enterMapTransfer(bleManager: bleManager, status: { _ in }))
+            } catch {
+                outcome = .failure(error)
+            }
+        }
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|map".utf8)) {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        deliver(retained)
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        assert(outcome == nil, "a retained earlier error cannot end map startup")
+
+        deliver(#"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"sd_unavailable","message":"no card","sequence":8}}"#)
+        await transferTask.value
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        if case .failure(let error)? = outcome,
+           case .deviceSDCardUnavailable? = error as? OfflineMapPlatformError {} else {
+            assert(false, "a fresh entry rejection keeps its classified error: \(String(describing: outcome))")
+        }
+        assert(elapsed < MapTransferStartupPolicy.timeout / 2,
+               "a fresh entry rejection ends startup without waiting for the readiness deadline (\(elapsed) s)")
+    }
+
+    @MainActor
+    static func testDeviceTransferManagerKeepsMapStartupBeforeFirstLinkStatus() async {
+        let suiteName = "transfer-fixture.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let manager = DeviceTransferManager(coordinator: DeviceOperationCoordinator(defaults: defaults))
+        let bleManager = BLEManager()
+        bleManager.setConnectedDeviceIDForTesting("device-a")
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        let deliver = { (json: String) in
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+            )
+        }
+        var sentPackets: [Data] = []
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { sentPackets.append($0) }
+        ))
+        // A pending install resumes as soon as a new link is navigation-ready,
+        // before the reply to the post-authentication status request arrives.
+        assertEqual(bleManager.deviceTransferStatusRevision, 0,
+                    "map entry starts before the link's first device status")
+
+        var outcome: Result<DeviceTransferSession, Error>?
+        let transferTask = Task { @MainActor in
+            do {
+                outcome = .success(try await manager.enterMapTransfer(bleManager: bleManager, status: { _ in }))
+            } catch {
+                outcome = .failure(error)
+            }
+        }
+        for _ in 0..<100 where !sentPackets.contains(Data("DTRNenter|map".utf8)) {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        let retainedError = #""lastError":{"code":"sd_unavailable","message":"earlier","sequence":7}"#
+        deliver(#"{"configured":true,"enabled":false,"mode":"","# + retainedError + "}")
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        assert(outcome == nil, "an error retained before the link's first status cannot end map startup")
+        assert(!sentPackets.contains(Data("DTRNexit".utf8)),
+               "an error retained before the link's first status does not exit the entry")
+
+        let tlsFingerprint = String(repeating: "c", count: 64)
+        deliver("""
+        {"configured":true,"enabled":true,"port":8080,"mode":"map","baseUrl":"https://192.168.4.20:8080","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"dddddddddddddddddddddddddddddddd","tls":{"identityVersion":1,"certificateSha256":"\(tlsFingerprint)"},"transferGeneration":4,"capabilities":{"secureTransferV1":true,"signedMapStreamV1":true,"legacyArchivePolicy":"disabled"},\(retainedError)}
+        """)
+        await transferTask.value
+        if case .success(let session)? = outcome {
+            assertEqual(session.sessionToken, "dddddddddddddddddddddddddddddddd",
+                        "the entry's own session wins over an error retained before the link's first status")
+            _ = await manager.exitMapTransfer(bleManager: bleManager)
+        } else {
+            assert(false, "map startup succeeds despite a retained earlier error: \(String(describing: outcome))")
         }
     }
 
@@ -6508,7 +7134,7 @@ extension NavigationProtocolTests {
     static func testBLEManagerParsesMapTransferStatus() {
         let manager = BLEManager()
         let json = """
-        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapStateKnown":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeMapDisplayName":"Kyoto Hills","activeMapBoundsE7":[1356000000,349000000,1360000000,352000000],"activeRendererFormat":2,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
+        {"configured":true,"enabled":true,"port":8080,"baseUrl":"http://192.168.4.20:8080","sdPresent":true,"mapStateKnown":true,"mapFound":false,"mapBlocks":0,"activeMapId":"kyoto-v1","activeSessionId":"kyoto-v1-session","activeManifestReceipt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","activeMapDisplayName":"Kyoto Hills","activeMapBoundsE7":[1356000000,349000000,1360000000,352000000],"activeRendererFormat":5,"labelProfileVersion":1,"labelLanguages":["ja","en"],"fontAssetHealthy":true,"poiProfileVersion":1,"poiIndexProfileVersion":1,"poiDataHealthy":true,"poiIndexHealthy":true,"contourLayerIncluded":false,"activation":{"status":"activating","sequence":12,"sessionId":"tokyo-v2","mapId":"tokyo-v2","step":1,"steps":5,"progress":6},"lastError":{"code":"previous","message":"previous upload failed"}}
         """
         let packet = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(json.utf8)
 
@@ -6526,7 +7152,7 @@ extension NavigationProtocolTests {
                     "device map descriptor exposes its manifest display name")
         assertEqual(manager.activeDeviceMap?.bounds?.minLongitude, 135.6,
                     "device map descriptor converts integer preview bounds")
-        assertEqual(manager.activeMapRendererFormat, 2,
+        assertEqual(manager.activeMapRendererFormat, 5,
                     "status parser exposes active renderer target")
         assertEqual(manager.activeMapLabelProfileVersion, 1,
                     "status parser exposes active label profile")
@@ -6534,6 +7160,14 @@ extension NavigationProtocolTests {
                     "status parser exposes active label languages")
         assert(manager.activeMapFontAssetHealthy,
                "status parser exposes live FMA1 health")
+        assertEqual(manager.activeMapPoiProfileVersion, 1,
+                    "status parser exposes the active POI profile")
+        assertEqual(manager.activeMapPoiIndexProfileVersion, 1,
+                    "status parser exposes the signed POI index profile")
+        assert(manager.activeMapPoiDataHealthy,
+                   "status parser exposes independently validated POI data health")
+        assert(manager.activeMapPoiIndexHealthy,
+               "status parser exposes independently validated POI index health")
         assertEqual(manager.mapTransferActivationStatus, "activating", "status parser exposes activation state")
         assertEqual(manager.mapTransferActivationSequence, 12, "status parser exposes activation sequence")
         assertEqual(manager.mapTransferActivationSessionId, "tokyo-v2", "status parser exposes activation session")
@@ -6547,6 +7181,17 @@ extension NavigationProtocolTests {
         assertEqual(manager.deviceMapFoundForCurrentLocation, false, "status parser exposes current map coverage")
         assertEqual(manager.deviceMapBlockCount, 0, "status parser exposes current map block count")
         assertEqual(manager.mapTransferLastError, "previous: previous upload failed", "status parser exposes last transfer error")
+
+        let failedActivationPacket =
+            Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
+                "{\"enabled\":false,\"activeMapId\":\"kyoto-v1\",\"activeRendererFormat\":4,\"poiProfileVersion\":1,\"poiDataHealthy\":true,\"activation\":{\"status\":\"failed\"}}".utf8
+            )
+        assert(manager.handleMapTransferStatusNotification(failedActivationPacket),
+               "failed target-4 activation status should be consumed")
+        assertEqual(manager.activeMapPoiProfileVersion, nil,
+                    "activation failure clears the active POI profile")
+        assert(!manager.activeMapPoiDataHealthy,
+               "activation failure clears active POI health")
 
         let legacyPacket = Data(DeviceBLEProtocol.mapTransferStatusPrefix.utf8) + Data(
             "{\"enabled\":true,\"activeMapId\":\"legacy-map\"}".utf8
@@ -7313,6 +7958,11 @@ extension NavigationProtocolTests {
             "mapSettings.showWater",
             "mapSettings.showRailways",
             "mapSettings.showOtherAreas",
+            "mapSettings.showPOIShops",
+            "mapSettings.showPOIRestaurantsAndCafes",
+            "mapSettings.showPOIPublicToilets",
+            "mapSettings.showPOIGasStations",
+            "mapSettings.showPOIBicycleServices",
             "mapSettings.showNature",
             "mapSettings.showMinorRoads",
             "mapPlusNavigationSettings.minPolygonSize",
@@ -7338,6 +7988,11 @@ extension NavigationProtocolTests {
             "mapPlusNavigationSettings.showWater",
             "mapPlusNavigationSettings.showRailways",
             "mapPlusNavigationSettings.showOtherAreas",
+            "mapPlusNavigationSettings.showPOIShops",
+            "mapPlusNavigationSettings.showPOIRestaurantsAndCafes",
+            "mapPlusNavigationSettings.showPOIPublicToilets",
+            "mapPlusNavigationSettings.showPOIGasStations",
+            "mapPlusNavigationSettings.showPOIBicycleServices",
             "mapPlusNavigationSettings.migrated.v1",
             "mapSettings.recommendedDefaults.v2",
             "streetLabels.defaults.v1",
@@ -7397,6 +8052,18 @@ extension NavigationProtocolTests {
                "fresh Map + Navigation profiles hide other areas")
         assert(!freshManager.mapPlusNavigationLabelsEnabled,
                "fresh Map + Navigation profiles hide street labels")
+        assert(freshManager.showPOIShops &&
+               freshManager.showPOIRestaurantsAndCafes &&
+               freshManager.showPOIPublicToilets &&
+               freshManager.showPOIGasStations &&
+               freshManager.showPOIBicycleServices,
+               "fresh Map profiles show all POI categories")
+        assert(!freshManager.mapPlusNavigationShowPOIShops &&
+               !freshManager.mapPlusNavigationShowPOIRestaurantsAndCafes &&
+               !freshManager.mapPlusNavigationShowPOIPublicToilets &&
+               !freshManager.mapPlusNavigationShowPOIGasStations &&
+               !freshManager.mapPlusNavigationShowPOIBicycleServices,
+               "fresh Map + Navigation profiles hide all POI categories")
         assertEqual(freshManager.mapPlusNavigationLabelDensity, 2,
                     "fresh Map + Navigation profiles retain Balanced as the dormant label density")
 
@@ -7583,6 +8250,8 @@ extension NavigationProtocolTests {
         manager.showServiceRoads = false
         manager.mapPlusNavigationShowTracks = false
         manager.mapPlusNavigationShowServiceRoads = false
+        manager.showPOIShops = false
+        manager.mapPlusNavigationShowPOIBicycleServices = true
         manager.mapLabelsEnabled = false
         manager.mapLabelDensity = 1
         manager.mapLabelLanguageMode = 0
@@ -7610,6 +8279,10 @@ extension NavigationProtocolTests {
                "Map + Navigation track visibility should persist independently")
         assert(!reloaded.mapPlusNavigationShowServiceRoads,
                "Map + Navigation service-road visibility should persist independently")
+        assert(!reloaded.showPOIShops,
+               "Map POI visibility should persist")
+        assert(reloaded.mapPlusNavigationShowPOIBicycleServices,
+               "Map + Navigation POI visibility should persist independently")
         assert(!reloaded.mapLabelsEnabled,
                "Map street-label visibility should persist")
         assertEqual(reloaded.mapLabelDensity, 1,
@@ -9037,6 +9710,68 @@ extension NavigationProtocolTests {
 }
 
 extension NavigationProtocolTests {
+    static func testMapTransferStartupDeadline() async {
+        var now: TimeInterval = 100
+        var polls: [TimeInterval] = []
+        do {
+            let delayed: String? = try await MapTransferStartupPolicy.waitForSession(
+                clock: { now }, sleep: { now += Double($0) / 1_000_000_000 },
+                session: { now >= 112 ? "complete-secure-session" : nil },
+                requestStatus: { polls.append(now) }
+            )
+            assertEqual(delayed, "complete-secure-session", "readiness beyond eight seconds is accepted")
+            assertEqual(now, 112, "startup completes immediately when the full session arrives")
+            assertEqual(polls, [102, 104, 106, 108, 110], "status polling is bounded and paced")
+
+            now = 0; polls = []
+            var observations = 0
+            let absent: String? = try await MapTransferStartupPolicy.waitForSession(
+                clock: { now }, sleep: { now += Double($0) / 1_000_000_000 },
+                session: { observations += 1; return nil }, requestStatus: { polls.append(now) }
+            )
+            assert(absent == nil && now == 30 && observations <= 121,
+                   "incomplete/progress-only snapshots cannot renew the absolute startup deadline")
+            assertEqual(polls.count, 14, "an absent device cannot trigger an unbounded polling loop")
+
+            now = 0
+            let atDeadline: String? = try await MapTransferStartupPolicy.waitForSession(
+                clock: { now }, sleep: { now += Double($0) / 1_000_000_000 },
+                session: { now == 30 ? "ready" : nil }, requestStatus: {}
+            )
+            assertEqual(atDeadline, "ready", "the final deadline observation is not skipped")
+
+            now = 0
+            let late: String? = try await MapTransferStartupPolicy.waitForSession(
+                clock: { now }, sleep: { _ in now = 31 },
+                session: { now > 0 ? "too-late" : nil }, requestStatus: {}
+            )
+            assert(late == nil, "scheduler overrun must not accept a session beyond the deadline")
+
+            var checks = 0
+            do {
+                let _: String? = try await MapTransferStartupPolicy.waitForSession(
+                    clock: { 0 }, sleep: { _ in throw CancellationError() },
+                    session: { checks += 1; return nil }, requestStatus: {}
+                )
+                assert(false, "startup cancellation must propagate")
+            } catch is CancellationError {
+                assertEqual(checks, 1, "cancellation must not request a successor session")
+            }
+            for failure in [DeviceTransferSecurityError.secureTransferRequired,
+                            .signedMapStreamRequired] {
+                do {
+                    let _: String? = try await MapTransferStartupPolicy.waitForSession(
+                        clock: { 0 }, sleep: { _ in assert(false, "security rejection must not retry") },
+                        session: { throw failure }, requestStatus: {}
+                    )
+                    assert(false, "security failures remain terminal")
+                } catch let error as DeviceTransferSecurityError {
+                    assertEqual(error, failure, "startup preserves the original security rejection")
+                }
+            }
+        } catch { assert(false, "map startup simulation failed: \(error)") }
+    }
+
     static func testDeviceTransferReadinessWindow() async {
         let offline = DeviceTransferServerProbeResult(
             outcome: .transportError(domain: NSURLErrorDomain, code: NSURLErrorNotConnectedToInternet),

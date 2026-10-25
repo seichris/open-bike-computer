@@ -1,4 +1,5 @@
 #include "map_stream_install.hpp"
+#include "map_file_io.hpp"
 #include "../maps/src/mapRendererFileValidator.hpp"
 
 #include <algorithm>
@@ -271,12 +272,10 @@ bool readText(const std::string &path, std::string &value,
   uint64_t bytes = 0;
   if (!regularFileSize(path, bytes) || bytes > maximumBytes)
     return false;
-  struct FileCloser { void operator()(FILE *file) const { std::fclose(file); } };
-  std::unique_ptr<FILE, FileCloser> input(std::fopen(path.c_str(), "rb"));
-  if (!input) return false;
-  value.resize(static_cast<size_t>(bytes));
-  const size_t read = bytes == 0 ? 0 : std::fread(&value[0], 1, value.size(), input.get());
-  return read == bytes && std::fgetc(input.get()) == EOF && !std::ferror(input.get());
+  MapReadFile input(path);
+  if (!input)
+    return false;
+  return input.readAll(value, static_cast<size_t>(bytes));
 }
 
 std::string jsonEscape(const std::string &value) {
@@ -903,7 +902,8 @@ bool MapStreamInstallSession::prepareRoot(
     const std::string activePath =
         joinPath(storageRoot_, "/VECTMAP/active-map.json");
     for (const std::string &candidate : {activePath, activePath + ".bak"}) {
-      if (storage_->readText(candidate, active, 2048) &&
+      // Same 4 KiB limit as the installer's pointer reader and writer.
+      if (storage_->readText(candidate, active, 4096) &&
           (jsonString(active, "root") == inactiveRootRelative() ||
            jsonString(active, "previousRoot") == inactiveRootRelative())) {
         return fail("stream_session_conflict",

@@ -190,6 +190,7 @@ struct ConfigurableDeviceScreensSettingsSection: View {
         case .batteryStatus: return "battery.100percent"
         case .worldRadio: return "radio"
         case .elevation: return "mountain.2"
+        case .nearby: return "mappin.and.ellipse"
         }
     }
 }
@@ -291,7 +292,8 @@ private struct DeviceScreenInstanceEditorView: View {
                 .disabled(!instance.enabled || isDefault)
             }
 
-            if instance.type == .map || instance.type == .mapPlusNavigation,
+            if instance.type == .map || instance.type == .mapPlusNavigation ||
+                instance.type == .nearby,
                instance.mapProfile != nil {
                 DeviceScreenMapProfileEditor(
                     profile: mapProfileBinding,
@@ -299,7 +301,14 @@ private struct DeviceScreenInstanceEditorView: View {
                     supportsNavigationOrientation: bleManager.supportsMapNavigationOrientation,
                     topographicContoursAvailable:
                         bleManager.topographicContoursAvailable,
-                    supportsTerrainExperiments: bleManager.supportsTerrainExperiments
+                    supportsTerrainExperiments: bleManager.supportsTerrainExperiments,
+                    supportsMapPois: bleManager.supportsMapPois,
+                    poisAvailable: bleManager.supportsMapPois &&
+                        bleManager.activeMapRendererFormat == 5 &&
+                        bleManager.activeMapPoiProfileVersion == 1 &&
+                        bleManager.activeMapPoiIndexProfileVersion == 1 &&
+                        bleManager.activeMapPoiDataHealthy &&
+                        bleManager.activeMapPoiIndexHealthy
                 )
                 FriendMarkerSizeSection(bleManager: bleManager)
             }
@@ -386,6 +395,16 @@ private struct DeviceScreenMapProfileEditor: View {
     let supportsNavigationOrientation: Bool
     let topographicContoursAvailable: Bool
     let supportsTerrainExperiments: Bool
+    let supportsMapPois: Bool
+    let poisAvailable: Bool
+
+    private let poiOptions: [(String, UInt32)] = [
+        ("Shops", 1 << 18),
+        ("Restaurants & Cafes", 1 << 19),
+        ("Public Toilets", 1 << 20),
+        ("Gas Stations", 1 << 21),
+        ("Bicycle Shops & Repair", 1 << 22),
+    ]
 
     private let visibilityOptions: [(String, UInt32)] = [
         ("Buildings", 1 << 0), ("Green Space", 1 << 1),
@@ -403,7 +422,8 @@ private struct DeviceScreenMapProfileEditor: View {
             Stepper("Route Width: \(profile.routeLineWidth)", value: $profile.routeLineWidth, in: 2...48)
             Stepper("Street Width: \(profile.streetLineWidth)", value: $profile.streetLineWidth, in: 1...24)
             Stepper("Position Scale: \(profile.positionMarkerScale)", value: $profile.positionMarkerScale, in: 1...5)
-            Stepper("Zoom: \(profile.zoomLevel)", value: $profile.zoomLevel, in: 0...5)
+            // Firmware renders zoom 1-5; a stored 0 is drawn at 1.
+            Stepper("Zoom: \(profile.zoomLevel)", value: $profile.zoomLevel, in: 1...5)
         }
 
         Section("Map Content") {
@@ -417,6 +437,15 @@ private struct DeviceScreenMapProfileEditor: View {
                 )
             )
             .disabled(!topographicContoursAvailable)
+        }
+
+        if type != .nearby && supportsMapPois {
+            Section("Points of Interest") {
+                ForEach(poiOptions, id: \.1) { option in
+                    Toggle(option.0, isOn: visibilityBinding(option.1))
+                        .disabled(!poisAvailable)
+                }
+            }
         }
 
         Section("Labels") {

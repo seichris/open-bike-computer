@@ -69,6 +69,8 @@ nonisolated struct DiagnosticsCaptureStatus: Codable, Equatable, Sendable {
     let deadlineUptimeMs: UInt32
     let baselineMinimumLevel: UInt32
     let rawPayloads: Bool
+    // Absent on older firmware: ambiguous marker writes must not be retried.
+    var markerReplaySafe: Bool? = nil
 
     var valid: Bool {
         schema == 2 && schemaDigest.count == 64 &&

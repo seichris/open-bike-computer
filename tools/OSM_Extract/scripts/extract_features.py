@@ -32,6 +32,12 @@ from building_block_cache import (
     BuildingBlockCacheError,
     load_building_block_cache_identity,
 )
+from poi_pipeline import (
+    PoiPipelineError,
+    load_poi_config,
+    prepare_pois,
+    records_by_block,
+)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import product
 from shapely import box
@@ -47,11 +53,15 @@ parser.add_argument("max_lon")
 parser.add_argument("max_lat")
 parser.add_argument("geojson_prefix")
 parser.add_argument("map_folder", nargs="?", default="../maps/shanghai_v2")
-parser.add_argument("--renderer-format", type=int, choices=(1, 2, 3), default=1)
+parser.add_argument("--renderer-format", type=int, choices=(1, 2, 3, 5), default=1)
 parser.add_argument("--preferred-language", action="append", default=[])
 parser.add_argument("--international-fallback", default="en")
 parser.add_argument("--selection-geometry")
 parser.add_argument("--selection-buffer-m", type=float, default=0.0)
+parser.add_argument(
+    "--output-blocks",
+    help="canonical target-5 output blocks, equal to the signed Nearby coverage",
+)
 parser.add_argument("--scope-plan")
 parser.add_argument("--suppress-scope-marker", action="store_true")
 parser.add_argument("--calibration-manifest")
@@ -87,11 +97,15 @@ if (args.debug_image_dir is None) != (args.debug_image_limit is None):
     parser.error("debug image directory and limit must be supplied together")
 if args.debug_image_limit is not None and not 1 <= args.debug_image_limit <= 10000:
     parser.error("--debug-image-limit must be between 1 and 10000")
+if args.output_blocks is not None and args.renderer_format != 5:
+    parser.error("--output-blocks requires renderer format 5")
 
 LINES_INPUT_FILE = "{}_lines.geojson".format(args.geojson_prefix)
 POLYGONS_INPUT_FILE = "{}_polygons.geojson".format(args.geojson_prefix)
+POINTS_INPUT_FILE = "{}_points.geojson".format(args.geojson_prefix)
 CONF_FEATURES = '../conf/conf_extract.yaml'
 CONF_STYLES = '../conf/conf_styles.yaml'
+CONF_POIS = '../conf/poi_categories.yaml'
 MAP_FOLDER = args.map_folder
 MAP_ROOT = Path(MAP_FOLDER).resolve(strict=False)
 DEBUG_IMAGE_ROOT = (
@@ -112,6 +126,8 @@ MAPFOLDER_SIZE_BITS = 4     # 16 x 16 map blocks per folder
 BUILDING_SCOPE_POLICY_VERSION = 5
 mapblock_mask  = pow( 2, MAPBLOCK_SIZE_BITS) - 1     # ...00000000111111111111
 mapfolder_mask = pow( 2, MAPFOLDER_SIZE_BITS) - 1    # ...00001111
+includes_buildings = args.renderer_format >= 3
+includes_pois = args.renderer_format == 5
 
 
 def fail_building_preprocess(code, message):
@@ -155,6 +171,56 @@ def fail_generic_geometry(error):
     raise SystemExit(2)
 
 
+def fail_poi(error):
+    print(
+        "POI_FAILURE:"
+        + json.dumps(
+            {
+                "code": getattr(error, "code", "poi_artifact_validation_failed"),
+                "message": str(error)[:1024],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+    raise SystemExit(2)
+
+
+# Mirrors the signed Nearby coverage limit enforced by the backend and readers.
+MAX_OUTPUT_BLOCKS = 1024
+
+
+def load_output_blocks(path):
+    """Return canonical target-5 output block origins in ascending (x, y) order."""
+    with open(path, "rb") as source:
+        document = json.load(source)
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schemaVersion", "blockSizeMeters", "blocks"}
+        or type(document["schemaVersion"]) is not int
+        or document["schemaVersion"] != 1
+        or type(document["blockSizeMeters"]) is not int
+        or document["blockSizeMeters"] != 4096
+        or not isinstance(document["blocks"], list)
+        or not 1 <= len(document["blocks"]) <= MAX_OUTPUT_BLOCKS
+    ):
+        raise ValueError("target-5 output block set is invalid")
+    positions = []
+    previous = None
+    for block in document["blocks"]:
+        if (
+            not isinstance(block, list)
+            or len(block) != 2
+            or any(type(value) is not int for value in block)
+            or (previous is not None and tuple(block) <= previous)
+        ):
+            raise ValueError("target-5 output blocks are not canonical")
+        previous = tuple(block)
+        positions.append((block[0] * 4096, block[1] * 4096))
+    return tuple(positions)
+
+
 conf = yaml.safe_load( open( CONF_FEATURES, "r"))
 styles = yaml.safe_load( open(CONF_STYLES, "r"))
 
@@ -163,7 +229,7 @@ area_min_x, area_min_y = lon2x( float( min_lon)), lat2y( float( min_lat))
 area_max_x, area_max_y = lon2x( float( max_lon)), lat2y( float( max_lat))
 building_normalization_started = None
 building_normalization_seconds = 0.0
-if args.renderer_format == 3:
+if includes_buildings:
     area_min_x &= ~mapblock_mask
     area_min_y &= ~mapblock_mask
     area_max_x = (area_max_x + mapblock_mask) & ~mapblock_mask
@@ -193,8 +259,8 @@ if args.scope_plan:
         or scope_policy.get("blockSizeMeters") != 4096
     ):
         fail_building_preprocess("building_scope_policy_invalid", "scope plan identity or policy is invalid")
-    if args.renderer_format != 3:
-        fail_building_preprocess("building_scope_policy_invalid", "scope plans are only supported by renderer format 3")
+    if not includes_buildings:
+        fail_building_preprocess("building_scope_policy_invalid", "scope plans require a building-aware renderer format")
     output_blocks = serialized_scope.get("outputBlocks")
     if not isinstance(output_blocks, list) or not output_blocks:
         fail_building_preprocess("building_scope_policy_invalid", "scope plan output blocks are invalid")
@@ -256,15 +322,30 @@ block_positions = tuple(
     if scope_block_positions is not None
     else product(x_positions, y_positions)
 )
+if args.output_blocks is not None:
+    # Selection masks keep whole crossing features and the request grid is a
+    # rectangle, so neither bounds the emitted blocks. The signed coverage
+    # does; calibration, closure and feature selection are left unchanged.
+    try:
+        output_block_positions = load_output_blocks(args.output_blocks)
+    except (OSError, TypeError, ValueError) as exc:
+        fail_poi(exc)
+    if scope_block_positions is not None:
+        if not set(output_block_positions).issuperset(block_positions):
+            fail_poi(ValueError("scope plan blocks lie outside the target-5 output blocks"))
+    else:
+        if not set(block_positions).issuperset(output_block_positions):
+            fail_poi(ValueError("target-5 output blocks lie outside the extracted area"))
+        block_positions = output_block_positions
 total = len(block_positions)
 if total <= 0:
     if scope_plan is not None:
         fail_building_preprocess("building_scope_policy_invalid", "map extraction has no output blocks")
     raise ValueError("map extraction has no output blocks")
 if scope_plan is not None and args.building_block_cache_root is None:
-    fail_building_preprocess("building_block_cache_unavailable", "plan-aware target 3 requires the building block cache")
+    fail_building_preprocess("building_block_cache_unavailable", "plan-aware building extraction requires the building block cache")
 
-if args.renderer_format == 3:
+if includes_buildings:
     print(
         'BUILDING_PREPROCESS_PROGRESS:'
         '{"completed":0,"indeterminate":true,"unit":"building_normalization"}',
@@ -275,6 +356,10 @@ print("  Step 1/5 reading lines files")
 lines = json.load( open( LINES_INPUT_FILE, "r"))
 print("  Step 2/5 reading polygons files")
 polygons = json.load( open( POLYGONS_INPUT_FILE, "r"))
+points = {"features": []}
+if includes_pois:
+    print("  Step 2/5 reading points file")
+    points = json.load(open(POINTS_INPUT_FILE, "r"))
 
 selection_geometry = None
 if args.selection_geometry:
@@ -286,6 +371,11 @@ if args.selection_geometry:
 apply_selection_mask = (
     selection_geometry is not None
     and selection_policy != "complete_blocks_no_selection_edge_clipping"
+    # Canonical target-5 coverage signs whole blocks, including their empty
+    # areas. Edge-clipping POIs or other features within those blocks would
+    # falsely describe omitted data as searched empty space. Scope-planned
+    # builds already use the same complete-block semantics.
+    and args.output_blocks is None
 )
 
 
@@ -302,6 +392,33 @@ def selected_features(features):
             selected.append(feature)
     return selected
 
+
+poi_records_by_block = {}
+poi_stats = None
+poi_normalization_seconds = 0.0
+if includes_pois:
+    try:
+        poi_started = time.perf_counter()
+        poi_config = load_poi_config(CONF_POIS)
+        poi_records, poi_stats = prepare_pois(
+            points["features"],
+            polygons["features"],
+            poi_config,
+            selection_geometry=(selection_geometry if apply_selection_mask else None),
+            emitted_blocks=block_positions,
+        )
+        poi_records_by_block = records_by_block(poi_records)
+        poi_normalization_seconds = time.perf_counter() - poi_started
+        poi_stats.update(
+            {
+                "blocks": 0,
+                "blockBytes": 0,
+                "maximumBlockBytes": 0,
+            }
+        )
+    except (KeyError, TypeError, PoiPipelineError) as exc:
+        fail_poi(exc)
+
 buildings = []
 building_report = {}
 building_complexity = {}
@@ -310,7 +427,7 @@ building_block_cache_entries = {}
 building_cache_report = None
 building_cache_lookup_seconds = 0.0
 building_cache_generation_seconds = 0.0
-if args.renderer_format == 3:
+if includes_buildings:
     rules_path = os.path.join(os.path.dirname(__file__), "..", "conf", "building_height_rules.yaml")
     building_rules, building_rules_sha256 = load_rules(rules_path)
     if args.building_cache_only:
@@ -333,7 +450,7 @@ if args.renderer_format == 3:
     if (calibration_cache is None) != (args.calibration_source_sha256 is None):
         fail_building_preprocess("building_calibration_unavailable", "calibration manifest and source identity must be supplied together")
     if scope_plan is not None and calibration_cache is None:
-        fail_building_preprocess("building_calibration_unavailable", "plan-aware target 3 requires immutable calibration")
+        fail_building_preprocess("building_calibration_unavailable", "plan-aware building extraction requires immutable calibration")
     if scope_plan is not None and not args.building_cache_only:
         closure_audit = relation_index.get("closureAudit")
         if not isinstance(closure_audit, dict):
@@ -645,7 +762,7 @@ print("Applying styles")
 # apply styles
 lines = style_features( lines, styles) # styled_lines
 polygons = style_features( polygons, styles) # styled_polygons
-if args.renderer_format == 3:
+if includes_buildings:
     polygons = [
         feature
         for feature in polygons
@@ -705,7 +822,7 @@ building_totals = {
 }
 
 building_block_encoding_started = (
-    time.perf_counter() if args.renderer_format == 3 else None
+    time.perf_counter() if includes_buildings else None
 )
 debug_images_rendered = 0
 for init_x, init_y in progress.track(block_positions):
@@ -733,7 +850,7 @@ for init_x, init_y in progress.track(block_positions):
         clipped_buildings = []
         building_block_stats = {}
         cached_building_block = None
-        if args.renderer_format == 3:
+        if includes_buildings:
             cached_building_block = building_block_cache_entries.get(
                 (min_x, min_y)
             )
@@ -744,10 +861,12 @@ for init_x, init_y in progress.track(block_positions):
                     buildings, building_block_bbox, min_x, min_y
                 )
         building_record_count = building_block_stats.get("recordCount", 0)
+        poi_block_records = poi_records_by_block.get((min_x, min_y), ())
         if (
             len(clipped_lines) == 0
             and len(clipped_polygons) == 0
             and building_record_count == 0
+            and len(poi_block_records) == 0
         ):
             continue
 
@@ -818,7 +937,10 @@ for init_x, init_y in progress.track(block_positions):
 
         # BINARY VERSION (.fmb)
         block_write_started = time.perf_counter()
-        fmb_kwargs = {"font_builder": font_builder}
+        fmb_kwargs = {
+            "renderer_target": args.renderer_format,
+            "font_builder": font_builder,
+        }
         if cached_building_block is not None:
             fmb_kwargs.update(
                 {
@@ -830,8 +952,10 @@ for init_x, init_y in progress.track(block_positions):
                     },
                 }
             )
-        elif args.renderer_format == 3:
+        elif includes_buildings:
             fmb_kwargs["building_records"] = clipped_buildings
+        if includes_pois:
+            fmb_kwargs["poi_records"] = [record.encoded() for record in poi_block_records]
         try:
             block_metadata = write_fmb(
                 f"{file_name}.fmb",
@@ -842,7 +966,9 @@ for init_x, init_y in progress.track(block_positions):
                 **fmb_kwargs,
             )
         except MapFormatError as exc:
-            if args.renderer_format != 3:
+            if getattr(exc, "code", "").startswith("poi_"):
+                fail_poi(exc)
+            if not includes_buildings:
                 raise
             fail_building_preprocess(exc.code, exc)
         fmb_writing_seconds += time.perf_counter() - block_write_started
@@ -858,7 +984,7 @@ for init_x, init_y in progress.track(block_positions):
                 label_totals[maximum_key] = max(
                     label_totals[maximum_key], block_metadata[key]
                 )
-        if args.renderer_format == 3:
+        if includes_buildings:
             building_totals["blocks"] += 1
             building_totals["blockBytes"] += block_metadata["buildingBytes"]
             for key in (
@@ -875,6 +1001,12 @@ for init_x, init_y in progress.track(block_positions):
             building_totals["maximumBlockPoints"] = max(
                 building_totals["maximumBlockPoints"],
                 building_block_stats["pointCount"],
+            )
+        if includes_pois:
+            poi_stats["blocks"] += 1
+            poi_stats["blockBytes"] += block_metadata["poiBytes"]
+            poi_stats["maximumBlockBytes"] = max(
+                poi_stats["maximumBlockBytes"], block_metadata["poiBytes"]
             )
 
 building_block_encoding_seconds = (
@@ -909,7 +1041,7 @@ if font_builder is not None:
     }
     print("LABEL_STATS:" + json.dumps(label_totals, sort_keys=True, separators=(",", ":")))
 
-if args.renderer_format == 3:
+if includes_buildings:
     building_totals["geometryDiagnostics"] = geometry_diagnostics
     for key, value in building_report.items():
         if key not in building_totals:
@@ -933,3 +1065,10 @@ if args.renderer_format == 3:
         "blockEncoding": round(building_block_encoding_seconds, 6),
     }
     print("BUILDING_STATS:" + json.dumps(building_totals, sort_keys=True, separators=(",", ":")))
+
+if includes_pois:
+    poi_stats["phaseTimings"] = {
+        "poiNormalization": round(poi_normalization_seconds, 6),
+        "poiEncoding": round(max(0.0, fmb_writing_seconds), 6),
+    }
+    print("POI_STATS:" + json.dumps(poi_stats, sort_keys=True, separators=(",", ":")))

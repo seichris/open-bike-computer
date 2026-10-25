@@ -8,6 +8,26 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class LifecycleQualificationTests(unittest.TestCase):
+    def test_poi_budget_profiles_do_not_change_shipping_or_trust_gates(self):
+        config = configparser.ConfigParser(interpolation=None)
+        config.read(ROOT / "esp32/platformio.ini")
+        for board in ("175", "206"):
+            lifecycle = f"env:WAVESHARE_AMOLED_{board}_LIFECYCLE_QUALIFICATION"
+            qualifier = f"env:WAVESHARE_AMOLED_{board}_POI_LIFECYCLE_QUALIFICATION"
+            self.assertEqual(config[qualifier]["extends"], lifecycle)
+            self.assertEqual(config[qualifier]["build_flags"].split(), [
+                "${" + lifecycle + ".build_flags}", "-DMAP_POIS_RUNTIME_ENABLED=1",
+            ])
+            self.assertEqual(set(config[qualifier]), {"extends", "build_flags"})
+            # The existing reserve check and CI lifecycle adapter audit both
+            # cover these suffixes. No partition/reserve exception is added.
+            self.assertTrue(qualifier.endswith("_LIFECYCLE_QUALIFICATION"))
+            for profile in (f"env:WAVESHARE_AMOLED_{board}_PRODUCTION", lifecycle):
+                self.assertNotIn("MAP_POIS_RUNTIME_ENABLED=1", config[profile]["build_flags"])
+        for workflow in ("firmware-release.yml", "firmware-release-candidate.yml"):
+            self.assertNotIn("POI_LIFECYCLE_QUALIFICATION",
+                             (ROOT / ".github/workflows" / workflow).read_text())
+
     def test_profiles_only_add_lifecycle_gates_to_production_behavior(self):
         config = configparser.ConfigParser(interpolation=None)
         config.read(ROOT / "esp32/platformio.ini")

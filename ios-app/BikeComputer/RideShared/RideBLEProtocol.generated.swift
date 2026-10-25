@@ -15,7 +15,7 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let capabilityRequestMagic = "CAPS"
     static let capabilityResponseMagic = "CAP2"
     static let capabilitySchemaVersion: UInt8 = 1
-    static let currentClientVersion: UInt8 = 32
+    static let currentClientVersion: UInt8 = 33
     static let extendedFeatureTLVType: UInt8 = 3
     static let deviceSoundsFeature: UInt32 = 1 << 0
     static let deviceSoundsMinimumClientVersion: UInt8 = 1
@@ -87,6 +87,8 @@ nonisolated enum RideBLEGeneratedProtocolV1 {
     static let extendedFriendMarkerScaleV1MinimumClientVersion: UInt8 = 31
     static let extendedRouteElevationV1Feature: UInt32 = 1 << 2
     static let extendedRouteElevationV1MinimumClientVersion: UInt8 = 32
+    static let extendedMapPoisFeature: UInt32 = 1 << 3
+    static let extendedMapPoisMinimumClientVersion: UInt8 = 33
     static let screenConfigurationSchemaVersion: UInt8 = 1
     static let screenConfigurationCapabilityTLVType: UInt8 = 2
     static let maximumScreenConfigurationInstances = 16
@@ -163,6 +165,7 @@ nonisolated enum RideBLEScreenTypeV1: UInt8, CaseIterable, Codable, Sendable {
     case batteryStatus = 4
     case worldRadio = 5
     case elevation = 6
+    case nearby = 7
 }
 
 nonisolated enum RideBLELegacyScreenV1: Int, CaseIterable, Codable, Sendable {
