@@ -158,6 +158,32 @@ int main() {
       assert(sorted[index].candidate.recordOrder == expected[index].recordOrder);
   }
 
+  // A dense cluster of one category must not crowd every other category out
+  // of the bounded pool before collision: free space still takes a toilet.
+  for (const bool guidance : {false, true}) {
+    MapPoiLayoutVector<Candidate> pool;
+    pool.reserve(kMaximumCandidates);
+    for (size_t index = 0; index < kMaximumCandidates; ++index) {
+      Candidate restaurant;
+      restaurant.x = 100 + static_cast<float>(index % 4);
+      restaurant.y = 100 + static_cast<float>(index / 64);
+      restaurant.riderDistanceSquared = static_cast<double>(index);
+      restaurant.category = Category::RestaurantsAndCafes;
+      restaurant.recordOrder = static_cast<uint16_t>(index);
+      retainBounded(pool, restaurant, {400, 400}, guidance, {});
+    }
+    // Guidance ranks toilets above restaurants; check the reverse crowding too.
+    const Category crowded = guidance ? Category::Shops : Category::PublicToilets;
+    retainBounded(pool, {300, 300, 1e6, crowded, 1, 0, 0}, {400, 400}, guidance, {});
+    bool lowerPriorityPlaced = false, restaurantPlaced = false;
+    for (const auto &placement : place(std::move(pool), {400, 400}, guidance, {})) {
+      lowerPriorityPlaced = lowerPriorityPlaced || placement.candidate.category == crowded;
+      restaurantPlaced = restaurantPlaced ||
+          placement.candidate.category == Category::RestaurantsAndCafes;
+    }
+    assert(restaurantPlaced && lowerPriorityPlaced);
+  }
+
   std::cout << "map POI layout tests passed\n";
   return 0;
 }

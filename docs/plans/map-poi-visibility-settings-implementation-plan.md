@@ -1235,7 +1235,9 @@ For each ordinary ambient-map render:
 2. Project anchors through the captured render-context projection.
 3. Reject near-plane, invalid, or offscreen anchors with an icon margin.
 4. Keep at most 256 candidates using a bounded nearest/best structure; do not
-   allocate proportional to every POI in all loaded blocks.
+   allocate proportional to every POI in all loaded blocks. Each category keeps
+   an equal share of that pool, so one dense enabled category cannot remove
+   the others before collision even where they would fit.
 5. Rank by screen mode, semantic category priority, encoded rank, distance to
    the presented rider position, block order, and record order.
 6. Reserve marker and guidance/control regions.

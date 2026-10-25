@@ -3,6 +3,7 @@
 #include "../../ble_navigation/map_profile_protocol.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <tuple>
 
@@ -121,11 +122,31 @@ void retainBounded(MapPoiLayoutVector<Candidate> &candidates,
     candidates.push_back(candidate);
     return;
   }
-  size_t worst = 0;
-  for (size_t index = 1; index < candidates.size(); ++index)
-    if (better(candidates[worst], candidates[index], guidance))
+  // Truncating by priority alone let one dense category fill the pool before
+  // collision, so other enabled categories vanished even where they would
+  // fit. Each category keeps an equal share: one under its share displaces
+  // the worst candidate of a category over its share. Placement order and
+  // the placement cap are unchanged.
+  constexpr size_t kCategoryShare = kMaximumCandidates / 5;
+  std::array<size_t, 6> counts{};
+  const auto slot = [&counts](map_poi_block::Category category) {
+    return std::min<size_t>(static_cast<size_t>(category), counts.size() - 1);
+  };
+  for (const auto &kept : candidates)
+    ++counts[slot(kept.category)];
+  const size_t own = slot(candidate.category);
+  const bool underShare = counts[own] < kCategoryShare;
+  size_t worst = candidates.size();
+  for (size_t index = 0; index < candidates.size(); ++index) {
+    const size_t category = slot(candidates[index].category);
+    if (counts[category] <= kCategoryShare && (underShare || category != own))
+      continue;
+    if (worst == candidates.size() ||
+        better(candidates[worst], candidates[index], guidance))
       worst = index;
-  if (better(candidate, candidates[worst], guidance))
+  }
+  if (worst < candidates.size() &&
+      (underShare || better(candidate, candidates[worst], guidance)))
     candidates[worst] = candidate;
   if (diagnostics != nullptr)
     ++diagnostics->capacityDeferred;
