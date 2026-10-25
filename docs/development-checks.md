@@ -146,12 +146,15 @@ needed. Empty diffs run full coverage. Deletions and renames retain old/new path
 | Other map source/shared config | Full map consumers, plus OSM when its inputs change |
 | Known Swift helper sources | Matching navigation map/sensor/workout/radio groups using the shared source registry; other host contracts remain |
 | Unknown Swift source or script/registry/config | Full helper suite |
-| Unclassified tooling, protocol or CI input | All component checks; development/CI test suites already run unconditionally |
+| Unclassified tooling, protocol or CI input | Selection fails before product jobs; add an explicit consumer mapping. Development/CI unit tests and Markdown remain exempt |
+| Workout-zone fixture | One Swift workout helper and both-board zone contracts; no firmware images, native apps/simulators, backend or OSM |
+| Firmware release history / boot-acceptance verifier | Existing Python manifest/tool tests only; no native host dependency installation or unrelated zone contracts |
 | iOS application source | Fresh Debug app/container evidence; dedicated simulators only for their production/test/shared dependencies |
 | iOS build/distribution/project/identity inputs or full manual/release | Debug and Release containers plus relevant simulator contracts |
 | Production firmware libraries | Production and lifecycle, with extra ordinary/debug profiles for their conditional features |
-| BLE navigation or map-transfer libraries | BLE also retains ordinary/remote-debug; map transfer retains remote-debug development-trust compilation |
-| Board/runtime/build/shared configuration | Every regular profile for both boards |
+| BLE navigation or map-transfer libraries | Production plus remote-debug (2 builds per selected board). A preprocessor coverage test checks all four profiles on both boards and rejects uncovered ordinary/lifecycle-only branches |
+| Firmware board/runtime/build configuration | Every regular profile for both boards; board-specific 206 files retain 206 selection |
+| CI/shared-runner configuration | Every regular profile for the requested board family (175 by default); full manual/release requests still select both families |
 
 Ordinary source-only PRs no longer prove Release compilation. Before release, use
 full CI; the release candidate always requests all components and both board families.
@@ -163,8 +166,10 @@ The navigation umbrella script without arguments still runs every assertion; its
 Promotion dispatch first checks for an eligible existing CI run at the current head;
 branch movement aborts selection. The protected partial gate still requires the exact
 promotion branch and its sole allowed lock file. No deployment or rollout policy is
-relaxed. New sources that do not fit a known group use the broad fallback.
+relaxed. Unknown product sources keep their component fallback; unmapped shared tools, protocol files and CI inputs must declare their consumers instead of silently skipping or triggering every component.
 
-Observe the next 5–10 natural PR runs by scope/cache state and tighten routing if a
+The host job validates its nonempty check-ID selection before executing named registry steps. A missing/failed selected job still fails the aggregate gate. The rider-badge renderer runs for potentially rendering-related changes; BLE/transfer-only edits skip that unrelated benchmark. Documentation and CI unit-test edits accompanying firmware do not expand the hardware matrix. Lifecycle adapters under `firmware_update` and `map_transfer_http`, shared board/build inputs, and explicit manual/release scopes retain broader qualification. The preprocessor guard establishes source-branch coverage, not linking, runtime equivalence or physical acceptance.
+
+Compare total runner-minutes as well as wall time on the next 5–10 natural PR runs by scope/cache state. Tighten routing if a
 full/manual/release lane finds an omitted relevant failure. Revert the selector and
 workflow changes to restore the broad policy; do not raise runner resource limits.

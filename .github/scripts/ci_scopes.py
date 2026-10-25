@@ -13,6 +13,61 @@ from swift_compile import sources
 MAP_SCOPES = ('map_source', 'map_catalog', 'map_social', 'map_readers', 'map_deploy')
 COMPOSE_LOCKS = {'map-platform/deploy/compose.yaml', 'map-platform/deploy/compose.development.yaml'}
 
+# Inputs consumed only by existing fast checks. Keep one mapping for local and
+# hosted selection; adding an input here must identify its executable consumers.
+SHARED_FAST_CHECKS = {
+    'protocol/fixtures/workout-zones-v1.json': ('ios-navigation-workout',),
+    'tools/firmware_release_history.py': ('esp32-host-firmware-manifest-tests',),
+    'tools/verify_firmware_boot_acceptance.py': ('esp32-host-firmware-manifest-tests',),
+}
+
+
+def registry_checks():
+    return json.loads((ROOT / 'tools/development/checks.json').read_text())['checks']
+
+
+def product_inputs(paths):
+    # CI/development unit tests already run in the selection job.
+    return [p for p in paths or () if not p.endswith('.md') and not p.startswith(
+        ('.github/scripts/tests/', 'tools/development/tests/'))]
+
+
+def shared_fast_checks(paths):
+    """Return exact checks only when every executable input is explicitly mapped."""
+    inputs = product_inputs(paths)
+    if not inputs or any(p not in SHARED_FAST_CHECKS for p in inputs):
+        return None
+    selected = {check for p in inputs for check in SHARED_FAST_CHECKS[p]}
+    known = {c['id'] for c in registry_checks()}
+    if selected - known:
+        raise ValueError('shared input references unknown checks: ' + ', '.join(sorted(selected - known)))
+    return selected
+
+
+def firmware_host_checks(paths, *, selected):
+    checks = [c['id'] for c in registry_checks() if c['component'] == 'firmware_host']
+    narrow = shared_fast_checks(paths)
+    result = [c for c in checks if narrow is None or c in narrow] if selected else []
+    if selected and not result:
+        raise ValueError('selected firmware host component has no checks')
+    return result
+
+
+def firmware_renderer_required(paths):
+    # BLE and transfer-only edits do not change the rider-badge rasterizer.
+    inputs = product_inputs(paths)
+    return not inputs or any(not p.startswith(('esp32/lib/ble_navigation/',
+        'esp32/lib/map_transfer/', 'esp32/lib/device_transfer/')) for p in inputs)
+
+
+def zone_contracts_required(paths, *, ios, firmware_host):
+    if not (ios or firmware_host):
+        return False
+    narrow = shared_fast_checks(paths)
+    # The zone fixture has Swift and both-board wire/display consumers. The
+    # release-history and boot-evidence Python tools have none of those inputs.
+    return narrow is None or 'ios-navigation-workout' in narrow
+
 
 def map_scopes(paths, *, selected):
     result = dict.fromkeys(MAP_SCOPES, False)
@@ -31,9 +86,10 @@ def map_scopes(paths, *, selected):
 def firmware_targets(paths, full_targets):
     if not paths:
         return full_targets
+    paths = product_inputs(paths)
     relevant = [p for p in paths if p.startswith('esp32/')]
-    if len(relevant) != len(paths):
-        return tuple('WAVESHARE_AMOLED_'+b+s for b in ('175', '206') for s in ('', '_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION'))
+    if not relevant:
+        return full_targets
     if all('206' in p for p in relevant):
         return tuple('WAVESHARE_AMOLED_206'+s for s in ('', '_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION'))
     # Common board/runtime/config changes qualify both families and every profile.
@@ -43,25 +99,38 @@ def firmware_targets(paths, full_targets):
         else:
             boards = ('175', '206')
         return tuple('WAVESHARE_AMOLED_'+b+s for b in boards for s in ('', '_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION'))
+    if len(relevant) != len(paths):
+        # CI/runner inputs exercise the requested hardware family. Resolve
+        # board/runtime changes first so a mixed diff cannot hide their board.
+        return full_targets
     production_libraries = ('map_transfer', 'device_transfer', 'ble_navigation', 'maps', 'gui', 'device_debug', 'world_radio')
     if any(p.split('/')[2] not in production_libraries for p in relevant):
         return full_targets
-    profiles = {'_PRODUCTION', '_LIFECYCLE_QUALIFICATION'}
-    # BLE owns ordinary diagnostics and remote-debug adapters; map transfer
-    # also compiles the development trust registry only in remote-debug.
-    if any(p.startswith(('esp32/lib/device_debug/', 'esp32/lib/gui/', 'esp32/lib/maps/',
-                         'esp32/lib/map_transfer/', 'esp32/lib/ble_navigation/')) for p in relevant):
-        profiles.add('_REMOTE_DEBUG')
-    if any(p.startswith(('esp32/lib/world_radio/', 'esp32/lib/gui/', 'esp32/lib/ble_navigation/')) for p in relevant):
-        profiles.update(('', '_REMOTE_DEBUG'))
+    profiles = {'_PRODUCTION'}
+    for path in relevant:
+        if path.startswith(('esp32/lib/ble_navigation/', 'esp32/lib/map_transfer/')):
+            # Remote-debug inherits ordinary diagnostics and adds debug/trust
+            # branches; production exercises their disabled branches. Neither
+            # library contains the lifecycle-only adapter implementation.
+            profiles.add('_REMOTE_DEBUG')
+        else:
+            profiles.add('_LIFECYCLE_QUALIFICATION')
+            if path.startswith(('esp32/lib/device_debug/', 'esp32/lib/gui/', 'esp32/lib/maps/')):
+                profiles.add('_REMOTE_DEBUG')
+            if path.startswith(('esp32/lib/world_radio/', 'esp32/lib/gui/')):
+                profiles.update(('', '_REMOTE_DEBUG'))
     return tuple(t for t in full_targets if any(t.endswith(s) if s else t[-3:].isdigit() for s in profiles))
 
 
 def ios_scopes(paths, *, native, selected):
-    checks = json.loads((ROOT / 'tools/development/checks.json').read_text())['checks']
+    checks = registry_checks()
     fast = [c for c in checks if c['component'] == 'ios']
     if not selected:
         return {'ios_checks': [], 'ios_simulator': False, 'ios_release': False}
+    narrow = shared_fast_checks(paths)
+    if narrow is not None:
+        return {'ios_checks': [c['id'] for c in fast if c['id'] in narrow],
+                'ios_simulator': False, 'ios_release': False}
     full = not paths or any(not p.endswith('.swift') for p in paths)
     groups = json.loads((ROOT / 'tools/development/swift-sources.json').read_text())['groups']
     nav = [c for c in fast if 'ciInputs' in c]

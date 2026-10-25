@@ -155,7 +155,7 @@ def registry_changed_components(base, head=None):
 
 
 def native_ios_required(paths, *, run_all=False, registry_components=None):
-    native_paths = [p for p in paths if p not in IOS_FAST_ONLY_PATHS and not p.startswith(IOS_FAST_ONLY_PREFIXES)
+    native_paths = [p for p in paths if p not in IOS_FAST_ONLY_PATHS and p not in ci_scopes.SHARED_FAST_CHECKS and not p.startswith(IOS_FAST_ONLY_PREFIXES)
                     and not (p == CHECK_REGISTRY and registry_components is not None and "ios_native" not in registry_components)]
     return classify_paths(native_paths, run_all=run_all, registry_components=registry_components)["ios"]
 
@@ -167,14 +167,14 @@ def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_comp
     selected = _classify_known_paths(paths, run_all=run_all, registry_components=registry_components)
     if not run_all:
         for path in paths:
-            # An unclassified shared input is not evidence that every consumer
-            # is unaffected. Keep explicit recipe scoping and the suites already
-            # executed by the changes job, but validate unknown tools/contracts.
+            # Stop before expensive jobs when ownership is unknown. An explicit
+            # consumer mapping is required; neither a green skip nor full CI is
+            # a substitute for that decision.
             if (path.startswith(("tools/", "protocol/", ".github/"))
                     and not path.endswith(".md") and path != CHECK_REGISTRY
                     and not path.startswith(("tools/development/tests/", ".github/scripts/tests/"))
                     and not any(_classify_known_paths([path], registry_components=registry_components).values())):
-                return dict.fromkeys(COMPONENTS, True)
+                raise ValueError(f'unclassified CI input: {path}; add an explicit consumer mapping')
     return selected
 
 
@@ -186,6 +186,14 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
     for raw_path in paths:
         path = raw_path
         if not path:
+            continue
+
+        if path in ci_scopes.SHARED_FAST_CHECKS:
+            checks = {c['id']: c for c in ci_scopes.registry_checks()}
+            for identifier in ci_scopes.SHARED_FAST_CHECKS[path]:
+                if identifier not in checks:
+                    raise ValueError(f'unknown shared-input check: {identifier}')
+                selected[checks[identifier]['component']] = True
             continue
 
         # Runner/environment entry points route like their tools/development/ code.
@@ -217,7 +225,7 @@ def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_compo
             ):
                 selected["firmware_build"] = True
 
-        if path in FIRMWARE_RENDER_TEST_PATHS:
+        if path in FIRMWARE_RENDER_TEST_PATHS or path.startswith('tools/ride_stats_preview/'):
             selected["firmware_build"] = True
             selected["firmware_host"] = True
 
@@ -448,7 +456,10 @@ def main() -> int:
     print(f"firmware_targets={firmware_targets}")
     print(f"ios_native={'true' if native_ios else 'false'}")
     details = {**ci_scopes.map_scopes(paths, selected=selected["map_backend"]),
-               **ci_scopes.ios_scopes(paths, native=native_ios, selected=selected["ios"])}
+               **ci_scopes.ios_scopes(paths, native=native_ios, selected=selected["ios"]),
+               'firmware_host_checks': ci_scopes.firmware_host_checks(paths, selected=selected['firmware_host']),
+               'firmware_renderer': ci_scopes.firmware_renderer_required(paths),
+               'zone_contracts': ci_scopes.zone_contracts_required(paths, ios=selected['ios'], firmware_host=selected['firmware_host'])}
     for key, value in details.items():
         print(f"{key}={json.dumps(value, separators=(',', ':'))}")
     return 0

@@ -251,7 +251,11 @@ def main(argv=None):
     ids = {c["id"] for c in checks}
     if set(args.check) - ids:
         parser.error("unknown checks: " + ", ".join(sorted(set(args.check) - ids)))
-    selected_components = components(changed_paths(args.base), args.base) if args.suite == "auto" and not args.check else set()
+    automatic_paths = changed_paths(args.base) if args.suite == "auto" and not args.check else None
+    try:
+        selected_components = components(automatic_paths, args.base) if automatic_paths is not None else set()
+    except ValueError as error:
+        parser.error(str(error))
     if args.suite == "auto" and not args.check:
         selected_components.add("development")
     suites = {"firmware": {"firmware_host", "firmware_build"}, "ios": {"ios", "ios_native"},
@@ -262,6 +266,11 @@ def main(argv=None):
         selected_components |= suites.get(args.suite, set())
         selected = [c for c in checks if (args.suite == "all" or c["component"] in selected_components)
                     and (args.level == "full" or c.get("level", "fast") == "fast")]
+        if automatic_paths is not None:
+            import ci_scopes
+            narrow = ci_scopes.shared_fast_checks(automatic_paths)
+            if narrow is not None:
+                selected = [c for c in selected if c['component'] == 'development' or c['id'] in narrow]
     path = args.report or Path(git("rev-parse", "--git-path", "development-checks")) / str(uuid.uuid4()) / "results.json"
     try:
         return run_checks(selected, path.resolve(), plan=args.plan, board=args.board, base=args.base,

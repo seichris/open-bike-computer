@@ -99,18 +99,24 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))
         self.assertFalse(changed_components.native_ios_required(["tools/development/tests/test_development_checks.py"]))
 
-    def test_unclassified_shared_inputs_cannot_skip_their_consumers(self):
-        # Existing omissions and future inputs must fail open to validation.
-        for path in ("protocol/fixtures/workout-zones-v1.json",
-                     "tools/firmware_release_history.py", "tools/verify_firmware_boot_acceptance.py",
-                     "tools/ride_stats_preview/emit_preview.cpp", "protocol/new-contract.json",
-                     "tools/new-validator.py", ".github/workflows/new-validation.yml"):
-            with self.subTest(path=path):
-                self.assertTrue(all(changed_components.classify_paths([path]).values()))
-                self.assertTrue(changed_components.native_ios_required([path]))
-        # CI already runs these suites unconditionally; documentation is not code.
-        for path in (".github/scripts/tests/test_ci_scopes.py", "tools/README.md"):
+    def test_unclassified_shared_inputs_stop_before_product_jobs(self):
+        for path in ('protocol/new-contract.json', 'tools/new-validator.py',
+                     '.github/workflows/new-validation.yml'):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'explicit consumer mapping'):
+                changed_components.classify_paths([path])
+        for path in ('.github/scripts/tests/test_ci_scopes.py', 'tools/README.md'):
             self.assertFalse(any(changed_components.classify_paths([path]).values()))
+
+    def test_known_shared_inputs_select_only_executable_consumers(self):
+        for path in ('tools/firmware_release_history.py', 'tools/verify_firmware_boot_acceptance.py'):
+            selection = changed_components.classify_paths([path])
+            self.assertEqual([c for c, enabled in selection.items() if enabled], ['firmware_host'])
+            self.assertFalse(changed_components.native_ios_required([path]))
+        path = 'protocol/fixtures/workout-zones-v1.json'
+        self.assertEqual([c for c, v in changed_components.classify_paths([path]).items() if v], ['ios'])
+        self.assertFalse(changed_components.native_ios_required([path]))
+        selection = changed_components.classify_paths(['tools/ride_stats_preview/emit_preview.cpp'])
+        self.assertEqual([c for c, v in selection.items() if v], ['firmware_build', 'firmware_host'])
 
     def test_cache_and_core_changes_keep_regular_builds_and_fast_tests(self):
         for path in (
@@ -140,7 +146,7 @@ class ChangedComponentsTests(unittest.TestCase):
                 ), redirect_stdout(output):
                     self.assertEqual(0, changed_components.main())
                 selected = dict(line.split("=", 1) for line in output.getvalue().splitlines())
-                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets", "ios_native", "ios_checks", "ios_simulator", "ios_release", *changed_components.ci_scopes.MAP_SCOPES}, set(selected))
+                self.assertEqual({*changed_components.COMPONENTS, "firmware_targets", "firmware_host_checks", "firmware_renderer", "zone_contracts", "ios_native", "ios_checks", "ios_simulator", "ios_release", *changed_components.ci_scopes.MAP_SCOPES}, set(selected))
                 self.assertEqual("true" if native_ios else "false", selected["ios_native"])
 
     def test_docs_only_change_skips_product_jobs(self) -> None:

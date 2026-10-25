@@ -42,11 +42,51 @@ class ScopeTests(unittest.TestCase):
             full = components.select_firmware_targets(board)
             for path in ('esp32/lib/ble_navigation/ble_navigation.cpp',
                          'esp32/lib/ble_navigation/firmware_diagnostics_config.hpp'):
-                self.assertEqual(scope.firmware_targets([path], full), full, path)
+                self.assertEqual(scope.firmware_targets([path], full), tuple(t for t in full if t.endswith(('_REMOTE_DEBUG', '_PRODUCTION'))), path)
             for path in ('esp32/lib/map_transfer/map_stream_compiled_trust.cpp',
                          'esp32/lib/map_transfer/map_stream_development_compiled_key.generated.inc'):
-                expected = tuple(t for t in full if t.endswith(('_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION')))
+                expected = tuple(t for t in full if t.endswith(('_REMOTE_DEBUG', '_PRODUCTION')))
                 self.assertEqual(scope.firmware_targets([path], full), expected, path)
+
+    def test_docs_and_ci_inputs_do_not_expand_to_unrequested_boards(self):
+        full = components.select_firmware_targets('175')
+        ble = 'esp32/lib/ble_navigation/ble_navigation.cpp'
+        self.assertEqual(scope.firmware_targets([ble, 'docs/ble-protocol.md'], full),
+                         scope.firmware_targets([ble], full))
+        for path in ('.github/workflows/ci.yml', 'tools/dev_check.py'):
+            self.assertEqual(scope.firmware_targets([path], full), full)
+        # Lifecycle adapter implementations and shared board/build inputs retain
+        # broader qualification; manual/release scopes preserve the chosen matrix.
+        for path in ('esp32/lib/firmware_update/firmware_update_http.cpp',
+                     'esp32/lib/map_transfer_http/map_transfer_http.cpp'):
+            self.assertIn('WAVESHARE_AMOLED_175_LIFECYCLE_QUALIFICATION',
+                          scope.firmware_targets([path], full))
+        self.assertEqual(scope.firmware_targets(None, components.select_firmware_targets('all')),
+                         components.select_firmware_targets('all'))
+
+    def test_shared_fast_inputs_keep_only_their_consumers(self):
+        fixture = ['protocol/fixtures/workout-zones-v1.json', 'docs/example.md']
+        self.assertEqual(scope.ios_scopes(fixture, native=False, selected=True),
+                         {'ios_checks': ['ios-navigation-workout'], 'ios_simulator': False, 'ios_release': False})
+        tools = ['tools/firmware_release_history.py', 'tools/verify_firmware_boot_acceptance.py',
+                 'tools/development/tests/test_development_checks.py']
+        self.assertEqual(scope.firmware_host_checks(tools, selected=True),
+                         ['esp32-host-firmware-manifest-tests'])
+        mixed = tools + ['esp32/lib/power/power.cpp']
+        self.assertIn('esp32-host-usb-recovery-status', scope.firmware_host_checks(mixed, selected=True))
+        with self.assertRaisesRegex(ValueError, 'no checks'):
+            scope.firmware_host_checks(fixture, selected=True)
+        with patch.dict(scope.SHARED_FAST_CHECKS, {'tools/firmware_release_history.py': ('missing-check',)}):
+            with self.assertRaisesRegex(ValueError, 'unknown checks'):
+                scope.shared_fast_checks(tools)
+
+    def test_renderer_cost_is_reserved_for_potential_render_changes(self):
+        for path in ('esp32/lib/ble_navigation/ble_navigation.cpp',
+                     'esp32/lib/map_transfer/map_stream_compiled_trust.cpp'):
+            self.assertFalse(scope.firmware_renderer_required([path, 'docs/example.md']))
+        for paths in (None, ['esp32/lib/maps/mapTiles.cpp'], ['.github/workflows/ci.yml'],
+                      ['esp32/lib/device_debug/device_debug_http.cpp']):
+            self.assertTrue(scope.firmware_renderer_required(paths))
 
     def test_ios_scopes_keep_consumers_and_unknown_fallback(self):
         select=lambda paths:scope.ios_scopes(paths,native=True,selected=True)
