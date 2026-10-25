@@ -1,5 +1,38 @@
 # PR #378 review fixes
 
+## October 26 iOS Fast Tests timing repair
+
+CI-MARKER-WAIT-STATE, P2: CI run40209219652 failed the capture-rotation
+assertion in `testDiagnosticsIssueMarkerDelivery`: expected notDelivered,
+observed pending. This test and the marker runtime are unchanged by the four
+latest commits. A controlled experiment at `98a81167` with a 300 ms test retry
+delay reproduces the exact failure because the old observation waited only
+200 ms. The queued case also used a fixed 150 ms delay without proving queue
+admission. This is a test synchronization defect; no new production marker
+fencing defect is established by this evidence.
+
+The repair waits, with a two-second bound, for actual queue admission and marker
+settlement. Scheduled and queued capture-rotation cases both exercise 50 ms
+and 300 ms delays, retaining the no-replayed-marker assertion and verifying
+the held status write. Capture end likewise waits for notDelivered before
+checking the absence of replay. Production source, retry policy and wire format
+are unchanged. Revert this test-only change through Git if necessary; no device,
+map, journal or configuration migration is involved.
+
+This narrowly scoped CI test repair carries its own discovery/confirmation
+record: discovery pass1 and clean confirming pass2/3, zero active findings
+within this test-only scope. The delayed-callback baseline fails with the exact
+pending/notDelivered mismatch; the repaired marker regression passes both
+delay cases with the actual BLE manager and queue. This does not reopen or
+reset the original whole-PR
+3/3, map compatibility3/3, GPS2/3, Nearby2/3 or earlier marker repair records.
+Mode publish; standard profile; sequential-local; zero subagents; P0/P1/P2 gate.
+Base/main remains `cd7ad00bb6c4f9566195cd44ab4d6a675518b94d`; parent candidate
+is `98a811678ca8d1246755f06bdd526b7fb3193b29`. Final candidate identity,
+executed verification and CI status are recorded in the PR and retained CI
+repair artifact. Existing feature findings and physical gates remain open;
+whole-feature state remains needs-rethink / not merge-ready.
+
 ## October 25 crash, map compatibility, GPS and Nearby publication
 
 User authorized pushing the accumulated fixes to the existing PR; no merge or

@@ -4925,24 +4925,32 @@ extension NavigationProtocolTests {
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         assertEqual(v1Packets(), ["DTRNmark|1|1|other"], "v1 has no idempotency key")
 
-        for queuedRetry in [false, true] {
-            let rotated = BLEManager()
-            let rotatedPackets = connect(rotated)
-            assert(rotated.sendDiagnosticsIssueMarker(.connectionDrop, incidentID: incident))
-            rotated.completeNavigationWriteForTesting(error: attFailure)
-            if queuedRetry {
-                // Hold another ATT write, so the retry gets admitted but cannot
-                // dispatch. Capture binding can then invalidate the queued item.
-                assert(rotated.requestDeviceTransferStatus())
-                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        // Exercise callback delays beyond the old fixed 200 ms observation.
+        // Queue admission and invalidation are observable state transitions.
+        for retryDelay in [0.05, 0.3] {
+            for queuedRetry in [false, true] {
+                let rotated = BLEManager()
+                let rotatedPackets = connect(rotated)
+                rotated.setDiagnosticsIssueMarkerRetryDelayForTesting(retryDelay)
+                assert(rotated.sendDiagnosticsIssueMarker(.connectionDrop, incidentID: incident))
+                rotated.completeNavigationWriteForTesting(error: attFailure)
+                if queuedRetry {
+                    // Hold another ATT write until the retry is actually queued.
+                    assert(rotated.requestDeviceTransferStatus())
+                    assert(waitForMainLoop(timeout: 2) {
+                        rotated.rendererBenchmarkBLETransportEvidence().queueDepth == 1
+                    }, "the retry is queued behind the held status write")
+                    assertEqual(rotatedPackets(), [marker, "DSTS"],
+                                "the queued retry has not reached BLE")
+                }
+                assert(rotated.sendDiagnosticsCaptureBinding(UUID()))
+                if queuedRetry { rotated.completeNavigationWriteForTesting(error: nil) }
+                assert(waitForMainLoop(timeout: 2) {
+                    rotated.diagnosticsIssueMarkerDelivery?.state == .notDelivered
+                }, "a capture change settles its invalidated marker")
+                assertEqual(rotatedPackets().filter { $0 == marker }.count, 1,
+                            "capture rotation fences scheduled and already queued marker retries")
             }
-            assert(rotated.sendDiagnosticsCaptureBinding(UUID()))
-            if queuedRetry { rotated.completeNavigationWriteForTesting(error: nil) }
-            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
-            assertEqual(rotatedPackets().filter { $0 == marker }.count, 1,
-                        "capture rotation fences scheduled and already queued marker retries")
-            assertEqual(rotated.diagnosticsIssueMarkerDelivery?.state, .notDelivered,
-                        "a capture change settles its invalidated marker")
         }
 
         let ended = BLEManager()
@@ -4950,7 +4958,9 @@ extension NavigationProtocolTests {
         assert(ended.sendDiagnosticsIssueMarker(.connectionDrop, incidentID: incident))
         ended.completeNavigationWriteForTesting(error: attFailure)
         assert(ended.endDiagnosticsCapture())
-        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assert(waitForMainLoop(timeout: 2) {
+            ended.diagnosticsIssueMarkerDelivery?.state == .notDelivered
+        }, "capture end settles its invalidated marker")
         assertEqual(endedPackets().filter { $0 == marker }.count, 1,
                     "capture end fences pending retry even without a local recorder")
 
