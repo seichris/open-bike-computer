@@ -214,6 +214,7 @@ int main() {
 #include <cassert>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include "mapNearbyLayout.hpp"
 namespace map_nearby_storage {
@@ -233,29 +234,40 @@ struct {
 } nearby;
 std::string displayed;
 void lv_label_set_text(void *,const char *text) {displayed=text;}
+// The device formats with LVGL's built-in printf and LV_USE_FLOAT 0, where a
+// float conversion prints its letter and consumes no argument. Reject it
+// rather than let the host's vsnprintf format it.
 void lv_label_set_text_fmt(void *,const char *format,...) {
+  for (const char *p=format; *p; ++p) {
+    if (*p!='%' || *++p=='%') continue;
+    while (*p && std::strchr("-+ #0123456789.*hljztL",*p)) ++p;
+    assert(*p && !std::strchr("fFeEgGaA",*p));
+  }
   char value[512]; va_list args; va_start(args,format);
   vsnprintf(value,sizeof(value),format,args); va_end(args); displayed=value;
 }
-void refreshStatus() {
 '''
+        fixture += fragment(source, "static unsigned nearbyRadiusKm() {")
+        fixture += "\nvoid refreshStatus() {\n"
         fixture += fragment(source, "switch (replacement.status)")
         fixture += r'''
 }
 int main() {
   refreshStatus();
+  assert(displayed.rfind("10 places - 10 km\n", 0)==0);
   assert(displayed.find("No toilets in nearest 10")!=std::string::npos);
   assert(displayed.find("Downloaded area only; map edge nearby")!=std::string::npos);
   replacement.coverageComplete=true; refreshStatus();
   assert(displayed.find("No toilets in nearest 10")!=std::string::npos);
   assert(displayed.find("map edge")==std::string::npos);
   replacement.places[0].category=3; refreshStatus();
-  assert(displayed.find("No toilets")==std::string::npos);
+  assert(displayed=="10 places - 10 km");
   replacement.coverageComplete=false; replacement.count=0; refreshStatus();
-  assert(displayed.find("No matches in downloaded area")!=std::string::npos);
-  assert(displayed.find("Map edge nearby")!=std::string::npos);
+  assert(displayed=="No matches in downloaded area (10 km)\nMap edge nearby");
   replacement.coverageComplete=true; refreshStatus();
-  assert(displayed.find("No matching places within")!=std::string::npos);
+  assert(displayed=="No matching places within 10 km in this map");
+  nearby.radiusM=25000; refreshStatus();
+  assert(displayed=="No matching places within 25 km in this map");
 }
 '''
         self.run_fixture(fixture)

@@ -1586,6 +1586,15 @@ void updateMap(lv_event_t *event) {
   revealPendingMapTileIfReady();
 }
 
+// LVGL formats labels without float support (lv_conf.h: LV_USE_FLOAT 0), so
+// show a dilution of precision as whole tenths.
+static void setDilutionLabel(lv_obj_t *label, const char *name, float value) {
+  const unsigned tenths = std::isfinite(value) && value > 0.0F
+      ? static_cast<unsigned>(std::min(value, 999.9F) * 10.0F + 0.5F)
+      : 0U;
+  lv_label_set_text_fmt(label, "%s: %u.%u", name, tenths / 10U, tenths % 10U);
+}
+
 /**
  * @brief Update Satellite Tracking
  *
@@ -1593,9 +1602,9 @@ void updateMap(lv_event_t *event) {
  */
 void updateSatTrack(lv_event_t *event) {
   if (gps.isDOPChanged()) {
-    lv_label_set_text_fmt(pdopLabel, "PDOP: %.1f", gps.gpsData.pdop);
-    lv_label_set_text_fmt(hdopLabel, "HDOP: %.1f", gps.gpsData.hdop);
-    lv_label_set_text_fmt(vdopLabel, "VDOP: %.1f", gps.gpsData.vdop);
+    setDilutionLabel(pdopLabel, "PDOP", gps.gpsData.pdop);
+    setDilutionLabel(hdopLabel, "HDOP", gps.gpsData.hdop);
+    setDilutionLabel(vdopLabel, "VDOP", gps.gpsData.vdop);
   }
 
   if (gps.isAltitudeChanged())
@@ -2601,6 +2610,13 @@ static bool nearbyRefreshPosition(uint32_t nowMs,
   return true;
 }
 
+// LVGL formats labels without float support (lv_conf.h: LV_USE_FLOAT 0): a
+// float conversion there consumes no argument, so every later conversion
+// reads the wrong one. Show the search radius as whole kilometres.
+static unsigned nearbyRadiusKm() {
+  return static_cast<unsigned>(nearby.radiusM / 1000.0 + 0.5);
+}
+
 static void serviceNearbyScreen(uint32_t nowMs) {
   if (activeTile != NEARBY || !nearby.showingMap) return;
   const uint32_t currentEpoch = mapView.currentMapEpoch();
@@ -2662,12 +2678,12 @@ static void serviceNearbyScreen(uint32_t nowMs) {
       if (replacement.count == 0) {
         if (replacement.coverageComplete)
           lv_label_set_text_fmt(nearby.status,
-              "No matching places within %.0f km in this map",
-              nearby.radiusM / 1000.0);
+              "No matching places within %u km in this map",
+              nearbyRadiusKm());
         else
           lv_label_set_text_fmt(nearby.status,
-              "No matches in downloaded area (%.0f km)\nMap edge nearby",
-              nearby.radiusM / 1000.0);
+              "No matches in downloaded area (%u km)\nMap edge nearby",
+              nearbyRadiusKm());
       } else {
         // The nearest ten are counted across every selected category; say
         // which selected category they crowded out.
@@ -2680,8 +2696,8 @@ static void serviceNearbyScreen(uint32_t nowMs) {
         const bool missing = map_nearby_layout::formatAbsentCategories(
             nearby.selectedMask, categories, count, nearby.radiusM / 1000.0,
             absent, sizeof(absent));
-        lv_label_set_text_fmt(nearby.status, "%u places - %.0f km%s%s%s",
-            replacement.count, nearby.radiusM / 1000.0,
+        lv_label_set_text_fmt(nearby.status, "%u places - %u km%s%s%s",
+            replacement.count, nearbyRadiusKm(),
             missing ? "\n" : "", missing ? absent : "",
             replacement.coverageComplete ? "" :
                 "\nDownloaded area only; map edge nearby");
