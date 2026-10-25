@@ -163,6 +163,22 @@ def native_ios_required(paths, *, run_all=False, registry_components=None):
 def classify_paths(paths: Iterable[str], *, run_all: bool = False, registry_components=None) -> dict[str, bool]:
     """Return the CI components affected by a collection of Git paths."""
 
+    paths = tuple(paths)
+    selected = _classify_known_paths(paths, run_all=run_all, registry_components=registry_components)
+    if not run_all:
+        for path in paths:
+            # An unclassified shared input is not evidence that every consumer
+            # is unaffected. Keep explicit recipe scoping and the suites already
+            # executed by the changes job, but validate unknown tools/contracts.
+            if (path.startswith(("tools/", "protocol/", ".github/"))
+                    and not path.endswith(".md") and path != CHECK_REGISTRY
+                    and not path.startswith(("tools/development/tests/", ".github/scripts/tests/"))
+                    and not any(_classify_known_paths([path], registry_components=registry_components).values())):
+                return dict.fromkeys(COMPONENTS, True)
+    return selected
+
+
+def _classify_known_paths(paths: Iterable[str], *, run_all=False, registry_components=None) -> dict[str, bool]:
     selected = {component: run_all for component in COMPONENTS}
     if run_all:
         return selected

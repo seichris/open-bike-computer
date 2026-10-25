@@ -51,8 +51,8 @@ def source_identity():
 
 def changed_paths(base):
     merge_base = git("merge-base", "HEAD", base)
-    commands = (["diff", "--name-only", "-z", merge_base, "HEAD"],
-                ["diff", "--name-only", "-z", "HEAD"],
+    commands = (["diff", "--no-renames", "--name-only", "-z", merge_base, "HEAD"],
+                ["diff", "--no-renames", "--name-only", "-z", "HEAD"],
                 ["ls-files", "-o", "--exclude-standard", "-z"])
     return sorted({os.fsdecode(p) for command in commands
                    for p in subprocess.check_output(["git", *command], cwd=ROOT).split(b"\0") if p})
@@ -165,7 +165,10 @@ def _run_checks(checks, report_path, *, plan=False, board=None, base=None, selec
         log.parent.mkdir(parents=True, exist_ok=True)
         entry["log"] = str(log)
         with tempfile.TemporaryDirectory(prefix="bicino-check-") as temporary:
-            environment = (local_results.environment() if check["id"] in local.contracts else os.environ.copy())
+            # A policy/network/toolchain miss must not restore test filters or
+            # compiler overrides that the reusable execution profile removes.
+            normalized = check["id"] in local.contracts or (reuse_local and local_results.eligible(check))
+            environment = local_results.environment() if normalized else os.environ.copy()
             environment.update({"TMPDIR": temporary + "/", "CLANG_MODULE_CACHE_PATH": temporary + "/clang-modules",
                                 "SWIFT_MODULE_CACHE_PATH": temporary + "/swift-modules",
                                 "DEV_CHECK_ARTIFACTS": str(report_path.parent),

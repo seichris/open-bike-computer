@@ -47,9 +47,12 @@ def firmware_targets(paths, full_targets):
     if any(p.split('/')[2] not in production_libraries for p in relevant):
         return full_targets
     profiles = {'_PRODUCTION', '_LIFECYCLE_QUALIFICATION'}
-    if any(p.startswith(('esp32/lib/device_debug/', 'esp32/lib/gui/', 'esp32/lib/maps/')) for p in relevant):
+    # BLE owns ordinary diagnostics and remote-debug adapters; map transfer
+    # also compiles the development trust registry only in remote-debug.
+    if any(p.startswith(('esp32/lib/device_debug/', 'esp32/lib/gui/', 'esp32/lib/maps/',
+                         'esp32/lib/map_transfer/', 'esp32/lib/ble_navigation/')) for p in relevant):
         profiles.add('_REMOTE_DEBUG')
-    if any(p.startswith(('esp32/lib/world_radio/', 'esp32/lib/gui/')) for p in relevant):
+    if any(p.startswith(('esp32/lib/world_radio/', 'esp32/lib/gui/', 'esp32/lib/ble_navigation/')) for p in relevant):
         profiles.update(('', '_REMOTE_DEBUG'))
     return tuple(t for t in full_targets if any(t.endswith(s) if s else t[-3:].isdigit() for s in profiles))
 

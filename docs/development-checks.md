@@ -146,9 +146,11 @@ needed. Empty diffs run full coverage. Deletions and renames retain old/new path
 | Other map source/shared config | Full map consumers, plus OSM when its inputs change |
 | Known Swift helper sources | Matching navigation map/sensor/workout/radio groups using the shared source registry; other host contracts remain |
 | Unknown Swift source or script/registry/config | Full helper suite |
+| Unclassified tooling, protocol or CI input | All component checks; development/CI test suites already run unconditionally |
 | iOS application source | Fresh Debug app/container evidence; dedicated simulators only for their production/test/shared dependencies |
 | iOS build/distribution/project/identity inputs or full manual/release | Debug and Release containers plus relevant simulator contracts |
 | Production firmware libraries | Production and lifecycle, with extra ordinary/debug profiles for their conditional features |
+| BLE navigation or map-transfer libraries | BLE also retains ordinary/remote-debug; map transfer retains remote-debug development-trust compilation |
 | Board/runtime/build/shared configuration | Every regular profile for both boards |
 
 Ordinary source-only PRs no longer prove Release compilation. Before release, use

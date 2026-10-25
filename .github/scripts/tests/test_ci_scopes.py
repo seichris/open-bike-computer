@@ -28,7 +28,7 @@ class ScopeTests(unittest.TestCase):
 
     def test_firmware_profiles_and_boards(self):
         full=components.select_firmware_targets('175')
-        targets=scope.firmware_targets(['esp32/lib/map_transfer/map_transfer.cpp'],full)
+        targets=scope.firmware_targets(['esp32/lib/device_transfer/durable_operation.cpp'],full)
         self.assertEqual(targets,tuple(t for t in full if t.endswith(('_PRODUCTION','_LIFECYCLE_QUALIFICATION'))))
         self.assertIn('WAVESHARE_AMOLED_175_REMOTE_DEBUG',scope.firmware_targets(['esp32/lib/device_debug/device_debug_http.cpp'],full))
         for path in ('esp32/platformio.ini','esp32/tools/build_firmware.py','esp32/include/board.h','esp32/lib/panel/WAVESHARE_AMOLED_175.cpp'):
@@ -36,6 +36,17 @@ class ScopeTests(unittest.TestCase):
         for path in ('esp32/waveshare_206_hello.cpp','esp32/lib/panel/WAVESHARE_AMOLED_206.cpp'):
             self.assertTrue(all('206' in t for t in scope.firmware_targets([path],full)))
         self.assertEqual(scope.firmware_targets(None,full),full)
+
+    def test_firmware_conditional_consumers_keep_the_profiles_that_compile_them(self):
+        for board in ('175', '206', 'all'):
+            full = components.select_firmware_targets(board)
+            for path in ('esp32/lib/ble_navigation/ble_navigation.cpp',
+                         'esp32/lib/ble_navigation/firmware_diagnostics_config.hpp'):
+                self.assertEqual(scope.firmware_targets([path], full), full, path)
+            for path in ('esp32/lib/map_transfer/map_stream_compiled_trust.cpp',
+                         'esp32/lib/map_transfer/map_stream_development_compiled_key.generated.inc'):
+                expected = tuple(t for t in full if t.endswith(('_REMOTE_DEBUG', '_PRODUCTION', '_LIFECYCLE_QUALIFICATION')))
+                self.assertEqual(scope.firmware_targets([path], full), expected, path)
 
     def test_ios_scopes_keep_consumers_and_unknown_fallback(self):
         select=lambda paths:scope.ios_scopes(paths,native=True,selected=True)

@@ -447,6 +447,33 @@ class WorkflowPolicyTests(unittest.TestCase):
                         completed.stdout + completed.stderr,
                     )
 
+    def test_every_registered_firmware_host_check_is_reachable_in_ci(self):
+        host = mapping_block(workflow_source("ci.yml"), "esp32-host", indent=2)
+        registry = json.loads((REPO_ROOT / "tools/development/checks.json").read_text())["checks"]
+        expected = {c["id"] for c in registry if c["component"] == "firmware_host"}
+        invoked = set(re.findall(r"--check ([a-z0-9-]+)", host))
+        self.assertEqual(expected - invoked, set(), "Registered firmware checks omitted by CI")
+
+    def test_all_selected_gate_inputs_reject_missing_failed_cancelled_or_skipped_results(self):
+        gate = mapping_block(workflow_source("ci.yml"), "gate", indent=2)
+        script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+        selections = ("FIRMWARE_BUILD_CHANGED", "FIRMWARE_HOST_CHANGED", "HEAVY_CI", "IOS_CHANGED",
+                      "IOS_NATIVE_CHANGED", "IOS_SIMULATOR_CHANGED", "MAP_BACKEND_CHANGED", "OSM_CHANGED")
+        results = ("CHANGES_RESULT", "ESP32_RESULT", "HOST_RESULT", "IOS_FAST_RESULT", "IOS_RESULT",
+                   "IOS_PLATFORM_RESULT", "MAP_RESULT", "ZONE_RESULT")
+        environment = {**os.environ, **dict.fromkeys(selections, "true"), **dict.fromkeys(results, "success")}
+        def run(overrides):
+            return subprocess.run(["bash", "-euo", "pipefail", "-c", script],
+                                  env={**environment, **overrides}, capture_output=True).returncode
+        self.assertEqual(run({}), 0)
+        for key in results:
+            for value in ("", "failure", "cancelled", "skipped"):
+                with self.subTest(key=key, value=value):
+                    self.assertNotEqual(run({key: value}), 0)
+        for key in selections:
+            with self.subTest(selection=key):
+                self.assertNotEqual(run({key: ""}), 0)
+
     def test_each_ios_job_failure_blocks_the_gate(self):
         gate = mapping_block(workflow_source("ci.yml"), "gate", indent=2)
         self.assertIn("- ios-platform", gate)

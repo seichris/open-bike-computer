@@ -169,6 +169,28 @@ class DevelopmentChecksTests(unittest.TestCase):
             self.assertEqual(first["commit"], second["commit"])
             self.assertNotEqual(first["workingStateSha256"], second["workingStateSha256"])
 
+    def test_renames_keep_deleted_source_consumers_for_committed_and_local_changes(self):
+        for committed in (False, True):
+            with self.subTest(committed=committed), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                def git(*args):
+                    return subprocess.check_output(["git", *args], cwd=root, stderr=subprocess.DEVNULL).decode().strip()
+                git("init", "-q")
+                (root / "ios-app").mkdir()
+                (root / "docs").mkdir()
+                (root / "ios-app/retired.swift").write_text("// Former app source\n")
+                git("add", ".")
+                git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Base")
+                base = git("rev-parse", "HEAD")
+                git("mv", "ios-app/retired.swift", "docs/retired.swift")
+                if committed:
+                    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Rename")
+                with patch.object(runner, "ROOT", root):
+                    paths = runner.changed_paths(base)
+                self.assertEqual(paths, ["docs/retired.swift", "ios-app/retired.swift"])
+                self.assertIn("ios", runner.components(paths, base))
+                self.assertIn("ios_native", runner.components(paths, base))
+
 
 class SimulatorOwnershipTests(unittest.TestCase):
     identifier = "00000000-0000-0000-0000-000000000001"

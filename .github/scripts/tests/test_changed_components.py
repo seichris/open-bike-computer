@@ -99,6 +99,19 @@ class ChangedComponentsTests(unittest.TestCase):
         self.assertFalse(any(changed_components.classify_paths(["tools/development/tests/test_development_checks.py"]).values()))
         self.assertFalse(changed_components.native_ios_required(["tools/development/tests/test_development_checks.py"]))
 
+    def test_unclassified_shared_inputs_cannot_skip_their_consumers(self):
+        # Existing omissions and future inputs must fail open to validation.
+        for path in ("protocol/fixtures/workout-zones-v1.json",
+                     "tools/firmware_release_history.py", "tools/verify_firmware_boot_acceptance.py",
+                     "tools/ride_stats_preview/emit_preview.cpp", "protocol/new-contract.json",
+                     "tools/new-validator.py", ".github/workflows/new-validation.yml"):
+            with self.subTest(path=path):
+                self.assertTrue(all(changed_components.classify_paths([path]).values()))
+                self.assertTrue(changed_components.native_ios_required([path]))
+        # CI already runs these suites unconditionally; documentation is not code.
+        for path in (".github/scripts/tests/test_ci_scopes.py", "tools/README.md"):
+            self.assertFalse(any(changed_components.classify_paths([path]).values()))
+
     def test_cache_and_core_changes_keep_regular_builds_and_fast_tests(self):
         for path in (
             "esp32/tools/shared_firmware_cache.py", "esp32/tools/firmware_compile_cache.py",

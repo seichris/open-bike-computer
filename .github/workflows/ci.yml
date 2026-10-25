@@ -511,6 +511,8 @@ jobs:
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check social-riders-host-tests --report "$RUNNER_TEMP/dev-checks/social-riders-host-tests/results.json"
       - name: Device capabilities protocol host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-device-capabilities-protocol-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-device-capabilities-protocol-host-tests/results.json"
+      - name: USB recovery status request tests
+        run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-usb-recovery-status --report "$RUNNER_TEMP/dev-checks/esp32-host-usb-recovery-status/results.json"
       - name: Screen configuration protocol and Ride Stats widget host tests
         run: python3 "${{ github.workspace }}/tools/dev_check.py" --check esp32-host-screen-configuration-protocol-and-ride-stats-widget-host-tests --report "$RUNNER_TEMP/dev-checks/esp32-host-screen-configuration-protocol-and-ride-stats-widget-host-tests/results.json"
       - name: Ride controller lease host tests
