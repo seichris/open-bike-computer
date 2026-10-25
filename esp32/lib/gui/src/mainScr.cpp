@@ -2114,7 +2114,11 @@ static void nearbyPickerStatus() {
   for (uint8_t index = 0; index < 5; ++index) {
     if (nearby.categoryButtons[index] == nullptr) continue;
     const bool selected = (nearby.selectedMask & (1U << index)) != 0;
-    lv_obj_set_style_border_width(nearby.categoryButtons[index], selected ? 2 : 0, 0);
+    // The selection persists across visits and a tap toggles it, so make the
+    // state unmistakable: tapping an already selected tile deselects it.
+    lv_obj_set_style_border_width(nearby.categoryButtons[index], selected ? 3 : 0, 0);
+    lv_obj_set_style_bg_opa(nearby.categoryButtons[index],
+                            selected ? LV_OPA_30 : LV_OPA_TRANSP, 0);
   }
 }
 
@@ -2345,6 +2349,7 @@ static void createNearbyScreen() {
     lv_obj_set_size(button, index == 4 ? 252 : tileWidth, tileHeight);
     lv_obj_set_pos(button, x, y);
     lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x80E8A1), 0);
     lv_obj_set_style_border_color(button, lv_color_hex(0x80E8A1), 0);
     lv_obj_set_style_border_width(button, 0, 0);
     lv_obj_set_style_radius(button, 15, 0);
@@ -2420,6 +2425,9 @@ static void createNearbyScreen() {
     marker.count = lv_label_create(marker.button);
     lv_obj_set_style_text_font(marker.count, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(marker.count, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(marker.count, lv_color_white(), 0);
+    lv_obj_set_style_radius(marker.count, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_hor(marker.count, 3, 0);
     lv_obj_align(marker.count, LV_ALIGN_TOP_RIGHT, -5, 4);
     marker.arrow = lv_line_create(marker.button);
     lv_obj_set_style_line_color(marker.arrow, lv_color_white(), 0);
@@ -2520,6 +2528,12 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
     }
     if (placed.count > 1) {
       lv_label_set_text_fmt(marker.count, "%u", placed.count);
+      // A mixed group shows its nearest member's icon. Mark its count so the
+      // other categories in it, such as a toilet beside a cafe, are visible.
+      const bool mixed = placed.category == 0;
+      lv_obj_set_style_bg_opa(marker.count, mixed ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+      lv_obj_set_style_text_color(marker.count,
+                                  mixed ? lv_color_black() : lv_color_white(), 0);
       lv_obj_clear_flag(marker.count, LV_OBJ_FLAG_HIDDEN);
     } else {
       lv_obj_add_flag(marker.count, LV_OBJ_FLAG_HIDDEN);
@@ -2654,15 +2668,25 @@ static void serviceNearbyScreen(uint32_t nowMs) {
           lv_label_set_text_fmt(nearby.status,
               "No matches in downloaded area (%.0f km)\nMap edge nearby",
               nearby.radiusM / 1000.0);
+      } else if (replacement.coverageComplete) {
+        // The nearest ten are counted across every selected category; say
+        // which selected category they crowded out.
+        uint8_t categories[map_nearby_layout::kMaximumResults]{};
+        const size_t count = std::min<size_t>(
+            replacement.count, map_nearby_layout::kMaximumResults);
+        for (size_t index = 0; index < count; ++index)
+          categories[index] = replacement.places[index].category;
+        char absent[96];
+        const bool missing = map_nearby_layout::formatAbsentCategories(
+            nearby.selectedMask, categories, count, nearby.radiusM / 1000.0,
+            absent, sizeof(absent));
+        lv_label_set_text_fmt(nearby.status, "%u places - %.0f km%s%s",
+            replacement.count, nearby.radiusM / 1000.0,
+            missing ? "\n" : "", missing ? absent : "");
       } else {
-        if (replacement.coverageComplete)
-          lv_label_set_text_fmt(nearby.status,
-              "%u places - %.0f km", replacement.count,
-              nearby.radiusM / 1000.0);
-        else
-          lv_label_set_text_fmt(nearby.status,
-              "%u places - %.0f km\nDownloaded area only; map edge nearby",
-              replacement.count, nearby.radiusM / 1000.0);
+        lv_label_set_text_fmt(nearby.status,
+            "%u places - %.0f km\nDownloaded area only; map edge nearby",
+            replacement.count, nearby.radiusM / 1000.0);
       }
       break;
     case map_nearby_storage::Status::Unavailable:

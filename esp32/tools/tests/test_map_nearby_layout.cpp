@@ -138,4 +138,30 @@ int main() {
   char tooSmall[2]{};
   assert(!map_nearby_layout::formatDirectDistance(
       1200.0, kilometres, tooSmall, sizeof(tooSmall)));
+
+  // Nearby ranks the nearest ten across all selected categories; a selected
+  // category crowded out of them is named rather than silently missing.
+  char absent[96]{};
+  const uint8_t restaurants[10] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
+  const uint32_t restaurantsAndToilets = (1U << 1) | (1U << 2);
+  assert(map_nearby_layout::formatAbsentCategories(
+      restaurantsAndToilets, restaurants, 10, 10.0, absent, sizeof(absent)));
+  assert(std::strcmp(absent, "No toilets in nearest 10") == 0);
+  const uint8_t both[3] = {2, 3, 2};
+  assert(!map_nearby_layout::formatAbsentCategories(
+      restaurantsAndToilets, both, 3, 10.0, absent, sizeof(absent)));
+  assert(absent[0] == '\0');
+  // Fewer than ten places means the search radius, not the ten, excluded it.
+  const uint8_t toilets[2] = {3, 3};
+  assert(map_nearby_layout::formatAbsentCategories(
+      (1U << 2) | (1U << 3), toilets, 2, 25.0, absent, sizeof(absent)));
+  assert(std::strcmp(absent, "No gas stations within 25 km") == 0);
+  assert(map_nearby_layout::formatAbsentCategories(
+      0x1FU, restaurants, 10, 10.0, absent, sizeof(absent)));
+  assert(std::strcmp(absent,
+      "No shops, toilets, gas stations, bike shops in nearest 10") == 0);
+  char small[12]{};
+  assert(!map_nearby_layout::formatAbsentCategories(
+      restaurantsAndToilets, restaurants, 10, 10.0, small, sizeof(small)));
+  assert(small[0] == '\0');
 }

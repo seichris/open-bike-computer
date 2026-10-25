@@ -186,11 +186,29 @@ int main() {
         self.assertIn("lv_color_black()", picker)
         self.assertIn("lv_obj_remove_style_all(button)", picker)
         self.assertIn("lv_obj_set_style_bg_opa(button, LV_OPA_TRANSP, 0)", picker)
-        self.assertIn("selected ? 2 : 0", state)
+        # The selection persists and a tap toggles it, so the selected state
+        # is both a thicker border and a fill, not a border alone.
+        self.assertIn("selected ? 3 : 0", state)
+        self.assertIn("selected ? LV_OPA_30 : LV_OPA_TRANSP", state)
+        self.assertIn("lv_obj_set_style_bg_color(button, lv_color_hex(0x80E8A1), 0)", picker)
         self.assertNotIn("categoryChecks", source)
         self.assertNotIn('"[x]"', source)
         self.assertNotIn('"Categories"', picker)
         self.assertNotIn("Direct distance - not route distance", source)
+
+    def test_results_name_crowded_out_categories_and_mark_mixed_groups(self):
+        # Nearby keeps the nearest ten in total. When a selected category is
+        # absent from complete-coverage results, say so; a merged group of
+        # different categories gets a distinct count badge.
+        source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()
+        service = fragment(source, "static void serviceNearbyScreen(uint32_t nowMs) {")
+        complete = service.index("} else if (replacement.coverageComplete) {")
+        self.assertLess(complete,
+                        service.index("map_nearby_layout::formatAbsentCategories("))
+        self.assertIn("nearby.selectedMask, categories, count", service)
+        markers = fragment(source, "static void refreshNearbyMarkers(uint32_t nowMs) {")
+        self.assertIn("const bool mixed = placed.category == 0;", markers)
+        self.assertIn("mixed ? LV_OPA_COVER : LV_OPA_TRANSP", markers)
 
     def test_search_uses_current_position_source_not_onboard_receiver_fix(self):
         source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()

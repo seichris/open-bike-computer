@@ -78,6 +78,53 @@ inline bool formatDirectDistance(double meters, bool &kilometres,
   return written >= 0 && static_cast<size_t>(written) < capacity;
 }
 
+// Nearby ranks the nearest places across every selected category, so one
+// dense category can fill all ten. Name each selected category (mask bit =
+// category - 1) with no place among the results so the selection does not
+// look ignored. False, with an empty buffer, when none is absent or it does
+// not fit.
+inline bool formatAbsentCategories(uint32_t selectedMask,
+                                   const uint8_t *categories, size_t count,
+                                   double radiusKm, char *buffer,
+                                   size_t capacity) {
+  if (buffer == nullptr || capacity == 0) return false;
+  buffer[0] = '\0';
+  if (count > kMaximumResults || (count != 0 && categories == nullptr))
+    return false;
+  uint32_t absent = selectedMask & 0x1FU;
+  for (size_t index = 0; index < count; ++index)
+    if (categories[index] >= 1 && categories[index] <= 5)
+      absent &= ~(1U << (categories[index] - 1U));
+  if (absent == 0) return false;
+  static constexpr const char *kNames[5] = {
+      "shops", "restaurants", "toilets", "gas stations", "bike shops"};
+  size_t used = 0;
+  const auto append = [&](const char *text) {
+    const int written =
+        std::snprintf(buffer + used, capacity - used, "%s", text);
+    if (written < 0 || static_cast<size_t>(written) >= capacity - used)
+      return false;
+    used += static_cast<size_t>(written);
+    return true;
+  };
+  bool fits = append("No ");
+  bool first = true;
+  for (uint8_t bit = 0; fits && bit < 5; ++bit) {
+    if ((absent & (1U << bit)) == 0) continue;
+    fits = (first || append(", ")) && append(kNames[bit]);
+    first = false;
+  }
+  char scope[32];
+  if (count == kMaximumResults)
+    std::snprintf(scope, sizeof(scope), " in nearest %u",
+                  static_cast<unsigned>(kMaximumResults));
+  else
+    std::snprintf(scope, sizeof(scope), " within %.0f km", radiusKm);
+  fits = fits && append(scope);
+  if (!fits) buffer[0] = '\0';
+  return fits;
+}
+
 inline bool pinFits(double x, double y, double width, double height,
                     bool round, double topInset, double bottomInset,
                     bool wasOnMap) {
