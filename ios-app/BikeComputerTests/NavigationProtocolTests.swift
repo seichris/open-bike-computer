@@ -869,6 +869,11 @@ struct NavigationProtocolTests {
             print("Diagnostics entry readiness regressions passed")
             return
         }
+        if CommandLine.arguments.contains("--diagnostics-marker-only") {
+            testDiagnosticsIssueMarkerDelivery()
+            print("Diagnostics issue marker delivery regressions passed")
+            return
+        }
         testIconMapping()
         testRouteEndpointExtraction()
         testRouteRemainingDistance()
@@ -971,6 +976,7 @@ struct NavigationProtocolTests {
         testBLEManagerSendsDeviceTransferControlFrames()
         testBLEManagerSuppressesOptionalWritesDuringFirmwareMaintenance()
         testBLEManagerSuppressesOrdinaryWritesWhileMaintenanceReconnectIsExpected()
+        testDiagnosticsIssueMarkerDelivery()
         testBLEManagerParsesMapTransferStatus()
         testBLEManagerReassemblesChunkedMapTransferStatus()
         testBLEManagerCompletesRetransmittedChunkedMapTransferStatus()

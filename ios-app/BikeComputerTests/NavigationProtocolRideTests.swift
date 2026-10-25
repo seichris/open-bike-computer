@@ -4824,6 +4824,110 @@ extension NavigationProtocolTests {
                "ending maintenance restores the normal connection policy")
     }
 
+    static func testDiagnosticsIssueMarkerDelivery() {
+        let attFailure = CBATTError(.unlikelyError)
+        let incident = UUID(uuidString: "0f1e2d3c-4b5a-4968-8776-655443322110")!
+        let marker = "DTRNmark|2|1|connection_drop|\(incident.uuidString.lowercased())"
+        // An authenticated link with acknowledged writes and the matching
+        // diagnostics registry, which admits v2 markers carrying an incident.
+        func connect(_ manager: BLEManager) -> () -> [String] {
+            manager.isConnected = true
+            manager.isNavigationReady = true
+            _ = manager.handleDeviceCapabilitiesNotification(
+                Data(DeviceBLEProtocol.deviceCapabilitiesV2Prefix.utf8) + Data([1, 0, 0, 0x30, 0])
+            )
+            _ = manager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data("""
+                {"configured":true,"enabled":false,"mode":"","diagnosticsPolicy":{"schema":2,"schemaDigest":"\(DiagnosticsSchema.digest)","supportedMask":1,"generation":0,"mask":0,"minimumLevel":2,"active":false,"captureId":"","remainingBytes":0,"filteredCount":0,"deadlineUptimeMs":0,"baselineMinimumLevel":2,"rawPayloads":false}}
+                """.utf8)
+            )
+            manager.setDiagnosticsIssueMarkerRetryDelayForTesting(0.05)
+            var packets: [Data] = []
+            manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 96,
+                expectsWriteResponse: true,
+                canSend: { true },
+                write: { packets.append($0) }
+            ))
+            return { packets.map { String(decoding: $0, as: UTF8.self) } }
+        }
+
+        let retried = BLEManager()
+        let retriedPackets = connect(retried)
+        assert(retried.sendDiagnosticsIssueMarker(.connectionDrop, incidentID: incident),
+               "a marker is queued for the connected Bicino")
+        assertEqual(retriedPackets(), [marker], "the first marker attempt reaches BLE")
+        assertEqual(
+            retried.diagnosticsIssueMarkerDelivery,
+            DiagnosticsIssueMarkerDelivery(sequence: 1, incidentID: incident, state: .pending),
+            "a marker is pending until its BLE write succeeds"
+        )
+        retried.completeNavigationWriteForTesting(error: attFailure)
+        assertEqual(retried.diagnosticsIssueMarkerDelivery?.state, .pending,
+                    "a failed marker write stays pending while it is retried")
+        assert(waitForMainLoop(timeout: 2) { retriedPackets().count == 2 },
+               "an ATT-failed marker is retried")
+        assertEqual(retriedPackets(), [marker, marker],
+                    "the retry keeps the marker sequence and incident")
+        retried.completeNavigationWriteForTesting(error: nil)
+        assertEqual(retried.diagnosticsIssueMarkerDelivery?.state, .sent,
+                    "a successful BLE write reports the marker as sent")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(retriedPackets().count, 2, "a sent marker is never repeated")
+        assert(retried.sendDiagnosticsIssueMarker(.other, incidentID: UUID()),
+               "a later marker is queued")
+        assert(retriedPackets().last?.hasPrefix("DTRNmark|2|2|other|") == true,
+               "a retry does not consume another marker sequence")
+
+        let exhausted = BLEManager()
+        let exhaustedPackets = connect(exhausted)
+        assert(exhausted.sendDiagnosticsIssueMarker(.deviceBlank, incidentID: incident),
+               "a marker is queued before its writes fail")
+        for attempt in 1...DiagnosticsIssueMarkerRetryPolicy.maximumAttemptCount {
+            assert(waitForMainLoop(timeout: 2) { exhaustedPackets().count == attempt },
+                   "marker attempt \(attempt) reaches BLE")
+            exhausted.completeNavigationWriteForTesting(error: attFailure)
+        }
+        assertEqual(exhausted.diagnosticsIssueMarkerDelivery?.state, .notDelivered,
+                    "a marker whose bounded retries all fail is not delivered")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(exhaustedPackets().count, DiagnosticsIssueMarkerRetryPolicy.maximumAttemptCount,
+                    "marker retries remain bounded")
+        assertEqual(Set(exhaustedPackets()).count, 1, "every attempt resends the same marker")
+
+        let delivered = BLEManager()
+        let deliveredPackets = connect(delivered)
+        assert(delivered.sendDiagnosticsIssueMarker(.sensorMissing, incidentID: incident),
+               "a marker is queued before its write succeeds")
+        delivered.completeNavigationWriteForTesting(error: nil)
+        assertEqual(delivered.diagnosticsIssueMarkerDelivery?.state, .sent,
+                    "a first successful write sends the marker")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(deliveredPackets().count, 1, "a successful marker write is not retried")
+
+        let relinked = BLEManager()
+        let firstLinkPackets = connect(relinked)
+        assert(relinked.sendDiagnosticsIssueMarker(.navigationWrong, incidentID: incident),
+               "a marker is queued before its link drops")
+        relinked.completeNavigationWriteForTesting(error: attFailure)
+        let failedGeneration = relinked.rideConnectionGenerationForTesting
+        relinked.clearConnectionStateForTesting()
+        assert(relinked.rideConnectionGenerationForTesting != failedGeneration,
+               "losing the link ends its connection generation")
+        assertEqual(relinked.diagnosticsIssueMarkerDelivery?.state, .notDelivered,
+                    "a marker awaiting a retry is not delivered once its link is lost")
+        let successorPackets = connect(relinked)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(firstLinkPackets().count, 1, "the lost link receives no retry")
+        assert(successorPackets().isEmpty,
+               "a marker is never retried on a later connection generation")
+        assert(relinked.sendDiagnosticsIssueMarker(.other, incidentID: incident),
+               "a marker is queued on the successor link")
+        relinked.clearConnectionStateForTesting()
+        assertEqual(relinked.diagnosticsIssueMarkerDelivery?.state, .notDelivered,
+                    "a marker in flight when its link drops is not left pending")
+    }
+
     @MainActor
     static func testDeviceDiagnosticsTransferPolicy() async {
         let configuration = URLSessionConfiguration.ephemeral

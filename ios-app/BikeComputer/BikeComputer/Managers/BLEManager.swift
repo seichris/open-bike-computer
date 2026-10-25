@@ -1030,6 +1030,25 @@ struct DeviceTransferWiFiStartFailure: Equatable {
     let after: Memory
 }
 
+/// Delivery of the latest issue marker sent to Bicino. Firmware does not
+/// acknowledge markers, so `.sent` proves only a successful BLE write.
+struct DiagnosticsIssueMarkerDelivery: Equatable {
+    enum State: Equatable {
+        case pending
+        case sent
+        case notDelivered
+    }
+
+    let sequence: UInt32
+    let incidentID: UUID?
+    var state: State
+}
+
+enum DiagnosticsIssueMarkerRetryPolicy {
+    static let maximumAttemptCount = 3
+    static let retryDelay: TimeInterval = 1
+}
+
 #if HOST_TESTING
 final class BLEScanDriverForTesting {
     struct Start: Equatable {
@@ -1157,6 +1176,12 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
     private var nextDiagnosticsMarkerSequence: UInt32 = 1
+    @Published private(set) var diagnosticsIssueMarkerDelivery: DiagnosticsIssueMarkerDelivery?
+#if HOST_TESTING
+    private var diagnosticsIssueMarkerRetryDelay = DiagnosticsIssueMarkerRetryPolicy.retryDelay
+#else
+    private let diagnosticsIssueMarkerRetryDelay = DiagnosticsIssueMarkerRetryPolicy.retryDelay
+#endif
     @Published var mapTransferModeEnabled: Bool = false
     @Published var mapTransferBaseURL: URL?
     @Published var mapTransferAccessPointSSID: String?
@@ -1560,6 +1585,7 @@ class BLEManager: NSObject, ObservableObject {
         pendingATTWrite?.owner == .authentication
     }
     private var navigationWriteWithResponseFailureHandler: (() -> Void)?
+    private var navigationWriteWithResponseSuccessHandler: (() -> Void)?
     private var navigationWriteResponseTimeoutTimer: Timer?
     private var navigationWriteResponseGeneration: UInt64 = 0
     private var navigationBackpressureStartedAt: Date?
@@ -5168,6 +5194,11 @@ class BLEManager: NSObject, ObservableObject {
         cancelPendingRideApplicationDeliveries(
             notifyFailure: notifyFailure
         )
+        // A marker still queued, in flight or awaiting a retry left with its
+        // link: the queue and ATT handlers are cleared without callbacks.
+        if let marker = diagnosticsIssueMarkerDelivery {
+            settleDiagnosticsIssueMarker(sequence: marker.sequence, state: .notDelivered)
+        }
     }
 
     private var isWaitingForRideApplicationAcknowledgement: Bool {
@@ -6519,13 +6550,93 @@ class BLEManager: NSObject, ObservableObject {
             marker = "mark|1|\(markerSequence)|\(code.rawValue)"
         }
         let packet = Data("\(DeviceBLEProtocol.deviceTransferControlPrefix)\(marker)".utf8)
-        let queued = sendTransferControlPacket(
+        // Publish before queueing: a write without response can succeed
+        // before the send call returns.
+        let previousDelivery = diagnosticsIssueMarkerDelivery
+        diagnosticsIssueMarkerDelivery = DiagnosticsIssueMarkerDelivery(
+            sequence: markerSequence,
+            incidentID: incidentID,
+            state: .pending
+        )
+        guard sendDiagnosticsIssueMarkerAttempt(
+            packet,
+            sequence: markerSequence,
+            attempt: 1,
+            connectionGeneration: rideDeliveryConnectionGeneration
+        ) else {
+            diagnosticsIssueMarkerDelivery = previousDelivery
+            return false
+        }
+        nextDiagnosticsMarkerSequence &+= 1
+        return true
+    }
+
+    private func sendDiagnosticsIssueMarkerAttempt(
+        _ packet: Data,
+        sequence: UInt32,
+        attempt: Int,
+        connectionGeneration: UInt64
+    ) -> Bool {
+        sendTransferControlPacket(
             packet,
             label: "diagnostics issue marker",
-            coalescingKey: nil
+            coalescingKey: nil,
+            onWriteFailure: { [weak self] in
+                self?.retryDiagnosticsIssueMarker(
+                    packet,
+                    sequence: sequence,
+                    failedAttempt: attempt,
+                    connectionGeneration: connectionGeneration
+                )
+            },
+            onWriteSuccess: { [weak self] in
+                self?.settleDiagnosticsIssueMarker(sequence: sequence, state: .sent)
+            }
         )
-        if queued { nextDiagnosticsMarkerSequence &+= 1 }
-        return queued
+    }
+
+    private func retryDiagnosticsIssueMarker(
+        _ packet: Data,
+        sequence: UInt32,
+        failedAttempt: Int,
+        connectionGeneration: UInt64
+    ) {
+        guard failedAttempt < DiagnosticsIssueMarkerRetryPolicy.maximumAttemptCount else {
+            settleDiagnosticsIssueMarker(sequence: sequence, state: .notDelivered)
+            return
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + diagnosticsIssueMarkerRetryDelay
+        ) { [weak self] in
+            guard let self,
+                  self.diagnosticsIssueMarkerDelivery?.sequence == sequence,
+                  self.diagnosticsIssueMarkerDelivery?.state == .pending else { return }
+            // Resend the identical packet only on the authenticated link whose
+            // write failed. Firmware accepts each sequence once, so a retry of
+            // a write that did arrive is rejected rather than duplicated.
+            guard self.isNavigationReady,
+                  self.rideDeliveryConnectionGeneration == connectionGeneration,
+                  self.sendDiagnosticsIssueMarkerAttempt(
+                    packet,
+                    sequence: sequence,
+                    attempt: failedAttempt + 1,
+                    connectionGeneration: connectionGeneration
+                  ) else {
+                self.settleDiagnosticsIssueMarker(sequence: sequence, state: .notDelivered)
+                return
+            }
+        }
+    }
+
+    private func settleDiagnosticsIssueMarker(
+        sequence: UInt32,
+        state: DiagnosticsIssueMarkerDelivery.State
+    ) {
+        // Only the latest marker is tracked: firmware rejects a sequence
+        // below one it has already accepted, so an older retry is moot.
+        guard diagnosticsIssueMarkerDelivery?.sequence == sequence,
+              diagnosticsIssueMarkerDelivery?.state == .pending else { return }
+        diagnosticsIssueMarkerDelivery?.state = state
     }
 
     @discardableResult
@@ -8639,7 +8750,8 @@ class BLEManager: NSObject, ObservableObject {
         applicationCommandID: UUID? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
-        onWriteFailure: (() -> Void)? = nil
+        onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil
     ) -> Bool {
         if (firmwareMaintenanceActive ||
             firmwareMaintenanceReconnectExpected) &&
@@ -8654,6 +8766,7 @@ class BLEManager: NSObject, ObservableObject {
             onWrite: onWrite,
             onDrop: onDrop,
             onWriteFailure: onWriteFailure,
+            onWriteSuccess: onWriteSuccess,
             transportCanSend: transportCanSend,
             transportExpectsWriteResponse: transportExpectsWriteResponse,
             transportCharacteristicUUIDString:
@@ -8832,7 +8945,8 @@ class BLEManager: NSObject, ObservableObject {
         payloadProvider: (() -> Data)? = nil,
         onWrite: (() -> Void)? = nil,
         onDrop: (() -> Void)? = nil,
-        onWriteFailure: (() -> Void)? = nil
+        onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil
     ) -> Bool {
         guard let endpoint = navigationWriteEndpoint,
               isConnected,
@@ -8859,7 +8973,8 @@ class BLEManager: NSObject, ObservableObject {
             },
             onWrite: onWrite,
             onDrop: onDrop,
-            onWriteFailure: onWriteFailure
+            onWriteFailure: onWriteFailure,
+            onWriteSuccess: onWriteSuccess
         ) else {
             log("Fallback \(label) not queued: write queue unavailable")
             return false
@@ -8874,7 +8989,8 @@ class BLEManager: NSObject, ObservableObject {
         label: String,
         coalescingKey: String?,
         forMaintenanceReconnect: Bool = false,
-        onWriteFailure: (() -> Void)? = nil
+        onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil
     ) -> Bool {
         if DeviceTransferPacketRoutingPolicy.usesNavigationFallback(
             firmwareMaintenanceActive: firmwareMaintenanceActive,
@@ -8886,7 +9002,8 @@ class BLEManager: NSObject, ObservableObject {
                 writeClass: .transfer,
                 coalescingKey: coalescingKey,
                 prioritized: true,
-                onWriteFailure: onWriteFailure
+                onWriteFailure: onWriteFailure,
+                onWriteSuccess: onWriteSuccess
             )
         }
         return DevicePacketRouting.sendPreferredThenFallback(
@@ -8897,7 +9014,8 @@ class BLEManager: NSObject, ObservableObject {
                     writeClass: .transfer,
                     coalescingKey: coalescingKey,
                     prioritized: true,
-                    onWriteFailure: onWriteFailure
+                    onWriteFailure: onWriteFailure,
+                    onWriteSuccess: onWriteSuccess
                 )
             },
             fallback: {
@@ -8907,7 +9025,8 @@ class BLEManager: NSObject, ObservableObject {
                     writeClass: .transfer,
                     coalescingKey: coalescingKey,
                     prioritized: true,
-                    onWriteFailure: onWriteFailure
+                    onWriteFailure: onWriteFailure,
+                    onWriteSuccess: onWriteSuccess
                 )
             }
         )
@@ -8921,7 +9040,8 @@ class BLEManager: NSObject, ObservableObject {
         coalescingKey: String? = nil,
         prioritized: Bool = false,
         onDrop: (() -> Void)? = nil,
-        onWriteFailure: (() -> Void)? = nil
+        onWriteFailure: (() -> Void)? = nil,
+        onWriteSuccess: (() -> Void)? = nil
     ) -> Bool {
         guard isConnected,
               isNavigationReady,
@@ -8967,7 +9087,8 @@ class BLEManager: NSObject, ObservableObject {
             transportCharacteristicUUIDString:
                 characteristic.uuid.uuidString,
             onDrop: onDrop,
-            onWriteFailure: onWriteFailure
+            onWriteFailure: onWriteFailure,
+            onWriteSuccess: onWriteSuccess
         ) else { return false }
         log("Queued native \(label): \(data.count) bytes")
         return true
@@ -9044,6 +9165,7 @@ class BLEManager: NSObject, ObservableObject {
                 beginNavigationWriteResponseWait(for: write)
             }
             write.perform(using: endpoint.write, preparedData: payload)
+            if !expectsWriteResponse { write.onWriteSuccess?() }
             log("Sent \(write.label): \(write.data.count) bytes")
         }
         updateNavigationBackpressureWatchdog(
@@ -9111,9 +9233,12 @@ class BLEManager: NSObject, ObservableObject {
     private func completeNavigationWrite(error: Error?) {
         guard pendingATTWrite?.owner == .ride else { return }
         let writeFailureHandler = navigationWriteWithResponseFailureHandler
+        let writeSuccessHandler = navigationWriteWithResponseSuccessHandler
         finishPendingATTWrite(error: error)
         if error != nil {
             writeFailureHandler?()
+        } else {
+            writeSuccessHandler?()
         }
         flushAuthMessageQueue()
         if isNavigationReady, let endpoint = navigationWriteEndpoint {
@@ -9147,7 +9272,8 @@ class BLEManager: NSObject, ObservableObject {
             writeClass: write.writeClass,
             byteCount: write.data.count,
             applicationCommandID: write.applicationCommandID,
-            failureHandler: write.onWriteFailure
+            failureHandler: write.onWriteFailure,
+            successHandler: write.onWriteSuccess
         )
     }
 
@@ -9159,10 +9285,12 @@ class BLEManager: NSObject, ObservableObject {
         writeClass: NavigationWriteClass,
         byteCount: Int,
         applicationCommandID: UUID?,
-        failureHandler: (() -> Void)?
+        failureHandler: (() -> Void)?,
+        successHandler: (() -> Void)? = nil
     ) {
         precondition(pendingATTWrite == nil)
         navigationWriteWithResponseFailureHandler = failureHandler
+        navigationWriteWithResponseSuccessHandler = successHandler
         navigationWriteResponseGeneration &+= 1
         if navigationWriteResponseGeneration == 0 {
             navigationWriteResponseGeneration = 1
@@ -9343,6 +9471,7 @@ class BLEManager: NSObject, ObservableObject {
         pendingATTWrite = nil
         navigationWriteResponseGeneration &+= 1
         navigationWriteWithResponseFailureHandler = nil
+        navigationWriteWithResponseSuccessHandler = nil
         navigationBackpressureStartedAt = nil
         if rideTransportStateMachine.acceptsWriterCallbacks {
             let writerState: RideBLEWriterStateV1
@@ -9369,6 +9498,7 @@ class BLEManager: NSObject, ObservableObject {
         pendingATTWrite = nil
         navigationWriteResponseGeneration &+= 1
         navigationWriteWithResponseFailureHandler = nil
+        navigationWriteWithResponseSuccessHandler = nil
         navigationBackpressureStartedAt = nil
         // Adoption clears the previous writer after entering .connecting.
         // Only publish writer changes in phases that admit them.
@@ -9467,6 +9597,9 @@ class BLEManager: NSObject, ObservableObject {
     var pendingNavigationClearForTesting: Bool { pendingNavigationClear != nil }
     func setRideApplicationAcknowledgementTimeoutForTesting(_ timeout: TimeInterval) {
         rideApplicationAcknowledgementTimeout = timeout
+    }
+    func setDiagnosticsIssueMarkerRetryDelayForTesting(_ delay: TimeInterval) {
+        diagnosticsIssueMarkerRetryDelay = delay
     }
     func retryNavigationClearForTesting() { retryPendingNavigationClear() }
     func adoptConnectionForTesting(connected: Bool) -> Bool {
