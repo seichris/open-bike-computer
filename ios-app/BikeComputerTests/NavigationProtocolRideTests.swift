@@ -4928,6 +4928,89 @@ extension NavigationProtocolTests {
                     "a marker in flight when its link drops is not left pending")
     }
 
+    static func testSettingWriteRetry() {
+        let attFailure = CBATTError(.unlikelyError)
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: "deviceSettings.brightnessPercent")
+        defer { defaults.removeObject(forKey: "deviceSettings.brightnessPercent") }
+        // No settings characteristic, so settings use acknowledged fallback writes.
+        func connect(_ manager: BLEManager) -> () -> [Data] {
+            manager.isConnected = true
+            manager.isNavigationReady = true
+            manager.setSettingWriteRetryDelayForTesting(0.05)
+            var packets: [Data] = []
+            manager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+                maximumWriteLength: 20,
+                expectsWriteResponse: true,
+                canSend: { true },
+                write: { packets.append($0) }
+            ))
+            return { packets }
+        }
+        func setting(_ id: UInt8, _ value: Int32) -> Data {
+            var packet = Data(DeviceBLEProtocol.settingsFallbackPrefix.utf8)
+            packet.append(id)
+            withUnsafeBytes(of: value.littleEndian) { packet.append(contentsOf: $0) }
+            return packet
+        }
+        let brightness = DeviceBLEProtocol.brightnessSettingID
+
+        let retried = BLEManager()
+        let retriedPackets = connect(retried)
+        assert(retried.sendSetting(id: brightness, value: 40), "a setting is queued for the connected Bicino")
+        assertEqual(retriedPackets(), [setting(brightness, 40)], "the first setting attempt reaches BLE")
+        retried.completeNavigationWriteForTesting(error: attFailure)
+        assert(waitForMainLoop(timeout: 2) { retriedPackets().count == 2 },
+               "an ATT-failed setting write is retried")
+        assertEqual(retriedPackets(), [setting(brightness, 40), setting(brightness, 40)],
+                    "the retry resends the same value")
+        retried.completeNavigationWriteForTesting(error: nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(retriedPackets().count, 2, "a delivered setting is never repeated")
+
+        let exhausted = BLEManager()
+        let exhaustedPackets = connect(exhausted)
+        assert(exhausted.sendSetting(id: brightness, value: 55), "a setting is queued before its writes fail")
+        for attempt in 1...SettingWriteRetryPolicy.maximumAttemptCount {
+            assert(waitForMainLoop(timeout: 2) { exhaustedPackets().count == attempt },
+                   "setting attempt \(attempt) reaches BLE")
+            exhausted.completeNavigationWriteForTesting(error: attFailure)
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(exhaustedPackets().count, SettingWriteRetryPolicy.maximumAttemptCount,
+                    "setting retries remain bounded")
+        assertEqual(Set(exhaustedPackets()), [setting(brightness, 55)],
+                    "every attempt resends the same value")
+
+        let superseded = BLEManager()
+        let supersededPackets = connect(superseded)
+        assert(superseded.sendSetting(id: brightness, value: 30), "a setting is queued before its write fails")
+        superseded.completeNavigationWriteForTesting(error: attFailure)
+        assert(superseded.sendSetting(id: brightness, value: 70), "a newer value is queued")
+        superseded.completeNavigationWriteForTesting(error: nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(supersededPackets(), [setting(brightness, 30), setting(brightness, 70)],
+                    "a newer value supersedes the retry of an older one")
+
+        let relinked = BLEManager()
+        let firstLinkPackets = connect(relinked)
+        assert(relinked.sendSetting(id: brightness, value: 45), "a setting is queued before its link drops")
+        relinked.completeNavigationWriteForTesting(error: attFailure)
+        relinked.clearConnectionStateForTesting()
+        let successorPackets = connect(relinked)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(firstLinkPackets().count, 1, "the lost link receives no retry")
+        assert(successorPackets().isEmpty,
+               "a setting is never retried on a later connection generation")
+
+        let reboot = BLEManager()
+        let rebootPackets = connect(reboot)
+        assert(reboot.sendSetting(id: 5, value: 1), "the reboot command is queued")
+        reboot.completeNavigationWriteForTesting(error: attFailure)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        assertEqual(rebootPackets(), [setting(5, 1)], "the one-shot reboot command is never repeated")
+    }
+
     @MainActor
     static func testDeviceDiagnosticsTransferPolicy() async {
         let configuration = URLSessionConfiguration.ephemeral

@@ -999,6 +999,12 @@ Current setting IDs:
 | `38` | Display inactivity timeouts | Atomic `Int32LE` pair: low 16 bits are seconds before dimming and high 16 bits are seconds before panel off. Defaults are `15` and `45`. Firmware accepts dim `5...600`, off `10...3600`, and requires off to be at least five seconds later than dim. The pair is persisted as one NVS value. |
 | `39` | Friend marker size | Percent of the normal friend marker, clamped to `100...300`; defaults to `100` and is persisted as `friendScale`. One global value for every map screen (Map, Map + Navigation and terrain/topographic Map instances); portraits, initials, distances and grouped counts scale together around the rider. The iPhone offers `100`, `125`, `150`, `200`, `250` and `300`, uses the same value for its own map, and sends it only after extended capability bit `1`. |
 
+iOS resends a state setting whose acknowledged write fails at the ATT layer:
+at most three attempts in total, one second apart, with the same value and
+only on the connection whose write failed. A newer value for
+the same ID supersedes the retry. The legacy reboot command (ID `5`) is
+never resent.
+
 In a dense scene, firmware reserves its bounded extrusion workspace from the
 nearest eligible buildings outward, preserves global back-to-front drawing,
 and renders overflow records as flat roofs. One oversized viewport therefore

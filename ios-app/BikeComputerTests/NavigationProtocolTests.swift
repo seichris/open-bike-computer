@@ -874,6 +874,11 @@ struct NavigationProtocolTests {
             print("Diagnostics issue marker delivery regressions passed")
             return
         }
+        if CommandLine.arguments.contains("--setting-retry-only") {
+            testSettingWriteRetry()
+            print("Setting write retry regressions passed")
+            return
+        }
         testIconMapping()
         testRouteEndpointExtraction()
         testRouteRemainingDistance()
@@ -982,6 +987,7 @@ struct NavigationProtocolTests {
         testBLEManagerCompletesRetransmittedChunkedMapTransferStatus()
         testBLEManagerParsesDeviceTransferStatus()
         testBLEManagerSendsBrightnessFallbackSetting()
+        testSettingWriteRetry()
         testBLEManagerResendsBrightnessAfterAuthentication()
         testBLEManagerGatesAutomaticDisplayOffForLegacyFirmware()
         testBLEManagerSendsAutomaticDisplayOffAfterCapabilityNegotiation()

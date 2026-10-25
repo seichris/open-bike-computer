@@ -1049,6 +1049,11 @@ enum DiagnosticsIssueMarkerRetryPolicy {
     static let retryDelay: TimeInterval = 1
 }
 
+enum SettingWriteRetryPolicy {
+    static let maximumAttemptCount = 3
+    static let retryDelay: TimeInterval = 1
+}
+
 #if HOST_TESTING
 final class BLEScanDriverForTesting {
     struct Start: Equatable {
@@ -1179,9 +1184,14 @@ class BLEManager: NSObject, ObservableObject {
     @Published private(set) var diagnosticsIssueMarkerDelivery: DiagnosticsIssueMarkerDelivery?
 #if HOST_TESTING
     private var diagnosticsIssueMarkerRetryDelay = DiagnosticsIssueMarkerRetryPolicy.retryDelay
+    private var settingWriteRetryDelay = SettingWriteRetryPolicy.retryDelay
 #else
     private let diagnosticsIssueMarkerRetryDelay = DiagnosticsIssueMarkerRetryPolicy.retryDelay
+    private let settingWriteRetryDelay = SettingWriteRetryPolicy.retryDelay
 #endif
+    // The latest send of each setting ID; a retry yields to any newer send.
+    private var settingWriteGeneration: UInt64 = 0
+    private var latestSettingWriteGenerations: [UInt8: UInt64] = [:]
     @Published var mapTransferModeEnabled: Bool = false
     @Published var mapTransferBaseURL: URL?
     @Published var mapTransferAccessPointSSID: String?
@@ -5532,7 +5542,26 @@ class BLEManager: NSObject, ObservableObject {
     @discardableResult
     private func sendSettingPacket(id: UInt8, value: Int32, label: String) -> Bool {
         guard isConnected, isNavigationReady else { return false }
+        settingWriteGeneration &+= 1
+        latestSettingWriteGenerations[id] = settingWriteGeneration
+        return sendSettingPacketAttempt(
+            id: id,
+            value: value,
+            label: label,
+            generation: settingWriteGeneration,
+            attempt: 1,
+            connectionGeneration: rideDeliveryConnectionGeneration
+        )
+    }
 
+    private func sendSettingPacketAttempt(
+        id: UInt8,
+        value: Int32,
+        label: String,
+        generation: UInt64,
+        attempt: Int,
+        connectionGeneration: UInt64
+    ) -> Bool {
         var data = Data()
         data.append(id)
         withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
@@ -5574,6 +5603,21 @@ class BLEManager: NSObject, ObservableObject {
         } else {
             onDrop = nil
         }
+        // A setting is device state, not a replaceable snapshot: a write that
+        // fails at the ATT layer (e.g. while a chunked status reply holds the
+        // device's BLE buffers) would otherwise leave the device on the old
+        // value until the next connection. Setting 5 is the one-shot reboot
+        // command, which is never repeated.
+        let onWriteFailure: (() -> Void)? = id == 5 ? nil : { [weak self] in
+            self?.retrySettingPacket(
+                id: id,
+                value: value,
+                label: label,
+                generation: generation,
+                failedAttempt: attempt,
+                connectionGeneration: connectionGeneration
+            )
+        }
 
         return DevicePacketRouting.sendPreferredThenFallback(
             preferred: {
@@ -5581,7 +5625,8 @@ class BLEManager: NSObject, ObservableObject {
                     data,
                     label: label,
                     coalescingKey: coalescingKey,
-                    onDrop: onDrop
+                    onDrop: onDrop,
+                    onWriteFailure: onWriteFailure
                 )
             },
             fallback: {
@@ -5593,10 +5638,44 @@ class BLEManager: NSObject, ObservableObject {
                     fallback,
                     label: label,
                     coalescingKey: coalescingKey,
-                    onDrop: onDrop
+                    onDrop: onDrop,
+                    onWriteFailure: onWriteFailure
                 )
             }
         )
+    }
+
+    private func retrySettingPacket(
+        id: UInt8,
+        value: Int32,
+        label: String,
+        generation: UInt64,
+        failedAttempt: Int,
+        connectionGeneration: UInt64
+    ) {
+        guard failedAttempt < SettingWriteRetryPolicy.maximumAttemptCount else {
+            log("\(label) not delivered after \(failedAttempt) failed writes")
+            return
+        }
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + settingWriteRetryDelay
+        ) { [weak self] in
+            // Resend only the latest value, on the link whose write failed.
+            guard let self,
+                  self.latestSettingWriteGenerations[id] == generation,
+                  self.isConnected,
+                  self.isNavigationReady,
+                  self.rideDeliveryConnectionGeneration == connectionGeneration else { return }
+            self.log("Retrying \(label) after a failed write")
+            _ = self.sendSettingPacketAttempt(
+                id: id,
+                value: value,
+                label: label,
+                generation: generation,
+                attempt: failedAttempt + 1,
+                connectionGeneration: connectionGeneration
+            )
+        }
     }
 
 #if canImport(UIKit) && !HOST_TESTING
@@ -9600,6 +9679,9 @@ class BLEManager: NSObject, ObservableObject {
     }
     func setDiagnosticsIssueMarkerRetryDelayForTesting(_ delay: TimeInterval) {
         diagnosticsIssueMarkerRetryDelay = delay
+    }
+    func setSettingWriteRetryDelayForTesting(_ delay: TimeInterval) {
+        settingWriteRetryDelay = delay
     }
     func retryNavigationClearForTesting() { retryPendingNavigationClear() }
     func adoptConnectionForTesting(connected: Bool) -> Bool {
