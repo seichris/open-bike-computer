@@ -24,7 +24,16 @@ constexpr double kWgs84MinimumRadiusM = 6335439.0;
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kBlockSizeM = 4096.0;
 constexpr double kBlockCenterDistanceUpperBoundM = 4200.0;
-constexpr size_t kMaximumResults = 10;
+constexpr size_t kMaximumCategories = 5;
+constexpr size_t kResultsPerCategory = 10;
+constexpr size_t kMaximumResults = kMaximumCategories * kResultsPerCategory;
+
+constexpr size_t resultLimit(uint32_t selectedMask) {
+  size_t count = 0;
+  for (size_t bit = 0; bit < kMaximumCategories; ++bit)
+    if ((selectedMask & (1U << bit)) != 0) count += kResultsPerCategory;
+  return count;
+}
 constexpr size_t kMaximumBatchRecords = 256;
 
 struct Position {
@@ -214,9 +223,9 @@ inline bool better(const Result &left, const Result &right) {
   return left.recordOrdinal < right.recordOrdinal;
 }
 
-class NearestTen {
+class NearestByCategory {
  public:
-  NearestTen(Position rider, uint32_t selectedMask, double radiusM)
+  NearestByCategory(Position rider, uint32_t selectedMask, double radiusM)
       : rider_(rider), selectedMask_(selectedMask), radiusM_(radiusM) {}
 
   // Supply at most 256 consecutive eight-byte records from the signed FMB6
@@ -249,6 +258,21 @@ class NearestTen {
       if (distance > radiusM_) continue;
       Result result{position, distance, block.blockX, block.blockY,
                     static_cast<uint16_t>(firstOrdinal + index), category};
+      // Other selected categories never consume this category's quota.
+      // The shared output stays globally sorted for stable nearest-first UI.
+      size_t categoryCount = 0;
+      size_t farthestInCategory = 0;
+      for (size_t existing = 0; existing < size_; ++existing) {
+        if (results_[existing].category != category) continue;
+        ++categoryCount;
+        farthestInCategory = existing;
+      }
+      if (categoryCount == kResultsPerCategory) {
+        if (!better(result, results_[farthestInCategory])) continue;
+        for (size_t move = farthestInCategory + 1; move < size_; ++move)
+          results_[move - 1] = results_[move];
+        --size_;
+      }
       size_t insert = 0;
       while (insert < size_ && !better(result, results_[insert])) ++insert;
       if (insert >= kMaximumResults) continue;
@@ -263,7 +287,7 @@ class NearestTen {
   bool canFinishBefore(double nextBlockLowerBoundM) const {
     if (!std::isfinite(nextBlockLowerBoundM)) return false;
     return nextBlockLowerBoundM > radiusM_ ||
-           (size_ == kMaximumResults &&
+           (size_ == resultLimit(selectedMask_) && size_ != 0 &&
             nextBlockLowerBoundM > results_[size_ - 1].directDistanceM);
   }
 

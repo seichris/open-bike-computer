@@ -401,11 +401,20 @@ int main() {
                                    static_cast<uint8_t>(x >> 8U),
                                    0, 0, 1, 2, 0, 0});
   }
-  NearestTen search(origin, 1, 10000.0);
+  NearestByCategory search(origin, 1, 10000.0);
   assert(search.consume(near, 0, records.data(), 12));
   assert(search.size() == 10);
   assert(search[0].recordOrdinal == 0);
   assert(search[9].recordOrdinal == 9);
+  assert(search.canFinishBefore(search[9].directDistanceM + 1.0));
+  NearestByCategory missingSecondCategory(origin, 3, 10000.0);
+  assert(missingSecondCategory.consume(near, 0, records.data(), 12));
+  assert(missingSecondCategory.size() == 10);
+  assert(!missingSecondCategory.canFinishBefore(search[9].directDistanceM + 1.0));
+  static_assert(sizeof(map_nearby_storage::SearchResult) <= 3072,
+                "Nearby result copies must stay within the worker stack budget");
+  static_assert(sizeof(NearestByCategory) <= 3072,
+                "Nearby frontier must remain bounded per cursor");
   auto updatedDistance = search[0];
   updatedDistance.directDistanceM += 12.0;
   assert(sameRecord(search[0], updatedDistance));
@@ -479,7 +488,7 @@ int main() {
   assert(prepareFrontier(seamIndex.data(), seamIndex.size(), rider, 1,
                          25000.0, frontier));
   assert(frontier.size() == seamPlaces.size());
-  NearestTen seamSearch(rider, 1, 25000.0);
+  NearestByCategory seamSearch(rider, 1, 25000.0);
   for (size_t index = 0; index < seamPlaces.size(); ++index)
     assert(seamSearch.consume(seamIndex[index], 0,
                               seamRecords[index].data(), 1));
@@ -487,7 +496,7 @@ int main() {
   assert(seamSearch[0].blockX == seamIndex[1].blockX);
   assert(seamSearch[1].blockX == seamIndex[0].blockX);
   assert(seamSearch[2].blockX == seamIndex[2].blockX);
-  NearestTen seamRadiusSearch(rider, 1, 500.0);
+  NearestByCategory seamRadiusSearch(rider, 1, 500.0);
   for (size_t index = 0; index < seamPlaces.size(); ++index)
     assert(seamRadiusSearch.consume(seamIndex[index], 0,
                                     seamRecords[index].data(), 1));
@@ -502,7 +511,7 @@ int main() {
   tiedBlock.sectionBytes = 24;
   const std::array<uint8_t, 8> tiedShop{{0, 0, 0, 0, 1, 2, 0, 0}};
   const std::array<uint8_t, 8> tiedCafe{{0, 0, 0, 0, 2, 2, 0, 0}};
-  NearestTen tiedSearch(origin, 3, 10000.0);
+  NearestByCategory tiedSearch(origin, 3, 10000.0);
   assert(tiedSearch.consume(tiedBlock, 1, tiedCafe.data(), 1));
   assert(tiedSearch.consume(tiedBlock, 0, tiedShop.data(), 1));
   assert(tiedSearch.size() == 2);
@@ -516,7 +525,7 @@ int main() {
   std::array<std::vector<uint8_t>, 4> denseRecords{};
   std::vector<Result> expected;
   constexpr uint32_t selectedCategories = (1U << 0) | (1U << 2) | (1U << 4);
-  NearestTen denseSearch(origin, selectedCategories, 25000.0);
+  NearestByCategory denseSearch(origin, selectedCategories, 25000.0);
   for (size_t block = 0; block < denseIndex.size(); ++block) {
     auto &entry = denseIndex[block];
     entry.blockX = blockXs[block];
@@ -546,7 +555,12 @@ int main() {
     assert(denseSearch.consume(entry, 0, denseRecords[block].data(), 30));
   }
   std::sort(expected.begin(), expected.end(), better);
-  assert(denseSearch.size() == kMaximumResults);
+  std::array<size_t, 5> perCategory{};
+  expected.erase(std::remove_if(expected.begin(), expected.end(),
+      [&](const Result &result) { return perCategory[result.category - 1]++ >= 10; }),
+      expected.end());
+  assert(expected.size() == 30);
+  assert(denseSearch.size() == expected.size());
   for (size_t index = 0; index < denseSearch.size(); ++index) {
     assert(denseSearch[index].blockX == expected[index].blockX);
     assert(denseSearch[index].recordOrdinal == expected[index].recordOrdinal);
@@ -558,6 +572,34 @@ int main() {
                          selectedCategories, 25000.0, frontier));
   assert(frontier.size() == 3);
 
+  // Adding any other category preserves every restaurant identity.
+  auto collect = [&](uint32_t mask) {
+    NearestByCategory query(origin, mask, 25000.0);
+    for (size_t block = 0; block < denseIndex.size(); ++block)
+      assert(query.consume(denseIndex[block], 0, denseRecords[block].data(), 30));
+    return query;
+  };
+  const auto restaurantsOnly = collect(1U << 1);
+  assert(restaurantsOnly.size() == 10);
+  for (uint32_t mask : {(1U << 1) | (1U << 2), (1U << 0) | (1U << 1), 0x1FU}) {
+    const auto combined = collect(mask);
+    assert(combined.size() == resultLimit(mask));
+    size_t restaurant = 0;
+    std::array<size_t, 5> counts{};
+    for (size_t index = 0; index < combined.size(); ++index) {
+      ++counts[combined[index].category - 1];
+      if (index) assert(!better(combined[index], combined[index - 1]));
+      if (combined[index].category == 2) {
+        assert(restaurant < restaurantsOnly.size());
+        assert(sameRecord(combined[index], restaurantsOnly[restaurant++]));
+      }
+    }
+    assert(restaurant == restaurantsOnly.size());
+    for (size_t category = 0; category < counts.size(); ++category)
+      assert(counts[category] == ((mask & (1U << category)) ? 10U : 0U));
+  }
+  assert(resultLimit(0) == 0 && resultLimit(0x1F) == 50);
+
   testResumableCoverageMatchesSinglePass();
   assert(map_nearby_storage::openFailureStatus(ENOENT) ==
          map_nearby_storage::Status::Unavailable);
@@ -567,5 +609,5 @@ int main() {
   testHighLatitudeWindowIsEvaluatedInBoundedSteps();
   testCursorPublishesAfterResumableCoverage();
 
-  std::cout << "Nearby query geometry and bounded nearest-ten tests passed\n";
+  std::cout << "Nearby query geometry and bounded per-category tests passed\n";
 }

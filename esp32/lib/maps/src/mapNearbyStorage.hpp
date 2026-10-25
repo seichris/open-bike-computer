@@ -360,7 +360,7 @@ class SearchCursor {
   uint32_t selectedMask_;
   double radiusM_;
   const std::vector<map_nearby_coverage::Block> *coverage_;
-  map_nearby_query::NearestTen nearest_;
+  map_nearby_query::NearestByCategory nearest_;
   SearchResult result_{};
   MapNearbyVector<map_poi_index::Entry> entries_;
   MapNearbyVector<map_nearby_query::FrontierItem> frontier_;

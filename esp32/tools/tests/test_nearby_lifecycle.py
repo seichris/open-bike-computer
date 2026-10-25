@@ -197,9 +197,8 @@ int main() {
         self.assertNotIn("Direct distance - not route distance", source)
 
     def test_results_name_crowded_out_categories_and_mark_mixed_groups(self):
-        # Nearby keeps the nearest ten in total. When a selected category is
-        # absent from either coverage mode, say so; a merged group of
-        # different categories gets a distinct count badge.
+        # Nearby keeps ten per selected category. An absent category has no
+        # matches in the searched coverage. Mixed groups retain their badge.
         source = (ROOT / "lib/gui/src/mainScr.cpp").read_text()
         service = fragment(source, "static void serviceNearbyScreen(uint32_t nowMs) {")
         self.assertIn("nearby.selectedMask, categories, count", service)
@@ -255,10 +254,10 @@ void lv_label_set_text_fmt(void *,const char *format,...) {
 int main() {
   refreshStatus();
   assert(displayed.rfind("10 places - 10 km\n", 0)==0);
-  assert(displayed.find("No toilets in nearest 10")!=std::string::npos);
+  assert(displayed.find("No toilets within 10 km")!=std::string::npos);
   assert(displayed.find("Downloaded area only; map edge nearby")!=std::string::npos);
   replacement.coverageComplete=true; refreshStatus();
-  assert(displayed.find("No toilets in nearest 10")!=std::string::npos);
+  assert(displayed.find("No toilets within 10 km")!=std::string::npos);
   assert(displayed.find("map edge")==std::string::npos);
   replacement.places[0].category=3; refreshStatus();
   assert(displayed=="10 places - 10 km");

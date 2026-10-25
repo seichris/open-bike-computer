@@ -10,6 +10,8 @@
 using map_nearby_layout::Input;
 
 int main() {
+  static_assert(sizeof(map_nearby_layout::Layout) <= 1024,
+                "GUI layout must not grow a fifty-placement stack buffer");
   std::array<uint16_t, 16 * 16> color{};
   std::array<uint8_t, 16 * 16> alpha{};
   std::array<unsigned, 5> glyphPixels{};
@@ -139,14 +141,14 @@ int main() {
   assert(!map_nearby_layout::formatDirectDistance(
       1200.0, kilometres, tooSmall, sizeof(tooSmall)));
 
-  // Nearby ranks the nearest ten across all selected categories; a selected
-  // category crowded out of them is named rather than silently missing.
+  // Per-category quotas mean an absent selected category has no matches in
+  // the searched radius, regardless of another category reaching ten.
   char absent[96]{};
   const uint8_t restaurants[10] = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2};
   const uint32_t restaurantsAndToilets = (1U << 1) | (1U << 2);
   assert(map_nearby_layout::formatAbsentCategories(
       restaurantsAndToilets, restaurants, 10, 10.0, absent, sizeof(absent)));
-  assert(std::strcmp(absent, "No toilets in nearest 10") == 0);
+  assert(std::strcmp(absent, "No toilets within 10 km") == 0);
   const uint8_t both[3] = {2, 3, 2};
   assert(!map_nearby_layout::formatAbsentCategories(
       restaurantsAndToilets, both, 3, 10.0, absent, sizeof(absent)));
@@ -159,9 +161,49 @@ int main() {
   assert(map_nearby_layout::formatAbsentCategories(
       0x1FU, restaurants, 10, 10.0, absent, sizeof(absent)));
   assert(std::strcmp(absent,
-      "No shops, toilets, gas stations, bike shops in nearest 10") == 0);
+      "No shops, toilets, gas stations, bike shops within 10 km") == 0);
   char small[12]{};
   assert(!map_nearby_layout::formatAbsentCategories(
       restaurantsAndToilets, restaurants, 10, 10.0, small, sizeof(small)));
   assert(small[0] == '\0');
+  // All fifty results remain reachable through at most ten count-badged groups,
+  // including members above the old 16-bit and 32-bit membership boundaries.
+  std::array<Input, 50> many{};
+  for (size_t index = 0; index < many.size(); ++index) {
+    many[index] = {200.0 + (index % 10) * 250.0,
+                   200.0 + (index / 10) * 250.0, 0, 0, true,
+                   static_cast<uint8_t>(index / 10 + 1),
+                   100.0 + index * 10.0};
+  }
+  for (bool isRound : {false, true}) {
+    const auto grouped = map_nearby_layout::arrange(
+        many.data(), many.size(), 3000, 3000, isRound, 42, 42);
+    assert(grouped.count > 0 && grouped.count <= map_nearby_layout::kMaximumMarkers);
+    uint64_t represented = 0;
+    size_t representedCount = 0;
+    for (size_t group = 0; group < grouped.count; ++group) {
+      const auto &placement = grouped.placements[group];
+      assert((represented & placement.members) == 0);
+      represented |= placement.members;
+      representedCount += placement.count;
+      size_t memberCount = 0;
+      double nearest = INFINITY;
+      for (size_t index = 0; index < many.size(); ++index) {
+        if ((placement.members & (uint64_t{1} << index)) == 0) continue;
+        ++memberCount;
+        nearest = std::min(nearest, many[index].directDistanceM);
+      }
+      assert(memberCount == placement.count);
+      assert(placement.nearestDistanceM == nearest);
+      assert(std::isfinite(placement.x) && std::isfinite(placement.y));
+    }
+    assert(represented == ((uint64_t{1} << 50) - 1));
+    assert(representedCount == many.size());
+    const auto again = map_nearby_layout::arrange(
+        many.data(), many.size(), 3000, 3000, isRound, 42, 42);
+    assert(again.count == grouped.count);
+    for (size_t index = 0; index < grouped.count; ++index)
+      assert(again.placements[index].members == grouped.placements[index].members);
+  }
+
 }

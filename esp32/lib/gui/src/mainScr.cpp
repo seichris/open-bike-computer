@@ -125,8 +125,10 @@ struct NearbyView {
   lv_obj_t *status = nullptr;
   lv_obj_t *furtherButton = nullptr;
   lv_obj_t *chooser = nullptr;
-  NearbyMarkerView markers[10]{};
+  NearbyMarkerView markers[map_nearby_layout::kMaximumMarkers]{};
   map_nearby_storage::SearchResult result{};
+  map_nearby_storage::SearchResult replacement{};
+  std::array<map_nearby_layout::Input, map_nearby_layout::kMaximumResults> projected{};
   map_nearby_layout::Layout layout{};
   std::array<bool, map_nearby_layout::kMaximumResults> wasOnMap{};
   std::array<bool, map_nearby_layout::kMaximumResults> distanceKilometres{};
@@ -2239,7 +2241,7 @@ static void nearbyMarkerTap(lv_event_t *event) {
   const auto &placement = nearby.layout.placements[index];
   if (placement.count == 1) {
     for (uint8_t member = 0; member < nearby.result.count; ++member) {
-      if ((placement.members & (1U << member)) != 0) {
+      if ((placement.members & (uint64_t{1} << member)) != 0) {
         nearbyFocusResult(member);
         return;
       }
@@ -2263,7 +2265,7 @@ static void nearbyMarkerTap(lv_event_t *event) {
   const bool fresh = nearbyFreshPosition(millis(), rider);
   uint8_t row = 0;
   for (uint8_t member = 0; member < nearby.result.count; ++member) {
-    if ((placement.members & (1U << member)) == 0) continue;
+    if ((placement.members & (uint64_t{1} << member)) == 0) continue;
     lv_obj_t *button = lv_btn_create(list);
     lv_obj_set_size(button, lv_obj_get_width(list) - 8, 37);
     lv_obj_set_pos(button, 2, row * 42);
@@ -2414,7 +2416,7 @@ static void createNearbyScreen() {
   lv_obj_set_style_text_font(furtherLabel, &lv_font_montserrat_14, 0);
   lv_obj_center(furtherLabel);
   lv_obj_add_flag(nearby.furtherButton, LV_OBJ_FLAG_HIDDEN);
-  for (uint8_t index = 0; index < 10; ++index) {
+  for (uint8_t index = 0; index < map_nearby_layout::kMaximumMarkers; ++index) {
     NearbyMarkerView &marker = nearby.markers[index];
     marker.button = lv_btn_create(nearby.overlay);
     lv_obj_remove_style_all(marker.button);
@@ -2493,7 +2495,7 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
       nearby.lastLayoutMs != 0 &&
       static_cast<uint32_t>(nowMs - nearby.lastLayoutMs) < 100U) return;
   nearby.lastLayoutMs = nowMs;
-  std::array<map_nearby_layout::Input, 10> projected{};
+  auto &projected = nearby.projected;
   map_nearby_query::Position rider;
   const bool fresh = nearbyFreshPosition(nowMs, rider);
   for (uint8_t index = 0; index < nearby.result.count; ++index) {
@@ -2509,7 +2511,7 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
       projected.data(), nearby.result.count, TFT_WIDTH, TFT_HEIGHT, round,
       round ? 80.0 : 60.0, round ? 95.0 : 80.0, nearby.wasOnMap);
   nearby.wasOnMap = nearby.layout.onMap;
-  for (uint8_t index = 0; index < 10; ++index) {
+  for (uint8_t index = 0; index < map_nearby_layout::kMaximumMarkers; ++index) {
     NearbyMarkerView &marker = nearby.markers[index];
     if (index >= nearby.layout.count) {
       lv_obj_add_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
@@ -2523,7 +2525,7 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
         static_cast<int16_t>(std::lround(placed.x)) - width / 2,
         static_cast<int16_t>(std::lround(placed.y)) - height / 2);
     const bool highlighted = nearby.highlightedResult < nearby.result.count &&
-        (placed.members & (1U << nearby.highlightedResult)) != 0;
+        (placed.members & (uint64_t{1} << nearby.highlightedResult)) != 0;
     lv_obj_set_style_border_width(marker.button, highlighted ? 2 : 0, 0);
     lv_obj_set_style_border_color(marker.button, lv_color_hex(0xFFE269), 0);
     const uint8_t displayCategory = map_nearby_layout::displayCategory(
@@ -2551,7 +2553,7 @@ static void refreshNearbyMarkers(uint32_t nowMs) {
       char distance[24];
       uint8_t nearest = 0;
       while (nearest < nearby.result.count &&
-             (placed.members & (1U << nearest)) == 0)
+             (placed.members & (uint64_t{1} << nearest)) == 0)
         ++nearest;
       if (nearest >= nearby.result.count) {
         lv_obj_add_flag(marker.button, LV_OBJ_FLAG_HIDDEN);
@@ -2639,9 +2641,13 @@ static void serviceNearbyScreen(uint32_t nowMs) {
     nearbyStartSearch(nowMs);
   }
   uint32_t sequence = 0;
-  map_nearby_storage::SearchResult replacement;
+  auto &replacement = nearby.replacement;
   if (mapView.takeNearbySearchResult(sequence, replacement) &&
       sequence == nearby.querySequence) {
+    // Chooser rows refer to this result snapshot. Never let a row tap select
+    // a different place after a fresh query reorders the result indices.
+    if (nearby.chooser != nullptr)
+      lv_obj_add_flag(nearby.chooser, LV_OBJ_FLAG_HIDDEN);
     nearby.querying = false;
     if (replacement.status == map_nearby_storage::Status::Ok) {
       std::array<bool, map_nearby_layout::kMaximumResults> nextUnits{};
@@ -2685,8 +2691,8 @@ static void serviceNearbyScreen(uint32_t nowMs) {
               "No matches in downloaded area (%u km)\nMap edge nearby",
               nearbyRadiusKm());
       } else {
-        // The nearest ten are counted across every selected category; say
-        // which selected category they crowded out.
+        // Each selected category has its own quota. Missing categories have
+        // no matches in the searched radius/downloaded coverage.
         uint8_t categories[map_nearby_layout::kMaximumResults]{};
         const size_t count = std::min<size_t>(
             replacement.count, map_nearby_layout::kMaximumResults);
@@ -2737,7 +2743,7 @@ static void serviceNearbyScreen(uint32_t nowMs) {
                            : "Search interrupted - retrying");
   }
   const bool canExpand = nearby.radiusM < 25000.0 &&
-      !nearby.querying && nearby.haveResults && nearby.result.count < 10;
+      !nearby.querying && nearby.haveResults && nearby.result.count < map_nearby_query::resultLimit(nearby.selectedMask);
   if (canExpand)
     lv_obj_clear_flag(nearby.furtherButton, LV_OBJ_FLAG_HIDDEN);
   else

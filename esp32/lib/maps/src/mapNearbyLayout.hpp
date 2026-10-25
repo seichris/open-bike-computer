@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mapNearbyQuery.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -8,7 +10,9 @@
 #include <cstdio>
 
 namespace map_nearby_layout {
-constexpr size_t kMaximumResults = 10;
+constexpr size_t kMaximumResults = map_nearby_query::kMaximumResults;
+constexpr size_t kMaximumMarkers = 10;
+static_assert(kMaximumResults <= 64, "Nearby group membership must fit uint64_t");
 constexpr double kPi = 3.14159265358979323846;
 
 struct Input {
@@ -26,7 +30,7 @@ struct Input {
 struct Placement {
   double x = 0.0;
   double y = 0.0;
-  uint16_t members = 0;
+  uint64_t members = 0;
   double nearestDistanceM = 0.0;
   uint8_t category = 0; // zero means mixed categories
   uint8_t count = 0;
@@ -36,7 +40,9 @@ struct Placement {
 };
 
 struct Layout {
-  std::array<Placement, kMaximumResults> placements{};
+  // One scratch slot lets the next result merge without allocating a full
+  // fifty-placement layout on the GUI task's stack.
+  std::array<Placement, kMaximumMarkers + 1> placements{};
   std::array<bool, kMaximumResults> onMap{};
   size_t count = 0;
 };
@@ -49,7 +55,7 @@ inline uint8_t displayCategory(const Placement &placement,
     return placement.category;
   if (inputs == nullptr || inputCount > kMaximumResults) return 0;
   for (size_t index = 0; index < inputCount; ++index) {
-    if ((placement.members & (1U << index)) != 0 &&
+    if ((placement.members & (uint64_t{1} << index)) != 0 &&
         inputs[index].category >= 1 && inputs[index].category <= 5)
       return inputs[index].category;
   }
@@ -78,11 +84,9 @@ inline bool formatDirectDistance(double meters, bool &kilometres,
   return written >= 0 && static_cast<size_t>(written) < capacity;
 }
 
-// Nearby ranks the nearest places across every selected category, so one
-// dense category can fill all ten. Name each selected category (mask bit =
-// category - 1) with no place among the results so the selection does not
-// look ignored. False, with an empty buffer, when none is absent or it does
-// not fit.
+// Every selected category has its own nearest-ten quota. A category absent
+// from the completed search therefore has no matching place in the searched
+// radius/coverage, rather than being crowded out by another category.
 inline bool formatAbsentCategories(uint32_t selectedMask,
                                    const uint8_t *categories, size_t count,
                                    double radiusKm, char *buffer,
@@ -115,11 +119,7 @@ inline bool formatAbsentCategories(uint32_t selectedMask,
     first = false;
   }
   char scope[32];
-  if (count == kMaximumResults)
-    std::snprintf(scope, sizeof(scope), " in nearest %u",
-                  static_cast<unsigned>(kMaximumResults));
-  else
-    std::snprintf(scope, sizeof(scope), " within %.0f km", radiusKm);
+  std::snprintf(scope, sizeof(scope), " within %.0f km", radiusKm);
   fits = fits && append(scope);
   if (!fits) buffer[0] = '\0';
   return fits;
@@ -157,6 +157,43 @@ inline Layout arrange(const Input *inputs, size_t inputCount, double width,
   const double roundRadius = std::min(width, height) / 2.0 - 60.0;
   if (halfWidth <= 0.0 || halfHeight <= 0.0 ||
       (round && roundRadius <= 0.0)) return layout;
+
+  const auto merge = [&](size_t first, size_t second) {
+    auto &group = layout.placements[first];
+    const auto other = layout.placements[second];
+    if (!group.edge && other.edge) {
+      group.x = other.x;
+      group.y = other.y;
+      group.edge = true;
+    }
+    group.members |= other.members;
+    group.count += other.count;
+    if (group.category != other.category) group.category = 0;
+    for (size_t item = second + 1; item < layout.count; ++item)
+      layout.placements[item - 1] = layout.placements[item];
+    --layout.count;
+  };
+  const auto mergeOverlaps = [&]() {
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (size_t first = 0; first < layout.count && !changed; ++first) {
+        const auto &group = layout.placements[first];
+        for (size_t second = first + 1; second < layout.count; ++second) {
+          const auto &other = layout.placements[second];
+          const double widthSum = (group.edge ? 80.0 : 44.0) +
+                                  (other.edge ? 80.0 : 44.0);
+          const double heightSum = (group.edge ? 68.0 : 44.0) +
+                                   (other.edge ? 68.0 : 44.0);
+          if (std::fabs(group.x - other.x) * 2.0 >= widthSum ||
+              std::fabs(group.y - other.y) * 2.0 >= heightSum) continue;
+          merge(first, second);
+          changed = true;
+          break;
+        }
+      }
+    }
+  };
 
   for (size_t index = 0; index < inputCount; ++index) {
     const Input &input = inputs[index];
@@ -204,43 +241,31 @@ inline Layout arrange(const Input *inputs, size_t inputCount, double width,
       directionY /= length;
     }
     layout.placements[layout.count++] = {
-        x, y, static_cast<uint16_t>(1U << index), input.directDistanceM,
+        x, y, (uint64_t{1} << index), input.directDistanceM,
         input.category, 1, !onMap, directionX, directionY};
-  }
-
-  // Mixed pin/edge footprints also collide. Merge to a fixed point because
-  // promoting a pin group to an edge marker enlarges/moves its footprint.
-  // At most nine merges are possible. Nearest-first metadata and true bearing
-  // remain those of the nearest member, not of the clamped/grouped anchor.
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (size_t first = 0; first < layout.count && !changed; ++first) {
-      auto &group = layout.placements[first];
-      for (size_t second = first + 1; second < layout.count; ++second) {
-        const auto &other = layout.placements[second];
-        const double widthSum = (group.edge ? 80.0 : 44.0) +
-                                (other.edge ? 80.0 : 44.0);
-        const double heightSum = (group.edge ? 68.0 : 44.0) +
-                                 (other.edge ? 68.0 : 44.0);
-        if (std::fabs(group.x - other.x) * 2.0 >= widthSum ||
-            std::fabs(group.y - other.y) * 2.0 >= heightSum) continue;
-        if (!group.edge && other.edge) {
-          group.x = other.x;
-          group.y = other.y;
-          group.edge = true;
+    mergeOverlaps();
+    if (layout.count > kMaximumMarkers) {
+      // Every result remains represented. When pins do not overlap, merge the
+      // closest pair into a count-badged group with the existing scroll chooser.
+      size_t nearestFirst = 0, nearestSecond = 1;
+      double nearestDistance = INFINITY;
+      for (size_t first = 0; first < layout.count; ++first) {
+        for (size_t second = first + 1; second < layout.count; ++second) {
+          const double dx = layout.placements[first].x - layout.placements[second].x;
+          const double dy = layout.placements[first].y - layout.placements[second].y;
+          const double distance = dx * dx + dy * dy;
+          if (distance < nearestDistance) {
+            nearestDistance = distance;
+            nearestFirst = first;
+            nearestSecond = second;
+          }
         }
-        group.members |= other.members;
-        group.count += other.count;
-        if (group.category != other.category) group.category = 0;
-        for (size_t item = second + 1; item < layout.count; ++item)
-          layout.placements[item - 1] = layout.placements[item];
-        --layout.count;
-        changed = true;
-        break;
       }
+      merge(nearestFirst, nearestSecond);
+      mergeOverlaps();
     }
   }
+
   return layout;
 }
 } // namespace map_nearby_layout

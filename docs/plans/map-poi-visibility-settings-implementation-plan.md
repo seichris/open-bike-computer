@@ -1,5 +1,19 @@
 # Offline Map Layers and Nearby POIs Implementation Plan
 
+> Current Nearby contract (2026-10-25): the user changed combined-category
+> selection to retain up to ten nearest places **per selected category**,
+> rather than ten total. Up to fifty retained places are represented by at
+> most ten count-badged map groups; tapping a group opens its scrollable list.
+> This supersedes the historical global-ten descriptions below. Adding Shops
+> or Toilets must preserve the Restaurants result identities for the same
+> position, radius and installed map. Search further remains available while
+> any selected category has fewer than ten results, up to the existing 25 km
+> maximum. Category absence describes the searched radius/downloaded coverage.
+> Result/group membership is bounded to fifty bits, GUI projection/result
+> scratch storage stays off the GUI stack, and render/input slice budgets and
+> production hardware qualification gates remain unchanged.
+
+
 ## Outcome
 
 Add offline OpenStreetMap points of interest to the bike-computer map and let
