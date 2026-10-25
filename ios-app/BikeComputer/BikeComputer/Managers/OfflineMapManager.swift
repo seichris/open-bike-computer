@@ -752,15 +752,26 @@ nonisolated enum OfflineMapServerIdentity {
 nonisolated enum SavedMapReaderRequirementsMigrationPolicy {
     static func shouldDeriveFromSignedManifest(
         generationServerURLString: String?,
-        isDevelopmentBuild: Bool
+        isDevelopmentBuild: Bool,
+        signatureKeyID: String? = nil,
+        trustStore: BikeMapStreamTrustStore = .production
     ) -> Bool {
-        guard isDevelopmentBuild, let generationServerURLString else {
-            return false
-        }
-        return OfflineMapServerIdentity.normalized(generationServerURLString) ==
+        guard isDevelopmentBuild else { return false }
+        if let generationServerURLString,
+           OfflineMapServerIdentity.normalized(generationServerURLString) ==
             OfflineMapServerIdentity.normalized(
                 OfflineMapServiceConfig.developmentServerURLString
-            )
+            ) {
+            return true
+        }
+        // The app's commissioned development signer also covers saved LAN maps.
+        // Hostnames and app builds may change, but the stream must still pass
+        // signature, fingerprint, manifest and reader validation below. Never
+        // extend this migration to production signers or Release builds.
+        guard let signatureKeyID,
+              !BikeMapStreamTrustStore.production.contains(keyID: signatureKeyID),
+              trustStore.contains(keyID: signatureKeyID) else { return false }
+        return true
     }
 }
 
@@ -6116,7 +6127,9 @@ final class OfflineMapManager: ObservableObject {
                     SavedMapReaderRequirementsMigrationPolicy
                         .shouldDeriveFromSignedManifest(
                             generationServerURLString: metadata.serverURLString,
-                            isDevelopmentBuild: true
+                            isDevelopmentBuild: true,
+                            signatureKeyID: artifact.signatureKeyId,
+                            trustStore: trustStore
                         )
 #else
                 let deriveReaderRequirementsFromSignedManifest = false

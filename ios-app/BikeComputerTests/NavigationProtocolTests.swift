@@ -1584,6 +1584,47 @@ struct NavigationProtocolTests {
             "map-test-2026-01": publicKey,
             "map-next-2026-02": publicKey,
         ])
+        let lanOrigin = "http://qualification.local:8765"
+        for origin in [lanOrigin, "http://previous-mac.local:8765", nil] {
+            assert(
+                SavedMapReaderRequirementsMigrationPolicy.shouldDeriveFromSignedManifest(
+                    generationServerURLString: origin,
+                    isDevelopmentBuild: true,
+                    signatureKeyID: "map-test-2026-01",
+                    trustStore: trustStore
+                ),
+                "a commissioned developer signer survives app and origin changes"
+            )
+        }
+        assert(
+            !SavedMapReaderRequirementsMigrationPolicy.shouldDeriveFromSignedManifest(
+                generationServerURLString: lanOrigin,
+                isDevelopmentBuild: false,
+                signatureKeyID: "map-test-2026-01",
+                trustStore: trustStore
+            ),
+            "Release never migrates an app-bound developer artifact"
+        )
+        for keyID in ["map-unknown", nil] {
+            assert(
+                !SavedMapReaderRequirementsMigrationPolicy.shouldDeriveFromSignedManifest(
+                    generationServerURLString: lanOrigin,
+                    isDevelopmentBuild: true,
+                    signatureKeyID: keyID,
+                    trustStore: trustStore
+                ),
+                "a LAN origin alone never authorizes migration"
+            )
+        }
+        assert(
+            !SavedMapReaderRequirementsMigrationPolicy.shouldDeriveFromSignedManifest(
+                generationServerURLString: lanOrigin,
+                isDevelopmentBuild: true,
+                signatureKeyID: "map-prod-2026-07",
+                trustStore: .production
+            ),
+            "a LAN origin cannot release a production signer's exact app binding"
+        )
         let streamURL = directory.appendingPathComponent("golden-map.bmap")
         try! stream.write(to: streamURL)
         let catalogReaderRequirements = OfflineMapReaderRequirements(
@@ -1623,12 +1664,61 @@ struct NavigationProtocolTests {
                 artifact: artifact(bytes: stream),
                 expectedMapID: "golden-map",
                 trustStore: trustStore,
-                deriveReaderRequirementsFromSignedManifest: true
+                deriveReaderRequirementsFromSignedManifest:
+                    SavedMapReaderRequirementsMigrationPolicy
+                        .shouldDeriveFromSignedManifest(
+                            generationServerURLString: lanOrigin,
+                            isDevelopmentBuild: true,
+                            signatureKeyID: "map-test-2026-01",
+                            trustStore: trustStore
+                        )
             )
             assertEqual(
                 verified.readerRequirements,
                 catalogReaderRequirements,
                 "an opted-in app-bound stream derives compatibility from its signed manifest"
+            )
+            let capability = "\(verified.signatureKeyID)=\(verified.signatureKeySHA256)"
+            let device = MapTransferDeviceStatus(
+                enabled: true,
+                activeMapId: nil,
+                activeSessionId: nil,
+                activation: nil,
+                protocols: [1, 2],
+                streamFormatVersions: [1],
+                streamTrust: [capability],
+                firmwareVersion: "0.3.4",
+                firmwareBuild: 104,
+                firmwareGitSha: String(repeating: "c", count: 40)
+            )
+            assertEqual(
+                MapInstallProtocolSelector.select(
+                    isBikeMapStream: true,
+                    signatureTrustCapability: capability,
+                    requiredIosBuild: verified.requiredIosBuild,
+                    requiredIosGitSha: verified.requiredIosGitSHA,
+                    requiredIosBuildSha256: verified.requiredIosBuildSHA256,
+                    currentIosBuild: "101",
+                    currentIosGitSha: String(repeating: "d", count: 40),
+                    currentIosBuildSha256: String(repeating: "e", count: 64),
+                    readerRequirements: verified.readerRequirements,
+                    deviceStatus: device
+                ),
+                .streamV2,
+                "a verified LAN development map installs after an app rebuild"
+            )
+            assertEqual(
+                MapInstallProtocolSelector.evaluate(
+                    isBikeMapStream: true,
+                    signatureTrustCapability: capability,
+                    readerRequirements: verified.readerRequirements,
+                    requiredFirmwareVersion: "0.3.4",
+                    requiredFirmwareBuild: 103,
+                    requiredFirmwareGitSha: String(repeating: "c", count: 40),
+                    deviceStatus: device
+                ).rejection,
+                .firmwareIdentityMismatch,
+                "developer migration preserves exact firmware approval bindings"
             )
         } catch {
             assert(false, "a valid stream supports an explicit compatibility migration: \(error)")
@@ -1765,7 +1855,8 @@ struct NavigationProtocolTests {
                 url: tamperedURL,
                 artifact: artifact(bytes: tamperedPayload),
                 expectedMapID: "golden-map",
-                trustStore: trustStore
+                trustStore: trustStore,
+                deriveReaderRequirementsFromSignedManifest: true
             )
             assert(false, "payload tampering is rejected")
         } catch {
