@@ -325,8 +325,12 @@ Offset  Size  Field
 
 Command type `1` is `navigationClear`; type `2` is `workoutState`. A navigation
 clear is two members on both iPhone and Watch (empty route plus
-the canonical `1|0|Navigation idle` maneuver). A workout group contains the
-canonical core, extended, and optional origin frames in their existing order.
+the canonical `1|0|Navigation idle` maneuver). Firmware treats that exact
+maneuver, grouped or not, as clearing navigation data rather than as a live
+maneuver, so the clear holds whichever member is applied first and an idle
+Map + Navigation screen is not held in course-up guidance. A workout group
+contains the canonical core, extended, and optional origin frames in their
+existing order.
 Only terminal/idle workout state and explicit navigation clear require this
 application acknowledgement; replaceable GPS, route windows, maneuvers, and
 ordinary live workout snapshots retain latest-state resynchronization semantics.

@@ -1323,10 +1323,22 @@ static void initBleIdentityAndSecurity(const char *deviceName) {
                     : advertisedAddress);
 }
 
+// Second member of an explicit navigation clear (docs/ble-protocol.md).
+static constexpr char kNavigationIdlePacket[] = "1|0|Navigation idle";
+
 /**
  * @brief Parse navigation instruction data
  */
 static void parseNavigationData(const std::string &data) {
+  // The idle maneuver ends guidance; it is not a live maneuver. Stored as one,
+  // every screen treated the rider as navigating and course-up Map +
+  // Navigation deferred each frame while stationary. Clearing here also makes
+  // the clear independent of when the route member reaches the UI task.
+  if (data == kNavigationIdlePacket) {
+    clearCurrentNavigationData();
+    return;
+  }
+
   // Format: "IconID|Distance|Instruction"
   int firstPipe = data.find('|');
   int secondPipe = data.find('|', firstPipe + 1);
@@ -6334,12 +6346,11 @@ public:
       return;
     }
     if (hasDeliveryMember) {
-      static constexpr char kNavigationIdle[] = "1|0|Navigation idle";
       if (deliveryMember.memberCount != 2 ||
           deliveryMember.memberIndex != 1 ||
-          deliveryMember.payloadLength != sizeof(kNavigationIdle) - 1 ||
-          std::memcmp(deliveryMember.payload, kNavigationIdle,
-                      sizeof(kNavigationIdle) - 1) != 0) {
+          deliveryMember.payloadLength != sizeof(kNavigationIdlePacket) - 1 ||
+          std::memcmp(deliveryMember.payload, kNavigationIdlePacket,
+                      sizeof(kNavigationIdlePacket) - 1) != 0) {
         noteRideDeliveryMember(
             deliveryMember, ride_delivery_protocol::Result::Malformed,
             deliveryLeaseGeneration);
