@@ -879,15 +879,11 @@ extension NavigationProtocolTests {
                     "transfer handshake retains its eight-second readiness window")
         assertEqual(DeviceTransferHandshakePolicy.remoteDebugAttemptCount, 64,
                     "LAN-first debug startup allows station timeout plus hotspot fallback")
-        assertEqual(
-            DeviceTransferHandshakePolicy.diagnosticsAttemptCount(lanFirst: true),
-            DeviceTransferHandshakePolicy.remoteDebugAttemptCount,
-            "LAN-first diagnostics allows station timeout plus hotspot fallback"
-        )
-        assertEqual(
-            DeviceTransferHandshakePolicy.diagnosticsAttemptCount(lanFirst: false),
-            DeviceTransferHandshakePolicy.attemptCount,
-            "hotspot-only diagnostics keeps the ordinary readiness window"
+        assert(
+            MapTransferStartupPolicy.timeout >=
+                Double(DeviceTransferHandshakePolicy.remoteDebugAttemptCount) *
+                Double(DeviceTransferHandshakePolicy.retryIntervalNanoseconds) / 1_000_000_000,
+            "diagnostics startup keeps the LAN-first station timeout plus hotspot fallback"
         )
         assertEqual(DeviceTransferHandshakePolicy.remoteDebugExitAttemptCount, 32,
                     "debug teardown allows the worker's bounded stop path to finish")
@@ -5104,40 +5100,143 @@ extension NavigationProtocolTests {
         )
     }
 
+    static let diagnosticsReadyStatus = """
+    {"configured":true,"enabled":true,"port":8443,"mode":"diagnostics","baseUrl":"https://192.168.4.20:8443","apSsid":"BikeComputer-Transfer","apPassphrase":"0123456789abcdef01234567","networkTransport":"hotspot","sessionToken":"dddddddddddddddddddddddddddddddd","tls":{"identityVersion":1,"certificateSha256":"\(String(repeating: "c", count: 64))"},"transferGeneration":4,"capabilities":{"secureTransferV1":true}}
+    """
+
+    /// Runs the diagnostics readiness wait on a simulated clock. `device`
+    /// publishes firmware status as time advances; DSTS polls are recorded.
+    @MainActor
+    static func simulateDiagnosticsReadiness(
+        _ bleManager: BLEManager,
+        device: (_ before: TimeInterval, _ now: TimeInterval) -> Void
+    ) async -> (result: Result<DeviceTransferSession, Error>, elapsed: TimeInterval, polls: [TimeInterval]) {
+        final class SimulatedTime {
+            var now: TimeInterval = 0
+            var polls: [TimeInterval] = []
+        }
+        let time = SimulatedTime()
+        bleManager.isConnected = true
+        bleManager.isNavigationReady = true
+        bleManager.installNavigationWriteEndpoint(NavigationWriteEndpoint(
+            maximumWriteLength: 64,
+            canSend: { true },
+            write: { if $0 == Data("DSTS".utf8) { time.polls.append(time.now) } }
+        ))
+        let result: Result<DeviceTransferSession, Error>
+        do {
+            result = .success(try await DeviceTransferManager().waitForDiagnosticsSessionForTesting(
+                bleManager: bleManager,
+                afterRevision: bleManager.deviceTransferStatusRevision,
+                afterErrorSequence: bleManager.deviceTransferLastErrorSequence,
+                clock: { time.now },
+                sleep: { nanoseconds in
+                    let before = time.now
+                    time.now += Double(nanoseconds) / 1_000_000_000
+                    device(before, time.now)
+                }
+            ))
+        } catch {
+            result = .failure(error)
+        }
+        return (result, time.now, time.polls)
+    }
+
+    @MainActor
+    static func testDeviceDiagnosticsWaitsForDelayedReadiness() async {
+        let preparing = #"{"configured":true,"enabled":false,"mode":""}"#
+        let bleManager = BLEManager()
+        let deliver = { (json: String) in
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+            )
+        }
+        deliver(preparing)
+        // Storage preparation and the bounded seal publish an empty mode with
+        // no error; physical hardware then needs 11-18 s before Wi-Fi is ready.
+        let delayed = await simulateDiagnosticsReadiness(bleManager) { before, now in
+            if before < 0.5, now >= 0.5 { deliver(preparing) }
+            if before < 12, now >= 12 { deliver(diagnosticsReadyStatus) }
+        }
+        if case .success(let session) = delayed.result {
+            assertEqual(session.mode, .diagnostics, "delayed diagnostics readiness opens a diagnostics session")
+            assertEqual(session.sessionToken, "dddddddddddddddddddddddddddddddd",
+                        "delayed diagnostics readiness returns the fresh token")
+        } else {
+            assert(false, "diagnostics readiness after 12 s must not time out: \(delayed.result)")
+        }
+        assertEqual(delayed.elapsed, 12, "diagnostics entry completes as soon as the session arrives")
+        assertEqual(delayed.polls, [2, 4, 6, 8, 10], "diagnostics status polling is bounded and paced")
+
+        let absentManager = BLEManager()
+        _ = absentManager.handleDeviceTransferStatusNotification(
+            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(preparing.utf8)
+        )
+        let absent = await simulateDiagnosticsReadiness(absentManager) { _, _ in }
+        if case .failure(let error) = absent.result,
+           case .missingDiagnosticsSession? = error as? RemoteDeviceDebugError {} else {
+            assert(false, "an absent diagnostics session still fails: \(absent.result)")
+        }
+        assertEqual(absent.elapsed, MapTransferStartupPolicy.timeout,
+                    "diagnostics entry ends at the absolute readiness deadline")
+        assertEqual(absent.polls.count, 14, "an absent device cannot trigger an unbounded polling loop")
+    }
+
     @MainActor
     static func testDeviceDiagnosticsFailsFastOnFirmwareRejection() async {
         let bleManager = BLEManager()
-        let initialRevision = bleManager.deviceTransferStatusRevision
-        let manager = DeviceTransferManager()
-        let started = Date()
-        let wait = Task {
-            try await manager.waitForDiagnosticsSessionForTesting(
-                bleManager: bleManager,
-                afterRevision: initialRevision,
-                attemptCount: 32
+        let deliver = { (json: String) in
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
             )
         }
-        try? await Task.sleep(nanoseconds: 20_000_000)
-        let rejectedStatus = """
-        {"configured":true,"enabled":false,"mode":"","lastError":{"code":"diagnostics_writable_probe_failed","message":"probe failed"}}
-        """
-        _ = bleManager.handleDeviceTransferStatusNotification(
-            Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) +
-                Data(rejectedStatus.utf8)
-        )
-        do {
-            _ = try await wait.value
-            assert(false, "firmware diagnostics rejection must fail entry")
-        } catch RemoteDeviceDebugError.rejected(let code, let message) {
+        // The device keeps its last transfer error for diagnostics.
+        let retained = #"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"diagnostics_seal_timeout","message":"earlier","sequence":7}}"#
+        deliver(retained)
+        let rejected = await simulateDiagnosticsReadiness(bleManager) { before, now in
+            if before < 0.5, now >= 0.5 { deliver(retained) }
+            if before < 3, now >= 3 {
+                deliver(#"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"diagnostics_writable_probe_failed","message":"probe failed","sequence":9}}"#)
+            }
+        }
+        if case .failure(let error) = rejected.result,
+           case .rejected(let code, let message)? = error as? RemoteDeviceDebugError {
             assertEqual(code, "diagnostics_writable_probe_failed",
                         "diagnostics handshake retains the firmware code")
-            assert(message.contains("diagnostics_writable_probe_failed"),
+            assert(message.contains("[diagnostics_writable_probe_failed]"),
                    "diagnostics rejection presented to the user includes its code")
-            assert(Date().timeIntervalSince(started) < 1.5,
-                   "fresh firmware rejection bypasses the full polling window")
-        } catch {
-            assert(false, "firmware diagnostics rejection has the right error")
+        } else {
+            assert(false, "a fresh firmware diagnostics rejection must fail entry: \(rejected.result)")
         }
+        assertEqual(rejected.elapsed, 3,
+                    "a retained error waits, while a fresh rejection bypasses the readiness window")
+    }
+
+    @MainActor
+    static func testDeviceDiagnosticsKeepsWaitingBeforeFirstLinkStatus() async {
+        let bleManager = BLEManager()
+        let deliver = { (json: String) in
+            _ = bleManager.handleDeviceTransferStatusNotification(
+                Data(DeviceBLEProtocol.deviceTransferStatusPrefix.utf8) + Data(json.utf8)
+            )
+        }
+        assertEqual(bleManager.deviceTransferStatusRevision, 0,
+                    "diagnostics entry starts before the link's first device status")
+        // The reply to the post-authentication status request can still carry
+        // an error retained from an attempt made before this link existed.
+        let delayed = await simulateDiagnosticsReadiness(bleManager) { before, now in
+            if before < 0.5, now >= 0.5 {
+                deliver(#"{"configured":true,"enabled":false,"mode":"","lastError":{"code":"diagnostics_seal_timeout","message":"earlier","sequence":7}}"#)
+            }
+            if before < 6, now >= 6 { deliver(diagnosticsReadyStatus) }
+        }
+        if case .success(let session) = delayed.result {
+            assertEqual(session.sessionToken, "dddddddddddddddddddddddddddddddd",
+                        "the entry's own session wins over an error retained before the link's first status")
+        } else {
+            assert(false, "an error retained before the link's first status cannot end diagnostics entry: \(delayed.result)")
+        }
+        assertEqual(delayed.elapsed, 6, "diagnostics entry keeps waiting for its own session")
     }
 
     @MainActor

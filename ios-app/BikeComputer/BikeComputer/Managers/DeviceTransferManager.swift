@@ -403,13 +403,6 @@ enum DeviceTransferHandshakePolicy {
         attempt > 0 && attempt % 4 == 0
     }
 
-    static func diagnosticsAttemptCount(lanFirst: Bool) -> Int {
-        // Diagnostics uses the same station-association worker as remote
-        // debug. Give LAN-first startup enough time to reach either the LAN
-        // listener or the protected-hotspot fallback.
-        lanFirst ? remoteDebugAttemptCount : attemptCount
-    }
-
 }
 
 enum MapTransferStartupPolicy {
@@ -1868,6 +1861,7 @@ final class DeviceTransferManager {
         let lanCredentials = RemoteDebugLANCredentialStore().load()
         do {
             let initialRevision = bleManager.deviceTransferStatusRevision
+            let initialErrorSequence = bleManager.deviceTransferLastErrorSequence
             guard bleManager.requestDeviceTransferMode(
                 .diagnostics,
                 remoteDebugLANCredentials: lanCredentials
@@ -1876,12 +1870,10 @@ final class DeviceTransferManager {
             }
             enterWasQueued = true
             remoteAcceptancePossible = true
-            let attemptCount = DeviceTransferHandshakePolicy
-                .diagnosticsAttemptCount(lanFirst: lanCredentials != nil)
             var session = try await waitForDiagnosticsSession(
                 bleManager: bleManager,
                 afterRevision: initialRevision,
-                attemptCount: attemptCount
+                afterErrorSequence: initialErrorSequence
             )
             if session.networkTransport == "lan" {
                 status("checking local Wi-Fi")
@@ -1951,6 +1943,7 @@ final class DeviceTransferManager {
         for attempt in 0..<DeviceDiagnosticsHotspotFallbackPolicy
             .maximumAttemptCount {
             let fallbackRevision = bleManager.deviceTransferStatusRevision
+            let fallbackErrorSequence = bleManager.deviceTransferLastErrorSequence
             guard bleManager.requestDeviceTransferMode(
                 .diagnostics,
                 remoteDebugHotspotFallbackReason: .endpointUnreachable
@@ -1961,7 +1954,7 @@ final class DeviceTransferManager {
                 return try await waitForDiagnosticsSession(
                     bleManager: bleManager,
                     afterRevision: fallbackRevision,
-                    attemptCount: DeviceTransferHandshakePolicy.attemptCount
+                    afterErrorSequence: fallbackErrorSequence
                 )
             } catch {
                 let hasRetry = attempt + 1 <
@@ -1991,42 +1984,52 @@ final class DeviceTransferManager {
     private func waitForDiagnosticsSession(
         bleManager: BLEManager,
         afterRevision initialRevision: UInt64,
-        attemptCount: Int
+        afterErrorSequence initialErrorSequence: UInt64?,
+        clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        sleep: (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }
     ) async throws -> DeviceTransferSession {
-        for attempt in 0..<attemptCount {
-            if operationLease != nil && !ownsConnection(bleManager) {
-                throw DeviceOperationCoordinator.Failure.staleOwner
-            }
-            if bleManager.deviceTransferStatusRevision != initialRevision,
-               let session = try secureSession(
-                mode: .diagnostics,
-                bleManager: bleManager
-               ) {
-                return session
-            }
-            // A fresh firmware rejection is authoritative. Do not spend the
-            // remainder of the LAN/hotspot readiness window polling after the
-            // device has already classified storage or seal preparation.
-            if bleManager.deviceTransferStatusRevision != initialRevision,
-               let code = bleManager.deviceTransferLastErrorCode,
-               !code.isEmpty {
-                let fallback = bleManager.deviceTransferLastErrorMessage
-                    .flatMap { $0.isEmpty ? nil : $0 }
-                throw RemoteDeviceDebugError.rejected(
-                    code: code,
-                    message: DeviceDiagnosticsRejectionPolicy.message(
-                        code: code,
-                        fallback: fallback
+        // Each link starts without a status, so its first one may carry the
+        // device's retained error and must not be read as a fresh rejection.
+        let knowsRetainedError = initialRevision != 0
+        // Firmware prepares storage and seals the active chunk before it starts
+        // LAN association or its hotspot. That takes as long as map entry, so
+        // diagnostics shares map startup's absolute readiness window.
+        let readySession: DeviceTransferSession? = try await MapTransferStartupPolicy.waitForSession(
+            clock: clock,
+            sleep: sleep,
+            session: {
+                if self.operationLease != nil && !self.ownsConnection(bleManager) {
+                    throw DeviceOperationCoordinator.Failure.staleOwner
+                }
+                guard bleManager.deviceTransferStatusRevision != initialRevision else {
+                    return nil
+                }
+                if let session = try self.secureSession(mode: .diagnostics, bleManager: bleManager) {
+                    return session
+                }
+                // A fresh firmware rejection is authoritative. Do not spend the
+                // remainder of the readiness window polling after the device
+                // has already classified storage or seal preparation.
+                if knowsRetainedError,
+                   let failure = DeviceTransferFreshFailurePolicy.failure(
+                       after: initialErrorSequence,
+                       currentSequence: bleManager.deviceTransferLastErrorSequence,
+                       code: bleManager.deviceTransferLastErrorCode,
+                       message: bleManager.deviceTransferLastErrorMessage
+                   ) {
+                    throw RemoteDeviceDebugError.rejected(
+                        code: failure.code,
+                        message: DeviceDiagnosticsRejectionPolicy.message(
+                            code: failure.code,
+                            fallback: failure.message
+                        )
                     )
-                )
-            }
-            if DeviceTransferHandshakePolicy.shouldRequestStatus(attempt: attempt) {
-                _ = bleManager.requestDeviceTransferStatus()
-            }
-            try await Task.sleep(
-                nanoseconds: DeviceTransferHandshakePolicy.retryIntervalNanoseconds
-            )
-        }
+                }
+                return nil
+            },
+            requestStatus: { _ = bleManager.requestDeviceTransferStatus() }
+        )
+        if let readySession { return readySession }
         if bleManager.deviceTransferStatusRevision != initialRevision,
            let code = bleManager.deviceTransferLastErrorCode,
            !code.isEmpty {
@@ -2047,12 +2050,16 @@ final class DeviceTransferManager {
     func waitForDiagnosticsSessionForTesting(
         bleManager: BLEManager,
         afterRevision initialRevision: UInt64,
-        attemptCount: Int
+        afterErrorSequence initialErrorSequence: UInt64?,
+        clock: () -> TimeInterval,
+        sleep: (UInt64) async throws -> Void
     ) async throws -> DeviceTransferSession {
         try await waitForDiagnosticsSession(
             bleManager: bleManager,
             afterRevision: initialRevision,
-            attemptCount: attemptCount
+            afterErrorSequence: initialErrorSequence,
+            clock: clock,
+            sleep: sleep
         )
     }
 #endif

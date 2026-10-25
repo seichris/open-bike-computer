@@ -861,6 +861,14 @@ struct NavigationProtocolTests {
             print("Debug shutdown and delayed confirmation regressions passed")
             return
         }
+        if CommandLine.arguments.contains("--diagnostics-entry-only") {
+            testDeviceTransferHandshakePolicy()
+            await testDeviceDiagnosticsWaitsForDelayedReadiness()
+            await testDeviceDiagnosticsFailsFastOnFirmwareRejection()
+            await testDeviceDiagnosticsKeepsWaitingBeforeFirstLinkStatus()
+            print("Diagnostics entry readiness regressions passed")
+            return
+        }
         testIconMapping()
         testRouteEndpointExtraction()
         testRouteRemainingDistance()
@@ -1059,7 +1067,9 @@ struct NavigationProtocolTests {
         await testFirmwareMaintenancePreparationFlow()
         await testDeviceDiagnosticsTransferPolicy()
         await testDeviceDiagnosticsInterruptedChunk()
+        await testDeviceDiagnosticsWaitsForDelayedReadiness()
         await testDeviceDiagnosticsFailsFastOnFirmwareRejection()
+        await testDeviceDiagnosticsKeepsWaitingBeforeFirstLinkStatus()
         await testDeviceDiagnosticsRecordsEntryFailure()
         await testDeviceDiagnosticsDownloadEndToEnd()
         await testOfflineMapInstallationCredentialClient()
