@@ -1,5 +1,61 @@
 # PR #378 review fixes
 
+## October 25 crash, map compatibility, GPS and Nearby publication
+
+User authorized pushing the accumulated fixes to the existing PR; no merge or
+production deployment. Mode publish; standard profile; sequential-local; zero
+subagents; P0/P1/P2 gate. Base/main remains
+`cd7ad00bb6c4f9566195cd44ab4d6a675518b94d`; remote head before this batch is
+`40e1496c0b4b549414ade83868dec73013b02076`. This is a normal fast-forward,
+including `19342f1b` (LVGL-safe Nearby labels), `549e2de4` (trusted development
+map migration), `ec311785` (ten results per selected Nearby category), and the
+reviewed app/backend patch SHA-256
+`9d549ba95bb2c70793a3eb0ae1e5c682aa602d135a6ca90a8f4de958746430ae`.
+The final candidate SHA and clean verification results are recorded in the PR.
+
+Compatible signed maps are admitted through signed reader requirements rather
+than downloader app-version identity, including immutable URL refresh. Ownership,
+cohort, trusted producer/signature and explicit firmware gates remain enforced.
+Deploy the updated service through the normal image-promotion process before
+releasing the new client contract. Startup restores native GPS follow once on
+the first real location; subsequent user panning and simulation are preserved.
+Nearby retains ten per selected category, up to fifty, represented by bounded
+groups and a scrollable chooser. No storage format or production POI gate changes.
+
+Focused findings MAP-APP-VERSION-DEFAULT-PIN, GPS-INITIAL-FOLLOW and
+NEARBY-CATEGORY-CROWDING are fixed+verified within their local scopes. Map
+compatibility retains its clean 3/3 review; GPS and Nearby retain clean 2/3
+reviews. No additional whole-PR review or reset of its exhausted 3/3 budget.
+The earlier DEV-SAVED-MAP-LAN-IDENTITY repair is retained. Overall risk remains
+high because signed map admission and firmware resource bounds are affected.
+
+Precommit evidence: 1,054 backend tests passed, three skipped; full affected map
+checks and Debug/Release app containers passed with unchanged dirty source;
+Nearby host query/layout/lifecycle/feature checks and ASan/UBSan passed. These
+are not clean final-candidate or merge-tree CI results.
+
+The clean `ec311785` isolated 175 qualification image was built and uploaded
+through the locked helper to the same user-confirmed 1.75-inch board. Four
+image writes verified; the authenticated phone reports SHA prefix
+`ec311785a9cc`. Application size is 3,071,184 bytes: both 3 MiB slots and the
+65,536-byte reserve remain intact, with 9,008 additional bytes spare. The user
+reports the original blackout is gone and the new Nearby behavior tested and
+working. These are user-attested physical results for this qualification image,
+not production or 2.06 acceptance. A fresh owner-authenticated boot checkpoint
+could not be retrieved: diagnostics Wi-Fi startup failed with `wifi_memory`
+(ESP257). Cause/pre-existence is unestablished; raw evidence is retained. No
+extra reset, retry, settings workaround or source fix was used for retrieval.
+The latest GPS/normal-map app changes are not installed; service is not deployed.
+
+Whole-feature state remains **needs-rethink / not merge-ready**. R53/R56 contour
+companion coordination, R54 configurable-screen POI regeneration action and R55
+target-5 reuse remain active. Full transfer/cleanup, GPS/reconnect, cold boot and
+separate board/profile qualification remain open; the user test does not clear
+these gates. Rollback uses the normal compatible app/image/map process after
+reconciling pending operations; never erase journals or bypass upload, trust,
+partition, reserve or hardware gates. Retain the tested qualification artifacts
+and symbols independently of later Git commits.
+
 ## October 25 physical-feedback fixes: publication checkpoint
 
 Mode publish; standard profile; sequential-local; zero subagents; P0/P1/P2

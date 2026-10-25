@@ -722,8 +722,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
         artifact: OfflineMapArtifact,
         expectedMapID: String,
         trustStore: BikeMapStreamTrustStore,
-        readerRequirements: OfflineMapReaderRequirements? = nil,
-        deriveReaderRequirementsFromSignedManifest: Bool = false
+        readerRequirements: OfflineMapReaderRequirements? = nil
     ) throws -> VerifiedBikeMapArtifact {
         guard artifact.isBikeMapStream else {
             throw BikeMapStreamFormatError.invalidArtifactMetadata("unexpected artifact format")
@@ -769,27 +768,11 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 "producer image identity is invalid"
             )
         }
-        let iosRequirements = (
-            artifact.requiredIosBuild,
-            artifact.requiredIosGitSha,
-            artifact.requiredIosBuildSha256
-        )
-        if readerRequirements == nil {
-            guard isValidAppIdentity(iosRequirements) else {
-                throw BikeMapStreamFormatError.invalidArtifactMetadata(
-                    "required app identity is incomplete"
-                )
-            }
-        } else {
-            let hasAnyAppIdentity = iosRequirements.0 != nil ||
-                iosRequirements.1 != nil || iosRequirements.2 != nil
-            guard !hasAnyAppIdentity || isValidAppIdentity(iosRequirements) else {
-                throw BikeMapStreamFormatError.invalidArtifactMetadata(
-                    "optional app identity is incomplete"
-                )
-            }
-            guard let readerRequirements,
-                  readerRequirements.streamFormat == artifact.format,
+        // Legacy requester app fields are audit metadata, never reader requirements.
+        // Both new downloads and saved streams derive compatibility from the signed
+        // manifest, including when old sidecars have no reader contract.
+        if let readerRequirements {
+            guard readerRequirements.streamFormat == artifact.format,
                   OfflineMapReaderCompatibilityPolicy.supports(readerRequirements) else {
                 throw BikeMapStreamFormatError.invalidArtifactMetadata(
                     "reader requirements are unsupported"
@@ -939,7 +922,7 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 )
             }
             verifiedReaderRequirements = readerRequirements
-        } else if deriveReaderRequirementsFromSignedManifest {
+        } else {
             guard OfflineMapReaderCompatibilityPolicy.supports(
                 derivedReaderRequirements
             ) else {
@@ -948,8 +931,6 @@ nonisolated enum BikeMapStreamArtifactValidator {
                 )
             }
             verifiedReaderRequirements = derivedReaderRequirements
-        } else {
-            verifiedReaderRequirements = nil
         }
         var poiBlocksByPath: [String: BikeMapPOIIndexValidator.Entry] = [:]
         var poiIndexData: Data?

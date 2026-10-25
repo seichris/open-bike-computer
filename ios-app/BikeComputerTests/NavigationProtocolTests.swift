@@ -816,6 +816,14 @@ struct NavigationProtocolTests {
     }
 
     static func main() async {
+        if CommandLine.arguments.contains("--map-reader-compatibility-only") {
+            testBikeMapStreamGoldenVector()
+            testBikeMapPOIIndexValidation()
+            testBikeMapStreamArtifactValidation()
+            testOfflineMapArtifactSelectionAndProtocolNegotiation()
+            print("Signed map reader compatibility regressions passed")
+            return
+        }
         if CommandLine.arguments.contains("--map-startup-only") {
             await testMapTransferStartupDeadline()
             await testDeviceTransferManagerWaitsForMapToken(startupDelayNanoseconds: 9_000_000_000)
@@ -1548,9 +1556,11 @@ struct NavigationProtocolTests {
             bytes: Data,
             sha: String? = nil,
             objectKey: String? = nil,
-            includesRequiredAppIdentity: Bool = true
+            includesRequiredAppIdentity: Bool = true,
+            signedReceipt: String? = nil
         ) -> OfflineMapArtifact {
-            OfflineMapArtifact(
+            let receipt = signedReceipt ?? fixture["signed_manifest_receipt"]!
+            return OfflineMapArtifact(
                 format: OfflineMapArtifact.bikeMapStreamFormat,
                 mediaType: "application/vnd.openbikecomputer.map-stream",
                 filename: "golden-map.bmap",
@@ -1558,12 +1568,12 @@ struct NavigationProtocolTests {
                     "maps/golden-map/bike-map-stream-v1/map-test-2026-01/" +
                         "\(sha256(publicKey))/\(String(repeating: "1", count: 64))/" +
                         "\(String(repeating: "2", count: 64))/" +
-                        "\(fixture["signed_manifest_receipt"]!).bmap"
+                        "\(receipt).bmap"
                 ),
                 bytes: Int64(bytes.count),
                 sha256: sha ?? sha256(bytes),
                 manifestReceipt: fixture["manifest_receipt"],
-                signedManifestReceipt: fixture["signed_manifest_receipt"],
+                signedManifestReceipt: receipt,
                 signatureKeyId: "map-test-2026-01",
                 signatureKeySha256: sha256(publicKey),
                 producerBuildSha256: String(repeating: "1", count: 64),
@@ -1584,47 +1594,6 @@ struct NavigationProtocolTests {
             "map-test-2026-01": publicKey,
             "map-next-2026-02": publicKey,
         ])
-        let lanOrigin = "http://qualification.local:8765"
-        for origin in [lanOrigin, "http://previous-mac.local:8765", nil] {
-            assert(
-                SavedMapReaderRequirementsMigrationPolicy.shouldDeriveFromSignedManifest(
-                    generationServerURLString: origin,
-                    isDevelopmentBuild: true,
-                    signatureKeyID: "map-test-2026-01",
-                    trustStore: trustStore
-                ),
-                "a commissioned developer signer survives app and origin changes"
-            )
-        }
-        assert(
-            !SavedMapReaderRequirementsMigrationPolicy.shouldDeriveFromSignedManifest(
-                generationServerURLString: lanOrigin,
-                isDevelopmentBuild: false,
-                signatureKeyID: "map-test-2026-01",
-                trustStore: trustStore
-            ),
-            "Release never migrates an app-bound developer artifact"
-        )
-        for keyID in ["map-unknown", nil] {
-            assert(
-                !SavedMapReaderRequirementsMigrationPolicy.shouldDeriveFromSignedManifest(
-                    generationServerURLString: lanOrigin,
-                    isDevelopmentBuild: true,
-                    signatureKeyID: keyID,
-                    trustStore: trustStore
-                ),
-                "a LAN origin alone never authorizes migration"
-            )
-        }
-        assert(
-            !SavedMapReaderRequirementsMigrationPolicy.shouldDeriveFromSignedManifest(
-                generationServerURLString: lanOrigin,
-                isDevelopmentBuild: true,
-                signatureKeyID: "map-prod-2026-07",
-                trustStore: .production
-            ),
-            "a LAN origin cannot release a production signer's exact app binding"
-        )
         let streamURL = directory.appendingPathComponent("golden-map.bmap")
         try! stream.write(to: streamURL)
         let catalogReaderRequirements = OfflineMapReaderRequirements(
@@ -1652,8 +1621,8 @@ struct NavigationProtocolTests {
             )
             assertEqual(
                 verified.readerRequirements,
-                nil,
-                "an app-bound stream keeps exact identity without an explicit migration policy"
+                catalogReaderRequirements,
+                "legacy app-bound streams derive signed reader compatibility by default"
             )
         } catch {
             assert(false, "valid complete map stream is accepted: \(error)")
@@ -1661,22 +1630,14 @@ struct NavigationProtocolTests {
         do {
             let verified = try BikeMapStreamArtifactValidator.validate(
                 url: streamURL,
-                artifact: artifact(bytes: stream),
+                artifact: artifact(bytes: stream, includesRequiredAppIdentity: false),
                 expectedMapID: "golden-map",
-                trustStore: trustStore,
-                deriveReaderRequirementsFromSignedManifest:
-                    SavedMapReaderRequirementsMigrationPolicy
-                        .shouldDeriveFromSignedManifest(
-                            generationServerURLString: lanOrigin,
-                            isDevelopmentBuild: true,
-                            signatureKeyID: "map-test-2026-01",
-                            trustStore: trustStore
-                        )
+                trustStore: trustStore
             )
             assertEqual(
                 verified.readerRequirements,
                 catalogReaderRequirements,
-                "an opted-in app-bound stream derives compatibility from its signed manifest"
+                "new streams without app identity derive the same signed reader compatibility"
             )
             let capability = "\(verified.signatureKeyID)=\(verified.signatureKeySHA256)"
             let device = MapTransferDeviceStatus(
@@ -1695,17 +1656,11 @@ struct NavigationProtocolTests {
                 MapInstallProtocolSelector.select(
                     isBikeMapStream: true,
                     signatureTrustCapability: capability,
-                    requiredIosBuild: verified.requiredIosBuild,
-                    requiredIosGitSha: verified.requiredIosGitSHA,
-                    requiredIosBuildSha256: verified.requiredIosBuildSHA256,
-                    currentIosBuild: "101",
-                    currentIosGitSha: String(repeating: "d", count: 40),
-                    currentIosBuildSha256: String(repeating: "e", count: 64),
                     readerRequirements: verified.readerRequirements,
                     deviceStatus: device
                 ),
                 .streamV2,
-                "a verified LAN development map installs after an app rebuild"
+                "a verified map installs without any requesting or current app-build identity"
             )
             assertEqual(
                 MapInstallProtocolSelector.evaluate(
@@ -1718,10 +1673,10 @@ struct NavigationProtocolTests {
                     deviceStatus: device
                 ).rejection,
                 .firmwareIdentityMismatch,
-                "developer migration preserves exact firmware approval bindings"
+                "reader compatibility preserves exact firmware approval bindings"
             )
         } catch {
-            assert(false, "a valid stream supports an explicit compatibility migration: \(error)")
+            assert(false, "a valid stream derives compatibility by default: \(error)")
         }
 
         let catalogArtifact = artifact(
@@ -1749,20 +1704,6 @@ struct NavigationProtocolTests {
             )
         } catch {
             assert(false, "a capability-compatible catalog stream is accepted: \(error)")
-        }
-        do {
-            _ = try BikeMapStreamArtifactValidator.validate(
-                url: streamURL,
-                artifact: catalogArtifact,
-                expectedMapID: "golden-map",
-                trustStore: trustStore
-            )
-            assert(false, "a build-unbound stream without reader requirements fails closed")
-        } catch {
-            guard case .invalidArtifactMetadata = error as? BikeMapStreamFormatError else {
-                assert(false, "missing reader requirements produce a typed rejection: \(error)")
-                return
-            }
         }
         do {
             _ = try BikeMapStreamArtifactValidator.validate(
@@ -1846,6 +1787,29 @@ struct NavigationProtocolTests {
             }
         }
 
+        var forgedStream = stream
+        let envelopeStart = BikeMapStreamFormat.fixedHeaderBytes + Int(header.manifestBytes)
+        let envelopeEnd = envelopeStart + Int(header.signatureEnvelopeBytes)
+        forgedStream[envelopeEnd - 1] ^= 1
+        let forgedReceipt = BikeMapStreamFormat.signedManifestReceipt(
+            manifest: manifest,
+            envelope: forgedStream.subdata(in: envelopeStart..<envelopeEnd)
+        )
+        let forgedURL = directory.appendingPathComponent("forged.bmap")
+        try! forgedStream.write(to: forgedURL)
+        do {
+            _ = try BikeMapStreamArtifactValidator.validate(
+                url: forgedURL,
+                artifact: artifact(bytes: forgedStream, includesRequiredAppIdentity: false,
+                                   signedReceipt: forgedReceipt),
+                expectedMapID: "golden-map", trustStore: trustStore
+            )
+            assert(false, "default reader migration never accepts a forged signature")
+        } catch {
+            assertEqual(error as? BikeMapStreamFormatError, .invalidSignature,
+                        "rewritten sidecar hashes cannot authorize a forged signed manifest")
+        }
+
         var tamperedPayload = stream
         tamperedPayload[tamperedPayload.index(before: tamperedPayload.endIndex)] ^= 1
         let tamperedURL = directory.appendingPathComponent("tampered.bmap")
@@ -1855,8 +1819,7 @@ struct NavigationProtocolTests {
                 url: tamperedURL,
                 artifact: artifact(bytes: tamperedPayload),
                 expectedMapID: "golden-map",
-                trustStore: trustStore,
-                deriveReaderRequirementsFromSignedManifest: true
+                trustStore: trustStore
             )
             assert(false, "payload tampering is rejected")
         } catch {
@@ -2288,52 +2251,7 @@ struct NavigationProtocolTests {
             firmwareBuild: 41,
             firmwareGitSha: String(repeating: "6", count: 40)
         )
-        assert(
-            SavedMapReaderRequirementsMigrationPolicy
-                .shouldDeriveFromSignedManifest(
-                    generationServerURLString:
-                        OfflineMapServiceConfig.developmentServerURLString,
-                    isDevelopmentBuild: true
-                ),
-            "development builds migrate streams generated by the development service"
-        )
-        assert(
-            !SavedMapReaderRequirementsMigrationPolicy
-                .shouldDeriveFromSignedManifest(
-                    generationServerURLString:
-                        OfflineMapServiceConfig.productionServerURLString,
-                    isDevelopmentBuild: true
-                ),
-            "development builds retain production rollout app bindings"
-        )
-        assert(
-            !SavedMapReaderRequirementsMigrationPolicy
-                .shouldDeriveFromSignedManifest(
-                    generationServerURLString:
-                        OfflineMapServiceConfig.developmentServerURLString,
-                    isDevelopmentBuild: false
-                ),
-            "release builds retain exact app rollout bindings"
-        )
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
-                requiredIosBuild: stream.requiredIosBuild,
-                requiredIosGitSha: stream.requiredIosGitSha,
-                requiredIosBuildSha256: stream.requiredIosBuildSha256,
-                currentIosBuild: "100",
-                currentIosGitSha: String(repeating: "8", count: 40),
-                currentIosBuildSha256: String(repeating: "9", count: 64),
-                requiredFirmwareVersion: stream.requiredFirmwareVersion,
-                requiredFirmwareBuild: stream.requiredFirmwareBuild,
-                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
-                deviceStatus: v2Status
-            ),
-            .streamV2,
-            "stream artifact selects v2 only when protocol and format match"
-        )
-        let catalogReaderRequirements = OfflineMapReaderRequirements(
+        let reader = OfflineMapReaderRequirements(
             schemaVersion: 1,
             streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
             manifestSchemaVersion: 1,
@@ -2341,312 +2259,117 @@ struct NavigationProtocolTests {
             rendererFormatVersion: 1,
             requiredFeatures: []
         )
+        let capability = "map-prod-1=" + String(repeating: "5", count: 64)
         assertEqual(
             MapInstallProtocolSelector.select(
                 isBikeMapStream: true,
-                signatureTrustCapability:
-                    "map-prod-1=" + String(repeating: "5", count: 64),
-                readerRequirements: catalogReaderRequirements,
+                signatureTrustCapability: capability,
+                readerRequirements: reader,
                 requiredFirmwareVersion: stream.requiredFirmwareVersion,
                 requiredFirmwareBuild: stream.requiredFirmwareBuild,
                 requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
                 deviceStatus: v2Status
             ),
             .streamV2,
-            "a verified catalog reader contract selects stream v2 without app-build binding"
+            "verified reader compatibility selects stream v2 without any app identity"
         )
         assertEqual(
             MapInstallProtocolSelector.select(
                 isBikeMapStream: true,
-                signatureTrustCapability:
-                    "map-prod-1=" + String(repeating: "5", count: 64),
-                requiredIosBuild: stream.requiredIosBuild,
-                requiredIosGitSha: stream.requiredIosGitSha,
-                requiredIosBuildSha256: stream.requiredIosBuildSha256,
-                currentIosBuild: "101",
-                currentIosGitSha: String(repeating: "8", count: 40),
-                currentIosBuildSha256: String(repeating: "9", count: 64),
-                readerRequirements: catalogReaderRequirements,
-                requiredFirmwareVersion: stream.requiredFirmwareVersion,
-                requiredFirmwareBuild: stream.requiredFirmwareBuild,
-                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                signatureTrustCapability: capability,
+                readerRequirements: reader,
                 deviceStatus: v2Status
             ),
             .streamV2,
-            "a signed reader contract supersedes stale app audit identity"
-        )
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability:
-                    "map-prod-1=" + String(repeating: "5", count: 64),
-                deviceStatus: v2Status
-            ),
-            .legacyArtifactRequired,
-            "a build-unbound stream without a verified reader contract fails closed"
-        )
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability:
-                    "map-prod-1=" + String(repeating: "5", count: 64),
-                readerRequirements: OfflineMapReaderRequirements(
-                    schemaVersion: 2,
-                    streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
-                    manifestSchemaVersion: 1,
-                    renderer: "esp32-fmb",
-                    rendererFormatVersion: 1,
-                    requiredFeatures: []
-                ),
-                deviceStatus: v2Status
-            ),
-            .legacyArtifactRequired,
-            "unknown catalog reader contracts fail closed during install selection"
+            "maps without exact firmware qualification still require reader and signer compatibility"
         )
         assertEqual(
             MapInstallProtocolSelector.evaluate(
                 isBikeMapStream: true,
-                signatureTrustCapability:
-                    "map-prod-1=" + String(repeating: "5", count: 64),
-                readerRequirements: OfflineMapReaderRequirements(
-                    schemaVersion: 2,
-                    streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
-                    manifestSchemaVersion: 1,
-                    renderer: "esp32-fmb",
-                    rendererFormatVersion: 1,
-                    requiredFeatures: []
-                ),
+                signatureTrustCapability: capability,
                 deviceStatus: v2Status
             ).rejection,
             .readerRequirementsUnsupported,
-            "selector diagnostics classify unsupported reader requirements"
+            "a stream without a verified reader contract fails closed"
         )
-        let wrongFirmwareStatus = MapTransferDeviceStatus(
-            enabled: true,
-            activeMapId: nil,
-            activeSessionId: nil,
-            activation: nil,
-            protocols: [1, 2],
-            streamFormatVersions: [1],
-            streamTrust: ["map-prod-1=" + String(repeating: "5", count: 64)],
-            firmwareVersion: "0.3.0",
-            firmwareBuild: 43,
-            firmwareGitSha: String(repeating: "7", count: 40)
-        )
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
-                requiredIosBuild: stream.requiredIosBuild,
-                requiredIosGitSha: stream.requiredIosGitSha,
-                requiredIosBuildSha256: stream.requiredIosBuildSha256,
-                currentIosBuild: "100",
-                currentIosGitSha: String(repeating: "8", count: 40),
-                currentIosBuildSha256: String(repeating: "9", count: 64),
-                requiredFirmwareVersion: stream.requiredFirmwareVersion,
-                requiredFirmwareBuild: stream.requiredFirmwareBuild,
-                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
-                deviceStatus: wrongFirmwareStatus
-            ),
-            .legacyArtifactRequired,
-            "a later firmware build cannot reuse a hardware approval for another binary"
-        )
+        for unsupported in [
+            OfflineMapReaderRequirements(schemaVersion: 2,
+                streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                manifestSchemaVersion: 1, renderer: "esp32-fmb",
+                rendererFormatVersion: 1, requiredFeatures: []),
+            OfflineMapReaderRequirements(schemaVersion: 1,
+                streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                manifestSchemaVersion: 1, renderer: "esp32-fmb",
+                rendererFormatVersion: 99, requiredFeatures: []),
+            OfflineMapReaderRequirements(schemaVersion: 1,
+                streamFormat: OfflineMapArtifact.bikeMapStreamFormat,
+                manifestSchemaVersion: 1, renderer: "esp32-fmb",
+                rendererFormatVersion: 1, requiredFeatures: ["unknown-feature"]),
+        ] {
+            assertEqual(
+                MapInstallProtocolSelector.evaluate(
+                    isBikeMapStream: true, signatureTrustCapability: capability,
+                    readerRequirements: unsupported, deviceStatus: v2Status
+                ).rejection,
+                .readerRequirementsUnsupported,
+                "unknown reader schemas, versions and features fail closed"
+            )
+        }
         assertEqual(
             MapInstallProtocolSelector.evaluate(
-                isBikeMapStream: true,
-                signatureTrustCapability:
-                    "map-prod-1=" + String(repeating: "5", count: 64),
-                readerRequirements: catalogReaderRequirements,
-                requiredFirmwareVersion: stream.requiredFirmwareVersion,
-                requiredFirmwareBuild: stream.requiredFirmwareBuild,
-                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
-                deviceStatus: wrongFirmwareStatus
+                isBikeMapStream: true, signatureTrustCapability: capability,
+                readerRequirements: reader,
+                requiredFirmwareVersion: "0.3.0", requiredFirmwareBuild: 43,
+                requiredFirmwareGitSha: String(repeating: "7", count: 40),
+                deviceStatus: v2Status
             ).rejection,
             .firmwareIdentityMismatch,
-            "selector diagnostics classify an exact firmware mismatch"
-        )
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
-                requiredIosBuild: stream.requiredIosBuild,
-                requiredIosGitSha: stream.requiredIosGitSha,
-                requiredIosBuildSha256: stream.requiredIosBuildSha256,
-                currentIosBuild: "101",
-                currentIosGitSha: String(repeating: "8", count: 40),
-                currentIosBuildSha256: String(repeating: "9", count: 64),
-                requiredFirmwareVersion: stream.requiredFirmwareVersion,
-                requiredFirmwareBuild: stream.requiredFirmwareBuild,
-                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
-                deviceStatus: v2Status
-            ),
-            .legacyArtifactRequired,
-            "a later same-key app build cannot reuse an older hardware approval"
+            "a later firmware binary cannot reuse another hardware approval"
         )
         assertEqual(
             MapInstallProtocolSelector.evaluate(
-                isBikeMapStream: true,
-                signatureTrustCapability:
-                    "map-prod-1=" + String(repeating: "5", count: 64),
-                requiredIosBuild: stream.requiredIosBuild,
-                requiredIosGitSha: stream.requiredIosGitSha,
-                requiredIosBuildSha256: stream.requiredIosBuildSha256,
-                currentIosBuild: "101",
-                currentIosGitSha: String(repeating: "8", count: 40),
-                currentIosBuildSha256: String(repeating: "9", count: 64),
-                requiredFirmwareVersion: stream.requiredFirmwareVersion,
-                requiredFirmwareBuild: stream.requiredFirmwareBuild,
-                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
+                isBikeMapStream: true, signatureTrustCapability: capability,
+                readerRequirements: reader, requiredFirmwareBuild: 42,
                 deviceStatus: v2Status
             ).rejection,
-            .appIdentityMismatch,
-            "selector diagnostics classify an exact app mismatch"
-        )
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
-                requiredIosBuild: stream.requiredIosBuild,
-                requiredIosGitSha: stream.requiredIosGitSha,
-                requiredIosBuildSha256: stream.requiredIosBuildSha256,
-                currentIosBuild: "100",
-                currentIosGitSha: String(repeating: "8", count: 40),
-                currentIosBuildSha256: String(repeating: "a", count: 64),
-                requiredFirmwareVersion: stream.requiredFirmwareVersion,
-                requiredFirmwareBuild: stream.requiredFirmwareBuild,
-                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
-                deviceStatus: v2Status
-            ),
-            .legacyArtifactRequired,
-            "a different app component cannot reuse the same bundle build approval"
-        )
-        let resumablePredecessor = MapStreamAppArtifactCompatibilityPolicy
-            .resumablePredecessorIdentities[0]
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
-                requiredIosBuild: resumablePredecessor.build,
-                requiredIosGitSha: resumablePredecessor.gitSha,
-                requiredIosBuildSha256: resumablePredecessor.componentSha256,
-                currentIosBuild: "101",
-                currentIosGitSha: String(repeating: "a", count: 40),
-                currentIosBuildSha256: String(repeating: "b", count: 64),
-                compatibleArtifactAppIdentities: [resumablePredecessor],
-                requiredFirmwareVersion: stream.requiredFirmwareVersion,
-                requiredFirmwareBuild: stream.requiredFirmwareBuild,
-                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
-                deviceStatus: v2Status
-            ),
-            .streamV2,
-            "an exact reviewed predecessor artifact can resume after an app update"
-        )
-        let streetLabelPredecessor = MapStreamAppArtifactCompatibilityPolicy
-            .resumablePredecessorIdentities[1]
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
-                requiredIosBuild: streetLabelPredecessor.build,
-                requiredIosGitSha: streetLabelPredecessor.gitSha,
-                requiredIosBuildSha256: streetLabelPredecessor.componentSha256,
-                currentIosBuild: "7",
-                currentIosGitSha: String(repeating: "d", count: 40),
-                currentIosBuildSha256: String(repeating: "e", count: 64),
-                compatibleArtifactAppIdentities:
-                    MapStreamAppArtifactCompatibilityPolicy
-                        .resumablePredecessorIdentities,
-                deviceStatus: v2Status
-            ),
-            .streamV2,
-            "the exact street-label artifact identity survives transport-only app repairs"
-        )
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
-                requiredIosBuild: resumablePredecessor.build,
-                requiredIosGitSha: resumablePredecessor.gitSha,
-                requiredIosBuildSha256: String(repeating: "c", count: 64),
-                currentIosBuild: "101",
-                currentIosGitSha: String(repeating: "a", count: 40),
-                currentIosBuildSha256: String(repeating: "b", count: 64),
-                compatibleArtifactAppIdentities: [resumablePredecessor],
-                requiredFirmwareVersion: stream.requiredFirmwareVersion,
-                requiredFirmwareBuild: stream.requiredFirmwareBuild,
-                requiredFirmwareGitSha: stream.requiredFirmwareGitSha,
-                deviceStatus: v2Status
-            ),
-            .legacyArtifactRequired,
-            "a one-field predecessor identity mutation remains fail closed"
-        )
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
-                requiredIosBuild: resumablePredecessor.build,
-                requiredIosGitSha: resumablePredecessor.gitSha,
-                requiredIosBuildSha256: resumablePredecessor.componentSha256,
-                compatibleArtifactAppIdentities: [resumablePredecessor],
-                deviceStatus: v2Status
-            ),
-            .legacyArtifactRequired,
-            "an unidentified current app cannot use a predecessor exception"
-        )
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
-                deviceStatus: v1Status
-            ),
-            .legacyArtifactRequired,
-            "stream artifact requires a durable legacy artifact on v1 firmware"
+            .firmwareIdentityIncomplete,
+            "partial firmware approvals remain invalid"
         )
         assertEqual(
             MapInstallProtocolSelector.evaluate(
-                isBikeMapStream: true,
-                signatureTrustCapability:
-                    "map-prod-1=" + String(repeating: "5", count: 64),
-                deviceStatus: v1Status
+                isBikeMapStream: true, signatureTrustCapability: capability,
+                readerRequirements: reader, deviceStatus: v1Status
             ).rejection,
             .deviceProtocolUnsupported,
-            "selector diagnostics classify a device protocol mismatch"
-        )
-        let wrongKeyStatus = MapTransferDeviceStatus(
-            enabled: true,
-            activeMapId: nil,
-            activeSessionId: nil,
-            activation: nil,
-            protocols: [1, 2],
-            streamFormatVersions: [1],
-            streamTrust: ["map-prod-1=" + String(repeating: "6", count: 64)],
-            firmwareVersion: "0.3.0",
-            firmwareBuild: 42,
-            firmwareGitSha: String(repeating: "7", count: 40)
-        )
-        assertEqual(
-            MapInstallProtocolSelector.select(
-                isBikeMapStream: true,
-                signatureTrustCapability: "map-prod-1=" + String(repeating: "5", count: 64),
-                deviceStatus: wrongKeyStatus
-            ),
-            .legacyArtifactRequired,
-            "v2 requires the device to trust the artifact's exact public key material"
+            "stream artifacts require v2 firmware"
         )
         assertEqual(
             MapInstallProtocolSelector.evaluate(
                 isBikeMapStream: true,
-                signatureTrustCapability:
-                    "map-prod-1=" + String(repeating: "5", count: 64),
-                deviceStatus: wrongKeyStatus
+                signatureTrustCapability: "map-prod-1=" + String(repeating: "6", count: 64),
+                readerRequirements: reader, deviceStatus: v2Status
             ).rejection,
             .signingKeyNotTrusted,
-            "selector diagnostics classify an exact signing-key mismatch"
+            "the device must trust the artifact's exact public key material"
+        )
+        assertEqual(
+            MapInstallProtocolSelector.evaluate(
+                isBikeMapStream: true, readerRequirements: reader,
+                deviceStatus: v2Status
+            ).rejection,
+            .missingSignatureCapability,
+            "a reader contract does not replace authenticated signer capability"
         )
         assertEqual(
             MapInstallProtocolSelector.select(isBikeMapStream: false, deviceStatus: v2Status),
             .legacyArtifactRequired,
             "unsigned ZIP archives are never selected for device installation"
+        )
+        assertEqual(
+            OfflineMapPlatformError.mapStreamCompatibilityRejected(.readerRequirementsUnsupported)
+                .errorDescription,
+            "This map uses a format this app does not support. Update Bicino and try again.",
+            "format errors give the user an actionable explanation"
         )
         assertEqual(
             ExistingMapStreamAttemptDisposition.evaluate(
@@ -3421,6 +3144,8 @@ struct NavigationProtocolTests {
                 }
                 return (200, try! JSONEncoder().encode(credential))
             case "/v1/map-packs/map/artifacts/bike-map-stream-v1/download-url":
+                assertEqual(request.value(forHTTPHeaderField: "X-Map-Stream-Reader-Contract"),
+                            "1", "new clients negotiate signed reader compatibility")
                 assertEqual(
                     request.value(forHTTPHeaderField: "X-Installation-Token"),
                     refreshedCredential.clientInstallationToken,
@@ -3434,17 +3159,17 @@ struct NavigationProtocolTests {
                 assertEqual(
                     request.value(forHTTPHeaderField: "X-Map-Stream-App-Build"),
                     "100",
-                    "artifact URL refresh binds the exact app build"
+                    "artifact URL refresh reports the requesting app build for audit"
                 )
                 assertEqual(
                     request.value(forHTTPHeaderField: "X-Map-Stream-App-Git-Sha"),
                     String(repeating: "8", count: 40),
-                    "artifact URL refresh binds the exact app source"
+                    "artifact URL refresh reports the requesting app source for audit"
                 )
                 assertEqual(
                     request.value(forHTTPHeaderField: "X-Map-Stream-App-Build-Sha256"),
                     String(repeating: "9", count: 64),
-                    "artifact URL refresh binds the generated app component"
+                    "artifact URL refresh reports the requesting app component for audit"
                 )
                 assert(
                     request.url?.query?.contains(
@@ -3469,9 +3194,6 @@ struct NavigationProtocolTests {
                     "signatureKeySha256": artifact.signatureKeySha256!,
                     "producerBuildSha256": artifact.producerBuildSha256!,
                     "producerImageDigest": artifact.producerImageDigest!,
-                    "requiredIosBuild": artifact.requiredIosBuild!,
-                    "requiredIosGitSha": artifact.requiredIosGitSha!,
-                    "requiredIosBuildSha256": artifact.requiredIosBuildSha256!,
                     "url": "/immutable/map.bmap",
                     "expiresAt": 123,
                     "expiresInSeconds": 900,

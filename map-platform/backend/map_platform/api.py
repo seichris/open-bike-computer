@@ -7,7 +7,7 @@ import secrets
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 from urllib.parse import urlencode
 
 try:
@@ -567,6 +567,7 @@ def create_app(
         client_app_build: str | None,
         client_app_git_sha: str | None,
         client_app_build_sha256: str | None,
+        reader_contract: str | None = None,
     ) -> dict[str, Any]:
         result = job.to_dict()
         if job.status == JobStatus.QUEUED or job.scheduler_yielded:
@@ -597,10 +598,9 @@ def create_app(
             public_artifacts.append(
                 {
                     **artifact,
-                    **map_stream_rollout.artifact_identity_requirements(
-                        client_app_build,
-                        client_app_git_sha,
-                        client_app_build_sha256,
+                    **map_stream_rollout.artifact_delivery_requirements(
+                        client_app_build, client_app_git_sha, client_app_build_sha256,
+                        reader_contract=reader_contract,
                     ),
                 }
             )
@@ -1299,6 +1299,10 @@ def create_app(
             default=None,
             alias="X-Map-Stream-App-Build-Sha256",
         ),
+        x_map_stream_reader_contract: Literal["1"] | None = Header(
+            default=None,
+            alias="X-Map-Stream-Reader-Contract",
+        ),
         x_app_attest_challenge_id: str | None = Header(
             default=None,
             alias="X-App-Attest-Challenge-Id",
@@ -1343,6 +1347,7 @@ def create_app(
                         app_build,
                         app_git_sha,
                         app_build_sha256,
+                        reader_contract=x_map_stream_reader_contract,
                     )
                 if not all(
                     isinstance(value, str) and value
@@ -1382,6 +1387,7 @@ def create_app(
                     app_build,
                     app_git_sha,
                     app_build_sha256,
+                    reader_contract=x_map_stream_reader_contract,
                 )
         except AdmissionCapacityError as exc:
             raise HTTPException(
@@ -1417,6 +1423,10 @@ def create_app(
             default=None,
             alias="X-Map-Stream-App-Build-Sha256",
         ),
+        x_map_stream_reader_contract: Literal["1"] | None = Header(
+            default=None,
+            alias="X-Map-Stream-Reader-Contract",
+        ),
     ) -> dict[str, Any]:
         if clientInstallationId is None:
             raise HTTPException(status_code=400, detail="clientInstallationId is required")
@@ -1443,6 +1453,7 @@ def create_app(
                     app_build,
                     app_git_sha,
                     app_build_sha256,
+                    reader_contract=x_map_stream_reader_contract,
                 )
                 for job in jobs
             ]
@@ -1472,6 +1483,10 @@ def create_app(
             default=None,
             alias="X-Map-Stream-App-Build-Sha256",
         ),
+        x_map_stream_reader_contract: Literal["1"] | None = Header(
+            default=None,
+            alias="X-Map-Stream-Reader-Contract",
+        ),
     ) -> dict[str, Any]:
         try:
             trust_capabilities = client_map_stream_trust_capabilities(x_map_stream_trust)
@@ -1491,6 +1506,7 @@ def create_app(
                 app_build,
                 app_git_sha,
                 app_build_sha256,
+                reader_contract=x_map_stream_reader_contract,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1702,6 +1718,10 @@ def create_app(
             default=None,
             alias="X-Map-Stream-App-Build-Sha256",
         ),
+        x_map_stream_reader_contract: Literal["1"] | None = Header(
+            default=None,
+            alias="X-Map-Stream-Reader-Contract",
+        ),
     ) -> dict[str, Any]:
         try:
             trust_capabilities = client_map_stream_trust_capabilities(x_map_stream_trust)
@@ -1722,6 +1742,7 @@ def create_app(
                 app_build,
                 app_git_sha,
                 app_build_sha256,
+                reader_contract=x_map_stream_reader_contract,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1813,6 +1834,10 @@ def create_app(
             default=None,
             alias="X-Map-Stream-App-Build-Sha256",
         ),
+        x_map_stream_reader_contract: Literal["1"] | None = Header(
+            default=None,
+            alias="X-Map-Stream-Reader-Contract",
+        ),
     ) -> dict[str, Any]:
         try:
             trust_capabilities = client_map_stream_trust_capabilities(x_map_stream_trust)
@@ -1840,6 +1865,7 @@ def create_app(
             app_build,
             app_git_sha,
             app_build_sha256,
+            reader_contract=x_map_stream_reader_contract,
         )
 
     @app.post("/v1/map-packs/{map_id}/download-url")
@@ -1919,6 +1945,10 @@ def create_app(
         x_map_stream_app_build_sha256: str | None = Header(
             default=None,
             alias="X-Map-Stream-App-Build-Sha256",
+        ),
+        x_map_stream_reader_contract: Literal["1"] | None = Header(
+            default=None,
+            alias="X-Map-Stream-Reader-Contract",
         ),
     ) -> dict[str, Any]:
         try:
@@ -2019,10 +2049,9 @@ def create_app(
         return {
             **artifact.to_dict(),
             **(
-                map_stream_rollout.artifact_identity_requirements(
-                    app_build,
-                    app_git_sha,
-                    app_build_sha256,
+                map_stream_rollout.artifact_delivery_requirements(
+                    app_build, app_git_sha, app_build_sha256,
+                    reader_contract=x_map_stream_reader_contract,
                 )
                 if artifact_format == BIKE_MAP_STREAM_FORMAT
                 else {}

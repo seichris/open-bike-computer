@@ -749,32 +749,6 @@ nonisolated enum OfflineMapServerIdentity {
     }
 }
 
-nonisolated enum SavedMapReaderRequirementsMigrationPolicy {
-    static func shouldDeriveFromSignedManifest(
-        generationServerURLString: String?,
-        isDevelopmentBuild: Bool,
-        signatureKeyID: String? = nil,
-        trustStore: BikeMapStreamTrustStore = .production
-    ) -> Bool {
-        guard isDevelopmentBuild else { return false }
-        if let generationServerURLString,
-           OfflineMapServerIdentity.normalized(generationServerURLString) ==
-            OfflineMapServerIdentity.normalized(
-                OfflineMapServiceConfig.developmentServerURLString
-            ) {
-            return true
-        }
-        // The app's commissioned development signer also covers saved LAN maps.
-        // Hostnames and app builds may change, but the stream must still pass
-        // signature, fingerprint, manifest and reader validation below. Never
-        // extend this migration to production signers or Release builds.
-        guard let signatureKeyID,
-              !BikeMapStreamTrustStore.production.contains(keyID: signatureKeyID),
-              trustStore.contains(keyID: signatureKeyID) else { return false }
-        return true
-    }
-}
-
 nonisolated enum MapActivationDecision: Equatable {
     case pending(String)
     case installed
@@ -6122,26 +6096,12 @@ final class OfflineMapManager: ObservableObject {
                         "signed map metadata is missing or does not match"
                     )
                 }
-#if DEBUG
-                let deriveReaderRequirementsFromSignedManifest =
-                    SavedMapReaderRequirementsMigrationPolicy
-                        .shouldDeriveFromSignedManifest(
-                            generationServerURLString: metadata.serverURLString,
-                            isDevelopmentBuild: true,
-                            signatureKeyID: artifact.signatureKeyId,
-                            trustStore: trustStore
-                        )
-#else
-                let deriveReaderRequirementsFromSignedManifest = false
-#endif
                 let verified = try BikeMapStreamArtifactValidator.validate(
                     url: packURL,
                     artifact: artifact,
                     expectedMapID: metadata.mapID,
                     trustStore: trustStore,
-                    readerRequirements: metadata.readerRequirements,
-                    deriveReaderRequirementsFromSignedManifest:
-                        deriveReaderRequirementsFromSignedManifest
+                    readerRequirements: metadata.readerRequirements
                 )
                 return PreparedMapTransfer(artifact: verified)
             }
@@ -6511,16 +6471,6 @@ final class OfflineMapManager: ObservableObject {
                        isBikeMapStream: true,
                        signatureTrustCapability:
                            "\(artifact.signatureKeyID)=\(artifact.signatureKeySHA256)",
-                       requiredIosBuild: artifact.requiredIosBuild,
-                       requiredIosGitSha: artifact.requiredIosGitSHA,
-                       requiredIosBuildSha256: artifact.requiredIosBuildSHA256,
-                       currentIosBuild: MapStreamAppBuildIdentity.current?.build,
-                       currentIosGitSha: MapStreamAppBuildIdentity.current?.gitSha,
-                       currentIosBuildSha256:
-                           MapStreamAppBuildIdentity.current?.componentSha256,
-                       compatibleArtifactAppIdentities:
-                           MapStreamAppArtifactCompatibilityPolicy
-                               .resumablePredecessorIdentities,
                        readerRequirements: artifact.readerRequirements,
                        requiredFirmwareVersion: artifact.requiredFirmwareVersion,
                        requiredFirmwareBuild: artifact.requiredFirmwareBuild,

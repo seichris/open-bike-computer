@@ -4448,7 +4448,7 @@ extension NavigationProtocolTests {
             } catch OfflineMapPlatformError.mapStreamCompatibilityRejected(let rejection) {
                 assertEqual(rejection, .signingKeyNotTrusted, "control failure cannot hide the original rejection")
             } catch { assert(false, "the original rejection is preserved") }
-            assert(manager.errorMessage?.contains("signing_key_not_trusted") == true, "the preflight cause remains visible")
+            assert(manager.errorMessage?.contains("does not trust this map's signing key") == true, "the preflight cause remains visible")
             let persisted = try! store.records()[0]
             if scenario == "cancelled" {
                 assertEqual(paths, ["cancel", "acknowledge"], "matching saved terminal receipt permits ACK")

@@ -41,30 +41,6 @@ nonisolated struct MapStreamAppBuildIdentity: Codable, Equatable {
     }
 }
 
-nonisolated enum MapStreamAppArtifactCompatibilityPolicy {
-    // Stream artifacts are normally pinned to the exact app build that requested
-    // them. Keep exceptions exact and reviewed so an app update can resume a
-    // previously started transfer without accepting arbitrary older artifacts.
-    static let resumablePredecessorIdentities = [
-        MapStreamAppBuildIdentity(
-            schemaVersion: 1,
-            build: "202607132210",
-            gitSha: "4ee3aa43dd3026917ceca52c4779438867ee0e7a",
-            componentSha256: "271c2d9d17d4430548a46d5ea9ae677862ecf08c57b8e62f5a48c22ae8656002"
-        ),
-        // Street-label artifacts generated before the BLE/Wi-Fi transport
-        // repairs remain byte-for-byte valid and signed by the same reviewed
-        // production map key. Keep this exception bound to the exact app
-        // component that requested those artifacts.
-        MapStreamAppBuildIdentity(
-            schemaVersion: 1,
-            build: "7",
-            gitSha: "c0ccb990dde3205fc35cd5e8f6fb6894b087e577",
-            componentSha256: "e74587bd57299d5748e2e630bdbed7737395b8a56ddbf428bc9ceb14f9dbb446"
-        )
-    ]
-}
-
 struct OfflineMapBounds: Codable, Equatable {
     let minLon: Double
     let minLat: Double
@@ -1381,7 +1357,16 @@ nonisolated enum OfflineMapPlatformError: LocalizedError {
         case .firmwareMapStreamUnsupported:
             return "This saved map cannot be installed securely. Update the device firmware and regenerate the map as a signed stream."
         case .mapStreamCompatibilityRejected(let rejection):
-            return "This saved map cannot be installed securely (\(rejection.rawValue)). Regenerate it with this app or use compatible device firmware."
+            switch rejection {
+            case .readerRequirementsUnsupported:
+                return "This map uses a format this app does not support. Update Bicino and try again."
+            case .deviceProtocolUnsupported, .firmwareIdentityIncomplete, .firmwareIdentityMismatch:
+                return "This map needs compatible Bike Computer firmware. Update the device firmware and try again."
+            case .signingKeyNotTrusted:
+                return "The Bike Computer does not trust this map's signing key. Update its firmware and try again."
+            case .notSignedStream, .missingSignatureCapability:
+                return "This map could not be verified. Download it again and try again."
+            }
         case .backgroundMapUploadInProgress:
             return "Another map upload is already in progress. Wait for it to finish before transferring a different map."
         case .mapActivationFailed(let message):
@@ -1933,8 +1918,6 @@ nonisolated enum MapInstallProtocolRejection: String, Equatable {
     case deviceProtocolUnsupported = "device_protocol_unsupported"
     case signingKeyNotTrusted = "signing_key_not_trusted"
     case readerRequirementsUnsupported = "reader_requirements_unsupported"
-    case appIdentityIncomplete = "app_identity_incomplete"
-    case appIdentityMismatch = "app_identity_mismatch"
     case firmwareIdentityIncomplete = "firmware_identity_incomplete"
     case firmwareIdentityMismatch = "firmware_identity_mismatch"
 }
@@ -1956,13 +1939,6 @@ nonisolated enum MapInstallProtocolSelector {
     static func select(
         isBikeMapStream: Bool,
         signatureTrustCapability: String? = nil,
-        requiredIosBuild: String? = nil,
-        requiredIosGitSha: String? = nil,
-        requiredIosBuildSha256: String? = nil,
-        currentIosBuild: String? = nil,
-        currentIosGitSha: String? = nil,
-        currentIosBuildSha256: String? = nil,
-        compatibleArtifactAppIdentities: [MapStreamAppBuildIdentity] = [],
         readerRequirements: OfflineMapReaderRequirements? = nil,
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
@@ -1972,13 +1948,6 @@ nonisolated enum MapInstallProtocolSelector {
         evaluate(
             isBikeMapStream: isBikeMapStream,
             signatureTrustCapability: signatureTrustCapability,
-            requiredIosBuild: requiredIosBuild,
-            requiredIosGitSha: requiredIosGitSha,
-            requiredIosBuildSha256: requiredIosBuildSha256,
-            currentIosBuild: currentIosBuild,
-            currentIosGitSha: currentIosGitSha,
-            currentIosBuildSha256: currentIosBuildSha256,
-            compatibleArtifactAppIdentities: compatibleArtifactAppIdentities,
             readerRequirements: readerRequirements,
             requiredFirmwareVersion: requiredFirmwareVersion,
             requiredFirmwareBuild: requiredFirmwareBuild,
@@ -1990,13 +1959,6 @@ nonisolated enum MapInstallProtocolSelector {
     static func evaluate(
         isBikeMapStream: Bool,
         signatureTrustCapability: String? = nil,
-        requiredIosBuild: String? = nil,
-        requiredIosGitSha: String? = nil,
-        requiredIosBuildSha256: String? = nil,
-        currentIosBuild: String? = nil,
-        currentIosGitSha: String? = nil,
-        currentIosBuildSha256: String? = nil,
-        compatibleArtifactAppIdentities: [MapStreamAppBuildIdentity] = [],
         readerRequirements: OfflineMapReaderRequirements? = nil,
         requiredFirmwareVersion: String? = nil,
         requiredFirmwareBuild: UInt32? = nil,
@@ -2015,48 +1977,10 @@ nonisolated enum MapInstallProtocolSelector {
         guard deviceStatus.streamTrust?.contains(signatureTrustCapability) == true else {
             return .rejected(.signingKeyNotTrusted)
         }
-        let appRequirements = (
-            requiredIosBuild,
-            requiredIosGitSha,
-            requiredIosBuildSha256
-        )
-        if let readerRequirements {
-            guard readerRequirements.streamFormat ==
-                    OfflineMapArtifact.bikeMapStreamFormat,
-                  OfflineMapReaderCompatibilityPolicy.supports(
-                    readerRequirements
-                  ) else {
-                return .rejected(.readerRequirementsUnsupported)
-            }
-        } else {
-            guard let requiredAppBuild = appRequirements.0,
-                  let requiredAppGitSHA = appRequirements.1,
-                  let requiredAppBuildSHA256 = appRequirements.2,
-                  let currentAppBuild = currentIosBuild,
-                  let currentAppGitSHA = currentIosGitSha,
-                  let currentAppBuildSHA256 = currentIosBuildSha256 else {
-                return .rejected(.appIdentityIncomplete)
-            }
-            let requiredAppIdentity = MapStreamAppBuildIdentity(
-                schemaVersion: 1,
-                build: requiredAppBuild,
-                gitSha: requiredAppGitSHA,
-                componentSha256: requiredAppBuildSHA256
-            )
-            let currentAppIdentity = MapStreamAppBuildIdentity(
-                schemaVersion: 1,
-                build: currentAppBuild,
-                gitSha: currentAppGitSHA,
-                componentSha256: currentAppBuildSHA256
-            )
-            guard requiredAppIdentity.isReleaseGrade,
-                  currentAppIdentity.isReleaseGrade,
-                  requiredAppIdentity == currentAppIdentity ||
-                    compatibleArtifactAppIdentities.contains(
-                        requiredAppIdentity
-                    ) else {
-                return .rejected(.appIdentityMismatch)
-            }
+        guard let readerRequirements,
+              readerRequirements.streamFormat == OfflineMapArtifact.bikeMapStreamFormat,
+              OfflineMapReaderCompatibilityPolicy.supports(readerRequirements) else {
+            return .rejected(.readerRequirementsUnsupported)
         }
         let deviceRequirements = (
             requiredFirmwareVersion,
@@ -4216,9 +4140,6 @@ struct OfflineMapPlatformClient {
               response.signatureKeySha256 == artifact.signatureKeySha256,
               response.producerBuildSha256 == artifact.producerBuildSha256,
               response.producerImageDigest == artifact.producerImageDigest,
-              response.requiredIosBuild == artifact.requiredIosBuild,
-              response.requiredIosGitSha == artifact.requiredIosGitSha,
-              response.requiredIosBuildSha256 == artifact.requiredIosBuildSha256,
               response.requiredFirmwareVersion == artifact.requiredFirmwareVersion,
               response.requiredFirmwareBuild == artifact.requiredFirmwareBuild,
               response.requiredFirmwareGitSha == artifact.requiredFirmwareGitSha,
@@ -4388,6 +4309,7 @@ struct OfflineMapPlatformClient {
     ]
 
     private func authorizeInstallation(_ request: inout URLRequest) {
+        request.setValue("1", forHTTPHeaderField: "X-Map-Stream-Reader-Contract")
         if let legacyBearerToken {
             request.setValue(
                 "Bearer \(legacyBearerToken)",

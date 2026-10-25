@@ -236,9 +236,9 @@ class MapStreamRolloutPolicy:
                     "map stream rollout approval uses signing material absent from production trust"
                 )
             approved_keys = approval.approved_signing_keys
-            # A new App Store build must not evict an already approved client.
-            # Each additional identity still needs its own recorded approval,
-            # bound to every hardware, producer and trust field of this rollout.
+            # Retain the measured test-client identities for rollout audit only.
+            # These do not bind saved artifacts or gate later app versions.
+            # The selected hardware, producer and trust approval remains exact.
             compatibility_fields = (
                 "candidate_git_sha", "producer_build_sha256", "worker_image_digest",
                 "firmware_version", "firmware_build", "firmware_git_sha",
@@ -278,17 +278,6 @@ class MapStreamRolloutPolicy:
             approved_ios_identities=approved_ios_identities,
         )
 
-    def _allows_app_identity(
-        self, build: str | None, git_sha: str | None, build_sha256: str | None,
-    ) -> bool:
-        if build is None or git_sha is None or build_sha256 is None:
-            return False
-        identities = self.approved_ios_identities or frozenset({(
-            self.required_ios_build, self.required_ios_git_sha,
-            self.required_ios_build_sha256,
-        )})
-        return (build, git_sha, build_sha256) in identities
-
     def includes(self, installation_id: str | None) -> bool:
         if not installation_id or not INSTALLATION_ID_PATTERN.fullmatch(installation_id):
             return False
@@ -327,62 +316,49 @@ class MapStreamRolloutPolicy:
         )
         if artifact_key is None or artifact_key not in client_trust_capabilities:
             return False
-        if (
-            client_app_build is None
-            or client_app_git_sha is None
-            or client_app_build_sha256 is None
-        ):
-            return False
+        # Requester versions remain request audit context. Map reuse depends on
+        # the signed reader contract, not the build that requested the download.
+        del client_app_build, client_app_git_sha, client_app_build_sha256
         if self.mode == MapStreamRolloutMode.ALLOWLIST:
             return True
         return bool(
             artifact_key in self.approved_signing_keys
             and producer_build_sha256 == self.producer_build_sha256
             and producer_image_digest == self.worker_image_digest
-            and self._allows_app_identity(
-                client_app_build, client_app_git_sha, client_app_build_sha256,
-            )
         )
 
-    def artifact_identity_requirements(
+    def artifact_delivery_requirements(
         self,
-        client_app_build: str | None,
-        client_app_git_sha: str | None,
-        client_app_build_sha256: str | None,
+        client_app_build: str | None = None,
+        client_app_git_sha: str | None = None,
+        client_app_build_sha256: str | None = None,
+        *,
+        reader_contract: str | None = "1",
     ) -> dict[str, str | int]:
-        if self.mode == MapStreamRolloutMode.ALLOWLIST:
+        # New clients derive compatibility from the signed manifest. Keep the
+        # old response shape only for clients that predate that reader contract.
+        values: dict[str, str | int] = {}
+        if self.mode != MapStreamRolloutMode.ALLOWLIST:
             if (
-                client_app_build is None
-                or client_app_git_sha is None
-                or client_app_build_sha256 is None
+                self.required_firmware_version is None
+                or self.required_firmware_build is None
+                or self.required_firmware_git_sha is None
             ):
-                raise ValueError("allowlisted rollout is missing requester app identity")
-            return {
+                raise ValueError("promoted rollout is missing required device identity")
+            values.update({
+                "requiredFirmwareVersion": self.required_firmware_version,
+                "requiredFirmwareBuild": self.required_firmware_build,
+                "requiredFirmwareGitSha": self.required_firmware_git_sha,
+            })
+        if reader_contract is None and all((
+            client_app_build, client_app_git_sha, client_app_build_sha256,
+        )):
+            values.update({
                 "requiredIosBuild": client_app_build,
                 "requiredIosGitSha": client_app_git_sha,
                 "requiredIosBuildSha256": client_app_build_sha256,
-            }
-        if (
-            self.required_firmware_version is None
-            or self.required_firmware_build is None
-            or self.required_firmware_git_sha is None
-            or self.required_ios_build is None
-            or self.required_ios_git_sha is None
-            or self.required_ios_build_sha256 is None
-        ):
-            raise ValueError("promoted rollout is missing required client/device identity")
-        if not self._allows_app_identity(
-            client_app_build, client_app_git_sha, client_app_build_sha256,
-        ):
-            raise ValueError("promoted rollout requester app identity is not approved")
-        return {
-            "requiredIosBuild": client_app_build,
-            "requiredIosGitSha": client_app_git_sha,
-            "requiredIosBuildSha256": client_app_build_sha256,
-            "requiredFirmwareVersion": self.required_firmware_version,
-            "requiredFirmwareBuild": self.required_firmware_build,
-            "requiredFirmwareGitSha": self.required_firmware_git_sha,
-        }
+            })
+        return values
 
     def public_summary(self) -> dict[str, int | str]:
         summary: dict[str, int | str] = {"mode": self.mode.value}
